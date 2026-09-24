@@ -144,22 +144,24 @@ post-init with mail allowed — the same site as an [input](input.md) subscribe,
 addressing a different cap. `wire` receives a `WireCtx`, the window-bearing
 context that also serves the assets a component ships in
 `aether.asset.<path>` sections (ADR-0163); it `Deref`s to `WasmCtx`, so every
-send and subscribe verb reads the same as in a handler. Declare the lifecycle cap
-as a dependency, spell your actor on the `wire` context, and name the publisher
-and the stage:
+send and subscribe verb reads the same as in a handler. The `wire` context is
+typed by your actor like a handler's: `WireCtx<'_, '_>` reads as
+`WireCtx<'_, '_, Self>`. Declare the lifecycle cap as a dependency and name the
+publisher and the stage:
 
 ```rust
 #[actor(depends(LifecycleCapability))]
 impl WasmActor for Camera {
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
         ctx.subscribe::<LifecycleCapability, Tick>();
         ctx.subscribe::<LifecycleCapability, Render>();
     }
 }
 ```
 
-A native actor's `wire` and `unwire` hooks spell `NativeCtx<'_, Self>` the
-same way to reach their declared dependencies.
+A native actor's `wire` and `unwire` hooks are typed the same way:
+`NativeCtx<'_>` reads as `NativeCtx<'_, Self>`, so they reach their declared
+dependencies.
 
 `ctx.subscribe::<P, K>()` subscribes the calling actor — the cap reads the
 subscriber off the inbound's host-stamped `Source`, so you name neither the stage
@@ -188,9 +190,10 @@ Then handle each stage as its kind, like any other mail:
 fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) { /* advance one frame */ }
 ```
 
-A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
-ctx typed by that actor; the default `Erased` names no actor. The actor is the
-first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
+`WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
+with `depends(R)`. The actor is the first parameter, the reply mode the second
+(`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 `aether-kit-commons`'s `camera` export subscribes `Tick` and `Render` — it
 computes its camera matrix on `Tick` and publishes it to `aether.render` on

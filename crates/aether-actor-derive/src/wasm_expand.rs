@@ -6,9 +6,9 @@ use crate::diagnostics::{doc_attrs, extract_agent_doc};
 use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
     FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
-    classify_handler_reply, ctx_names_actor, extract_handler_kind_type, handler_cfgs, parse_handler_class,
-    parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, validate_addressable_consts,
-    validate_fallback_sig,
+    classify_handler_reply, ctx_names_actor, extract_handler_kind_type, fill_ctx_actor, handler_cfgs,
+    parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
+    validate_addressable_consts, validate_fallback_sig,
 };
 use crate::manifest::{
     build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
@@ -140,6 +140,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     // the artifacts derived from it.
                     let cfgs = handler_cfgs(&f.attrs);
                     f.attrs.remove(idx);
+                    fill_ctx_actor(&mut f.sig);
                     handlers.push(HandlerFn { method: f, kind_ty, agent_doc, reply, class, cfgs });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
@@ -148,10 +149,14 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     validate_fallback_sig(&f.sig)?;
                     let agent_doc = extract_agent_doc(&f.attrs);
                     f.attrs.remove(idx);
+                    fill_ctx_actor(&mut f.sig);
                     fallback = Some(FallbackFn { method: f, agent_doc });
                 } else if name == "init" {
                     init_method = Some(f);
                 } else if matches!(name.as_str(), "wire" | "unwire" | "on_dehydrate" | "on_rehydrate") {
+                    // `on_dehydrate` takes a `WasmDropCtx`, which the fill leaves
+                    // alone.
+                    fill_ctx_actor(&mut f.sig);
                     lifecycle_methods.push(f);
                 } else if name == "receive" {
                     return Err(syn::Error::new_spanned(
@@ -522,7 +527,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
 
             fn on_rehydrate(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
             ) {
                 match __aether_prior.decode_kind::<<Self as ::aether_actor::WasmActor>::Persist>() {
@@ -559,8 +564,13 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // accordingly — boot hooks into `impl Lifecycle`, hot-swap into
     // `impl WasmActor`. The per-target ctx GATs are pinned to the concrete
     // FFI ctx types here, so a `wire`/`init` body keeps its concrete ctx.
-    let (mut boot_hooks, hotswap_hooks): (Vec<syn::ImplItemFn>, Vec<syn::ImplItemFn>) =
-        lifecycle_methods.into_iter().partition(|m| matches!(m.sig.ident.to_string().as_str(), "wire" | "unwire"));
+    // `on_rehydrate` rides with the renamed hooks (#6533): its trait method
+    // takes the typed ctx, so a hand-written one is renamed and forwarded to
+    // like `wire` / `unwire`, and only `on_dehydrate` lands in the trait impl
+    // as written.
+    let (mut boot_hooks, hotswap_hooks): (Vec<syn::ImplItemFn>, Vec<syn::ImplItemFn>) = lifecycle_methods
+        .into_iter()
+        .partition(|m| matches!(m.sig.ident.to_string().as_str(), "wire" | "unwire" | "on_rehydrate"));
 
     // iamacoffeepot/aether#2311: the shared `Lifecycle<S>` `wire`/`unwire`
     // take `(state: &mut S, ctx)`, not a `self` receiver, so a user's
@@ -569,16 +579,16 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // from the trait fn via UFCS (passing the state as the `&mut self`
     // receiver for an un-split `State = Self`). Emitted only when the user
     // provided the hook; the trait's default no-op stands otherwise.
-    let (has_wire, has_unwire) = rename_lifecycle_hooks(&mut boot_hooks);
+    let (has_wire, has_unwire, has_rehydrate) = rename_lifecycle_hooks(&mut boot_hooks);
     // ADR-0163 §3: `wire` receives the window-bearing `WireCtx`, not a bare
     // `WasmCtx`, so an author can read assets in `wire` but not from a
     // handler (which is handed a `WasmCtx`). The forwarder wraps the
     // `WasmCtx` the lifecycle call builds; `WireCtx` `Deref`s to it, so the
     // user's `wire` body reaches every send / subscribe verb unchanged.
     // Issue 6279: the renamed hooks keep the author's signatures, so read the
-    // actor off them. The lifecycle ctx is typed by the actor, so a `wire` /
-    // `unwire` that spells its actor receives it as is and every other hook
-    // the erased view.
+    // actor off them. The lifecycle ctx is typed by the actor, and so is every
+    // hook that omitted its actor (#6533), so it passes as is; only a hook
+    // that spells `Erased` receives the erased view.
     let wire_ctx = boot_hooks.iter().find(|m| m.sig.ident == "__aether_wire").map(|m| erase_ctx_unless_named(&m.sig));
     let unwire_ctx =
         boot_hooks.iter().find(|m| m.sig.ident == "__aether_unwire").map(|m| erase_ctx_unless_named(&m.sig));
@@ -604,6 +614,27 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
             ) {
                 #self_ty::__aether_unwire(__aether_state, #unwire_ctx);
+            }
+        }
+    } else {
+        quote! {}
+    };
+    // ADR-0101 / #6533: `WasmActor::on_rehydrate` takes the typed ctx, so a
+    // hand-written hook forwards from it the way `wire` / `unwire` do, erasing
+    // only for an override that spells `Erased`.
+    let rehydrate_forward = if has_rehydrate {
+        let rehydrate_ctx = boot_hooks
+            .iter()
+            .find(|m| m.sig.ident == "__aether_on_rehydrate")
+            .map(|m| erase_ctx_unless_named(&m.sig))
+            .expect("has_rehydrate implies a renamed __aether_on_rehydrate method");
+        quote! {
+            fn on_rehydrate(
+                &mut self,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
+                __aether_prior: ::aether_actor::PriorState<'_>,
+            ) {
+                #self_ty::__aether_on_rehydrate(self, #rehydrate_ctx, __aether_prior);
             }
         }
     } else {
@@ -667,6 +698,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             #persist_type_tokens
 
             #(#hotswap_hooks)*
+            #rehydrate_forward
 
             #generated_state_hooks
         }
@@ -711,7 +743,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
             // ADR-0112: the lifecycle ctx is `WasmCtx<'_, Self>` (= Single);
             // upgrade the carried erased ctx to the actor once, where it is
-            // born, and downgrade the `Manual` view here.
+            // born, and downgrade the `Manual` view here. `on_rehydrate` takes
+            // the same typed ctx (#6533) and upgrades the same way below.
             fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>) {
                 <#self_ty as ::aether_actor::Lifecycle<Self>>::wire(self, __aether_ctx.__for_actor::<Self>().as_single());
             }
@@ -729,7 +762,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
             ) {
-                <#self_ty as ::aether_actor::WasmActor>::on_rehydrate(self, __aether_ctx.as_single(), __aether_prior);
+                <#self_ty as ::aether_actor::WasmActor>::on_rehydrate(
+                    self,
+                    __aether_ctx.__for_actor::<Self>().as_single(),
+                    __aether_prior,
+                );
             }
         }
 
@@ -741,8 +778,9 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
 
 /// Issue 6279: the ctx expression a dispatch arm calls through —
 /// `__aether_ctx.__for_actor::<Self>()` when the callee's signature names its
-/// actor, bare `__aether_ctx` otherwise, so every other arm receives the
-/// erased ctx exactly as today. The guest mirror of native's
+/// actor, bare `__aether_ctx` otherwise. After `fill_ctx_actor` every handler
+/// and `#[fallback]` names its actor except one spelling `Erased`, which alone
+/// receives the erased ctx. The guest mirror of native's
 /// `erase_unless_ctx_names_actor`: the guest ctx starts erased and upgrades
 /// per signature where the native ctx starts typed and downgrades.
 fn upgrade_ctx_when_named(sig: &syn::Signature) -> TokenStream2 {
@@ -753,9 +791,10 @@ fn upgrade_ctx_when_named(sig: &syn::Signature) -> TokenStream2 {
     }
 }
 
-/// The ctx expression a `wire` / `unwire` forwarder hands its hook. The
-/// lifecycle ctx is already typed by the actor, so it passes as is when the
-/// hook's signature names its actor and as `__aether_ctx.erase()` otherwise —
+/// The ctx expression a `wire` / `unwire` / `on_rehydrate` forwarder hands its
+/// hook. The lifecycle ctx is already typed by the actor, so it passes as is
+/// when the hook's signature names its actor — every hook but one spelling
+/// `Erased`, after `fill_ctx_actor` — and as `__aether_ctx.erase()` otherwise,
 /// the same downgrade-only choice native's `erase_unless_ctx_names_actor`
 /// makes for every arm.
 fn erase_ctx_unless_named(sig: &syn::Signature) -> TokenStream2 {
@@ -797,10 +836,10 @@ fn build_dispatch_body(
     let arms = handlers.iter().map(|h| {
         let k = &h.kind_ty;
         let method = &h.method.sig.ident;
-        // Issue 6279: a handler whose signature names its actor is called
-        // through the `__for_actor::<Self>()` upgrade, ahead of the per-class
-        // downgrade below; every other handler receives the erased ctx as
-        // today.
+        // Issue 6279 / #6533: a handler whose signature names its actor — any
+        // handler that does not spell `Erased` — is called through the
+        // `__for_actor::<Self>()` upgrade, ahead of the per-class downgrade
+        // below; one that spells `Erased` receives the erased ctx.
         let ctx = upgrade_ctx_when_named(&h.method.sig);
         // ADR-0112: the dispatch ctx is the full `Manual` view. A single
         // handler is called with the downgraded `as_single()` view and the
@@ -862,10 +901,16 @@ fn build_dispatch_body(
     // over an inherited one; the set answers `DISPATCH_UNKNOWN_KIND` when it
     // does not recognize the kind either, leaving the tail below to decide.
     // Any other code passes through unchanged, so the set's arm class reaches
-    // the host the way a local arm's does (#6412).
+    // the host the way a local arm's does (#6412). The set's dispatch method
+    // takes the ctx typed by its adopter (#6533), so the erased dispatch ctx
+    // upgrades once here, as a handler arm that names its actor does.
     let set_delegation = handler_set.map(|set| {
         quote! {
-            let __aether_set_rc = <Self as #set>::__aether_handler_set_dispatch(self, __aether_ctx, __aether_mail);
+            let __aether_set_rc = <Self as #set>::__aether_handler_set_dispatch(
+                self,
+                __aether_ctx.__for_actor::<Self>(),
+                __aether_mail,
+            );
             if __aether_set_rc != ::aether_actor::DISPATCH_UNKNOWN_KIND {
                 return __aether_set_rc;
             }
@@ -874,8 +919,9 @@ fn build_dispatch_body(
 
     let tail = if let Some(f) = fallback {
         let method = &f.method.sig.ident;
-        // Issue 6279: a `#[fallback]` whose signature names its actor is
-        // called through the `__for_actor::<Self>()` upgrade, like a handler.
+        // Issue 6279 / #6533: a `#[fallback]` whose signature names its actor
+        // — any that does not spell `Erased` — is called through the
+        // `__for_actor::<Self>()` upgrade, like a handler.
         let ctx = upgrade_ctx_when_named(&f.method.sig);
         // ADR-0112: a `#[fallback]` keeps its `WasmCtx<'_>` (= Single)
         // signature; the dispatch ctx is `Manual`, so downgrade.

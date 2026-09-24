@@ -467,14 +467,14 @@ impl WidgetDefaults for MenuBarWidget {
     /// Focus loss closes the menu. Overrides the shared default because
     /// `cancel_activation` cannot report the close, and an unreported close
     /// would leave the root holding a grab for a plate nobody can see.
-    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_, Self>, _lost: FocusLost) {
         self.state.lose_focus();
         self.pressed_title = None;
         self.dismiss().emit(ctx);
     }
 
     /// Leaving the bar clears the per-title hover as well as the widget's.
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_, Self>, _lost: HoverLost) {
         self.state.set_hovered(false);
         self.hovered_title = None;
     }

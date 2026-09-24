@@ -410,7 +410,7 @@ impl WidgetDefaults for VirtualListWidget {
     /// Restyle: adopt the fanned theme and request metrics for its font. The
     /// list declares this rather than adopting the shared default, because a
     /// new font or type size invalidates every row it measured.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_, Self>, set: SetTheme) {
         apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
         self.forget_measurements();
     }
@@ -418,7 +418,7 @@ impl WidgetDefaults for VirtualListWidget {
     /// The pointer left the list, so no row and no verb of it is under the
     /// pointer any more — the widget-wide hover fact the shared handler keeps
     /// says nothing about *which* row or verb it was over.
-    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_, Self>, _lost: HoverLost) {
         self.state.set_hovered(false);
         self.hovered_action = None;
         self.pointer_local = None;

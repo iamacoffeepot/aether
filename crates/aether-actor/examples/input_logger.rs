@@ -21,7 +21,7 @@ use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
 pub struct InputLogger;
 
-#[actor]
+#[actor(depends(WindowCapability))]
 impl WasmActor for InputLogger {
     const NAMESPACE: &'static str = "example.input_logger";
 

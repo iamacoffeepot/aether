@@ -117,10 +117,11 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     _mode: PhantomData<M>,
     /// Phantom marker naming the actor this ctx dispatches *for* — the
     /// parent any [`Self::spawn_child`] call places its child under. The
-    /// dispatcher builds the typed form because it knows the actor;
-    /// [`Self::erase`] downgrades to [`Erased`] for a handler that never
-    /// spawns, which is why the default keeps the common `NativeCtx<'_>`
-    /// signature unchanged.
+    /// dispatcher builds the typed form because it knows the actor, and
+    /// `#[actor]` types every handler ctx that omits its actor by it
+    /// (ADR-0231 §7); [`Self::erase`] downgrades to [`Erased`] for a handler
+    /// that spells `Erased`. The type default is [`Erased`], for a ctx built
+    /// where no actor is in scope.
     _actor: PhantomData<fn() -> A>,
 }
 /// The actor marker of a ctx that names no actor, and so cannot parent a
@@ -131,8 +132,8 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
 /// caller has no way to name a parent the runtime will then contradict.
 /// Every ctx built where no actor is in scope — the chassis root, a cap-side
 /// test fixture — is this form, and loses only a call it could not have made
-/// correctly. A `wire` / `unwire` hook that names no actor receives this view
-/// of its actor-typed lifecycle ctx.
+/// correctly. Inside `#[actor]` a method receives this view only by spelling
+/// `Erased` in its ctx; one that omits its actor is typed by it (ADR-0231 §7).
 ///
 /// A type-position marker like [`Single`] / [`Manual`], never a value: it is
 /// only ever the `A` of a `NativeCtx`, so it carries no impls of its own.
@@ -150,9 +151,10 @@ impl<'a> NativeCtx<'a, Erased, Single> {
     /// Build a `<Manual>` ctx for driving the macro dispatch trampoline
     /// with [`Self::new_dispatching`].
     ///
-    /// It also stays [`Erased`], for the same reason: the fixtures that call a
-    /// handler directly name no actor, so nothing here could parent a child.
-    /// [`Self::new_for_actor`] is the one that does.
+    /// It also stays [`Erased`]: it backs a fixture driving a handler that
+    /// spells `Erased`, so nothing here could parent a child. A handler that
+    /// omits its actor is typed by it, and a fixture driving one builds its
+    /// ctx with [`Self::new_for_actor`].
     pub fn new(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
@@ -236,9 +238,9 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
 
     /// Issue 4158 downgrade-only coercion: view this ctx as one that names
     /// no actor, dropping [`Self::spawn_child`]. The `#[actor]` macro hands
-    /// this view to every handler whose signature declares the plain
-    /// `NativeCtx<'_, …>` form, so only a handler that asks for the typed
-    /// ctx can parent a child. Like [`Self::as_single`] the coercion only
+    /// this view to a handler whose signature spells `Erased`; every other
+    /// handler is typed by its actor (ADR-0231 §7) and can parent a child.
+    /// Like [`Self::as_single`] the coercion only
     /// removes capability — there is deliberately no way back up, because
     /// re-naming an actor is exactly the misstatement this replaced.
     #[doc(hidden)]

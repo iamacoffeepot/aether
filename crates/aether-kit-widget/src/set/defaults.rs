@@ -41,7 +41,8 @@
 //!
 //! [`cancel_activation`]: WidgetDefaults::cancel_activation
 
-use aether_actor::{WasmCtx, handler_set};
+use aether_actor::{DependsOn, WasmCtx, handler_set};
+use aether_text::TextCapability;
 
 use crate::set::pump_text_font_metrics;
 use crate::state::InteractionState;
@@ -115,7 +116,7 @@ macro_rules! widget_chrome {
 pub(crate) use widget_chrome;
 
 #[handler_set]
-pub trait WidgetDefaults: WidgetChrome {
+pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability> {
     /// Release any half-finished interaction: an armed press, a live drag, a
     /// pending IME composition. Called on focus loss, and callable from a
     /// widget's own control-state handler.

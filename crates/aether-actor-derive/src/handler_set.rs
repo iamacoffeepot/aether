@@ -11,7 +11,8 @@
 //!   `DISPATCH_HANDLED` from a manual arm or any native arm, or
 //!   `DISPATCH_UNKNOWN_KIND` when no arm matched (#6412). The adopter
 //!   calls it after its local chain misses (ADR-0169 §2), which is what makes
-//!   a locally-declared handler authoritative over an inherited one.
+//!   a locally-declared handler authoritative over an inherited one. It takes
+//!   the ctx typed by the adopter, as every member does (see Typed members).
 //! - `__AETHER_HANDLER_SET_MANIFEST` (wasm sets) — the set's
 //!   `aether.kinds.inputs` record bytes, in the same encoding
 //!   `build_inputs_manifest_consts` emits, so an adopter's manifest reports its
@@ -67,6 +68,20 @@
 //! `HandlesKind` bound, so a marker there would gate nothing. Its kinds reach
 //! the adopter's `CONTRACTS` list but get no per-kind `Contract` row.
 //!
+//! # Typed members
+//!
+//! ADR-0231 §7 (#6533): a member's ctx is typed by the adopting actor. The
+//! expansion fills `Self` into every member ctx that omits its actor, on the
+//! trait method's own signature, so the default body type-checks against
+//! `WasmCtx<'_, Self>` / `NativeCtx<'_, Self>`. A default body that reaches
+//! another actor needs the adopter to declare it, so the set states that reach
+//! as a supertrait (`trait WidgetDefaults: DependsOn<TextCapability>`), and the
+//! expansion adds `Sized` to the supertraits, because the typed ctx needs a
+//! sized `Self` and every adopter is a concrete actor. A member that spells
+//! `Erased` keeps the erased view: its arm erases before the call. An override
+//! is a plain trait-method impl no macro rewrites, so it spells the typed
+//! signature itself.
+//!
 //! # Gated handlers
 //!
 //! ADR-0183: a `#[cfg]` on a set handler is resolved in the crate that defines
@@ -102,8 +117,8 @@ use syn::{FnArg, ItemTrait, TraitItem, Type};
 use crate::diagnostics::extract_agent_doc;
 use crate::handler_parse::{
     HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler, classify_handler_reply,
-    extract_handler_kind_type, extract_native_actor_handler_kind, handler_cfgs, parse_handler_class,
-    parse_handler_variant, reject_duplicate_handler_kinds,
+    erase_unless_ctx_names_actor, extract_handler_kind_type, extract_native_actor_handler_kind, fill_ctx_actor,
+    handler_cfgs, parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
 };
 use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{
@@ -123,16 +138,17 @@ pub enum SetTransport {
 }
 
 impl SetTransport {
-    /// The ctx type the set's dispatch method takes, in its `Manual` view —
-    /// the same view `#[actor]` dispatches with, so the adopter can hand its
-    /// own ctx straight through.
+    /// The ctx type the set's dispatch method takes: typed by the adopting
+    /// actor (#6533), in its `Manual` view — the same view `#[actor]`
+    /// dispatches with. The native adopter hands its typed ctx straight
+    /// through; the guest adopter upgrades its erased one at the delegation.
     fn dispatch_ctx(self) -> TokenStream2 {
         match self {
             Self::Wasm => quote! {
-                ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>
+                ::aether_actor::WasmCtx<'_, Self, ::aether_actor::Manual>
             },
             Self::Native => quote! {
-                ::aether_substrate::actor::native::NativeCtx<'_, ::aether_substrate::Erased, ::aether_actor::Manual>
+                ::aether_substrate::actor::native::NativeCtx<'_, Self, ::aether_actor::Manual>
             },
         }
     }
@@ -291,6 +307,9 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         let class = parse_handler_class(&f.attrs[idx], variant)?;
         let cfgs = handler_cfgs(&f.attrs);
         f.attrs.remove(idx);
+        // #6533: type the member by its adopter on the trait method itself, so
+        // the default body and the dispatch arm below both see the filled ctx.
+        fill_ctx_actor(&mut f.sig);
 
         // The dispatch chain only needs the signature; the body stays on the
         // trait as the method's default. `HandlerFn` carries a full
@@ -318,6 +337,13 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         ));
     }
     reject_duplicate_handler_kinds(&handlers)?;
+
+    // The typed member ctx needs a sized `Self`, and a trait's `Self` is unsized
+    // unless a supertrait says otherwise. Every adopter is a concrete actor.
+    if item.colon_token.is_none() {
+        item.colon_token = Some(syn::Token![:](item.ident.span()));
+    }
+    item.supertraits.push(syn::parse_quote!(::core::marker::Sized));
 
     let transport = transport.expect("handlers is non-empty, so a transport was recorded");
     let split = split.expect("handlers is non-empty, so a shape was recorded");
@@ -611,16 +637,20 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
         } else {
             quote! { ::aether_actor::DISPATCH_HANDLED }
         };
+        // #6533: the dispatch ctx is typed by the adopter, and so is every
+        // member that omitted its actor; only a member spelling `Erased` gets
+        // the erased view.
+        let erase = erase_unless_ctx_names_actor(&h.method.sig);
         let call = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
-                let __aether_reply = Self::#method(#receiver, __aether_ctx.as_single(), __aether_decoded);
+                let __aether_reply = Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);
                 ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
             },
             (HandlerClass::Single, _) => quote! {
-                Self::#method(#receiver, __aether_ctx.as_single(), __aether_decoded);
+                Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);
             },
             (HandlerClass::Manual, _) => quote! {
-                Self::#method(#receiver, __aether_ctx, __aether_decoded);
+                Self::#method(#receiver, __aether_ctx #erase, __aether_decoded);
             },
         };
         let (matches_kind, decode) = transport.arm_terms(k);

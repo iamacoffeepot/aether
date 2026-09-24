@@ -351,12 +351,12 @@ impl WidgetDefaults for TextAreaWidget {
         self.edit.clear_composition();
     }
 
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: FocusGained) {
+    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_, Self>, gained: FocusGained) {
         self.state.gain_focus(gained.keyboard);
         self.reconcile_scroll();
     }
 
-    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_, Self>, _lost: FocusLost) {
         self.state.lose_focus();
         self.dragging = false;
         self.paste_pending = false;
