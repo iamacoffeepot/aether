@@ -903,13 +903,14 @@ fn build_dispatch_body(
     // Any other code passes through unchanged, so the set's arm class reaches
     // the host the way a local arm's does (#6412). The set's dispatch method
     // takes the ctx typed by its adopter (#6533), so the erased dispatch ctx
-    // upgrades once here, as a handler arm that names its actor does.
+    // upgrades once here, as a handler arm that names its actor does. The set
+    // borrows the mail, so a miss leaves it for the tail below (#6569).
     let set_delegation = handler_set.map(|set| {
         quote! {
             let __aether_set_rc = <Self as #set>::__aether_handler_set_dispatch(
                 self,
                 __aether_ctx.__for_actor::<Self>(),
-                __aether_mail,
+                &__aether_mail,
             );
             if __aether_set_rc != ::aether_actor::DISPATCH_UNKNOWN_KIND {
                 return __aether_set_rc;
