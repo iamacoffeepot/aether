@@ -17,7 +17,7 @@
 
 use core::marker::PhantomData;
 
-use aether_actor::{Addressable, HandlesKind, MailboxForward, Singleton};
+use aether_actor::{Addressable, HandlesKind, MailboxForward};
 use aether_data::{ActorMail, Kind, MailId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -97,25 +97,6 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         context: &'context C,
     ) -> NativeActorMailboxWithContext<'a, 'context, R, C> {
         NativeActorMailboxWithContext { mailbox: *self, context }
-    }
-
-    /// Resolve the singleton `Peer` hosted beneath this actor: `Peer`'s
-    /// resolver folds with this handle's actor as the carry.
-    ///
-    /// The fold is the one `ctx.actor::<Peer>()` computes, except that the
-    /// carry is this handle's actor rather than the caller's. A root
-    /// capability's [`One`](aether_actor::One) resolver ignores the carry;
-    /// an embedded component's [`Embedded`](aether_actor::Embedded) resolver
-    /// folds it beneath the host (ADR-0154). `aether-http`'s deferred route
-    /// resolves its recipient through the component host's handle this way.
-    /// The returned handle retains this mailbox's binding and in-flight
-    /// causal context.
-    #[must_use]
-    pub fn hosted<Peer: Singleton>(&self) -> NativeActorMailbox<'a, Peer>
-    where
-        R: Addressable,
-    {
-        NativeActorMailbox::new(Peer::resolve(self.mailbox, ()).0, self.binding, self.parent, self.root)
     }
 }
 

@@ -8,15 +8,13 @@
 //! [`typed`] and [`stream`] are the route-authoring surface, written against
 //! the server; the `#[http::router]` and `#[http::route]` macros come from
 //! `aether-http-derive` and are re-exported here so a route sits next to the
-//! `FromRequest` / `Path` / `Ctx` types this crate owns. The crate depends on
-//! `aether-component` because a deferred reply names `ComponentHostCapability`
-//! to resolve the handler component it answers through.
+//! `FromRequest` / `Path` / `Ctx` types this crate owns.
 //!
 //! The `runtime` feature carries the `aether_substrate`-typed half: both cap
 //! states, the listener and its dispatch shards, and the deferred-reply
 //! obligation table. The kinds, cap identities, typed routes, and stream
-//! handles compile always-on, so a wasm guest can address
-//! `ctx.actor::<HttpCapability>()` and author routes without pulling the
+//! handles compile always-on, so a wasm guest can send
+//! `ctx.send::<HttpCapability>(..)` and author routes without pulling the
 //! substrate through (ADR-0122).
 
 #![forbid(unsafe_code)]
