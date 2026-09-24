@@ -14,7 +14,9 @@
 //! One-shot and detached, unlike the proxy's repeating heartbeat: there is
 //! nothing to stop early and nothing to join. The timer holds a
 //! [`SelfWake`], never the cap's mailbox position (ADR-0230), so a timer
-//! that outlives its cap wakes nothing.
+//! that outlives its cap wakes nothing. It is spawned as the cap's
+//! sidecar, so a panic in it is fatal to the chassis, like any sidecar's
+//! (ADR-0063).
 
 use crate::kinds::EngineRestartDue;
 use aether_substrate::actor::native::SelfWake;
@@ -31,15 +33,14 @@ pub fn schedule_restart(wake: SelfWake<EngineRestartDue>, token: u64, backoff: D
     // An infra timer below the mail layer, like the proxy's heartbeat
     // sidecar: it fires one wake-mail and exits, with no inbound chain to
     // inherit and so no settlement umbrella to honor.
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: infra timer; one wake-mail then exits
-    let spawned = thread::Builder::new().name("aether-fleet-restart".into()).spawn(move || {
+    let spawned = wake.clone().spawn_sidecar("aether-fleet-restart".to_owned(), move || {
         thread::sleep(backoff);
         wake.wake(&EngineRestartDue { token });
     });
 
     if let Err(e) = spawned {
-        // The OS refused a thread. Say so at the level an operator will
-        // see: the engine this token stood for is not coming back, and
+        // The timer could not be spawned. Say so at the level an operator
+        // will see: the engine this token stood for is not coming back, and
         // its pending entry is now unreachable garbage in the cap's map.
         tracing::error!(
             target: "aether_substrate::fleet_server",

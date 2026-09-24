@@ -478,23 +478,21 @@ impl HttpShardState {
         // response stream.
         let idle_deadline = self.ws_idle_timeout;
 
-        #[allow(clippy::disallowed_methods)]
-        let writer_thread =
-            match thread::Builder::new().name(format!("aether-http-writer-{conn_id}")).spawn(move || {
-                run_writer_loop(write_half, stream_id, &rx, &sink, idle_deadline);
-            }) {
-                Ok(thread) => thread,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "aether_http::server",
-                        conn = conn_id,
-                        error = %e,
-                        "http websocket: writer thread spawn failed; closing",
-                    );
-                    self.close_connection(conn_id, "websocket writer spawn failed");
-                    return;
-                }
-            };
+        let writer_thread = match self.wake.spawn_sidecar(format!("aether-http-writer-{conn_id}"), move || {
+            run_writer_loop(write_half, stream_id, &rx, &sink, idle_deadline);
+        }) {
+            Ok(thread) => thread,
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_http::server",
+                    conn = conn_id,
+                    error = %e,
+                    "http websocket: writer thread spawn failed; closing",
+                );
+                self.close_connection(conn_id, "websocket writer spawn failed");
+                return;
+            }
+        };
 
         self.streams.insert(
             stream_id,

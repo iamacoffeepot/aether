@@ -140,15 +140,14 @@ impl NativeActor for HttpServerCapability {
 
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
         let wake_dirty = Arc::new(AtomicBool::new(false));
-        let accept_sink = WakeSink { inbound_tx, wake: ctx.self_wake(), dirty: Arc::clone(&wake_dirty) };
+        let wake = ctx.self_wake::<HttpInboundReady>();
+        let accept_sink = WakeSink { inbound_tx, wake: wake.clone(), dirty: Arc::clone(&wake_dirty) };
 
         // Transport thread below the mail layer — it accepts sockets
         // that carry inbound mail in; no inbound chain to inherit, no
         // settlement umbrella.
-        #[allow(clippy::disallowed_methods)]
-        let accept_thread = thread::Builder::new()
-            .name(format!("aether-http-accept-{port}"))
-            .spawn(move || {
+        let accept_thread = wake
+            .spawn_sidecar(format!("aether-http-accept-{port}"), move || {
                 while !accept_shutdown_for_thread.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((stream, peer)) => {
