@@ -14,13 +14,12 @@ use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::{Envelope, NativeActor};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
-use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, InstalledActivation, LiveActivation, PreparedMail,
     PreparedSpawnActivation, PreparedSpawnFailure,
 };
 use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry, SeizeCell};
-use crate::mail::{Mail, MailId, MailboxId};
+use crate::mail::{MailId, MailboxId};
 use crate::runtime::effect_chain::EffectChain;
 use crate::scheduler::pending_depth;
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeHandle};
@@ -44,8 +43,6 @@ pub(super) struct LegacyPreparedActivation<A: NativeActor> {
 
 pub(super) struct NativeSpawnFinalizer<A> {
     state: Mutex<Option<NativeSpawnFinalizerState<A>>>,
-    retained: Mutex<Vec<(MailId, MailId)>>,
-    mailer: Arc<Mailer>,
 }
 
 /// Where one birth's authoritative fate is delivered.
@@ -97,14 +94,12 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
         mailbox_id: MailboxId,
         canonical_name: Arc<str>,
         child: Weak<NativeBinding>,
-        mailer: Arc<Mailer>,
     ) -> Arc<Self> {
         Self::new(
             Some(ParentLink { reservation: parent_reservation, child }),
             SpawnCompletionSink::Deferred(completion),
             mailbox_id,
             canonical_name,
-            mailer,
         )
     }
 
@@ -115,9 +110,8 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
         outcome: crossbeam_channel::Sender<SpawnOutcome<A>>,
         mailbox_id: MailboxId,
         canonical_name: Arc<str>,
-        mailer: Arc<Mailer>,
     ) -> Arc<Self> {
-        Self::new(None, SpawnCompletionSink::Channel(outcome), mailbox_id, canonical_name, mailer)
+        Self::new(None, SpawnCompletionSink::Channel(outcome), mailbox_id, canonical_name)
     }
 
     fn new(
@@ -125,28 +119,16 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
         completion: SpawnCompletionSink<A>,
         mailbox_id: MailboxId,
         canonical_name: Arc<str>,
-        mailer: Arc<Mailer>,
     ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(Some(NativeSpawnFinalizerState { parent, completion, mailbox_id, canonical_name })),
-            retained: Mutex::new(Vec::new()),
-            mailer,
         })
-    }
-
-    fn retain(&self, mail: &Mail) {
-        if mail.mail_id != MailId::NONE {
-            self.retained.lock().expect("native spawn retained-mail lock poisoned").push((mail.mail_id, mail.root));
-        }
     }
 
     fn reject(&self, failure: PreparedSpawnFailure) {
         let Some(state) = self.state.lock().expect("native spawn finalizer lock poisoned").take() else {
             return;
         };
-        for (mail_id, root) in self.retained.lock().expect("native spawn retained-mail lock poisoned").drain(..) {
-            self.mailer.record_finished(mail_id, root);
-        }
         if let Some(parent) = state.parent {
             parent.reservation.reject();
         }
@@ -260,12 +242,6 @@ impl<A: NativeActor> PreparedSpawnActivation for LegacyPreparedActivation<A> {
         });
         sink.schedule(job);
         done_rx
-    }
-
-    fn retain_mail(&mut self, mail: &Mail) {
-        if let Some(finalizer) = &self.finalizer {
-            finalizer.retain(mail);
-        }
     }
 
     fn id_is_retired(&self) -> bool {

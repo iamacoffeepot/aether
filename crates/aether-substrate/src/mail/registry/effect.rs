@@ -121,10 +121,6 @@ pub trait PreparedSpawnActivation: Send {
     /// path; shutdown retains it until the home-side drop completes.
     fn discard_at_home(self: Box<Self>, failure: PreparedSpawnFailure) -> crossbeam_channel::Receiver<()>;
 
-    /// Remember one non-bootstrap same-flush mail obligation so native
-    /// rejection can settle it after home-side state destruction.
-    fn retain_mail(&mut self, _mail: &Mail) {}
-
     /// Has this birth's id already been retired by a completed actor life?
     ///
     /// Read only from the owner's apply loop, to classify a route conflict
@@ -213,10 +209,6 @@ impl PreparedActivationGuard {
         self.take().discard_at_home(failure)
     }
 
-    fn retain_mail(&mut self, mail: &Mail) {
-        self.0.as_mut().expect("prepared activation remains available while retaining mail").retain_mail(mail);
-    }
-
     fn id_is_retired(&self) -> bool {
         self.0.as_ref().expect("prepared activation remains available while classifying a conflict").id_is_retired()
     }
@@ -245,11 +237,6 @@ impl PreparedSpawnCommit {
 
     pub fn take_activation(&mut self) -> Box<dyn PreparedSpawnActivation> {
         self.activation.take()
-    }
-
-    pub(crate) fn retain_after_init(&mut self, mail: Mail) {
-        self.activation.retain_mail(&mail);
-        self.after_init.push(PreparedMail::parked(mail));
     }
 
     pub fn discard_at_home(self) -> crossbeam_channel::Receiver<()> {
