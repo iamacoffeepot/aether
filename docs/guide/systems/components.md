@@ -294,15 +294,18 @@ impl WasmActor for MyComponent {
 aether_actor::export!(MyComponent);
 ```
 
-`aether.component.replace` compiles the candidate and resolves its manifest/export,
-then runs `unwire` and `on_dehydrate` on the old instance, drops it, instantiates the
-new wasm **behind the same binding**, and calls `on_rehydrate` when the old instance
-saved a bundle. A component that leaves both state hooks at their defaults swaps
-cleanly and comes back fresh from `init`. There is no mailbox freeze/drain phase in
-this binding-stable implementation; queued mail remains on the trampoline's inbox,
-and the wire field `drain_timeout_ms` is accepted for compatibility but ignored.
+`aether.component.replace` compiles the candidate, resolves its manifest/export,
+checks it, and instantiates it **behind the same binding** while the old instance
+is still installed. Only then does the old instance run `unwire` and
+`on_dehydrate`; the candidate calls `on_rehydrate` when the old instance saved a
+bundle, and only after that is it installed and the old instance dropped. A
+component that leaves both state hooks at their defaults swaps cleanly and comes
+back fresh from `init`. There is no mailbox freeze/drain phase in this
+binding-stable implementation; queued mail remains on the trampoline's inbox, and
+the wire field `drain_timeout_ms` is accepted for compatibility but ignored.
 
-Replacement is phase-aware rather than transactionally rolled back:
+A failed replace leaves the old instance serving the mailbox, but a failure after
+its hooks ran does not undo them ([ADR-0016](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0016-persistent-state-across-hot-reload.md) §4):
 
 - candidate compile, manifest, or export-selection errors happen before the old
   instance is touched;
@@ -312,17 +315,20 @@ Replacement is phase-aware rather than transactionally rolled back:
 - a candidate whose hosted type (the named export, or the type the slot hosts
   for a replace with no export) declares a dependency with no `Live` route is
   refused before the old instance is touched ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md));
+- an instantiation error (the candidate's `init` fails, for example on config
+  bytes that do not decode as its `Config`) happens before the old instance is
+  touched;
 - a state-save error reinstalls the old instance after its `unwire` / `on_dehydrate`
   hooks have run;
 - a candidate that does not declare the kind of a request context the old
   instance carries is refused after those hooks, and the old instance is
-  reinstalled ([ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md) §4);
-- an instantiation error occurs after the old instance was dropped and leaves the
-  stable trampoline empty; and
-- a rehydrate error installs the new instance but returns `ReplaceResult::Err`, so
-  the caller must decide how to roll forward.
+  reinstalled ([ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md) §4); and
+- a rehydrate error drops the candidate and reinstalls the old instance with its
+  reply table and correlation counters, still hosting its own module and type.
+  Its `unwire` / `on_dehydrate` effects, and any mail the candidate sent from
+  `on_rehydrate`, are not undone, and its `wire` does not run again.
 
-Another replace can refill an empty trampoline. Only a fully successful replace
+Another replace can refill the empty trampoline a drop leaves. Only a fully successful replace
 returns `ReplaceResult::Ok` with the new component's capabilities so the hub's
 cached view reflects the swapped binary.
 
