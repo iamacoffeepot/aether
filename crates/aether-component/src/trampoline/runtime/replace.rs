@@ -126,8 +126,8 @@ impl WasmTrampolineState {
 
     pub(super) fn finish_sibling_spawn(&self, done: TaskDone<SpawnOutcome<WasmTrampoline>, SiblingSpawnContext>) {
         match &done.output().result {
-            Ok(_) => {
-                self.mailer.capability_registry().register(done.output().mailbox_id, &done.context().capabilities);
+            Ok(child) => {
+                self.mailer.capability_registry().register_actor(child.erase(), &done.context().capabilities);
             }
             Err(error) => {
                 tracing::warn!(

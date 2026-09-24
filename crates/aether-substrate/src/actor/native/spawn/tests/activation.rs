@@ -95,6 +95,7 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
     );
     let commit = spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain));
     let child_id = commit.route.id;
+    let child_name = commit.route.canonical_name.clone();
     let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
 
     drop(owner);
@@ -108,7 +109,7 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
     let done = parent
         .dispatch_take::<SpawnOutcome<ActivationProbe>, ()>(dispatch_id)
         .expect("owner-close finalization fills the typed deferred result");
-    assert_eq!(done.output().mailbox_id, child_id, "a rejection still names the birth it belongs to");
+    assert_eq!(&*done.output().canonical_name, &*child_name, "a rejection still names the birth it belongs to");
     assert!(matches!(done.output().result, Err(SpawnError::OwnerClosed)));
     done.release_no_reply();
     drop(parent.reserve_child(key).expect("owner-close rejection releases the staged parent key"));
@@ -141,6 +142,9 @@ fn rejected_multi_birth_batch_marks_unvisited_native_finalizer_as_activation_rej
     let first_id = first.route.id;
     let middle_id = middle.route.id;
     let later_id = later.route.id;
+    let first_name = first.route.canonical_name.clone();
+    let middle_name = middle.route.canonical_name.clone();
+    let later_name = later.route.canonical_name.clone();
     registry
         .try_register_inbox_with_id(&boot_authority(), middle_id, middle.route.canonical_name.clone(), noop_handler())
         .unwrap();
@@ -165,15 +169,15 @@ fn rejected_multi_birth_batch_marks_unvisited_native_finalizer_as_activation_rej
     assert!(registry.entry_at(later_id).is_none());
 
     let first_done = await_spawn_done(&parent, first_dispatch);
-    assert_eq!(first_done.output().mailbox_id, first_id, "each rejection names its own birth");
+    assert_eq!(&*first_done.output().canonical_name, &*first_name, "each rejection names its own birth");
     assert!(matches!(first_done.output().result, Err(SpawnError::ActivationRejected)));
     first_done.release_no_reply();
     let middle_done = await_spawn_done(&parent, middle_dispatch);
-    assert_eq!(middle_done.output().mailbox_id, middle_id);
+    assert_eq!(&*middle_done.output().canonical_name, &*middle_name);
     assert!(matches!(middle_done.output().result, Err(SpawnError::SubnameInUse { .. })));
     middle_done.release_no_reply();
     let later_done = await_spawn_done(&parent, later_dispatch);
-    assert_eq!(later_done.output().mailbox_id, later_id);
+    assert_eq!(&*later_done.output().canonical_name, &*later_name);
     assert!(matches!(later_done.output().result, Err(SpawnError::ActivationRejected)));
     later_done.release_no_reply();
     for key in [first_key, middle_key, later_key] {
@@ -263,7 +267,7 @@ fn closed_child_subname_restages_as_retired_not_in_use() {
     let done = await_spawn_done(&parent, dispatch_id);
     assert!(matches!(
         done.output(),
-        SpawnOutcome { mailbox_id, result: Ok(child), .. } if *mailbox_id == child_id && child.id() == child_id
+        SpawnOutcome { result: Ok(child), .. } if child.id() == child_id
     ));
     done.release_no_reply();
     assert!(parent.reserve_child(key).is_none(), "Live promotion carries the same key into the live-child set");

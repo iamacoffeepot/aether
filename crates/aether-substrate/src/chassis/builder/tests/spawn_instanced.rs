@@ -89,7 +89,7 @@ fn instanced_can_spawn_grandchild() {
 
     struct Parent {
         grandchild_received: Arc<AtomicU32>,
-        spawned_name: Arc<Mutex<Option<(MailboxId, String)>>>,
+        spawned_name: Arc<Mutex<Option<String>>>,
     }
     impl Addressable for Parent {
         const NAMESPACE: &'static str = "test.recursive.parent";
@@ -100,7 +100,7 @@ fn instanced_can_spawn_grandchild() {
     impl HandlesKind<Quit> for Parent {}
     impl aether_actor::Lifecycle<Self> for Parent {
         type Config = ();
-        type Params = (Arc<AtomicU32>, Arc<Mutex<Option<(MailboxId, String)>>>);
+        type Params = (Arc<AtomicU32>, Arc<Mutex<Option<String>>>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a, Self>;
@@ -135,7 +135,7 @@ fn instanced_can_spawn_grandchild() {
                     .stage()
                     .expect("recursive spawn must succeed");
                 *state.spawned_name.lock().expect("spawned-name mutex poisoned") =
-                    Some((receipt.mailbox_id, receipt.canonical_name.to_string()));
+                    Some(receipt.canonical_name.to_string());
                 return Some(());
             }
             if kind.0 == Quit::ID.0 {
@@ -197,7 +197,7 @@ fn instanced_can_spawn_grandchild() {
     ));
     assert_eq!(
         *spawned_name.lock().expect("spawned-name mutex poisoned"),
-        Some((grandchild_id, "test.recursive.parent:p1/test.recursive.grandchild:only".to_owned())),
+        Some("test.recursive.parent:p1/test.recursive.grandchild:only".to_owned()),
         "the staged receipt must carry the exact nested canonical registration name",
     );
     assert!(

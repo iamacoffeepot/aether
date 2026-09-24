@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use aether_actor::{ActorRef, Addressable, ErasedActorRef, Manual, Single, runtime};
-use aether_data::{ActorMail, MailboxId};
+use aether_data::ActorMail;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
     TextInput, WindowMode, WindowSize,
@@ -293,7 +293,6 @@ impl DesktopWindowCapabilityState {
         };
         match attachment {
             Ok(()) => {
-                let predicted = MailboxId(id.0);
                 // ADR-0168 §3: this runs on a `PumpedSlot::host_turn`, which
                 // carries no chain, so the staged birth takes no settlement
                 // hold — and is ordered anyway. `pending.reply` retains the
@@ -301,32 +300,19 @@ impl DesktopWindowCapabilityState {
                 // in `finish_window_child_spawn`, so the request's `Finished`
                 // stays un-recorded across the birth and its chain cannot
                 // settle through it. Declared here because that reasoning is
-                // three call frames away from this line.
-                let receipt = match ctx
+                // three call frames away from this line. The birth carries the
+                // predicted id as its completion context, since that id is what
+                // the reservation is keyed by.
+                if let Err(error) = ctx
                     .spawn_child::<DesktopWindowInstance>(Subname::Named(&pending.spec.name), (), ())
                     .ordered_by(OrderingDevice::RetainedReplyDebt)
-                    .stage()
+                    .stage_with(id)
                 {
-                    Ok(receipt) => receipt,
-                    Err(error) => {
-                        return self.rollback_attached_create(
-                            id,
-                            &mut pending,
-                            format!("failed to spawn window child: {error:?}"),
-                        );
-                    }
-                };
-                // The reservation is keyed by the id consumers address, so a
-                // divergent deterministic id dooms it rather than publishing a
-                // window nobody can reach: roll back now and reserve nothing,
-                // and the completion's no-reservation arm retires the child the
-                // owner still applies.
-                if receipt.mailbox_id != predicted {
-                    let error = format!(
-                        "spawned window child {:?} did not match predicted mailbox {predicted:?}",
-                        receipt.mailbox_id
+                    return self.rollback_attached_create(
+                        id,
+                        &mut pending,
+                        format!("failed to spawn window child: {error:?}"),
                     );
-                    return self.rollback_attached_create(id, &mut pending, error);
                 }
 
                 self.pending_creates.insert(id, pending);
@@ -350,11 +336,9 @@ impl DesktopWindowCapabilityState {
     fn finish_window_child_spawn<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
+        id: WindowId,
         outcome: &SpawnOutcome<DesktopWindowInstance>,
     ) {
-        // The birth names itself on both arms, so the reservation key comes
-        // straight off the outcome rather than a context struct carrying it.
-        let id = WindowId(outcome.mailbox_id.0);
         let Some(mut pending) = self.pending_creates.remove(&id) else {
             if let Ok(child) = &outcome.result {
                 ctx.send_to(child, &RetireWindow);
@@ -364,6 +348,18 @@ impl DesktopWindowCapabilityState {
         let effects = match &outcome.result {
             Err(error) => {
                 self.rollback_attached_create(id, &mut pending, format!("failed to spawn window child: {error:?}"))
+            }
+            // The reservation is keyed by the id consumers address, so a
+            // divergent deterministic id dooms it rather than publishing a
+            // window nobody can reach: retire the child and roll back before
+            // anything answers the caller.
+            Ok(child) if WindowId(child.id().0) != id => {
+                ctx.send_to(child, &RetireWindow);
+                self.rollback_attached_create(
+                    id,
+                    &mut pending,
+                    format!("spawned window child {child:?} did not match predicted window {id:?}"),
+                )
             }
             Ok(child) => match ctx.monitor(child.erase()) {
                 Ok(monitor) => self.promote_attached_window(ctx, id, *child, monitor, &mut pending),
@@ -901,9 +897,9 @@ impl NativeActor for DesktopWindowCapability {
     fn on_window_child_spawn_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<DesktopWindowInstance>, ()>,
+        done: TaskDone<SpawnOutcome<DesktopWindowInstance>, WindowId>,
     ) {
-        state.finish_window_child_spawn(ctx, done.output());
+        state.finish_window_child_spawn(ctx, *done.context(), done.output());
         done.release_no_reply();
     }
 
@@ -1017,7 +1013,7 @@ mod tests {
     use std::fmt::Debug;
     use std::sync::mpsc;
 
-    use aether_data::Kind;
+    use aether_data::{Kind, MailboxId};
     use aether_kinds::mouse_button;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::SpawnError;
@@ -1025,7 +1021,10 @@ mod tests {
     use aether_substrate::mail::Source;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, MailDispatch, OwnedDispatch, noop_handler};
-    use aether_substrate::testing::{boot_authority, registered_binding, registered_ref, token_root, unrouted_binding};
+    use aether_substrate::testing::{
+        boot_authority, boot_test_chassis_with, decode_session_reply, fresh_substrate, manual_dispatch_ctx,
+        registered_binding, registered_ref, session_sender, test_mailer_and_rx, token_root, unrouted_binding,
+    };
 
     use super::*;
     // The subscription request kinds moved to the `WindowSubscriptions` set,
@@ -1227,8 +1226,8 @@ mod tests {
 
         state.finish_window_child_spawn(
             &mut ctx,
+            id,
             &SpawnOutcome::<DesktopWindowInstance> {
-                mailbox_id: MailboxId(id.0),
                 canonical_name: Arc::from("aether.window/aether.window.instance:tools"),
                 result: Err(SpawnError::OwnerClosed),
             },
@@ -1236,6 +1235,56 @@ mod tests {
 
         assert!(!state.windows.contains_key(&id), "a rejected birth rolls its window back");
         assert!(state.pending_creates.is_empty(), "a rejected birth clears its reservation");
+        assert!(
+            state
+                .pending_host_effects
+                .iter()
+                .any(|effect| matches!(effect, WindowHostEffect::Closing { id: closing } if *closing == id)),
+            "rollback detaches the native window through the host-effect queue",
+        );
+    }
+
+    /// The divergence guard runs when the birth completes: a Live child whose
+    /// reference does not name the predicted window is never promoted, and the
+    /// caller's reply names the divergence. The child is placed flat at the
+    /// chassis root under another name, so its reference is real but names a
+    /// window nobody reserved.
+    #[test]
+    fn a_window_child_that_diverges_from_its_prediction_rolls_back() {
+        let (registry, chassis_mailer) = fresh_substrate();
+        let chassis = boot_test_chassis_with::<WindowCapability>(&registry, &chassis_mailer, (), ());
+        let child = chassis
+            .spawn_actor_for_test::<DesktopWindowInstance>(Subname::Named("elsewhere"), (), ())
+            .finish()
+            .expect("the stray window child spawns");
+        let (mailer, rx) = test_mailer_and_rx();
+        let binding = unrouted_binding(&mailer);
+        let mut state = test_state();
+        let id = predicted_window_id("tools");
+
+        DesktopWindowCapability::on_create(
+            &mut state,
+            &mut manual_dispatch_ctx(&binding, session_sender()),
+            CreateWindow { spec: spec("tools", "Tools") },
+        );
+        insert_window(&mut state, id, "tools", false);
+        state.windows.get_mut(&id).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
+        state.finish_window_child_spawn(
+            &mut NativeCtx::<'_, Erased>::new_for_actor(&binding, Source::NONE, None, None),
+            id,
+            &SpawnOutcome::<DesktopWindowInstance> {
+                canonical_name: Arc::from("aether.window/aether.window.instance:tools"),
+                result: Ok(child),
+            },
+        );
+
+        let CreateWindowResult::Err { error } = decode_session_reply::<CreateWindowResult>(&rx) else {
+            panic!("a divergent child fails the create");
+        };
+        assert!(error.contains("did not match predicted window"), "the reply names the divergence: {error}");
+        assert!(state.children.is_empty(), "a divergent child is never supervised");
+        assert!(!state.windows.contains_key(&id), "a divergent child rolls its window back");
+        assert!(state.pending_creates.is_empty(), "a divergent child clears its reservation");
         assert!(
             state
                 .pending_host_effects

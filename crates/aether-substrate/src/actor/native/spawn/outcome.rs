@@ -8,7 +8,6 @@ use std::sync::Arc;
 use aether_actor::{ActorRef, Addressable};
 
 use crate::actor::native::DispatchId;
-use crate::mail::MailboxId;
 
 use super::SpawnError;
 
@@ -17,7 +16,6 @@ use super::SpawnError;
 /// live; the authoritative result arrives as a later `TaskDone`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpawnReceipt {
-    pub mailbox_id: MailboxId,
     pub canonical_name: Arc<str>,
     pub completion: DispatchId,
 }
@@ -26,17 +24,16 @@ pub struct SpawnReceipt {
 /// through the ADR-0093 task completion path once the registry owner has
 /// decided it.
 ///
-/// Self-identifying on **both** arms: `mailbox_id` and `canonical_name` name
-/// the child the handler staged whether or not it reached Live, so a completion
-/// handler correlates the result without a hand-rolled context struct whose
-/// only job was carrying an id back. `result` is the precise [`SpawnError`] on
-/// a refused birth. Its `Ok` arm is the ADR-0230 proof: the child's
-/// [`ActorRef<A>`], minted once by the registry after the child is published
-/// Live and catch-up is armed. A parent that keeps or mails its child holds
-/// that reference and sends through `ctx.send_to(&child, ..)`; it never
-/// re-derives one from `mailbox_id`.
+/// Self-identifying on **both** arms: `canonical_name` names the child the
+/// handler staged whether or not it reached Live, so a completion handler
+/// correlates the result by that name, or by the completion context it staged
+/// with when its key is something else, without a hand-rolled context struct
+/// whose only job was carrying the name back. `result` is the precise
+/// [`SpawnError`] on a refused birth. Its `Ok` arm is the ADR-0230 proof: the
+/// child's [`ActorRef<A>`], minted once by the registry after the child is
+/// published Live and catch-up is armed. A parent that keeps or mails its child
+/// holds that reference and sends through `ctx.send_to(&child, ..)`.
 pub struct SpawnOutcome<A> {
-    pub mailbox_id: MailboxId,
     pub canonical_name: Arc<str>,
     pub result: Result<ActorRef<A>, SpawnError>,
 }
@@ -50,6 +47,6 @@ impl<A: Addressable> fmt::Debug for SpawnOutcome<A> {
             .debug_struct("SpawnOutcome")
             .field("canonical_name", &self.canonical_name)
             .field("result", &self.result)
-            .finish_non_exhaustive()
+            .finish()
     }
 }

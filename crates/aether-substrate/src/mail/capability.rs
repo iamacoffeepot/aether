@@ -145,6 +145,20 @@ impl CapabilityRegistry {
         full.insert(mailbox, caps.clone());
     }
 
+    /// Register (or replace) the caps for the actor `target` proves. The
+    /// reference form of [`Self::register`], with the same effect.
+    ///
+    /// The component host's load completions and the trampoline's sibling
+    /// completion are the consumers: each registers a child's caps on the
+    /// `Ok` arm of its [`SpawnOutcome`](crate::actor::native::SpawnOutcome),
+    /// which carries the child's reference (ADR-0230).
+    ///
+    /// # Panics
+    /// Panics if either internal lock is poisoned (see [`Self::accepts`]).
+    pub fn register_actor(&self, target: ErasedActorRef, caps: &ComponentCapabilities) {
+        self.register(target.id(), caps);
+    }
+
     /// The full [`ComponentCapabilities`] for `mailbox` — handler names,
     /// docs, fallback doc, and config kind — as last registered.
     /// `None` for an unknown or dropped mailbox. Backs the name-addressed

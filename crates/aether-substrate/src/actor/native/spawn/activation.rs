@@ -79,9 +79,11 @@ struct ParentLink {
 struct NativeSpawnFinalizerState<A> {
     parent: Option<ParentLink>,
     completion: SpawnCompletionSink<A>,
-    /// The staged child's identity, carried onto **both** arms of the
-    /// [`SpawnOutcome`] so a rejection names the birth it belongs to.
+    /// The staged child's route, which mints the `Ok` arm's reference once
+    /// the child is Live. It never leaves the finalizer.
     mailbox_id: MailboxId,
+    /// The staged child's name, carried onto **both** arms of the
+    /// [`SpawnOutcome`] so a rejection names the birth it belongs to.
     canonical_name: Arc<str>,
 }
 
@@ -141,11 +143,7 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
             PreparedSpawnFailure::ActivationRejected => SpawnError::ActivationRejected,
             PreparedSpawnFailure::OwnerClosed => SpawnError::OwnerClosed,
         };
-        state.completion.complete(SpawnOutcome {
-            mailbox_id: state.mailbox_id,
-            canonical_name: state.canonical_name,
-            result: Err(error),
-        });
+        state.completion.complete(SpawnOutcome { canonical_name: state.canonical_name, result: Err(error) });
     }
 
     /// Complete the birth `Ok`. Called only from the activation's catch-up
@@ -162,7 +160,6 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
             }
         }
         state.completion.complete(SpawnOutcome {
-            mailbox_id: state.mailbox_id,
             canonical_name: state.canonical_name,
             result: Ok(Registry::activated(state.mailbox_id)),
         });
