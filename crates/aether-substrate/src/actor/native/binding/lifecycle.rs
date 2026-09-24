@@ -41,7 +41,7 @@ impl NativeBinding {
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
         carry: u64,
-        canonical_name: Arc<str>,
+        canonical_name: ActorPath,
         aborter: Arc<dyn FatalAborter>,
         spawner: Option<Arc<crate::Spawner>>,
     ) -> Self {
@@ -56,7 +56,7 @@ impl NativeBinding {
         self_mailbox: MailboxId,
         parent_mailbox: Option<MailboxId>,
         carry: u64,
-        canonical_name: Arc<str>,
+        canonical_name: ActorPath,
         aborter: Arc<dyn FatalAborter>,
         spawner: Option<Arc<crate::Spawner>>,
     ) -> Self {
@@ -90,10 +90,13 @@ impl NativeBinding {
     ///
     /// ```ignore
     /// let claim = ctx.claim_mailbox_drop_on_shutdown(NAME)?;
-    /// let transport = NativeBinding::from_ctx::<MyActor>(ctx, claim.id);
+    /// let transport = NativeBinding::from_ctx(ctx, claim.id, canonical_name);
     /// ```
+    ///
+    /// `canonical_name` is the root actor's `A::NAMESPACE`, proven by the
+    /// caller before it claims the mailbox.
     #[must_use]
-    pub(crate) fn from_ctx<A: super::NativeActor>(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId) -> Self {
+    pub(crate) fn from_ctx(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId, canonical_name: ActorPath) -> Self {
         Self::new(
             ctx.mail_send_handle(),
             self_mailbox,
@@ -101,7 +104,7 @@ impl NativeBinding {
             // capability (depth-1), so its lineage carry is its own
             // `ActorId.0` == `self_mailbox.0` — it keeps today's id.
             self_mailbox.0,
-            Arc::from(A::NAMESPACE),
+            canonical_name,
             ctx.fatal_aborter(),
             Some(Arc::clone(ctx.spawner_arc())),
         )

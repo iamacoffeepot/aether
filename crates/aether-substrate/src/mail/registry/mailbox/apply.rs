@@ -79,23 +79,21 @@ impl Registry {
         for effect in batch.effects {
             match effect {
                 RegistryEffect::PreparedSpawn(mut commit) => {
-                    let id = commit.route.id;
+                    let id = commit.id;
                     // The zero id is every absent-mailbox wasm ABI slot's
                     // encoding ("no source", "no parent"), so it is never
                     // registrable: a real actor there would be
                     // indistinguishable from no actor. The chassis id is
                     // short-circuited ahead of the registry. Every arm below
-                    // refuses both, and refuses a name outside the ADR-0166
-                    // path grammar the same way, so every stored route name is
-                    // proven once, here.
-                    let Some(canonical_name) = ActorPath::new(&commit.route.canonical_name)
-                        .ok()
-                        .filter(|_| id.0 != 0 && id != MailboxId::CHASSIS_MAILBOX_ID)
-                    else {
-                        let name = commit.route.canonical_name.clone();
+                    // refuses both. A native birth's name was proven against
+                    // the ADR-0166 path grammar at staging, so this arm reads
+                    // the proof; the other arms still prove theirs here, so
+                    // every stored route name is proven once.
+                    if id.0 == 0 || id == MailboxId::CHASSIS_MAILBOX_ID {
+                        let name = commit.canonical_name.to_string();
                         drop(commit.reject_at_home(PreparedSpawnFailure::SubnameInUse { full_name: name.clone() }));
                         return Err(RegistryEffectError::Name(NameConflict { name }));
-                    };
+                    }
                     match staged_route(&staged_routes, inner, id) {
                         // Same-name reuse of a `Dropped` route. The boot and
                         // eager-spawn unwinds produce one through
@@ -107,14 +105,14 @@ impl Registry {
                         // conflict arm below reads.
                         Some(existing)
                             if matches!(existing.lifecycle, RouteLifecycle::Dropped)
-                                && existing.canonical_name == canonical_name => {}
+                                && existing.canonical_name == commit.canonical_name => {}
                         // A route already occupies this id. `reserve` — where
                         // the authoritative retired-name answer lives — is
                         // still two steps away and will never run for this
                         // birth, so classify the conflict here instead of
                         // reporting every one of them as a live occupant.
                         Some(_) => {
-                            let name = commit.route.canonical_name.clone();
+                            let name = commit.canonical_name.to_string();
                             let failure = commit.route_conflict_failure();
                             drop(commit.reject_at_home(failure));
                             return Err(RegistryEffectError::Name(NameConflict { name }));
@@ -133,15 +131,17 @@ impl Registry {
                         activation.reject(PreparedSpawnFailure::ActivationRejected);
                         return Err(RegistryEffectError::ActivationRejected);
                     }
-                    let route = commit.route;
-                    let record = RouteRecord { canonical_name, lifecycle: RouteLifecycle::Starting { token } };
-                    staged_routes.insert(route.id, Some(record.clone()));
-                    staged_pending.insert(route.id, Some(token));
-                    publication.route_updates.push(Update::Insert(route.id, record));
+                    let record = RouteRecord {
+                        canonical_name: commit.canonical_name,
+                        lifecycle: RouteLifecycle::Starting { token },
+                    };
+                    staged_routes.insert(id, Some(record.clone()));
+                    staged_pending.insert(id, Some(token));
+                    publication.route_updates.push(Update::Insert(id, record));
                     prepared_births.insert(
-                        route.id,
+                        id,
                         PendingBirth {
-                            id: route.id,
+                            id,
                             token,
                             parked: VecDeque::new(),
                             activation: Some(Arc::clone(&activation)),
@@ -151,7 +151,7 @@ impl Registry {
                             cancel_requested: false,
                         },
                     );
-                    applied.push(RegistryApplied::Starting { id: route.id, token });
+                    applied.push(RegistryApplied::Starting { id, token });
                 }
                 RegistryEffect::PublishAlias(alias) => {
                     let Some(canonical_name) = ActorPath::new(&alias.rendered_name)

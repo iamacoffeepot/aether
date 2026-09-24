@@ -45,7 +45,7 @@ use super::spawn::reservation::{ChildReservationTable, LiveChildReservation};
 
 // The modules below reach `actor::native`'s own items through `super::` paths,
 // which resolve against this module — so bind them here.
-pub(super) use super::{NativeActor, blob, offload};
+pub(super) use super::{blob, offload};
 
 mod activation;
 mod dispatch;

@@ -7,6 +7,7 @@ use aether_actor::Root;
 use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace::ActorTraceRing;
+use aether_data::ActorPath;
 
 use super::passive_boot::{DynShutdown, PassiveBoot};
 use crate::actor::native::binding::NativeBinding;
@@ -111,6 +112,10 @@ where
             panic!("PassiveBoot::claim called in non-Pending state");
         };
 
+        // The binding's canonical name is the root's `A::NAMESPACE`, proven
+        // before any registry write so a refusal leaves nothing to unwind.
+        let canonical_name = ActorPath::new(A::NAMESPACE).map_err(|error| BootError::Other(Box::new(error)))?;
+
         // Issue 607 Phase 3b (ADR-0079): claim namespace ownership for
         // this singleton's `Addressable::NAMESPACE`. The actor registry
         // tracks one TypeId per namespace across both cardinalities
@@ -152,7 +157,7 @@ where
 
         // Per-cap transport. `NativeBinding::from_ctx` pulls the
         // chassis's aborter + spawner.
-        let transport = Arc::new(NativeBinding::from_ctx::<A>(ctx, mailbox_id));
+        let transport = Arc::new(NativeBinding::from_ctx(ctx, mailbox_id, canonical_name));
         transport.install_inbox(receiver);
 
         // Per-actor scratch storage (issue 582 / ADR-0074). Stamped

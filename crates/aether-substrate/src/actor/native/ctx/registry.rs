@@ -88,7 +88,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// broken invariant, not an answer (ADR-0063).
     ///
     /// Consumers: the http server's unmonitorable route-holder warning, the
-    /// component host's replacement-boot warnings, and the lifecycle cap's
+    /// component host's replacement-boot warnings and its load-under parent,
+    /// whose proven path names the child's lineage, and the lifecycle cap's
     /// stuck-advance warning, which names each subscriber still owed.
     #[must_use]
     pub fn actor_path(&self, reference: ErasedActorRef) -> ActorPath {

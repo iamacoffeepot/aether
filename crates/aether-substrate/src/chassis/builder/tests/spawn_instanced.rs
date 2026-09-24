@@ -288,8 +288,8 @@ fn spawn_finish_with_name_returns_the_registered_top_level_name() {
 
     let proven = |name: &str| registry.resolve_live(registry.lookup(name).expect("registered name resolves"));
     assert_eq!(proven("test.spawn_name.return:id-only"), Ok(id_only.erase()));
-    assert_eq!(canonical_name, "test.spawn_name.return:exact-name");
-    assert_eq!(proven(&canonical_name), Ok(named_id.erase()));
+    assert_eq!(canonical_name.as_str(), "test.spawn_name.return:exact-name");
+    assert_eq!(proven(canonical_name.as_str()), Ok(named_id.erase()));
 
     drop(chassis);
 }

@@ -54,7 +54,7 @@ impl NativeBinding {
             let name = self
                 .identity
                 .runtime_identity()
-                .map_or("<untyped test binding>", |identity| &**identity.canonical_name());
+                .map_or("<untyped test binding>", |identity| identity.canonical_name().as_str());
             tracing::warn!(
                 actor = name,
                 live,
