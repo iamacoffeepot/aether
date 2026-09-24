@@ -56,7 +56,7 @@ fn main() {}
 
 // Only `Parent` is listed. The test crate declares no `library` feature, so the
 // shim's `cfg(feature = "library")` is allowed.
-#[allow(unexpected_cfgs)]
+#[allow(unexpected_cfgs)] // aether-suppression-request: the trybuild crate declares no `library` feature, so the export shim's `cfg(feature = "library")` gate is an unknown value here
 mod listed {
     aether_actor::export!(super::Parent);
 }
