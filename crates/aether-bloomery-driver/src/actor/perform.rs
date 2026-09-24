@@ -16,7 +16,7 @@ impl BundleDriver {
     /// Journal reads and appends go to the handed-over journal reference, loads go
     /// to the component host under the bundle's digest name, root commands go
     /// to the reference the digest's load reply was stamped with, and answers
-    /// release the parked reply. Every send carries its ticket as the request
+    /// and fetch answers release the parked reply. Every send carries its ticket as the request
     /// context, so the reply routes back to the core continuation that issued
     /// it. The head watch rides a fresh chain: the journal parks it until the
     /// head moves, and the chain that happens to re-arm it did not cause the
@@ -66,6 +66,11 @@ impl BundleDriver {
                 Command::Processed { caller, reply } => {
                     if let Some(owed) = self.take_parked(caller) {
                         owed.reply(ctx, &reply);
+                    }
+                }
+                Command::Fetched { caller, result } => {
+                    if let Some(owed) = self.take_parked(caller) {
+                        owed.reply(ctx, &result);
                     }
                 }
                 Command::Abort { reason } => ctx.fatal_abort(reason),

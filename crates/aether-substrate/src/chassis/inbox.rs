@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use aether_actor::ErasedActorRef;
 use aether_data::{Kind, KindId, MailId, MailboxId, Source};
 
 use crate::actor::native::envelope::Envelope;
@@ -119,9 +120,17 @@ impl SettlingInbox {
     /// [`MailboxClaim`](crate::chassis::ctx::MailboxClaim) returned by
     /// `claim_mailbox`; the explicit constructor is `pub` so out-of-crate
     /// tests can pair a channel with a registered inbox handler and drive
-    /// the guard directly.
+    /// the guard directly, passing the proof of that registered inbox as
+    /// `target`.
     #[must_use]
-    pub fn new(id: MailboxId, receiver: mpsc::Receiver<Envelope>, mailer: Arc<Mailer>) -> Self {
+    pub fn new(target: ErasedActorRef, receiver: mpsc::Receiver<Envelope>, mailer: Arc<Mailer>) -> Self {
+        Self::new_at(target.id(), receiver, mailer)
+    }
+
+    /// The positional form of [`Self::new`], for substrate-internal
+    /// inboxes that hold no proof yet: a claim, and a Starting route
+    /// before its owner promotes it. Same fresh reply-id counter.
+    pub(crate) fn new_at(id: MailboxId, receiver: mpsc::Receiver<Envelope>, mailer: Arc<Mailer>) -> Self {
         Self { id, receiver, mailer, reply_counter: ReplyLineage::new() }
     }
 
@@ -137,12 +146,6 @@ impl SettlingInbox {
         reply_lineage: ReplyLineage,
     ) -> Self {
         Self { id, receiver, mailer, reply_counter: reply_lineage }
-    }
-
-    /// The claimed mailbox's id.
-    #[must_use]
-    pub fn id(&self) -> MailboxId {
-        self.id
     }
 
     /// Re-home this inbox's reply-id minting onto `reply_lineage`,
@@ -423,7 +426,7 @@ mod tests {
         // (1) consume — read the payload, then drop.
         {
             let (tx, rx) = mpsc::channel();
-            let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
+            let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
             let root = MailId::new(id, 1);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
@@ -437,7 +440,7 @@ mod tests {
         // (2) unmatched drop — never touch the fields, just drop.
         {
             let (tx, rx) = mpsc::channel();
-            let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
+            let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
             let root = MailId::new(id, 2);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
@@ -449,7 +452,7 @@ mod tests {
         // (3) closure drain.
         {
             let (tx, rx) = mpsc::channel();
-            let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
+            let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
             let root = MailId::new(id, 3);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
@@ -461,7 +464,7 @@ mod tests {
         // (4) teardown — mail queued, SettlingInbox dropped.
         {
             let (tx, rx) = mpsc::channel();
-            let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
+            let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
             let root = MailId::new(id, 4);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
@@ -483,7 +486,7 @@ mod tests {
         let guard_rx = settlement.subscribe_settlement(guard_root);
 
         let (tx, rx) = mpsc::channel();
-        let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
+        let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
         tx.send(armed_env(id, MailId::NONE, guard_root, Source::NONE)).unwrap();
         // Drop without reading — a NONE inbound must not settle anything.
         drop(inbox.try_next().expect("one queued"));
@@ -515,7 +518,7 @@ mod tests {
         let settle = settlement.subscribe_settlement(root);
 
         let (tx, rx) = mpsc::channel();
-        let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
+        let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
         tx.send(armed_env(id, MailId::new(id, 21), root, sender)).unwrap();
 
@@ -557,7 +560,7 @@ mod tests {
             .expect("register reply target");
 
         let (tx, rx) = mpsc::channel();
-        let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
+        let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 1);
         // A lineage-less inbound (root NONE) still mints a high-space
         // reply id — the id space is the drain's, not the inbound's.

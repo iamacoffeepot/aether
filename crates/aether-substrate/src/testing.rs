@@ -341,7 +341,7 @@ pub fn manual_dispatch_ctx<A>(binding: &Arc<NativeBinding>, sender: Source) -> N
         sender,
         MailId::NONE,
         MailId::NONE,
-        OwnedDispatch::disarmed(
+        OwnedDispatch::disarmed_at(
             KindId(0),
             None,
             sender,

@@ -259,8 +259,8 @@ opt-level = 3
 [workspace.lints.rust]
 # Phase 5 of iamacoffeepot/aether#913 swept ~244 RsUnnecessaryQualifications
 # findings across the workspace. Enabling rustc's matching lint here at
-# `warn` prevents reintroduction — CI's `cargo clippy -- -D warnings`
-# escalates it to a hard fail on any new qualified path that the
+# `warn` prevents reintroduction — CI's clippy gate (`verify.clippy`),
+# which fails on any warning, escalates it to a hard fail on any new qualified path that the
 # compiler can elide (e.g. `core::mem::size_of` when the edition-2024
 # prelude has `size_of` in scope).
 unused_qualifications = "warn"
@@ -297,7 +297,7 @@ private_intra_doc_links = "warn"
 
 [workspace.lints.clippy]
 # Every level in this table is a merge gate. CI's `Clippy gate` job runs
-# `verify.clippy` — `cargo clippy --workspace --all-targets` under
+# `verify.clippy` — `cargo clippy --workspace --all-targets --all-features` under
 # `--message-format=json` — and applies the same fail-on-any-warning predicate
 # `-D warnings` encodes over the resulting diagnostic list, so a `warn` here
 # fails a pull request exactly as a `deny` does. The two differ only in whether
