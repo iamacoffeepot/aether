@@ -283,7 +283,7 @@ impl NativeActor for FleetProxy {
     /// stranded in that gap.
     fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         state.route_hold = ctx.acquire_settlement_hold();
-        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: state.engine_id });
+        ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: state.engine_id });
         ctx.self_wake::<RpcInboundReady>().wake(&RpcInboundReady::default());
     }
 

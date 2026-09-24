@@ -357,7 +357,7 @@ impl DesktopWindowCapabilityState {
         let id = WindowId(outcome.mailbox_id.0);
         let Some(mut pending) = self.pending_creates.remove(&id) else {
             if let Ok(child) = &outcome.result {
-                ctx.to(child).send(&RetireWindow);
+                ctx.send_to(child, &RetireWindow);
             }
             return;
         };
@@ -368,7 +368,7 @@ impl DesktopWindowCapabilityState {
             Ok(child) => match ctx.monitor(child.erase()) {
                 Ok(monitor) => self.promote_attached_window(ctx, id, *child, monitor, &mut pending),
                 Err(error) => {
-                    ctx.to(child).send(&RetireWindow);
+                    ctx.send_to(child, &RetireWindow);
                     self.rollback_attached_create(
                         id,
                         &mut pending,
@@ -390,7 +390,7 @@ impl DesktopWindowCapabilityState {
     ) -> Vec<WindowHostEffect> {
         let Some(state) = self.windows.get_mut(&id) else {
             let error = format!("window {id:?} disappeared during attachment");
-            ctx.to(&child).send(&RetireWindow);
+            ctx.send_to(child, &RetireWindow);
             return self.rollback_attached_create(id, pending, error);
         };
         self.children.insert(id, WindowChild { reference: child, _monitor: monitor });
@@ -456,7 +456,7 @@ impl DesktopWindowCapabilityState {
         if let Some(reply) = close_reply {
             reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Ok));
         } else if let Some(child) = self.children.get(&id) {
-            ctx.to(&child.reference).send(&RetireWindow);
+            ctx.send_to(child.reference, &RetireWindow);
         }
         self.publish(ctx, id, &WindowClosed { window: id });
         if self.windows.values().any(|window| window.lifecycle != DesktopWindowLifecycle::Attaching) {
