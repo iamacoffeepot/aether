@@ -1,25 +1,11 @@
-//! Fleet-runtime helpers for the engines cap: pick a free localhost RPC
-//! port, resolve the per-engine spawn-dir parent, and reclaim the
-//! per-engine dirs under it. Native-only (sockets, process env).
+//! Fleet-runtime helpers for the engines cap: resolve the per-engine
+//! spawn-dir parent, name the files inside one engine's dir, and reclaim
+//! the per-engine dirs under it. Native-only (filesystem, process env).
 
 use aether_data::{EngineId, Uuid};
 use std::env;
 use std::fs;
-use std::io;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-
-/// Bind `127.0.0.1:0`, read the OS-assigned port, drop the
-/// listener. A tiny TOCTOU window exists before the substrate
-/// rebinds the port, but on localhost it's negligible — and this
-/// sidesteps both a wire change to report an ephemeral port back
-/// from the substrate and an un-recycled incrementing port pool.
-pub fn free_local_port() -> io::Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
-}
 
 /// Parent directory under which the cap allocates per-engine
 /// handle-store dirs (issue 1274). Priority:
@@ -47,6 +33,14 @@ pub fn resolve_fleet_store_root(override_dir: Option<&str>) -> PathBuf {
 /// is written, so the fork and the reap cannot name different dirs.
 pub fn engine_dir(root: &Path, engine_id: EngineId) -> PathBuf {
     root.join(engine_id.0.simple().to_string())
+}
+
+/// The file a forked substrate reports its bound RPC port through
+/// (`--rpc-port-file`, issue 6503), inside `engine_id`'s own dir. A fresh
+/// engine id per fork makes it fresh per attempt, so a report is always
+/// this child's.
+pub fn rpc_port_file(root: &Path, engine_id: EngineId) -> PathBuf {
+    engine_dir(root, engine_id).join("rpc.port")
 }
 
 /// Reclaim every per-engine dir under `root` left behind by an earlier hub

@@ -32,6 +32,7 @@ use super::{
     RpcServerParams, Settled,
 };
 use aether_actor::runtime;
+use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::mail::ResolveLiveError;
 use aether_substrate::net::teardown_connect_addr;
 
@@ -53,6 +54,7 @@ pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::{HashMap, HashSet};
 pub use std::io;
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 pub use std::sync::Arc;
 pub use std::sync::atomic::{AtomicBool, Ordering};
 pub use std::sync::mpsc;
@@ -84,6 +86,8 @@ pub struct RpcServerHandle {
 #[derive(Clone)]
 pub struct RpcBindGate {
     port: u16,
+    /// Where [`Self::open`] reports the port it bound, when configured.
+    port_file: Option<PathBuf>,
     inbound: mpsc::Sender<InboundEvent>,
     wake: SelfWake<RpcInboundReady>,
     opened: Arc<AtomicBool>,
@@ -91,18 +95,19 @@ pub struct RpcBindGate {
 
 impl RpcBindGate {
     /// Bind `127.0.0.1:{port}` on the calling thread, hand the listener to
-    /// the cap, wake it, and return the bound port (the OS-picked one when
-    /// the resolved port is `0`).
+    /// the cap, wake it, report the bound port to the configured port file,
+    /// and return it (the OS-picked one when the resolved port is `0`).
     ///
-    /// The listener is listening when this returns: a dial that lands before
-    /// the cap's next turn starts the accept thread waits in the backlog
-    /// rather than being refused.
+    /// The listener is listening when this returns, and when the port file
+    /// appears: a dial that lands before the cap's next turn starts the
+    /// accept thread waits in the backlog rather than being refused.
     ///
     /// # Errors
     ///
     /// Returns an error when the gate was already opened (whether that open
-    /// bound or not), when the port cannot be bound, or when the server has
-    /// already stopped and cannot take the listener.
+    /// bound or not), when the port cannot be bound, when the server has
+    /// already stopped and cannot take the listener, or when the port file
+    /// cannot be written.
     pub fn open(&self) -> io::Result<u16> {
         if self.opened.swap(true, Ordering::AcqRel) {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, "rpc bind gate is already open"));
@@ -114,8 +119,17 @@ impl RpcBindGate {
             .send(InboundEvent::Bound { listener })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "rpc server stopped before its gate opened"))?;
         self.wake.wake(&RpcInboundReady::default());
+        if let Some(path) = &self.port_file {
+            write_port_file(path, port)?;
+        }
         Ok(port)
     }
+}
+
+/// Report the port this server bound: its decimal form and a newline,
+/// written atomically so a reader sees the whole port or no file.
+fn write_port_file(path: &Path, port: u16) -> io::Result<()> {
+    atomic_write(path, format!("{port}\n").as_bytes())
 }
 
 /// Bookkeeping for one in-flight call (cid passed `Some` on the
@@ -640,6 +654,9 @@ impl NativeActor for RpcServerCapability {
                 let port = TcpListener::bind(("127.0.0.1", bind_port))
                     .and_then(|listener| state.start_accepting(listener))
                     .map_err(|e| BootError::Other(Box::new(e)))?;
+                if let Some(path) = &config.port_file {
+                    write_port_file(Path::new(path), port).map_err(|e| BootError::Other(Box::new(e)))?;
+                }
                 ctx.publish_handle(RpcServerHandle { local_port: port });
             }
             // Issue #6399: bind nothing yet. The composer opens the gate once
@@ -653,6 +670,7 @@ impl NativeActor for RpcServerCapability {
                 );
                 ctx.publish_handle(RpcBindGate {
                     port: bind_port,
+                    port_file: config.port_file.map(PathBuf::from),
                     inbound: state.inbound_tx.clone(),
                     wake: state.wake.clone(),
                     opened: Arc::new(AtomicBool::new(false)),
