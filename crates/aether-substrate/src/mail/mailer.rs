@@ -535,40 +535,94 @@ impl Mailer {
     where
         K: Kind,
     {
+        // ADR-0100: each arm encodes the reply through the kind's declared
+        // codec (cast or wire), not a hardcoded codec path.
         match sender.addr {
             SourceAddr::None => false,
             SourceAddr::Session(_) | SourceAddr::EngineMailbox { .. } => {
-                // The replier minted `reply_id` in its own id space, so its
-                // sender half is the replying actor: stamped on the session
-                // reply for an embedder to read (ADR-0230 §3), when that
-                // position holds a route.
-                let stamp = reply_id.and_then(|id| self.registry.stamped_sender(id.sender));
-                self.outbound.as_ref().is_some_and(|outbound| outbound.send_reply_stamped(sender, result, stamp))
+                self.send_hub_reply(sender, K::ID, K::NAME, result.encode_into_bytes(), reply_id)
             }
-            SourceAddr::Component(mailbox) => {
-                // ADR-0100: encode the reply through the kind's declared
-                // codec (cast or wire), not a hardcoded codec path.
-                let payload = result.encode_into_bytes();
-                // ADR-0042: echo the caller's correlation_id onto the
-                // reply envelope so the originating handler can pick
-                // the right reply out of the mpsc by correlation.
-                // Reply target is None — nobody replies to a reply.
-                let reply_to = Source::with_correlation(SourceAddr::None, sender.correlation_id);
-                // ADR-0080 §2 producer hook: record the reply's `Sent`
-                // before pushing it, so the caller's `root` counts the
-                // reply in-flight until its `Finished`. Skipped when the
-                // reply carries no id (the bare `send_reply_unchained`
-                // path) or no root, since a rootless `Sent` counts against
-                // no chain.
-                if let (Some(reply_id), Some(root)) = (reply_id, root) {
-                    self.record_sent(reply_id, root, parent, reply_id.sender, mailbox, K::ID);
-                }
-                self.push(
-                    Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to).with_lineage(reply_id, root, parent),
-                );
-                true
+            SourceAddr::Component(_) => {
+                self.send_component_reply(sender, K::ID, result.encode_into_bytes(), reply_id, root, parent)
             }
         }
+    }
+
+    /// [`Self::send_reply`] for an already-encoded reply of `kind`, which
+    /// routes, stamps, and records exactly as the typed form does. The hub
+    /// arms name the kind from its registry descriptor, since no `K::NAME`
+    /// is in hand; a kind the registry cannot name is warned and not sent.
+    /// Its caller is `NativeBinding::send_reply_envelope_for_handler`.
+    pub(crate) fn send_reply_envelope(
+        &self,
+        sender: Source,
+        kind: KindId,
+        bytes: &[u8],
+        reply_id: Option<aether_data::MailId>,
+        root: Option<aether_data::MailId>,
+        parent: Option<aether_data::MailId>,
+    ) -> bool {
+        match sender.addr {
+            SourceAddr::None => false,
+            SourceAddr::Session(_) | SourceAddr::EngineMailbox { .. } => {
+                let Some(kind_name) = self.registry.kind_name_shared(kind) else {
+                    tracing::warn!(target: "aether_substrate::mail", kind = %kind, "reply of an unregistered kind not sent");
+                    return false;
+                };
+                self.send_hub_reply(sender, kind, &kind_name, bytes.to_vec(), reply_id)
+            }
+            SourceAddr::Component(_) => self.send_component_reply(sender, kind, bytes.to_vec(), reply_id, root, parent),
+        }
+    }
+
+    /// The `Session` / `EngineMailbox` arm of the reply path: hand the
+    /// encoded reply to the hub outbound, stamped with the replying actor.
+    fn send_hub_reply(
+        &self,
+        sender: Source,
+        kind: KindId,
+        kind_name: &str,
+        payload: Vec<u8>,
+        reply_id: Option<aether_data::MailId>,
+    ) -> bool {
+        // The replier minted `reply_id` in its own id space, so its sender
+        // half is the replying actor: stamped on the session reply for an
+        // embedder to read (ADR-0230 §3), when that position holds a route.
+        let stamp = reply_id.and_then(|id| self.registry.stamped_sender(id.sender));
+        self.outbound
+            .as_ref()
+            .is_some_and(|outbound| outbound.send_reply_envelope_stamped(sender, kind, kind_name, payload, stamp))
+    }
+
+    /// The `Component` arm of the reply path: record the reply's `Sent` and
+    /// push a lineage-stamped `Mail` into the target component's inbox.
+    fn send_component_reply(
+        &self,
+        sender: Source,
+        kind: KindId,
+        payload: Vec<u8>,
+        reply_id: Option<aether_data::MailId>,
+        root: Option<aether_data::MailId>,
+        parent: Option<aether_data::MailId>,
+    ) -> bool {
+        let SourceAddr::Component(mailbox) = sender.addr else {
+            return false;
+        };
+        // ADR-0042: echo the caller's correlation_id onto the reply envelope
+        // so the originating handler can pick the right reply out of the
+        // mpsc by correlation. Reply target is None — nobody replies to a
+        // reply.
+        let reply_to = Source::with_correlation(SourceAddr::None, sender.correlation_id);
+        // ADR-0080 §2 producer hook: record the reply's `Sent` before pushing
+        // it, so the caller's `root` counts the reply in-flight until its
+        // `Finished`. Skipped when the reply carries no id (the bare
+        // `send_reply_unchained` path) or no root, since a rootless `Sent`
+        // counts against no chain.
+        if let (Some(reply_id), Some(root)) = (reply_id, root) {
+            self.record_sent(reply_id, root, parent, reply_id.sender, mailbox, kind);
+        }
+        self.push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to).with_lineage(reply_id, root, parent));
+        true
     }
 }
 

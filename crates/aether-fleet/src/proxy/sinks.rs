@@ -1,12 +1,13 @@
 //! Test-only capture actors for the proxy's round-trip / heartbeat
 //! tests: a stand-in engines cap that records `EngineAlive` /
-//! `EngineDied` reports, and a reply sink that records routed
-//! `TestEchoReply` values. The whole module is `#[cfg(test)]` (gated at
+//! `EngineDied` reports, and a reply sink that logs routed
+//! `TestEchoReply` values and `CallSettled` terminals in arrival order. The whole module is `#[cfg(test)]` (gated at
 //! its `mod` declaration), so none of it ships in the cap's surface.
 
 use crate::kinds::{EngineAlive, EngineDied};
 use aether_actor::actor;
 use aether_rpc::server::test_echo::TestEchoReply;
+use aether_rpc::{CallSettled, RpcError};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use std::sync::{Arc, Mutex};
@@ -55,12 +56,25 @@ impl NativeActor for FleetCapSink {
     }
 }
 
-/// Test-only sink: records the `value` of every [`TestEchoReply`] it
-/// receives into a shared cell so the round-trip test can observe a
-/// reply routed back through the proxy. A field-bearing `#[cfg(test)]`
-/// actor, so it stays the un-split `type State = Self` shape (ADR-0122).
+/// One reply [`ProxyReplySink`] received, in the order it arrived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecordedReply {
+    /// A relayed [`TestEchoReply`], by its `value`.
+    Echo(u64),
+    /// A [`CallSettled`] terminal, as the result it carries.
+    Settled(Result<(), RpcError>),
+}
+
+/// The ordered log a [`ProxyReplySink`] appends to.
+pub type ReplyLog = Arc<Mutex<Vec<RecordedReply>>>;
+
+/// Test-only sink: logs every [`TestEchoReply`] and [`CallSettled`] it
+/// receives, in arrival order, into a shared cell so the proxy tests can
+/// observe what routed back through the proxy and when the exchange
+/// ended. A field-bearing `#[cfg(test)]` actor, so it stays the un-split
+/// `type State = Self` shape (ADR-0122).
 pub struct ProxyReplySink {
-    recorded: Arc<Mutex<Option<u64>>>,
+    log: ReplyLog,
 }
 
 #[actor(singleton, root)]
@@ -69,15 +83,24 @@ impl NativeActor for ProxyReplySink {
     // handle), not operator config, so it rides the `Params` channel; `Config`
     // is `()`, which declares no aggregate member.
     type Config = ();
-    type Params = Arc<Mutex<Option<u64>>>;
+    type Params = ReplyLog;
     const NAMESPACE: &'static str = "aether.fleet.test.reply_sink";
 
-    fn init((): (), recorded: Arc<Mutex<Option<u64>>>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { recorded })
+    fn init((): (), log: ReplyLog, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { log })
     }
 
     #[handler::single]
     fn on_reply(&mut self, _ctx: &mut NativeCtx<'_>, reply: TestEchoReply) {
-        *self.recorded.lock().expect("test setup: recorded mutex poisoned") = Some(reply.value);
+        self.log.lock().expect("test setup: reply log mutex poisoned").push(RecordedReply::Echo(reply.value));
+    }
+
+    #[handler::single]
+    fn on_settled(&mut self, _ctx: &mut NativeCtx<'_>, settled: CallSettled) {
+        let result = match settled {
+            CallSettled::Ok => Ok(()),
+            CallSettled::Err { error } => Err(error),
+        };
+        self.log.lock().expect("test setup: reply log mutex poisoned").push(RecordedReply::Settled(result));
     }
 }

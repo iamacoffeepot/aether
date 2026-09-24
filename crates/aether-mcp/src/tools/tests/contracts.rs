@@ -203,7 +203,6 @@ async fn router_dispatches_a_fresh_compatible_comparison_with_explicit_subject_i
                 payload: DescribeComponentResult::Ok { capabilities: ComponentCapabilities::default() }
                     .encode_into_bytes(),
             }],
-            settle: true,
         },
         ScriptedRouteReply {
             events: vec![ScriptedReplyEvent {
@@ -211,7 +210,6 @@ async fn router_dispatches_a_fresh_compatible_comparison_with_explicit_subject_i
                 payload: DescribeComponentResult::Ok { capabilities: ComponentCapabilities::default() }
                     .encode_into_bytes(),
             }],
-            settle: true,
         },
     ])));
     let inventory = ListKindsResult { kinds: Vec::new() };
