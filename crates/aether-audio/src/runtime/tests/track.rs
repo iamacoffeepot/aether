@@ -167,7 +167,7 @@ fn play_track_happy_path_replies_ok_and_starts_a_track() {
     let transport = unrouted_binding(&mailer);
 
     let root = MailId { correlation_id: 1, ..MailId::NONE };
-    let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), root, root);
+    let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), root, root);
     AudioCapability::on_play_track(
         &mut cap,
         &mut ctx,
@@ -185,7 +185,7 @@ fn play_track_happy_path_replies_ok_and_starts_a_track() {
     // Synthesize the fs reply with a real WAV asset (at half the
     // device rate, so decode also resamples).
     let wav = decode::wav_int16_mono(&ramp(512), 24_000);
-    let mut read_ctx = NativeCtx::new_dispatching(&transport, fs_reply_source(track_correlation), root, root);
+    let mut read_ctx = NativeCtx::new_for_actor(&transport, fs_reply_source(track_correlation), root, root);
     AudioCapability::on_read_result(
         &mut cap,
         &mut read_ctx,
@@ -217,7 +217,7 @@ fn play_track_echoes_lane_through_result_and_track_start() {
     let (mailer, rx) = test_mailer_and_rx();
     let transport = unrouted_binding(&mailer);
 
-    let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+    let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), MailId::NONE, MailId::NONE);
     AudioCapability::on_play_track(
         &mut cap,
         &mut ctx,
@@ -258,7 +258,7 @@ fn play_track_missing_file_replies_err_with_fs_error() {
     let (mailer, rx) = test_mailer_and_rx();
     let transport = unrouted_binding(&mailer);
 
-    let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+    let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), MailId::NONE, MailId::NONE);
     AudioCapability::on_play_track(
         &mut cap,
         &mut ctx,
@@ -293,7 +293,7 @@ fn play_track_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, rx) = test_mailer_and_rx();
     let transport = unrouted_binding(&mailer);
-    let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+    let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), MailId::NONE, MailId::NONE);
     AudioCapability::on_play_track(
         &mut cap,
         &mut ctx,

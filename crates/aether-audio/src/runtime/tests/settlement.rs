@@ -56,7 +56,7 @@ fn play_track_deferred_reply_settles_caller_chain() {
     let (mut cap, _queue) = live_cap();
 
     {
-        let mut ctx = NativeCtx::new_dispatching(&transport, caller, root, root);
+        let mut ctx = NativeCtx::new_for_actor(&transport, caller, root, root);
         AudioCapability::on_play_track(
             &mut cap,
             &mut ctx,
@@ -73,7 +73,7 @@ fn play_track_deferred_reply_settles_caller_chain() {
     let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     let wav = decode::wav_int16_mono(&ramp(512), 24_000);
     {
-        let mut read_ctx = NativeCtx::new_dispatching(&transport, fs_reply_source(track_correlation), root, root);
+        let mut read_ctx = NativeCtx::new_for_actor(&transport, fs_reply_source(track_correlation), root, root);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
@@ -106,7 +106,7 @@ fn load_instrument_deferred_reply_settles_caller_chain() {
     let (mut cap, _queue) = live_cap();
 
     {
-        let mut ctx = NativeCtx::new_dispatching(&transport, caller, root, root);
+        let mut ctx = NativeCtx::new_for_actor(&transport, caller, root, root);
         AudioCapability::on_load_instrument(
             &mut cap,
             &mut ctx,
@@ -123,7 +123,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
     ";
     let wav = decode::wav_int16_mono(&ramp(256), 24_000);
     {
-        let mut read_ctx = NativeCtx::new_dispatching(&transport, fs_reply_source(sfz_correlation), root, root);
+        let mut read_ctx = NativeCtx::new_for_actor(&transport, fs_reply_source(sfz_correlation), root, root);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
@@ -133,7 +133,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
     let c4_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     let c5_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     {
-        let mut read_ctx = NativeCtx::new_dispatching(&transport, fs_reply_source(c4_correlation), root, root);
+        let mut read_ctx = NativeCtx::new_for_actor(&transport, fs_reply_source(c4_correlation), root, root);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
@@ -142,7 +142,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
     }
     {
         // Last sample — triggers assembly dispatch and hold acquisition.
-        let mut read_ctx = NativeCtx::new_dispatching(&transport, fs_reply_source(c5_correlation), root, root);
+        let mut read_ctx = NativeCtx::new_for_actor(&transport, fs_reply_source(c5_correlation), root, root);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,

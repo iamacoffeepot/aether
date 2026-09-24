@@ -1064,7 +1064,7 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
         }
     });
     // ADR-0230: native expansion emits the `DependsOn` impls plus one link-time
-    // `DependencyEntry` per `depends(R)` below, which the birth sites check
+    // `DependencyEntry` per listed type below, which the birth sites check
     // before `init`.
     let depends_impls = opts.depends.iter().map(|target| {
         quote! {

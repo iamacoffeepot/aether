@@ -51,14 +51,14 @@ impl WasmActor for Boot {
     /// boot singleton was instantiated exactly once no matter how many selector
     /// loads of the module happened.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<SubstrateHarnessObserver>().send(&BootObserved { marker: 0 });
+        ctx.send::<SubstrateHarnessObserver>(&BootObserved { marker: 0 });
     }
 
     /// Broadcast [`BootTornDown`] once when the host tears the boot down (its
     /// refcount reached zero). `unwire` is the trampoline's pre-shutdown hook,
     /// reached via the host's self-directed `DropComponent` at last unload.
     fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
-        ctx.actor::<SubstrateHarnessObserver>().send(&BootTornDown { marker: 0 });
+        ctx.send::<SubstrateHarnessObserver>(&BootTornDown { marker: 0 });
     }
 
     #[handler::single]

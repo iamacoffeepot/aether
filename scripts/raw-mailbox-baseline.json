@@ -8,7 +8,7 @@
     "mailbox_id_from_path(": 50,
     "<recipient>.id() at a send": 0,
     "clippy::disallowed_methods": 174,
-    ".actor::<": 110,
-    ".to(&": 10
+    ".actor::<": 46,
+    ".to(&": 7
   }
 }

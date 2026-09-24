@@ -371,7 +371,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     let first_session = SessionToken(Uuid::from_u128(1));
     let second_session = SessionToken(Uuid::from_u128(2));
 
-    let mut first_ctx = NativeCtx::new_dispatching(
+    let mut first_ctx = NativeCtx::new_for_actor(
         &transport,
         Source::to(SourceAddr::Session(first_session)),
         MailId::NONE,
@@ -384,7 +384,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     );
     let first_sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
-    let mut second_ctx = NativeCtx::new_dispatching(
+    let mut second_ctx = NativeCtx::new_for_actor(
         &transport,
         Source::to(SourceAddr::Session(second_session)),
         MailId::NONE,
@@ -452,7 +452,7 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
     let track_session = SessionToken(Uuid::from_u128(3));
     let instrument_session = SessionToken(Uuid::from_u128(4));
 
-    let mut track_ctx = NativeCtx::new_dispatching(
+    let mut track_ctx = NativeCtx::new_for_actor(
         &transport,
         Source::to(SourceAddr::Session(track_session)),
         MailId::NONE,
@@ -471,7 +471,7 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
     );
     let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
-    let mut instrument_ctx = NativeCtx::new_dispatching(
+    let mut instrument_ctx = NativeCtx::new_for_actor(
         &transport,
         Source::to(SourceAddr::Session(instrument_session)),
         MailId::NONE,

@@ -10,7 +10,9 @@
 //! leaves only through `deliver_detached` or `deliver_forwarded`. The call a
 //! handler is serving is forwarded, reply target and chain intact, by
 //! `deliver_forwarded` for a bundle item and by `forward_to` for a typed
-//! payload to a proof. The
+//! payload to a proof. A declared dependency is mailed by type through the
+//! flat `send`, `send_with_context` and `send_detached`, which compile only
+//! on a ctx whose actor declares the target (ADR-0232 §1). The
 //! per-stage capability traits carry the typed vocabulary FFI guests share:
 //! [`MailSender`] on every mode and [`OutboundReply`] on [`Manual`] only, so
 //! a handler whose class disagrees with what it does fails to unify rather
@@ -195,13 +197,62 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         mail_id
     }
 
+    /// Send `payload` to the declared dependency `R`, inheriting this
+    /// handler's causal chain (ADR-0080 §7, ADR-0232 §1).
+    ///
+    /// Compiles only on a ctx typed by an actor that declares `R` with
+    /// `#[actor(depends(R))]` (`A: DependsOn<R>`), and only for a kind `R`
+    /// handles; the turbofish names only `R`. It sends through the proof
+    /// [`Self::actor_ref`] mints, so it lands exactly where the dependency's
+    /// proof points, under the running chain's root with the handled mail as
+    /// its parent. [`Self::send_detached`] is the fresh-chain sibling.
+    ///
+    /// Its consumers are `aether.text`'s render sends: the atlas texture's
+    /// creation, glyph uploads, atlas resyncs, and each draw's textured-quad
+    /// batch.
+    pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        let _ = self.push_to(self.actor_ref::<R>().erase(), payload, self.outbound_parent(), self.outbound_root());
+    }
+
+    /// Send `payload` to the declared dependency `R` as [`Self::send`] does
+    /// and store `context` under the minted correlation, for the reply
+    /// handler to take back with
+    /// [`Self::take_context`](super::NativeCtx::take_context).
+    ///
+    /// It carries [`Self::send`]'s bound (`A: DependsOn<R>`), inherits this
+    /// handler's causal chain, and returns the minted [`MailId`].
+    ///
+    /// Its consumers are the `aether.fs` reads `aether.audio` forwards for a
+    /// track, an instrument's `.sfz` file and each of its samples, and the
+    /// font read `aether.text` forwards.
+    #[must_use]
+    pub fn send_with_context<R: Singleton + CallerAddressable>(
+        &mut self,
+        payload: &impl SendableTo<R>,
+        context: &impl Kind,
+    ) -> MailId
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        let mail_id =
+            self.push_to(self.actor_ref::<R>().erase(), payload, self.outbound_parent(), self.outbound_root());
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        mail_id
+    }
+
     /// Send `payload` to the declared dependency `R` on a fresh causal chain,
     /// ignoring this handler's in-flight lineage (ADR-0080 §7, ADR-0232 §1–§2).
     ///
     /// Compiles only on a ctx typed by an actor that declares `R` with
     /// `#[actor(depends(R))]`, and only for a kind `R` handles; the turbofish
     /// names only `R`. It sends through the proof [`Self::actor_ref`] mints,
-    /// so it lands exactly where the dependency's proof points.
+    /// so it lands exactly where the dependency's proof points. A send the
+    /// running chain caused inherits it through [`Self::send`] instead.
     ///
     /// Its consumers are the fleet proxy's liveness and death reports to the
     /// fleet server: the `Pong` or connection close behind each is an

@@ -23,7 +23,7 @@ impl WasmActor for ContractBase {
 
     #[handler::single]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
-        ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved { count: 1 });
+        ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
     }
 
     #[handler::single]

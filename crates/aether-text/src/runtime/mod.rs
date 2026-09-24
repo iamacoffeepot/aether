@@ -11,18 +11,16 @@ use std::collections::HashMap;
 
 pub use std::sync::Arc;
 
+use aether_actor::DependsOn;
 pub use aether_actor::OutboundReply;
-use aether_actor::Reaches;
 pub use aether_data::Source;
 pub use aether_kinds::QuadSpace;
-use aether_substrate::Erased;
 pub use aether_substrate::Manual;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 use aether_substrate::session_ids::SessionIds;
 
 use crate::MEMORY_FONT_NAMESPACE;
-use aether_fs::FsMailboxExt;
 #[allow(unused_imports)]
 pub use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 pub use aether_render::{
@@ -148,7 +146,7 @@ impl TextCapabilityState {
     /// request context. The `ReadResult` routes back to `on_read_result`,
     /// which recovers the context, parses the bytes, and replies in the shape
     /// `reply` selects.
-    pub fn forward_font_read<A: Reaches<FsCapability>>(
+    pub fn forward_font_read<A: DependsOn<FsCapability>>(
         ctx: &mut NativeCtx<'_, A, Manual>,
         namespace: String,
         path: String,
@@ -160,7 +158,7 @@ impl TextCapabilityState {
         // Forward the read to the single fs resolver (ADR-0041); the
         // `ReadResult` routes back to `on_read_result`, which parses
         // it.
-        ctx.actor::<FsCapability>().with_context(&context).read(namespace, path);
+        let _ = ctx.send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(namespace, path) }, &context);
     }
 
     /// Parse caller-supplied font bytes off the hot path, then resume through
@@ -186,7 +184,7 @@ impl TextCapabilityState {
     /// already in flight. The reply (`CreateTextureResult`) routes back
     /// to this cap's own mailbox, where `on_create_texture_result`
     /// stores the assigned id.
-    pub fn ensure_atlas_texture<A: Reaches<RenderCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) {
+    pub fn ensure_atlas_texture<A: DependsOn<RenderCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) {
         if self.atlas_texture_id.is_some() || self.atlas_create_inflight {
             return;
         }
@@ -201,12 +199,12 @@ impl TextCapabilityState {
         // Address the render cap through the lineage-correct resolver
         // (ADR-0099); `send` propagates this handler's chain by default
         // so the `CreateTextureResult` reply settles back into it.
-        ctx.actor::<RenderCapability>().send(&create);
+        ctx.send::<RenderCapability>(&create);
         self.atlas_create_inflight = true;
     }
 
     /// Send one `update_texture` for a newly-rasterized glyph's rect.
-    pub fn upload_glyph<A: Reaches<RenderCapability>>(
+    pub fn upload_glyph<A: DependsOn<RenderCapability>>(
         &self,
         ctx: &mut NativeCtx<'_, A>,
         texture_id: u32,
@@ -220,14 +218,14 @@ impl TextCapabilityState {
             height: entry.height,
             pixels: self.atlas.rect_rgba(entry),
         };
-        ctx.actor::<RenderCapability>().send(&update);
+        ctx.send::<RenderCapability>(&update);
     }
 
     /// Re-sync the GPU side after an atlas reset by uploading the full
     /// zeroed buffer. This ensures the render cap's staged pixels are a
     /// clean mirror of the reset CPU atlas before per-glyph uploads layer
     /// on top. Uses the same `update_texture` path as `upload_glyph`.
-    pub fn resync_atlas<A: Reaches<RenderCapability>>(&self, ctx: &mut NativeCtx<'_, A>, texture_id: u32) {
+    pub fn resync_atlas<A: DependsOn<RenderCapability>>(&self, ctx: &mut NativeCtx<'_, A>, texture_id: u32) {
         let update = UpdateTexture {
             texture_id,
             x: 0,
@@ -236,7 +234,7 @@ impl TextCapabilityState {
             height: ATLAS_SIZE,
             pixels: self.atlas.pixels().to_vec(),
         };
-        ctx.actor::<RenderCapability>().send(&update);
+        ctx.send::<RenderCapability>(&update);
     }
 
     /// Resolve a text item's font and reject invalid pixel sizes. An unknown
@@ -258,7 +256,7 @@ impl TextCapabilityState {
 
     /// Return the live atlas texture, lazily creating it when needed and
     /// resetting a saturated atlas before the caller lays out its items.
-    fn atlas_texture_for_draw<A: Reaches<RenderCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) -> Option<u32> {
+    fn atlas_texture_for_draw<A: DependsOn<RenderCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) -> Option<u32> {
         let Some(texture_id) = self.atlas_texture_id else {
             // No atlas texture yet — kick off creation; immediate mode
             // resends this draw next frame once the id lands.
@@ -402,7 +400,7 @@ impl NativeActor for TextCapability {
     /// or `Err` with the failure reason (bad path, or an unparseable
     /// file). The `font_id` is session-scoped — thread it into `draw`.
     #[handler::manual]
-    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadFont) {
+    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: LoadFont) {
         TextCapabilityState::forward_font_read(ctx, mail.namespace, mail.path, PendingReply::LoadFont);
     }
 
@@ -414,7 +412,7 @@ impl NativeActor for TextCapability {
     /// This avoids requiring a component with an embedded fallback font to
     /// write that font through `aether.fs` before loading it.
     #[handler::manual]
-    fn on_load_font_bytes(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadFontBytes) {
+    fn on_load_font_bytes(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: LoadFontBytes) {
         let source = ctx.reply_target();
         let name = mail.name;
         TextCapabilityState::dispatch_font_parse(
@@ -440,7 +438,7 @@ impl NativeActor for TextCapability {
     /// addressable by the assigned id too) or `Err` on a bad path /
     /// unparseable file. An unknown `font_id` replies `Err`.
     #[handler::manual]
-    fn on_font_metrics(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: FontMetricsRequest) {
+    fn on_font_metrics(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: FontMetricsRequest) {
         match mail.font {
             FontRef::Id(font_id) => {
                 let reply = state.fonts.get(&font_id).map_or_else(
@@ -469,7 +467,7 @@ impl NativeActor for TextCapability {
     /// original `load_font` caller; `Err` relays the fs error to that
     /// caller as `LoadFontResult::Err`.
     #[handler::manual]
-    fn on_read_result(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: ReadResult) {
+    fn on_read_result(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: ReadResult) {
         let Some(context) = ctx.take_context::<FontLoadContext>() else {
             return;
         };
@@ -730,7 +728,7 @@ mod tests {
     fn load_font_forwards_read_with_context() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
         TextCapability::on_load_font(
             &mut state,
             &mut ctx,
@@ -744,7 +742,7 @@ mod tests {
     fn read_err_replies_load_font_err_via_request_context() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
         TextCapability::on_load_font(
             &mut state,
             &mut ctx,
@@ -754,7 +752,7 @@ mod tests {
         let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
 
         let mut read_ctx =
-            NativeCtx::new_dispatching(&binding, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE);
+            NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE);
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,
@@ -773,7 +771,7 @@ mod tests {
         let first_session = SessionToken(Uuid::from_u128(1));
         let second_session = SessionToken(Uuid::from_u128(2));
 
-        let mut first_ctx = NativeCtx::new_dispatching(
+        let mut first_ctx = NativeCtx::new_for_actor(
             &binding,
             Source::to(SourceAddr::Session(first_session)),
             MailId::NONE,
@@ -786,7 +784,7 @@ mod tests {
         );
         let first_correlation = assert_next_send_kind::<Read>(&binding, &rx);
 
-        let mut second_ctx = NativeCtx::new_dispatching(
+        let mut second_ctx = NativeCtx::new_for_actor(
             &binding,
             Source::to(SourceAddr::Session(second_session)),
             MailId::NONE,
@@ -800,7 +798,7 @@ mod tests {
         let second_correlation = assert_next_send_kind::<Read>(&binding, &rx);
 
         let mut second_reply_ctx =
-            NativeCtx::new_dispatching(&binding, fs_reply_source(second_correlation), MailId::NONE, MailId::NONE);
+            NativeCtx::new_for_actor(&binding, fs_reply_source(second_correlation), MailId::NONE, MailId::NONE);
         TextCapability::on_read_result(
             &mut state,
             &mut second_reply_ctx,
@@ -811,7 +809,7 @@ mod tests {
         assert!(matches!(reply, LoadFontResult::Err { .. }), "second reply should be the fs error");
 
         let mut first_reply_ctx =
-            NativeCtx::new_dispatching(&binding, fs_reply_source(first_correlation), MailId::NONE, MailId::NONE);
+            NativeCtx::new_for_actor(&binding, fs_reply_source(first_correlation), MailId::NONE, MailId::NONE);
         TextCapability::on_read_result(
             &mut state,
             &mut first_reply_ctx,
@@ -826,7 +824,7 @@ mod tests {
     fn malformed_font_bytes_reply_err() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
         TextCapability::on_load_font(
             &mut state,
             &mut ctx,
@@ -835,7 +833,7 @@ mod tests {
         let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
 
         let mut read_ctx =
-            NativeCtx::new_dispatching(&binding, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE);
+            NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE);
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,
@@ -855,7 +853,7 @@ mod tests {
     fn load_font_bytes_registers_memory_font() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
         TextCapability::on_load_font_bytes(
             &mut state,
             &mut ctx,
@@ -879,7 +877,7 @@ mod tests {
     fn malformed_load_font_bytes_replies_err() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
         TextCapability::on_load_font_bytes(
             &mut state,
             &mut ctx,
@@ -1195,7 +1193,7 @@ mod tests {
         state.fonts.insert(0, Arc::new(test_font()));
         let (binding, rx) = ctx_binding();
 
-        let mut ctx = NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
         TextCapability::on_font_metrics(&mut state, &mut ctx, FontMetricsRequest { font: FontRef::Id(0) });
         match decode_session_reply::<FontMetricsResult>(&rx) {
             FontMetricsResult::Ok { metrics } => {
@@ -1205,7 +1203,7 @@ mod tests {
             FontMetricsResult::Err { error } => panic!("expected Ok: {error}"),
         }
 
-        let mut ctx = NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
         TextCapability::on_font_metrics(&mut state, &mut ctx, FontMetricsRequest { font: FontRef::Id(99) });
         match decode_session_reply::<FontMetricsResult>(&rx) {
             FontMetricsResult::Err { error } => assert!(error.contains("99")),
@@ -1221,7 +1219,7 @@ mod tests {
     fn font_metrics_by_path_loads_on_miss() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
         TextCapability::on_font_metrics(
             &mut state,
             &mut ctx,
@@ -1230,7 +1228,7 @@ mod tests {
         let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
 
         let mut read_ctx =
-            NativeCtx::new_dispatching(&binding, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE);
+            NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE);
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,

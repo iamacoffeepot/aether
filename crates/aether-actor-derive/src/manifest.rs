@@ -234,8 +234,8 @@ pub fn build_inputs_manifest_consts(
         );
     }
 
-    // ADR-0230 (issue 6277): one `Dependency` record per `depends(...)`
-    // entry, after the `Config` record. The resolver tag and namespace both
+    // ADR-0230 (issue 6277): one `Dependency` record per type in the
+    // `depends(...)` list, in list order, after the `Config` record. The resolver tag and namespace both
     // come off the named actor type, so the record cannot name a strategy
     // the type does not implement. Variant tag `0x05` matches
     // `InputsRecord::Dependency`.

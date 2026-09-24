@@ -56,7 +56,7 @@ impl NativeActor for VideoDep {
 
 struct PairDependent;
 
-#[aether_actor::actor(root, depends(AudioDep), depends(VideoDep))]
+#[aether_actor::actor(root, depends(AudioDep, VideoDep))]
 impl NativeActor for PairDependent {
     const NAMESPACE: &'static str = "test.deps.pair";
     type Config = ();
