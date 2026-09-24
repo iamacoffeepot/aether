@@ -254,10 +254,8 @@ Fleet operations do not share one universal timeout:
 - Proxy startup has a hub configuration budget that covers both waiting for the
   port report and dialing the reported port; a zero configuration is
   explicitly the wait-forever sentinel.
-- Only a startup exit with exit code 1, which is how a chassis reports a boot
-  error such as a failed RPC bind, is reforked, within a bounded number of
-  attempts. A usage error (exit code 2), a clean exit, a panic, or a signal is
-  reported on the first attempt.
+- A substrate that exits during startup is reported on the first attempt, with
+  its exit code or signal and its stderr in the detail.
 - Boot-component loads run inside the proxy startup dial: the substrate binds
   only after they answer, so the same connect budget covers them, and a failed
   load is a startup exit reported with the substrate's stderr.
