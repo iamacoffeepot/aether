@@ -101,16 +101,6 @@ pub struct FleetConfig {
     /// terminal error).
     #[config(default = 30)]
     pub proxy_connect_budget_secs: u64,
-    /// How many times a failed engine spawn is attempted by re-forking.
-    ///
-    /// `on_spawn` re-forks a substrate that exits during startup with the
-    /// boot-error exit code (1) up to this many times before giving up
-    /// (issue 2422). The hub forks each substrate on port `0` and dials
-    /// the port it reports (issue 6503), so its bind cannot lose the port
-    /// to another socket; an exit 1 is still re-forked. `1` preserves the
-    /// single-attempt behavior (no re-fork).
-    #[config(default = 3)]
-    pub proxy_spawn_attempts: u32,
     /// Whether a crashed or evicted engine is automatically re-spawned.
     ///
     /// Off by default: the cap's historical contract is that a death is
@@ -201,10 +191,6 @@ impl Default for FleetConfig {
             // startup-dial budget — `0` would mean wait-forever and
             // hang on a genuinely dead substrate.
             proxy_connect_budget_secs: DEFAULT_PROXY_CONNECT_BUDGET_SECS,
-            // A single attempt by default in tests: the re-fork loop is
-            // a contention mitigation, and tests fork real substrates
-            // serially, so one attempt keeps the path deterministic.
-            proxy_spawn_attempts: 1,
             // Restart supervision stays off in the test constructor for
             // the same reason it is off in production by default: every
             // existing harness reads a death as terminal, and a cap that
@@ -238,13 +224,6 @@ impl FleetConfig {
     #[must_use]
     pub fn connect_budget(&self) -> Option<Duration> {
         (self.proxy_connect_budget_secs != 0).then(|| Duration::from_secs(self.proxy_connect_budget_secs))
-    }
-
-    /// The bounded re-fork attempt count for `on_spawn` (issue 2422),
-    /// clamped to at least 1 — `0` would never fork at all.
-    #[must_use]
-    pub fn spawn_attempts(&self) -> u32 {
-        self.proxy_spawn_attempts.max(1)
     }
 
     /// The automatic-restart policy to supervise deaths under, or `None`

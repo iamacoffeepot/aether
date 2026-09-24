@@ -39,13 +39,13 @@ pub fn wait_for_reader_wake_before_connect_returns() {
 }
 
 /// Outcome distinctions [`connect_proxy`] surfaces to the proxy's
-/// `init` so the engines cap can tell a re-forkable startup death from
-/// a genuinely unreachable substrate.
+/// `init` so the engines cap can tell a substrate that died during
+/// startup from a genuinely unreachable one. Every outcome is terminal:
+/// the cap reports it on the first attempt.
 #[derive(Debug)]
 pub enum ProxyConnectError {
     /// The dial never connected within the budget (or hit a terminal
-    /// handshake / frame error). Genuinely unreachable — not
-    /// re-forkable.
+    /// handshake / frame error). Genuinely unreachable.
     Dial(RpcClientError),
     /// The forked child substrate exited before the proxy committed to a
     /// connection, with `status` as `try_wait` captured it. Any early exit
@@ -54,8 +54,8 @@ pub enum ProxyConnectError {
     /// some other server completed after the child died, which is the
     /// check that keeps a foreign server from answering for this engine.
     /// Distinct from [`Self::Dial`] so the dial stops at once rather than
-    /// waiting out the budget; which of these exits `on_spawn` re-forks is
-    /// [`is_reforkable_spawn_failure`]'s call, made from the exit code.
+    /// waiting out the budget; `on_spawn` reports it with the exit code or
+    /// signal and the child's stderr.
     ChildExited { status: ExitStatus },
     /// The forked child stayed alive but reported no RPC port within the
     /// connect budget.
@@ -230,8 +230,8 @@ fn dial(
                 };
                 // The child reported this port, so a refused dial is most
                 // likely its death: stop dialing a dead port and return a
-                // terminal child-exited outcome the cap classifies by exit
-                // code.
+                // terminal child-exited outcome the cap reports with its
+                // exit status.
                 if let Some(status) = exit_status(child) {
                     return Err(ProxyConnectError::ChildExited { status });
                 }
@@ -244,24 +244,6 @@ fn dial(
         };
     }
 }
-
-/// The exit code a chassis leaves with on a boot error, a failed RPC bind
-/// among them.
-///
-/// A failed bind or port report leaves the substrate by exactly one route:
-/// `RpcServerCapability::init` (`RpcBind::Boot`), or `RpcBindGate::open`
-/// (`RpcBind::Held`, opened by the chassis boot or the Bloomery's
-/// `build_mounted`), returns a `BootError`; that propagates out of
-/// `C::build`, out of `run_chassis_main`, and out of the binary's
-/// `fn main() -> anyhow::Result<()>`, whose `Err` std turns into
-/// `ExitCode::FAILURE` — 1. A clap usage error exits 2, `--help`,
-/// `--describe` and `--print-config` exit 0, a panic exits 101, and a
-/// signal death has no code at all. Other deterministic boot errors (an
-/// unparseable config value, an unreadable boot manifest) share the 1.
-///
-/// The hub forks a substrate on port `0` (issue 6503), so its bind cannot
-/// lose the port to another socket; an exit 1 is still re-forked.
-const BIND_FAILURE_EXIT_CODE: i32 = 1;
 
 /// A child's exit status in words: `exit code N`, or the platform's own
 /// rendering for a death that carries no code (a signal).
@@ -281,16 +263,6 @@ pub fn startup_exit_status(err: &SpawnError) -> Option<ExitStatus> {
         return None;
     };
     Some(*status)
-}
-
-/// `true` when a failed `spawn_child::<FleetProxy>` is a startup exit with
-/// [`BIND_FAILURE_EXIT_CODE`], the boot-error exit a failed RPC bind
-/// produces, which the cap re-forks (issue 2422). Any other startup exit
-/// (a usage error, a clean exit, a panic, a signal) dies the same way on
-/// every fork, so it is terminal, as is every non-exit failure.
-#[must_use]
-pub fn is_reforkable_spawn_failure(err: &SpawnError) -> bool {
-    startup_exit_status(err).is_some_and(|status| status.code() == Some(BIND_FAILURE_EXIT_CODE))
 }
 
 /// `true` for the connection-level errors a still-coming-up

@@ -11,7 +11,7 @@ use super::{FleetConfig, FleetServer};
 use crate::child_env::isolate_child_environment;
 use crate::child_stderr::{StderrRedactions, StderrTail, tee_child_stderr};
 use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
-pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyTarget, is_reforkable_spawn_failure};
+pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyTarget};
 use crate::proxy::{describe_exit, read_reported_port, startup_exit_status, terminate_child_group};
 pub use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
 pub use aether_actor::{ActorRef, Manual, Single};
@@ -143,9 +143,8 @@ impl Supervision {
 /// `Terminated` never is: the operator asked for that engine to be gone,
 /// and an engines cap that forked it straight back would make
 /// `terminate_substrate` unable to do the one thing it exists for.
-/// `SpawnFailed` never is either — it names a spawn that failed, so
-/// there is no supervised engine to recover and `on_spawn`'s own bounded
-/// re-fork already owns that retry.
+/// `SpawnFailed` never is either — it names a spawn that failed, so no
+/// engine was ever registered and there is nothing to recover.
 pub fn restart_applies_to(reason: &DeathReason) -> bool {
     matches!(reason, DeathReason::Crashed { .. } | DeathReason::Evicted { .. })
 }
@@ -392,13 +391,6 @@ pub struct FleetServerState<P = ActorRef<FleetProxy>> {
     /// (issue 2072), resolved once from `FleetConfig` at init.
     /// `Some(d)` caps the retry; `None` is the wait-forever sentinel.
     pub connect_budget: Option<Duration>,
-    /// How many times `on_spawn` forks a substrate that keeps exiting
-    /// during startup with the boot-error exit code (1) before giving up
-    /// (issue 2422), resolved once from `FleetConfig` at init. The child
-    /// binds a port it picks (issue 6503), so its bind cannot lose the
-    /// port to another socket; an exit 1 is still re-forked. Clamped to
-    /// at least 1.
-    pub spawn_attempts: u32,
     /// Parent directory under which the cap allocates per-engine
     /// spawn / handle-store dirs (issue 1274), resolved once from
     /// `FleetConfig::fleet_store_root` at init via
@@ -502,8 +494,7 @@ impl<P> FleetServerState<P> {
     /// disk under a bare uuid — unbounded growth proportional to spawn
     /// count on a long-lived hub, with nothing to correlate it back to.
     /// Called at every exit from supervision: a terminate, a reported
-    /// death, a birth that never committed, and an abandoned re-fork
-    /// attempt.
+    /// death, a birth that never committed, and a failed spawn.
     ///
     /// Best-effort. The dir may not exist (a failure before the
     /// materialize) and unlinking a running image is refused on some
@@ -888,7 +879,6 @@ impl NativeActor for FleetServer {
             next_engine_seq: 1,
             heartbeat: config.heartbeat_params(),
             connect_budget: config.connect_budget(),
-            spawn_attempts: config.spawn_attempts(),
             fleet_store_root,
             recently_died: VecDeque::new(),
             store,
@@ -953,7 +943,7 @@ impl NativeActor for FleetServer {
     /// staged proxy.
     #[handler::manual]
     fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: SpawnEngine) {
-        let mut owed: DeferredReply = ctx.defer_reply_to(ctx.reply_target());
+        let owed: DeferredReply = ctx.defer_reply_to(ctx.reply_target());
 
         // Resolve the registry selector to stored content bytes before
         // any side effect, so a miss returns without burning an engine id
@@ -971,115 +961,59 @@ impl NativeActor for FleetServer {
             return;
         };
 
-        // Bounded re-fork (issue 2422): a substrate that exits during
-        // startup with the boot-error exit code (1), the exit a failed
-        // RPC bind produces, is re-forked under a fresh engine id and
-        // scratch dir. The child binds a port it picks (issue 6503), so
-        // its bind cannot lose the port to another socket; an exit 1 is
-        // still re-forked. Any non-re-forkable failure returns
-        // immediately. The proxy already kills the child it owns on a
-        // failed init, so an abandoned attempt leaves no orphan.
-        //
-        // Each terminal post-allocation failure records a `SpawnFailed`
-        // death and carries the minted `engine_id` back (issue 2423) so a
-        // caller can correlate and reap; a transient re-forked attempt is
-        // recovered, not a real death, so it records nothing.
-        let attempts = state.spawn_attempts;
+        // Each post-allocation failure records a `SpawnFailed` death and
+        // carries the minted `engine_id` back (issue 2423) so a caller can
+        // correlate and reap.
         let recipe = SpawnRecipe {
             hash: artifact.hash.clone(),
             args: mail.args.clone(),
             boot_manifest: mail.boot_manifest.clone(),
         };
 
-        for attempt in 0..attempts {
-            let prepared = match state.prepare_fork(ctx, &artifact.path, &recipe) {
-                Ok(prepared) => prepared,
-                // An id is minted but no engine was ever registered, so
-                // record a `SpawnFailed` death and carry the id back so a
-                // caller can correlate and reap. No child ran, so no port
-                // was reported.
-                Err(PrepareFailure { engine_id, error }) => {
-                    owed.reply(ctx, &state.fail_spawn(engine_id, 0, error));
-                    return;
-                }
-            };
+        let prepared = match state.prepare_fork(ctx, &artifact.path, &recipe) {
+            Ok(prepared) => prepared,
+            // No child ran, so no port was reported.
+            Err(PrepareFailure { engine_id, error }) => {
+                owed.reply(ctx, &state.fail_spawn(engine_id, 0, error));
+                return;
+            }
+        };
 
-            let PreparedFork { engine_id, port_file, child, stderr } = prepared;
-            let subname = engine_id.0.simple().to_string();
+        let PreparedFork { engine_id, port_file, child, stderr } = prepared;
+        let subname = engine_id.0.simple().to_string();
 
-            // `continue_from` still runs `FleetProxy::init` on this thread:
-            // it waits for the substrate to report its port, dials it, and,
-            // on failure, terminates the child it was handed. So once it
-            // returns the report is on disk if there is one. A successful
-            // init transfers the original caller obligation into the staged
-            // birth; only its later task completion may commit the engine.
-            let result = ctx
-                .spawn_child::<FleetProxy>(
-                    Subname::Named(&subname),
-                    FleetProxyConfig {
-                        engine_id,
-                        target: ProxyTarget::Forked { child, port_file: port_file.clone() },
-                        heartbeat: state.heartbeat,
-                        connect_budget: state.connect_budget,
-                    },
-                    (),
-                )
-                .continue_from(
-                    owed,
-                    FleetSpawnContext {
-                        engine_id,
-                        supervision: Supervision::new(recipe.clone()),
-                        origin: SpawnOrigin::Requested,
-                    },
-                );
-            let rpc_port = reported_port(&port_file);
+        // `continue_from` still runs `FleetProxy::init` on this thread: it
+        // waits for the substrate to report its port, dials it, and, on
+        // failure, terminates the child it was handed. So once it returns
+        // the report is on disk if there is one. A successful init
+        // transfers the original caller obligation into the staged birth;
+        // only its later task completion may commit the engine.
+        let result = ctx
+            .spawn_child::<FleetProxy>(
+                Subname::Named(&subname),
+                FleetProxyConfig {
+                    engine_id,
+                    target: ProxyTarget::Forked { child, port_file: port_file.clone() },
+                    heartbeat: state.heartbeat,
+                    connect_budget: state.connect_budget,
+                },
+                (),
+            )
+            .continue_from(
+                owed,
+                FleetSpawnContext { engine_id, supervision: Supervision::new(recipe), origin: SpawnOrigin::Requested },
+            );
+        let rpc_port = reported_port(&port_file);
 
-            match result {
-                Ok(_) => {
-                    state.begin_pending_spawn(engine_id, rpc_port, recipe.hash.clone());
-                    return;
-                }
-                Err((e, returned)) => {
-                    owed = returned;
-                    // Re-fork only the startup exit a failed RPC bind
-                    // produces, and only if attempts remain. Any other
-                    // failure is terminal — a bad flag or a panic dies the
-                    // same way on every port, so re-forking it would just
-                    // burn the budget again.
-                    if is_reforkable_spawn_failure(&e) && attempt + 1 < attempts {
-                        // The abandoned attempt's stderr already reached
-                        // the hub log; its tail belongs to no reply.
-                        drop(stderr);
-                        tracing::warn!(
-                            target: "aether_substrate::fleet_server",
-                            engine_id = %engine_id.0,
-                            rpc_port,
-                            attempt = attempt + 1,
-                            attempts,
-                            "engine spawn: substrate exited during startup with the boot-error exit code; re-forking",
-                        );
-                        // The abandoned attempt burned an id and a
-                        // materialized copy of the binary. The next attempt
-                        // mints both afresh, so this one's dir is
-                        // reclaimed here rather than left behind by a spawn
-                        // that ultimately succeeded (issue 5502).
-                        state.reap_engine_dir(engine_id);
-                        continue;
-                    }
-                    let error = spawn_failure_detail("spawned", &e, stderr);
-                    owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, error));
-                    return;
-                }
+        match result {
+            Ok(_) => state.begin_pending_spawn(engine_id, rpc_port, artifact.hash),
+            // A startup exit of any kind is terminal: the reply names its
+            // exit code or signal and carries the child's stderr.
+            Err((e, owed)) => {
+                let error = spawn_failure_detail("spawned", &e, stderr);
+                owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, error));
             }
         }
-
-        // Only reached if `attempts` is 0, which `spawn_attempts()`
-        // clamps away — keep an honest terminal `Err` rather than an
-        // unreachable panic.
-        owed.reply(
-            ctx,
-            &SpawnEngineResult::Err { engine_id: None, error: "the fleet made no spawn attempt".to_owned() },
-        );
     }
 
     /// Settle one staged proxy birth. Only an authoritative apply with no
