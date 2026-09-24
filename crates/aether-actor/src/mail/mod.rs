@@ -45,6 +45,10 @@ impl Kind for RegistryChanged {
     aether_data::pod_kind_codec!();
 }
 
+/// Ordinary mail (ADR-0233): a forged wake only makes the receiver re-read
+/// the real inventory.
+impl aether_data::ActorMail for RegistryChanged {}
+
 /// Sentinel the substrate passes as the reply-handle parameter on
 /// the `receive` shim when there is no reply target — for
 /// component-originated mail (no Claude session involved) and for

@@ -1,12 +1,12 @@
 //! [`SendableTo`]: the payload bound of the flat typed send verbs
 //! (ADR-0232 §2).
 
-use aether_data::Kind;
+use aether_data::ActorMail;
 
 use super::HandlesKind;
 
 mod sealed {
-    use aether_data::Kind;
+    use aether_data::ActorMail;
 
     use crate::model::HandlesKind;
 
@@ -15,7 +15,7 @@ mod sealed {
     /// does not handle it.
     pub trait Sealed<R> {}
 
-    impl<K: Kind, R: HandlesKind<K>> Sealed<R> for K {}
+    impl<K: ActorMail, R: HandlesKind<K>> Sealed<R> for K {}
 }
 
 /// A kind that may be mailed to actor `R`: `K: SendableTo<R>` holds exactly
@@ -31,11 +31,26 @@ mod sealed {
 /// Sealed: the one blanket impl is the only way in, so the bound refuses a
 /// kind the recipient has no handler for rather than letting it warn-drop at
 /// run time.
+///
+/// The supertrait is [`ActorMail`], so an engine-only kind (ADR-0233) is
+/// refused at the call site even when the recipient handles it:
+///
+/// ```compile_fail
+/// fn requires<K: aether_data::ActorMail>() {}
+/// requires::<aether_kinds::MonitorNotice>();
+/// ```
+///
+/// An ordinary kind satisfies the same bound:
+///
+/// ```
+/// fn requires<K: aether_data::ActorMail>() {}
+/// requires::<aether_kinds::Ping>();
+/// ```
 #[diagnostic::on_unimplemented(
     message = "`{R}` has no handler for `{Self}`",
     label = "`{R}` does not handle `{Self}`",
     note = "a `#[fallback]` does not count as handling a kind"
 )]
-pub trait SendableTo<R>: Kind + sealed::Sealed<R> {}
+pub trait SendableTo<R>: ActorMail + sealed::Sealed<R> {}
 
-impl<K: Kind, R: HandlesKind<K>> SendableTo<R> for K {}
+impl<K: ActorMail, R: HandlesKind<K>> SendableTo<R> for K {}

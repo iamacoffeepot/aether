@@ -22,8 +22,9 @@ use aether_actor::{
     Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef, HandlesKind,
     MailSender, Manual, OutboundReply, ReplyMode, SendableTo, Singleton, Target,
 };
-use aether_data::{Kind, KindId, MailId, RequestId};
+use aether_data::{ActorMail, Kind, KindId, MailId, RequestId};
 
+use crate::mail::boundary::is_engine_only;
 use crate::mail::{BoundaryMail, Source};
 
 use super::NativeCtx;
@@ -41,7 +42,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// chain settles only after the reply lands (#1695). Routes through
     /// the same binding reply path (the crate-private
     /// `NativeBinding::send_reply_for_handler`) as [`OutboundReply::reply`].
-    pub fn reply_to_target<K: Kind>(&mut self, sender: Source, payload: &K, root: MailId, parent: Option<MailId>) {
+    pub fn reply_to_target<K: ActorMail>(&mut self, sender: Source, payload: &K, root: MailId, parent: Option<MailId>) {
         self.binding.send_reply_for_handler(sender, payload, root, parent);
     }
     /// Lineage-aware multicast: encode `payload` once, then push one copy
@@ -61,7 +62,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// runs when there's at least one consumer.
     ///
     /// Issue iamacoffeepot/aether#723.
-    pub fn fanout<K: Kind>(&mut self, recipients: impl IntoIterator<Item = ErasedActorRef>, payload: &K) {
+    pub fn fanout<K: ActorMail>(&mut self, recipients: impl IntoIterator<Item = ErasedActorRef>, payload: &K) {
         let mut recipients = recipients.into_iter();
         let Some(first) = recipients.next() else {
             return;
@@ -100,8 +101,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Differs from [`Self::fanout`] only in what it carries: `fanout`
     /// encodes one typed `K` and pushes it to many recipients, while this
     /// takes `(KindId, &[u8])` already encoded and dispatches one.
+    ///
+    /// An engine-only `kind` (ADR-0233) is refused with a warning and
+    /// [`MailId::NONE`], since no typed bound checks the raw kind here.
     #[must_use]
     pub fn send_envelope_tracked_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> MailId {
+        if refuse_engine_only(kind) {
+            return MailId::NONE;
+        }
         self.binding.push_envelope_buffered(
             target.id().0,
             kind.0,
@@ -127,8 +134,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// inheriting its chain would attribute the dispatch to the wrong root
     /// and `subscribe_settlement_mail` would never fire (descendants don't
     /// settle individually; only the chain root does).
+    ///
+    /// An engine-only `kind` (ADR-0233) is refused with a warning and
+    /// [`MailId::NONE`], as [`Self::send_envelope_tracked_to`] refuses it.
     #[must_use]
     pub fn send_envelope_detached_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> MailId {
+        if refuse_engine_only(kind) {
+            return MailId::NONE;
+        }
         self.binding.push_envelope_buffered(target.id().0, kind.0, bytes, 1, None, None)
     }
 
@@ -142,7 +155,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// Its consumer is the fleet server's `TerminateEngine` forward to the
     /// proxy its spawn proved.
-    pub fn send_to<K: Kind>(&mut self, target: impl Target<K>, payload: &K) {
+    pub fn send_to<K: ActorMail>(&mut self, target: impl Target<K>, payload: &K) {
         let _ = self.push_to(target.erased(), payload, self.outbound_parent(), self.outbound_root());
     }
 
@@ -160,7 +173,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// (`Invoke`, `Warm`, `Evaluate`, and `StatusQuery`, to the erased root it
     /// kept from its load reply's stamped sender).
     #[must_use]
-    pub fn send_to_with_context<K: Kind, C: Kind>(
+    pub fn send_to_with_context<K: ActorMail, C: Kind>(
         &mut self,
         target: impl Target<K>,
         payload: &K,
@@ -186,7 +199,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Its consumer is the bloomery driver's `WatchHead`, the long poll the
     /// journal owner parks until the head moves.
     #[must_use]
-    pub fn send_detached_to_with_context<K: Kind, C: Kind>(
+    pub fn send_detached_to_with_context<K: ActorMail, C: Kind>(
         &mut self,
         target: impl Target<K>,
         payload: &K,
@@ -269,7 +282,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// The push behind the `send_to` family: encode `payload` and push it to
     /// `target` under the `(parent, root)` lineage, returning the minted
     /// [`MailId`].
-    fn push_to<K: Kind>(
+    fn push_to<K: ActorMail>(
         &self,
         target: ErasedActorRef,
         payload: &K,
@@ -287,7 +300,13 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// The body of [`TaskDone::hand_off`](crate::actor::native::TaskDone::hand_off),
     /// which owns the hold and the reply target this reads.
-    pub(crate) fn push_handed_off<K: Kind>(&self, target: ErasedActorRef, payload: &K, root: MailId, reply_to: Source) {
+    pub(crate) fn push_handed_off<K: ActorMail>(
+        &self,
+        target: ErasedActorRef,
+        payload: &K,
+        root: MailId,
+        reply_to: Source,
+    ) {
         let bytes = payload.encode_into_bytes();
         let root = (root != MailId::NONE).then_some(root);
         let _ = self.binding.push_envelope_buffered_with_reply_to(
@@ -350,7 +369,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Its consumers are the component host's `DropComponent` forward to the
     /// addressed trampoline and the `aether.window` root's forward of a
     /// per-window command to the sole live window.
-    pub fn forward_to<K: Kind>(&self, target: &ErasedActorRef, payload: &K) {
+    pub fn forward_to<K: ActorMail>(&self, target: &ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered_with_reply_to(
             target.id().0,
@@ -364,6 +383,16 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
 }
 
+/// The raw-kind verbs' ADR-0233 door: `true`, after a warning, when `kind` is
+/// engine-only mail an actor may not originate.
+fn refuse_engine_only(kind: KindId) -> bool {
+    let refused = is_engine_only(kind);
+    if refused {
+        tracing::warn!(target: "aether_substrate::mail", kind = %kind, "actor-originated engine-only mail refused");
+    }
+    refused
+}
+
 // The per-stage capability trait impls (`MailSender` / `OutboundReply`).
 // `send` / `send_many` inherit this handler's
 // in-flight lineage (ADR-0080 §7); `send_detached` /
@@ -375,7 +404,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(
@@ -391,7 +420,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
+        K: ActorMail + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         // Batch count rides as `u32` on the wire (matches the FFI ABI);
@@ -415,7 +444,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         // ADR-0080 §7: suppress the in-flight lineage so the recipient
@@ -432,7 +461,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
 
     // By-id detached send — the by-name body with the caller's id, `None` /
     // `None` lineage minting a fresh root (ADR-0080 §7).
-    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
+    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(target.id().0, K::ID.0, &bytes, 1, None, None);
     }
@@ -456,14 +485,14 @@ impl<A> OutboundReply for NativeCtx<'_, A, Manual> {
         Some(self.source)
     }
 
-    fn reply<K: Kind>(&mut self, payload: &K) {
+    fn reply<K: ActorMail>(&mut self, payload: &K) {
         // ADR-0080 §5/§6 (#1695): a synchronous reply joins the handler's
         // causal chain — inherit this ctx's `root` + `parent` so the
         // reply's `Sent` lands in the caller's chain.
         self.binding.send_reply_for_handler(self.source, payload, self.in_flight_root, self.outbound_parent());
     }
 
-    fn reply_to<K: Kind>(&mut self, sender: Source, payload: &K) {
+    fn reply_to<K: ActorMail>(&mut self, sender: Source, payload: &K) {
         self.binding.send_reply_for_handler(sender, payload, self.in_flight_root, self.outbound_parent());
     }
 }

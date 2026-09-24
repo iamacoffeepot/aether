@@ -36,6 +36,13 @@ pub(super) fn emit_tagged_element(name: &syn::Ident) -> TokenStream2 {
 
 pub(super) fn emit(input: &DeriveInput, kind: &KindAttr, storage: &TypeStorageAttr) -> syn::Result<TokenStream2> {
     let name = &input.ident;
+    if kind.engine_only {
+        return Err(syn::Error::new_spanned(
+            name,
+            "a storage kind cannot be `engine_only`: storage values never travel as mail, so they carry no \
+             mail class (ADR-0233)",
+        ));
+    }
     let kind_name = &kind.name;
     let strict = storage.strict;
     let leaves = match &input.data {
@@ -66,6 +73,8 @@ pub(super) fn emit(input: &DeriveInput, kind: &KindAttr, storage: &TypeStorageAt
             }
         }
 
+        // No `impl ActorMail` (ADR-0233): a storage value reaches mail only
+        // through handle indirection, so a typed send of one fails to compile.
         impl ::aether_data::Storage for #name {
             const STRICT: bool = #strict;
 

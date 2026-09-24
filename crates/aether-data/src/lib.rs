@@ -104,7 +104,8 @@ pub use aether_data_derive::transform;
 /// `#[aether_data::kind(name = "aether.fs.read")]` stands for `Debug`,
 /// `Clone`, `Kind`, `Schema`, `Serialize`, `Deserialize` plus the
 /// `#[kind(name = …)]` helper, with `copy` / `default` / `partial_eq` /
-/// `eq` / `pod` / `no_serde` / `derive(…)` naming the departures. Spell
+/// `eq` / `pod` / `no_serde` / `derive(…)` naming the departures and
+/// `engine_only` declaring engine-only mail (see [`ActorMail`]). Spell
 /// it fully qualified at the declaration site — the bare `#[kind(…)]`
 /// name belongs to the derives' inert helper attribute. Behind the
 /// `derive` feature like the other macros.
@@ -166,6 +167,30 @@ pub trait Kind {
     }
 }
 
+/// A kind an actor may send or reply: every typed send and reply bound
+/// requires it in place of plain [`Kind`] (ADR-0233).
+///
+/// The kinds without it are engine-only mail — statements only the engine
+/// can make, such as "this actor departed" or "this chain settled". The
+/// engine sends those from host code through the mailer, never through an
+/// actor's binding, so no actor-facing send path accepts them.
+///
+/// The `Kind` derive implements it for every kind unless the kind declares
+/// `#[kind(engine_only)]`; that declaration instead submits the kind to the
+/// link-time engine-only list the raw-`KindId` doors read. A hand-written
+/// `Kind` impl adds `impl ActorMail for T {}` itself when the kind is
+/// actor-sendable; leaving it out fails closed, because the kind then
+/// cannot be sent. The `Storage` derive emits none: storage values reach
+/// mail only through handle indirection.
+///
+/// Not sealed: the orphan rule already stops a crate from implementing it
+/// for a kind it does not own.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is engine-only mail: the engine sends it, never an actor",
+    label = "declared #[kind(engine_only)]"
+)]
+pub trait ActorMail: Kind {}
+
 /// Emit the `Kind::decode_from_bytes` / `encode_into_bytes` pair for a
 /// hand-rolled `Kind` impl over a `#[repr(C)]` + `bytemuck::Pod` type.
 ///
@@ -217,6 +242,9 @@ impl Kind for () {
         Vec::new()
     }
 }
+
+/// The unit payload is ordinary mail.
+impl ActorMail for () {}
 
 /// Compile-time predicate: can this type's payload travel across the
 /// wire as raw `#[repr(C)]` bytes (and decode by `bytemuck::cast`)?

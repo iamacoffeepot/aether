@@ -48,7 +48,8 @@ use std::sync::{Mutex, Weak};
 use std::thread;
 
 use aether_actor::{ActorRef, HandlesKind, ReplyMode, Single};
-use aether_data::{Kind, KindId, MailId};
+use aether_data::name_inventory::EngineOnlyKind;
+use aether_data::{ActorMail, Kind, KindId, MailId};
 
 use crate::mail::Source;
 use crate::runtime::trace::SettlementHold;
@@ -85,7 +86,7 @@ impl DispatchId {
 /// marker. Framework-constructed: `Pending::new` is crate-internal;
 /// out-of-crate minting goes through [`NativeCtx::pending`] or
 /// `TaskQueue` / `PerSenderEgress` `submit` (ADR-0109 §3).
-pub struct Pending<R: Kind> {
+pub struct Pending<R: ActorMail> {
     dispatch_id: DispatchId,
     /// `fn() -> R` so `Pending<R>` is covariant in `R` and stays
     /// `Send`/`Sync` regardless of `R` — it owns no `R`, it only names
@@ -93,7 +94,7 @@ pub struct Pending<R: Kind> {
     _reply: PhantomData<fn() -> R>,
 }
 
-impl<R: Kind> Pending<R> {
+impl<R: ActorMail> Pending<R> {
     /// Wrap the armed dispatch's [`DispatchId`]. Crate-internal — called from
     /// [`dispatch_blocking`](NativeCtx::dispatch_blocking) and
     /// [`NativeCtx::pending`] (ADR-0109 §3).
@@ -187,6 +188,16 @@ impl Kind for TaskCompletionWake {
     ));
 
     aether_data::pod_kind_codec!();
+}
+
+// Engine-only mail (ADR-0233): `NativeBinding::wake_self` pushes it from host
+// code, so it has no `ActorMail` impl, and its entry is submitted by hand
+// because this impl bypasses the `Kind` derive.
+aether_data::name_inventory::inventory::submit! {
+    EngineOnlyKind {
+        kind: <TaskCompletionWake as Kind>::ID,
+        name: <TaskCompletionWake as Kind>::NAME,
+    }
 }
 
 /// One in-flight dispatch's held state, parked in the [`InflightTable`]
@@ -339,7 +350,7 @@ impl DeferredReply {
     pub fn reply<M, R, A>(mut self, ctx: &mut NativeCtx<'_, A, M>, reply: &R)
     where
         M: ReplyMode,
-        R: Kind,
+        R: ActorMail,
     {
         let root = self.hold.as_ref().map_or(MailId::NONE, SettlementHold::root);
         ctx.reply_to_target(self.reply_to, reply, root, None);
@@ -441,7 +452,7 @@ impl<O, C> TaskDone<O, C> {
     /// `output` into the reply value, so this is the common one-liner.
     pub fn resolve<A>(mut self, ctx: &mut NativeCtx<'_, A, Single>)
     where
-        O: Kind,
+        O: ActorMail,
     {
         ctx.reply_to_target(self.reply_to, &self.output, self.hold_root(), None);
         self.release();
@@ -453,7 +464,7 @@ impl<O, C> TaskDone<O, C> {
     /// output (and context, when present) than the raw `output`.
     pub fn resolve_with<R, F, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, f: F)
     where
-        R: Kind,
+        R: ActorMail,
         F: FnOnce(&O, &C) -> R,
     {
         let reply = f(&self.output, &self.context);
@@ -471,7 +482,7 @@ impl<O, C> TaskDone<O, C> {
     /// `Release`, ADR-0080 §12), like the rest of the `resolve*` family.
     pub fn resolve_value<R, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, reply: &R)
     where
-        R: Kind,
+        R: ActorMail,
     {
         ctx.reply_to_target(self.reply_to, reply, self.hold_root(), None);
         self.release();
@@ -494,7 +505,7 @@ impl<O, C> TaskDone<O, C> {
     pub fn hand_off<R, K, A, M>(mut self, ctx: &mut NativeCtx<'_, A, M>, target: &ActorRef<R>, payload: &K)
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
         M: ReplyMode,
     {
         ctx.push_handed_off(target.erase(), payload, self.hold_root(), self.reply_to);
@@ -517,7 +528,7 @@ impl<O, C> TaskDone<O, C> {
     /// failure rather than a result.
     pub fn resolve_err<E, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, err: &E)
     where
-        E: Kind,
+        E: ActorMail,
     {
         ctx.reply_to_target(self.reply_to, err, self.hold_root(), None);
         self.release();
@@ -717,6 +728,8 @@ mod tests {
         const ID: KindId = KindId(0xD15B_0CC1_0000_0001);
         aether_data::pod_kind_codec!();
     }
+
+    impl ActorMail for Answer {}
 
     /// Forward every dispatched envelope onto `tx` so a test can observe
     /// the routed reply. The reply lands at the caller's

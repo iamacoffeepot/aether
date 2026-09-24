@@ -64,7 +64,7 @@
 //! kind types need spellings that resolve from every adopter.
 //!
 //! A wasm set emits no bridge. Its adopters — the widget family — address each
-//! other by name through `RelativeMailbox::send<K: Kind>`, which carries no
+//! other by name through `RelativeMailbox::send<K: ActorMail>`, which carries no
 //! `HandlesKind` bound, so a marker there would gate nothing. Its kinds reach
 //! the adopter's `CONTRACTS` list but get no per-kind `Contract` row.
 //!

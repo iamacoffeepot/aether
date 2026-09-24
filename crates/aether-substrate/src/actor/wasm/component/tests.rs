@@ -505,7 +505,8 @@ fn wat_stores_recipient() -> String {
 /// the observable behavior. ADR-0030 Phase 2 made kind ids hashed,
 /// so the test builds the WAT with the live `kind_id_from_parts`
 /// for "test.pong" rather than a hardcoded sequential 0. Exports
-/// `realloc_p32` so the empty mail has a region to be placed in.
+/// `realloc_p32` so the empty mail has a region to be placed in. The host
+/// fn's status lands at offset 500.
 fn wat_replies(kind_id: u64) -> String {
     format!(
         r#"
@@ -515,12 +516,36 @@ fn wat_replies(kind_id: u64) -> String {
             (memory (export "memory") 1)
             {WAT_REALLOC}
             (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
-                (drop (call $reply_mail
+                (i32.store (i32.const 500) (call $reply_mail
                     (local.get 4) ;; sender handle from receive param
                     (i64.const {kind_id}) ;; hashed kind id of "test.pong"
                     (i32.const 0) ;; ptr
                     (i32.const 0) ;; len
                     (i32.const 1) ;; count
+                    (i64.const 0))) ;; from = NONE (issue 1987); falls back to self id
+                i32.const 0))
+        "#
+    )
+}
+
+/// `receive` sends one empty mail of `kind_id` to `recipient` through
+/// `send_mail_p32` and records the host fn's status at offset 500.
+fn wat_sends(recipient: u64, kind_id: u64) -> String {
+    format!(
+        r#"
+        (module
+            (import "aether" "send_mail_p32"
+                (func $send_mail (param i64 i64 i32 i32 i32 i32 i64) (result i32)))
+            (memory (export "memory") 1)
+            {WAT_REALLOC}
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                (i32.store (i32.const 500) (call $send_mail
+                    (i64.const {recipient}) ;; recipient mailbox
+                    (i64.const {kind_id}) ;; kind id
+                    (i32.const 0) ;; ptr
+                    (i32.const 0) ;; len
+                    (i32.const 1) ;; count
+                    (i32.const 0) ;; inherit the chain
                     (i64.const 0))) ;; from = NONE (issue 1987); falls back to self id
                 i32.const 0))
         "#
@@ -1270,6 +1295,61 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
         "reply must echo the inbound correlation, not a fresh mint",
     );
     assert_eq!(reply_to.addr, SourceAddr::None, "reply-of-a-reply target must be None, matching native send_reply");
+}
+
+/// ADR-0233: the guest's `send_mail_p32` is a raw-`KindId` door, so it
+/// refuses engine-only mail with status `3` and sends nothing. Catches a
+/// wasm guest forging a departure notice by handing its id to the host.
+#[test]
+fn guest_send_of_an_engine_only_kind_returns_status_three_and_delivers_nothing() {
+    use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+    use aether_data::Kind;
+    use aether_kinds::MonitorNotice;
+
+    let registry = Arc::new(Registry::new());
+    let (captured, sink_id) = register_lineage_capture_sink(&registry, "engine_only_send_sink");
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let ctx = ComponentCtx::new(M(0), Arc::clone(&registry), mailer, HubOutbound::disconnected());
+    let mut component = instantiate_with_ctx(&wat_sends(sink_id.0, MonitorNotice::ID.0), ctx);
+
+    component.deliver(&SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)).expect("deliver");
+
+    assert_eq!(component.read_u32(500), 3, "send_mail_p32 refuses engine-only mail with status 3");
+    assert!(captured.lock().unwrap().is_empty(), "no engine-only mail reached the sink");
+}
+
+/// ADR-0233: the guest's `reply_mail_p32` refuses engine-only mail with
+/// `REPLY_ENGINE_ONLY_KIND` and sends nothing, even with a live component
+/// reply target and the kind registered. Catches a guest forging a
+/// settlement or departure as its reply.
+#[test]
+fn guest_reply_of_an_engine_only_kind_returns_engine_only_status_and_delivers_nothing() {
+    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use aether_data::{Kind, KindDescriptor, Schema};
+    use aether_kinds::MonitorNotice;
+
+    let registry = Arc::new(Registry::new());
+    let (captured, recipient) = register_lineage_capture_sink(&registry, "engine_only_reply_recipient");
+    registry
+        .register_kind_with_descriptor(
+            &boot_authority(),
+            KindDescriptor { name: <MonitorNotice as Kind>::NAME.into(), schema: MonitorNotice::SCHEMA },
+        )
+        .expect("register kind");
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let ctx = ComponentCtx::new(M(0), Arc::clone(&registry), mailer, HubOutbound::disconnected());
+    let mut component = instantiate_with_ctx(&wat_replies(MonitorNotice::ID.0), ctx);
+
+    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
+        .with_reply_to(Source::with_correlation(SourceAddr::Component(recipient), 1));
+    component.deliver(&mail).expect("deliver");
+
+    assert_eq!(
+        component.read_u32(500),
+        host_fns::REPLY_ENGINE_ONLY_KIND,
+        "reply_mail_p32 refuses engine-only mail with its own status",
+    );
+    assert!(captured.lock().unwrap().is_empty(), "no engine-only reply reached the recipient");
 }
 
 /// ADR-0037 Phase 1 + Phase 2: when a component sends to a mailbox

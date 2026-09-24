@@ -30,7 +30,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use aether_actor::{ErasedActorRef, ReplyMode};
-use aether_data::Kind;
+use aether_data::ActorMail;
 use aether_substrate::actor::native::{DispatchId, NativeCtx, Pending};
 
 /// A buffered fetch: replays an over-bound request via
@@ -103,7 +103,7 @@ impl PerSenderEgress {
         work: F,
     ) -> Pending<O>
     where
-        O: Kind + serde::Serialize + Send + 'static,
+        O: ActorMail + serde::Serialize + Send + 'static,
         F: FnOnce() -> O + Send + 'static,
         M: ReplyMode,
     {
@@ -246,6 +246,8 @@ mod tests {
         const ID: KindId = KindId(0xE9E5_0CC2_0000_0001);
         aether_data::pod_kind_codec!();
     }
+
+    impl aether_data::ActorMail for Answer {}
 
     /// A distinct chain root per request so a multi-request test keeps each
     /// chain's hold accounting separate — the value a cap handler reads from

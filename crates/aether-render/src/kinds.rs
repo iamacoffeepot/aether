@@ -24,8 +24,9 @@ use serde::{Deserialize, Serialize};
 /// capture. `replay_cache_when_idle` carries the issue 847 semantic —
 /// harness captures replay the last committed accumulators when the producer
 /// was idle; desktop always commits current. Not addressed by wasm guests —
-/// the pumping chassis driver is its sole sender.
-#[aether_data::kind(name = "aether.render.frame", default, eq)]
+/// the pumping chassis driver is its sole sender. Engine-only mail (ADR-0233):
+/// the driver pushes it from host code through the mailer.
+#[aether_data::kind(name = "aether.render.frame", default, eq, engine_only)]
 pub struct Frame {
     pub replay_cache_when_idle: bool,
     /// Engine window targets dirtied by this application turn. The render
@@ -40,8 +41,9 @@ pub struct Frame {
 /// `pre_remaining`. Wire-identical to `aether.trace.settled` (a single
 /// `MailId` field) so the settlement registry's notice-mail bridge
 /// (`subscribe_settlement_mail`) delivers it directly. Chassis-internal —
-/// the settlement bridge is its sole sender.
-#[aether_data::kind(name = "aether.render.pre_settled", copy, eq)]
+/// the settlement bridge is its sole sender. Engine-only mail (ADR-0233): the
+/// settlement registry pushes it from host code through the mailer.
+#[aether_data::kind(name = "aether.render.pre_settled", copy, eq, engine_only)]
 pub struct PreSettled {
     pub mail_id: MailId,
 }
@@ -51,7 +53,9 @@ pub struct PreSettled {
 /// `RenderCapability::on_occluded` fail-fasts a pending capture when the
 /// window becomes occluded (relocating `fail_capture_if_occluded` into the
 /// actor, issue 1317). Chassis-internal — the driver is its sole sender.
-#[aether_data::kind(name = "aether.render.occluded", copy, default, eq)]
+/// Engine-only mail (ADR-0233): the desktop driver pushes it from host code
+/// through the mailer.
+#[aether_data::kind(name = "aether.render.occluded", copy, default, eq, engine_only)]
 pub struct Occluded {
     pub window: WindowId,
     pub occluded: bool,

@@ -5,7 +5,7 @@
 use core::marker::PhantomData;
 use core::num::NonZeroU64;
 
-use aether_data::{Kind, MailboxId};
+use aether_data::{ActorMail, Kind, MailboxId};
 
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::persistence::Persistence;
@@ -112,7 +112,7 @@ impl MailSender for WasmDropCtx<'_> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         mail::send_mail(
@@ -128,7 +128,7 @@ impl MailSender for WasmDropCtx<'_> {
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
+        K: ActorMail + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         mail::send_mail(
@@ -148,7 +148,7 @@ impl MailSender for WasmDropCtx<'_> {
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         mail::send_mail(
@@ -162,7 +162,7 @@ impl MailSender for WasmDropCtx<'_> {
     }
 
     // By-id detached send — the by-name body with the caller's id.
-    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
+    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         mail::send_mail(target.id().0, K::ID.0, &bytes, 1, true, self.mailbox);
     }

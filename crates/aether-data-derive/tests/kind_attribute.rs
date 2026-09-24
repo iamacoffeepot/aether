@@ -62,6 +62,16 @@ pub enum Outcome {
     Rejected { reason: String },
 }
 
+/// `engine_only` withholds `ActorMail`, so the typed send of the engine-only
+/// kind is refused with the ADR-0233 diagnostic, and the plain kind beside
+/// it still sends. Catches the derive emitting `ActorMail` despite
+/// `engine_only`, or never emitting it (the plain call would fail too).
+#[test]
+fn ui() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/rejects_engine_only_send.rs");
+}
+
 /// Tripwire: `pod` must keep the cast wire shape, and the base stack
 /// must keep the structured one. Both are `const` asserts because the
 /// derive computes `ELIGIBLE` at compile time.

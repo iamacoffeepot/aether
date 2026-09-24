@@ -47,7 +47,7 @@ use std::thread::{self, JoinHandle};
 
 use aether_actor::{Addressable, ErasedActorRef, HandlesKind};
 use aether_actor::{CallerAddressable, CallerScoped, MailSender, Singleton};
-use aether_data::{Kind, MailId};
+use aether_data::{ActorMail, MailId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::fail_fast;
@@ -125,7 +125,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
@@ -141,7 +141,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
+        K: ActorMail + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         // Batch count rides as `u32` on the wire (matches the FFI ABI);
@@ -165,7 +165,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
@@ -180,7 +180,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
 
     // By-id detached send: `None` / `None` lineage mints a fresh root
     // rather than inheriting this ctx's captured chain (ADR-0080 §7).
-    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
+    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(target.id().0, K::ID.0, &bytes, 1, None, None);
     }
@@ -209,7 +209,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         // No inherited parent / root — each send mints its own chain
@@ -227,7 +227,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
+        K: ActorMail + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         // Batch count rides as `u32` on the wire (matches the FFI ABI);
@@ -251,7 +251,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
@@ -266,7 +266,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
 
     // By-id detached send. A root ctx already mints a fresh chain per send,
     // so this matches its other sends' `None` / `None` lineage.
-    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
+    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(target.id().0, K::ID.0, &bytes, 1, None, None);
     }
@@ -350,7 +350,7 @@ mod tests {
     use std::sync::Mutex;
 
     use aether_actor::{CallerScope, Resolve};
-    use aether_data::{KindId, MailboxId};
+    use aether_data::{Kind, KindId, MailboxId};
 
     use crate::mail::registry::{OwnedDispatch, Registry};
     use crate::mail::{Mail, Mailer};

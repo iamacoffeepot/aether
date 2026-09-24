@@ -9,7 +9,7 @@ use std::any::{Any, TypeId};
 use std::sync::Arc;
 
 use aether_actor::{ActorRef, Addressable, CallerAddressable, CallerScoped, Erased, Reaches, Singleton};
-use aether_data::{Kind, MailId, MailboxId};
+use aether_data::{ActorMail, MailId, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::mailbox::NativeActorMailbox;
@@ -83,7 +83,7 @@ impl<'a> NativeInitCtx<'a> {
     /// `K`. `init` itself still mails nothing: the handle only wakes once the
     /// thread calls it, and it names no position (ADR-0230).
     #[must_use]
-    pub fn self_wake<K: Kind>(&self) -> SelfWake<K> {
+    pub fn self_wake<K: ActorMail>(&self) -> SelfWake<K> {
         SelfWake::new(self.binding)
     }
 

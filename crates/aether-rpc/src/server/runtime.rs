@@ -33,6 +33,7 @@ use super::{
 };
 use aether_actor::{HandlesKind, runtime};
 use aether_substrate::atomic_write::atomic_write;
+use aether_substrate::mail::boundary::is_engine_only;
 use aether_substrate::net::teardown_connect_addr;
 
 // Re-export every substrate / std / cross-crate type the top-level
@@ -457,6 +458,21 @@ impl RpcServerState {
         cid: Option<u64>,
         envelope: MailEnvelope,
     ) {
+        // ADR-0233: engine-only mail never arrives from the wire. Refused
+        // first, so neither a forward to another engine nor a proven local
+        // dispatch carries it; the reason names the kind by its tagged id.
+        if is_engine_only(envelope.kind) {
+            let reason = format!("{} is engine-only mail", envelope.kind);
+            let Some(wire_cid) = cid else {
+                tracing::warn!(target: "aether_substrate::rpc", conn = conn_id, %reason, "rpc call refused");
+                return;
+            };
+            self.write_frame_to(
+                conn_id,
+                &WireFrame::ReplyEnd { cid: wire_cid, result: Err(RpcError::Other { reason }) },
+            );
+            return;
+        }
         // The envelope names an engine (issue 763 P5a): relay to the
         // proxy registered for it, as a `ForwardEnvelope`. This server is
         // the sender, so the send's default reply target is this server

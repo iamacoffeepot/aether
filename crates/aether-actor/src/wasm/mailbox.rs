@@ -22,7 +22,7 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, MailboxId, RequestId, Source};
+use aether_data::{ActorMail, Kind, MailboxId, RequestId, Source};
 
 use crate::model::{Addressable, HandlesKind};
 use crate::wasm::bridge::mail;
@@ -118,14 +118,14 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     /// with the flat `WasmCtx::send` verb, whose payload bound
     /// ([`SendableTo`](crate::SendableTo)) carries the check instead: a verb
     /// body cannot restate `HandlesKind` for its anonymous payload type.
-    pub(crate) fn push<K: Kind>(&self, payload: &K) {
+    pub(crate) fn push<K: ActorMail>(&self, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, ChainMode::Inherit, self.sender);
     }
 
     /// The unbounded body of [`Self::send_tracked`], shared with the flat
     /// `WasmCtx::send_tracked` verb.
-    pub(crate) fn push_tracked<K: Kind>(&self, payload: &K) -> RequestId {
+    pub(crate) fn push_tracked<K: ActorMail>(&self, payload: &K) -> RequestId {
         match self.inline.route_decision(self.mailbox) {
             RouteDecision::Local => {
                 self.push(payload);
@@ -145,7 +145,7 @@ impl<'a, R> WasmActorMailbox<'a, R> {
 
     /// The unbounded body of [`Self::send_with_context`], shared with the
     /// flat `WasmCtx::send_with_context` verb.
-    pub(crate) fn push_with_context<K: Kind, C: Kind>(&self, payload: &K, context: &C) -> RequestId {
+    pub(crate) fn push_with_context<K: ActorMail, C: Kind>(&self, payload: &K, context: &C) -> RequestId {
         let request = self.push_tracked(payload);
         if request.0 != Source::NO_CORRELATION {
             self.inline.insert_request_context(request, context);
@@ -155,7 +155,7 @@ impl<'a, R> WasmActorMailbox<'a, R> {
 
     /// The unbounded body of [`Self::send_many`], shared with the flat
     /// `WasmCtx::send_many` verb.
-    pub(crate) fn push_many<K: Kind + bytemuck::NoUninit>(&self, payloads: &[K]) {
+    pub(crate) fn push_many<K: ActorMail + bytemuck::NoUninit>(&self, payloads: &[K]) {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         self.inline.route_or_enqueue(
             self.mailbox,
@@ -175,7 +175,7 @@ impl<R: Addressable, C: Kind> WasmActorMailboxWithContext<'_, '_, R, C> {
     pub fn send<K>(&self, payload: &K) -> RequestId
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         self.mailbox.send_with_context(payload, self.context)
     }
@@ -201,7 +201,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     pub fn send<K>(&self, payload: &K)
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         self.push(payload);
     }
@@ -215,7 +215,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     pub fn send_tracked<K>(&self, payload: &K) -> RequestId
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         self.push_tracked(payload)
     }
@@ -227,7 +227,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     pub fn send_with_context<K, C>(&self, payload: &K, context: &C) -> RequestId
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
         C: Kind,
     {
         self.push_with_context(payload, context)
@@ -240,7 +240,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     pub fn send_many<K>(&self, payloads: &[K])
     where
         R: HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
+        K: ActorMail + bytemuck::NoUninit,
     {
         self.push_many(payloads);
     }
@@ -257,7 +257,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     pub fn send_detached<K>(&self, payload: &K)
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, ChainMode::Detached, self.sender);

@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use aether_actor::{ActorRef, Addressable, ErasedActorRef, Manual, Single, runtime};
-use aether_data::{Kind, MailboxId};
+use aether_data::{ActorMail, MailboxId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
     TextInput, WindowMode, WindowSize,
@@ -817,7 +817,7 @@ impl DesktopWindowCapabilityState {
         WindowSize { window: id, width, height, scale_factor }
     }
 
-    fn publish<K: Kind, A>(&self, ctx: &mut NativeCtx<'_, A, Single>, window: WindowId, event: &K) {
+    fn publish<K: ActorMail, A>(&self, ctx: &mut NativeCtx<'_, A, Single>, window: WindowId, event: &K) {
         ctx.fanout(self.subscribers.recipients(window, K::ID), event);
     }
 }
@@ -1011,6 +1011,7 @@ mod tests {
     use std::fmt::Debug;
     use std::sync::mpsc;
 
+    use aether_data::Kind;
     use aether_kinds::mouse_button;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::SpawnError;

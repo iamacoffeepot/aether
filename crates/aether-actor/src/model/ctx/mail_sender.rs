@@ -18,7 +18,7 @@
 //! code that needs cross-impl sends uses the trait's [`MailSender::send`]
 //! / [`MailSender::send_many`] methods.
 
-use aether_data::Kind;
+use aether_data::ActorMail;
 
 use crate::model::{CallerAddressable, HandlesKind, Singleton};
 use crate::reference::ErasedActorRef;
@@ -51,14 +51,14 @@ pub trait MailSender {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind;
+        K: ActorMail;
 
     /// Send a slice of cast-shape payloads as a contiguous batch.
     /// Cast-only — structured kinds have no efficient batched wire shape.
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit;
+        K: ActorMail + bytemuck::NoUninit;
 
     /// Correlation id the host minted for this actor's most recent
     /// outbound `send_mail` (ADR-0042). `0` before any send.
@@ -83,7 +83,7 @@ pub trait MailSender {
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind;
+        K: ActorMail;
 
     /// By-id counterpart to [`Self::send_detached`]: fire-and-forget send
     /// of `payload` to the proven `target`, minting a fresh causal root
@@ -113,5 +113,5 @@ pub trait MailSender {
     /// Required rather than defaulted: there is no by-id inherit method on
     /// this trait to delegate to (the inherit-by-id send is the per-ctx
     /// inherent `send_to`), so each concrete ctx supplies its own body.
-    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K);
+    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K);
 }

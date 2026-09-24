@@ -5,7 +5,7 @@
 //! and drop ctxs deliberately do not — there's no inbound mail at boot
 //! and reply targets are not honoured during teardown.
 
-use aether_data::Kind;
+use aether_data::ActorMail;
 
 use crate::model::ctx::mail_sender::MailSender;
 
@@ -38,9 +38,9 @@ pub trait OutboundReply: MailSender {
     /// Reply to the originator of the mail currently being dispatched.
     /// No-op when there's no reply target. Wire shape (cast or structured)
     /// follows `Kind::encode_into_bytes` (ADR-0100), so a reply needs
-    /// only `K: Kind` — a `Pod`-without-`Serialize` cast kind is
-    /// repliable.
-    fn reply<K: Kind>(&mut self, payload: &K);
+    /// only `K: ActorMail` — a `Pod`-without-`Serialize` cast kind is
+    /// repliable, and an engine-only kind (ADR-0233) is not.
+    fn reply<K: ActorMail>(&mut self, payload: &K);
 
     /// Reply to an explicit `sender` rather than the dispatcher-stamped
     /// reply target. Used by the parked-sender pattern: caps that stash
@@ -52,5 +52,5 @@ pub trait OutboundReply: MailSender {
     /// Same wire-shape contract as [`Self::reply`]. Native impls route
     /// through `NativeBinding::send_reply_for_handler`; FFI impls route
     /// through `crate::wasm::bridge::mail::reply_mail`.
-    fn reply_to<K: Kind>(&mut self, sender: Self::ReplyHandle, payload: &K);
+    fn reply_to<K: ActorMail>(&mut self, sender: Self::ReplyHandle, payload: &K);
 }

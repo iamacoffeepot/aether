@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use aether_actor::{ActorRef, HandlesKind, Instanced, validate_namespace_segment};
-use aether_data::Kind;
+use aether_data::{ActorMail, Kind};
 use aether_kinds::trace::Nanos;
 
 use crate::actor::native::NativeActor;
@@ -140,7 +140,7 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     pub fn after_init<K>(mut self, mail: K) -> Self
     where
         A: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let payload = mail.encode_into_bytes();
         let kind = KindId(<K as Kind>::ID.0);

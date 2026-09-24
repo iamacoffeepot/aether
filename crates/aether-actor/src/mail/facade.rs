@@ -18,7 +18,7 @@
 //! wrong-kind rejection a facade method inherits is the same one a direct
 //! `.send(&payload)` gets.
 
-use aether_data::Kind;
+use aether_data::{ActorMail, Kind};
 
 use crate::model::{Addressable, HandlesKind};
 use crate::wasm::{WasmActorMailbox, WasmActorMailboxWithContext};
@@ -37,14 +37,14 @@ pub trait MailboxForward<A> {
     fn forward<K>(&self, payload: &K)
     where
         A: HandlesKind<K>,
-        K: Kind;
+        K: ActorMail;
 }
 
 impl<A: Addressable> MailboxForward<A> for WasmActorMailbox<'_, A> {
     fn forward<K>(&self, payload: &K)
     where
         A: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         self.send(payload);
     }
@@ -54,7 +54,7 @@ impl<A: Addressable, C: Kind> MailboxForward<A> for WasmActorMailboxWithContext<
     fn forward<K>(&self, payload: &K)
     where
         A: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let _ = self.send(payload);
     }

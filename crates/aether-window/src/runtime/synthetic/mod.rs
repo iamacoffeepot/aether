@@ -78,7 +78,7 @@ impl SyntheticWindowCapabilityState {
         }
     }
 
-    fn publish<K: aether_data::Kind, A>(&self, ctx: &mut NativeCtx<'_, A>, window: WindowId, event: &K) {
+    fn publish<K: aether_data::ActorMail, A>(&self, ctx: &mut NativeCtx<'_, A>, window: WindowId, event: &K) {
         ctx.fanout(self.subscribers.recipients(window, K::ID), event);
     }
 

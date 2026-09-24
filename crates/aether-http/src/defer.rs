@@ -25,7 +25,7 @@
 //! anything here.
 
 use aether_actor::{HandlesKind, Manual, OutboundReply, Reaches, Singleton};
-use aether_data::{Kind, Source};
+use aether_data::{ActorMail, Source};
 use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
 
 use super::kinds::HttpServerResponse;
@@ -59,7 +59,7 @@ impl<A: Reaches<ComponentHostCapability>> Ctx<'_, NativeCtx<'_, A, Manual>> {
     /// it is not `ctx.actor::<R>()`, which supplies the caller's carry and
     /// therefore refuses an embedded target outright (ADR-0119 amendment).
     #[must_use = "a deferred request does nothing until `.to::<R>()` forwards it"]
-    pub fn defer<'ctx, 'request, K: Kind>(&'ctx self, request: &'request K) -> DeferredRequest<'ctx, 'request, K> {
+    pub fn defer<'ctx, 'request, K: ActorMail>(&'ctx self, request: &'request K) -> DeferredRequest<'ctx, 'request, K> {
         DeferredRequest { host: self.actor::<ComponentHostCapability>(), request, source: self.reply_target() }
     }
 }
@@ -74,7 +74,7 @@ pub struct DeferredRequest<'ctx, 'request, K> {
     source: Source,
 }
 
-impl<K: Kind> DeferredRequest<'_, '_, K> {
+impl<K: ActorMail> DeferredRequest<'_, '_, K> {
     /// Forward this request to recipient `R` and hold the route open until its reply.
     /// The send is *inherited* (ADR-0080 §7), so the request's chain stays open
     /// and the HTTP server does not `502` it before the reply;

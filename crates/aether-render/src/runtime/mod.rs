@@ -312,7 +312,8 @@ impl RenderCapabilityState {
     /// causal chain — visible to tracing and settlement and ordered
     /// against the mail it describes (issue 5965). The payload is empty
     /// because the harness's inline observer records only the kind id;
-    /// nothing downstream decodes a witness.
+    /// nothing downstream decodes a witness. Engine-only kinds (ADR-0233)
+    /// get no witness: the raw verb refuses them from an actor.
     fn observe<M: ReplyMode, A>(&self, ctx: &NativeCtx<'_, A, M>, kind: KindId) {
         if let Some(observer) = self.observer {
             let _ = ctx.send_envelope_tracked_to(observer, kind, &[]);
@@ -1067,19 +1068,20 @@ impl NativeActor for RenderCapability {
 
     /// `PreSettled` (ADR-0161) — decrement the pending capture's
     /// `pre_remaining`. A stray notice with no pending capture is ignored.
+    /// Engine-only mail (ADR-0233), so the harness observer is not sent a
+    /// witness of it.
     #[handler::single]
-    fn on_pre_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: PreSettled) {
-        state.observe(ctx, <PreSettled as Kind>::ID);
+    fn on_pre_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: PreSettled) {
         if let Some(pending) = &mut state.pending_capture {
             pending.pre_remaining = pending.pre_remaining.saturating_sub(1);
         }
     }
 
     /// `Occluded` — update only the named target and fail only a capture
-    /// selected for that target.
+    /// selected for that target. Engine-only mail (ADR-0233), so the harness
+    /// observer is not sent a witness of it.
     #[handler::single]
-    fn on_occluded(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Occluded) {
-        state.observe(ctx, <Occluded as Kind>::ID);
+    fn on_occluded(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Occluded) {
         #[cfg(feature = "desktop")]
         let became_occluded =
             state.targets.set_occluded(mail.window, mail.occluded, |target, occluded| target.occluded = occluded)
@@ -1101,10 +1103,10 @@ impl NativeActor for RenderCapability {
     /// each live non-occluded target's dimensions. A target whose record
     /// fails drops that target's frame and nothing else — the fan-out still
     /// owes every window behind it its turn. An empty target list is
-    /// reserved for the explicitly surfaceless harness.
+    /// reserved for the explicitly surfaceless harness. Engine-only mail
+    /// (ADR-0233), so the harness observer is not sent a witness of it.
     #[handler::single]
     fn on_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Frame) {
-        state.observe(ctx, <Frame as Kind>::ID);
         let Frame { replay_cache_when_idle, windows } = mail;
         let windows = deduplicate_windows(windows);
 

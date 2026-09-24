@@ -3,7 +3,7 @@
 use aether_actor::{DependsOn, ReplyMode};
 use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery};
 use aether_component::ComponentHostCapability;
-use aether_data::Kind;
+use aether_data::{ActorMail, Kind};
 use aether_kinds::LoadComponent;
 use aether_substrate::actor::native::{DeferredReply, NativeCtx};
 
@@ -84,7 +84,7 @@ impl BundleDriver {
     /// Send `request` to `bundle`'s loaded root with `ticket` as the request
     /// context. The core addresses only a digest it saw load, so a digest
     /// with no kept root is a broken invariant and aborts (ADR-0063).
-    fn send_to_root<M: ReplyMode, A, K: Kind, C: Kind>(
+    fn send_to_root<M: ReplyMode, A, K: ActorMail, C: Kind>(
         &self,
         ctx: &mut NativeCtx<'_, A, M>,
         bundle: Digest,

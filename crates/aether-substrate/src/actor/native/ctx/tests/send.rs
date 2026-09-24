@@ -257,6 +257,50 @@ fn flat_send_and_send_with_context_reach_the_declared_dependency_on_the_handlers
     );
 }
 
+/// ADR-0233: the raw-kind verbs are the native door no `ActorMail` bound
+/// guards, so each refuses an engine-only kind, returning `MailId::NONE` and
+/// routing nothing, while an ordinary kind through the same verb still
+/// arrives. Catches a native actor forging a departure notice by its id.
+#[test]
+fn raw_send_of_an_engine_only_kind_is_refused() {
+    use aether_data::Kind;
+    use aether_kinds::MonitorNotice;
+
+    use crate::mail::registry::OwnedDispatch;
+    use crate::testing::{bare_substrate, registered_ref};
+    use std::sync::mpsc;
+
+    let (registry, mailer) = bare_substrate();
+    let (tx, rx) = mpsc::channel::<Envelope>();
+    let sink = registered_ref(
+        &registry,
+        "test.engine_only.sink",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            // Terminal test sink (ADR-0094): discharge before observing.
+            dispatch.discharge();
+            let _ = tx.send(dispatch);
+        }),
+    );
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00BE_EF06)));
+    let source = Source::with_correlation(SourceAddr::None, 0);
+    let notice = MonitorNotice.encode_into_bytes();
+
+    {
+        let ctx: NativeCtx<'_, Erased, Single> = NativeCtx::new(&binding, source, MailId::NONE, MailId::NONE);
+        let tracked = ctx.send_envelope_tracked_to(sink, MonitorNotice::ID, &notice);
+        let detached = ctx.send_envelope_detached_to(sink, MonitorNotice::ID, &notice);
+        assert_eq!(tracked, MailId::NONE, "the tracked raw verb refuses engine-only mail");
+        assert_eq!(detached, MailId::NONE, "the detached raw verb refuses engine-only mail");
+
+        let control = ctx.send_envelope_detached_to(sink, CastOnly::ID, &CastOnly { code: 8 }.encode_into_bytes());
+        assert_ne!(control, MailId::NONE, "an ordinary kind still sends");
+    }
+
+    let arrived = rx.try_recv().expect("the ordinary kind routed at flush");
+    assert_eq!(arrived.kind, CastOnly::ID, "only the ordinary kind reaches the sink");
+    assert!(rx.try_recv().is_err(), "no engine-only mail reached the sink");
+}
+
 /// One `TaskDone<CastOnly, ()>` per `resolve*` method, bundled into a tuple
 /// so `_assert_cast_kind_repliable`'s parameter count stays under clippy's
 /// `too_many_arguments` threshold without a suppression.
@@ -265,7 +309,8 @@ type CastOnlyTaskDones =
 
 /// Type-level proof (ADR-0100): a `Pod`-without-`Serialize` cast kind
 /// is repliable through every native reply entry point — the bounds
-/// relaxed from `K: Kind + serde::Serialize` to `K: Kind`. Never
+/// relaxed from `K: Kind + serde::Serialize` to `K: Kind` (now
+/// `K: ActorMail`, ADR-0233). Never
 /// called; the compile is the assertion. If a reply bound regains a
 /// `serde::Serialize` half, this stops compiling. Covers the direct
 /// entry points (`OutboundReply::reply`, `reply_to`, `reply_to_target`)

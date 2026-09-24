@@ -10,7 +10,7 @@
 use alloc::string::String;
 
 use aether_actor::{ActorInitError, ErasedActorRef, Subname, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
-use aether_data::Kind;
+use aether_data::ActorMail;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
 };
@@ -37,7 +37,7 @@ pub struct EditorRegion {
 impl EditorRegion {
     /// Hand one relayed input event to the hosted panel. A region whose panel
     /// failed to spawn has nowhere to send it, and says so once, in `wire`.
-    fn relay<A, K: Kind>(&self, ctx: &mut WasmCtx<'_, A>, payload: &K) {
+    fn relay<A, K: ActorMail>(&self, ctx: &mut WasmCtx<'_, A>, payload: &K) {
         if let Some(panel) = self.panel {
             ctx.send_to(panel, payload);
         }

@@ -5,6 +5,7 @@
 - **Amended:** 2026-05-09 — Section 6 retired the `on_close` name in favour of `unwire`, added the symmetric `wire` hook, and recorded the rationale for moving away from `Drop`'s reserved Rust semantics.
 - **Amended:** 2026-07-20 — Section 8 added the vacate path: `MonitorNotice` fires on close *or* vacate (a wasm unload behind a still-live trampoline mailbox), so watchers learn "state keyed by this target is stale" for both departures. Enables the component-host teardown fan-out inversion (issues 3740 / 3741).
 - **Amended:** 2026-09-22 — Section 8's `MonitorNotice` became fieldless: the host stamps the departed actor as the notice's envelope sender, so a watcher reads it from `ctx.sender()` as the proven reference it monitored (ADR-0230) and no position is handed out. An inline-child alias departs under its own notice, sent from the alias. `MonitorHandle` no longer exposes its target.
+- **Amended:** 2026-09-24 — Section 8's `MonitorNotice` is engine-only mail ([ADR-0233](0233-engine-only-mail.md)): only the host's `notify_departure` sends it, a typed actor send of it does not compile, and every raw-`KindId` door refuses it.
 
 ## Context
 

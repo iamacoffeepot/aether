@@ -355,7 +355,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // through a generated `macro_rules!` bridge — which a native set emits and
     // its adopters invoke. A wasm set does not, because nothing on this
     // transport reads the marker: the widget family addresses its members
-    // parent-to-child by name through `RelativeMailbox::send<K: Kind>`, which
+    // parent-to-child by name through `RelativeMailbox::send<K: ActorMail>`, which
     // carries no `HandlesKind` bound. The scoped consequence is that a wasm
     // set's kinds are not sendable through the typed resolver
     // (`ctx.actor::<R>().send(&k)`).

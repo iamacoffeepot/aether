@@ -33,7 +33,7 @@ use aether_actor::Single;
 
 use crate::actor::native::NativeCtx;
 use crate::actor::native::offload::blocking::{DispatchId, Pending};
-use aether_data::Kind;
+use aether_data::ActorMail;
 
 /// Default per-cap concurrency bound when a cap doesn't override it.
 /// Doubles as rate-limit throttling for the paid provider endpoints
@@ -92,7 +92,7 @@ impl TaskQueue {
     /// *this* caller (iamacoffeepot/aether#1031).
     pub fn submit<O, F, M, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, work: F) -> Pending<O>
     where
-        O: Kind + Send + 'static,
+        O: ActorMail + Send + 'static,
         F: FnOnce() -> O + Send + 'static,
         M: aether_actor::ReplyMode,
     {
@@ -158,6 +158,8 @@ mod tests {
         const ID: KindId = KindId(0xD15B_0CC2_0000_0001);
         aether_data::pod_kind_codec!();
     }
+
+    impl aether_data::ActorMail for Answer {}
 
     /// A synthetic chain root for a request — the value the cap handler
     /// would read from `ctx.in_flight_root()`. Distinct per `cid` so a

@@ -257,6 +257,27 @@ pub struct DependencyEntry {
 
 inventory::collect!(DependencyEntry);
 
+/// An engine-only kind, collected at link time (ADR-0233). The `Kind`
+/// derive submits one entry for each kind that declares
+/// `#[kind(engine_only)]`, and a hand-written engine-only `Kind` impl
+/// submits its own. The substrate folds these into the set its raw-`KindId`
+/// doors (the RPC `Call`, bundle items, the guest host functions, the raw
+/// native verbs) refuse, since a typed send is already refused by the
+/// missing [`ActorMail`](crate::ActorMail) bound.
+pub struct EngineOnlyKind {
+    /// The kind's id (`<K as Kind>::ID`).
+    pub kind: KindId,
+    /// The kind's name (`<K as Kind>::NAME`), for refusal messages.
+    pub name: &'static str,
+}
+
+inventory::collect!(EngineOnlyKind);
+
+/// Iterate every [`EngineOnlyKind`] collected at link time.
+pub fn engine_only_kinds() -> impl Iterator<Item = &'static EngineOnlyKind> {
+    inventory::iter::<EngineOnlyKind>.into_iter()
+}
+
 /// Iterate every native [`RootEntry`] collected at link time.
 pub fn root_entries() -> impl Iterator<Item = &'static RootEntry> {
     inventory::iter::<RootEntry>.into_iter()

@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use aether_actor::{HandlesKind, Instanced, validate_namespace_segment};
-use aether_data::{ActorId, Kind};
+use aether_data::{ActorId, ActorMail};
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
@@ -80,7 +80,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
     pub fn after_init<K>(mut self, mail: K) -> Self
     where
         A: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         self.inner = self.inner.after_init(mail);
         self

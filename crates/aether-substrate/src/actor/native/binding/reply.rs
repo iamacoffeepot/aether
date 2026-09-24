@@ -3,7 +3,7 @@
 
 use super::NativeBinding;
 use crate::mail::{MailId, Source};
-use aether_data::{Kind, RequestId};
+use aether_data::{ActorMail, Kind, RequestId};
 
 impl NativeBinding {
     /// Reply path for native actors (ADR-0080 §5 / #1695). Mints the
@@ -25,7 +25,7 @@ impl NativeBinding {
     /// typed entry is the only reply API native actors reach for.
     pub(crate) fn send_reply_for_handler<K>(&self, sender: Source, payload: &K, root: MailId, parent: Option<MailId>)
     where
-        K: Kind,
+        K: ActorMail,
     {
         let correlation = self.reply_lineage.mint();
         let reply_id = MailId::new(self.self_mailbox(), correlation);

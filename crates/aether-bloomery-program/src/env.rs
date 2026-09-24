@@ -17,7 +17,7 @@ use aether_actor::{Addressable, CallerAddressable, Replies, ReplyMode, Sends, Si
 use aether_bloomery_kinds::{
     ClosureArtifact, Digest, EncodedArtifact, OpaqueBytes, ReadArtifactResult, Ref, Refusal, Utf8Text,
 };
-use aether_data::{Cites, Kind, KindId, Storage};
+use aether_data::{ActorMail, Cites, Kind, KindId, Storage};
 
 use crate::kinds::Detail;
 
@@ -76,7 +76,7 @@ struct CapturedSend<A, K> {
 impl<A, K> DispatchBody for CapturedSend<A, K>
 where
     A: Singleton + CallerAddressable + Replies<K>,
-    K: Kind + Send,
+    K: ActorMail + Send,
 {
     fn send(&self, sends: &mut Sends<'_>) {
         sends.actor::<A>().send(&self.mail);
@@ -87,7 +87,7 @@ impl PendingCall {
     fn new<A, K>(mail: K) -> Self
     where
         A: Singleton + CallerAddressable + Replies<K> + 'static,
-        K: Kind + Send + 'static,
+        K: ActorMail + Send + 'static,
     {
         Self {
             mailbox: A::NAMESPACE,
@@ -165,7 +165,7 @@ impl<A: Addressable> Binding<A> {
     ) -> impl Future<Output = Result<<A as Replies<K>>::Reply, Refusal>> + Send + 'static
     where
         A: Singleton + CallerAddressable + Replies<K> + Unpin + 'static,
-        K: Kind + Send + Unpin + 'static,
+        K: ActorMail + Send + Unpin + 'static,
     {
         Call::<A, K> { env: self.env, mail: Some(mail), _target: PhantomData }
     }
@@ -224,7 +224,7 @@ struct Call<A, K> {
 impl<A, K> Future for Call<A, K>
 where
     A: Singleton + CallerAddressable + Replies<K> + Unpin + 'static,
-    K: Kind + Send + Unpin + 'static,
+    K: ActorMail + Send + Unpin + 'static,
 {
     type Output = Result<A::Reply, Refusal>;
 

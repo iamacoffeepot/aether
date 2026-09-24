@@ -76,6 +76,8 @@ impl Kind for CastOnly {
     }
 }
 
+impl aether_data::ActorMail for CastOnly {}
+
 impl HandlesKind<CastOnly> for StubActor {}
 
 pub(super) struct EmbeddedPeer;

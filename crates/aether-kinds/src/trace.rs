@@ -285,7 +285,10 @@ pub enum TraceTailResult {
 /// registry's `settled` set dedups). The gate-site contract is
 /// "settles eventually," not "settles only once every dependency is
 /// provably done."
-#[aether_data::kind(name = "aether.trace.settled", copy, eq, derive(Hash))]
+///
+/// Engine-only mail (ADR-0233): the settlement registry pushes it from host
+/// code through the mailer, and no actor may send it.
+#[aether_data::kind(name = "aether.trace.settled", copy, eq, engine_only, derive(Hash))]
 pub struct Settled {
     pub root: MailId,
 }

@@ -340,6 +340,37 @@ fn call_to_an_absent_path_closes_not_present() {
     );
 }
 
+/// ADR-0233: a wire `Call` carrying engine-only mail closes with `ReplyEnd`
+/// `Err(Other)` before any dispatch. The recipient path is absent on purpose:
+/// a door that proved the recipient first would answer `NotPresent` instead.
+/// Catches a wire client forging a departure notice or a settlement.
+#[test]
+fn call_carrying_an_engine_only_kind_closes_with_err_before_dispatch() {
+    use crate::{MailEnvelope, RpcError};
+    use aether_data::Kind;
+    use aether_kinds::MonitorNotice;
+
+    let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(5));
+    complete_handshake(&mut stream);
+
+    write_frame(
+        &mut stream,
+        &WireFrame::Call {
+            cid: Some(13),
+            envelope: MailEnvelope {
+                to: Recipient::local(ActorPath::new(ABSENT).expect("the absent fixture is a path")),
+                kind: <MonitorNotice as Kind>::ID,
+                payload: MonitorNotice.encode_into_bytes(),
+            },
+        },
+    )
+    .expect("test: write_frame Call to rpc server");
+
+    let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
+    let reason = format!("{} is engine-only mail", <MonitorNotice as Kind>::ID);
+    assert_eq!(end, WireFrame::ReplyEnd { cid: 13, result: Err(RpcError::Other { reason }) });
+}
+
 /// A `Call` addressed at an engine no proxy has registered closes at once
 /// with `ReplyEnd` `Err(UnknownEngine)` naming that engine. Without it the
 /// no-route branch returns without writing a `ReplyEnd` and the call hangs

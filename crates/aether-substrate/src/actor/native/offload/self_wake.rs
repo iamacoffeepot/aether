@@ -23,7 +23,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Weak};
 use std::thread::{self, JoinHandle};
 
-use aether_data::Kind;
+use aether_data::ActorMail;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::fail_fast;
@@ -76,7 +76,7 @@ impl<K> SelfWake<K> {
     }
 }
 
-impl<K: Kind> SelfWake<K> {
+impl<K: ActorMail> SelfWake<K> {
     /// Push `payload` to the minting actor's own mailbox as an unchained
     /// loopback wake. Does nothing once that actor has dropped.
     pub fn wake(&self, payload: &K) {

@@ -8,7 +8,7 @@
 //! [`Silent`], and a manual handler's row is [`Undeclared`]. A `#[fallback]`
 //! contributes no row.
 
-use aether_data::{Kind, KindId, ReplyContract};
+use aether_data::{ActorMail, Kind, KindId, ReplyContract};
 
 /// The row of a handler that sends no reply (`-> ()`).
 ///
@@ -31,11 +31,12 @@ mod sealed {
 
     impl Sealed for super::Silent {}
     impl Sealed for super::Undeclared {}
-    impl<O: aether_data::Kind> Sealed for O {}
+    impl<O: aether_data::ActorMail> Sealed for O {}
 }
 
 /// What a contract row can name as its reply: a reply kind, [`Silent`], or
-/// [`Undeclared`]. Sealed.
+/// [`Undeclared`]. Sealed. A reply kind must be [`ActorMail`], so a handler
+/// that declares an engine-only reply (ADR-0233) fails at its declaration.
 pub trait ReplyShape: sealed::Sealed {
     /// The row in the manifest's vocabulary, as the inputs manifest and the
     /// native `HandlerEntry` report it.
@@ -50,7 +51,7 @@ impl ReplyShape for Undeclared {
     const CONTRACT: ReplyContract = ReplyContract::Manual;
 }
 
-impl<O: Kind> ReplyShape for O {
+impl<O: ActorMail> ReplyShape for O {
     const CONTRACT: ReplyContract = ReplyContract::One(O::ID);
 }
 
