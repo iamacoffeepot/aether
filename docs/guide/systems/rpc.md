@@ -23,17 +23,27 @@ remain part of the stream boundary.
 
 ## Addressing
 
-An RPC mail envelope carries an optional engine selection plus mailbox/kind
-identity and correlation metadata. `engine = None` means the current RPC
-server's local actor registry, not specifically the engine-control capability;
-a hub fleet operation uses that form with the `aether.fleet` mailbox.
-Per-engine operations use `Some(id)` and route through the hub's matching
-`FleetProxy`.
+A `Call` names its recipient with a `Recipient`: an optional engine selection
+plus an `ActorPath` (ADR-0166, canonical or short), beside the kind and the
+encoded bytes. `engine = None` means the current RPC server's local actor
+registry, not specifically the engine-control capability; a hub fleet
+operation uses that form with the `aether.fleet` path. Per-engine operations
+use `Some(id)` and route through the hub's matching `FleetProxy`, which sends
+the path on as written.
 
 ```text
-engine = none     → supplied mailbox in this RPC server's local registry
-engine = some(id) → the proxy registered for id → child registry
+engine = none     → the path, resolved in this RPC server's local registry
+engine = some(id) → the proxy registered for id → the path, resolved in the child registry
 ```
+
+Only the engine that hosts the recipient resolves the path, on arrival
+(ADR-0230 §3), so only it expands a short path; no client, harness, or hub
+computes a mailbox id. A path that does not resolve there to a `Live` actor,
+whatever the reason (never registered, still starting, dropped, or an
+ambiguous or illegal short path), closes the call at once with
+`RpcError::NotPresent { path, detail }`, where `detail` is the engine's
+diagnostic. The hub relays that refusal to its caller unchanged. A reply
+(`ReplyEvent`) carries its kind and bytes and no address.
 
 Each `FleetProxy` registers its engine with the hub's RPC server once it is
 live (`aether.rpc.register_engine_route`), and the server forwards every
@@ -80,6 +90,13 @@ kinds travel inside `MailEnvelope` and do not require a new `WireFrame` variant.
 `RpcError::UnknownEngine` was appended after every existing variant without a
 `WIRE_VERSION` bump: appending keeps every earlier variant's tag, only the hub's
 RPC server produces it, and `aether-mcp` ships from the same build.
+
+`WIRE_VERSION` 2 (issue 6570) names a `Call`'s recipient by `ActorPath` in
+place of a mailbox id, refuses an unresolved path with `RpcError::NotPresent`,
+and drops the address from replies. Mixed versions do not interoperate: a peer built before it is
+refused at the handshake, and a stored pre-change substrate binary fails its
+spawn with a handshake error, so re-upload the substrate binary after
+upgrading the hub.
 
 Wire changes need:
 

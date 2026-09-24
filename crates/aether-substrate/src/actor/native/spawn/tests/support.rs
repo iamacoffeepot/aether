@@ -194,7 +194,6 @@ pub(super) fn finalized_probe(
         staged.identity.id,
         Arc::clone(&staged.identity.canonical_name),
         Arc::downgrade(&staged.transport),
-        Arc::clone(spawner.mailer()),
     );
 
     (spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain)), dispatch_id, key)

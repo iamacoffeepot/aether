@@ -110,8 +110,8 @@ pub struct ComponentSpec {
     /// later instance `{base}-{index}`, where `base` follows the same
     /// precedence as an unreplicated load (`name` > `export` > the default
     /// actor's own namespace) — so `replicas: 1` loads exactly what an
-    /// omitted field loads, and a co-hosted peer's bare-type
-    /// `ctx.actor::<R>()` reaches replica 0. Pairs with `#[router(shared)]`
+    /// omitted field loads, and a co-hosted peer's typed send,
+    /// `ctx.send::<R>(..)`, reaches replica 0. Pairs with `#[router(shared)]`
     /// (ADR-0136) to scale an HTTP handler to N instances in one spec.
     /// Omit (or `null`) for one instance, today's behaviour.
     /// `replicas: 0` is a tool error, not a silent no-op. Every derived
@@ -635,7 +635,7 @@ pub struct LoadComponentArgs {
     /// replica 0 for the bare `base` and each later instance
     /// `{base}-{index}` (`base` = `name` > `export` > the default actor's
     /// own namespace — the same precedence a plain load resolves against),
-    /// so a co-hosted peer's bare-type `ctx.actor::<R>()` reaches replica 0.
+    /// so a co-hosted peer's typed send, `ctx.send::<R>(..)`, reaches replica 0.
     /// Pairs with `#[router(shared)]` (ADR-0136) to scale an HTTP handler
     /// to N instances in one call. Returns one shared `capabilities` block plus
     /// `instances: [{address}, …]` (issue 3006) instead of the

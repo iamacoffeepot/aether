@@ -130,15 +130,12 @@ pub(super) async fn actor_cost(mcp: &Mcp, args: ActorCostArgs) -> Result<String,
         None => None,
     };
 
-    // Build the typed request, resolve the recipient the agent named,
-    // address it by id, and await the reply.
+    // Build the typed request, resolve the recipient the agent named to
+    // the engine's canonical path, address it by that path, and await the
+    // reply.
     let request = CostTail { kind };
-    let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.address).await.map_err(internal)?;
-    let reply = mcp
-        .session
-        .call_one(engine_envelope_by_id(engine, mailbox_id, &request))
-        .await
-        .map_err(internal)?;
+    let path = mcp.resolve_engine_path(engine, &args.address).await.map_err(internal)?;
+    let reply = mcp.session.call_one(engine_envelope_to(engine, path, &request)).await.map_err(internal)?;
 
     // Decode the reply kind and shape it for JSON.
     match CostTailResult::decode_from_bytes(&reply.payload) {
@@ -168,17 +165,19 @@ The skeleton every tool follows:
 2. **Build the typed request kind, then resolve the recipient before you
    address it.** An address the agent typed is often a rendered lineage —
    `aether.component/aether.embedded:web`, the form `load_component`
-   hands back — which is a path of nodes rather than one name to hash.
-   `mcp.resolve_engine_address(engine, address)` takes whichever form arrives: a
-   tagged `mbx-…` parses locally, and anything else goes to the engine's
-   inventory cap, which folds the path and replies with the id plus its
-   canonical rendering. Pass that id to `engine_envelope_by_id(engine,
-   mailbox_id, &request)`, which stamps `K::ID` and encodes the payload;
-   `mcp.session.call_one(...)` relays it as a wire `Call` and awaits the
-   correlated reply. The by-name `engine_envelope(engine, name, &request)`
-   hashes its name as a single segment, so it is for the fixed chassis-cap
-   constants a tool writes itself (`INVENTORY_CAP`, `RENDER_CAP`,
-   `COMPONENT_CAP`) and never for a name that came in over the tool surface.
+   hands back — or an ADR-0166 short path, or a tagged `mbx-…` id.
+   `mcp.resolve_engine_path(engine, address)` takes whichever form arrives and
+   asks the selected engine for the canonical `ActorPath`: text goes to the
+   inventory cap's `resolve_address`, and a tagged id to its `resolve`, which
+   names the id's registered path. Pass that path to `engine_envelope_to(engine,
+   path, &request)`, which stamps `K::ID` and encodes the payload;
+   `mcp.session.call_one(...)` relays it as a wire `Call` naming the path, the
+   engine resolves it on arrival, and the call awaits the correlated reply. A
+   path the engine cannot resolve closes the call with `RpcError::NotPresent`.
+   `engine_envelope(engine, CONSTANT, &request)` takes a `&'static str`, so it
+   is for the fixed chassis-cap constants a tool writes itself
+   (`INVENTORY_CAP`, `RENDER_CAP`, `COMPONENT_CAP`) and never for a name that
+   came in over the tool surface.
 3. **Decode the reply** with `CostTailResult::decode_from_bytes(&reply.payload)`,
    matching the kind's own variants — `Ok` becomes the JSON response, `Err` and an
    undecodable payload become `McpError`s.
@@ -232,7 +231,7 @@ After the build, bring the harness up and call the tool against a real engine:
 ## Verify against current code
 
 This recipe names live symbols — `ActorCostArgs`, `Mcp::actor_cost`, `CostTail` /
-`CostTailResult`, `resolve_engine`, `resolve_engine_address`, `engine_envelope`,
+`CostTailResult`, `resolve_engine`, `resolve_engine_path`, `engine_envelope_to`, `engine_envelope`,
 `parse_kind_id`, `guard_response_size`, `tagged_id::encode`. Before
 following it, confirm they still exist in `crates/aether-mcp/src/args.rs` and
 `crates/aether-mcp/src/tools/`

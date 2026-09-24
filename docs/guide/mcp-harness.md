@@ -108,9 +108,11 @@ the **kind** to deliver, and the structured params, which the tool schema-encode
 wire bytes against that kind's descriptor. A textual `address` may be a
 canonical lineage (`aether.component/aether.embedded:camera`) or an ADR-0166
 short path (`aether.component/:camera`). The selected engine resolves either
-spelling to the same live mailbox id and canonical path before dispatch;
-aether-mcp does not hash operator strings or keep an alias cache. A tagged
-`mbx-…` remains direct on tools that accept it. By default each item *blocks* until its
+spelling to the same canonical path before dispatch, and the `Call` names its
+recipient by that `ActorPath`; aether-mcp does not hash operator strings or keep
+an alias cache. A tagged `mbx-…` id, on tools that accept it, is sent to the
+selected engine's `aether.inventory.resolve` for its canonical path, and the
+mail goes by that path. By default each item *blocks* until its
 chain settles. The batch-level `replies` projection defaults to `terminal`: it
 keeps the last arrival-ordered reply plus any reply recognized as an error from
 its decoded `Err` shape or exact kind-name error suffix. Use `none` to suppress
@@ -221,8 +223,9 @@ dispatched atomically around the readback — `mails` before (the state that sho
 appear) and `after_mails` after (cleanup). How that frame is produced — world-space
 geometry, the camera matrix, the depth convention — is covered in
 [Rendering & camera](systems/rendering.md).
-`actor_logs` and `actor_cost` resolve textual actor addresses inside the
-selected engine before querying its returned mailbox id. `actor_logs` pulls
+`actor_logs` and `actor_cost` resolve the actor address, text or a tagged
+`mbx-…` id, inside the selected engine to its canonical path and query by that
+path. `actor_logs` pulls
 recent entries from that actor's per-actor log ring; pass `contains` to filter message bodies by a case-sensitive substring
 substrate-side, before entries cross the wire. Thread the reply's `next_since`
 back as `since` to page forward without re-reading. Only in-actor `tracing::*` events reach a ring — see

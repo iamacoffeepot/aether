@@ -12,7 +12,7 @@
 mod tests {
     use aether_data::Kind;
     use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
-    use aether_rpc::MailEnvelope;
+    use aether_rpc::ReplyEnvelope;
 
     use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
@@ -82,7 +82,7 @@ mod tests {
 
     /// Decode the single reply envelope of kind `R` from a call's
     /// reply set, panicking if it is absent or undecodable.
-    fn decode_reply<R: Kind>(replies: &[MailEnvelope]) -> R {
+    fn decode_reply<R: Kind>(replies: &[ReplyEnvelope]) -> R {
         let envelope = replies
             .iter()
             .find(|e| e.kind == R::ID)

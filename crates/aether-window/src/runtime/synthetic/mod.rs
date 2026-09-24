@@ -95,7 +95,7 @@ impl SyntheticWindowCapabilityState {
         let monitor = match ctx.monitor(child.erase()) {
             Ok(monitor) => monitor,
             Err(error) => {
-                ctx.to(&child).send(&RetireWindow);
+                ctx.send_to(child, &RetireWindow);
                 answer(
                     &mut reply,
                     &CreateWindowResult::Err { error: format!("failed to monitor window child: {error:?}") },
@@ -183,7 +183,7 @@ impl NativeActor for SyntheticWindowCapability {
         // straight off the outcome rather than a context struct carrying it.
         let Some(mut pending) = state.pending_creates.remove(&WindowId(done.output().mailbox_id.0)) else {
             if let Ok(child) = &done.output().result {
-                ctx.to(child).send(&RetireWindow);
+                ctx.send_to(child, &RetireWindow);
             }
             done.release_no_reply();
             return;

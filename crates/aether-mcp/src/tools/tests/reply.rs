@@ -20,13 +20,7 @@ fn decode_reply_events_decodes_known_substrate_kind() {
     let params = serde_json::json!({ "addr": { "namespace": "save", "path": "" } });
     let payload = aether_codec::encode_schema(&params, &desc.schema).expect("encode list params");
     let kind = KindId(kind_id_from_parts(&desc.name, &desc.schema));
-    let reply = MailEnvelope {
-        to: MailboxAddress::local(mailbox_id_from_name("aether.fs")),
-        from: None,
-        kind,
-        correlation_id: Some(7),
-        payload,
-    };
+    let reply = ReplyEnvelope { kind, payload };
 
     // Empty engine-kinds map → falls through to the static vocabulary.
     let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
@@ -44,13 +38,7 @@ fn decode_reply_events_decodes_known_substrate_kind() {
 /// disconnected-engine fallback contract).
 #[test]
 fn decode_reply_events_falls_back_on_unknown_kind() {
-    let reply = MailEnvelope {
-        to: MailboxAddress::local(MailboxId(1)),
-        from: None,
-        kind: KindId(0xDEAD_BEEF_DEAD_BEEF),
-        correlation_id: None,
-        payload: vec![1, 2, 3],
-    };
+    let reply = ReplyEnvelope { kind: KindId(0xDEAD_BEEF_DEAD_BEEF), payload: vec![1, 2, 3] };
     // No engine-kinds entry, no declared reply → falls through to base64.
     let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
     assert_eq!(decoded.len(), 1);
@@ -71,13 +59,7 @@ fn clean_decode_reply_omits_payload_bytes_key_in_json() {
     let params = serde_json::json!({ "addr": { "namespace": "save", "path": "" } });
     let payload = aether_codec::encode_schema(&params, &desc.schema).expect("encode list params");
     let kind = KindId(kind_id_from_parts(&desc.name, &desc.schema));
-    let reply = MailEnvelope {
-        to: MailboxAddress::local(mailbox_id_from_name("aether.fs")),
-        from: None,
-        kind,
-        correlation_id: Some(7),
-        payload,
-    };
+    let reply = ReplyEnvelope { kind, payload };
 
     // Empty engine-kinds map → falls through to the static vocabulary.
     let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
@@ -106,13 +88,7 @@ fn decode_reply_events_decodes_component_defined_reply_via_engine_cache() {
     let value = serde_json::Value::String("hello from component".to_owned());
     let payload = aether_codec::encode_schema(&value, &reply_kind.schema).expect("encode reply value");
 
-    let envelope = MailEnvelope {
-        to: MailboxAddress::local(mailbox_id_from_name("aether.test.component")),
-        from: None,
-        kind: reply_kind_id,
-        correlation_id: Some(1),
-        payload,
-    };
+    let envelope = ReplyEnvelope { kind: reply_kind_id, payload };
 
     // Pre-condition: the static vocabulary doesn't carry this kind, so
     // without the engine cache the decode would fall through to base64.
@@ -145,13 +121,7 @@ fn decode_reply_events_decodes_component_defined_reply_via_engine_cache() {
 #[test]
 fn decode_reply_events_base64_fallback_when_kind_absent_from_all_caches() {
     let absent_kind_id = KindId(0xC0FF_EE00_C0FF_EE00);
-    let envelope = MailEnvelope {
-        to: MailboxAddress::local(MailboxId(2)),
-        from: None,
-        kind: absent_kind_id,
-        correlation_id: None,
-        payload: vec![0xAB, 0xCD],
-    };
+    let envelope = ReplyEnvelope { kind: absent_kind_id, payload: vec![0xAB, 0xCD] };
     // Declared reply matches the envelope but the engine cache is empty.
     let decoded = decode_reply_events(&[envelope], &HashMap::new(), Some(absent_kind_id));
     assert_eq!(decoded.len(), 1);

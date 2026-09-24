@@ -4,8 +4,8 @@ use super::ids::{mail_node_to_json, node_reversible_ids, parse_engine_id, parse_
 use super::{
     AWAIT_TIMEOUT_DEFAULT_MILLIS, AsyncMutex, ComponentSelector, ComponentSpec, EngineId, EngineMailSpec, EngineNames,
     FLEET_CAP, INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson,
-    MailNodeWire, MailSpec, MailboxAddress, MailboxId, Manifest, ManifestResult, Mcp, McpError, NamedMail, Resolve,
-    ResolveAddress, ResolveAddressResult, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType,
+    MailNodeWire, MailSpec, MailboxId, Manifest, ManifestResult, Mcp, McpError, NamedMail, Recipient, ReplyEnvelope,
+    Resolve, ResolveAddress, ResolveAddressResult, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType,
     component_config_bytes, descriptors, engine_envelope, frame_size_aware_error, internal_msg, local_envelope,
     max_frame_size, reject_zero_replicas, selector_with_explicit_export, tagged_id, wire,
 };
@@ -26,7 +26,7 @@ pub(super) struct PreparedDirectMail {
 }
 
 pub(super) struct DeliveredDirectMail {
-    pub(super) events: Vec<MailEnvelope>,
+    pub(super) events: Vec<ReplyEnvelope>,
     pub(super) timed_out: bool,
     pub(super) engine: EngineId,
     /// The canonical lineage the engine resolved the recipient to — the
@@ -121,20 +121,55 @@ impl Mcp {
         }
     }
 
-    /// Resolve one operator-supplied address in the selected engine. Tagged
-    /// mailbox ids are already canonical wire identity and remain direct;
-    /// every textual address makes one uncached inventory RPC so ADR-0166
-    /// expansion and liveness are owned by the engine registry.
-    pub(super) async fn resolve_engine_address(
-        &self,
-        engine: EngineId,
-        address: &str,
-    ) -> anyhow::Result<(MailboxId, String)> {
+    /// Resolve one operator-supplied address to the canonical `ActorPath`
+    /// the selected engine answers for it, which is what a `Call` then names.
+    ///
+    /// A tagged `mbx-…` id is sent to the engine's `aether.inventory.resolve`,
+    /// which returns the registered path for that id; an id the engine names
+    /// no path for is an error naming the id and the engine. The tagged text
+    /// is never sent as a path itself: it parses as a one-segment `ActorPath`,
+    /// so nothing downstream would catch it. Every textual address makes one
+    /// uncached `aether.inventory.resolve_address` RPC, so ADR-0166 expansion
+    /// and liveness stay owned by the engine registry.
+    pub(super) async fn resolve_engine_path(&self, engine: EngineId, address: &str) -> anyhow::Result<ActorPath> {
         if address.starts_with("mbx-") {
-            let mailbox_id = parse_mailbox_id(address).map_err(|error| anyhow::anyhow!("{}", error.message))?;
-            return Ok((mailbox_id, address.to_owned()));
+            parse_mailbox_id(address).map_err(|error| anyhow::anyhow!("{}", error.message))?;
+            return self
+                .engine_paths(engine, vec![address.to_owned()])
+                .await?
+                .pop()
+                .flatten()
+                .ok_or_else(|| anyhow::anyhow!("engine {} names no actor path for {address}", engine.0));
         }
 
+        let (_, canonical) = self.resolve_textual_address(engine, address).await?;
+        ActorPath::new(&canonical).map_err(|error| {
+            anyhow::anyhow!("engine answered {address:?} with a non-path lineage {canonical:?}: {error}")
+        })
+    }
+
+    /// Ask the selected engine for the canonical path of each tagged id, in
+    /// one `aether.inventory.resolve`. The answer is in request order; an id
+    /// the engine names nothing for, or names with text that is not a path,
+    /// is `None`.
+    pub(super) async fn engine_paths(
+        &self,
+        engine: EngineId,
+        tagged: Vec<String>,
+    ) -> anyhow::Result<Vec<Option<ActorPath>>> {
+        let reply = self.session.call_one(engine_envelope(engine, INVENTORY_CAP, &Resolve { ids: tagged })).await?;
+        let ResolveResult { resolved } = ResolveResult::decode_from_bytes(&reply.payload)
+            .ok_or_else(|| anyhow::anyhow!("undecodable ResolveResult"))?;
+        Ok(resolved.into_iter().map(|entry| entry.name.and_then(|name| ActorPath::new(&name).ok())).collect())
+    }
+
+    /// Resolve one textual address in the selected engine through
+    /// `aether.inventory.resolve_address`, returning the engine's answer:
+    /// the position and the canonical lineage. Only
+    /// [`Self::strict_component_snapshot`] keeps the position, because
+    /// `compare_component_contracts` still reports it; every sender takes
+    /// the path through [`Self::resolve_engine_path`].
+    async fn resolve_textual_address(&self, engine: EngineId, address: &str) -> anyhow::Result<(MailboxId, String)> {
         ActorPath::new(address)?;
         let reply = self
             .session
@@ -167,10 +202,7 @@ impl Mcp {
                 None,
             ));
         }
-        let (_, canonical) = self.resolve_engine_address(engine, address).await.map_err(super::render::internal)?;
-        ActorPath::new(&canonical).map_err(|error| {
-            internal_msg(&format!("engine answered {address:?} with a non-path lineage {canonical:?}: {error}"))
-        })
+        self.resolve_engine_path(engine, address).await.map_err(super::render::internal)
     }
 
     /// Observe one component and its kind vocabulary for compatibility work.
@@ -185,7 +217,7 @@ impl Mcp {
         if address.starts_with("mbx-") {
             anyhow::bail!("compare_component_contracts requires a textual component address, not a tagged mailbox id");
         }
-        let (mailbox_id, canonical_lineage) = self.resolve_engine_address(engine, address).await?;
+        let (mailbox_id, canonical_lineage) = self.resolve_textual_address(engine, address).await?;
         let reply = self
             .session
             .call_one(engine_envelope(engine, super::COMPONENT_CAP, &DescribeComponent { name: address.to_owned() }))
@@ -356,16 +388,14 @@ impl Mcp {
             .resolve_engine(spec.engine_id.as_deref())
             .await
             .map_err(|error| anyhow::anyhow!("{}", error.message))?;
-        let (resolved_mailbox_id, canonical_recipient) =
-            self.resolve_engine_address(engine, &spec.mail.address).await?;
+        let canonical = self.resolve_engine_path(engine, &spec.mail.address).await?;
+        let canonical_recipient = canonical.to_string();
         let params = spec.mail.params.unwrap_or(serde_json::Value::Null);
         let (desc, payload) = self.resolve_and_encode(engine, &spec.mail.kind_name, params).await?;
         Ok(PreparedDirectMail {
             envelope: MailEnvelope {
-                to: MailboxAddress { engine: Some(engine), mailbox: resolved_mailbox_id },
-                from: None,
+                to: Recipient { engine: Some(engine), path: canonical },
                 kind: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
-                correlation_id: None,
                 payload,
             },
             engine,

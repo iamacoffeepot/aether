@@ -1,6 +1,7 @@
+use std::iter;
 use std::time::Duration;
 
-use aether_data::{ActorPath, EngineId, Kind, MailId};
+use aether_data::{ActorPath, EngineId, Kind, MailId, tagged_id};
 use aether_kinds::trace::{DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult};
 use aether_trace::walk::TreeWalk;
 use rmcp::ErrorData as McpError;
@@ -10,7 +11,7 @@ use crate::args::{
     TraceFormat,
 };
 
-use super::envelope::{engine_envelope, engine_envelope_by_id};
+use super::envelope::{engine_envelope, engine_envelope_to};
 use super::ids::{mail_id_to_json, render_compact_tree};
 use super::render::{internal, internal_msg, json};
 use super::reply::{decode_reply_events, decode_traced_ack, project_replies, strip_ack};
@@ -168,7 +169,7 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
     finish_traced_dispatch(mcp, engine, engine_id, root, replies, args.format).await
 }
 
-async fn finish_traced_dispatch(
+pub(super) async fn finish_traced_dispatch(
     mcp: &Mcp,
     engine: EngineId,
     engine_id: String,
@@ -177,29 +178,41 @@ async fn finish_traced_dispatch(
     format: TraceFormat,
 ) -> Result<String, McpError> {
     // Round 2: reconstruct the tree by a guided walk over the
-    // per-actor trace rings (ADR-0086 Phase 3b). Seed at
-    // `root.sender` (`CHASSIS_MAILBOX_ID` for this chassis-rooted
-    // dispatch), follow each `Sent`'s recipient, fetch every ring
-    // with one `aether.trace.tail` addressed by id — the chassis-
-    // host ring answers at `CHASSIS_MAILBOX_ID`. The walk touches
-    // only the actors in the tree; the rings are in-memory and the
-    // chain has already settled, so each hop is microseconds. A
-    // failed or undecodable per-ring reply contributes no entries —
-    // the walk completes from the rings that answer.
+    // per-actor trace rings (ADR-0086 Phase 3b), one frontier layer at a
+    // time. The walk reports ids from the `Sent`s it absorbed; a `Call`
+    // names its recipient by path, so each layer's ids are turned into the
+    // engine's canonical paths with one `aether.inventory.resolve`, and
+    // each ring is then tailed with `aether.trace.tail` addressed by that
+    // path. The walk touches only the actors in the tree; the rings are
+    // in-memory and the chain has already settled, so each hop is
+    // microseconds. An id the engine names no path for, and a failed or
+    // undecodable per-ring reply, contribute no entries — the walk
+    // completes from the rings that answer. A failed `resolve` ends the
+    // walk with the layers already absorbed.
     let mut walk = TreeWalk::new(root);
-    while let Some(mailbox) = walk.next_mailbox() {
-        let request = TraceTail { max: 0, since: None, root: Some(root) };
-        let entries = match mcp
-            .session
-            .call_one(engine_envelope_by_id(engine, mailbox, &request))
-            .await
-            .ok()
-            .and_then(|reply| TraceTailResult::decode_from_bytes(&reply.payload))
-        {
-            Some(TraceTailResult::Ok { entries, .. }) => entries,
-            Some(TraceTailResult::Err { .. }) | None => Vec::new(),
+    loop {
+        let tagged: Vec<String> =
+            iter::from_fn(|| walk.next_mailbox()).filter_map(|mailbox| tagged_id::encode(mailbox.0)).collect();
+        if tagged.is_empty() {
+            break;
+        }
+        let Ok(paths) = mcp.engine_paths(engine, tagged).await else {
+            break;
         };
-        walk.absorb(entries);
+        for path in paths.into_iter().flatten() {
+            let request = TraceTail { max: 0, since: None, root: Some(root) };
+            let entries = match mcp
+                .session
+                .call_one(engine_envelope_to(engine, path, &request))
+                .await
+                .ok()
+                .and_then(|reply| TraceTailResult::decode_from_bytes(&reply.payload))
+            {
+                Some(TraceTailResult::Ok { entries, .. }) => entries,
+                Some(TraceTailResult::Err { .. }) | None => Vec::new(),
+            };
+            walk.absorb(entries);
+        }
     }
 
     match walk.finish() {
