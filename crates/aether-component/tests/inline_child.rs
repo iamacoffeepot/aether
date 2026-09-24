@@ -21,10 +21,10 @@ use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, te
 use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_bundle::{
-    InlineChild, InlineDespawnChild, InlineDespawnParent, InlineFsDemuxChild, InlineFsDemuxParent, InlineParent,
-    InlineStatefulChild, InlineStatefulParent, InlineTagParent, NestedDetachedLeaf, NestedLineageChild,
-    NestedLineageLeaf, NestedLineageParent,
+    InlineChild, InlineDespawnChild, InlineDespawnParent, InlineParent, InlineStatefulChild, InlineStatefulParent,
+    InlineTagParent, NestedDetachedLeaf, NestedLineageChild, NestedLineageLeaf, NestedLineageParent,
 };
+use aether_test_fixtures_fs_demux::{InlineFsDemuxChild, InlineFsDemuxParent};
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, FsDemuxReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
     InlineProbe, RunFsDemux, SpawnNestedDetached, TagSpawnQuery, TagSpawnReport,
@@ -596,10 +596,10 @@ fn settled_load_covers_the_inline_child_alias_publication() {
 /// for that dispatch left the child reading `None`, and it never reported.
 #[test]
 fn inline_child_matches_host_replies_to_its_own_requests() {
-    const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
+    const FS_DEMUX_STEM: &str = "aether_test_fixtures_fs_demux";
     const FIXTURE_NAME: &str = "inline_child_reply";
 
-    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
+    let Some(wasm_path) = require_wasm(FS_DEMUX_STEM) else {
         return;
     };
     let mut harness = SubstrateHarness::builder()

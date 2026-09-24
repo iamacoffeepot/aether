@@ -42,9 +42,6 @@ aether-render = { path = "../aether-render", default-features = false }
 # iamacoffeepot/aether#3751: the tcp cap was extracted to `aether-tcp`; the
 # tcp-load probe fixture dials and echoes through it. Marker face only.
 aether-tcp = { path = "../aether-tcp", default-features = false }
-# The `aether.fs` cap (iamacoffeepot/aether#3706) — the fs-demux fixture
-# addresses `FsCapability` + its kinds. Marker face only.
-aether-fs = { path = "../aether-fs", default-features = false }
 # ADR-0141 / ADR-0230: the editor-region probe names `EditorShell` by bare type
 # to announce itself, so it needs the widget crate's actor impls. `library`
 # strips that crate's own `export!` entry surface (one `export!` per wasm

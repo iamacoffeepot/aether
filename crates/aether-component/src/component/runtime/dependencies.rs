@@ -6,7 +6,9 @@
 //! the other sites are checked by the component host. The fourth site is
 //! the module itself (ADR-0230 §3): a load or replace also refuses when an
 //! actor its module can spawn inline declares a dependency with no `Live`
-//! route, before anything in the module runs.
+//! route, before anything in the module runs. Those actors are the exported
+//! inline-spawnable types and every private inline child (issue 6590), read
+//! from the module's `aether.kinds.inputs.private` section.
 
 use std::collections::HashSet;
 
@@ -57,27 +59,33 @@ pub fn replacement_refusal(registry: &Registry, canonical: &str, dependencies: &
     missing_dependency(registry, parent, dependencies).map(|namespace| dependency_refusal(canonical, namespace))
 }
 
-/// The module's inline-spawnable groups, in declaration order, each with its
-/// resolved namespace: a group some actor of the same module can spawn inside
-/// itself. The lineage section decides it — a `ModuleChild` record (what
-/// `composable` emits), or a `Child` record whose parent is another exported
-/// group of this module (what `child_of(P)` emits for an in-module `P`). A
-/// `Root` record, or a `Child` under a parent outside the module, names no
-/// in-module spawner. The implicit single-actor group (namespace `None`)
-/// resolves through the module's `aether.namespace` section.
+/// The module's inline-spawnable exported groups, in declaration order, each
+/// with its resolved namespace: a group some actor of the same module can
+/// spawn inside itself. The lineage section decides it — a `ModuleChild`
+/// record (what `composable` emits), or a `Child` record whose parent is
+/// another exported group or a private group of this module (what
+/// `child_of(P)` emits for an in-module `P`). A `Root` record, or a `Child`
+/// under a parent outside the module, names no in-module spawner. The
+/// implicit single-actor group (namespace `None`) resolves through the
+/// module's `aether.namespace` section. The private groups themselves need no
+/// selection: a private type exists to be spawned inline.
 fn inline_spawnable<'a>(
     actors: &'a [ActorInputs],
+    private: &[ActorInputs],
     lineage: &[ActorLineageRecord],
     module_namespace: Option<&'a str>,
 ) -> impl Iterator<Item = (&'a str, &'a ActorInputs)> {
-    let exported: HashSet<&str> =
-        actors.iter().filter_map(|actor| actor.namespace.as_deref().or(module_namespace)).collect();
+    let in_module: HashSet<&str> = actors
+        .iter()
+        .filter_map(|actor| actor.namespace.as_deref().or(module_namespace))
+        .chain(private.iter().filter_map(|actor| actor.namespace.as_deref()))
+        .collect();
     let spawnable: HashSet<&str> = lineage
         .iter()
         .filter_map(|record| match record {
             ActorLineageRecord::ModuleChild { child_namespace, .. } => Some(child_namespace.as_ref()),
             ActorLineageRecord::Child { parent_namespace, child_namespace, .. } => {
-                exported.contains(parent_namespace.as_ref()).then_some(child_namespace.as_ref())
+                in_module.contains(parent_namespace.as_ref()).then_some(child_namespace.as_ref())
             }
             ActorLineageRecord::Root { .. } => None,
         })
@@ -90,8 +98,10 @@ fn inline_spawnable<'a>(
 
 /// The refusal error for a module one of whose inline-spawnable actors
 /// declares a dependency with no `Live` route, or `None` when the module may
-/// load. The first such group, in declaration order, is refused with the
-/// same wording as the other sites.
+/// load. The selected exported groups are checked first, in declaration
+/// order, then every private group, and the first failing group is refused
+/// with the same wording as the other sites. A private group needs no
+/// lineage filter: every private type is an inline child.
 ///
 /// The check passes no parent, so a `One` entry folds from the root exactly
 /// as for a component load, and an `Embedded` entry refuses closed: an
@@ -101,10 +111,12 @@ fn inline_spawnable<'a>(
 pub(super) fn inline_dependency_refusal(
     registry: &Registry,
     actors: &[ActorInputs],
+    private: &[ActorInputs],
     lineage: &[ActorLineageRecord],
     module_namespace: Option<&str>,
 ) -> Option<String> {
-    inline_spawnable(actors, lineage, module_namespace).find_map(|(namespace, group)| {
+    let private_groups = private.iter().filter_map(|group| Some((group.namespace.as_deref()?, group)));
+    inline_spawnable(actors, private, lineage, module_namespace).chain(private_groups).find_map(|(namespace, group)| {
         missing_dependency(registry, None, &group.dependencies).map(|missing| dependency_refusal(namespace, missing))
     })
 }
@@ -128,7 +140,16 @@ mod tests {
         lineage: &[ActorLineageRecord],
         module_namespace: Option<&'a str>,
     ) -> Vec<&'a str> {
-        inline_spawnable(actors, lineage, module_namespace).map(|(namespace, _)| namespace).collect()
+        selected_with_private(actors, &[], lineage, module_namespace)
+    }
+
+    fn selected_with_private<'a>(
+        actors: &'a [ActorInputs],
+        private: &[ActorInputs],
+        lineage: &[ActorLineageRecord],
+        module_namespace: Option<&'a str>,
+    ) -> Vec<&'a str> {
+        inline_spawnable(actors, private, lineage, module_namespace).map(|(namespace, _)| namespace).collect()
     }
 
     #[test]
@@ -162,6 +183,20 @@ mod tests {
         ];
 
         assert!(selected(&actors, &lineage, None).is_empty());
+    }
+
+    #[test]
+    fn selects_children_of_a_private_parent() {
+        let actors = [group(Some("m.child"))];
+        let private = [group(Some("m.private_parent"))];
+        let lineage = [ActorLineageRecord::Child {
+            parent: 1,
+            child: 2,
+            parent_namespace: "m.private_parent".into(),
+            child_namespace: "m.child".into(),
+        }];
+
+        assert_eq!(selected_with_private(&actors, &private, &lineage, None), ["m.child"]);
     }
 
     #[test]

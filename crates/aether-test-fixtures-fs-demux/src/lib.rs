@@ -213,3 +213,7 @@ impl WasmActor for InlineFsDemuxChild {
         self.demux.read_result(ctx);
     }
 }
+
+// No default: both consumers load by export selector. The inline child is
+// private, rebuilt on a replace but never loaded by selector (issue 6136).
+aether_actor::export!(FsDemux, InlineFsDemuxParent, private = [InlineFsDemuxChild]);

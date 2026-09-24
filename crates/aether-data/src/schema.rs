@@ -818,6 +818,15 @@ pub enum InputsRecord {
 /// handled.
 pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
 
+/// Custom-section name for a module's private inline children (issue 6590).
+/// The same record grammar and [`INPUTS_SECTION_VERSION`] as
+/// [`INPUTS_SECTION`]: one `ActorBoundary`-led group per type listed in
+/// `export!`'s `private = [..]` slot. Only the module-load dependency check
+/// (ADR-0230 §3) reads it, so a private type stays out of export selection,
+/// component description, and every other reader of [`INPUTS_SECTION`]. A
+/// module without private children has no such section.
+pub const PRIVATE_INPUTS_SECTION: &str = "aether.kinds.inputs.private";
+
 /// Version byte prefixing every record in the `aether.kinds.inputs`
 /// section. Follows ADR-0028's per-record versioning convention —
 /// unknown versions abort the read rather than silently skip. v0x02
