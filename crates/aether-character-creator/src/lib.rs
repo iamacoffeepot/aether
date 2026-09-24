@@ -12,6 +12,10 @@ use std::{
 
 use serde_json::{Value, json};
 
+mod preview;
+
+pub use preview::render_head_preview_png;
+
 const ARRAY_BUFFER: u32 = 34_962;
 const ELEMENT_ARRAY_BUFFER: u32 = 34_963;
 const FLOAT: u32 = 5_126;

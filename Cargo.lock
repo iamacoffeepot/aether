@@ -298,6 +298,7 @@ dependencies = [
 name = "aether-character-creator"
 version = "0.3.0-alpha"
 dependencies = [
+ "png",
  "serde_json",
 ]
 
