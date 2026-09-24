@@ -196,6 +196,9 @@ arboard = { version = "3.6.1", default-features = false, features = ["wayland-da
 base64 = "0.22"
 bytemuck = { version = "1.19", default-features = false }
 confique = { version = "0.4", default-features = false }
+# The request-context table's preallocated map (ADR-0139 §4, issue 6420).
+# Default features off keeps it no_std for the wasm guest SDK.
+hashbrown = { version = "0.16", default-features = false }
 cpal = "0.17"
 hound = "3"
 inventory = "0.3"

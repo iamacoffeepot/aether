@@ -32,15 +32,30 @@ impl NativeBinding {
         self.mailer.send_reply(sender, payload, reply_id, root, parent);
     }
 
-    /// Store request context for a just-minted outbound request.
+    /// Store request context for a just-minted outbound request, warning
+    /// with this actor's canonical name when the table passes a new
+    /// high-water mark (ADR-0139 §4).
     ///
     /// # Panics
     /// Panics if the request-context mutex is poisoned.
     pub fn store_request_context<C: Kind>(&self, request: RequestId, context: &C) {
-        self.request_contexts
-            .lock()
-            .expect("request context table poisoned; fail-fast per ADR-0063")
-            .insert(request, context);
+        let high_water = {
+            let mut table =
+                self.request_contexts.lock().expect("request context table poisoned; fail-fast per ADR-0063");
+            table.insert(request, context);
+            table.high_water()
+        };
+        if let Some(live) = high_water {
+            let name = self
+                .identity
+                .runtime_identity()
+                .map_or("<untyped test binding>", |identity| &**identity.canonical_name());
+            tracing::warn!(
+                actor = name,
+                live,
+                "request context table grew past its preallocated room; a reply that never arrives keeps its context",
+            );
+        }
     }
 
     /// Remove and decode request context for an inbound reply.

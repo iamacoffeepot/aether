@@ -28,6 +28,9 @@ aether-actor-derive = { path = "../aether-actor-derive" }
 # `aether.net.*`, and `aether.log.*` request kinds from this crate.
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { workspace = true, default-features = false }
+# The request-context table's preallocated map, `no_std` with default
+# features off (ADR-0139 §4).
+hashbrown = { workspace = true }
 # Decoding typed payloads (e.g. `PriorState::decode_kind`,
 # `Mail::decode_kind`) is serde-driven via `aether_data::wire`. The crate
 # stays `no_std`-friendly with `default-features = false`.
