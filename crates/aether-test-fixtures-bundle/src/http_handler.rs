@@ -372,7 +372,7 @@ impl WasmActor for RoutedHttpHandler {
     /// Not sent manually — dispatched by `aether.http.server` for the
     /// `/routed/drop` route this actor claims.
     #[http::route(any, "/routed/drop")]
-    fn on_routed_drop(&mut self, ctx: http::Ctx<'_, WasmCtx<'_>>, req: HttpServerRequest) -> HttpServerResponse {
+    fn on_routed_drop(&mut self, mut ctx: http::Ctx<'_, WasmCtx<'_>>, req: HttpServerRequest) -> HttpServerResponse {
         let Ok(target) = ActorPath::new(String::from_utf8_lossy(&req.body).trim()) else {
             return HttpServerResponse {
                 status: 400,
@@ -380,7 +380,7 @@ impl WasmActor for RoutedHttpHandler {
                 body: b"body must be a component actor path".to_vec(),
             };
         };
-        ctx.actor::<ComponentHostCapability>().send_detached(&DropComponent { target });
+        ctx.send_detached::<ComponentHostCapability>(&DropComponent { target });
         HttpServerResponse { status: 200, headers: Vec::new(), body: b"dropping".to_vec() }
     }
 }

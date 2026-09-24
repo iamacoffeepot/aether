@@ -101,6 +101,29 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     {
         self.singleton_handle::<R>().push_with_context(payload, context)
     }
+
+    /// Send `payload` to the declared dependency `R` on a fresh causal chain,
+    /// ignoring this handler's in-flight lineage (ADR-0080 §7, ADR-0232 §1–§2).
+    ///
+    /// Compiles only on a ctx typed by an actor that declares `R` with
+    /// `#[actor(depends(R))]`, and only for a kind `R` handles; the turbofish
+    /// names only `R`, the kind is inferred from the payload. Routes exactly as
+    /// `ctx.actor::<R>().send_detached(..)` does. A send the running chain
+    /// caused inherits it through [`Self::send`] instead.
+    ///
+    /// **Fire-and-forget only.** A detached send mints no parent linkage, so
+    /// any reply the recipient issues roots in the recipient's tree rather
+    /// than the sender's.
+    ///
+    /// Its consumer is the routed HTTP fixture's drop bridge, which keeps the
+    /// component teardown out of the request's causal chain.
+    pub fn send_detached<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        self.singleton_handle::<R>().push_detached(payload);
+    }
 }
 
 // ADR-0114 addressing amendment: every `WasmCtx` send resolves the recipient
