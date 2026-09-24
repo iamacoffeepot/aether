@@ -174,7 +174,7 @@ pub fn expand_replicas(packed: PackedComponent) -> Result<Vec<AutoloadComponent>
 /// the receiving half, one answer per load. The loader sends one load at a
 /// time, so the components come up in manifest order and the answer awaited
 /// next always belongs to the next label: a failure or a timeout names its
-/// entry with no correlation map. A `budget` of `None` waits forever.
+/// entry with no correlation map.
 ///
 /// The chassis is handed back once every load has answered. On a timeout it
 /// is leaked rather than dropped, because its teardown would wait on the load
@@ -190,7 +190,7 @@ pub fn expand_replicas(packed: PackedComponent) -> Result<Vec<AutoloadComponent>
 pub(crate) fn load_boot_components<C: Chassis>(
     built: BuiltChassis<C>,
     components: Vec<AutoloadComponent>,
-    budget: Option<Duration>,
+    budget: Duration,
 ) -> Result<BuiltChassis<C>, BootError> {
     if components.is_empty() {
         return Ok(built);
@@ -230,34 +230,24 @@ enum BootWaitError {
     TimedOut(String),
 }
 
-/// Wait for one answer per label, in order, each within `budget` (`None`
-/// waits forever), and name the label the boot stopped on: its load's error,
+/// Wait for one answer per label, in order, each within `budget`, and name
+/// the label the boot stopped on: its load's error,
 /// its timeout with how many loaded before it, or the loader stopping while
 /// it was awaited.
-fn await_boot_loads(
-    labels: &[String],
-    answers: &Receiver<LoadAnswer>,
-    budget: Option<Duration>,
-) -> Result<(), BootWaitError> {
+fn await_boot_loads(labels: &[String], answers: &Receiver<LoadAnswer>, budget: Duration) -> Result<(), BootWaitError> {
     for (loaded, label) in labels.iter().enumerate() {
-        let answer = match budget {
-            Some(budget) => answers.recv_timeout(budget).map_err(|error| match error {
-                RecvTimeoutError::Timeout => BootWaitError::TimedOut(format!(
-                    "boot component {label} did not answer its load within {budget:?} ({loaded} of {} loaded)",
-                    labels.len(),
-                )),
-                RecvTimeoutError::Disconnected => BootWaitError::Failed(loader_stopped(label)),
-            })?,
-            None => answers.recv().map_err(|_| BootWaitError::Failed(loader_stopped(label)))?,
-        };
+        let answer = answers.recv_timeout(budget).map_err(|error| match error {
+            RecvTimeoutError::Timeout => BootWaitError::TimedOut(format!(
+                "boot component {label} did not answer its load within {budget:?} ({loaded} of {} loaded)",
+                labels.len(),
+            )),
+            RecvTimeoutError::Disconnected => {
+                BootWaitError::Failed(format!("the boot loader stopped while boot component {label} was loading"))
+            }
+        })?;
         answer.map_err(|error| BootWaitError::Failed(format!("boot component {label}: {error}")))?;
     }
     Ok(())
-}
-
-/// The message for a loader that stopped while `label`'s answer was awaited.
-fn loader_stopped(label: &str) -> String {
-    format!("the boot loader stopped while boot component {label} was loading")
 }
 
 /// Box a boot-load failure message into [`BootError::Other`].
@@ -319,8 +309,7 @@ mod tests {
         let labels = vec!["first".to_owned(), "stuck".to_owned()];
         let (report, answers) = mpsc::channel();
         report.send(Ok(())).expect("receiver is alive");
-        let Err(BootWaitError::TimedOut(error)) = await_boot_loads(&labels, &answers, Some(Duration::from_millis(50)))
-        else {
+        let Err(BootWaitError::TimedOut(error)) = await_boot_loads(&labels, &answers, Duration::from_millis(50)) else {
             panic!("a load that never answers must time the wait out");
         };
         assert!(error.contains("stuck"), "the error names the stuck load: {error}");

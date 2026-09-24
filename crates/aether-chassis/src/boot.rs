@@ -14,6 +14,7 @@
 use std::env;
 use std::fs;
 use std::mem;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -418,21 +419,22 @@ pub struct ChassisBootConfig {
     /// precedence when both are set. `Option<String>` filters empty → `None`.
     #[config(cli_long = "package")]
     pub package: Option<String>,
-    /// Seconds each boot component's load may take to answer before boot aborts; 0 waits forever.
+    /// Seconds each boot component's load may take to answer before boot aborts.
     ///
     /// Bounds each load separately rather than the whole boot list, so a
     /// long list needs no larger budget. When a load does not answer in time
     /// the boot fails naming that component and how many loaded before it,
     /// and the substrate exits nonzero before its RPC server binds (issue
-    /// #6637). Default 20 seconds.
+    /// #6637). Default 20 seconds. A `0` is refused at resolution: every boot
+    /// load has a deadline.
     #[config(cli_long = "boot-load-budget-secs", default = 20)]
-    pub boot_load_budget_secs: u64,
+    pub boot_load_budget_secs: NonZeroU64,
 }
 
 /// The default [`ChassisBootConfig::boot_load_budget_secs`]. It sits below the
 /// hub's default proxy connect budget (30 s), so a stuck boot load is reported
 /// by the substrate, naming the component, before the hub gives up on the dial.
-const DEFAULT_BOOT_LOAD_BUDGET_SECS: u64 = 20;
+const DEFAULT_BOOT_LOAD_BUDGET_SECS: NonZeroU64 = NonZeroU64::new(20).expect("20 is nonzero");
 
 impl Default for ChassisBootConfig {
     fn default() -> Self {
@@ -441,11 +443,10 @@ impl Default for ChassisBootConfig {
 }
 
 impl ChassisBootConfig {
-    /// The per-load boot wait: `Some(d)` caps each boot component's load;
-    /// `None` (the `0` sentinel) waits forever.
+    /// How long each boot component's load may take to answer.
     #[must_use]
-    pub fn boot_load_budget(&self) -> Option<Duration> {
-        (self.boot_load_budget_secs != 0).then(|| Duration::from_secs(self.boot_load_budget_secs))
+    pub fn boot_load_budget(&self) -> Duration {
+        Duration::from_secs(self.boot_load_budget_secs.get())
     }
 
     /// Lower the resolved `workers` knob to the pool-size `Option<usize>`
