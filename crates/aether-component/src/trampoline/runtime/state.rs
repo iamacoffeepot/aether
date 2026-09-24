@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use aether_actor::Local as _;
-use aether_substrate::actor::native::{Dispatch, NativeCtx};
+use aether_kinds::ComponentCapabilities;
+use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, CorrelationCursor, PendingReplies};
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
-use aether_substrate::mail::{CostCells, MailboxId};
 use wasmtime::{Engine, Linker, Module};
 
 use crate::trampoline::WasmTrampoline;
@@ -23,72 +22,66 @@ use crate::trampoline::WasmTrampoline;
 /// name; dropping the **trampoline** would kill the actor and
 /// tombstone the subname. The cap's `DropComponent` handler does
 /// the former; the latter happens at substrate teardown.
+///
+/// Its fields are crate-private, so no crate outside `aether-component` can
+/// build one to hand [`NativeCtx::sync_guest`].
 pub struct WasmTrampolineState {
     /// `Some` while wasm is loaded; `None` after a `DropComponent`.
     /// Mail arriving in the `None` state warn-drops via the
     /// fallback (the trampoline is just an empty named slot).
-    pub component: Option<Component>,
+    pub(crate) component: Option<Component>,
     /// Held for [`Self::handle_replace`] so a fresh
     /// `Component::instantiate` against the same engine + linker
     /// is reachable from the handler.
-    pub engine: Arc<Engine>,
-    pub linker: Arc<Linker<ComponentCtx>>,
-    pub registry: Arc<Registry>,
-    pub mailer: Arc<Mailer>,
-    pub outbound: Arc<HubOutbound>,
-    /// The trampoline's own mailbox id — the registry's depth-1
-    /// derivation over `full_name`. Cached because
-    /// `NativeCtx` only exposes `self_id()` via the
-    /// `NativeInitCtx` flavour today; storing it here avoids
-    /// reaching into `ctx.binding().self_mailbox()` on every
-    /// handler call.
-    pub mailbox: MailboxId,
+    pub(crate) engine: Arc<Engine>,
+    pub(crate) linker: Arc<Linker<ComponentCtx>>,
+    pub(crate) registry: Arc<Registry>,
+    pub(crate) mailer: Arc<Mailer>,
+    pub(crate) outbound: Arc<HubOutbound>,
+    /// The receive surface of the guest this slot hosts, or last hosted:
+    /// what [`GuestHost::guest`](aether_substrate::actor::native::ctx::GuestHost::guest)
+    /// reads while `component` is `Some`.
+    pub(crate) capabilities: ComponentCapabilities,
     /// ADR-0096: the selected export's actor-type tag, or `None`
     /// for the entry type. Held so [`Self::handle_replace`]
     /// re-instantiates the same exported type from the new wasm
     /// and re-reads that type's capability group.
-    pub type_tag: Option<u64>,
+    pub(crate) type_tag: Option<u64>,
     /// ADR-0097: the resident `Module`, retained so a sibling spawn
     /// re-instantiates it (a cheap `Arc` clone — wasmtime shares the
     /// compiled code) without a re-compile, and refreshed on replace.
-    pub module: Module,
+    pub(crate) module: Module,
     /// ADR-0097: every exported type's capability group (see
     /// [`super::WasmTrampolineConfig::actor_caps`]). A spawned sibling looks
     /// up its own handler set here by actor-type tag.
-    pub actor_caps: Vec<ActorInputs>,
+    pub(crate) actor_caps: Vec<ActorInputs>,
     /// ADR-0163 §3 (#3984): the resident module's raw wasm bytes, retained
     /// so a `spawn_child::<Sibling>` from this module can index its own
     /// asset load window, and refreshed on replace. Shared `Arc` — indexed,
     /// never mutated.
-    pub wasm_bytes: Arc<[u8]>,
+    pub(crate) wasm_bytes: Arc<[u8]>,
     /// ADR-0139 §3 (#6400, #6422): the correlation cursor of the last guest
     /// to leave this slot, which the next occupant resumes, so the mailbox's
     /// request ids and reply-lineage ids both stay monotonic across replace
     /// and refill. `None` until a guest first leaves; a fresh slot starts
     /// both counters at their bases.
-    pub retired_correlations: Option<CorrelationCursor>,
+    pub(crate) retired_correlations: Option<CorrelationCursor>,
     /// #6409: the reply table of the last guest to leave this slot, which
     /// the next occupant to start resumes, so a handle issued before the
     /// swap still answers its own requester and no number is reissued.
     /// Left in place when a replacement fails to start, for the next
     /// refill. `None` until a guest first leaves, or once resumed.
-    pub retired_replies: Option<PendingReplies>,
+    pub(crate) retired_replies: Option<PendingReplies>,
 }
 
 impl WasmTrampolineState {
-    /// The trampoline's canonical name for a diagnostic, falling back to its
-    /// tagged id when the registry has no name for it.
-    pub(super) fn own_name(&self) -> String {
-        self.registry.mailbox_name(self.mailbox).unwrap_or_else(|| self.mailbox.to_string())
-    }
-
     /// Unload the **wasm component**: run the guest's `unwire` pre-shutdown
-    /// hook, drop the `Component`, clear the mailbox's accept-set, re-seed the
-    /// trampoline's own framework cost cells, and vacate the mailbox. The
+    /// hook, drop the `Component`, sync the now-empty slot (the accept set
+    /// clears and only the framework cost cells stay), and vacate the mailbox. The
     /// trampoline itself stays alive as an empty slot a `ReplaceComponent`
     /// can refill. Both a `DropComponent` and the host's module-boot
     /// `BootTeardown` end here.
-    pub fn unload<A>(&mut self, ctx: &mut NativeCtx<'_, A>) {
+    pub fn unload(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>) {
         if let Some(mut component) = self.component.take() {
             // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
             // single pre-shutdown hook — the legacy `on_drop`
@@ -102,16 +95,13 @@ impl WasmTrampolineState {
             // later refill answers the rest to their own requesters.
             self.retired_replies = Some(component.take_pending_replies());
         }
-        // iamacoffeepot/aether#1037: clear the trampoline's
-        // capabilities — the wasm is unloaded, so the mailbox now
-        // accepts nothing until a `replace` refills it. The
-        // trampoline (and its mailbox name) survives as an empty
-        // slot, but it has no accept-set while empty.
-        self.mailer.capability_registry().remove(self.mailbox);
-        // iamacoffeepot/aether#1128: drop the unloaded guest's per-handler
-        // cost cells from the global table and the per-actor cache.
-        // `unload` runs on the trampoline's own thread inside
-        // `with_stamped`, so both indexes clear together.
+        // The slot is empty now, so the declaration reads `None` and the sync
+        // releases the guest. iamacoffeepot/aether#1037: the mailbox accepts
+        // nothing until a `replace` refills it; the trampoline (and its
+        // mailbox name) survives as an empty slot with no accept set.
+        // iamacoffeepot/aether#1128: the unloaded guest's cost cells leave
+        // the global table and the per-actor cache together, because `unload`
+        // runs on the trampoline's own thread inside `with_stamped`.
         //
         // The trampoline's own framework arms are re-seeded rather than
         // dropped with them (iamacoffeepot/aether#4269): the mailbox survives
@@ -121,10 +111,7 @@ impl WasmTrampolineState {
         // unloading handler among them, which folds into its cell just after
         // it returns. The re-seed is neutral, which is the honest reading of
         // an estimate whose occupant just changed.
-        self.mailer.cost_table().drop_mailbox(self.mailbox);
-        let framework_kinds = <WasmTrampoline as Dispatch<Self>>::measured_kinds();
-        let seeded = self.mailer.cost_table().seed(self.mailbox, &framework_kinds);
-        CostCells::try_with_mut(|cells| cells.seed(seeded));
+        ctx.sync_guest(self);
         // ADR-0079 §8 (amended, issue 3741): declare the mailbox
         // vacated — drain this trampoline's watchers and fire one
         // `MonitorNotice` each, so every cap holding state keyed by

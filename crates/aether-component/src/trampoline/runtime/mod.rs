@@ -35,7 +35,9 @@ use crate::component::LoadDelivered;
 use crate::kinds::BootTeardown;
 pub use aether_actor::Local;
 use aether_actor::{Manual, OutboundReply, Single, runtime};
+use aether_kinds::ComponentCapabilities;
 pub use aether_kinds::{DropComponent, DropResult, LoadResult, ReplaceComponent, ReplaceResult};
+use aether_substrate::actor::native::ctx::GuestHost;
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
     Dispatch, NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
@@ -45,6 +47,14 @@ pub use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
 pub use aether_substrate::chassis::error::BootError;
 #[allow(unused_imports, reason = "runtime facade retains its established KindId re-export")]
 pub use aether_substrate::mail::{CostCell, CostCells, KindId, Mail};
+
+/// The trampoline hosts a wasm guest, and its receive surface is that
+/// guest's: the substrate reads it here through [`NativeCtx::sync_guest`].
+impl GuestHost for WasmTrampoline {
+    fn guest(state: &WasmTrampolineState) -> Option<&ComponentCapabilities> {
+        state.component.as_ref().map(|_| &state.capabilities)
+    }
+}
 
 #[runtime]
 impl NativeActor for WasmTrampoline {
@@ -69,7 +79,6 @@ impl NativeActor for WasmTrampoline {
     const NAMESPACE: &'static str = EMBEDDED_SCOPE;
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
-        let mailbox = ctx.self_id();
         let mailer = ctx.mailer();
         let mut substrate_ctx = ComponentCtx::new(
             Arc::clone(ctx.binding()),
@@ -110,11 +119,19 @@ impl NativeActor for WasmTrampoline {
         // thread vs the trampoline's is irrelevant: the stamp binds to
         // the actor's `ActorSlots`, not to a thread. Exact
         // `Arc<CostCell>`s stay actor-local until the fused owner
-        // commit installs those same arcs globally. Replace continues to
-        // re-seed on the live trampoline's own dispatch; drop clears both
-        // indexes.
-        let seeded =
-            config.capabilities.handlers.iter().map(|handler| (handler.id, Arc::new(CostCell::new()))).collect();
+        // commit installs those same arcs globally.
+        //
+        // The trampoline's own framework arms are seeded with them, the same
+        // set `NativeCtx::sync_guest` seeds (iamacoffeepot/aether#4269), so the
+        // sync in `wire` finds every row already present and adds none. A row
+        // it added there would be no birth's to roll back, and a birth
+        // cancelled after `wire` would leave it behind to refuse the next
+        // birth at this position.
+        let mut measured = <WasmTrampoline as Dispatch<WasmTrampolineState>>::measured_kinds();
+        let guest: Vec<KindId> =
+            config.capabilities.handlers.iter().map(|h| h.id).filter(|id| !measured.contains(id)).collect();
+        measured.extend(guest);
+        let seeded = measured.into_iter().map(|kind| (kind, Arc::new(CostCell::new()))).collect();
         CostCells::try_with_mut(|cells| cells.seed(seeded));
 
         Ok(WasmTrampolineState {
@@ -124,7 +141,7 @@ impl NativeActor for WasmTrampoline {
             registry: config.registry,
             mailer,
             outbound: config.outbound,
-            mailbox,
+            capabilities: config.capabilities,
             type_tag: config.type_tag,
             module: config.module,
             actor_caps: config.actor_caps,
@@ -134,16 +151,22 @@ impl NativeActor for WasmTrampoline {
         })
     }
 
-    /// Issue 640 Phase 2: fire the wasm guest's `wire` hook
-    /// post-registration. The cap-side spawn flow registers the
-    /// trampoline mailbox in step 5–7; this hook runs after that
-    /// as part of the dispatcher's lifecycle, so a wire-time
+    /// Register the guest's accept set and cost rows from this actor's
+    /// [`GuestHost`] declaration, then fire the wasm guest's `wire` hook.
+    /// Every birth of a trampoline — a load, a module boot, a sibling spawn —
+    /// runs this hook, so the declaration is the accept set's one writer and
+    /// the set is in place before the guest's `wire` sends anything.
+    ///
+    /// Issue 640 Phase 2: the guest's `wire` fires post-registration. The
+    /// cap-side spawn flow registers the trampoline mailbox in step 5–7; this
+    /// hook runs after that as part of the dispatcher's lifecycle, so a wire-time
     /// `aether.window.subscribe` mail proves against a live closure
     /// entry. Pre-issue-640 the call lived inside
     /// `Component::instantiate` (step 4, before registration) and
     /// races the window cap proving the subscriber at receipt through
     /// `ctx.resolve_live`, silently dropping subscribes.
     fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        ctx.sync_guest(state);
         let (aliases, retired) = state.component.as_mut().map_or_else(Default::default, |component| {
             if let Err(e) = component.wire() {
                 tracing::error!(
@@ -226,11 +249,11 @@ impl NativeActor for WasmTrampoline {
 
     #[handler(task)]
     fn on_sibling_spawn_done(
-        state: &mut Self::State,
+        _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
         done: TaskDone<SpawnOutcome<WasmTrampoline>, replace::SiblingSpawnContext>,
     ) {
-        state.finish_sibling_spawn(done);
+        WasmTrampolineState::finish_sibling_spawn(done);
     }
 
     #[handler(task)]
@@ -260,7 +283,7 @@ impl NativeActor for WasmTrampoline {
             let Some(component) = state.component.as_mut() else {
                 tracing::warn!(
                     target: "aether_component",
-                    actor = %state.own_name(),
+                    actor = %ctx.path(),
                     kind = %ctx.kind_label(env.kind),
                     "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",
                 );
@@ -277,8 +300,8 @@ impl NativeActor for WasmTrampoline {
             // fresh root.
             // ADR-0114 §2: deliver the *routed* recipient as the guest
             // `Mail`'s recipient, not the trampoline's own id. For a
-            // normally-addressed actor `env.recipient` equals
-            // `state.mailbox`, so this is a no-op; for an inline-child
+            // normally-addressed actor the routed recipient is the
+            // trampoline itself, so this is a no-op; for an inline-child
             // alias it carries the child's address, which
             // `Component::deliver` threads to the guest's `receive`
             // frame + the `ComponentCtx` dispatch identity so the
@@ -295,7 +318,7 @@ impl NativeActor for WasmTrampoline {
                 // native actors, which have no wedge guard either
                 // today.
                 let kind = ctx.kind_label(env.kind);
-                ctx.fatal_abort(format!("component {} (kind {kind}) trapped: {e}", state.own_name()));
+                ctx.fatal_abort(format!("component {} (kind {kind}) trapped: {e}", ctx.path()));
             }
             (
                 component.drain_pending_aliases(),

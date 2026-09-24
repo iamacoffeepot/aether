@@ -2,13 +2,13 @@
 //!
 //! It dispatches nothing and mails nothing (issue 703: `init` is the
 //! sync constructor, ADR-0079). What it carries is what construction needs —
-//! the actor's own address, the chassis mailer, and the
+//! the actor's binding, the chassis mailer, and the
 //! [`ExportedHandles`] map a cap publishes a driver-facing sub-handle into.
 
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
-use aether_data::{ActorMail, MailboxId};
+use aether_data::ActorMail;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::self_wake::SelfWake;
@@ -53,18 +53,6 @@ impl<'a> NativeInitCtx<'a> {
     #[must_use]
     pub fn binding(&self) -> &Arc<NativeBinding> {
         self.binding
-    }
-
-    /// The actor's own [`MailboxId`] — the deterministic FNV-1a hash
-    /// of its full registered name (ADR-0029). For singletons that's
-    /// `Addressable::NAMESPACE`; for instanced actors it's
-    /// `"{NAMESPACE}:{subname}"` (ADR-0079). No handler ctx has a mirror
-    /// of it: the wasm trampoline's `init` is the one caller, and it goes
-    /// with the trampoline's stored position in the closing slice of
-    /// issue 6350.
-    #[must_use]
-    pub fn self_id(&self) -> MailboxId {
-        self.binding.self_mailbox()
     }
 
     /// Clone the substrate's mailer. Caps that need to register a

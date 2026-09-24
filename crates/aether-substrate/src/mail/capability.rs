@@ -18,9 +18,11 @@
 // surface a `ComponentCapabilities` (ADR-0033) — wasm from the parsed
 // `aether.kinds.inputs` custom section, native from the always-on
 // `__AETHER_INPUTS_MANIFEST` the `#[actor]` macro emits — so a single
-// `register` call covers both. Register on add (component load /
-// native-cap boot), replace on `aether.component.replace` (the mailbox
-// id is stable per ADR-0022), remove on drop.
+// `register` call covers both. A native cap registers at boot. A wasm
+// guest's caps are written through `NativeCtx::sync_guest` from its host's
+// `GuestHost` declaration: on the host's `wire` (load, module boot, sibling
+// spawn), again on `aether.component.replace` (the mailbox id is stable per
+// ADR-0022), and removed on drop.
 
 // The registry's `RwLock` guard is intentionally held across the
 // read-then-membership-check pair in `accepts` — the same low-contention
@@ -126,10 +128,11 @@ impl CapabilityRegistry {
         guard.get(&mailbox).is_some_and(|c| c.has_fallback)
     }
 
-    /// Register (or replace) the caps for `mailbox`. Called at
-    /// component load / native-cap boot, and again on
-    /// `aether.component.replace` (same mailbox id, fresh handler set).
-    /// Takes the full [`ComponentCapabilities`] and projects the hot-path
+    /// Register (or replace) the caps for `mailbox`. A native cap's caps
+    /// are registered at boot; a wasm guest's are written through
+    /// `NativeCtx::sync_guest` from its host's `GuestHost` declaration, at
+    /// load and again on `aether.component.replace` (same mailbox id, fresh
+    /// handler set). Takes the full [`ComponentCapabilities`] and projects the hot-path
     /// [`MailboxCaps`] internally, retaining the full surface for
     /// `describe_component` (iamacoffeepot/aether#2421).
     ///
@@ -143,20 +146,6 @@ impl CapabilityRegistry {
         }
         let mut full = self.full.write().expect("capability registry lock poisoned");
         full.insert(mailbox, caps.clone());
-    }
-
-    /// Register (or replace) the caps for the actor `target` proves. The
-    /// reference form of [`Self::register`], with the same effect.
-    ///
-    /// The component host's load completions and the trampoline's sibling
-    /// completion are the consumers: each registers a child's caps on the
-    /// `Ok` arm of its [`SpawnOutcome`](crate::actor::native::SpawnOutcome),
-    /// which carries the child's reference (ADR-0230).
-    ///
-    /// # Panics
-    /// Panics if either internal lock is poisoned (see [`Self::accepts`]).
-    pub fn register_actor(&self, target: ErasedActorRef, caps: &ComponentCapabilities) {
-        self.register(target.id(), caps);
     }
 
     /// The full [`ComponentCapabilities`] for `mailbox` — handler names,

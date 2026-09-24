@@ -480,7 +480,6 @@ impl ComponentHostCapabilityState {
             self.pending_boots.remove(&plan.hash).expect("module boot retains its actor-local reservation");
         match booted {
             Ok(boot) => {
-                self.mailer.capability_registry().register_actor(boot, &plan.capabilities);
                 self.register_boot(plan.hash.clone(), BootEntry { boot, refcount: 0, pending_requests: 0 });
                 self.finish_boot_successor(ctx, done.into_deferred_reply(), first, &plan.hash);
                 for waiter in pending.waiters.drain(..) {
@@ -562,7 +561,6 @@ impl ComponentHostCapabilityState {
         if let Some(hash) = &boot_hash {
             self.settle_boot_request(ctx, hash, Some(child.erase()));
         }
-        self.mailer.capability_registry().register_actor(child.erase(), &load.capabilities);
         let path = canonical_path(&done.output().canonical_name);
         match path {
             // ADR-0230 §3: the loaded trampoline answers the requester itself,
