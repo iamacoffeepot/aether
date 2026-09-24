@@ -111,7 +111,6 @@ impl PreparedBoot {
         Self { hash, namespace, capabilities, dependencies, module, actors, wasm_bytes }
     }
 
-    #[allow(clippy::disallowed_methods)]
     fn config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
         WasmTrampolineConfig {
             engine: Arc::clone(&state.engine),
@@ -121,7 +120,7 @@ impl PreparedBoot {
             outbound: Arc::clone(&state.outbound),
             capabilities: self.capabilities.clone(),
             config: Vec::new(),
-            type_tag: Some(aether_data::mailbox_id_from_name(&self.namespace).0),
+            type_tag: Some(aether_data::ActorId::singleton(&self.namespace).0),
             actor_caps: self.actors.clone(),
             wasm_bytes: Arc::clone(&self.wasm_bytes),
         }
@@ -273,8 +272,7 @@ impl ComponentHostCapabilityState {
                     error: format!("export {requested:?} not found in module; exported types: {available:?}"),
                 });
             };
-            #[allow(clippy::disallowed_methods)]
-            let tag = aether_data::mailbox_id_from_name(requested).0;
+            let tag = aether_data::ActorId::singleton(requested).0;
             (group.capabilities.clone(), group.dependencies.clone(), Some(tag), Some(requested.clone()))
         } else if kind_manifest::read_no_default_marker(&payload.wasm) {
             let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
