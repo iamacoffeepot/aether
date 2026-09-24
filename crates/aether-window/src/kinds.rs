@@ -1,9 +1,6 @@
 //! Public wire vocabulary for the `aether.window` manager.
 
 use aether_data::{KindId, MailboxId};
-// The forwarding correlation's own type, gated with it.
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_data::MailId;
 use aether_kinds::{WindowId, WindowMode};
 use serde::{Deserialize, Serialize};
 
@@ -286,14 +283,16 @@ pub enum ApplyWindowCommandResult {
     RequestRedraw(RequestWindowRedrawResult),
 }
 
-/// Correlation stored on the private manager request.
+/// Correlation stored on the private manager request: the forwarding child's
+/// own key for the public request it retained. The child mints it, so it
+/// exists whether or not the public request carried a lineage id.
 ///
 /// Only a window-bearing runtime forwards, so this and [`RetireWindow`] carry
 /// the same gate their crate-root re-export already carries.
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 #[aether_data::kind(name = "aether.window.internal.forward_context", copy, eq)]
 pub(crate) struct WindowForwardContext {
-    pub inbound: MailId,
+    pub request: u64,
 }
 
 /// Manager-private request that retires a child after platform-originated close.
