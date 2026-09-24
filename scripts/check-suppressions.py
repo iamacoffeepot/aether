@@ -27,7 +27,14 @@ SIGNOFF_RE = re.compile(r"<!-- aether-suppression-signoff:v1 (\{[^\r\n]*\}) -->"
 HEX_SHA_RE = re.compile(r"[0-9a-f]{40}")
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 RUST_ATTRIBUTE_RE = re.compile(r"^\s*#!?\[\s*(allow|expect)\s*\(")
+RUST_CFG_ATTR_RE = re.compile(r"^\s*#!?\[\s*cfg_attr\s*\(")
 RUST_IGNORE_RE = re.compile(r'^\s*#\[\s*ignore(?:\s*=\s*"(?:\\.|[^"\\])*")?\s*\]\s*$')
+# One masked top-level element of a `cfg_attr` attribute list, so a string's
+# body is already blank: a nested `cfg_attr`, or a suppression it applies.
+NESTED_CFG_ATTR_RE = re.compile(r"cfg_attr\s*\(")
+LINT_ATTR_RE = re.compile(r"(allow|expect)\s*\((.*)\)", re.DOTALL)
+IGNORE_ATTR_RE = re.compile(r'ignore(?:\s*=\s*".*")?', re.DOTALL)
+SUPPRESSION_WORD_RE = re.compile(r"\b(?:allow|expect|ignore)\b")
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*")
 CFG_TEST_ATTR_RE = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 MOD_ITEM_RE = re.compile(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*")
@@ -306,24 +313,65 @@ def sanitize_rust(source: str) -> list[str]:
     return output
 
 
-def rust_attribute_spans(sanitized: list[str]) -> list[tuple[int, int, str, tuple[str, ...]]]:
-    spans: list[tuple[int, int, str, tuple[str, ...]]] = []
+@dataclass(frozen=True)
+class RustSpan:
+    """The physical lines of one suppression attribute and what it suppresses.
+
+    `kind` and `lints` describe its first suppression. `token` is fixed for a
+    `cfg_attr` span, whose own name is not the suppression; a plain `allow` or
+    `expect` span leaves it None and renders each finding from the added line.
+    """
+
+    start: int
+    end: int
+    kind: str
+    lints: tuple[str, ...]
+    token: str | None
+    suppressions: int
+
+
+def closing_line(sanitized: list[str], line: int) -> int | None:
+    """The index of the line closing the attribute opened on `line`, or None."""
+
+    bracket_depth = sanitized[line].count("[") - sanitized[line].count("]")
+    while bracket_depth > 0 and line + 1 < len(sanitized):
+        line += 1
+        bracket_depth += sanitized[line].count("[") - sanitized[line].count("]")
+    return line if bracket_depth == 0 else None
+
+
+def rust_attribute_spans(sanitized: list[str]) -> list[RustSpan]:
+    spans: list[RustSpan] = []
     line = 0
     while line < len(sanitized):
         match = RUST_ATTRIBUTE_RE.match(sanitized[line])
-        if match is None:
-            line += 1
+        if match is not None:
+            start = line + 1
+            kind = match.group(1)
+            closing = closing_line(sanitized, line)
+            if closing is None:
+                raise OperationalError(f"unterminated Rust suppression attribute at line {start}")
+            end = closing + 1
+            spans.append(RustSpan(start, end, kind, tuple(attribute_lints(sanitized, start, end, kind)), None, 1))
+            line = closing + 1
             continue
-        start = line + 1
-        kind = match.group(1)
-        bracket_depth = sanitized[line].count("[") - sanitized[line].count("]")
-        while bracket_depth > 0 and line + 1 < len(sanitized):
-            line += 1
-            bracket_depth += sanitized[line].count("[") - sanitized[line].count("]")
-        if bracket_depth != 0:
-            raise OperationalError(f"unterminated Rust suppression attribute at line {start}")
-        end = line + 1
-        spans.append((start, end, kind, tuple(attribute_lints(sanitized, start, end, kind))))
+        if RUST_CFG_ATTR_RE.match(sanitized[line]) is not None:
+            start = line + 1
+            closing = closing_line(sanitized, line)
+            if closing is None:
+                # A malformed `cfg_attr` that could not carry a suppression is
+                # not this gate's to refuse.
+                if SUPPRESSION_WORD_RE.search("\n".join(sanitized[line:])):
+                    raise OperationalError(f"unterminated Rust suppression attribute at line {start}")
+                line += 1
+                continue
+            end = closing + 1
+            carried = cfg_attr_suppressions("\n".join(sanitized[line:end]))
+            if carried:
+                kind, lints = carried[0]
+                spans.append(RustSpan(start, end, kind, lints, suppression_token(kind, lints), len(carried)))
+            line = closing + 1
+            continue
         line += 1
     return spans
 
@@ -345,7 +393,12 @@ def attribute_lints(sanitized: list[str], start: int, end: int, kind: str) -> li
             if depth == 0:
                 break
         index += 1
-    body = text[body_start:index]
+    return lint_names(text[body_start:index])
+
+
+def lint_names(body: str) -> list[str]:
+    """The lint paths in one `allow(...)` / `expect(...)` body, skipping `name = value` arguments."""
+
     lints: list[str] = []
     for ident in IDENT_RE.finditer(body):
         if ident.group(0) in {"allow", "expect"}:
@@ -355,6 +408,65 @@ def attribute_lints(sanitized: list[str], start: int, end: int, kind: str) -> li
             continue
         lints.append(ident.group(0))
     return lints
+
+
+def top_level_elements(arguments: str) -> list[str]:
+    """Split one attribute argument list at the commas outside any bracket pair."""
+
+    elements: list[str] = []
+    depth = 0
+    begin = 0
+    for index, char in enumerate(arguments):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            elements.append(arguments[begin:index].strip())
+            begin = index + 1
+    elements.append(arguments[begin:].strip())
+    return [element for element in elements if element]
+
+
+def cfg_attr_suppressions(text: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Every `allow`, `expect` or `ignore` a masked `cfg_attr` attribute applies, in source order.
+
+    Only the attributes a `cfg_attr` applies count: the predicate is skipped,
+    a nested `cfg_attr` is opened, and any other attribute is skipped whole,
+    so `config(allow(x))` names no lint. The walk keeps its own stack rather
+    than recursing on nesting depth.
+    """
+
+    match = RUST_CFG_ATTR_RE.match(text)
+    if match is None:
+        return []
+    stack = list(reversed(attribute_list(text[match.end() - 1 :])))
+    found: list[tuple[str, tuple[str, ...]]] = []
+    while stack:
+        element = stack.pop()
+        lint = LINT_ATTR_RE.fullmatch(element)
+        if lint is not None:
+            found.append((lint.group(1), tuple(lint_names(lint.group(2)))))
+        elif IGNORE_ATTR_RE.fullmatch(element) is not None:
+            found.append(("ignore", ()))
+        elif (nested := NESTED_CFG_ATTR_RE.match(element)) is not None:
+            stack.extend(reversed(attribute_list(element[nested.end() - 1 :])))
+    return found
+
+
+def attribute_list(call: str) -> list[str]:
+    """The attributes a `cfg_attr(<predicate>, …)` applies, given the text from its `(`."""
+
+    closed = _balanced_end(call, 0, "(", ")")
+    if closed is None:
+        return []
+    return top_level_elements(call[1 : closed - 1])[1:]
+
+
+def suppression_token(kind: str, lints: tuple[str, ...]) -> str:
+    if kind == "ignore":
+        return "ignore"
+    return f"{kind}({lints[0]})" if lints else f"{kind}(...)"
 
 
 def lint_token(kind: str, sanitized_line: str) -> str:
@@ -467,13 +579,13 @@ def cfg_test_module_lines(sanitized: list[str]) -> set[int]:
 
 def is_test_only_unwrap_allow(
     item: Suppression,
-    spans: list[tuple[int, int, str, tuple[str, ...]]],
+    spans: list[RustSpan],
     test_lines: set[int] | None,
 ) -> bool:
-    for start, end, kind, lints in spans:
-        if not start <= item.line <= end:
+    for span in spans:
+        if not span.start <= item.line <= span.end:
             continue
-        if kind != "allow" or lints != (TEST_UNWRAP_LINT,):
+        if span.suppressions != 1 or span.kind != "allow" or span.lints != (TEST_UNWRAP_LINT,):
             return False
         return test_lines is None or item.line in test_lines
     return False
@@ -489,15 +601,16 @@ def rust_suppressions(path: str, added: dict[int, str], head_source: str) -> lis
         if RUST_IGNORE_RE.match(masked):
             findings.append(Suppression(path, line, "ignore", source))
             continue
-        for start, end, kind, _lints in spans:
-            if not start <= line <= end:
+        for span in spans:
+            if not span.start <= line <= span.end:
                 continue
-            if start in added:
-                if line == start:
-                    findings.append(Suppression(path, line, lint_token(kind, masked), source))
+            token = span.token or lint_token(span.kind, masked)
+            if span.start in added:
+                if line == span.start:
+                    findings.append(Suppression(path, line, token, source))
                 break
             if IDENT_RE.search(masked):
-                findings.append(Suppression(path, line, lint_token(kind, masked), source))
+                findings.append(Suppression(path, line, token, source))
             break
 
     # Keep every detection above; drop only the test-only exact unwrap idiom.

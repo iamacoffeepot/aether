@@ -383,7 +383,7 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
                 },
                 bind: RpcBind::Boot,
             },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("hub caps boot");
@@ -445,7 +445,7 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
                 },
                 bind: RpcBind::Boot,
             },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("hub caps boot");
@@ -484,7 +484,7 @@ pub(super) fn boot_hub_with_route_loopback(
                 },
                 bind: RpcBind::Boot,
             },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("hub caps boot");
@@ -538,7 +538,7 @@ pub(super) fn boot_hub_with_address_route_replies(
                 },
                 bind: RpcBind::Boot,
             },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("address route loopback caps boot");
@@ -573,7 +573,7 @@ pub(super) fn try_boot_hub_with_scripted_route_loopback(
                 },
                 bind: RpcBind::Boot,
             },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()?;
 

@@ -459,6 +459,12 @@ fn wat_rehydrates() -> String {
 /// can observe what the substrate passed through. Exports `realloc_p32` so
 /// even an empty mail has a (non-null) region to be placed in.
 fn wat_stores_sender() -> String {
+    wat_stores_sender_returning(0)
+}
+
+/// [`wat_stores_sender`] with the `receive` return code chosen by the test,
+/// so a test can stand in for a guest arm of a given class (#6412).
+fn wat_stores_sender_returning(rc: u32) -> String {
     format!(
         r#"
         (module
@@ -468,7 +474,7 @@ fn wat_stores_sender() -> String {
                 i32.const 500
                 local.get 4
                 i32.store
-                i32.const 0))
+                i32.const {rc}))
     "#
     )
 }
@@ -936,6 +942,58 @@ fn deliver_with_component_reply_target_allocates_component_handle() {
     let observed = component.read_u32(500);
     assert_ne!(observed, NO_REPLY_HANDLE);
     assert_eq!(component.store.data().reply_table.resolve(observed), Some(ReplyEntry::component(M(7))),);
+}
+
+/// #6412: a single-class arm returns `DISPATCH_HANDLED_RELEASE`, so the host
+/// frees that dispatch's handle. Catches a host that ignores the class code
+/// and grows the table by one entry per tick.
+#[test]
+fn deliver_releases_handle_after_single_dispatch() {
+    use crate::actor::wasm::reply_table::NO_REPLY_HANDLE;
+    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+
+    let mut component = instantiate(&wat_stores_sender_returning(aether_actor::DISPATCH_HANDLED_RELEASE));
+    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
+        .with_reply_to(Source::to(SourceAddr::Component(M(7))));
+    let rc = component.deliver(&mail).expect("deliver");
+
+    assert_eq!(rc, aether_actor::DISPATCH_HANDLED_RELEASE);
+    let observed = component.read_u32(500);
+    assert_ne!(observed, NO_REPLY_HANDLE);
+    assert_eq!(component.store.data().reply_table.resolve(observed), None);
+}
+
+/// #6412: a strict receiver's miss ran no handler and no fallback, so nothing
+/// could have kept the handle. Catches an unhandled delivery leaking one.
+#[test]
+fn deliver_releases_handle_after_unknown_kind() {
+    use crate::actor::wasm::reply_table::NO_REPLY_HANDLE;
+    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+
+    let mut component = instantiate(&wat_stores_sender_returning(DISPATCH_UNKNOWN_KIND));
+    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
+        .with_reply_to(Source::to(SourceAddr::Component(M(7))));
+    let rc = component.deliver(&mail).expect("deliver");
+
+    assert_eq!(rc, DISPATCH_UNKNOWN_KIND);
+    let observed = component.read_u32(500);
+    assert_ne!(observed, NO_REPLY_HANDLE);
+    assert_eq!(component.store.data().reply_table.resolve(observed), None);
+}
+
+/// #6412: an oversize drop never reaches `receive`, so it must not allocate a
+/// handle nobody can answer. The table's first handle is 0.
+#[test]
+fn deliver_oversize_drop_allocates_no_handle() {
+    use crate::mail::{Source, SourceAddr};
+
+    let mut component = instantiate(&wat_records_mail_ptr());
+    let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; MAX_DELIVERABLE_MAIL_BYTES + 1], 1)
+        .with_reply_to(Source::to(SourceAddr::Component(MailboxId(7))));
+    let rc = component.deliver(&mail).expect("deliver must not trap");
+
+    assert_eq!(rc, DISPATCH_DROPPED_OVERSIZE);
+    assert_eq!(component.store.data().reply_table.resolve(0), None);
 }
 
 /// Issue 2001: `receive` stores the low 32 bits of the `source` param

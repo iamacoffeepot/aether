@@ -93,21 +93,21 @@ pub struct FleetConfig {
     pub heartbeat_miss_limit: u32,
     /// Seconds a freshly-spawned engine may take to connect before the spawn fails.
     ///
-    /// The proxy keeps retrying its startup dial for this budget (issue
+    /// The proxy keeps waiting for a forked substrate to report its RPC
+    /// port, and retrying its startup dial to it, for this budget (issue
     /// 2072). Generous by default so a debug cold start under fork
     /// contention isn't called dead prematurely; `0` is the wait-forever
-    /// sentinel (retry until the dial succeeds or hits a terminal error).
+    /// sentinel (wait until the dial succeeds, the substrate exits, or a
+    /// terminal error).
     #[config(default = 30)]
     pub proxy_connect_budget_secs: u64,
-    /// How many times a failed engine spawn is retried on a fresh port.
+    /// How many times a failed engine spawn is attempted by re-forking.
     ///
-    /// `on_spawn` re-forks a substrate on a fresh port up to this many
-    /// times before giving up (issue 2422). A freshly-forked substrate
-    /// can lose its guessed RPC port to another socket in
-    /// `free_local_port`'s TOCTOU window and exit on a fatal bind; a
-    /// re-fork on a fresh port escapes the stolen port, since the theft is
-    /// per-port and independent across attempts, so N attempts drop the
-    /// failure probability geometrically. `1` preserves the
+    /// `on_spawn` re-forks a substrate that exits during startup with the
+    /// boot-error exit code (1) up to this many times before giving up
+    /// (issue 2422). The hub forks each substrate on port `0` and dials
+    /// the port it reports (issue 6503), so its bind cannot lose the port
+    /// to another socket; an exit 1 is still re-forked. `1` preserves the
     /// single-attempt behavior (no re-fork).
     #[config(default = 3)]
     pub proxy_spawn_attempts: u32,

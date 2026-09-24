@@ -4,13 +4,14 @@
 //! `FleetProxy` actors — the engine-management surface of the
 //! forward-model architecture (issue 763). Three handlers:
 //!
-//! - **`on_spawn`** ([`SpawnEngine`](aether_kinds::SpawnEngine)) picks a free localhost port,
-//!   fork+execs the substrate binary with the port addressed as
-//!   `--rpc-port` argv (ADR-0162; the child's environment is constructed
-//!   from an allowlist at fork, never inherited, so no `AETHER_*` key
-//!   crosses), then boots an `aether.fleet.proxy:<id>` child actor that dials
-//!   it. The proxy owns the forked child from there — startup-dial
-//!   retry, kill-on-failed-boot, kill-on-drop. Reply:
+//! - **`on_spawn`** ([`SpawnEngine`](aether_kinds::SpawnEngine)) fork+execs
+//!   the substrate binary with `--rpc-port 0 --rpc-port-file <path>` argv
+//!   (ADR-0162; the child's environment is constructed from an allowlist at
+//!   fork, never inherited, so no `AETHER_*` key crosses), so the substrate
+//!   binds a port it picks and reports it, then boots an
+//!   `aether.fleet.proxy:<id>` child actor that dials the reported port.
+//!   The proxy owns the forked child from there — waiting for the report,
+//!   the startup-dial retry, kill-on-failed-boot, kill-on-drop. Reply:
 //!   `SpawnEngineResult`.
 //! - **`on_list`** ([`ListEngines`](aether_kinds::ListEngines)) reports every supervised engine.
 //! - **`on_terminate`** ([`TerminateEngine`](aether_kinds::TerminateEngine)) forwards the kind to the
@@ -182,7 +183,7 @@ mod tests {
     use aether_substrate::mail::{Mail, Source, SourceAddr};
     use aether_substrate::testing::{TestChassis, boot_authority};
     use std::collections::{HashMap, VecDeque};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use std::{env, fs, process, thread};
@@ -321,7 +322,6 @@ mod tests {
             .settle_pending_spawn(
                 FleetSpawnContext {
                     engine_id,
-                    rpc_port,
                     supervision: Supervision::new(test_recipe()),
                     origin: SpawnOrigin::Requested,
                 },
@@ -348,7 +348,6 @@ mod tests {
         let rpc_port = 40_681;
         let spawn = FleetSpawnContext {
             engine_id,
-            rpc_port,
             supervision: Supervision::new(test_recipe()),
             origin: SpawnOrigin::Requested,
         };
@@ -400,7 +399,6 @@ mod tests {
             .settle_pending_spawn(
                 FleetSpawnContext {
                     engine_id,
-                    rpc_port,
                     supervision: Supervision::new(test_recipe()),
                     origin: SpawnOrigin::Requested,
                 },
@@ -602,12 +600,25 @@ mod tests {
     #[test]
     fn a_recipe_renders_the_callers_args_ahead_of_the_hubs_injections() {
         let bare = SpawnRecipe { hash: "h".to_owned(), args: vec!["--seed".into(), "7".into()], boot_manifest: None };
-        assert_eq!(spawn_args(&bare, 8901), vec!["--seed", "7", "--rpc-port", "8901"]);
+        let port_file = Path::new("/engine/rpc.port");
+        assert_eq!(
+            spawn_args(&bare, port_file),
+            vec!["--seed", "7", "--rpc-port", "0", "--rpc-port-file", "/engine/rpc.port"],
+        );
 
         let with_manifest = SpawnRecipe { boot_manifest: Some("/boot.json".to_owned()), ..bare };
         assert_eq!(
-            spawn_args(&with_manifest, 8901),
-            vec!["--seed", "7", "--rpc-port", "8901", "--boot-manifest", "/boot.json"],
+            spawn_args(&with_manifest, port_file),
+            vec![
+                "--seed",
+                "7",
+                "--rpc-port",
+                "0",
+                "--rpc-port-file",
+                "/engine/rpc.port",
+                "--boot-manifest",
+                "/boot.json"
+            ],
         );
     }
 
@@ -626,7 +637,6 @@ mod tests {
             .settle_pending_spawn(
                 FleetSpawnContext {
                     engine_id,
-                    rpc_port: 7100,
                     supervision: Supervision::new(test_recipe()),
                     origin: SpawnOrigin::Requested,
                 },
@@ -670,12 +680,7 @@ mod tests {
         let recipe = SpawnRecipe { hash: hash.to_owned(), args: Vec::new(), boot_manifest: None };
         let reply = state
             .settle_pending_spawn(
-                FleetSpawnContext {
-                    engine_id,
-                    rpc_port,
-                    supervision: Supervision::new(recipe),
-                    origin: SpawnOrigin::Requested,
-                },
+                FleetSpawnContext { engine_id, supervision: Supervision::new(recipe), origin: SpawnOrigin::Requested },
                 ProxySpawnOutcome::Applied(u64::from(rpc_port)),
             )
             .expect("the matching completion settles");
@@ -741,7 +746,6 @@ mod tests {
             .settle_pending_spawn(
                 FleetSpawnContext {
                     engine_id,
-                    rpc_port: 7502,
                     supervision: Supervision::new(test_recipe()),
                     origin: SpawnOrigin::Requested,
                 },
