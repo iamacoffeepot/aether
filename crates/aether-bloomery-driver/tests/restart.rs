@@ -5,7 +5,8 @@ mod support;
 
 use aether_bloomery_driver::{Command, ProgramCore};
 use aether_bloomery_kinds::{
-    Digest, Evaluated, OpaqueBytes, ReactorIntent, ReactorName, RecordedHead, RecordedHeadMove, Ref, RuleName, SetHead,
+    ActivationRejected, Detail, Digest, Evaluated, OpaqueBytes, ReactorIntent, ReactorName, RecordedHead,
+    RecordedHeadMove, Ref, RuleName, SetHead,
 };
 use aether_data::Kind;
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
@@ -20,6 +21,8 @@ fn restart_world(world: &mut World) -> Vec<Command> {
     world.core = core;
     world.parked.clear();
     world.watches_seen.clear();
+    world.events_seen.clear();
+    world.warm_marks.clear();
     world.reactors.clear();
     world.eval_roots.clear();
     world.processed.clear();
@@ -150,4 +153,29 @@ fn restart_rejects_a_live_head_whose_bundle_no_longer_loads() {
     assert_eq!(world.loads_seen, vec![bundle_a]);
     assert!(world.events_for(bundle_a).is_empty());
     assert_eq!(world.parked.len(), 1);
+}
+
+#[test]
+fn restart_reads_no_pages_to_rebuild_routing_heads() {
+    // Catches restart replaying the journal prefix to rebuild routing `Heads`,
+    // which the journal view's own catch-up has already folded.
+    let (mut world, commands) = World::open();
+    world.seed_move("x", digest(1));
+    world.seed_move("y", digest(2));
+    world.seed_move("x", digest(4));
+    let rejected = ActivationRejected { head: program_head("a"), bundle: digest(3), reason: Detail::new("missing") };
+    world.seed(Some(3), &rejected);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let commands = restart_world(&mut world);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let from_start = world.events_seen.iter().filter(|after| **after == 0).count();
+    assert_eq!(from_start, 1, "only the journal view reads from the start: {:?}", world.events_seen);
+    assert!(world.appends.is_empty(), "a restart records nothing twice");
+    assert_eq!(world.parked.len(), 1, "restart finished and live routing parked its watch");
 }

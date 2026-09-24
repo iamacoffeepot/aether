@@ -143,6 +143,11 @@ fn rejected_interval_is_delivered_to_the_next_activation() {
     assert_eq!(world.events_for(next), vec![3, 4, 5]);
     assert_eq!(world.warm_ranges_for(next), vec![(1, 2)]);
     assert_eq!(activated_live_from(&world, next), vec![3]);
+
+    // The catch-up reads from `live_from - 1`, never the journal prefix again.
+    let last_warm = world.warm_marks.last().copied().expect("the activation warmed");
+    let after_warm = &world.events_seen[last_warm..];
+    assert!(after_warm.iter().all(|after| *after >= 2), "reads after the last warm: {after_warm:?}");
 }
 
 #[test]

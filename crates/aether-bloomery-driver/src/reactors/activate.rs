@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use aether_bloomery_kinds::{
     Activated, Detail, Digest, DriverRecord, Evaluated, Head, JournalEntry, OpaqueBytes, Seq, Warm, WarmEntries, Warmed,
 };
-use aether_bloomery_view::{HeadActivation, Heads};
+use aether_bloomery_view::HeadActivation;
 
 use crate::core::{Command, ProgramCore, WarmTicket};
 use crate::reactors::claim::Claim;
@@ -166,11 +166,17 @@ impl ProgramCore {
         } else if live_from > trigger {
             self.activate_head(out);
         } else {
+            let before = live_from - 1;
+            let Some(scratch) = self.journal.history().heads_at(Seq(before)) else {
+                let cursor = self.journal.cursor();
+                self.abort(format!("catch-up start {before} is past the journal-view cursor {cursor}"), out);
+                return;
+            };
             if let Some(activation) = self.routing.current.as_mut().and_then(|work| work.activation.as_mut()) {
-                let catch_up = CatchUp { scratch: Heads::new(), next: live_from, page: VecDeque::new() };
+                let catch_up = CatchUp { scratch, next: live_from, page: VecDeque::new() };
                 activation.phase = ActivationPhase::CatchingUp(catch_up);
             }
-            self.emit_routing_read(0, RoutingRead::CatchUp, out);
+            self.emit_routing_read(before, RoutingRead::CatchUp, out);
         }
     }
 

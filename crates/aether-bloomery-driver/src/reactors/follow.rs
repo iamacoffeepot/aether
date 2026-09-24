@@ -69,7 +69,6 @@ impl ProgramCore {
             RoutingRead::Steady => self.routing.page = entries.into(),
             RoutingRead::Warm => self.continue_warm_page(entries, out),
             RoutingRead::CatchUp => self.continue_catch_up_page(entries, out),
-            RoutingRead::RestartFold => self.continue_restart_fold(entries, out),
             RoutingRead::RestartWarm => self.continue_restart_warm_page(entries, out),
         }
         self.drive_routing(out);
