@@ -1,23 +1,19 @@
 use std::sync::Arc;
 
-use aether_actor::{OutboundReply, Reaches};
+use aether_actor::{DependsOn, OutboundReply};
 
 use super::sample::SampleBank;
 use super::{
     AudioCapabilityState, AudioEvent, AudioLoadContext, BankAssemblyContext, BankAssemblyOutput, DecodeOutput,
-    FsCapability, Manual, NativeCtx, ReadResult, SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS, TaskDone,
+    FsCapability, Manual, NativeCtx, Read, ReadResult, SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS, TaskDone,
     TrackDecodeContext, TrackLoad,
 };
-// Keep the runtime trampoline's existing `Read` re-export live after the
-// operation sites move from raw request construction to `FsMailboxExt`.
-#[allow(unused_imports)]
-use super::Read as _;
 use crate::kinds::{
     LoadInstrument, LoadInstrumentResult, NoteOff, NoteOn, PlayTrack, PlayTrackResult, Schedule, ScheduleResult,
     SetMasterGain, SetMasterGainResult, SetReverbSend, SetReverbSendResult, SetSenderGain, SetSenderGainResult,
     StopTrack,
 };
-use aether_fs::{FsMailboxExt, NamespaceAddr};
+use aether_fs::NamespaceAddr;
 
 impl AudioCapabilityState {
     pub fn handle_note_on<A>(&mut self, ctx: &mut NativeCtx<'_, A>, mail: NoteOn) {
@@ -151,7 +147,11 @@ impl AudioCapabilityState {
         ScheduleResult::Ok { accepted }
     }
 
-    pub fn handle_play_track<A: Reaches<FsCapability>>(&mut self, ctx: &mut NativeCtx<'_, A, Manual>, mail: PlayTrack) {
+    pub fn handle_play_track<A: DependsOn<FsCapability>>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, Manual>,
+        mail: PlayTrack,
+    ) {
         // Nop chassis (headless / hub / disabled / no device): fail
         // fast with a loud Err (ADR-0103 §7).
         if self.sender.is_none() || self.sample_rate.is_none() {
@@ -190,10 +190,11 @@ impl AudioCapabilityState {
         // where `on_read_result` recovers this request context. Keeping
         // the read on the fs cap means the audio cap never grows a second
         // namespace registry (ADR-0103 §2).
-        ctx.actor::<FsCapability>().with_context(&context).read(mail.namespace, mail.path);
+        let _ = ctx
+            .send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(mail.namespace, mail.path) }, &context);
     }
 
-    pub fn handle_read_result<A: Reaches<FsCapability>>(
+    pub fn handle_read_result<A: DependsOn<FsCapability>>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, Manual>,
         mail: ReadResult,
@@ -301,7 +302,7 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_load_instrument<A: Reaches<FsCapability>>(
+    pub fn handle_load_instrument<A: DependsOn<FsCapability>>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, Manual>,
         mail: LoadInstrument,
@@ -323,7 +324,8 @@ impl AudioCapabilityState {
         // Forward the `.sfz` read to the single fs resolver (ADR-0041);
         // the `ReadResult` routes back to `on_read_result`, which parses
         // it and fans out the sample reads (ADR-0103 §2/§5).
-        ctx.actor::<FsCapability>().with_context(&context).read(mail.namespace, mail.path);
+        let _ = ctx
+            .send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(mail.namespace, mail.path) }, &context);
     }
 
     /// Claim a session-scoped instrument id for an assembled bank and
