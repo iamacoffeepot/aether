@@ -14,10 +14,16 @@ const INVOCATION_IDENT: &str = "__AetherBloomeryBundleInvocation";
 const STATE_IDENT: &str = "__AetherBloomeryBundleProgramState";
 const TABLE_IDENT: &str = "__AETHER_BLOOMERY_BUNDLE_PROGRAM_TABLE";
 
+/// The per-call invocation actor the program role spawns inline, which the
+/// generator lists as private so `export!` marks it rebuildable.
+pub fn invocation_ident() -> Ident {
+    format_ident!("{INVOCATION_IDENT}")
+}
+
 pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
     let program = quote! { ::aether_bloomery_bundle::__macro_internals::aether_bloomery_program };
     let table = format_ident!("{TABLE_IDENT}");
-    let invocation = format_ident!("{INVOCATION_IDENT}");
+    let invocation = invocation_ident();
     let state = format_ident!("{STATE_IDENT}");
     let field = quote! {
         programs: #state,

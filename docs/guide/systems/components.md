@@ -220,6 +220,18 @@ but its generated export resolver rejects unknown exports, non-instanced
 actors, and actors without an exact-or-`composable` relationship to the actual
 runtime parent before allocating an alias.
 
+The typed inline verbs spawn only a type the module's `export!` lists, because
+that list is the set a hot reload rebuilds. A child the host should never load
+by selector goes in the `private` slot:
+
+```rust
+aether_actor::export!(default = RootManager, Sibling, private = [Panel]);
+```
+
+An inline spawn of a type neither exported nor listed there fails to compile
+with "`Panel` is spawned as an inline child, but no `export!` lists it", and the
+note names the `private = [..]` slot.
+
 `Subname::Counter` has the host assign a bare monotonic counter — `0`, `1`, … —
 for when you'll track it by the returned `MailboxId`; `Subname::Named("inventory")`
 gives it a stable discriminator you can render and address. A spawned actor nests
@@ -303,8 +315,10 @@ is still installed. Only then does the old instance run `unwire` and
 `on_dehydrate`; the candidate calls `on_rehydrate` when the old instance saved a
 bundle, and only after that is it installed and the old instance dropped. A
 component that leaves both state hooks at their defaults swaps cleanly and comes
-back fresh from `init`. There is no mailbox freeze/drain phase in this
-binding-stable implementation; queued mail remains on the trampoline's inbox, and
+back fresh from `init`. Resident inline children are rebuilt from the module's
+exported types and its `export!` `private` list, each under its old alias.
+There is no mailbox freeze/drain phase in this binding-stable implementation;
+queued mail remains on the trampoline's inbox, and
 the wire field `drain_timeout_ms` is accepted for compatibility but ignored.
 
 A failed replace leaves the old instance serving the mailbox, but a failure after

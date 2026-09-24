@@ -33,7 +33,7 @@ macro_rules! InjectSentinel {
             { ty: { $probe:ty } namespace: $probe_ns:tt extensions: [$($probe_ext:tt)*] }
             { ty: { $publisher:ty } namespace: $publisher_ns:tt extensions: [$($publisher_ext:tt)*] }
             { ty: { $witness:ty } namespace: $witness_ns:tt extensions: [$($witness_ext:tt)*] }
-        ], exports: [$($exports:tt)*] }
+        ], exports: [$($exports:tt)*], private: [$($private:tt)*] }
     ) => {
         aether_actor::__export_continue! {
             remaining_generators: [$($next),*]
@@ -44,6 +44,7 @@ macro_rules! InjectSentinel {
                 { ty: { $witness } namespace: $witness_ns extensions: [$($witness_ext)* test_export_sentinel { two }] }
             ]
             exports: [$($exports)*]
+            private: [$($private)*]
         }
     };
 }
@@ -56,7 +57,7 @@ macro_rules! RequireSentinel {
             { ty: { $publisher:ty } namespace: "test.bloomery.export.publisher" extensions: [aether_bloomery_reactor {} test_export_sentinel { one }] }
             { ty: { $witness:ty } namespace: "test.bloomery.export.witness" extensions: [aether_bloomery_reactor {} test_export_sentinel { two }] }
             
-        ], exports: [{ $ordinary_export:ty } { $first_export:ty } { $second_export:ty }] }
+        ], exports: [{ $ordinary_export:ty } { $first_export:ty } { $second_export:ty }], private: [$($private:tt)*] }
     ) => {
         const _: fn() = || {
             use core::marker::PhantomData;
@@ -77,6 +78,7 @@ macro_rules! RequireSentinel {
                 
             ]
             exports: [{ $ordinary_export } { $first_export } { $second_export }]
+            private: [$($private)*]
         }
     };
     ($($unexpected:tt)*) => { compile_error!("actor association, namespace, extension payload, or export selection changed"); };

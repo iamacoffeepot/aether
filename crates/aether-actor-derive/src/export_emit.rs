@@ -1,4 +1,5 @@
-//! Finish an `export!` generator pipeline by emitting a no-generator `export!`.
+//! Finish an `export!` generator pipeline by emitting a no-generator `export!`,
+//! carrying the pipeline's `private` list into its `private = [..]` slot.
 
 use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
@@ -17,6 +18,7 @@ struct EmitInput {
     boot: Option<Type>,
     default: Option<Type>,
     types: Vec<Type>,
+    private: Vec<Type>,
 }
 
 impl Parse for EmitInput {
@@ -24,6 +26,7 @@ impl Parse for EmitInput {
         let mut boot = None;
         let mut default = None;
         let mut types = Vec::new();
+        let mut private = Vec::new();
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             input.parse::<Token![:]>()?;
@@ -32,13 +35,14 @@ impl Parse for EmitInput {
                 "default" => default = parse_optional_type(input)?,
                 "actors" => skip_braced_list(input)?,
                 "exports" => types = parse_export_types(input)?,
+                "private" => private = parse_export_types(input)?,
                 other => return Err(syn::Error::new_spanned(&key, format!("unknown export emit field `{other}`"))),
             }
         }
         if types.is_empty() {
             return Err(syn::Error::new(Span::call_site(), "export! generators produced no types to export"));
         }
-        Ok(Self { boot, default, types })
+        Ok(Self { boot, default, types, private })
     }
 }
 
@@ -81,7 +85,8 @@ fn parse_export_types(input: ParseStream<'_>) -> syn::Result<Vec<Type>> {
 }
 
 fn expand(input: EmitInput) -> syn::Result<TokenStream2> {
-    let EmitInput { boot, default, types } = input;
+    let EmitInput { boot, default, types, private } = input;
+    let private = (!private.is_empty()).then(|| quote! { private = [#(#private),*], });
     let rest: Vec<&Type> = types
         .iter()
         .filter(|ty| default.as_ref().is_none_or(|default| !type_in(default, ty)))
@@ -89,10 +94,10 @@ fn expand(input: EmitInput) -> syn::Result<TokenStream2> {
         .collect();
     Ok(match (boot.as_ref(), default.as_ref()) {
         (Some(boot), Some(default)) => {
-            quote! { ::aether_actor::export!(boot = #boot, default = #default, #(#rest,)*); }
+            quote! { ::aether_actor::export!(boot = #boot, default = #default, #(#rest,)* #private); }
         }
         (None, Some(default)) => {
-            quote! { ::aether_actor::export!(default = #default, #(#rest,)*); }
+            quote! { ::aether_actor::export!(default = #default, #(#rest,)* #private); }
         }
         (Some(_), None) if rest.is_empty() => {
             return Err(syn::Error::new(
@@ -101,13 +106,16 @@ fn expand(input: EmitInput) -> syn::Result<TokenStream2> {
             ));
         }
         (Some(boot), None) => {
-            quote! { ::aether_actor::export!(boot = #boot, #(#rest,)*); }
+            quote! { ::aether_actor::export!(boot = #boot, #(#rest,)* #private); }
         }
         (None, None) if rest.len() == 1 => {
             let ty = rest[0];
-            quote! { ::aether_actor::export!(#ty); }
+            private.map_or_else(
+                || quote! { ::aether_actor::export!(#ty); },
+                |private| quote! { ::aether_actor::export!(#ty, #private); },
+            )
         }
-        (None, None) => quote! { ::aether_actor::export!(#(#rest,)*); },
+        (None, None) => quote! { ::aether_actor::export!(#(#rest,)* #private); },
     })
 }
 

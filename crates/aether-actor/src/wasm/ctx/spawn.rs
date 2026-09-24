@@ -12,7 +12,7 @@ use crate::model::{Addressable, ChildOf, Instanced, NamespaceError, Subname, val
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
-use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, WasmActor};
+use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, Rebuildable, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -158,6 +158,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// handler set. [`InlineChild::erase`] yields the proof a send or
     /// [`Self::despawn_inline_child`] takes, and [`InlineChild::id`] the key
     /// for a registry lookup (a slot table keyed on `MailboxId`).
+    ///
+    /// `C` must be listed by its module's `export!`, exported or under
+    /// `private = [..]` ([`Rebuildable`]), so a replace can rebuild it.
     pub fn spawn_inline_child<P, C>(
         &self,
         subname: Subname<'_>,
@@ -169,7 +172,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         // (ADR-0096) — the registry stores the child as `dyn
         // ErasedWasmActor`, so the bound is the mechanical realisation of
         // "reuse the existing erasure" (no new child-dispatch trait).
-        C: ChildOf<P> + Instanced + WasmActor + ErasedWasmActor,
+        C: ChildOf<P> + Instanced + WasmActor + ErasedWasmActor + Rebuildable,
         // iamacoffeepot/aether#2311: `C::init` returns the runtime state, boxed
         // as the erased child (`State = Self` for an un-split component).
         <C as WasmActor>::State: ErasedWasmActor,
@@ -205,13 +208,16 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// [`InlineChild<C>`]. A ctx whose mailbox identifies no actor still
     /// returns [`SpawnError::ParentIdentityUnavailable`] before any host call:
     /// the parent is read rather than named, not skipped.
+    ///
+    /// `C` must be listed by its module's `export!`, exported or under
+    /// `private = [..]` ([`Rebuildable`]), so a replace can rebuild it.
     pub fn spawn_inline<C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<InlineChild<C>, SpawnError>
     where
         // The erasure bounds are `spawn_inline_child`'s, for the same reason:
         // the registry stores the child as `dyn ErasedWasmActor`. They stay
         // explicit rather than folded into `ModuleChild`, which is a placement
         // *permission* (ADR-0166) and should not also assert a boxing seam.
-        C: ModuleChild + ErasedWasmActor,
+        C: ModuleChild + ErasedWasmActor + Rebuildable,
         <C as WasmActor>::State: ErasedWasmActor,
     {
         self.spawn_parent()?;

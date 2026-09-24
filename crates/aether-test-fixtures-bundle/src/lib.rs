@@ -8,9 +8,10 @@
 //! `export: Some("<NAMESPACE>")`.
 //!
 //! The `InlineChild` / `InlineDespawnChild` inline children ride in
-//! `inline_child`, and `InlineFsDemuxChild` in `fs_demux`, as types but are
-//! absent from the `export!` list — an inline child is constructed
-//! in-process by its parent, never instantiated by the host. The typed↔reshaped replace pair is *not*
+//! `inline_child`, and `InlineFsDemuxChild` in `fs_demux`, under the
+//! `export!` list's `private = [..]` slot: each parent constructs its child
+//! in-process and a replace rebuilds it, but the host never instantiates it
+//! by selector (issue 6136). The typed↔reshaped replace pair is *not*
 //! here: a cross-module `replace_component` needs two distinct binaries,
 //! so each lives in its own satellite crate.
 
@@ -45,7 +46,7 @@ pub use http_handler::{
     HttpHandler, RoutedHttpHandler, RoutedStreamingHttpHandler, StreamingHttpHandler, WebSocketHandler,
 };
 pub use inline_child::{
-    InlineConfiguredChild, InlineConfiguredParent, InlineDespawnChild, InlineDespawnParent, InlineParent,
+    InlineChild, InlineConfiguredChild, InlineConfiguredParent, InlineDespawnChild, InlineDespawnParent, InlineParent,
     InlineStatefulChild, InlineStatefulParent, InlineTagParent, NestedDetachedLeaf, NestedLineageChild,
     NestedLineageLeaf, NestedLineageParent,
 };
@@ -112,6 +113,7 @@ aether_actor::export!(
     ContractDropped,
     ContractChanged,
     ContractExtended,
+    private = [InlineChild, InlineDespawnChild, InlineFsDemuxChild],
 );
 
 // ADR-0163 §2: embed a small asset in the `aether.asset.asset_fixture.txt`
