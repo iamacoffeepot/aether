@@ -3,8 +3,7 @@
 //! in the parent carries the gate), so a transport-only build of the
 //! `InventoryCapability` identity never names these types nor pulls
 //! `aether_substrate`. The substrate-typed imports are gated once by this
-//! module rather than line-by-line; the reverse-lookup helper nests here as
-//! a sibling file (`resolve.rs`) covered by the same gate.
+//! module rather than line-by-line.
 
 // The moved `#[runtime] impl NativeActor for InventoryCapability` body
 // names the `#[runtime]` attribute, the cap identity, and the input/reply
@@ -18,12 +17,8 @@ use super::{InventoryCapability, ListHandlers, ListKinds, Manifest, Resolve, Res
 
 #[cfg(not(target_family = "wasm"))]
 use super::{HandlersResult, ListKindsResult, ManifestResult, ResolveAddressResult, ResolveResult};
-
-// The reverse-lookup helper, nested under this `runtime` directory so the
-// one `mod runtime;` gate in the parent covers it (no per-sibling `#[cfg]`).
-mod resolve;
-
-pub use resolve::resolve_ids;
+#[cfg(not(target_family = "wasm"))]
+use crate::kinds::ResolvedName;
 
 pub use crate::kinds::{HandlerEntryWire, NameEntryWire, ParamKindWire, TemplateEntryWire};
 pub use aether_data::KindId;
@@ -37,7 +32,7 @@ use std::collections::HashSet;
 
 /// `aether.inventory` runtime state — a ZST, because the cap has none.
 /// Every arm reads either a process-global link-time table or the
-/// engine's `Registry` borrowed from the handler ctx.
+/// engine's registry through a handler ctx read verb.
 ///
 /// It exists as a named type rather than `Self` because a struct-hosted
 /// split identity (ADR-0122) requires one: `#[actor]` reads
@@ -115,16 +110,14 @@ impl NativeActor for InventoryCapability {
     /// wire bytes (`schema_wire`) because `SchemaType` has
     /// no `Schema` impl of its own; decode it with
     /// `wire::from_bytes::<SchemaType>(&desc.schema_wire)`.
-    // The engine's live vocabulary is read straight off the ctx-borrowed
-    // `Registry` — the same one `ComponentHostCapability` registers into,
-    // so a `load_component`'s kinds are visible the moment it returns
-    // (ADR-0091 §2) without the cap holding its own `Arc` clone.
+    // The engine's live vocabulary comes from `ctx.kind_descriptors()`,
+    // which reads the same registry `ComponentHostCapability` registers
+    // into, so a `load_component`'s kinds are visible the moment it returns
+    // (ADR-0091 §2) without the cap holding its own handle on it.
     #[handler::single]
     fn on_list_kinds(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: ListKinds) -> ListKindsResult {
         let kinds = ctx
-            .mailer()
-            .registry()
-            .list_kind_descriptors()
+            .kind_descriptors()
             .into_iter()
             .map(|desc| {
                 // The schema rides as opaque wire bytes — see
@@ -161,12 +154,15 @@ impl NativeActor for InventoryCapability {
     /// locally-folded manifest couldn't resolve.
     #[handler::single]
     fn on_resolve(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Resolve) -> ResolveResult {
-        ResolveResult { resolved: resolve_ids(ctx.mailer().registry(), mail.ids) }
+        ResolveResult {
+            resolved: mail.ids.into_iter().map(|id| ResolvedName { name: ctx.tagged_id_name(&id), id }).collect(),
+        }
     }
 
-    /// Resolve one external actor address through the selected engine's
-    /// registry. ADR-0166 short-path expansion, canonical validation, and
-    /// liveness all remain engine-owned; the wire deliberately projects
+    /// Resolve one external actor address to its canonical path through the
+    /// selected engine's registry. ADR-0166 short-path expansion, canonical
+    /// validation, and liveness all remain engine-owned, and the answer is
+    /// the path, never a mailbox position; the wire deliberately projects
     /// failures as diagnostic text instead of exposing the substrate error
     /// enum.
     #[handler::single]
@@ -178,11 +174,9 @@ impl NativeActor for InventoryCapability {
     ) -> ResolveAddressResult {
         let resolved = ActorPath::new(&mail.address)
             .map_err(|error| error.to_string())
-            .and_then(|address| ctx.mailer().registry().resolve_address(&address).map_err(|error| error.to_string()));
+            .and_then(|address| ctx.canonical_path(&address).map_err(|error| error.to_string()));
         match resolved {
-            Ok(resolved) => {
-                ResolveAddressResult::Ok { mailbox_id: resolved.mailbox_id, canonical_path: resolved.canonical_path }
-            }
+            Ok(canonical_path) => ResolveAddressResult::Ok { canonical_path },
             Err(error) => ResolveAddressResult::Err { error },
         }
     }
@@ -494,7 +488,7 @@ mod tests {
         for address in [canonical.clone(), format!("{ADDRESS_TEST_ROOT}/:{name}")] {
             assert_eq!(
                 InventoryCapability::on_resolve_address(&mut fix.state, &mut ctx, ResolveAddress { address },),
-                ResolveAddressResult::Ok { mailbox_id, canonical_path: canonical.clone() },
+                ResolveAddressResult::Ok { canonical_path: canonical.clone() },
             );
         }
         let missing = InventoryCapability::on_resolve_address(

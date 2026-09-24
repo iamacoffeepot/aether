@@ -151,23 +151,24 @@ pub struct ResolveResult {
 
 /// `aether.inventory.resolve_address` — resolve one canonical or ADR-0166
 /// short actor address inside the selected engine. The engine registry
-/// owns short-path expansion, canonical validation, liveness, and the final
-/// mailbox id; external clients must not fold the supplied string themselves.
+/// owns short-path expansion, canonical validation, and liveness, and it
+/// answers the canonical path, never a mailbox position; external clients
+/// must not fold the supplied string themselves.
 #[aether_data::kind(name = "aether.inventory.resolve_address")]
 pub struct ResolveAddress {
     pub address: String,
 }
 
-/// Reply to [`ResolveAddress`]. The success arm carries both the live mailbox
-/// id and its canonical path so a caller can route by id while displaying and
-/// caching capabilities under the registry's real identity. The failure arm
+/// Reply to [`ResolveAddress`]. The success arm carries the live actor's
+/// canonical path, so a caller displays and caches capabilities under the
+/// registry's real identity; no mailbox position leaves the engine. The failure arm
 /// intentionally carries only the registry's human-readable diagnostic rather
 /// than duplicating the substrate's internal address-resolution error enum.
 /// It exists — where the sibling [`ListKindsResult`] over the same live
 /// `Registry` has none — because this is a lookup, and a lookup can miss.
 #[aether_data::kind(name = "aether.inventory.resolve_address_result", eq)]
 pub enum ResolveAddressResult {
-    Ok { mailbox_id: aether_data::MailboxId, canonical_path: String },
+    Ok { canonical_path: String },
     Err { error: String },
 }
 

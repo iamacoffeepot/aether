@@ -198,11 +198,10 @@ async fn lookup_descriptor_picks_up_a_post_load_kind_via_inventory() {
 async fn engine_path_resolver_returns_the_engine_canonical_path() {
     let supplied = "aether.test/:short";
     let canonical = "aether.test/aether.test.child:short";
-    let engine_answer = MailboxId(0xABCD_EF01_2345_6789);
 
     let engine = EngineId(Uuid::from_u128(0x4057));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, engine_answer, canonical, Arc::clone(&calls));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, canonical, Arc::clone(&calls));
     let mcp = connect_mcp(port);
 
     let resolved = mcp.resolve_engine_path(engine, supplied).await.expect("routed engine resolves a short path");
@@ -229,7 +228,6 @@ async fn a_tagged_id_resolves_to_the_engine_canonical_path() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let (_chassis, port) = boot_hub_with_address_route(AddressRouteLoopbackParams {
         engine,
-        mailbox_id: MailboxId(0),
         canonical_path: String::new(),
         names: HashMap::from([(tagged.clone(), canonical.to_owned())]),
         calls: Arc::clone(&calls),

@@ -17,12 +17,13 @@
 //!   connect and reconstructs its own static reverse map.
 //! - [`Resolve`] → [`ResolveResult`]: per-id reverse lookup of
 //!   dynamically-minted instance ids the client can't compute from the
-//!   manifest alone (the runtime-registry arm of the ADR-0088 §2 chain,
-//!   `thread_name::resolve_runtime`). `None` on a miss so the client
+//!   manifest alone (the runtime-registry arm of the ADR-0088 §2 chain):
+//!   a thread id from the runtime name registry, a mailbox or kind id from
+//!   the engine's live `Registry`. `None` on a miss so the client
 //!   falls back to rendering the ADR-0064 tagged-id string itself.
 //! - [`ResolveAddress`] → [`ResolveAddressResult`]: engine-owned
-//!   canonical/ADR-0166 short address resolution to one live mailbox id
-//!   and canonical path.
+//!   canonical/ADR-0166 short address resolution to one live actor's
+//!   canonical path.
 //! - [`ListKinds`] → [`ListKindsResult`] (ADR-0091): every
 //!   [`KindId`](aether_data::KindId) currently registered in the
 //!   substrate's `Registry`, with its full
@@ -53,13 +54,14 @@
 //! holdout in `aether-kinds`: `aether-fleet` uses it for component config
 //! descriptors, so it is shared vocabulary rather than cap-owned.
 //!
-//! The cap is stateless. `ResolveAddress` and `ListKinds` read the engine's `Registry`
-//! through the handler ctx (`NativeCtx::mailer().registry()`) — the same
-//! one the component-host cap stages its loaded kinds into, so a
-//! `load_component`'s registrations are visible the moment the owner
-//! publishes them; no event channel, no cache invalidation, and no `Arc` clone
-//! pinning one registry instance for the cap's lifetime. The manifest /
-//! resolve / handlers arms read process-global link-time tables.
+//! The cap is stateless. `ResolveAddress`, `ListKinds`, and `Resolve`'s
+//! mailbox and kind ids read the engine's `Registry` through handler ctx read
+//! verbs (`NativeCtx::canonical_path`, `kind_descriptors`, `tagged_id_name`)
+//! — the same registry the component-host cap stages its loaded kinds into,
+//! so a `load_component`'s registrations are visible the moment the owner
+//! publishes them; no event channel, no cache invalidation, and no handle
+//! pinning one registry instance for the cap's lifetime. The manifest and
+//! handlers arms, and `Resolve`'s thread ids, read process-global tables.
 //! `#[actor(singleton)]` auto-submits its own `NameEntry` for
 //! `NAMESPACE`, so `aether.inventory` reverses through the same static
 //! map it serves.
@@ -87,13 +89,13 @@ pub mod kinds;
 /// The cap carries no runtime state — `InventoryCapabilityState` is a
 /// ZST, named only because a struct-hosted split identity cannot use
 /// `type State = Self` (that spelling selects the un-split shape). The
-/// `Manifest`, `Resolve`, and `ListHandlers` arms read process-global
-/// tables — the link-time inventories and the runtime name registry —
-/// directly. The `ResolveAddress` and `ListKinds` arms read the engine's
-/// `Registry` off the handler ctx, so their replies reflect its live address
-/// and vocabulary state (including anything `ComponentHostCapability`
-/// registered at load time) without a cross-cap event channel or pinning one
-/// registry instance at `init`.
+/// `Manifest` and `ListHandlers` arms read the process-global link-time
+/// inventories directly. The `ResolveAddress`, `ListKinds`, and `Resolve`
+/// arms read the engine's `Registry` through handler ctx read verbs
+/// (`Resolve` names a thread id from the runtime name registry), so their
+/// replies reflect its live address and vocabulary state (including anything
+/// `ComponentHostCapability` registered at load time) without a cross-cap
+/// event channel or pinning one registry instance at `init`.
 #[actor(singleton, root)]
 pub struct InventoryCapability;
 
@@ -106,11 +108,9 @@ pub struct InventoryCapability;
 #[cfg(not(target_family = "wasm"))]
 use kinds::{HandlersResult, ListKindsResult, ManifestResult, ResolveAddressResult, ResolveResult};
 
-// The runtime half — the wire-projection helpers (nested as
-// `runtime/manifest.rs` / `runtime/resolve.rs`), the
-// `aether_substrate`-typed imports, the state struct, the `#[runtime]
-// impl`, and the cap's tests — lives under the `runtime` directory,
-// gated once here. Nothing in this file names a runtime type directly,
+// The runtime half — the `aether_substrate`-typed imports, the state
+// struct, the `#[runtime] impl`, and the cap's tests — lives under the
+// `runtime` directory, gated once here. Nothing in this file names a runtime type directly,
 // so there is no `use runtime::*` glob (matching `fs/mod.rs`).
 #[cfg(feature = "runtime")]
 mod runtime;

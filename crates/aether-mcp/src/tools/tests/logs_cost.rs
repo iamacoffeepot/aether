@@ -101,7 +101,6 @@ async fn actor_logs_bad_level_is_tool_error() {
 #[tokio::test]
 async fn actor_logs_and_cost_route_to_the_engine_resolved_mailbox_id() {
     let engine = EngineId(Uuid::from_u128(0x4057));
-    let engine_answer = MailboxId(0x4057_0000_0000_0200);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let replies = Arc::new(Mutex::new(VecDeque::from([
         ScriptedRouteReply {
@@ -120,13 +119,8 @@ async fn actor_logs_and_cost_route_to_the_engine_resolved_mailbox_id() {
             settle: true,
         },
     ])));
-    let (_chassis, port) = boot_hub_with_address_route_replies(
-        engine,
-        engine_answer,
-        "aether.test/aether.test.child:probe",
-        Arc::clone(&calls),
-        replies,
-    );
+    let (_chassis, port) =
+        boot_hub_with_address_route_replies(engine, "aether.test/aether.test.child:probe", Arc::clone(&calls), replies);
     let mcp = connect_mcp(port);
     let engine_id = engine.0.to_string();
 

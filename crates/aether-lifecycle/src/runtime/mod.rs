@@ -45,9 +45,7 @@ pub use aether_kinds::LifecycleAdvanceComplete;
 use aether_substrate::Erased;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::{BTreeMap, BTreeSet};
-pub use std::sync::Arc;
 pub use std::time::{Duration, Instant};
 
 /// Resolve the typed payload for one lifecycle stage. Keeping this seam pure
@@ -107,9 +105,6 @@ pub struct LifecycleCapabilityState {
     /// Last time a slow-settlement warn fired, for the
     /// `SLOW_SETTLE_WARN_COOLDOWN` rate limit.
     pub last_slow_warn: Option<Instant>,
-    /// `Arc<Mailer>` cached at init for `subscribe_settlement_mail`
-    /// calls inside handlers.
-    pub mailer: Arc<Mailer>,
     /// One monitor per subscriber (ADR-0079 §8 amended), registered on its
     /// first stage subscription and released when its `MonitorNotice`
     /// purges it. The handle's `Drop` deregisters, so the map is both the
@@ -158,13 +153,12 @@ impl LifecycleCapabilityState {
 }
 
 /// Construction-level state fixture: a Render→Present→Shutdown
-/// data graph + a fresh mailer, built directly (no chassis boot),
+/// data graph, built directly (no chassis boot),
 /// with the supplied advance timeout. Reachable from
 /// `mod settlement`'s descendant tests via module privacy.
 #[cfg(test)]
 fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
     use aether_kinds::{Present, Render, Shutdown};
-    use aether_substrate::mail::registry::Registry;
 
     let graph = LifecycleGraphData::builder()
         .state::<Render>()
@@ -176,7 +170,6 @@ fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
         .start::<Render>()
         .build()
         .expect("test setup: graph builds");
-    let mailer = Arc::new(Mailer::new(Arc::new(Registry::default())));
     LifecycleCapabilityState {
         current_state: graph.start(),
         graph,
@@ -187,7 +180,6 @@ fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
         advance_timeout,
         settlement_latency_ewma: None,
         last_slow_warn: None,
-        mailer,
         monitors: BTreeMap::new(),
     }
 }
@@ -198,7 +190,6 @@ fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
 #[cfg(test)]
 fn tick_start_graph_cap() -> LifecycleCapabilityState {
     use aether_kinds::{Shutdown, Tick};
-    use aether_substrate::mail::registry::Registry;
 
     let graph = LifecycleGraphData::builder()
         .state::<Tick>()
@@ -207,7 +198,6 @@ fn tick_start_graph_cap() -> LifecycleCapabilityState {
         .start::<Tick>()
         .build()
         .expect("test setup: tick graph builds");
-    let mailer = Arc::new(Mailer::new(Arc::new(Registry::default())));
     LifecycleCapabilityState {
         current_state: graph.start(),
         graph,
@@ -218,7 +208,6 @@ fn tick_start_graph_cap() -> LifecycleCapabilityState {
         advance_timeout: Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT),
         settlement_latency_ewma: None,
         last_slow_warn: None,
-        mailer,
         monitors: BTreeMap::new(),
     }
 }
@@ -236,12 +225,11 @@ impl NativeActor for LifecycleCapability {
     fn init(
         config: LifecycleConfig,
         params: LifecycleParams,
-        ctx: &mut NativeInitCtx<'_>,
+        _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<LifecycleCapabilityState, BootError> {
         let LifecycleConfig { advance_timeout_millis } = config;
         let LifecycleParams { graph } = params;
         let current_state = graph.start();
-        let mailer = ctx.mailer();
         Ok(LifecycleCapabilityState {
             graph,
             subscribers: BTreeMap::new(),
@@ -252,7 +240,6 @@ impl NativeActor for LifecycleCapability {
             advance_timeout: Duration::from_millis(advance_timeout_millis),
             settlement_latency_ewma: None,
             last_slow_warn: None,
-            mailer,
             monitors: BTreeMap::new(),
         })
     }
@@ -639,7 +626,7 @@ impl NativeActor for LifecycleCapability {
 mod tests {
     use super::*;
     use aether_kinds::{Present, Render, Tick};
-    use aether_substrate::testing::unrouted_binding;
+    use aether_substrate::testing::{bare_substrate, unrouted_binding};
 
     #[test]
     fn tick_payload_carries_elapsed_time_while_other_stages_stay_empty() {
@@ -764,7 +751,8 @@ mod tests {
         let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
         let render = <Render as Kind>::ID;
 
-        let transport = unrouted_binding(&cap.mailer);
+        let (_registry, mailer) = bare_substrate();
+        let transport = unrouted_binding(&mailer);
         let source = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xFEED))));
         let mut ctx = NativeCtx::new_for_actor(&transport, source, None, None);
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, LifecycleSubscribeSelf { stage: render.0 });
@@ -786,7 +774,7 @@ mod tests {
     /// cap through a `NativeBinding`.
     #[test]
     fn subscribe_request_via_flat_send_lands_calling_actor_in_stage_set() {
-        use std::sync::mpsc;
+        use std::sync::{Arc, mpsc};
 
         use aether_actor::{Addressable, Publisher};
         use aether_substrate::actor::native::Envelope;
@@ -842,7 +830,8 @@ mod tests {
         // dispatcher would, and confirm the calling actor is now in the
         // Tick stage set.
         let mut cap = tick_start_graph_cap();
-        let cap_transport = unrouted_binding(&cap.mailer);
+        let (_cap_registry, cap_mailer) = bare_substrate();
+        let cap_transport = unrouted_binding(&cap_mailer);
         let mut ctx = NativeCtx::new_for_actor(&cap_transport, source, None, None);
         assert_eq!(ctx.sender(), Some(sender), "the host stamps the calling actor as the Source");
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, decoded);

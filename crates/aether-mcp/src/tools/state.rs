@@ -4,8 +4,8 @@ use super::ids::{mail_node_to_json, node_reversible_ids, parse_engine_id, parse_
 use super::{
     AWAIT_TIMEOUT_DEFAULT_MILLIS, AsyncMutex, ComponentSelector, ComponentSpec, EngineId, EngineMailSpec, EngineNames,
     FLEET_CAP, INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson,
-    MailNodeWire, MailSpec, MailboxId, Manifest, ManifestResult, Mcp, McpError, NamedMail, Recipient, ReplyEnvelope,
-    Resolve, ResolveAddress, ResolveAddressResult, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType,
+    MailNodeWire, MailSpec, Manifest, ManifestResult, Mcp, McpError, NamedMail, Recipient, ReplyEnvelope, Resolve,
+    ResolveAddress, ResolveAddressResult, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType,
     component_config_bytes, descriptors, engine_envelope, frame_size_aware_error, internal_msg, local_envelope,
     max_frame_size, reject_zero_replicas, selector_with_explicit_export, tagged_id, wire,
 };
@@ -39,7 +39,6 @@ pub(super) struct DeliveredDirectMail {
 /// caches, every field here was obtained from the selected engine during this
 /// tool invocation, so it is safe to use for a compatibility verdict.
 pub(super) struct StrictComponentSnapshot {
-    pub(super) mailbox_id: MailboxId,
     pub(super) canonical_lineage: String,
     pub(super) capabilities: super::ComponentCapabilities,
     pub(super) kinds: HashMap<String, KindDescriptor>,
@@ -142,7 +141,7 @@ impl Mcp {
                 .ok_or_else(|| anyhow::anyhow!("engine {} names no actor path for {address}", engine.0));
         }
 
-        let (_, canonical) = self.resolve_textual_address(engine, address).await?;
+        let canonical = self.resolve_textual_address(engine, address).await?;
         ActorPath::new(&canonical).map_err(|error| {
             anyhow::anyhow!("engine answered {address:?} with a non-path lineage {canonical:?}: {error}")
         })
@@ -164,19 +163,17 @@ impl Mcp {
     }
 
     /// Resolve one textual address in the selected engine through
-    /// `aether.inventory.resolve_address`, returning the engine's answer:
-    /// the position and the canonical lineage. Only
-    /// [`Self::strict_component_snapshot`] keeps the position, because
-    /// `compare_component_contracts` still reports it; every sender takes
-    /// the path through [`Self::resolve_engine_path`].
-    async fn resolve_textual_address(&self, engine: EngineId, address: &str) -> anyhow::Result<(MailboxId, String)> {
+    /// `aether.inventory.resolve_address`, returning the engine's answer: the
+    /// canonical lineage. No position crosses it; every sender takes the
+    /// path through [`Self::resolve_engine_path`].
+    async fn resolve_textual_address(&self, engine: EngineId, address: &str) -> anyhow::Result<String> {
         ActorPath::new(address)?;
         let reply = self
             .session
             .call_one(engine_envelope(engine, INVENTORY_CAP, &ResolveAddress { address: address.to_owned() }))
             .await?;
         match ResolveAddressResult::decode_from_bytes(&reply.payload) {
-            Some(ResolveAddressResult::Ok { mailbox_id, canonical_path }) => Ok((mailbox_id, canonical_path)),
+            Some(ResolveAddressResult::Ok { canonical_path }) => Ok(canonical_path),
             Some(ResolveAddressResult::Err { error }) => Err(anyhow::anyhow!("{error}")),
             None => Err(anyhow::anyhow!("undecodable ResolveAddressResult")),
         }
@@ -217,7 +214,7 @@ impl Mcp {
         if address.starts_with("mbx-") {
             anyhow::bail!("compare_component_contracts requires a textual component address, not a tagged mailbox id");
         }
-        let (mailbox_id, canonical_lineage) = self.resolve_textual_address(engine, address).await?;
+        let canonical_lineage = self.resolve_textual_address(engine, address).await?;
         let reply = self
             .session
             .call_one(engine_envelope(engine, super::COMPONENT_CAP, &DescribeComponent { name: address.to_owned() }))
@@ -228,7 +225,7 @@ impl Mcp {
             None => anyhow::bail!("component {address:?}: undecodable DescribeComponentResult"),
         };
         let kinds = self.refresh_engine_kinds_strict(engine).await?;
-        Ok(StrictComponentSnapshot { mailbox_id, canonical_lineage, capabilities, kinds })
+        Ok(StrictComponentSnapshot { canonical_lineage, capabilities, kinds })
     }
 
     /// Resolve a component registry selector hub-local to its wasm bytes +
