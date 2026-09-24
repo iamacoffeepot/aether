@@ -48,11 +48,11 @@ pub use kinds::*;
 
 use core::f32::consts::FRAC_PI_3;
 
-use aether_actor::{ActorInitError, Reaches, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, DependsOn, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
-use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
+use aether_lifecycle::LifecycleCapability;
 use aether_math::{TAU, Vec2, Vec3};
-use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
+use aether_window::WindowCapability;
 
 use crate::camera::{CameraComponent, CameraOrbitSet, CameraTopdownSet, OrbitParams, TopdownParams};
 
@@ -146,10 +146,9 @@ impl WasmActor for CameraController {
     /// camera so the shadow is authoritative from frame one. `wire` is the
     /// placement for the seed — `init`'s ctx can't mail.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let window = ctx.actor::<WindowCapability>();
-        window.subscribe::<Key>(WindowSelector::All);
-        window.subscribe::<KeyRelease>(WindowSelector::All);
-        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+        ctx.subscribe::<WindowCapability, Key>();
+        ctx.subscribe::<WindowCapability, KeyRelease>();
+        ctx.subscribe::<LifecycleCapability, Tick>();
         self.seed(ctx);
     }
 
@@ -172,12 +171,12 @@ impl WasmActor for CameraController {
         match &mut self.shadow {
             Shadow::Orbit(orbit) => {
                 if let Some(params) = step_orbit(orbit, held, &self.config) {
-                    ctx.actor::<CameraComponent>().send(&CameraOrbitSet { name: camera, params });
+                    ctx.send::<CameraComponent>(&CameraOrbitSet { name: camera, params });
                 }
             }
             Shadow::Topdown(topdown) => {
                 if let Some(params) = step_topdown(topdown, held, &self.config) {
-                    ctx.actor::<CameraComponent>().send(&CameraTopdownSet { name: camera, params });
+                    ctx.send::<CameraComponent>(&CameraTopdownSet { name: camera, params });
                 }
             }
         }
@@ -187,11 +186,11 @@ impl WasmActor for CameraController {
 impl CameraController {
     /// Send the full-`Some` seed for the current mode, pinning orbit
     /// auto-advance off so it never fights the keys.
-    fn seed<A: Reaches<CameraComponent>>(&self, ctx: &mut WasmCtx<'_, A>) {
+    fn seed<A: DependsOn<CameraComponent>>(&self, ctx: &mut WasmCtx<'_, A>) {
         let camera = self.config.camera.clone();
         match &self.shadow {
             Shadow::Orbit(orbit) => {
-                ctx.actor::<CameraComponent>().send(&CameraOrbitSet {
+                ctx.send::<CameraComponent>(&CameraOrbitSet {
                     name: camera,
                     params: OrbitParams {
                         distance: Some(orbit.distance),
@@ -204,7 +203,7 @@ impl CameraController {
                 });
             }
             Shadow::Topdown(topdown) => {
-                ctx.actor::<CameraComponent>().send(&CameraTopdownSet {
+                ctx.send::<CameraComponent>(&CameraTopdownSet {
                     name: camera,
                     params: TopdownParams {
                         center: Some([topdown.center.x, topdown.center.y]),

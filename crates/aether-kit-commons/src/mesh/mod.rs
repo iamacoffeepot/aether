@@ -42,10 +42,9 @@ pub use kinds::*;
 use aether_actor::{
     ActorInitError, Erased, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
-use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
+use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_kinds::{MeshLoadResult, Render};
 use aether_lifecycle::LifecycleCapability;
-use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Rgb, Vec3};
 use aether_mesh::stroke::{self, StrokeParameters, StrokePoint};
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
@@ -132,7 +131,7 @@ impl WasmActor for MeshViewer {
     /// receives `Render` and never submits — a no-op there, where the
     /// render cap discards anyway (ADR-0082 §7 / §11).
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<LifecycleCapability>().subscribe::<Render>();
+        ctx.subscribe::<LifecycleCapability, Render>();
     }
 
     /// Emit cached faces and request the active eye when this DSL cache has
@@ -145,10 +144,10 @@ impl WasmActor for MeshViewer {
     #[handler::single]
     fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
         if !self.cache.faces.is_empty() {
-            ctx.actor::<RenderCapability>().send_many(&self.cache.faces);
+            ctx.send_many::<RenderCapability>(&self.cache.faces);
         }
         if !self.cache.outlines.is_empty() {
-            ctx.actor::<CameraComponent>().send(&CameraEyeRequest);
+            ctx.send::<CameraComponent>(&CameraEyeRequest);
         }
     }
 
@@ -161,7 +160,7 @@ impl WasmActor for MeshViewer {
         };
         let triangles = outline_triangles(&self.cache.outlines, eye);
         if !triangles.is_empty() {
-            ctx.actor::<RenderCapability>().send_many(&triangles);
+            ctx.send_many::<RenderCapability>(&triangles);
         }
     }
 
@@ -182,7 +181,7 @@ impl WasmActor for MeshViewer {
     // the load body delegates straight to `FsCapability` via `ctx`.
     #[allow(clippy::needless_pass_by_value, clippy::unused_self)]
     #[handler::manual]
-    fn on_load(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, msg: LoadMesh) {
+    fn on_load(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, msg: LoadMesh) {
         let context = MeshLoadContext { reply: ctx.reply_target(), namespace: msg.namespace, path: msg.path };
         tracing::info!(
             target: "aether_kit_commons",
@@ -190,7 +189,10 @@ impl WasmActor for MeshViewer {
             path = %context.path,
             "load requested; issuing read",
         );
-        ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
+        let _ = ctx.send_with_context::<FsCapability>(
+            &Read { addr: NamespaceAddr::new(&context.namespace, &context.path) },
+            &context,
+        );
     }
 
     /// Consumes the substrate's I/O reply. Dispatches on the request

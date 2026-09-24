@@ -51,7 +51,7 @@
 
 use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_kinds::{QuadSpace, Tick};
-use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
+use aether_lifecycle::LifecycleCapability;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::{
@@ -133,7 +133,7 @@ impl WasmActor for BundleComponent {
     ///
     /// [`on_create_texture_result`]: BundleComponent::on_create_texture_result
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+        ctx.subscribe::<LifecycleCapability, Tick>();
 
         let Some(pixels) = ctx.asset(TILE_ASSET_NAME) else {
             tracing::warn!(
@@ -155,7 +155,7 @@ impl WasmActor for BundleComponent {
             return;
         }
 
-        ctx.actor::<RenderCapability>().send(&CreateTexture {
+        ctx.send::<RenderCapability>(&CreateTexture {
             width: TILE_WIDTH,
             height: TILE_HEIGHT,
             format: TextureFormat::Rgba8,
@@ -173,7 +173,7 @@ impl WasmActor for BundleComponent {
     /// symmetry is the author's job; the engine does not enforce it.**
     fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
         if let Some(tile) = self.tile.take() {
-            ctx.actor::<RenderCapability>().send(&DestroyTexture { texture_id: tile.texture_id });
+            ctx.send::<RenderCapability>(&DestroyTexture { texture_id: tile.texture_id });
         }
     }
 
@@ -213,7 +213,7 @@ impl WasmActor for BundleComponent {
         let Some(tile) = self.tile else {
             return;
         };
-        ctx.actor::<RenderCapability>().send(&DrawTexturedQuads {
+        ctx.send::<RenderCapability>(&DrawTexturedQuads {
             texture_id: tile.texture_id,
             blend: QuadBlend::Straight,
             space: QuadSpace::Screen,
