@@ -15,65 +15,6 @@ use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 /// [`aether_actor::model::ctx`] are the only cross-target trait surface
 /// post-665.
 impl NativeBinding {
-    /// Push a typed payload at `recipient` straight through the shared
-    /// `Arc<Mailer>`. Mints a fresh correlation id (atomic monotonic
-    /// counter) and wraps the bytes in a [`Mail`] with
-    /// `SourceAddr::Component(self.self_mailbox)` so any reply routes back
-    /// here. Returns `0` (channel-send failures collapse to the same
-    /// scalar — there is no FFI surface here to differentiate).
-    ///
-    /// ADR-0080 §1 / §5: `parent_mail` and `inherited_root` carry the
-    /// in-flight handler's lineage so the outgoing [`Mail`] picks up the
-    /// correct `parent_mail` and inherited `root`. `None` / `None` is the
-    /// chassis-root send: the outgoing mail's `MailId` becomes its own
-    /// `root`, marking the start of a new causal chain.
-    pub(crate) fn send_mail_with_lineage(
-        &self,
-        recipient: u64,
-        kind: u64,
-        bytes: &[u8],
-        count: u32,
-        parent_mail: Option<MailId>,
-        inherited_root: Option<MailId>,
-    ) -> u32 {
-        let _ = self.push_envelope_returning_root(recipient, kind, bytes, count, parent_mail, inherited_root);
-        0
-    }
-
-    /// Like [`Self::send_mail_with_lineage`] but returns the minted
-    /// `MailId` (== the new root when `inherited_root.is_none()`) so the
-    /// caller can subscribe to its settlement via the chassis
-    /// [`crate::chassis::settlement::SettlementRegistry`].
-    ///
-    /// Same semantics as the `u32`-returning variant; the success-path
-    /// `0` was vestigial at this layer (channel-send failures collapse to
-    /// the same scalar).
-    ///
-    /// # Panics
-    /// Panics if the `pending_recipients` mutex is poisoned — fail-fast
-    /// per ADR-0063: a poisoned mutex means a prior holder panicked
-    /// inside the guard, which is itself a substrate-level invariant
-    /// violation.
-    pub(crate) fn push_envelope_returning_root(
-        &self,
-        recipient: u64,
-        kind: u64,
-        bytes: &[u8],
-        count: u32,
-        parent_mail: Option<MailId>,
-        inherited_root: Option<MailId>,
-    ) -> MailId {
-        self.push_envelope_returning_root_before_push(
-            recipient,
-            kind,
-            bytes,
-            count,
-            parent_mail,
-            inherited_root,
-            |_| {},
-        )
-    }
-
     /// Mint an eager envelope's identity, expose it to `before_push`, then
     /// publish the mail. The activation barrier uses this narrow hook to make
     /// its exact identity visible before another owner worker can consume it.
@@ -156,9 +97,9 @@ mod tests {
         assert_eq!(transport.parent_mailbox(), None, "legacy untyped bindings have no logical parent");
 
         assert_eq!(transport.prev_correlation(), 0);
-        assert_eq!(transport.send_mail_with_lineage(recipient.0, 1, &[], 1, None, None), 0);
+        transport.push_envelope_returning_root_before_push(recipient.0, 1, &[], 1, None, None, |_| {});
         assert_eq!(transport.prev_correlation(), 1);
-        assert_eq!(transport.send_mail_with_lineage(recipient.0, 1, &[], 1, None, None), 0);
+        transport.push_envelope_returning_root_before_push(recipient.0, 1, &[], 1, None, None, |_| {});
         assert_eq!(transport.prev_correlation(), 2);
     }
 

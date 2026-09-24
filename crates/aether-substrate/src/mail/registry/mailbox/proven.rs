@@ -181,10 +181,7 @@ impl Registry {
     /// Its second is the `host_turn` self-mail test in
     /// `crate::actor::native::slot::pumped`, which names the position it
     /// booted the probe at: a host turn has no sender, so
-    /// `NativeCtx::sender` cannot serve. The two detached-send tests in
-    /// `crate::actor::native::offload::thread` use it the same way, for the
-    /// position they registered their capture at: an offload worker has no
-    /// sender either.
+    /// `NativeCtx::sender` cannot serve.
     ///
     /// Its third is the session arm of `Mailer::send_reply` (and the wasm
     /// guest's `reply_mail_p32` session arm), which stamps the replying

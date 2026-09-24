@@ -5,10 +5,11 @@
 //! its own mail intake. Three shapes answer that, and they differ in how long
 //! the settlement hold has to live:
 //!
-//! - `thread::spawn_inherit` — a thread that captures the spawning handler's
-//!   in-flight chain, so the hold dies when the thread does (ADR-0080 §12).
-//! - `thread::spawn_detached` — the same without the inheritance; no hold at
-//!   all, a fresh chain.
+//! - `thread::spawn_inherit` — a worker that sends nothing and holds the
+//!   spawning handler's in-flight chain, so the hold dies when the thread
+//!   does (ADR-0080 §12).
+//! - `thread::spawn_detached` — a worker that sends nothing and holds no
+//!   chain at all.
 //! - [`blocking`] — ADR-0093 hold-until-resolve, for work that replies in a
 //!   *later* handler turn. The worker pushes a result and dies, and the reply
 //!   is sent from a subsequent invocation, so the hold has to outlive the

@@ -33,9 +33,8 @@ impl ErasedActorRef {
     /// what it closes, and only the gated mint does that.
     ///
     /// Its consumers are the routing bodies that hand a raw `u64` to the
-    /// dispatch surface: the `MailSender` impls for `NativeCtx`,
-    /// `InheritCtx`, and `RootCtx` in `aether-substrate`, plus the wasm-side
-    /// ctxs here.
+    /// dispatch surface: the `MailSender` impl for `NativeCtx` in
+    /// `aether-substrate`, plus the wasm-side ctxs here.
     #[must_use]
     pub const fn id(self) -> MailboxId {
         self.id

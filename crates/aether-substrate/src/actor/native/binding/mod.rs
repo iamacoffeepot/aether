@@ -68,7 +68,7 @@ mod send;
 /// The three inherent dispatch methods read/mutate the struct's
 /// fields directly:
 ///
-/// - The crate-private eager send, `send_mail_with_lineage`, mints a
+/// - The crate-private eager send, `push_envelope_returning_root_before_push`, mints a
 ///   fresh correlation id (atomic monotonic counter), wraps the bytes
 ///   in a [`Mail`](crate::mail::Mail) with
 ///   `SourceAddr::Component(self.self_mailbox)` so any reply
@@ -135,9 +135,8 @@ pub struct NativeBinding {
     /// `Mutex` only for the `&self` interior-mutability + `Sync`
     /// requirements — the buffer has a single logical producer (this
     /// actor's dispatcher thread, only during its own handler dispatch),
-    /// so the lock is uncontended. Spawned-worker sends
-    /// ([`super::offload::thread`]) stay on the eager [`Self::send_mail_with_lineage`] route.
-    /// Wasm-guest sends are also eager while Live; staged activation retains
+    /// so the lock is uncontended.
+    /// Wasm-guest sends are eager while Live; staged activation retains
     /// their owned payload here without writing the native ring, preserving
     /// its single-writer discipline.
     outbound: Mutex<OutboundBuffer>,

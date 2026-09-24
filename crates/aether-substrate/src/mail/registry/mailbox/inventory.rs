@@ -5,7 +5,6 @@ use std::sync::{Arc, Weak};
 
 use rustc_hash::FxHashMap;
 
-use aether_actor::{HandlesKind, RegistryChanged};
 use aether_data::{KindDescriptor, MailboxCategory, MailboxDescriptor};
 
 use crate::mail::mailer::Mailer;
@@ -49,11 +48,7 @@ pub(super) fn kind_inventory(kinds: &FxHashMap<KindId, KindSlot>) -> Vec<KindDes
 }
 
 impl Registry {
-    #[doc(hidden)]
-    pub fn subscribe_inventory<A>(&self, target: MailboxId, mailer: Arc<Mailer>) -> RegistrySubscription
-    where
-        A: HandlesKind<RegistryChanged>,
-    {
+    pub(crate) fn subscribe_inventory(&self, target: MailboxId, mailer: Arc<Mailer>) -> RegistrySubscription {
         let mut subscribers =
             self.subscribers.lock().expect("registry subscriber lock poisoned; fail-fast per ADR-0063");
         let (subscriber, subscription) = subscriber(target, mailer, self.inventory.clone());

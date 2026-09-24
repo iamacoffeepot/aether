@@ -33,7 +33,6 @@ use crate::mail::registry::{
 use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::trace::{SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
-use aether_actor::{HandlesKind, RegistryChanged};
 use aether_data::{Kind, KindId};
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use std::sync::OnceLock;
@@ -264,7 +263,7 @@ impl Mailer {
     /// into one call so chassis-side mail (Tick fanout from the
     /// frame loop, hub-bridged inbound, MCP-bridged) gets observable
     /// lineage without duplicating the producer-side hook in
-    /// `NativeBinding::send_mail_with_lineage`.
+    /// `NativeBinding::push_envelope_returning_root_before_push`.
     ///
     /// Returns the freshly minted `MailId` so the caller can
     /// subscribe to its settlement via the chassis
@@ -345,11 +344,8 @@ impl Mailer {
     /// crate-private path behind
     /// [`NativeCtx::subscribe_inventory`](crate::actor::native::ctx::NativeCtx::subscribe_inventory),
     /// which passes its own binding's mailbox as `target`.
-    pub(crate) fn subscribe_inventory_for<A: HandlesKind<RegistryChanged>>(
-        self: &Arc<Self>,
-        target: aether_data::MailboxId,
-    ) -> RegistrySubscription {
-        self.registry.subscribe_inventory::<A>(target, Arc::clone(self))
+    pub(crate) fn subscribe_inventory_for(self: &Arc<Self>, target: aether_data::MailboxId) -> RegistrySubscription {
+        self.registry.subscribe_inventory(target, Arc::clone(self))
     }
 
     /// Borrow the wired [`CapabilityRegistry`]
@@ -437,7 +433,7 @@ impl Mailer {
     ///
     /// Equivalent to [`Self::send_reply`] with an absent lineage
     /// triple — the bare form is the lineage form's chassis-root case,
-    /// as `NativeBinding::send_mail_with_lineage` is with `None` / `None`.
+    /// as `NativeBinding::push_envelope_buffered` is with `None` / `None`.
     pub fn send_reply_unchained<K>(&self, sender: Source, result: &K) -> bool
     where
         K: Kind,

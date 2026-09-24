@@ -23,6 +23,7 @@ use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_kinds::Tick;
 use aether_substrate::actor::wasm::host_fns;
+use aether_substrate::testing::unrouted_binding;
 use aether_substrate::{Component, ComponentCtx, HubOutbound, Mail, MailboxId, Mailer, Registry};
 use wasmtime::{Engine, Linker, Module};
 
@@ -40,7 +41,7 @@ fn known_kind_bad_payload_reports_unknown_kind_not_handled() {
 
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let ctx = ComponentCtx::new(MailboxId(0), registry, mailer, HubOutbound::disconnected());
+    let ctx = ComponentCtx::new(unrouted_binding(&mailer), registry, Arc::clone(&mailer), HubOutbound::disconnected());
 
     // `type_tag = None` instantiates the module's entry actor — `Probe`, the
     // strict (no-`#[fallback]`) receiver (`export!(default = Probe, …)` makes

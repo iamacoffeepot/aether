@@ -9,7 +9,7 @@ use crate::mail::registry::{DropError, MailboxEntry, Registry, noop_handler};
 use crate::scheduler::SeizeHandle;
 use crate::testing::boot_authority as auth;
 
-use super::support::{InventorySubscriber, inventory_subscription_fixture};
+use super::support::inventory_subscription_fixture;
 
 #[test]
 fn register_and_lookup_closure_mailbox() {
@@ -42,7 +42,7 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
     }
 
     let (r, mailer, wakes, target) = inventory_subscription_fixture();
-    let subscription = r.subscribe_inventory::<InventorySubscriber>(target, mailer);
+    let subscription = r.subscribe_inventory(target, mailer);
     wakes.recv_timeout(Duration::from_millis(100)).expect("initial inventory wake");
     let initial_inventory = r.inventory();
     subscription.acknowledge(initial_inventory.mailbox_generation, initial_inventory.kind_generation);
