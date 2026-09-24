@@ -360,7 +360,7 @@ mod tests {
     /// directory — so the relative-path handling is exercised over a tree with
     /// depth rather than a flat list.
     const BUNDLE: [(&str, &[u8]); 3] = [
-        ("wasm32-unknown-unknown/debug/aether_kit_commons.wasm", b"component"),
+        ("wasm32-unknown-unknown/debug/aether_kit.wasm", b"component"),
         ("wasm32-unknown-unknown/debug/examples/trap_script.wasm", b"behavior"),
         ("debug/aether-headless", b"chassis"),
     ];
@@ -533,7 +533,7 @@ mod tests {
         // or matching loosely, would attribute one run's cache outcome to
         // another's evidence.
         let captured = format!(
-            "   Compiling aether-kit-commons v0.1.0\n{}\ndist: 21 component(s) -> dist/manifest.json\n{}\n",
+            "   Compiling aether-kit v0.1.0\n{}\ndist: 21 component(s) -> dist/manifest.json\n{}\n",
             marker(CacheStatus::Miss),
             marker(CacheStatus::Hit),
         );

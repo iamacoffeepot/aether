@@ -1,5 +1,5 @@
 [package]
-name = "aether-kit-commons"
+name = "aether-kit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
