@@ -288,8 +288,9 @@ impl NativeActor for LifecycleCapability {
     /// (ADR-0082 §7, ADR-0083). Resolves the subscriber from the
     /// inbound envelope's host-stamped `Source` via
     /// [`sender`](NativeCtx::sender) rather than a
-    /// caller-supplied mailbox, so the subscriber cannot be forged and
-    /// needs no registry read — the host already answered who sent this.
+    /// caller-supplied mailbox, so the subscriber cannot be forged: the
+    /// host already answered who sent this, and `sender` mints it only for
+    /// a position that holds a route.
     /// `None` means the sender has no local mailbox (an external
     /// session or another engine) — reply `Err` and subscribe
     /// nothing, which gates the reflexive form to in-process actors
@@ -834,11 +835,10 @@ mod tests {
         assert_eq!(decoded.stage, <Tick as Kind>::ID.0, "the payload carries the Tick stage id");
 
         // Deliver the captured mail to the cap exactly as the
-        // dispatcher would, and confirm the calling actor is now in the
-        // Tick stage set.
+        // dispatcher would, in the same substrate whose registry routes the
+        // caller, and confirm the calling actor is now in the Tick stage set.
         let mut cap = tick_start_graph_cap();
-        let (_cap_registry, cap_mailer) = bare_substrate();
-        let cap_transport = unrouted_binding(&cap_mailer);
+        let cap_transport = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&cap_transport, source, None, None);
         assert_eq!(ctx.sender(), Some(sender), "the host stamps the calling actor as the Source");
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, decoded);

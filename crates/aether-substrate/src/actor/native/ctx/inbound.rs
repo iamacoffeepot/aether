@@ -14,7 +14,6 @@ use aether_data::{Kind, MailId, RequestId};
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::inbox::InboundMail;
-use crate::mail::registry::Registry;
 use crate::mail::{Source, SourceAddr};
 use crate::runtime::trace::SettlementHold;
 
@@ -101,7 +100,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
 
     /// The envelope sender as a proven [`ErasedActorRef`]: mints the dispatch
-    /// source the host stamped, with no registry read. This is the
+    /// source the host stamped, once one published-route read finds a route
+    /// record standing there, so the reference always names a path. This is the
     /// *immediate* sender (one hop, the addressing layer's `Source`), not
     /// the chain origin — the origin lives in the tracing layer (`root` /
     /// `parent_mail`, ADR-0080). `None` for mail with no local sender
@@ -119,12 +119,17 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// successful `LoadResult` itself (ADR-0230 §3). A reply sent with no
     /// handler chain (`Mailer::send_reply_unchained`) carries no mail id and
     /// so no sender.
+    ///
+    /// Also `None` for a stamped position that holds no route record, such as
+    /// the chassis sentinel or a position forged through the public mail
+    /// entry points. The read is one lock-free load of the published route
+    /// view and one hash probe, paid only when a handler asks.
     #[must_use]
     pub fn sender(&self) -> Option<ErasedActorRef> {
         match self.source.addr {
-            SourceAddr::Component(id) => Some(Registry::structural_erased(id)),
+            SourceAddr::Component(id) => self.binding.stamped_sender(id),
             SourceAddr::None if self.in_reply_to().is_some() => {
-                self.in_flight_mail_id.map(|id| Registry::structural_erased(id.sender))
+                self.in_flight_mail_id.and_then(|id| self.binding.stamped_sender(id.sender))
             }
             _ => None,
         }
