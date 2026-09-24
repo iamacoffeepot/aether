@@ -77,6 +77,47 @@ fn bind_listener(
     }
 }
 
+/// The shared body of `on_connect` and `on_connect_self`: park the caller's
+/// reply under a fresh connect id, then dial `addr` on a one-shot transport
+/// thread that wakes the cap with `ConnectReady`. The session it stages
+/// delivers to the already-proven `consumer`.
+fn dial<A>(
+    state: &mut TcpCapabilityState,
+    ctx: &mut NativeCtx<'_, A, Manual>,
+    addr: String,
+    name: Option<String>,
+    consumer: Option<ErasedActorRef>,
+) {
+    let id = state.next_connect_id;
+    state.next_connect_id += 1;
+    state.pending_connects.insert(
+        id,
+        PendingConnect { owed: ctx.defer_reply_to(ctx.reply_target()), addr: addr.clone(), name, consumer },
+    );
+
+    let connect_tx = state.connect_tx.clone();
+    let wake = state.connect_wake.clone();
+
+    // Transport thread below the mail layer — it carries a dial result
+    // in; no inbound chain to inherit, so no settlement umbrella applies.
+    let spawn_result = state.connect_wake.spawn_sidecar(format!("aether-tcp-connect-{id}"), move || {
+        if connect_tx.send((id, TcpStream::connect(&addr).map_err(|error| format!("connect failed: {error}")))).is_ok()
+        {
+            wake.wake(&ConnectReady {});
+        }
+    });
+
+    if let Err(error) = spawn_result {
+        let PendingConnect { owed, addr, .. } =
+            state.pending_connects.remove(&id).expect("connect inserted before thread spawn");
+        reply_to_pending_connect(
+            ctx,
+            owed,
+            &ConnectResult::Err { addr, error: format!("connect thread spawn failed: {error}") },
+        );
+    }
+}
+
 /// `aether.tcp` runtime state (issue 607 Phase 6a, ADR-0079). The singleton
 /// control-plane cap owns its listener fleet directly — it is the supervisor,
 /// not a thin shim over the chassis registry. Each `on_bind` registers a
@@ -217,42 +258,26 @@ impl NativeActor for TcpCapability {
                 return;
             }
         };
-        let id = state.next_connect_id;
-        state.next_connect_id += 1;
-        state.pending_connects.insert(
-            id,
-            PendingConnect {
-                owed: ctx.defer_reply_to(ctx.reply_target()),
-                addr: mail.addr.clone(),
-                name: mail.name,
-                consumer,
-            },
-        );
+        dial(state, ctx, mail.addr, mail.name, consumer);
+    }
 
-        let connect_tx = state.connect_tx.clone();
-        let wake = state.connect_wake.clone();
-        let addr = mail.addr;
-
-        // Transport thread below the mail layer — it carries a dial result
-        // in; no inbound chain to inherit, so no settlement umbrella applies.
-        let spawn_result = state.connect_wake.spawn_sidecar(format!("aether-tcp-connect-{id}"), move || {
-            if connect_tx
-                .send((id, TcpStream::connect(&addr).map_err(|error| format!("connect failed: {error}"))))
-                .is_ok()
-            {
-                wake.wake(&ConnectReady {});
-            }
-        });
-
-        if let Err(error) = spawn_result {
-            let PendingConnect { owed, addr, .. } =
-                state.pending_connects.remove(&id).expect("connect inserted before thread spawn");
-            reply_to_pending_connect(
-                ctx,
-                owed,
-                &ConnectResult::Err { addr, error: format!("connect thread spawn failed: {error}") },
-            );
-        }
+    /// Dial `mail.addr` with the sender as the session's consumer, as
+    /// [`Self::on_connect`] does with an explicit consumer.
+    ///
+    /// # Agent
+    /// Reply: `ConnectResult`. `Err` when the mail carries no actor sender
+    /// (a session has no inbox to deliver frames to), or on the errors
+    /// `Connect` reports.
+    #[handler::manual]
+    fn on_connect_self(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: ConnectSelf) {
+        let Some(consumer) = ctx.sender() else {
+            ctx.reply(&ConnectResult::Err {
+                addr: mail.addr,
+                error: "connect_self needs an actor sender to deliver frames to".to_owned(),
+            });
+            return;
+        };
+        dial(state, ctx, mail.addr, mail.name, Some(consumer));
     }
 
     /// Drain completed outbound dials and stage one `TcpSessionActor` per
@@ -385,7 +410,7 @@ impl NativeActor for TcpCapability {
         let monitor_handle = match ctx.monitor(listener.erase()) {
             Ok(handle) => handle,
             Err(monitor_error) => {
-                ctx.to(&listener).send(&Close::default());
+                ctx.send_to(listener, &Close::default());
                 let error = format!("monitor failed: {monitor_error:?}");
                 done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, error });
                 return;
@@ -455,7 +480,7 @@ impl NativeActor for TcpCapability {
         // is the lineage fold, not `hash(NAMESPACE:name)` — re-resolving by
         // name would reach a flat id nothing is registered under. The cap
         // kept the proof on the entry at spawn, so it sends through that.
-        ctx.to(&listener).send(&Close::default());
+        ctx.send_to(listener, &Close::default());
     }
 
     /// Walk the cap-local listener map and report metadata, ordered by
