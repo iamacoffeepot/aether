@@ -32,13 +32,20 @@
 //! injected `wire` registration mails the server. A missing declaration is a
 //! compile error at `#[http::router]`.
 //!
+//! The injected registration is the flat send
+//! `ctx.send::<HttpServerCapability>(..)` (ADR-0232 §1), so the router's
+//! `wire` ctx must be typed by its actor. A synthesized `wire`, or an
+//! author-written one that omits its ctx actor, is typed by `Self`; an
+//! author-written `wire` that spells an explicit `Erased` ctx fails to compile
+//! at the generated send.
+//!
 //! A route's or reply method's ctx that omits its actor is typed by the
 //! router's actor: `http::Ctx<'_, WasmCtx<'_>>` reads as
 //! `http::Ctx<'_, WasmCtx<'_, Self>>`, and the generated handler takes the
 //! same typed ctx (ADR-0231 §7). A route therefore reaches its declared
-//! dependencies through the typed verbs, and a route that calls
-//! `ctx.actor::<R>()` needs `depends(R)`. A ctx that names its actor,
-//! including an explicit erased one, passes through unchanged.
+//! dependencies through the flat verbs, `ctx.send::<R>(..)` and its siblings,
+//! and a route that sends to `R` needs `depends(R)`. A ctx that names its
+//! actor, including an explicit erased one, passes through unchanged.
 
 #![forbid(unsafe_code)]
 
@@ -1065,13 +1072,12 @@ fn registration_send(group: &Group<'_>, ctx: &Ident, shared: bool) -> TokenStrea
     let Group { method_expr, kind_struct, .. } = group;
     let static_head = LitStr::new(&group.static_head, Span::call_site());
     quote! {
-        #ctx.actor::<::aether_http::HttpServerCapability>()
-            .send(&::aether_http::kinds::RegisterRouteSelf {
-                prefix: #static_head.to_string(),
-                method: #method_expr,
-                kind: <#kind_struct as ::aether_data::Kind>::ID,
-                shared: #shared,
-            });
+        #ctx.send::<::aether_http::HttpServerCapability>(&::aether_http::kinds::RegisterRouteSelf {
+            prefix: #static_head.to_string(),
+            method: #method_expr,
+            kind: <#kind_struct as ::aether_data::Kind>::ID,
+            shared: #shared,
+        });
     }
 }
 
