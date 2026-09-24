@@ -28,6 +28,21 @@ struct RefuseInput {
     marker: u32,
 }
 
+/// Local mirror of the fixture's `test.program.read_uncited.input`: a bare
+/// digest, which the driver's closure read does not follow.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.read_uncited.input")]
+struct ReadUncitedInput {
+    text: Digest,
+}
+
+/// Local mirror of the fixture's `test.program.read_uncited.result`.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.read_uncited.result")]
+struct ReadUncitedResult {
+    text: Ref<Utf8Text>,
+}
+
 /// The `program` head the seed binds to the fixture bundle.
 const PROGRAM: Head<OpaqueBytes> = Head::new("program");
 
@@ -137,5 +152,41 @@ fn unbound_head_is_refused_and_records_nothing() -> Result<(), Box<dyn Error>> {
         other => panic!("expected a HeadUnbound refusal, got {other:?}"),
     }
     assert_eq!(harness.head(), before);
+    Ok(())
+}
+
+#[test]
+fn fetch_on_miss_reads_through_the_mounted_journal() -> Result<(), Box<dyn Error>> {
+    // Catches a fetch sent to a position nobody serves (#6478), a relay that loses the invocation's wait, a driver forward that does not pin the reply target to the bundle root, and a relay that forwards only `Found`.
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_program") else {
+        return Ok(());
+    };
+    let wasm = fs::read(&wasm_path)?;
+    let mut seed = Batch::new();
+    let bundle = seed.stage_bytes(&wasm);
+    seed.push_event(&RecordedHeadMove::new(RecordedHead::from(&PROGRAM), bundle.digest()), None)?;
+    let text = seed.stage_text("hello");
+    let found_input = seed.stage_encoded(&ReadUncitedInput { text: text.digest() })?.digest();
+    let missing_input = seed.stage_encoded(&ReadUncitedInput { text: Digest::from_bytes([9; 32]) })?.digest();
+
+    let mut harness = BloomeryHarness::start([seed]);
+    let origin = NativeOrigin::new("test.driver")?;
+    let name = ProgramName::new("test.program.read_uncited")?;
+    let found = Call { program: PROGRAM, name: name.clone(), input: found_input, origin: origin.clone(), key: 1 };
+    let outcome = harness.call(&found);
+    let CallOutcome::Transition { key: 1, transition, .. } = outcome else {
+        panic!("expected a Transition outcome, got {outcome:?}");
+    };
+    let expected = Ref::of_encoded(&ReadUncitedResult { text: Ref::of_text("fetched:hello") })?.digest();
+    assert_eq!(transition.result, expected, "the program read the fetched text");
+    assert!(harness.stores(&transition.result), "the staged result is stored");
+
+    let missing = Call { program: PROGRAM, name, input: missing_input, origin, key: 2 };
+    match harness.call(&missing) {
+        CallOutcome::Fault { key: 2, fault, .. } => {
+            assert_eq!(fault.reason, FaultReason::InputMissing, "a missing fetch faults InputMissing");
+        }
+        other => panic!("expected an InputMissing fault, got {other:?}"),
+    }
     Ok(())
 }
