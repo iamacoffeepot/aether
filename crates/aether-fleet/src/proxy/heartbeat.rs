@@ -6,7 +6,7 @@
 use crate::kinds::EngineHeartbeatTick;
 use aether_substrate::actor::native::SelfWake;
 use std::sync::mpsc;
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Owns the per-proxy heartbeat timer thread (issue 1339). The
@@ -45,10 +45,9 @@ pub fn spawn_heartbeat(wake: SelfWake<EngineHeartbeatTick>, interval: Duration) 
     // sidecar it only fires a wake-mail (no inbound chain to inherit,
     // so no settlement umbrella to honor), and the proxy is instanced
     // so `spawn_detached` (Singleton-only) doesn't apply.
-    #[allow(clippy::disallowed_methods)]
-    let thread = thread::Builder::new()
-        .name("aether-fleet-heartbeat".into())
-        .spawn(move || {
+    let thread = wake
+        .clone()
+        .spawn_sidecar("aether-fleet-heartbeat".to_owned(), move || {
             // `recv_timeout` returns `Timeout` each interval (fire a
             // tick); a stop signal or a disconnected channel (the
             // proxy dropped the sender) returns otherwise and ends

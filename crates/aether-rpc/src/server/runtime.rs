@@ -58,7 +58,7 @@ use std::path::{Path, PathBuf};
 pub use std::sync::Arc;
 pub use std::sync::atomic::{AtomicBool, Ordering};
 pub use std::sync::mpsc;
-pub use std::thread::{self, JoinHandle};
+pub use std::thread::JoinHandle;
 pub use std::time::Duration;
 
 /// Exported handle bundle published at boot. Reachable from the
@@ -257,8 +257,7 @@ impl RpcServerState {
 
         // Transport thread below the mail layer — it accepts sockets that carry
         // inbound mail in; no inbound chain to inherit, no settlement umbrella.
-        #[allow(clippy::disallowed_methods)] // aether-suppression-request: accept-thread allow moved from init
-        let thread = thread::Builder::new().name(format!("aether-rpc-accept-{port}")).spawn(move || {
+        let thread = self.wake.spawn_sidecar(format!("aether-rpc-accept-{port}"), move || {
             while !accept_shutdown.load(Ordering::Acquire) {
                 if let Ok((stream, peer)) = listener.accept() {
                     if accept_shutdown.load(Ordering::Acquire) {
@@ -368,8 +367,7 @@ impl RpcServerState {
 
         // Per-connection transport reader below the mail layer — carries inbound
         // mail in; no inbound chain to inherit, no settlement umbrella.
-        #[allow(clippy::disallowed_methods)]
-        let thread = match thread::Builder::new().name(format!("aether-rpc-reader-{conn_id}")).spawn(move || {
+        let thread = match self.wake.spawn_sidecar(format!("aether-rpc-reader-{conn_id}"), move || {
             run_reader_loop(read_half, conn_id, &shutdown_for_thread, &inbound_tx, &wake);
         }) {
             Ok(t) => t,
