@@ -404,6 +404,7 @@ a `ProgramRegisterResult` handler and dispatches once it has one:
 ```rust
 use aether_render::{ProgramDispatch, ProgramRegister, ProgramRegisterResult, RenderCapability};
 
+// In an `#[actor(depends(RenderCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     ctx.actor::<RenderCapability>().send(&self.build_register()); // a ProgramRegister value
 }
@@ -419,9 +420,10 @@ fn on_registered(&mut self, _ctx: &mut WasmCtx<'_>, result: ProgramRegisterResul
 }
 ```
 
-A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
-ctx typed by that actor; the default `Erased` names no actor. The actor is the
-first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
+`WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
+with `depends(R)`. The actor is the first parameter, the reply mode the second
+(`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 The dispatch then rides wherever the repaint cadence lives — a `Tick` or
 `Render` handler, a settle gate — as

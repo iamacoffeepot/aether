@@ -200,9 +200,10 @@ fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
 }
 ```
 
-A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
-ctx typed by that actor; the default `Erased` names no actor. The actor is the
-first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
+`WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
+with `depends(R)`. The actor is the first parameter, the reply mode the second
+(`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 The `ChildOf<RootManager>` bound rejects a missing placement at compile time.
 At runtime the ctx also verifies that its actual registry actor tag is
@@ -275,7 +276,9 @@ mailbox without a drop. State continuity across that swap rides two `WasmActor` 
 `on_dehydrate` and `on_rehydrate`, that default to no-ops ([ADR-0101](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0101-replace-hooks-on-ffiactor.md)). Override them
 to carry state forward: `on_dehydrate` serializes the old instance's state, and
 `on_rehydrate` recovers it on the replacement. There's no `replaceable` flag on
-`export!` and no subtrait — participation is the override itself:
+`export!` and no subtrait — participation is the override itself. `on_rehydrate`'s
+ctx is typed by the actor like a handler's (`WasmCtx<'_>` reads as
+`WasmCtx<'_, Self>`):
 
 ```rust
 #[actor]

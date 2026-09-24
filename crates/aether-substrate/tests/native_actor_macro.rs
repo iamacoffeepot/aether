@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use aether_actor::{ErasedActorRef, OutboundReply};
 use aether_data::{Kind, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
+use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
@@ -820,7 +821,7 @@ fn a_cfg_gated_set_handler_leaves_no_dispatch_artifact_in_an_adopter() {
     let (_registry, mailer) = bare_substrate();
     let binding = unrouted_binding(&mailer);
     let mut adopter = CfgGatedSetAdopter { seen: AtomicU32::new(0) };
-    let mut ctx: NativeCtx<'_, Erased, Manual> =
+    let mut ctx: NativeCtx<'_, CfgGatedSetAdopter, Manual> =
         NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
     let handled = <CfgGatedSetAdopter as CfgGatedSet>::__aether_handler_set_dispatch(
@@ -1072,6 +1073,73 @@ fn a_wire_hook_that_names_its_actor_receives_the_typed_ctx() {
     assert!(
         wait_for(13, &greet_total, Duration::from_millis(500)),
         "the typed wire hook's flat send should reach its declared dependency within budget"
+    );
+
+    drop(chassis);
+}
+
+/// A root actor whose every ctx omits its actor (ADR-0231 §7, #6533).
+/// `#[actor]` types each one by `Self`, so `send_detached` and `actor_ref`,
+/// both bounded `A: DependsOn<R>`, compile in `wire`, `unwire`, a handler, a
+/// task completion and the `#[fallback]` alike.
+struct OmittedCtxCap;
+
+#[aether_actor::actor(root, depends(MacroProbeCap))]
+impl NativeActor for OmittedCtxCap {
+    const NAMESPACE: &'static str = "test.macro_native_actor.omitted_ctx";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+        ctx.send_detached::<MacroProbeCap>(&Greet { tag: 17 });
+    }
+
+    fn unwire(&mut self, ctx: &mut NativeCtx<'_>) {
+        let _ = ctx.actor_ref::<MacroProbeCap>();
+    }
+
+    #[aether_actor::handler::single]
+    fn on_ping(&mut self, ctx: &mut NativeCtx<'_>, _mail: Ping) {
+        let _ = self;
+        ctx.send_detached::<MacroProbeCap>(&Greet { tag: 19 });
+    }
+
+    #[aether_actor::handler(task)]
+    fn on_silent_done(&mut self, ctx: &mut NativeCtx<'_>, _done: &TaskDone<Silent>) {
+        let _ = self;
+        let _ = ctx.actor_ref::<MacroProbeCap>();
+    }
+
+    #[aether_actor::fallback]
+    fn on_other(&mut self, ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+        let _ = self;
+        let _ = ctx.actor_ref::<MacroProbeCap>();
+    }
+}
+
+#[test]
+fn an_omitted_ctx_actor_is_typed_by_self_on_the_native_path() {
+    let (registry, mailer) = bare_substrate();
+    let greet_total = Arc::new(AtomicU32::new(0));
+    let ping_total = Arc::new(AtomicU32::new(0));
+
+    let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<MacroProbeCap>(ProbeParams {
+            greet_total: Arc::clone(&greet_total),
+            ping_total: Arc::clone(&ping_total),
+        })
+        .with_actor::<OmittedCtxCap>(())
+        .build_passive()
+        .expect("an actor whose ctxs omit their actor boots");
+
+    push_envelope(&registry, chassis.actor_ref::<OmittedCtxCap>().erase(), &Ping { seq: 1 });
+
+    assert!(
+        wait_for(36, &greet_total, Duration::from_millis(500)),
+        "the wire hook's and the handler's typed flat sends should both reach the declared dependency"
     );
 
     drop(chassis);

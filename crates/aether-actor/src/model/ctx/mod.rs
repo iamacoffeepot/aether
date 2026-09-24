@@ -32,10 +32,11 @@ pub use reply_mode::{Manual, ReplyMode, Single};
 /// actor being dispatched — natively, `spawn_child` lives only on the typed
 /// form, so the parent of a staged birth is read off the ctx rather than
 /// declared beside it, and a caller has no way to name a parent the runtime
-/// will then contradict (issue 4158). Every ctx built where no actor is in
-/// scope — a guest entry point, `wire` / `unwire`, the chassis root, a test
-/// fixture — is this form, and loses only a call it could not have made
-/// correctly.
+/// will then contradict (issue 4158). A ctx is this form when it is built
+/// where no actor is in scope — a guest entry point, the chassis root, a test
+/// fixture — or when a method inside `#[actor]` asks for it by spelling
+/// `Erased`; a ctx that omits its actor there is typed by it (ADR-0231 §7).
+/// The erased form loses only a call it could not have made correctly.
 ///
 /// A type-position marker like [`Single`] / [`Manual`], never a value: it is
 /// only ever the `A` of a [`WasmCtx`](crate::WasmCtx) / `NativeCtx`, so it

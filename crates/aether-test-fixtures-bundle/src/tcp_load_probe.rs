@@ -6,7 +6,8 @@
 
 use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_tcp::{
-    BindListenerResult, BindListenerSelf, ConnectResult, SessionClosed, SessionData, TcpCapability, TcpWasmExt,
+    BindListenerResult, BindListenerSelf, ConnectResult, ConnectSelf, SessionClosed, SessionData, SessionWrite,
+    TcpCapability,
 };
 use aether_test_fixtures_kinds::{
     CollectTcpLoadSnapshot, ConfigureTcpLoadProbe, StartTcpConnectLoad, TcpLoadSessionSnapshot, TcpLoadSnapshot,
@@ -15,7 +16,6 @@ use aether_test_fixtures_kinds::{
 
 #[derive(Default)]
 pub struct TcpLoadProbe {
-    listener_name: Option<String>,
     local_port: Option<u16>,
     sessions: Vec<TcpLoadSessionSnapshot>,
     connect_failures: Vec<String>,
@@ -58,14 +58,16 @@ impl WasmActor for TcpLoadProbe {
         Ok(Self::default())
     }
 
-    /// Record the listener lineage and bind it with this probe as the
-    /// consumer; the bind reply lands in [`Self::on_bind_result`] inside the
-    /// same chain, so the configure call settles with the port known.
+    /// Bind the named listener with this probe as the consumer; the bind
+    /// reply lands in [`Self::on_bind_result`] inside the same chain, so the
+    /// configure call settles with the port known.
+    #[allow(clippy::unused_self)] // aether-suppression-request: required wasm handler receiver; the bind reply carries the state
     #[handler::single]
-    fn on_configure(&mut self, ctx: &mut WasmCtx<'_>, configure: ConfigureTcpLoadProbe) {
-        ctx.actor::<TcpCapability>()
-            .send(&BindListenerSelf { addr: "127.0.0.1:0".to_owned(), name: Some(configure.listener_name.clone()) });
-        self.listener_name = Some(configure.listener_name);
+    fn on_configure(&mut self, ctx: &mut WasmCtx<'_, Self>, configure: ConfigureTcpLoadProbe) {
+        ctx.send::<TcpCapability>(&BindListenerSelf {
+            addr: "127.0.0.1:0".to_owned(),
+            name: Some(configure.listener_name),
+        });
     }
 
     #[handler::single]
@@ -77,12 +79,11 @@ impl WasmActor for TcpLoadProbe {
     }
 
     #[handler::single]
-    fn on_start_connect_load(&mut self, ctx: &mut WasmCtx<'_>, start: StartTcpConnectLoad) {
-        let tcp = ctx.actor::<TcpCapability>();
+    fn on_start_connect_load(&mut self, ctx: &mut WasmCtx<'_, Self>, start: StartTcpConnectLoad) {
         for index in 0..start.connection_count {
             let session_name = format!("{}-{index}", start.session_name_prefix);
             self.ensure_session(TcpLoadTopology::Outbound, &session_name);
-            tcp.connect(&start.addr, Some(&session_name), Some(ctx.mailbox_id()));
+            ctx.send::<TcpCapability>(&ConnectSelf { addr: start.addr.clone(), name: Some(session_name) });
         }
     }
 
@@ -111,14 +112,10 @@ impl WasmActor for TcpLoadProbe {
         framed.extend_from_slice(&body_bytes.to_le_bytes());
         framed.extend_from_slice(&data.bytes);
 
-        let tcp = ctx.actor::<TcpCapability>();
-        match topology {
-            TcpLoadTopology::Accepted => tcp.session_write(
-                self.listener_name.as_deref().expect("tcp load probe configured before accepted traffic"),
-                &data.session_name,
-                &framed,
-            ),
-            TcpLoadTopology::Outbound => tcp.connect_session_write(&data.session_name, &framed),
+        // The session that delivered the frame is the stamped sender, so the
+        // echo goes back to it whichever topology spawned it.
+        if let Some(session) = ctx.sender() {
+            ctx.send_to(session, &SessionWrite { bytes: framed });
         }
     }
 

@@ -14,14 +14,14 @@ use std::time::{Duration, Instant};
 
 use super::{
     BindListener, BindListenerResult, Connect, ConnectResult, ListListeners, ListListenersResult, SessionClosed,
-    SessionData, TcpCapability, TcpListenerActor, TcpNativeExt, TcpSessionActor, UnbindListener, UnbindListenerResult,
+    SessionData, SessionWrite, TcpCapability, TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
 use aether_actor::{Addressable, ErasedActorRef};
-use aether_data::{Kind, MailboxId, SessionToken, Uuid, mailbox_id_from_path};
+use aether_data::{Kind, LoadName, MailboxId, SessionToken, Uuid, mailbox_id_from_path};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
 use aether_substrate::ReplyTarget;
-use aether_substrate::actor::native::{NativeCtx, PumpedSlot};
+use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::MailId;
 use aether_substrate::mail::mailer::Mailer;
@@ -29,7 +29,7 @@ use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::OwnedDispatch;
 use aether_substrate::mail::registry::{MailboxEntry, Registry};
 use aether_substrate::mail::{MailRef, Source, SourceAddr};
-use aether_substrate::testing::{TestChassis, boot_authority, unrouted_binding};
+use aether_substrate::testing::{TestChassis, boot_authority};
 
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());
@@ -595,9 +595,8 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
 }
 
 /// Tripwire: an outbound dial must correlate its parked reply to the
-/// spawned cap-child session, and the connect-session lineage helper
-/// must route `SessionWrite` to that actor rather than the accepted-
-/// session grandchild path.
+/// spawned cap-child session, and a `SessionWrite` to the proven
+/// connect-side session must reach the dialed socket.
 #[test]
 #[allow(clippy::disallowed_methods)] // test-only loopback server thread; no actor lineage or runtime work.
 fn connect_roundtrip_spawns_writable_session() {
@@ -615,7 +614,7 @@ fn connect_roundtrip_spawns_writable_session() {
         received
     });
 
-    let (registry, mailer, rx, chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let consumer_rx = register_session_consumer(&registry, CONSUMER);
     let connect_reply = drive_and_decode::<Connect, ConnectResult>(
@@ -646,11 +645,19 @@ fn connect_roundtrip_spawns_writable_session() {
     assert_eq!(received.peer, peer.to_string());
     assert_eq!(received.bytes, REPLY);
 
-    let sender_binding = unrouted_binding(&mailer);
-    NativeCtx::new_dispatching(&sender_binding, Source::NONE, MailId::NONE, MailId::NONE)
-        .actor::<TcpCapability>()
-        .connect_session_write(&session_name, b"connect-roundtrip");
-    sender_binding.flush_outbound();
+    let session = chassis
+        .child::<TcpCapability, TcpSessionActor>(
+            chassis.actor_ref::<TcpCapability>(),
+            LoadName::new(&session_name).expect("session name is a load name"),
+        )
+        .expect("the connect-side session is live");
+    enqueue(
+        &registry,
+        session.erase(),
+        &SessionWrite { bytes: b"connect-roundtrip".to_vec() },
+        session_reply(),
+        MailId::NONE,
+    );
 
     assert_eq!(server_thread.join().expect("loopback server thread completes"), *b"connect-roundtrip");
 }

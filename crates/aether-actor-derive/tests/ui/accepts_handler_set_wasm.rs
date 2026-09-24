@@ -79,8 +79,10 @@ impl Shared for Adopter {
         &mut self.seen
     }
 
-    // Overriding a set member is an ordinary trait-method override.
-    fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, ping: Ping) {
+    // Overriding a set member is an ordinary trait-method override, so it
+    // spells the trait's typed signature: set members are typed by their
+    // adopter (#6533), and no macro rewrites an override.
+    fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_, Self>, ping: Ping) {
         self.seen = ping.seq;
     }
 }

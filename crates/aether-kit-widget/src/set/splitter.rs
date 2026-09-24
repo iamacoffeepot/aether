@@ -238,7 +238,7 @@ impl WidgetDefaults for SplitterWidget {
 
     /// Enter hover — and say so, so the host can put a resize pointer on it.
     /// A pointer that came back mid-drag cancels the leave that drag deferred.
-    fn on_hover_gained(&mut self, ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
+    fn on_hover_gained(&mut self, ctx: &mut WasmCtx<'_, Self>, _gained: HoverGained) {
         if self.enter() {
             Self::report_hover(ctx, true);
         }
@@ -246,7 +246,7 @@ impl WidgetDefaults for SplitterWidget {
 
     /// Leave hover — and say so, so the host can put the pointer back, unless
     /// a drag is still live and owns the cursor until the button comes up.
-    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_, Self>, _lost: HoverLost) {
         if self.leave() {
             Self::report_hover(ctx, false);
         }

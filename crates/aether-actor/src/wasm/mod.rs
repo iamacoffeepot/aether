@@ -218,9 +218,12 @@ pub trait WasmActor:
     /// override to rehydrate from `prior` (typically
     /// [`PriorState::decode_kind`][crate::PriorState::decode_kind]).
     ///
-    /// Concrete `&mut WasmCtx<'_>` — the post-init send surface, so an
-    /// override can both restore fields and emit mail.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: crate::PriorState<'_>) {
+    /// Concrete `&mut WasmCtx<'_, Self>` — the post-init send surface, typed
+    /// by the actor like a handler's ctx (ADR-0231 §7), so an override can
+    /// both restore fields and emit mail to its declared dependencies. Inside
+    /// `#[actor]` an override may write `WasmCtx<'_>`, which the macro types
+    /// by the actor, or `WasmCtx<'_, Erased>` to receive the erased view.
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, Self>, prior: crate::PriorState<'_>) {
         let _ = ctx;
         let _ = prior;
     }
@@ -300,7 +303,8 @@ pub trait ErasedWasmActor {
     /// Forwards to [`WasmActor::on_dehydrate`].
     fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
 
-    /// Forwards to [`WasmActor::on_rehydrate`].
+    /// Forwards to [`WasmActor::on_rehydrate`], upgrading the ctx the same way
+    /// as [`Self::erased_wire`].
     fn erased_on_rehydrate(
         &mut self,
         ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>,
@@ -1173,9 +1177,12 @@ macro_rules! __export_internal {
                             parent_bytes.len(),
                         )
                     };
+                    // #6533: `on_rehydrate` takes the lifecycle ctx typed by
+                    // the actor, so upgrade the erased ctx once, here where
+                    // it is born, as the `wire` / `unwire` shims do.
                     <$component as $crate::WasmActor>::on_rehydrate(
                         instance,
-                        ctx.as_single(),
+                        ctx.__for_actor::<$component>().as_single(),
                         parent_prior,
                     );
                 },
