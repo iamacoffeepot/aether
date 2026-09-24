@@ -96,6 +96,9 @@ pub enum Node {
         factor: Vec3,
         child: Box<Self>,
     },
+    /// Emit `child` plus its reflection across the plane perpendicular
+    /// to `axis` through the local origin. The reflected copy is
+    /// re-wound so its faces still point outward.
     Mirror {
         axis: Axis,
         child: Box<Self>,
