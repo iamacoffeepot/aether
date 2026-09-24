@@ -170,10 +170,7 @@ impl<A: Addressable> Binding<A> {
     }
 
     /// Send `mail` and await `<A as Replies<K>>::Reply`.
-    fn call<K>(
-        &mut self,
-        mail: K,
-    ) -> impl Future<Output = Result<<A as Replies<K>>::Reply, Refusal>> + Send + 'static
+    fn call<K>(&mut self, mail: K) -> impl Future<Output = Result<<A as Replies<K>>::Reply, Refusal>> + Send + 'static
     where
         A: Singleton + CallerAddressable + Replies<K> + Unpin + 'static,
         K: ActorMail + Send + Unpin + 'static,
