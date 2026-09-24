@@ -313,7 +313,8 @@ mod tests {
     fn headless_refuses_the_native_chrome_ops_at_both_identities_rather_than_dropping_them() {
         let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
         let binding = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut capability_ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut instance_ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         for advertised in [
             <HeadlessWindowCapability as Dispatch<HeadlessWindowCapabilityState>>::capabilities(),
@@ -327,7 +328,7 @@ mod tests {
         assert!(matches!(
             HeadlessWindowCapability::on_set_menu(
                 &mut HeadlessWindowCapabilityState,
-                &mut ctx,
+                &mut capability_ctx,
                 SetWindowMenu { menus: Vec::new() },
             ),
             SetWindowMenuResult::Err { .. }
@@ -335,7 +336,7 @@ mod tests {
         assert!(matches!(
             HeadlessWindowInstance::on_set_menu(
                 &mut HeadlessWindowInstanceState,
-                &mut ctx,
+                &mut instance_ctx,
                 SetWindowMenu { menus: Vec::new() },
             ),
             SetWindowMenuResult::Err { .. }
@@ -343,7 +344,7 @@ mod tests {
         assert!(matches!(
             HeadlessWindowCapability::on_set_cursor(
                 &mut HeadlessWindowCapabilityState,
-                &mut ctx,
+                &mut capability_ctx,
                 SetWindowCursor { icon: CursorIcon::Move },
             ),
             SetWindowCursorResult::Err { .. }
@@ -351,7 +352,7 @@ mod tests {
         assert!(matches!(
             HeadlessWindowInstance::on_set_cursor(
                 &mut HeadlessWindowInstanceState,
-                &mut ctx,
+                &mut instance_ctx,
                 SetWindowCursor { icon: CursorIcon::Move },
             ),
             SetWindowCursorResult::Err { .. }

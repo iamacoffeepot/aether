@@ -153,10 +153,10 @@ retry the same base or invent mailbox ids.
 
 Replacement uses a stable mailbox binding on success, but recovery must trust
 observation rather than intent. The splice is structural, so there is no drain
-argument to lengthen or retry. Pre-splice validation
-errors preserve the old guest; later instantiation failure can leave the
-trampoline empty, while rehydrate failure leaves the new guest installed even
-though the operation returns `Err`.
+argument to lengthen or retry. Validation and instantiation
+errors preserve the old guest untouched; a later state-save, carried-context or
+rehydrate failure reinstalls the old guest after its `unwire` and `on_dehydrate`
+hooks ran, and whatever those hooks tore down stays gone.
 
 The phase table and stale-introspection limits are in
 [Replacement failure states](components/replacement-failure-states.md).
