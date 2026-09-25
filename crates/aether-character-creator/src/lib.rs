@@ -507,7 +507,7 @@ fn disc_mesh(segments: u32) -> Mesh {
 fn mouth_mesh(segments: u32) -> Mesh {
     let mut mesh = disc_mesh(segments);
     for position in &mut mesh.positions {
-        *position = Vec3::new(position.x * 0.165, position.y.mul_add(0.018, -0.252), 0.610);
+        *position = Vec3::new(position.x * 0.165, position.y.mul_add(0.018, -0.252), 0.635);
     }
     mesh
 }
@@ -537,7 +537,7 @@ fn lips_mesh(segments: u32) -> Mesh {
             let center_y = curve.mul_add(1.0 - local_x * local_x, base_y);
             let half_height = height * (PI * t).sin().max(0.0).powf(0.65);
             for (side, offset) in [(0.0, -half_height), (1.0, half_height)] {
-                let mut point = front_surface_point(x, center_y + offset);
+                let mut point = front_mass_surface_point(x, center_y + offset);
                 point.z += 0.005;
                 mesh.positions.push(point);
                 mesh.normals.push(head_normal(point));
@@ -847,8 +847,8 @@ fn push_triangle(mesh: &mut Mesh, a: Vec3, mut b: Vec3, mut c: Vec3) {
 fn head_sdf(point: Vec3) -> f32 {
     let mut shape = head_mass_sdf(point);
 
-    for x in [-0.050, 0.050] {
-        let nostril = ellipsoid_sdf(point, Vec3::new(x, -0.120, 0.795), Vec3::new(0.018, 0.012, 0.026));
+    for x in [-0.070, 0.070] {
+        let nostril = ellipsoid_sdf(point, Vec3::new(x, -0.125, 0.770), Vec3::new(0.025, 0.016, 0.035));
         shape = smooth_maximum(shape, -nostril, 0.006);
     }
 
@@ -856,7 +856,7 @@ fn head_sdf(point: Vec3) -> f32 {
         let socket = ellipsoid_sdf(point, Vec3::new(x, 0.22, 0.600), Vec3::new(0.132, 0.066, 0.078));
         shape = smooth_maximum(shape, -socket, 0.014);
     }
-    let mouth = ellipsoid_sdf(point, Vec3::new(0.0, -0.27, 0.62), Vec3::new(0.19, 0.022, 0.06));
+    let mouth = ellipsoid_sdf(point, Vec3::new(0.0, -0.27, 0.65), Vec3::new(0.19, 0.022, 0.07));
     smooth_maximum(shape, -mouth, 0.014)
 }
 
@@ -864,6 +864,9 @@ fn head_mass_sdf(point: Vec3) -> f32 {
     let mut shape = superellipsoid_sdf(point, Vec3::new(0.0, 0.29, -0.12), Vec3::new(0.68, 0.56, 0.60), 2.10);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.37, 0.12), Vec3::new(0.52, 0.36, 0.42)), 0.10);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.14, 0.18), Vec3::new(0.49, 0.47, 0.45)), 0.11);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.11, 0.505), Vec3::new(0.31, 0.24, 0.19)), 0.10);
+    shape =
+        smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.245, 0.525), Vec3::new(0.25, 0.115, 0.155)), 0.08);
     shape = smooth_union(
         shape,
         superellipsoid_sdf(point, Vec3::new(0.0, -0.46, 0.34), Vec3::new(0.36, 0.20, 0.29), 2.40),
@@ -884,26 +887,16 @@ fn head_mass_sdf(point: Vec3) -> f32 {
             capsule_sdf(point, Vec3::new(side * 0.31, 0.30, 0.46), Vec3::new(side * 0.40, 0.04, 0.455), 0.10);
         shape = smooth_union(shape, lateral_orbital_rim, 0.10);
     }
-    shape = smooth_union(shape, straight_nose_mass_sdf(point), 0.045);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.10, 0.61), Vec3::new(0.085, 0.23, 0.16)), 0.05);
+    shape =
+        smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.07, 0.74), Vec3::new(0.115, 0.105, 0.115)), 0.045);
+    for x in [-0.085, 0.085] {
+        shape =
+            smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.08, 0.69), Vec3::new(0.065, 0.055, 0.075)), 0.028);
+    }
     for x in [-0.68, 0.68] {
         let temporal_fossa = ellipsoid_sdf(point, Vec3::new(x, 0.16, 0.06), Vec3::new(0.075, 0.25, 0.34));
         shape = smooth_maximum(shape, -temporal_fossa, 0.08);
-    }
-    shape
-}
-
-fn straight_nose_mass_sdf(point: Vec3) -> f32 {
-    let mut shape = ellipsoid_sdf(point, Vec3::new(0.0, 0.23, 0.58), Vec3::new(0.075, 0.105, 0.085));
-    shape =
-        smooth_union(shape, capsule_sdf(point, Vec3::new(0.0, 0.23, 0.61), Vec3::new(0.0, -0.035, 0.74), 0.062), 0.035);
-    shape =
-        smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.075, 0.775), Vec3::new(0.095, 0.080, 0.100)), 0.032);
-    for x in [-0.064, 0.064] {
-        shape = smooth_union(
-            shape,
-            ellipsoid_sdf(point, Vec3::new(x, -0.095, 0.725), Vec3::new(0.055, 0.045, 0.060)),
-            0.022,
-        );
     }
     shape
 }
@@ -1002,13 +995,12 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                     Vec3::new(position.x.signum() * 0.075 * front * lateral * cheekbones, 0.0, 0.0)
                 }
                 "NoseWidth" => {
-                    let central = (1.0 - (position.x.abs() / 0.18).powi(4)).clamp(0.0, 1.0);
-                    let weight = front * central * gaussian(position.x, position.y, 0.0, 0.02, 0.18, 0.19);
-                    Vec3::new(position.x * 0.30 * weight, 0.0, 0.008 * weight)
+                    let weight = front * gaussian(position.x, position.y, 0.0, 0.02, 0.19, 0.19);
+                    Vec3::new(position.x * 0.45 * weight, 0.0, 0.015 * weight)
                 }
                 "NoseLength" => {
                     let weight = front * gaussian(position.x, position.y, 0.0, 0.10, 0.13, 0.30);
-                    Vec3::new(0.0, 0.0, 0.10 * weight)
+                    Vec3::new(0.0, 0.0, 0.17 * weight)
                 }
                 "BrowOuterSize" => brow_outer_delta(position),
                 "LipFullness" => {
