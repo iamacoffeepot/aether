@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-24
+- **Amended:** 2026-09-24 — trees cross into and out of a container as canonical tar streams through the Engine API's archive endpoints; no tree is written to a host directory, so a remote daemon needs nothing on its host but the stream. While the blob split stays deferred, the actor's blob writes go through the journal.
 
 Amends [ADR-0229](0229-program-cap-apis-are-extra-run-arguments.md) (the
 closed, sealed set of program APIs, `Http` / `Process`, mapped through
@@ -216,6 +217,21 @@ the sandbox, or they make the program `Sampled`.
    | Output | stdout / stderr become blobs; `/work` minus `scratch` is snapshotted into the output tree; the private directory is deleted |
    | Admission | Decision 9. Docker enforces each container's allotment (`CpusetCpus`, `NanoCpus`, `Memory` = `MemorySwap`, `PidsLimit`); it does not admit or queue. |
 
+   *(Amended 2026-09-24: no tree touches a host directory. Run: after
+   `containers/create`, the run's tree streams as a canonical tar to
+   `PUT /containers/{id}/archive?path=/work`, and each `Mount` tree to its
+   declared path, before `start`. Output: `GET /containers/{id}/archive?path=/work`
+   returns a tar that decodes into the output tree, minus `scratch`; mount
+   paths are never read back, so a step cannot change them in any result.
+   A bind mount would need the directory on the daemon's host, which a TCP
+   or ssh daemon does not share, and would expose a host path and uid to the
+   container. How the archive endpoint treats a tmpfs `scratch` path under
+   `/work` is checked in step 0; placing scratch outside `/work` (for example
+   `CARGO_TARGET_DIR`) is the fallback. Decision 2's "written out at /work"
+   and decision 4's "mounted at `/work`" and "written out in canonical name
+   order" read as streamed in, with canonical order fixed by the tar
+   encoding.)*
+
    Other backends (unprivileged namespaces, a cluster scheduler) are other
    actors answering the same `Run` / `RunResult` contract. Programs and the
    driver never learn which backend served a run.
@@ -261,6 +277,12 @@ Prerequisites (follow-on issues):
 1. **Snapshot and materialize.** A directory → tree operation (imports, and
    the output tree) and a tree → directory operation (writing inputs out),
    in canonical order.
+
+   *(Amended 2026-09-24: one codec instead, a tree ↔ tar stream in
+   canonical order: sorted entries, fixed ownership, mode, and mtime. It
+   serves the run's input and output (decision 8) and the imports, which
+   read a distro tarball directly and a toolchain directory tarred once.
+   There is no tree ↔ directory operation, since nothing consumes one.)*
 2. **Imports.** A native import path that snapshots a distro tarball and a
    toolchain directory into trees once, and the Pure merge program that
    builds an `Environment` root.
@@ -326,6 +348,10 @@ Deferred:
    writes are idempotent), and tree artifacts, which cite, go through the
    journal so citation edges keep one writer. The driver's existing
    existence check on a `Transition`'s result then holds.
+
+   *(Amended 2026-09-24: there is no blob directory while the blob split
+   stays deferred, so the proposal is that the actor hands every blob and
+   tree to the journal, which stays the only writer of its one SQLite file.)*
 2. **Where executor provenance lives.** `Transition.executor` was dropped
    with ADR-0224's native executors, and host identity must not enter a
    Pure result. Proposed: a small provenance record beside the
