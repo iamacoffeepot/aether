@@ -1,8 +1,11 @@
 //! HTTP/1.1 request writing and response parsing, over any byte stream.
 //!
-//! Every request carries `Connection: close`, so one connection holds one
-//! exchange and a body with neither `Content-Length` nor chunked framing runs
-//! to the end of the stream. Every line the client reads is bounded, and a
+//! Every request but a hijack carries `Connection: close`, so one connection
+//! holds one exchange and a body with neither `Content-Length` nor chunked
+//! framing runs to the end of the stream. A request body is either a small
+//! JSON document sent with its length, or a stream the caller writes through
+//! [`ChunkedWriter`] one bounded chunk at a time, so a tar of any size crosses
+//! without being held. Every line the client reads is bounded, and a response
 //! body is only ever read a buffer at a time, so no claimed length sizes an
 //! allocation.
 
@@ -19,11 +22,15 @@ const MAX_HEADERS: usize = 128;
 /// The most of an error response's body kept for its message.
 const MAX_ERROR_BODY_BYTES: u64 = 64 * 1024;
 
+/// The largest chunk [`ChunkedWriter`] sends.
+const CHUNK_BYTES: usize = 64 * 1024;
+
 /// A request method this client sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
     Post,
+    Put,
     Delete,
 }
 
@@ -32,37 +39,123 @@ impl Method {
         match self {
             Self::Get => "GET",
             Self::Post => "POST",
+            Self::Put => "PUT",
             Self::Delete => "DELETE",
         }
     }
 }
 
-/// One request: the target is the path and query, the body a JSON document.
+/// What follows a request's head.
+#[derive(Debug, Clone, Copy)]
+pub enum RequestBody<'a> {
+    /// Nothing: `Content-Length: 0`.
+    Empty,
+    /// A JSON document, sent with its length.
+    Json(&'a [u8]),
+    /// A chunked body of this content type, which the caller streams through
+    /// a [`ChunkedWriter`] after the head.
+    Chunked(&'static str),
+    /// Nothing, and a request that the daemon hand the connection over as a
+    /// raw stream once it answers (`Connection: Upgrade`).
+    Upgrade,
+}
+
+/// One request: the target is the path and query.
 #[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
     pub method: Method,
     pub target: &'a str,
-    pub json: Option<&'a [u8]>,
+    pub body: RequestBody<'a>,
 }
 
 impl Request<'_> {
-    /// Write the request line, the headers, and the body.
+    /// Write the request line and the headers, then the body when it is JSON.
+    /// A chunked body is the caller's to write next.
     pub fn write_to(&self, out: &mut impl Write) -> io::Result<()> {
-        let body = self.json.unwrap_or_default();
-        let content_type = if self.json.is_some() {
-            "Content-Type: application/json\r\n"
-        } else {
-            ""
-        };
         write!(
             out,
-            "{} {} HTTP/1.1\r\nHost: docker\r\nUser-Agent: aether-workspace\r\nConnection: close\r\n{content_type}Content-Length: {}\r\n\r\n",
+            "{} {} HTTP/1.1\r\nHost: docker\r\nUser-Agent: aether-workspace\r\n",
             self.method.as_str(),
-            self.target,
-            body.len()
+            self.target
         )?;
-        out.write_all(body)?;
+        match self.body {
+            RequestBody::Empty => out.write_all(b"Connection: close\r\nContent-Length: 0\r\n\r\n")?,
+            RequestBody::Json(json) => {
+                write!(
+                    out,
+                    "Connection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    json.len()
+                )?;
+                out.write_all(json)?;
+            }
+            RequestBody::Chunked(content_type) => {
+                write!(out, "Connection: close\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\n\r\n")?;
+            }
+            RequestBody::Upgrade => {
+                out.write_all(b"Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n")?;
+            }
+        }
         out.flush()
+    }
+}
+
+/// A chunked request body: bytes written to it leave in chunks of at most
+/// [`CHUNK_BYTES`], and [`ChunkedWriter::finish`] sends the terminating chunk.
+/// Dropping it unfinished leaves the body unterminated, so the daemon never
+/// takes a cut stream as whole.
+pub struct ChunkedWriter<W: Write> {
+    out: W,
+    buffer: Vec<u8>,
+    failed: bool,
+}
+
+impl<W: Write> ChunkedWriter<W> {
+    pub fn new(out: W) -> Self {
+        Self { out, buffer: Vec::with_capacity(CHUNK_BYTES), failed: false }
+    }
+
+    /// Whether sending to the connection has failed, as opposed to the
+    /// caller's own source.
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Send what is buffered, then the zero-length chunk that ends the body.
+    pub fn finish(mut self) -> io::Result<W> {
+        self.send_chunk()?;
+        self.out.write_all(b"0\r\n\r\n").and_then(|()| self.out.flush())?;
+        Ok(self.out)
+    }
+
+    fn send_chunk(&mut self) -> io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let sent = write!(self.out, "{:x}\r\n", self.buffer.len())
+            .and_then(|()| self.out.write_all(&self.buffer))
+            .and_then(|()| self.out.write_all(b"\r\n"));
+        self.failed |= sent.is_err();
+        self.buffer.clear();
+        sent
+    }
+}
+
+impl<W: Write> Write for ChunkedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let taken = bytes.len().min(CHUNK_BYTES - self.buffer.len());
+        self.buffer.extend_from_slice(&bytes[..taken]);
+        if self.buffer.len() == CHUNK_BYTES {
+            self.send_chunk()?;
+        }
+        Ok(taken)
+    }
+
+    /// Sends what is buffered as a chunk; never the terminating one.
+    fn flush(&mut self) -> io::Result<()> {
+        self.send_chunk()?;
+        let flushed = self.out.flush();
+        self.failed |= flushed.is_err();
+        flushed
     }
 }
 
@@ -149,6 +242,15 @@ impl<R: Read> Response<R> {
 pub struct Body<R> {
     reader: BufReader<R>,
     framing: Framing,
+}
+
+impl<R> Body<R> {
+    /// The stream under the body, for a connection the daemon has hijacked.
+    /// Bytes already buffered past the head are dropped, which is safe only
+    /// where the daemon sends nothing after it, as a stdin-only attach does.
+    pub fn into_stream(self) -> R {
+        self.reader.into_inner()
+    }
 }
 
 enum Framing {

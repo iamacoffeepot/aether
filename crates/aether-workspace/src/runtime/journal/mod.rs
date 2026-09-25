@@ -1,17 +1,26 @@
-//! The tar codec's [`TreeSink`] over one of the journal's artifact batches.
+//! The tar codec's [`TreeSink`] and [`TreeSource`] over one of the journal's
+//! artifact batches.
 //!
-//! Each blob streams into a [`BlobFile`] a chunk at a time, so nothing grows
-//! from the archive's claimed length, and each directory is staged as an
-//! encoded [`Tree`]. The journal writes every file (ADR-0237 open question 1);
-//! nothing here touches the filesystem, and nothing is visible until the
-//! caller commits the batch.
+//! Decoding, each blob streams into a [`BlobFile`] a chunk at a time, so
+//! nothing grows from the archive's claimed length, and each directory is
+//! staged as an encoded [`Tree`]. The journal writes every file (ADR-0237 open
+//! question 1); nothing here touches the filesystem, and nothing is visible
+//! until the caller commits the batch.
+//!
+//! Encoding, each tree loads from its committed row and each blob streams from
+//! its file through a [`VerifiedBlob`], which fails the read at end of stream
+//! when the bytes do not hash to the digest, so a corrupt blob never crosses
+//! into a container as whole.
 
 #[cfg(test)]
 mod tests;
 
-use aether_bloomery_journal::{ArtifactBatch, BlobFile, JournalError};
-use aether_bloomery_kinds::{OpaqueBytes, Ref, Tree};
-use aether_bloomery_tar::{BlobWriter, TreeSink};
+use std::error::Error;
+use std::fmt;
+
+use aether_bloomery_journal::{ArtifactBatch, BlobFile, GetError, JournalError, VerifiedBlob};
+use aether_bloomery_kinds::{Digest, OpaqueBytes, Ref, Tree};
+use aether_bloomery_tar::{BlobWriter, SourceBlob, TreeSink, TreeSource};
 
 /// Stores what a decode builds into `batch`.
 pub struct JournalSink<'batch> {
@@ -52,5 +61,65 @@ impl BlobWriter for JournalBlob<'_> {
 
     fn finish(self) -> Result<Ref<OpaqueBytes>, JournalError> {
         self.0.finish()
+    }
+}
+
+/// Loads what an encode walks from `batch`'s committed rows.
+pub struct JournalSource<'batch> {
+    batch: &'batch ArtifactBatch,
+}
+
+impl<'batch> JournalSource<'batch> {
+    pub fn new(batch: &'batch ArtifactBatch) -> Self {
+        Self { batch }
+    }
+}
+
+impl TreeSource for JournalSource<'_> {
+    type Error = SourceError;
+    type Blob<'a>
+        = VerifiedBlob
+    where
+        Self: 'a;
+
+    fn tree(&mut self, tree: &Ref<Tree>) -> Result<Tree, SourceError> {
+        self.batch.get::<Tree>(&tree.digest()).map_err(SourceError::Get)?.ok_or(SourceError::Missing(tree.digest()))
+    }
+
+    fn blob(&mut self, blob: &Ref<OpaqueBytes>) -> Result<SourceBlob<VerifiedBlob>, SourceError> {
+        let reader = self.batch.blob_reader(blob).map_err(SourceError::Journal)?;
+        let reader = reader.ok_or(SourceError::Missing(blob.digest()))?;
+        Ok(SourceBlob { len: reader.payload_len(), reader })
+    }
+}
+
+/// Why [`JournalSource`] could not load a tree or open a blob.
+#[derive(Debug)]
+pub enum SourceError {
+    /// No committed row stores the digest.
+    Missing(Digest),
+    /// A tree's row did not load or decode.
+    Get(GetError),
+    /// A blob's row or file did not open.
+    Journal(JournalError),
+}
+
+impl fmt::Display for SourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing(digest) => write!(f, "the journal stores no artifact {digest}"),
+            Self::Get(error) => write!(f, "loading a tree: {error}"),
+            Self::Journal(error) => write!(f, "opening a blob: {error}"),
+        }
+    }
+}
+
+impl Error for SourceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Missing(_) => None,
+            Self::Get(error) => Some(error),
+            Self::Journal(error) => Some(error),
+        }
     }
 }

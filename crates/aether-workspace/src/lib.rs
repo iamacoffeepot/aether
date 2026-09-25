@@ -10,7 +10,7 @@
 //! (ADR-0237 decision 8): a root singleton that talks to the Docker Engine API
 //! through a private client and writes what it imports into the journal
 //! through the [`ArtifactStore`](aether_bloomery_journal::ArtifactStore) it is
-//! composed with. It answers [`Import`] so far; `Run` follows.
+//! composed with. It answers [`Import`] and [`Run`].
 //!
 //! Every constrained value is a newtype with a private field, a fallible
 //! `new`, and the same check on every decode path (`#[storage(validate)]`), so

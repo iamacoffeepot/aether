@@ -1,8 +1,12 @@
 //! Resolved configuration for the `aether.workspace` actor (ADR-0237 decision
-//! 8, ADR-0090). The Engine API endpoint and the import bounds are
-//! configuration resolved at chassis boot (argv > env > file > default) and
-//! handed to `init`; the actor reads no environment variable of its own, and
-//! never `DOCKER_HOST`.
+//! 8, ADR-0090). The Engine API endpoint, the import bounds, and the fixed run
+//! allotment are configuration resolved at chassis boot (argv > env > file >
+//! default) and handed to `init`; the actor reads no environment variable of
+//! its own, and never `DOCKER_HOST`.
+//!
+//! The run allotment is one fixed set of amounts every run gets until
+//! executor provisioning (#6710) replaces it with a host budget, per-program
+//! estimates, and FIFO admission.
 
 use alloc::string::String;
 
@@ -36,12 +40,46 @@ pub struct WorkspaceConfig {
     /// boot.
     #[cfg_attr(feature = "runtime", config(default = 8_589_934_592u64))]
     pub import_max_bytes: u64,
+    /// The wall-clock time, in milliseconds, one run's steps may take in
+    /// total, from the first step's container create to the last step's
+    /// exit. A step still running when it passes is killed and the run
+    /// answers `Exhausted(Time)`. `0` refuses boot.
+    #[cfg_attr(feature = "runtime", config(default = 1_800_000u64))]
+    pub run_deadline_millis: u64,
+    /// The memory, in bytes, each step's container may use, swap included
+    /// (`Memory` = `MemorySwap`). A step the kernel kills for it answers
+    /// `Exhausted(Memory)`. `0` refuses boot.
+    #[cfg_attr(feature = "runtime", config(default = 8_589_934_592u64))]
+    pub memory_limit_bytes: u64,
+    /// The most processes and threads each step's container may hold at
+    /// once. `0` refuses boot.
+    #[cfg_attr(feature = "runtime", config(default = 4_096))]
+    pub pids_limit: u32,
+    /// The most tree entries a run's output `/work` may decode to, implicit
+    /// parent directories included. An output over it answers `Failed`. `0`
+    /// refuses boot.
+    #[cfg_attr(feature = "runtime", config(default = 1_000_000))]
+    pub output_max_entries: u32,
+    /// The most file content, in bytes, a run's output `/work` may decode.
+    /// An output over it answers `Failed`. `0` refuses boot.
+    #[cfg_attr(feature = "runtime", config(default = 8_589_934_592u64))]
+    pub output_max_bytes: u64,
 }
 
 impl Default for WorkspaceConfig {
     /// The unset resolution, stated rather than derived: a derived `Default`
     /// would give zero bounds, which boot refuses.
     fn default() -> Self {
-        Self { endpoint: None, max_in_flight: 1, import_max_entries: 1_000_000, import_max_bytes: 8 << 30 }
+        Self {
+            endpoint: None,
+            max_in_flight: 1,
+            import_max_entries: 1_000_000,
+            import_max_bytes: 8 << 30,
+            run_deadline_millis: 1_800_000,
+            memory_limit_bytes: 8 << 30,
+            pids_limit: 4_096,
+            output_max_entries: 1_000_000,
+            output_max_bytes: 8 << 30,
+        }
     }
 }
