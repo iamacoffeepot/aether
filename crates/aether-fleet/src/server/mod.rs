@@ -295,13 +295,7 @@ mod tests {
         cells: &ReplyCells,
         fire: &K,
     ) -> aether_kinds::ListEnginesResult {
-        drop(chassis.send_tracked(
-            chassis.actor_ref::<FleetServer>().erase(),
-            K::ID,
-            fire.encode_into_bytes(),
-            1,
-            None,
-        ));
+        drop(chassis.send_tracked(chassis.actor_ref::<FleetServer>().erase(), K::ID, fire.encode_into_bytes(), None));
         drive(chassis, &ListEngines {}, || cells.list.lock().expect("test setup: list cell mutex poisoned").take())
     }
 

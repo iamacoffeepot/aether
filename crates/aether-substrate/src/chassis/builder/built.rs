@@ -6,11 +6,12 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root, child_address};
-use aether_data::{KindId, LoadName, SessionToken};
+use aether_data::{KindId, LoadName, MailId, SessionToken};
 use crossbeam_channel::Receiver;
 
 use super::boot_passives::BootedPassives;
 use super::driver::{DriverRunning, RunError, assemble_pumped_slot};
+use super::root_pusher::RootPusher;
 use crate::actor::native::NativeActor;
 use crate::actor::native::slot::pumped::PumpedSlot;
 use crate::chassis::Chassis;
@@ -137,9 +138,10 @@ impl<C: Chassis> BuiltChassis<C> {
     }
 
     /// Push `payload` to the actor `to` proves as a chassis-root mail and
-    /// return the receiver that fires once its whole causal chain settles
-    /// (ADR-0080 §6) — the tracked sibling of [`Self::send_for_reply`], gated
-    /// on the `test-support` feature the same way.
+    /// return the minted root beside the receiver that fires once its whole
+    /// causal chain settles (ADR-0080 §6) — the tracked sibling of
+    /// [`Self::send_for_reply`], gated on the `test-support` feature the same
+    /// way.
     ///
     /// [`PassiveChassis::send_tracked`] is the same push for a chassis with
     /// no driver. The bloomery harness's `call` is the consumer: it asserts
@@ -151,10 +153,9 @@ impl<C: Chassis> BuiltChassis<C> {
         to: ErasedActorRef,
         kind: KindId,
         payload: Vec<u8>,
-        correlation: u64,
         reply: Option<ReplyTarget>,
-    ) -> Receiver<()> {
-        self.booted.spawner.push_tracked(to, kind, payload, correlation, reply)
+    ) -> (MailId, Receiver<()>) {
+        self.booted.spawner.push_tracked(to, kind, payload, reply)
     }
 }
 
@@ -338,24 +339,36 @@ impl<C: Chassis> PassiveChassis<C> {
     }
 
     /// Push `payload` to the actor `to` proves as a chassis-root mail and
-    /// return the receiver that fires once its whole causal chain settles
-    /// (ADR-0080 §6).
+    /// return the minted root beside the receiver that fires once its whole
+    /// causal chain settles (ADR-0080 §6).
     ///
     /// The embedder's tracked send: the push is recorded as a root, so the
-    /// trace pipeline follows every descendant mail. `correlation` names the
-    /// root; `reply`, when present, routes the recipient's reply to a hub
-    /// session or another proven actor. The embedder holds a proof, never a
-    /// position.
+    /// trace pipeline follows every descendant mail. The root is minted from
+    /// the engine's one chassis-root counter, never chosen by the caller;
+    /// `reply`, when present, routes the recipient's reply to a hub session
+    /// or another proven actor. The embedder holds a proof, never a position.
     #[must_use]
     pub fn send_tracked(
         &self,
         to: ErasedActorRef,
         kind: KindId,
         payload: Vec<u8>,
-        correlation: u64,
         reply: Option<ReplyTarget>,
-    ) -> Receiver<()> {
-        self.booted.spawner.push_tracked(to, kind, payload, correlation, reply)
+    ) -> (MailId, Receiver<()>) {
+        self.booted.spawner.push_tracked(to, kind, payload, reply)
+    }
+
+    /// The chassis-root door to the composed root actor `R` (ADR-0080 §6),
+    /// for a no-driver chassis's embedder — the passive counterpart of
+    /// [`DriverCtx::root_pusher`](super::DriverCtx::root_pusher).
+    ///
+    /// # Panics
+    ///
+    /// Panics naming `R::NAMESPACE` when this chassis composed no `R`, like
+    /// [`Self::actor_ref`].
+    #[must_use]
+    pub fn root_pusher<R: Root + 'static>(&self) -> RootPusher<R> {
+        self.booted.spawner.root_pusher(actor_ref::<R>(&self.booted))
     }
 
     /// Push `payload` to the actor `to` proves, untracked, with its reply
