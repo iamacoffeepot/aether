@@ -1,0 +1,22 @@
+[package]
+name = "aether-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The workspace contract (ADR-0237): run, environment, and import kinds, valid by construction."
+
+# The ADR-0122 identity/runtime split rides the `runtime` feature. The identity
+# half (the kinds and their validators) is `no_std` and compiles always-on, so a
+# wasm program SDK depends on this crate with `default-features = false`. The
+# `runtime` feature is empty until the `aether.workspace` actor lands with it.
+[features]
+default = ["runtime"]
+runtime = []
+
+[dependencies]
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+
+[lints]
+workspace = true
