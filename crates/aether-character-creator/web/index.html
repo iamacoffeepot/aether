@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Aether Character Creator</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">AETHER / GENERATIVE ACTOR LAB</p>
+          <h1>Character Creator</h1>
+        </div>
+        <div class="status" id="status" aria-live="polite">
+          <span class="status-light"></span>
+          Loading generated head
+        </div>
+      </header>
+
+      <section class="workspace">
+        <div class="viewport-card">
+          <canvas id="viewport" aria-label="Interactive three-dimensional character head"></canvas>
+          <div class="viewport-gradient"></div>
+          <div class="view-controls" aria-label="Camera views">
+            <button type="button" data-view="front" class="active">Front</button>
+            <button type="button" data-view="three-quarter">3/4</button>
+            <button type="button" data-view="profile">Profile</button>
+          </div>
+          <div class="viewport-help">Drag to orbit · Scroll to zoom</div>
+        </div>
+
+        <aside class="creator-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">Facial structure</p>
+              <h2>Shape controls</h2>
+            </div>
+            <button type="button" class="text-button" id="reset">Reset</button>
+          </div>
+
+          <div id="morph-controls" class="morph-controls"></div>
+
+          <div class="actions">
+            <button type="button" class="primary" id="randomize">Generate variation</button>
+            <div class="action-row">
+              <button type="button" id="export">Export recipe</button>
+              <label class="button-label" for="import">Import recipe</label>
+              <input id="import" type="file" accept="application/json,.json">
+            </div>
+          </div>
+
+          <div class="asset-note">
+            <span>01</span>
+            <p>Geometry, materials, and controls are generated from Aether source. No external character assets.</p>
+          </div>
+        </aside>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

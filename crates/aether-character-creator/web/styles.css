@@ -1,0 +1,344 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #090d12;
+  color: #f4f0e8;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(34, 102, 112, 0.17), transparent 31rem),
+    #090d12;
+}
+
+button,
+.button-label {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.045);
+  color: #eee9df;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+button:hover,
+.button-label:hover {
+  border-color: rgba(108, 211, 205, 0.52);
+  background: rgba(108, 211, 205, 0.09);
+}
+
+button:active,
+.button-label:active {
+  transform: translateY(1px);
+}
+
+.app-shell {
+  width: min(1500px, 100%);
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 22px;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  min-height: 90px;
+  padding: 0 4px 20px;
+}
+
+.eyebrow,
+.section-kicker {
+  margin: 0 0 7px;
+  color: #72c8c3;
+  font-size: 0.67rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+h1,
+h2 {
+  margin: 0;
+  font-weight: 560;
+  letter-spacing: -0.035em;
+}
+
+h1 {
+  font-size: clamp(1.9rem, 4vw, 3.2rem);
+}
+
+h2 {
+  font-size: 1.45rem;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #9da5aa;
+  font-size: 0.78rem;
+}
+
+.status-light {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d6a153;
+  box-shadow: 0 0 14px rgba(214, 161, 83, 0.7);
+}
+
+.status.ready .status-light {
+  background: #62d2a2;
+  box-shadow: 0 0 14px rgba(98, 210, 162, 0.7);
+}
+
+.status.error .status-light {
+  background: #e56565;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 390px;
+  min-height: calc(100vh - 134px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
+  background: rgba(12, 17, 23, 0.82);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.36);
+}
+
+.viewport-card {
+  position: relative;
+  min-height: 680px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(58, 82, 91, 0.42), transparent 44%),
+    linear-gradient(145deg, #111923, #080c11 78%);
+}
+
+#viewport {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+
+#viewport:active {
+  cursor: grabbing;
+}
+
+.viewport-gradient {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(to top, rgba(4, 7, 10, 0.54), transparent 28%);
+}
+
+.view-controls {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  display: flex;
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 9px;
+  background: rgba(8, 12, 16, 0.74);
+  backdrop-filter: blur(14px);
+}
+
+.view-controls button {
+  padding: 7px 12px;
+  border-color: transparent;
+  color: #8f979c;
+  font-size: 0.72rem;
+}
+
+.view-controls button.active {
+  background: #e8e1d5;
+  color: #13171b;
+}
+
+.viewport-help {
+  position: absolute;
+  right: 20px;
+  bottom: 18px;
+  color: rgba(232, 225, 213, 0.52);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+}
+
+.creator-panel {
+  display: flex;
+  flex-direction: column;
+  padding: 30px 28px 25px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(22, 28, 34, 0.96), rgba(13, 18, 23, 0.98));
+}
+
+.panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding-bottom: 24px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.text-button {
+  padding: 6px 9px;
+  border: 0;
+  color: #82beba;
+  background: transparent;
+  font-size: 0.72rem;
+}
+
+.morph-controls {
+  display: grid;
+  gap: 19px;
+  padding: 27px 0 30px;
+}
+
+.morph-control {
+  display: grid;
+  grid-template-columns: 1fr 42px;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.morph-control label {
+  color: #ccd0cf;
+  font-size: 0.78rem;
+}
+
+.morph-value {
+  color: #7fc9c4;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.morph-control input {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 3px;
+  margin: 5px 0;
+  appearance: none;
+  border-radius: 10px;
+  outline: 0;
+  background: linear-gradient(to right, #43535a, #43535a);
+}
+
+.morph-control input::-webkit-slider-thumb {
+  width: 13px;
+  height: 13px;
+  appearance: none;
+  border: 2px solid #122125;
+  border-radius: 50%;
+  background: #7fd3ce;
+  box-shadow: 0 0 0 1px rgba(127, 211, 206, 0.34);
+}
+
+.actions {
+  display: grid;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.actions button,
+.button-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 10px 13px;
+  font-size: 0.76rem;
+}
+
+.actions .primary {
+  border-color: #77cec9;
+  background: #77cec9;
+  color: #0c1719;
+  font-weight: 700;
+}
+
+.action-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+#import {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.asset-note {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: 10px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  color: #69747a;
+  font-size: 0.67rem;
+  line-height: 1.5;
+}
+
+.asset-note span {
+  color: #73b9b5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.asset-note p {
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    padding: 12px;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .viewport-card {
+    min-height: 62vh;
+  }
+
+  .creator-panel {
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 540px) {
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 15px;
+  }
+
+  .viewport-card {
+    min-height: 520px;
+  }
+
+  .creator-panel {
+    padding: 24px 20px;
+  }
+}

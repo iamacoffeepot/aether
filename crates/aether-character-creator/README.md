@@ -14,6 +14,18 @@ Render a deterministic portrait from the same generated geometry:
 cargo run -p aether-character-creator --bin preview-head
 ```
 
+Launch the interactive WebGL character creator at
+`http://127.0.0.1:8787`:
+
+```sh
+cargo run -p aether-character-creator --bin serve-character-creator
+```
+
+The browser demo reads the morph names directly from the GLB and provides
+orbit and zoom controls, front/three-quarter/profile cameras, ten facial
+sliders, variation generation, reset, and JSON recipe import/export. It uses no
+external JavaScript packages or visual assets.
+
 The preview command refuses to render when the checked-in GLB differs from a
 fresh generator run, keeping the image tied to the binary asset.
 
