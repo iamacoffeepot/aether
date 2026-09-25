@@ -123,7 +123,9 @@ impl BlobStore {
 - In memory only. Never backed by files. A restart forgets every blob.
 - Check-in only. Bytes are immutable once checked in. A change is a new
   check-in and a new handle.
-- Check-in hashes the bytes. If the hash is already resident, check-in
+- Check-in hashes the bytes with BLAKE3. The hash is only a dedup key, and
+  it never matches the Bloomery journal's digests, which cover a kind prefix
+  plus the payload, so it need not share their sha256. If the hash is already resident, check-in
   returns the existing entry and drops the new bytes (dedup).
 - An entry is shared as an `Arc`. Reading its bytes takes no lock.
 - The dedup index takes a short lock on check-in only. Reads, sends and
@@ -271,8 +273,8 @@ impl<'a> BlobReader<'a> {
 - A guest can still loop the reader into a `Vec`. The API cannot prevent it.
   Nothing makes it the easy path, and the loop is visible in review.
 - `blob_read_p32` lands with a named production consumer, per the rule that
-  every FFI import needs one. The first candidate is Bloomery's `Env<Async>`
-  opening an `OpaqueBytes` input (open question 2).
+  every FFI import needs one: Bloomery's `Env::open` over an `OpaqueBytes`
+  input (section 11).
 
 ### 10. Closures carry handles, and the closure ceiling rises
 
@@ -287,7 +289,19 @@ frame. `ClosureLimit::MAX_BYTES` rises from 16 MiB to 4 GiB, which admits a
 stays within `MIN_BYTES ..= MAX_BYTES`, and `ClosureTooLarge` keeps its
 meaning.
 
-### 11. Files that change (implementation, not this ADR)
+### 11. Bloomery reads and the reader's shape
+
+- `Env::read::<K>` (`crates/aether-bloomery-program/src/env.rs:393`) keeps
+  returning a decoded `K`, since a typed artifact must be decoded anyway. A
+  new `Env::open` returns a `BlobReader` over an `OpaqueBytes` input. It is the
+  named production consumer of `blob_read_p32`.
+- `BlobReader` does not implement `std::io::Read`, whose provided
+  `read_to_end` is exactly the whole-load shortcut. A separately named adapter
+  (`BlobReadAdapter`, behind the guest SDK's `std` feature, since the SDK is
+  `no_std`) provides `Read` for decoders that need it, so the whole-load path
+  is always a named choice.
+
+### 12. Files that change (implementation, not this ADR)
 
 | Area | Files |
 |---|---|
@@ -324,31 +338,6 @@ meaning.
   the actor dies.
 - **Follow-on.** Guest-side check-in (a chunked writer that finishes into a
   `Blob`) needs its own named consumer and is not decided here.
-
-## Open questions
-
-The owner decides each. Each carries a recommendation.
-
-1. **Hash.** Recommend: BLAKE3, which is several times faster on large
-   inputs and parallelizes; the hash is only a dedup key, and it cannot share
-   digest values with the journal anyway (below). Alternative: sha256 over the
-   raw bytes, matching the Bloomery journal's hash function (`hash_bytes`,
-   `crates/aether-bloomery-kinds/src/artifact.rs:53`), so one crate and one
-   digest type serve both. Note the journal's artifact digest covers an 8-byte
-   `KindId` prefix plus the payload (`artifact_digest`, `artifact.rs:47`), so
-   it is not the store's hash of the payload alone. Sharing sha256 saves a
-   second hash family. Since the hash is only a dedup key, either is safe.
-2. **Bloomery `Env::read`.** Recommend: `Env::read::<K>`
-   (`crates/aether-bloomery-program/src/env.rs:393`) keeps returning a decoded
-   `K`, since a typed artifact must be decoded anyway. A new `Env::open` returns
-   a `BlobReader` over an `OpaqueBytes` input. That is the named consumer for
-   `blob_read_p32`.
-3. **Whether `BlobReader` implements `std::io::Read`.** Recommend: it does
-   not. Ecosystem decoders take `impl Read`, but `Read::read_to_end` is exactly
-   the whole-load shortcut. Provide a separately named adapter type (for
-   example `BlobReadAdapter`) for decoders that need `Read`, so the whole-load
-   path is always a named choice. The guest SDK is `no_std`, so the adapter
-   lives behind an `std` feature.
 
 ## Alternatives considered
 
