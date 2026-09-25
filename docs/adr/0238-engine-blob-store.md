@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-09-25
 - **Amended:** 2026-09-25 — decision 6: persisting a handle is a documented misuse, not enforced; later directions recorded.
+- **Amended:** 2026-09-25 — decision 10: `ReadArtifact` replies carry handles too; `aether.fs` recorded as a blob consumer.
 
 Builds on [ADR-0038](0038-actor-per-component-dispatch.md) and
 [ADR-0087](0087-blob-unit-of-dispatch.md) (one handler at a time per actor,
@@ -326,8 +327,9 @@ impl<'a> BlobReader<'a> {
 
 ### 10. Closures carry handles, and the closure ceiling rises
 
-This amends ADR-0226 decision 10. `ReadClosure` answers with handles, not
-inline bytes, and `Invoke` hands the program its closure as handles. A
+This amends ADR-0226 decision 10. `ReadArtifact` and `ReadClosure` answer
+with handles, not inline bytes, and `Invoke` hands the program its closure
+as handles. A
 program reads an `OpaqueBytes` member through `BlobReader`, so no member is
 copied into the program's memory unless it reads it.
 
@@ -375,6 +377,11 @@ meaning.
   receive a handle. A handle-bearing read is a new kind (for example
   `aether.fs.open` answering a `Blob`), and `aether.fs.read` keeps its bytes
   for wire callers. The same holds for process output, captures and HTTP.
+- **`aether.fs` moves to blobs.** In-engine readers should get a `Blob`
+  rather than inline bytes, and writes should take one once guest-side
+  check-in exists (see Follow-on). Wire callers keep `aether.fs.read` /
+  `write` with bytes (section 5). The move needs its own issue and a named
+  in-engine consumer.
 - **Other consumers.** Process stdout, fs reads, and future mostly-static
   graphics data (meshes, textures) held as blobs and uploaded by the render
   cap from a borrowed slice.
