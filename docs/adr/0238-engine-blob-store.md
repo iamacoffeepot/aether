@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-25
+- **Amended:** 2026-09-25 — decisions 9, 10 and 11: a closure member is read only through `ClosureArtifact::load(expected)`, which verifies the member's claimed digest before returning any byte and is `blob_read_p32`'s production consumer; `Env::open` and its `VerifyingReader` are deferred until a program streams a large opaque input. This supersedes the `Env::open` clause of the amendment below.
 - **Amended:** 2026-09-25 — decisions 3 and 11, wording: an empty attachments field is two words, not one; `Env::open` returns a `VerifyingReader` that streams through a `BlobReader` and checks the member's claimed digest at end of stream.
 - **Amended:** 2026-09-25 — decision 3: a tag-1 field is valid only beside a matching attachment; one carried by a blob-free sender or a wire `Call` is refused at its recipient's decode; intra-cluster guest mail keeps each named value alive until the child's dispatch; a guest's reply to a session or engine mailbox is an egress path.
 - **Amended:** 2026-09-25 — decisions 3, 4 and 12: a send resolves the tag-1 hashes already in its payload against the sender's own blobs and attaches their entries, so a raw forward stays shared and a guest shares a held value by hash on send; an unresolved hash refuses the send at the sender. Supersedes the guest share-on-send follow-on below.
@@ -380,15 +381,16 @@ impl<'a> BlobReader<'a> {
   `blob_hold_p32` and `blob_drop_p32` are a matched pair: a guest `Blob`'s
   construction and its `GuestHold`'s `Drop`. `blob_read_p32` has a named
   production consumer, per the rule that
-  every FFI import needs one: Bloomery's `Env::open` over an `OpaqueBytes`
-  input (section 11).
+  every FFI import needs one: Bloomery's `ClosureArtifact::load`, which
+  streams a closure member through a `BlobReader` while it hashes (section
+  11).
 
 ### 10. Closures carry `Blob`s, and the closure ceiling rises
 
 This amends ADR-0226 decision 10. `ReadArtifact` and `ReadClosure` answer
 with `Blob`s, not inline byte vectors, and `Invoke` hands the program its
-closure as `Blob`s. A program reads an `OpaqueBytes` member through `BlobReader`,
-so no member is copied into the program's memory unless it reads it.
+closure as `Blob`s, so no member is copied into the program's memory unless
+the program reads it.
 
 The ceiling now bounds resident bytes checked in for one closure, not a mail
 frame. `ClosureLimit::MAX_BYTES` rises from 16 MiB to 4 GiB, which admits a
@@ -398,13 +400,17 @@ meaning.
 
 ### 11. Bloomery reads and the reader's shape
 
-- `Env::read::<K>` (`crates/aether-bloomery-program/src/env.rs:393`) keeps
-  returning a decoded `K`, since a typed artifact must be decoded anyway. A
-  new `Env::open` returns a `VerifyingReader` over an `OpaqueBytes` input. It
-  streams through a `BlobReader` and hashes as it reads, because a closure
-  member's digest crosses mail as an unverified claim: a read that ends at a
-  mismatch fails there, and a read that stops early proves nothing about the
-  bytes it returned. It is the named production consumer of `blob_read_p32`.
+- A closure member's digest crosses mail as an unverified claim, so a member
+  is read only through `ClosureArtifact::load(expected)`. It streams the
+  member through a `BlobReader`, hashing every byte, and returns the bytes only
+  when they hash to `expected`. It is the named production consumer of
+  `blob_read_p32`. `Env::read::<K>` (`crates/aether-bloomery-program/src/env.rs`)
+  keeps returning a decoded `K` and goes through `load`, so a mismatch refuses
+  before any decode.
+- `Env::open`, a streaming reader over an `OpaqueBytes` input, is deferred
+  until a program streams a large opaque input it does not load whole, such
+  as a follow-up program that takes a prior run's log as an input. Until
+  then no program reads an `OpaqueBytes` member.
 - `BlobReader` does not implement `std::io::Read`, whose provided
   `read_to_end` is exactly the whole-load shortcut. A separately named adapter
   (`BlobReadAdapter`, behind a new `std` feature of the guest SDK, since the
