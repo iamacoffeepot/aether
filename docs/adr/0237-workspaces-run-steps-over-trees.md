@@ -6,6 +6,7 @@
 - **Amended:** 2026-09-25 — the blob split is no longer deferred: the journal is a root directory holding the SQLite database and a `blobs` directory of digest-named files for every blob, at every size (ADR-0220). Open question 1 is resolved: the journal stays the only writer, of the database and of the blob files. This replaces the previous amendment's deferred-split sentence.
 - **Amended:** 2026-09-25 — RunResult gains Failed { detail } for executor failures during a run; like Exhausted it never reaches the program.
 - **Amended:** 2026-09-25 — imports are an `Import` request on the workspace actor: it pulls a digest-pinned image through the Engine API and decodes its exported filesystem into a tree in the journal, under userland rules and `Config` bounds; no tarball, host path, or host pipe is read. Open question 3 is resolved (a new `aether-workspace` crate; the tar codec stays in `aether-bloomery-tar`). Open question 2 waits for a second executor. Open question 1's single writer gains a streaming artifact store the journal hands the workspace actor.
+- **Amended:** 2026-09-25 — decision 9: the allotment estimate is keyed on what the run does, not who asked. The key is the digest of the run's environment and its ordered steps (each step's tool, args and env). A `Run` carries no program identity, and the steps describe the work directly, so identical steps share an estimate and different args get their own.
 
 Amends [ADR-0229](0229-program-cap-apis-are-extra-run-arguments.md) (the
 closed, sealed set of program APIs, `Http` / `Process`, mapped through
@@ -285,7 +286,7 @@ the sandbox, or they make the program `Sampled`.
    | Piece | Mechanism |
    |---|---|
    | Host budget | Actor `Config`: the cores it may hand out (a cpuset list), the memory it may reserve, headroom left for the host |
-   | Allotment | A `Config` default for a program never seen. After that, an estimate kept per (program name, environment) from observed peak memory and wall time (an EWMA), times headroom, clamped to the budget. The estimate is executor-local state: rebuildable, never in the journal, never an input to a result. |
+   | Allotment | A `Config` default for a key never seen. After that, an estimate kept per run key from observed peak memory and wall time (an EWMA), times headroom, clamped to the budget. The run key is the digest of the environment and the ordered steps, each step's tool, args and env: what the run does, not who asked, since a `Run` names no program. Identical steps share an estimate, and a step whose args differ gets its own. The estimate is executor-local state: rebuildable, never in the journal, never an input to a result. |
    | After exhaustion | The estimate for that key grows (memory doubles, the deadline grows), so a reactor's retry receives more without anyone asking for it |
    | Admission | FIFO. A run starts when its allotment fits the free budget and is pinned to free cores; otherwise it waits. A run is never dropped. An allotment larger than the whole budget is clamped to it. |
 
@@ -301,7 +302,7 @@ the sandbox, or they make the program `Sampled`.
 
 - Proof execution leaves Bloomery entirely. There are no lanes, no rolls,
   and no per-lane janitoring; the only execution state is the actor's
-  budget, its per-program estimates, and the daemon's rebuildable image
+  budget, its per-run-key estimates, and the daemon's rebuildable image
   store, none of which can change a result.
 - Every result names its tree, environment, and platform by digest, so the
   journal proves exactly which tools produced it.
