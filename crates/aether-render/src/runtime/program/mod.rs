@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use aether_substrate::render::{
-    ProgramComputePipelineSpec, ProgramDrawPipelineSpec, build_fullscreen_vertex_module,
+    ProgramComputePipelineSpec, ProgramDrawPipelineSpec, ProgramPipelineSpec, build_fullscreen_vertex_module,
     build_program_compute_pipeline, build_program_draw_pipeline, build_program_pipeline, program_inputs_layout,
     program_storage_layout, program_uniform_layout,
 };
@@ -274,7 +274,11 @@ impl ProgramRegistry {
                 continue;
             };
             let queries = measuring.then(|| instrument.frame()).flatten();
-            record::record_dispatch(gpu, encoder, program, transient_pool, textures, geometries, dispatch, queries);
+            record::record_dispatch(
+                gpu,
+                encoder,
+                record::DispatchRecord { program, pool: transient_pool, textures, geometries, dispatch, queries },
+            );
         }
         instrument.end_frame(encoder);
     }
@@ -322,13 +326,15 @@ fn build_program_passes(
                     let output_format = plan.slot_format(pass.output.expect("fragment pass has an output"));
                     PassPipeline::Render(build_program_pipeline(
                         device,
-                        fullscreen,
-                        &module,
-                        &pass.entry_point,
-                        super::texture::wgpu_texture_format(output_format),
-                        blend_for(output_format),
-                        &uniform_layout,
-                        &inputs_layout,
+                        &ProgramPipelineSpec {
+                            vertex_module: fullscreen,
+                            fragment_module: &module,
+                            entry_point: &pass.entry_point,
+                            color_format: super::texture::wgpu_texture_format(output_format),
+                            blend: blend_for(output_format),
+                            uniform_layout: &uniform_layout,
+                            inputs_layout: &inputs_layout,
+                        },
                     ))
                 }
                 PassPlanStage::Draw(draw) | PassPlanStage::DrawIndexedIndirect(draw) => {

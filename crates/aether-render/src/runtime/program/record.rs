@@ -30,23 +30,23 @@ use super::validate::{PassPlan, PassPlanStage, ProgramPlan, ResolvedSlot, resolv
 use super::{PassGpu, PassPipeline, ProgramDeviceState, RegisteredProgram, TransientKey};
 use crate::{GeometryBuffer, PassLoad, ProgramDispatch, TextureSampling, TextureUsage};
 
+/// What [`record_dispatch`] realizes, pools, and encodes against: the
+/// program, the transient pool, the two registries, the dispatch, and
+/// the frame's timing queries when this frame measures.
+pub(super) struct DispatchRecord<'a> {
+    pub(super) program: &'a mut RegisteredProgram,
+    pub(super) pool: &'a mut HashMap<TransientKey, Vec<wgpu::TextureView>>,
+    pub(super) textures: &'a mut TextureRegistry,
+    pub(super) geometries: &'a mut GeometryRegistry,
+    pub(super) dispatch: &'a ProgramDispatch,
+    pub(super) queries: Option<FrameQueries<'a>>,
+}
+
 /// Execute one dispatch into `encoder`, or warn-drop it whole: the
 /// checks run first, so a rejected dispatch records nothing and the
 /// frame survives untouched.
-// The realize / pool / encode sequence takes the two registries plus the
-// pool and the dispatch; threading them through a bundle struct for the
-// one call site would only rename the same borrows.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn record_dispatch(
-    gpu: &RenderGpu,
-    encoder: &mut wgpu::CommandEncoder,
-    program: &mut RegisteredProgram,
-    pool: &mut HashMap<TransientKey, Vec<wgpu::TextureView>>,
-    textures: &mut TextureRegistry,
-    geometries: &mut GeometryRegistry,
-    dispatch: &ProgramDispatch,
-    queries: Option<FrameQueries<'_>>,
-) {
+pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, record: DispatchRecord<'_>) {
+    let DispatchRecord { program, pool, textures, geometries, dispatch, queries } = record;
     let RegisteredProgram { plan, state, timings, .. } = program;
     let ProgramDeviceState::Ready { passes_gpu, cache } = state else {
         let ProgramDeviceState::Quarantined { reason } = state else {
@@ -120,7 +120,11 @@ pub(super) fn record_dispatch(
         return;
     }
 
-    encode_passes(gpu, encoder, plan, passes_gpu, &mut parts, pool, textures, geometries, dispatch, queries);
+    encode_passes(
+        gpu,
+        encoder,
+        PassEncoding { plan, passes_gpu, cache: &mut parts, pool, textures, geometries, dispatch, queries },
+    );
 }
 
 /// The three WebGPU error classes a dispatch can produce. One nested scope
@@ -415,6 +419,21 @@ fn check_dispatch(
     Some(reference)
 }
 
+/// The checked dispatch and its derived state [`encode_passes`] records
+/// from: the validated plan and its per-pass GPU state, the split
+/// dispatch cache, the realized transient pool and registries, and the
+/// frame's timing queries when this frame measures.
+struct PassEncoding<'a, 'c> {
+    plan: &'a ProgramPlan,
+    passes_gpu: &'a [PassGpu],
+    cache: &'a mut CacheParts<'c>,
+    pool: &'a HashMap<TransientKey, Vec<wgpu::TextureView>>,
+    textures: &'a TextureRegistry,
+    geometries: &'a GeometryRegistry,
+    dispatch: &'a ProgramDispatch,
+    queries: Option<FrameQueries<'a>>,
+}
+
 /// Stage the dispatch's uniform windows, refresh the bind groups whose
 /// bound resources moved since the last dispatch, and record the passes.
 /// In the steady state — the same bindings, the same extent — the loop
@@ -423,19 +442,9 @@ fn check_dispatch(
 // Staging, bind groups, and pass encoding share the per-pass borrow
 // structure; splitting them would re-thread the same context
 // arguments — the same shape `record_overlay_batches` keeps.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-fn encode_passes(
-    gpu: &RenderGpu,
-    encoder: &mut wgpu::CommandEncoder,
-    plan: &ProgramPlan,
-    passes_gpu: &[PassGpu],
-    cache: &mut CacheParts<'_>,
-    pool: &HashMap<TransientKey, Vec<wgpu::TextureView>>,
-    textures: &TextureRegistry,
-    geometries: &GeometryRegistry,
-    dispatch: &ProgramDispatch,
-    mut queries: Option<FrameQueries<'_>>,
-) {
+#[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing; too_many_arguments left this attribute
+fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: PassEncoding<'_, '_>) {
+    let PassEncoding { plan, passes_gpu, cache, pool, textures, geometries, dispatch, mut queries } = encoding;
     let layout = cache.layout;
     let extent = cache.extent;
     let transient_view = |transient: u32| {

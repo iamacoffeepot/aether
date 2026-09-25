@@ -11,11 +11,11 @@ use aether_math::Rect2;
 use aether_substrate::render::{
     CompositeBlend, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw,
     MaterialPassRecord, MaterialPipelines, OverlayDraw, OverlaySource, Pipeline, QUAD_VERTEX_BUFFER_BYTES,
-    QUAD_VERTEX_STRIDE, QuadPipeline, SHAPE_VERTEX_BUFFER_BYTES, SHAPE_VERTEX_STRIDE, ShapeParams, Targets,
-    TextureBindings, build_main_pipeline, build_material_pipelines, build_quad_pipeline, build_texture_bindings,
-    push_coverage_params, push_material_rect_vertices, push_screen_quad_vertices, push_screen_shape_vertices,
-    push_screen_triangle_vertices, push_textured_params, push_world_quad_vertices, push_world_shape_vertices,
-    push_world_triangle_vertices, record_material_pass, record_quad_overlay_pass,
+    QUAD_VERTEX_STRIDE, QuadOverlayPassRecord, QuadPipeline, SHAPE_VERTEX_BUFFER_BYTES, SHAPE_VERTEX_STRIDE,
+    ShapeParams, Targets, TextureBindings, build_main_pipeline, build_material_pipelines, build_quad_pipeline,
+    build_texture_bindings, push_coverage_params, push_material_rect_vertices, push_screen_quad_vertices,
+    push_screen_shape_vertices, push_screen_triangle_vertices, push_textured_params, push_world_quad_vertices,
+    push_world_shape_vertices, push_world_triangle_vertices, record_material_pass, record_quad_overlay_pass,
 };
 
 use super::material::{MaterialBatch, accepts_coverage_texture};
@@ -325,15 +325,17 @@ pub(super) fn record_overlay_batches(
     }
 
     record_quad_overlay_pass(
-        &gpu.queue,
         encoder,
-        &gpu.quad_pipeline,
-        targets,
-        &vertex_bytes,
-        &shape_vertex_bytes,
-        &draws,
-        viewport,
-        view_proj,
+        QuadOverlayPassRecord {
+            queue: &gpu.queue,
+            pipeline: &gpu.quad_pipeline,
+            targets,
+            vertex_bytes: &vertex_bytes,
+            shape_vertex_bytes: &shape_vertex_bytes,
+            draws: &draws,
+            viewport,
+            view_proj,
+        },
     );
 
     if let Some(observation) = observation {

@@ -139,34 +139,34 @@ pub fn build_main_pipeline(
     Pipeline { pipeline, vertex_buffer, camera_buffer, camera_bind_group, camera_bind_group_layout, pipeline_layout }
 }
 
-/// Upload the frame's `vertices` + `view_proj`, then draw them into
-/// the offscreen target with `LessEqual` depth testing and the same
-/// background clear color both chassis use.
+/// The GPU resources and frame inputs [`record_main_pass`] binds.
 ///
 /// `extra_pipelines`: optional pipelines drawn after the main one
 /// inside the same render pass, sharing the same vertex range and
 /// camera bind group. Desktop passes a wireframe overlay pipeline
 /// here when `AETHER_WIREFRAME=overlay`; substrate-harness passes `&[]`.
+#[derive(Clone, Copy)]
+pub struct MainPassRecord<'a> {
+    pub queue: &'a wgpu::Queue,
+    pub pipeline: &'a Pipeline,
+    pub targets: &'a Targets,
+    pub vertices: &'a [u8],
+    pub view_proj: &'a [f32; 16],
+    pub extra_pipelines: &'a [&'a wgpu::RenderPipeline],
+    pub clear: wgpu::Color,
+}
+
+/// Upload the frame's `vertices` + `view_proj`, then draw them into
+/// the offscreen target with `LessEqual` depth testing and the same
+/// background clear color both chassis use.
 ///
 /// Returns `Err(RenderError::VertexBufferOverflow)` if the frame's
 /// bytes exceed the size the vertex buffer was created with — the
 /// pass is skipped, no encoder writes happen, the caller decides
 /// whether to log and continue (skipping submit) or short-circuit.
 /// Empty `vertices` is fine: the clear still runs, no draw is issued.
-// A pass recording call names the GPU resources it binds, and there are
-// eight of them. Grouping them into a struct would only move the same list
-// behind a name that adds nothing.
-#[allow(clippy::too_many_arguments)]
-pub fn record_main_pass(
-    queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
-    pipeline: &Pipeline,
-    targets: &Targets,
-    vertices: &[u8],
-    view_proj: &[f32; 16],
-    extra_pipelines: &[&wgpu::RenderPipeline],
-    clear: wgpu::Color,
-) -> Result<(), RenderError> {
+pub fn record_main_pass(encoder: &mut wgpu::CommandEncoder, record: MainPassRecord<'_>) -> Result<(), RenderError> {
+    let MainPassRecord { queue, pipeline, targets, vertices, view_proj, extra_pipelines, clear } = record;
     let vertex_bytes = vertices.len();
     // Clamp against the buffer's created size, so the check tracks
     // whatever `vertex_buffer_bytes` the boot knob resolved to.

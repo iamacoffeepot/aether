@@ -52,8 +52,8 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
-    CaptureMeta, IDENTITY_VIEW_PROJ, RenderError, encode_png, map_capture_rgba, prepare_capture_copy, record_main_pass,
-    record_resolve_pass,
+    CaptureMeta, IDENTITY_VIEW_PROJ, MainPassRecord, RenderError, encode_png, map_capture_rgba, prepare_capture_copy,
+    record_main_pass, record_resolve_pass,
 };
 #[cfg(feature = "desktop")]
 use winit::window::Window;
@@ -615,14 +615,16 @@ impl RenderCapabilityState {
         {
             let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
             record_main_pass(
-                &gpu.queue,
                 encoder,
-                &gpu.pipeline,
-                &targets,
-                &self.last_submitted,
-                &self.camera_state,
-                extras,
-                self.clear_color,
+                MainPassRecord {
+                    queue: &gpu.queue,
+                    pipeline: &gpu.pipeline,
+                    targets: &targets,
+                    vertices: &self.last_submitted,
+                    view_proj: &self.camera_state,
+                    extra_pipelines: extras,
+                    clear: self.clear_color,
+                },
             )?;
         }
         // Material pass (depth-tested world-space rects), then the screen /
