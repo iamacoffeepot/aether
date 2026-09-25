@@ -29,6 +29,7 @@ use aether_chassis::entry::ChassisEnv;
 use aether_chassis::signal_driver::SignalDriverCapability;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_http::HttpCapability;
+use aether_process::{ProcessCapability, ProcessParams};
 use aether_rpc::RpcBindGate;
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
@@ -181,7 +182,12 @@ impl BootableChassis for BloomeryChassis {
             hub_outbound: Arc::clone(&boot.outbound),
         };
         Ok(with_rpc_server(
-            builder.with_actor::<ComponentHostCapability>(component_host_params).with_actor::<HttpCapability>(()),
+            builder
+                .with_actor::<ComponentHostCapability>(component_host_params)
+                .with_actor::<HttpCapability>(())
+                // SPIKE (ADR-0237 step 0): the one exec integration the step-0 loop needs. The allowlist stays
+                // deny-by-default (`--process-allowlist docker=/usr/bin/docker` opens it).
+                .with_actor::<ProcessCapability>(ProcessParams { work_root: std::env::temp_dir() }),
         )
         .declare_config_member::<BloomeryConfig>())
     }

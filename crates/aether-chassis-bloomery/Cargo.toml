@@ -32,6 +32,8 @@ aether-substrate = { path = "../aether-substrate" }
 # (ADR-0155 §3), and the journal owner plus bundle driver the mount seam spawns.
 aether-component = { path = "../aether-component" }
 aether-http = { path = "../aether-http" }
+# SPIKE (ADR-0237 step 0): compose `aether.process` so a Sampled `Process` program can run.
+aether-process = { path = "../aether-process" }
 aether-rpc = { path = "../aether-rpc" }
 aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-driver = { path = "../aether-bloomery-driver" }

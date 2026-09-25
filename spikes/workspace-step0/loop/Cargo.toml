@@ -1,0 +1,23 @@
+[package]
+name = "spike-workspace-step0-loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# ADR-0237 step-0 spike driver: seeds a journal with the spike bundle, boots the
+# bloomery chassis (with `aether.process` composed on this spike branch), and
+# makes one `spike.workspace.clippy` call. Run with `--ignored --nocapture`.
+[dependencies]
+
+[dev-dependencies]
+aether-bloomery-journal = { path = "../../../crates/aether-bloomery-journal" }
+aether-bloomery-kinds = { path = "../../../crates/aether-bloomery-kinds" }
+aether-chassis-bloomery = { path = "../../../crates/aether-chassis-bloomery" }
+aether-data = { path = "../../../crates/aether-data", features = ["derive"] }
+aether-harness-bloomery = { path = "../../../crates/aether-harness-bloomery" }
+aether-harness-substrate = { path = "../../../crates/aether-harness-substrate" }
+clap = { workspace = true }
+
+[lints]
+workspace = true

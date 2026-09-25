@@ -10,6 +10,7 @@ use aether_chassis::boot::{ActorRingOverlay, RegistryQueueOverlay, SchedulerTuni
 use aether_chassis::chassis_cli;
 use aether_chassis::cli::ChassisMeta;
 use aether_http::HttpOverlay;
+use aether_process::ProcessOverlay;
 use aether_rpc::RpcServerOverlay;
 use aether_substrate::config::SettlementOverlay;
 use clap::Parser;
@@ -49,6 +50,10 @@ pub struct BloomeryCli {
     #[command(flatten)]
     pub http: HttpOverlay,
 
+    /// SPIKE (ADR-0237 step 0): `--process-allowlist` / `--process-timeout-ms`.
+    #[command(flatten)]
+    pub process: ProcessOverlay,
+
     /// Per-actor ring-capacity knobs (issue 1990): `--actor-*`. The chassis
     /// resolves `ActorRingConfig` off its own source stack for the actors its
     /// registry hosts.
@@ -84,6 +89,7 @@ chassis_cli!(BloomeryCli {
     BloomeryOverlay,
     RpcServerOverlay,
     HttpOverlay,
+    ProcessOverlay,
     ActorRingOverlay,
     SchedulerTuningOverlay,
     RegistryQueueOverlay,

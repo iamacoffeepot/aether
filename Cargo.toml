@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = [
+    # SPIKE (ADR-0237 step 0) — spike branch only.
+    "spikes/workspace-step0/program",
+    "spikes/workspace-step0/loop",
     "crates/aether-substrate",
     "crates/aether-chassis",
     "crates/aether-chassis-desktop",

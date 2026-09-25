@@ -324,6 +324,7 @@ dependencies = [
  "aether-harness-fleet",
  "aether-harness-substrate",
  "aether-http",
+ "aether-process",
  "aether-rpc",
  "aether-substrate",
  "clap",
@@ -5309,6 +5310,31 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spike-workspace-step0-loop"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-bloomery-journal",
+ "aether-bloomery-kinds",
+ "aether-chassis-bloomery",
+ "aether-data",
+ "aether-harness-bloomery",
+ "aether-harness-substrate",
+ "clap",
+]
+
+[[package]]
+name = "spike-workspace-step0-program"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-bundle",
+ "aether-bloomery-kinds",
+ "aether-bloomery-program",
+ "aether-data",
+ "aether-process",
 ]
 
 [[package]]

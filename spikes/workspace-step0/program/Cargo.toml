@@ -1,0 +1,22 @@
+[package]
+name = "spike-workspace-step0-program"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# ADR-0237 step-0 spike: one Sampled program with a trailing `Process` binding
+# that runs a single `docker run ... cargo clippy` through `aether.process`.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../../../crates/aether-actor" }
+aether-bloomery-bundle = { path = "../../../crates/aether-bloomery-bundle" }
+aether-bloomery-kinds = { path = "../../../crates/aether-bloomery-kinds" }
+aether-bloomery-program = { path = "../../../crates/aether-bloomery-program" }
+aether-data = { path = "../../../crates/aether-data", features = ["derive"] }
+aether-process = { path = "../../../crates/aether-process", default-features = false }
+
+[lints]
+workspace = true
