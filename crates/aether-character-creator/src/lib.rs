@@ -737,9 +737,11 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                     Vec3::new(0.0, -0.16 * weight, 0.025 * weight)
                 }
                 "CheekVolume" => {
-                    let weight = front
-                        * (gaussian(position.x, position.y, -0.37, -0.01, 0.25, 0.22)
-                            + gaussian(position.x, position.y, 0.37, -0.01, 0.25, 0.22));
+                    let mid_face =
+                        ((0.28 - position.y) / 0.20).clamp(0.0, 1.0) * ((position.y + 0.34) / 0.24).clamp(0.0, 1.0);
+                    let cheeks = gaussian(position.x, position.y, -0.37, -0.01, 0.25, 0.22)
+                        + gaussian(position.x, position.y, 0.37, -0.01, 0.25, 0.22);
+                    let weight = front * mid_face * cheeks;
                     Vec3::new(position.x * 0.075 * weight, 0.0, 0.11 * weight)
                 }
                 "NoseWidth" => {
@@ -828,6 +830,9 @@ mod tests {
                             deformed.x.is_sign_positive(),
                             "{name} crossed centerline"
                         );
+                    }
+                    if name == "CheekVolume" && position.y >= 0.28 {
+                        assert!(delta.length() < 0.000_1, "cheek morph leaked into the brow region");
                     }
                 }
             }
