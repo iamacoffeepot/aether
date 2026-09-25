@@ -78,11 +78,12 @@ pub struct ComponentCtx {
     /// next occupant as [`PendingReplies`] (#6409).
     pub(crate) reply_table: ReplyTable,
     /// ADR-0238 decisions 2 and 4: the blob-store entries this instance's
-    /// guest holds, keyed by hash, with the count of live `GuestHold`s over
-    /// each. The `blob_len_p32` / `blob_read_p32` / `blob_drop_p32` host fns
-    /// resolve a guest's hash only here. One table per instance, unlike
-    /// `reply_table`: a replacement starts empty, and the table drops with its
-    /// instance, releasing whatever is still counted.
+    /// guest can reach, keyed by hash: those `deliver` pins for the current
+    /// receive call, and those live `GuestHold`s hold, with their count. The
+    /// `blob_hold_p32` / `blob_read_p32` / `blob_drop_p32` host fns resolve a
+    /// guest's hash only here. One table per instance, unlike `reply_table`:
+    /// a replacement starts empty, and the table drops with its instance,
+    /// releasing whatever is still held.
     pub(crate) blob_table: BlobTable,
     /// Set by the `save_state` host fn during `on_dehydrate`. The
     /// substrate extracts it after hooks return via

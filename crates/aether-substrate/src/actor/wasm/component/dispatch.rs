@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use aether_actor::DISPATCH_HANDLED_RELEASE;
 use aether_actor::wasm::NO_INBOUND_SOURCE;
 
@@ -84,6 +86,11 @@ impl Component {
     /// handle stays held until answered. A table holding every
     /// addressable handle fails the delivery, which the trampoline turns
     /// into an ADR-0063 fail-fast.
+    ///
+    /// ADR-0238 decision 3: the envelope's blob attachments are pinned in
+    /// the instance's blob table for the `receive` call and unpinned when it
+    /// returns, whether it returned or trapped. A dropped delivery pins
+    /// nothing, and a blob-free one leaves the table unchanged.
     pub fn deliver(&mut self, env: &Envelope) -> wasmtime::Result<u32> {
         // ADR-0095: choose where in guest memory the payload lands via the
         // guest allocator — a fitting payload into the cached small region, a
@@ -141,9 +148,21 @@ impl Component {
         // as `source_of_p32` did — a peer-component origin yields its
         // `MailboxId`, every other origin yields `NO_INBOUND_SOURCE` (0).
         let source = Self::resolve_inbound_source(&env.sender.addr);
+        // ADR-0238 decision 3: pin each attached entry for this receive call
+        // only, so the guest's decode can take a hold on a tag-1 hash
+        // (`blob_hold_p32`). The payload was written verbatim: a hash names
+        // the same entry in every actor. The pins go when the call returns,
+        // on the trap path too, so none outlives it as an admission; only the
+        // holds the guest took keep an entry. Inline children drain inside
+        // this same call, so the pins cover their decodes as well.
+        let blob_table = &mut self.store.data_mut().blob_table;
+        for entry in env.attachments() {
+            blob_table.pin(Arc::clone(entry));
+        }
         let result = self
             .receive
             .call(&mut self.store, (env.kind.0, mail_ptr, byte_len, env.count, handle, env.recipient.0, source));
+        self.store.data_mut().blob_table.unpin_all();
         self.store.data().clear_in_flight();
         if let Ok(rc) = result
             && (rc == DISPATCH_HANDLED_RELEASE || rc == DISPATCH_UNKNOWN_KIND)

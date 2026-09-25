@@ -1,12 +1,12 @@
 //! Guest blob reads (ADR-0238 decisions 2 and 9): the guest half of the
-//! `blob_len_p32` / `blob_read_p32` / `blob_drop_p32` host fns.
+//! `blob_hold_p32` / `blob_read_p32` / `blob_drop_p32` host fns.
 //!
 //! A guest's `Shared` [`aether_data::Blob`] is backed by a `GuestHold` that
 //! names its store entry by hash. Each call hands the host a pointer to that
 //! 32-byte hash in guest memory, and the host resolves it only against this
 //! instance's own blob table, so a guessed hash reaches nothing. Every call
-//! returns the host's status unchanged: a negative value means the table does
-//! not hold the hash, and `GuestHold` decides what that means.
+//! returns the host's status unchanged: a negative value means the table
+//! neither pins nor holds the hash, and the caller decides what that means.
 
 use aether_data::BlobHash;
 
@@ -19,11 +19,12 @@ fn abi32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// The length of the blob `hash` names, or a negative host status.
-pub fn len(hash: &BlobHash) -> i64 {
+/// Take one hold on the blob `hash` names and return its length, or a
+/// negative host status with no hold taken. [`drop_hold`] gives it back.
+pub fn hold(hash: &BlobHash) -> i64 {
     // SAFETY: `hash_ptr` points at the 32 bytes of `hash`, which the borrow
     // keeps alive for the call; the host copies them out before returning.
-    unsafe { raw::blob_len(abi32(hash.as_bytes().as_ptr().addr())) }
+    unsafe { raw::blob_hold(abi32(hash.as_bytes().as_ptr().addr())) }
 }
 
 /// Copy bytes of the blob `hash` names, from `offset`, into `dst`. Returns
@@ -40,8 +41,8 @@ pub fn read(hash: &BlobHash, offset: u64, dst: &mut [u8]) -> i64 {
     }
 }
 
-/// Give up this instance's hold on the blob `hash` names. The host warns and
-/// does nothing for a hash the table does not hold.
+/// Give back one of this instance's holds on the blob `hash` names. The host
+/// warns and does nothing for a hash this instance has no hold on.
 pub fn drop_hold(hash: &BlobHash) {
     // SAFETY: `hash_ptr` points at the 32 bytes of `hash`, which the borrow
     // keeps alive for the call; the host copies them out before returning.

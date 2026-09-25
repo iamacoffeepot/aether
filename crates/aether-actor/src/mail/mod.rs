@@ -26,6 +26,9 @@ use aether_data::{
     wire,
 };
 
+#[cfg(target_arch = "wasm32")]
+use crate::blob::guest::GuestResolver;
+
 /// Framework wake emitted after the registry publishes a new live-mailbox or
 /// kind inventory generation. The inventory rides a pinned registry view, so
 /// the wake is intentionally empty and coalescible. This is hand-written
@@ -248,6 +251,14 @@ impl Mail<'_> {
     /// either the default body for hand-rolled `Kind` impls that
     /// didn't override, a cast-size mismatch, or a structured decode
     /// error.
+    ///
+    /// On wasm32 the decode is `K::decode_with` over the guest's
+    /// blob resolver (ADR-0238 decision 3): each tag-1 `Blob` field
+    /// becomes a `Shared` value holding one hold on this instance's
+    /// blob table, so decoding a mail twice holds twice and a field
+    /// never decoded holds nothing. A tag-1 hash the table neither
+    /// pins nor holds, such as one in bytes kept past their receive
+    /// call, fails the decode (`None`).
     #[must_use]
     pub fn decode_kind<K: Kind>(&self) -> Option<K> {
         if self.kind != K::ID.0 || self.count != 1 {
@@ -256,11 +267,11 @@ impl Mail<'_> {
         // SAFETY: `self.ptr` / `self.byte_len` originate from the
         // substrate's receive ABI; the substrate guarantees
         // `self.byte_len` bytes valid at `self.ptr` for this `Mail`'s
-        // lifetime. Bounding the slice by `byte_len` keeps
-        // `K::decode_from_bytes` (cast or structured) from running past
-        // the substrate-written region into adjacent linear memory.
+        // lifetime. Bounding the slice by `byte_len` keeps the decode
+        // (cast or structured) from running past the substrate-written
+        // region into adjacent linear memory.
         let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) };
-        K::decode_from_bytes(bytes)
+        decode_payload(bytes)
     }
 
     /// The raw inbound payload — the `byte_len` bytes the substrate wrote at
@@ -373,6 +384,21 @@ impl<'a> PriorState<'a> {
         }
         wire::from_bytes(payload).ok()
     }
+}
+
+/// [`Mail::decode_kind`]'s decode of a bounded payload: through the guest's
+/// blob resolver on wasm32, so tag-1 `Blob` fields become held `Shared`
+/// values (ADR-0238 decision 3).
+#[cfg(target_arch = "wasm32")]
+fn decode_payload<K: Kind>(bytes: &[u8]) -> Option<K> {
+    K::decode_with(bytes, &mut GuestResolver)
+}
+
+/// [`Mail::decode_kind`]'s decode of a bounded payload. The host build of the
+/// SDK holds no guest blob table, so a tag-1 field refuses.
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_payload<K: Kind>(bytes: &[u8]) -> Option<K> {
+    K::decode_from_bytes(bytes)
 }
 
 #[cfg(test)]

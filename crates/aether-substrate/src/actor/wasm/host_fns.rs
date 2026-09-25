@@ -47,11 +47,11 @@ pub const SAVE_STATE_NO_MEMORY: u32 = 1;
 pub const SAVE_STATE_OOB: u32 = 2;
 pub const SAVE_STATE_TOO_LARGE: u32 = 3;
 
-// Negative statuses returned by `blob_len_p32` and `blob_read_p32` (ADR-0238
+// Negative statuses returned by `blob_hold_p32` and `blob_read_p32` (ADR-0238
 // decision 9); a non-negative return is a length or a byte count. Nothing is
-// written into guest memory on any of them.
+// written into guest memory, and no hold is taken, on any of them.
 
-/// The hash is not in this instance's blob table.
+/// This instance's blob table neither pins nor holds the hash.
 pub const BLOB_NOT_HELD: i64 = -1;
 /// The hash or destination range lies outside guest memory.
 pub const BLOB_OUT_OF_BOUNDS: i64 = -2;
@@ -849,31 +849,31 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // HOST_FN_OK: ADR-0238 decision 9 — a guest's read of a blob it holds
-    // happens inside its handler, synchronously, into its own linear memory
-    // (`BlobBacking::read_at`, under `BlobReader`), which no mail capability
-    // can serve. Resolves the hash only against this instance's blob table
-    // (decision 4), so a guessed hash reaches nothing.
+    // HOST_FN_OK: ADR-0238 decisions 2 and 9 — a guest's decode builds a
+    // `Blob` over a tag-1 hash inside its handler, synchronously, and the
+    // value's `GuestHold` must own a hold before the decode returns, which no
+    // mail capability can serve. Resolves the hash only against this
+    // instance's blob table (decision 4): a hash the table neither pins nor
+    // holds is refused, so a guessed hash reaches nothing.
     //
-    // The blob's length, or a negative `BLOB_*` status. `GuestHold` reads it
-    // once, when delivery's grant builds the guest's value.
-    linker.func_wrap("aether", "blob_len_p32", |mut caller: Caller<'_, ComponentCtx>, hash_ptr: u32| -> i64 {
+    // Takes one hold and returns the blob's length, or a negative `BLOB_*`
+    // status with no hold taken. Paired with `blob_drop_p32`, which the
+    // hold's `Drop` calls.
+    linker.func_wrap("aether", "blob_hold_p32", |mut caller: Caller<'_, ComponentCtx>, hash_ptr: u32| -> i64 {
         let hash = match read_guest_hash(&mut caller, hash_ptr) {
             Ok(hash) => hash,
             Err(status) => return status,
         };
         // No resident entry nears `i64::MAX` bytes, so the length always fits.
-        caller
-            .data()
-            .blob_table
-            .entry(hash)
-            .map_or(BLOB_NOT_HELD, |entry| i64::try_from(entry.len()).unwrap_or(i64::MAX))
+        caller.data_mut().blob_table.hold(hash).map_or(BLOB_NOT_HELD, |len| i64::try_from(len).unwrap_or(i64::MAX))
     })?;
 
-    // HOST_FN_OK: ADR-0238 decision 9 — the streaming half of the read
-    // above, the body of `GuestHold`'s `BlobBacking::read_at`: the caller
-    // supplies the buffer and the host copies into it before returning.
-    // Same table-scoped resolution (decision 4).
+    // HOST_FN_OK: ADR-0238 decision 9 — a guest's read of a blob it holds
+    // happens inside its handler, synchronously, into its own linear memory:
+    // the body of `GuestHold`'s `BlobBacking::read_at`, under `BlobReader`,
+    // which no mail capability can serve. The caller supplies the buffer and
+    // the host copies into it before returning. Same table-scoped resolution
+    // as `blob_hold_p32` (decision 4), over a pinned or held hash.
     //
     // Copies `min(dst_len, MAX_READ_BYTES, len - offset)` bytes from `offset`
     // into `(dst_ptr, dst_len)` and returns that count, `0` at or past the
@@ -911,15 +911,16 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // HOST_FN_OK: ADR-0238 decision 2 — `GuestHold`'s `Drop` gives the
-    // instance's count back when a guest's last clone of a held `Blob` drops.
+    // HOST_FN_OK: ADR-0238 decision 2 — `GuestHold`'s `Drop` gives back the
+    // hold `blob_hold_p32` took when a guest's last clone of a held `Blob` drops.
     // It runs synchronously inside guest code with no ctx to mail from, and
     // mail-carried release counts are what ADR-0045 retired. Clones share one
     // hold, so there is no clone import.
     //
-    // Lowers the count for the hash; at zero the entry leaves the table and
-    // its `Arc` drops. An unheld hash, an out-of-bounds pointer or a guest
-    // without memory warns and changes nothing: no blob import traps.
+    // Lowers the hold count for the hash; once the entry is neither held nor
+    // pinned it leaves the table and its `Arc` drops. An unheld hash (pinned
+    // only, or absent), an out-of-bounds pointer or a guest without memory
+    // warns and changes nothing: no blob import traps.
     linker.func_wrap("aether", "blob_drop_p32", |mut caller: Caller<'_, ComponentCtx>, hash_ptr: u32| {
         let Ok(hash) = read_guest_hash(&mut caller, hash_ptr) else {
             tracing::warn!(
@@ -933,7 +934,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             tracing::warn!(
                 target: "aether_substrate::component",
                 component = %caller.data().actor_name(),
-                "blob_drop: this instance holds no count for the hash; nothing released",
+                "blob_drop: this instance has no hold on the hash; nothing released",
             );
         }
     })?;
