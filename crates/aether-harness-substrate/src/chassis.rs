@@ -377,18 +377,16 @@ impl SubstrateHarnessChassis {
         //
         // iamacoffeepot/aether#4171: the harness composes its own chain rather
         // than routing through `aether_substrate::chassis::composed`, so it runs
-        // that function's borrow-then-spend itself — the observer names the direct
-        // mutator through a borrowed authority, and the token is then spent
-        // unconditionally (the observer is optional, the spend is not), well
-        // before `build_passive` installs the ADR-0165 seal. The `SubstrateBoot`
-        // the embedder receives therefore carries no authority, which is what
-        // keeps the registry's direct mutators unnameable once the owner has
-        // taken over.
-        let authority = boot.authority().ok_or(BootError::AlreadyComposed)?;
+        // that function's register-then-spend itself — the observer registers
+        // under the boot's authority through `SubstrateBoot::register_inline`,
+        // and the token is then spent unconditionally (the observer is optional,
+        // the spend is not), well before `build_passive` installs the ADR-0165
+        // seal. The `SubstrateBoot` the embedder receives therefore carries no
+        // authority, which is what keeps the registry's direct mutators
+        // unnameable once the owner has taken over.
         if let Some(sink) = observed_kinds {
             let observed_for_handler = sink;
-            boot.registry.register_inline(
-                authority,
+            boot.register_inline(
                 SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
                 // Records the kind *id*, not its name. The observer runs on
                 // every observed dispatch, so resolving a name here would put a
@@ -402,7 +400,7 @@ impl SubstrateHarnessChassis {
                         .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
                         .push(dispatch.kind);
                 }),
-            );
+            )?;
         }
         let _spent = boot.take_authority();
 
@@ -427,9 +425,9 @@ impl SubstrateHarnessChassis {
         // `with_actor_configured` / the builder's `with_config`.
         // The hermetic in-process harness is a deliberate embedder: it does not
         // adopt the `composed` seam (no aborter, hermetic sources, per-scenario
-        // compose), so it keeps its direct `Builder::new`.
+        // compose), so it mints its own un-based builder off the boot.
         #[allow(clippy::disallowed_methods)]
-        let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
+        let mut builder = Builder::<Self>::from_boot(&boot)
             .with_config_sources(ConfigSources::hermetic())
             .with_workers(pool_workers)
             .with_ring_capacities(ring_capacities)

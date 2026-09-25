@@ -14,6 +14,8 @@ use super::driver::{DriverCapability, DriverCtx, DriverRunning};
 use super::native_actor_boot::NativeActorBoot;
 use super::passive_boot::{FallbackRouterBoot, PassiveBoot, ReservedPumpBoot};
 use crate::actor::native::NativeActor;
+#[cfg(feature = "wasm")]
+use crate::boot::SubstrateBoot;
 use crate::chassis::Chassis;
 use crate::chassis::ctx::{ChassisCtx, ChassisCtxParts, FallbackRouter};
 use crate::chassis::error::BootError;
@@ -175,6 +177,31 @@ impl<C: Chassis> Builder<C, NoDriver> {
             _chassis: PhantomData,
             _state: PhantomData,
         }
+    }
+
+    /// Mint an un-based builder over `boot`'s registry and mailer, for an
+    /// embedder that composes its own chain off a [`SubstrateBoot`] instead of
+    /// routing through [`composed`](crate::chassis::composed). Joins
+    /// [`Self::new`] in the `clippy.toml` `disallowed-methods` list with the
+    /// same reason: the boot path mints through `composed`, which installs the
+    /// aborter and base stratum. Takes the boot's handles and gives none back.
+    ///
+    /// Consumer: `SubstrateHarnessChassis::build_passive`, the hermetic
+    /// in-process harness.
+    #[cfg(feature = "wasm")]
+    #[must_use]
+    pub fn from_boot(boot: &SubstrateBoot) -> Self {
+        Self::boot_mint(boot)
+    }
+
+    /// The boot-owned mint behind [`composed`](crate::chassis::composed) and
+    /// [`Self::from_boot`]: the one place the boot path names [`Self::new`].
+    /// Crate-private, so the `disallowed-methods` entries gate every caller
+    /// outside the crate while the single suppression stays here.
+    #[cfg(feature = "wasm")]
+    #[allow(clippy::disallowed_methods)] // aether-suppression-request: the boot-owned mint behind `composed` and the hermetic harness; it moves here from `composed`, so the suppression count stays flat
+    pub(crate) fn boot_mint(boot: &SubstrateBoot) -> Self {
+        Self::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
     }
 
     /// Override the default [`PanicAborter`] with a chassis-supplied

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use aether_actor::ActorRef;
 use aether_data::Kind;
-use aether_substrate::{Registry, Subname};
+use aether_substrate::{RouteReadProbe, Subname};
 use serde::{Deserialize, Serialize};
 
 use super::fixture::{CloseBurst, CommitParent, CommitQuery, CommitReport, StageBurst};
@@ -80,15 +80,16 @@ pub struct OwnerCeiling {
 /// The counters are cumulative over the process, so `before` is subtracted:
 /// the loaded sample must not inherit the populate phase's drains, or the
 /// ceiling would be diluted by the floor that preceded it.
+#[must_use]
 pub fn sample(
     drive: &str,
-    registry: &Registry,
+    probe: &RouteReadProbe,
     before: Option<&RawCounters>,
     commits: u64,
     elapsed: Duration,
 ) -> OwnerCeiling {
     let elapsed_nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-    let Some(now) = RawCounters::read(registry) else {
+    let Some(now) = RawCounters::read(probe) else {
         // Pre-seal, or an embedder that never attached an owner: no queue
         // exists, so there is nothing to report rather than a zero.
         return empty(drive, commits, elapsed_nanos);
@@ -143,8 +144,8 @@ pub struct RawCounters {
 impl RawCounters {
     /// `None` before an owner is attached.
     #[must_use]
-    pub fn read(registry: &Registry) -> Option<Self> {
-        let metrics = registry.owner_queue_metrics()?;
+    pub fn read(probe: &RouteReadProbe) -> Option<Self> {
+        let metrics = probe.owner_queue_metrics()?;
         Some(Self {
             admitted: metrics.admitted,
             drained: metrics.drained,
@@ -185,7 +186,8 @@ fn empty(drive: &str, commits: u64, elapsed_nanos: u64) -> OwnerCeiling {
 /// integrity check: a fixture that dropped a `TaskDone` would hang here rather
 /// than quietly reporting a rate over fewer commits than it claims.
 pub fn measure_loaded_ceiling(harness: &mut SubstrateHarness, parent: ActorRef<CommitParent>) -> OwnerCeiling {
-    let before = RawCounters::read(harness.mail_registry());
+    let probe = harness.route_read_probe();
+    let before = RawCounters::read(&probe);
     let start = Instant::now();
     let mut driven = 0_u64;
     for _ in 0..BURSTS {
@@ -197,7 +199,7 @@ pub fn measure_loaded_ceiling(harness: &mut SubstrateHarness, parent: ActorRef<C
         driven += u64::from(BURST);
     }
     let elapsed = start.elapsed();
-    let mut ceiling = sample("staged-burst", harness.mail_registry(), before.as_ref(), driven, elapsed);
+    let mut ceiling = sample("staged-burst", &probe, before.as_ref(), driven, elapsed);
 
     // Reconcile against the fixture's own tally. `commits_driven` is what the
     // benchmark asked for; this is what the parent actually staged and saw

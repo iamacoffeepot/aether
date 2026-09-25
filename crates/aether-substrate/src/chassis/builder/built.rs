@@ -7,11 +7,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root, child_address};
 use aether_data::{KindId, LoadName, MailId, SessionToken};
+use aether_kinds::{CostTail, CostTailResult};
 use crossbeam_channel::Receiver;
 
 use super::boot_passives::BootedPassives;
 use super::driver::{DriverRunning, RunError, assemble_pumped_slot};
 use super::root_pusher::RootPusher;
+use super::route_probe::RouteReadProbe;
 use crate::actor::native::NativeActor;
 use crate::actor::native::slot::pumped::PumpedSlot;
 use crate::chassis::Chassis;
@@ -209,6 +211,62 @@ impl<C: Chassis> PassiveChassis<C> {
     #[must_use]
     pub fn settlement_registry(&self) -> &Arc<SettlementRegistry> {
         self.booted.settlement_registry()
+    }
+
+    /// Whether `actor` would dispatch `kind`: a declared handler or a
+    /// `#[fallback]` (ADR-0033), as the capability registry reflects after
+    /// load / replace / drop.
+    ///
+    /// Consumer: `SubstrateHarness::accepts`.
+    #[must_use]
+    pub fn accepts(&self, actor: ErasedActorRef, kind: KindId) -> bool {
+        self.booted.spawner.mailer().capability_registry().accepts_actor(actor, kind)
+    }
+
+    /// `actor`'s per-handler cost rows (ADR-0036), filtered by `request`: what
+    /// the `actor_cost` MCP tool reports.
+    ///
+    /// Consumer: `SubstrateHarness::actor_cost`.
+    #[must_use]
+    pub fn actor_cost(&self, actor: ErasedActorRef, request: &CostTail) -> CostTailResult {
+        self.booted.spawner.mailer().cost_table().tail(actor, request)
+    }
+
+    /// The id registered under the kind name `name`, or `None` when no kind of
+    /// that name is registered.
+    ///
+    /// Consumer: `SubstrateHarness::count_observed`.
+    #[must_use]
+    pub fn kind_id(&self, name: &str) -> Option<KindId> {
+        self.booted.spawner.registry().kind_id(name)
+    }
+
+    /// A diagnostic label for `kind`: its registered name, else its tagged id.
+    ///
+    /// Consumers: `SubstrateHarness::observed_kinds` and the harness's failure
+    /// diagnostics.
+    #[must_use]
+    pub fn kind_label(&self, kind: KindId) -> String {
+        self.booted.spawner.registry().kind_label(kind)
+    }
+
+    /// Every root the settlement table still counts as pending, as
+    /// `(root, in_flight, held_open)` (ADR-0080 §6) — the dump a wedged
+    /// settlement gate reports.
+    ///
+    /// Consumer: `SubstrateHarness`'s settlement-timeout diagnostic.
+    #[must_use]
+    pub fn pending_settlement_roots(&self) -> Vec<(MailId, u32, u32)> {
+        self.booted.spawner.mailer().trace_handle().settlement_counter().pending_roots()
+    }
+
+    /// A read-only probe of the route table's hot read path.
+    ///
+    /// Consumer: the registry benchmark (`aether-harness-substrate`'s
+    /// `perf::registry`, the `aether-perf-registry` binary).
+    #[must_use]
+    pub fn route_read_probe(&self) -> RouteReadProbe {
+        RouteReadProbe::new(Arc::clone(self.booted.spawner.registry()))
     }
 
     /// ADR-0161 slice R4: boot a [`PumpedSlot`] for an externally-pumped

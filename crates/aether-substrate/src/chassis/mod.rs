@@ -172,11 +172,12 @@ impl<C: Chassis> ComposeBase<C> for () {
 /// per-chassis env bag.
 ///
 /// The shared boot's [`BootAuthority`](crate::BootAuthority) is **spent here**
-/// (iamacoffeepot/aether#4171). A delta that needs the token borrows it off the
-/// boot handle for the length of its own call
-/// ([`SubstrateBoot::authority`](crate::SubstrateBoot::authority)); `composed`
-/// then takes it unconditionally once the delta returns, for every chassis,
-/// whether or not that chassis ever asked for it. So the token is gone before
+/// (iamacoffeepot/aether#4171). A delta that needs to register an inline sink
+/// does so through
+/// [`SubstrateBoot::register_inline`](crate::SubstrateBoot::register_inline),
+/// which uses the token for the length of its own call; `composed` then takes
+/// it unconditionally once the delta returns, for every chassis, whether or not
+/// that chassis ever asked for it. So the token is gone before
 /// the builder reaches the caller, and therefore long before `build` installs
 /// the ADR-0165 seal.
 ///
@@ -201,12 +202,11 @@ pub fn composed<C: BootableChassis>(
     base: C::Base,
     env: C::Env,
 ) -> Result<Builder<C>, BootError> {
-    // The sole sanctioned `Builder::new` on the boot path: `composed` is the one
-    // minting point the `clippy.toml` `disallowed-methods` entry funnels every
-    // chassis through, so a `compose` delta can only extend a based builder.
-    #[allow(clippy::disallowed_methods)]
-    let builder = Builder::<C>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
-        .with_aborter(Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound))));
+    // The boot path's minting point: `composed` mints through the crate-private
+    // boot mint the `clippy.toml` `disallowed-methods` entries funnel every
+    // chassis toward, so a `compose` delta can only extend a based builder.
+    let builder =
+        Builder::<C>::boot_mint(boot).with_aborter(Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound))));
 
     let composed = C::compose(base.install(builder), boot, env);
     let _spent = boot.take_authority();
@@ -260,14 +260,13 @@ pub trait BootableChassis: Chassis {
     /// boots. Takes the boot handle by reference; `build` moves the same `boot`
     /// into the driver afterward, while the describe / config helpers drop it.
     ///
-    /// A delta that registers an inline sink or claims a mailbox with an explicit
-    /// lineage id borrows the boot's authority through
-    /// [`SubstrateBoot::authority`](crate::SubstrateBoot::authority) to name the
-    /// registry's direct mutators (iamacoffeepot/aether#4171); most deltas never
-    /// ask. The borrow is what bounds the token's reach — it cannot outlive the
-    /// `&SubstrateBoot` this call receives, and [`composed`] spends the token
-    /// outright the moment the delta returns, so the direct write path is
-    /// unnameable by the time `build` installs the ADR-0165 seal.
+    /// A delta that registers an inline sink does so through
+    /// [`SubstrateBoot::register_inline`](crate::SubstrateBoot::register_inline),
+    /// which writes under the boot's authority without handing the token out
+    /// (iamacoffeepot/aether#4171); most deltas never ask. The token never
+    /// leaves the boot handle, and [`composed`] spends it outright the moment
+    /// the delta returns, so the direct write path is unnameable by the time
+    /// `build` installs the ADR-0165 seal.
     ///
     /// Fallible (ADR-0162 §config-at-its-seam): a chassis resolves the config
     /// members its own delta consumes — the hub's always-bind RPC port off the
