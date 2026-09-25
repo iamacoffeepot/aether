@@ -2,6 +2,7 @@ const canvas = document.querySelector("#viewport");
 const status = document.querySelector("#status");
 const controls = document.querySelector("#morph-controls");
 const gl = canvas.getContext("webgl2", { antialias: true, alpha: true });
+const silhouetteMode = new URLSearchParams(window.location.search).has("silhouette");
 
 if (!gl) {
   fail("WebGL 2 is required for this demo");
@@ -59,6 +60,7 @@ in vec3 vWorldPosition;
 uniform vec4 uColor;
 uniform vec3 uCamera;
 uniform float uRoughness;
+uniform float uSilhouette;
 out vec4 color;
 void main() {
   vec3 normal = normalize(vNormal);
@@ -73,7 +75,7 @@ void main() {
   float specular = pow(max(dot(normal, halfDirection), 0.0), specularPower) * specularStrength;
   float rim = pow(1.0 - max(dot(normal, viewDirection), 0.0), 2.8) * 0.18;
   float lighting = 0.24 + diffuse * 0.73 + fillLight + rim;
-  color = vec4(uColor.rgb * lighting + vec3(specular), uColor.a);
+  color = mix(vec4(uColor.rgb * lighting + vec3(specular), uColor.a), vec4(0.0, 0.0, 0.0, 1.0), uSilhouette);
 }`;
 
 const program = createProgram(vertexSource, fragmentSource);
@@ -88,6 +90,7 @@ const locations = {
   color: gl.getUniformLocation(program, "uColor"),
   camera: gl.getUniformLocation(program, "uCamera"),
   roughness: gl.getUniformLocation(program, "uRoughness"),
+  silhouette: gl.getUniformLocation(program, "uSilhouette"),
 };
 
 let scene;
@@ -312,7 +315,7 @@ async function importRecipe(event) {
 function render() {
   resizeCanvas();
   gl.viewport(0, 0, canvas.width, canvas.height);
-  gl.clearColor(0, 0, 0, 0);
+  gl.clearColor(silhouetteMode ? 1 : 0, silhouetteMode ? 1 : 0, silhouetteMode ? 1 : 0, silhouetteMode ? 1 : 0);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST);
   gl.useProgram(program);
@@ -327,6 +330,7 @@ function render() {
   gl.uniformMatrix4fv(locations.viewProjection, false, multiply(projection, view));
   gl.uniform3fv(locations.camera, camera);
   gl.uniform1fv(locations.weights, weights);
+  gl.uniform1f(locations.silhouette, silhouetteMode ? 1 : 0);
 
   for (const node of scene.nodes) {
     const translation = [...node.translation];
