@@ -23,9 +23,7 @@ use std::time::Duration;
 use aether_audio::HeadlessAudioCapability;
 use aether_clipboard::HeadlessClipboardCapability;
 use aether_component::ComponentHostParams;
-use aether_data::Kind;
 use aether_http::HttpServerCapability;
-use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_render::HeadlessRenderCapability;
 use aether_substrate::chassis::BootableChassis;
@@ -101,10 +99,7 @@ impl Chassis for HeadlessChassis {
                 "componentless boot — load a component via aether.component.load",
             );
 
-            Ok(move |boot: SubstrateBoot| {
-                let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
-                HeadlessTimerDriverCapability { boot, kind_tick, tick_period }
-            })
+            Ok(move |boot: SubstrateBoot| HeadlessTimerDriverCapability { boot, tick_period })
         })
     }
 }

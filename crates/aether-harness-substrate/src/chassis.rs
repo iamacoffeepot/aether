@@ -15,10 +15,9 @@ use std::time::Duration;
 
 use aether_actor::ErasedActorRef;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
-use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};
-use aether_kinds::{FrameVerdict, Tick};
+use aether_kinds::FrameVerdict;
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
@@ -268,14 +267,13 @@ pub struct SubstrateHarnessEnv {
 /// Output of [`SubstrateHarnessChassis::build_passive`]. Bundles the
 /// `PassiveChassis<SubstrateHarnessChassis>` (holding the booted Log +
 /// Render passives via `chassis_builder` typed lookup) with the
-/// substrate handles the embedder needs to drive its event loop —
-/// queue, outbound, kind ids, render accumulator handles.
+/// substrate boot the embedder needs to drive its event loop, and the
+/// frame hook that drains the pumped render slot.
 ///
 /// `boot` is exposed so the embedder can attach an egress backend
 /// for reply correlation (the in-process `SubstrateHarness` wires a
-/// `RecordingBackend` for this), read substrate-level handles
-/// (`registry`, `queue`, `outbound`), and own the lifetime guard the
-/// scheduler joins against on shutdown.
+/// `RecordingBackend` onto `boot.outbound` for this) and own the
+/// lifetime guard the scheduler joins against on shutdown.
 ///
 /// The embedder owns the matching `EventReceiver` for whichever
 /// `EventSender` it passed into [`SubstrateHarnessEnv`]; the build does
@@ -283,7 +281,6 @@ pub struct SubstrateHarnessEnv {
 pub struct SubstrateHarnessBuild {
     pub passive: PassiveChassis<SubstrateHarnessChassis>,
     pub boot: SubstrateBoot,
-    pub kind_tick: KindId,
     /// The frame hook [`SubstrateHarnessEnv::render_hook`] built in the
     /// build's start, draining the pumped render slot. `None` without a
     /// render hook.
@@ -301,11 +298,10 @@ impl SubstrateHarnessChassis {
     /// the event loop.
     ///
     /// # Panics
-    /// Panics if the `Tick` kind isn't registered in the substrate boot
-    /// — fail-fast per ADR-0063: `Tick` is part of the always-on kind
-    /// vocabulary the substrate registers from
-    /// `aether_kinds::descriptors::all()`, so a missing entry indicates
-    /// a substrate-build bug.
+    /// The observer sink this registers when `observed_kinds` is set
+    /// panics if that mutex is poisoned — fail-fast per ADR-0063: a
+    /// poisoned sink means a recording already panicked mid-push, so the
+    /// observed list can no longer be trusted.
     #[allow(clippy::too_many_lines)] // PR 3b growth from lifecycle graph + relay wiring.
     pub fn build_passive(env: SubstrateHarnessEnv) -> anyhow::Result<SubstrateHarnessBuild> {
         let SubstrateHarnessEnv {
@@ -326,8 +322,6 @@ impl SubstrateHarnessChassis {
 
         let mut boot = SubstrateBoot::build()?;
         let _ = workers;
-
-        let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
 
         // Phase 4: advance lands on `SubstrateHarnessCapability` claiming
         // `aether.substrate_harness`. The cap pushes `ChassisEvent::Advance`
@@ -486,6 +480,6 @@ impl SubstrateHarnessChassis {
         // sender is released.
         drop(events_tx);
 
-        Ok(SubstrateHarnessBuild { passive, boot, kind_tick, hook })
+        Ok(SubstrateHarnessBuild { passive, boot, hook })
     }
 }

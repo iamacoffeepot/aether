@@ -19,6 +19,7 @@ use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim, MailboxWakeSlot};
 use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
+use crate::chassis::settlement::SettlementRegistry;
 use crate::config::ConfigMemberRecord;
 use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
@@ -164,11 +165,27 @@ impl DriverRunning for NeverDriverRunning {
 pub struct DriverCtx<'a> {
     inner: ChassisCtx<'a>,
     handles: &'a ExportedHandles,
+    settlement: Arc<SettlementRegistry>,
 }
 
 impl<'a> DriverCtx<'a> {
-    pub(super) fn new(inner: ChassisCtx<'a>, handles: &'a ExportedHandles) -> Self {
-        Self { inner, handles }
+    pub(super) fn new(
+        inner: ChassisCtx<'a>,
+        handles: &'a ExportedHandles,
+        settlement: Arc<SettlementRegistry>,
+    ) -> Self {
+        Self { inner, handles, settlement }
+    }
+
+    /// ADR-0080 §6: the chassis's settlement registry, installed before any
+    /// driver boots. A driver subscribes a root it pushed through a
+    /// [`RootPusher`] here. The driver-side sibling of
+    /// [`PassiveChassis::settlement_registry`](super::PassiveChassis::settlement_registry).
+    ///
+    /// Consumer: the desktop driver's `pump_while_settling`.
+    #[must_use]
+    pub fn settlement_registry(&self) -> &Arc<SettlementRegistry> {
+        &self.settlement
     }
 
     /// Drivers have no `NAMESPACE` const to delegate against — claim

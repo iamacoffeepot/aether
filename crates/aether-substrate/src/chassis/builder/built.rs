@@ -56,11 +56,6 @@ macro_rules! chassis_accessors {
             spawn_actor(&self.booted, subname, config, params)
         }
 
-        #[must_use]
-        pub fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
-            actor_registry(&self.booted)
-        }
-
         /// The proven reference of the root actor `R` this chassis composed —
         /// a singleton capability or a pumped actor (ADR-0230 section 3).
         ///
@@ -185,6 +180,15 @@ impl<C: Chassis> fmt::Debug for PassiveChassis<C> {
 }
 
 impl<C: Chassis> PassiveChassis<C> {
+    /// The per-chassis actor lifecycle registry, for this crate's own
+    /// chassis tests, which assert on its monitor, tombstone, and liveness
+    /// bookkeeping. Test-only and crate-private: no embedder reads it.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
+        self.booted.spawner.actor_registry()
+    }
+
     /// Number of booted passives. Useful for tests; not expected to
     /// vary at runtime.
     #[must_use]
@@ -514,10 +518,6 @@ fn actor_ref<R: Root + 'static>(booted: &BootedPassives) -> ActorRef<R> {
     booted.references.get::<R>().unwrap_or_else(|| {
         panic!("this chassis composed no {:?} actor; compose it before asking for its reference", R::NAMESPACE)
     })
-}
-
-fn actor_registry(booted: &BootedPassives) -> &Arc<crate::ActorRegistry> {
-    &booted.actor_registry
 }
 
 fn handle<H: Any + Send + Sync + Clone + 'static>(booted: &BootedPassives) -> Option<H> {
