@@ -53,8 +53,7 @@ pub use contract::first_contract_break;
 pub use hash::{
     FIELD_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError,
     THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN, VARIANT_DOMAIN, fnv1a_64_bytes, fnv1a_64_fold, fnv1a_64_prefixed,
-    fold_lineage, mailbox_id_from_name, mailbox_id_from_name_pair, mailbox_id_from_path, storage_kind_id_from_name,
-    thread_id_from_name, validate_scope_path,
+    fold_lineage, storage_kind_id_from_name, thread_id_from_name, validate_scope_path,
 };
 pub use ids::{
     ActorId, DagId, KindId, MailboxId, RequestId, ThreadId, TransformId, tag_for_type_id, type_name_for_type_id,
@@ -700,6 +699,7 @@ pub fn encode_empty<T: Kind>() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::mailbox_id_from_name;
     use bytemuck::{Pod, Zeroable};
 
     #[repr(C)]
@@ -761,9 +761,6 @@ mod tests {
         assert!(matches!(err, DecodeError::SizeMismatch { expected: 8, actual: 7 }));
     }
 
-    // Exercises the name→id primitive directly — it is the unit under test,
-    // not a sibling-cap address.
-    #[allow(clippy::disallowed_methods)]
     #[test]
     fn mailbox_id_is_deterministic_and_name_specific() {
         let a = mailbox_id_from_name("hub.claude.broadcast");

@@ -184,12 +184,21 @@ impl EngineNames {
 
 #[cfg(test)]
 mod tests {
-    // Tests derive an id by name to probe the reverse-name map — the primitive
-    // yields the reference id under test, not a sibling-cap address.
-    #![allow(clippy::disallowed_methods)]
     use super::*;
-    use aether_data::hash::{mailbox_id_from_name, thread_id_from_name};
+    use aether_data::hash::thread_id_from_name;
     use aether_data::{KIND_DOMAIN, MAILBOX_DOMAIN, THREAD_DOMAIN};
+    use aether_substrate::Registry;
+    use aether_substrate::mail::registry::noop_handler;
+    use aether_substrate::testing::boot_authority;
+
+    /// The id the engine's registry assigns `aether.audio`: the position the
+    /// reverse map has to name, taken from a registration rather than a hash.
+    fn registered_audio_id() -> u64 {
+        Registry::new()
+            .try_register_inbox(&boot_authority(), "aether.audio", noop_handler())
+            .expect("a fresh registry has no conflicting mailbox")
+            .0
+    }
 
     /// Build a synthetic manifest with a `NameEntry` (a mailbox name + a
     /// kind name), a `Bounded` template (`aether-test-worker-{N}`), and a
@@ -219,8 +228,7 @@ mod tests {
     #[test]
     fn static_mailbox_name_reverses() {
         let names = EngineNames::from_manifest(&synthetic_manifest());
-        let id = mailbox_id_from_name("aether.audio");
-        assert_eq!(names.render(id.0), "aether.audio");
+        assert_eq!(names.render(registered_audio_id()), "aether.audio");
     }
 
     #[test]
@@ -292,8 +300,8 @@ mod tests {
     fn empty_manifest_falls_back_to_hex() {
         let empty = ManifestResult { names: vec![], templates: vec![] };
         let names = EngineNames::from_manifest(&empty);
-        let id = mailbox_id_from_name("aether.audio");
-        let tag = tagged_id::encode(id.0).expect("mailbox id is taggable");
-        assert_eq!(names.render(id.0), tag, "with no manifest folded, every id renders the hex tag");
+        let id = registered_audio_id();
+        let tag = tagged_id::encode(id).expect("mailbox id is taggable");
+        assert_eq!(names.render(id), tag, "with no manifest folded, every id renders the hex tag");
     }
 }
