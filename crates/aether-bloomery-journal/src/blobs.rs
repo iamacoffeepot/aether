@@ -15,6 +15,7 @@ use crate::Digest;
 use crate::journal::JournalError;
 
 /// The `blobs` directory of one journal root.
+#[derive(Clone)]
 pub struct BlobDir {
     dir: PathBuf,
 }
@@ -61,9 +62,28 @@ impl BlobDir {
             return sync_dir(&shard);
         }
 
-        let tmp = self.tmp();
-        let mut staged = NamedTempFile::new_in(&tmp).map_err(|error| JournalError::io(&tmp, error))?;
+        let mut staged = self.temp_file()?;
         staged.write_all(bytes).map_err(|error| JournalError::io(staged.path(), error))?;
+        self.place(digest, staged)
+    }
+
+    /// A new temp file in `blobs/tmp/`, deleted when it drops unplaced.
+    pub fn temp_file(&self) -> Result<NamedTempFile, JournalError> {
+        let tmp = self.tmp();
+        NamedTempFile::new_in(&tmp).map_err(|error| JournalError::io(&tmp, error))
+    }
+
+    /// Make `staged`, a temp file holding exactly the bytes `digest` hashes,
+    /// the file stored under `digest`: fsync it, rename it to the digest name,
+    /// fsync the shard directory. When the digest name already exists the temp
+    /// file is deleted instead and the shard directory is fsynced, as
+    /// [`BlobDir::store`] does. The caller commits the artifact row only
+    /// after this returns.
+    pub fn place(&self, digest: &Digest, staged: NamedTempFile) -> Result<(), JournalError> {
+        let (shard, path) = self.locate(digest);
+        if path.try_exists().map_err(|error| JournalError::io(&path, error))? {
+            return sync_dir(&shard);
+        }
         staged.as_file().sync_all().map_err(|error| JournalError::io(staged.path(), error))?;
 
         create_synced(&shard)?;
@@ -97,6 +117,11 @@ impl BlobDir {
             _ => read_error(digest, &path, error),
         })?;
         Ok(prefix)
+    }
+
+    /// The digest-named file stored under `digest`, whether or not it exists.
+    pub fn path_of(&self, digest: &Digest) -> PathBuf {
+        self.locate(digest).1
     }
 
     /// The shard directory `blobs/<first two hex>` and the digest-named file inside it.

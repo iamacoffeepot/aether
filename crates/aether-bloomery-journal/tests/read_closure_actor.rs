@@ -52,8 +52,14 @@ fn read_closure_replies_found_too_large_and_missing() -> Result<(), Box<dyn Erro
     let (registry, mailer) = bare_substrate();
     let (reader, rx) = caller(&registry, "test.journal_actor.closure_reader");
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
-    let journal =
-        chassis.spawn_actor::<JournalActor>(Subname::Named("closure"), path, ()).finish().expect("journal birth");
+    let journal = chassis
+        .spawn_actor::<JournalActor>(
+            Subname::Named("closure"),
+            (),
+            Journal::open(&path).expect("open the journal root"),
+        )
+        .finish()
+        .expect("journal birth");
 
     request(&registry, journal, reader, 1, &ReadClosure { root, limit_bytes: ClosureLimit::new(total_bytes)? });
     let ReadClosureResult::Found { root: echoed, artifacts } = reply::<ReadClosureResult>(&rx, 1) else {

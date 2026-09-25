@@ -65,8 +65,14 @@ impl Fixture {
         let (registry, mailer) = bare_substrate();
         let (caller, replies) = caller(&registry, "test.journal_write.caller");
         let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
-        let actor =
-            chassis.spawn_actor::<JournalActor>(Subname::Named("writes"), path.to_owned(), ()).finish().expect("birth");
+        let actor = chassis
+            .spawn_actor::<JournalActor>(
+                Subname::Named("writes"),
+                (),
+                Journal::open(path).expect("open the journal root"),
+            )
+            .finish()
+            .expect("birth");
         let journal = JournalReader::open(path).expect("observe journal");
         Self { registry, _chassis: chassis, actor, caller, replies, journal, note, marker }
     }

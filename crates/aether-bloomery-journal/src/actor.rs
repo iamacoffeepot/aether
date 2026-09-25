@@ -1,7 +1,6 @@
 //! Native journal owner and ordinary request/reply handlers.
 
 use std::ops::Range;
-use std::path::PathBuf;
 
 use crate::watch::Watchers;
 use crate::{AppendError, Batch, Closure, Journal};
@@ -24,6 +23,10 @@ pub const MAX_READ_EVENTS: u32 = 128;
 pub const MAX_HEAD_WATCHERS: usize = 64;
 
 /// One independently named journal owner over its own journal root.
+///
+/// The composer opens the [`Journal`] and hands it over as the actor's params
+/// (ADR-0156 §3), so the root is held, and a held root refused, before the
+/// actor exists.
 pub struct JournalActor {
     journal: Journal,
     watchers: Watchers,
@@ -31,15 +34,13 @@ pub struct JournalActor {
 
 #[actor(instanced, root)]
 impl NativeActor for JournalActor {
-    type Config = PathBuf;
+    type Config = ();
+    type Params = Journal;
 
     const NAMESPACE: &'static str = "aether.bloomery.journal";
 
-    fn init(root: PathBuf, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self {
-            journal: Journal::open(&root).map_err(|error| BootError::Other(Box::new(error)))?,
-            watchers: Watchers::new(),
-        })
+    fn init((): (), journal: Journal, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { journal, watchers: Watchers::new() })
     }
 
     #[handler::single]

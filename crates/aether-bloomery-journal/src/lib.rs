@@ -16,8 +16,13 @@
 //!   are an eight-byte [`aether_data::KindId`] prefix followed by a payload.
 //!   The digest covers the kind, so a digest names one kind and one payload.
 //!
-//! Events are [`aether_data::Storage`] kinds. The only write is a [`Batch`] of
-//! staged artifacts plus events; [`Journal::append`] is the only judge.
+//! Events are [`aether_data::Storage`] kinds. The only event write is a
+//! [`Batch`] of staged artifacts plus events; [`Journal::append`] judges it.
+//! Artifacts also land through a second door over the same root lock: an
+//! [`ArtifactStore`] derived by [`Journal::artifact_store`] opens
+//! [`ArtifactBatch`]es on any thread, which stream blobs into their files a
+//! chunk at a time ([`BlobFile`]) and commit their rows through the same row
+//! insert and citation check `append` runs (ADR-0237 open question 1).
 //! Citations are typed [`Ref`] values collected by a derive-emitted walk.
 //! The one recognized exception is `bloomery.head_moved`: `append` decodes
 //! that kind from the draft as [`aether_bloomery_kinds::RecordedHeadMove`]
@@ -59,12 +64,13 @@ mod closure;
 mod draft;
 mod journal;
 mod reader;
+mod store;
 mod watch;
 
 pub use actor::{JournalActor, MAX_HEAD_WATCHERS, MAX_READ_EVENTS};
 pub use aether_bloomery_kinds::{
-    DecodeError, Digest, Entry, OpaqueBytes, Ref, Seq, Utf8Text, artifact_blob, artifact_digest, artifact_prefix,
-    hash_bytes,
+    ArtifactHasher, DecodeError, Digest, Entry, OpaqueBytes, Ref, Seq, Utf8Text, artifact_blob, artifact_digest,
+    artifact_prefix, hash_bytes,
 };
 pub use artifact::split_artifact;
 pub use batch::{Batch, BatchError};
@@ -73,3 +79,4 @@ pub use closure::Closure;
 pub use draft::{Draft, DraftError};
 pub use journal::{AppendError, GetError, Journal, JournalError, JournalIdentity};
 pub use reader::JournalReader;
+pub use store::{ArtifactBatch, ArtifactStore, BlobFile, VerifiedBlob};

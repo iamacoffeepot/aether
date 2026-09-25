@@ -7,13 +7,14 @@ use std::io::{self, ErrorKind};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use std::{fmt, slice, str};
 
 use aether_bloomery_kinds::{ClosureLimit, RecordedHeadMove};
 use aether_data::wire::WireDecode;
-use aether_data::{Kind, KindId, Storage, StorageError, storage_kind_id_from_name};
+use aether_data::{Citation, Kind, KindId, Storage, StorageError, storage_kind_id_from_name};
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, Transaction, TransactionBehavior, params, params_from_iter};
+use rusqlite::{Connection, Statement, Transaction, TransactionBehavior, params, params_from_iter};
 
 use crate::artifact::{ARTIFACTS_DDL, CITATIONS_DDL, split_artifact};
 use crate::batch::Batch;
@@ -31,6 +32,13 @@ pub const DATABASE_FILE: &str = "journal.sqlite";
 
 /// The file a live journal holds an exclusive lock on.
 const LOCK_FILE: &str = "lock";
+
+/// How long a write waits for another connection's write transaction on the
+/// same root, such as an [`crate::ArtifactBatch`] commit racing an `append`,
+/// before it fails `SQLITE_BUSY`. Both writers insert rows only (blob bytes
+/// land before their transaction begins), so a wait this long means a writer
+/// is wedged.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ENTRIES_DDL: &str = "
 CREATE TABLE IF NOT EXISTS entries (
@@ -81,15 +89,29 @@ impl fmt::Debug for JournalIdentity {
 ///
 /// The root holds `journal.sqlite` and a `blobs` directory with one
 /// digest-named file per artifact. The journal holds an exclusive lock on
-/// the root for its whole life, released when it drops or its process dies.
+/// the root, released when it and every [`crate::ArtifactStore`] derived from
+/// it have dropped, or when its process dies. It writes through two doors
+/// over that one lock: [`Journal::append`], and the streaming store
+/// [`Journal::artifact_store`] hands out, whose batches insert rows through
+/// the same row insert and citation check `append` runs.
 /// The injected clock is `Send` so a journal can be owned by a native actor.
 pub struct Journal {
     conn: Connection,
     clock: Box<dyn Clock + Send>,
     identity: JournalIdentity,
-    blobs: BlobDir,
+    pub(crate) root: PathBuf,
+    pub(crate) blobs: BlobDir,
     /// Dropped last, so the lock outlives the connection.
-    _lock: File,
+    pub(crate) lock: Arc<RootLock>,
+}
+
+/// The exclusive lock on one journal root.
+///
+/// Shared by the [`Journal`] that took it and every store derived from it,
+/// so the root stays locked, and `blobs/tmp/` unswept, while any of them
+/// can still write.
+pub struct RootLock {
+    _file: File,
 }
 
 impl Journal {
@@ -124,9 +146,16 @@ impl Journal {
         blobs.sweep_tmp()?;
 
         let conn = Connection::open(root.join(DATABASE_FILE))?;
-        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")?;
+        configure_writer(&conn)?;
         prepare_schema(&conn)?;
-        Ok(Self { conn, clock, identity: JournalIdentity::new(), blobs, _lock: lock })
+        Ok(Self {
+            conn,
+            clock,
+            identity: JournalIdentity::new(),
+            root: root.to_path_buf(),
+            blobs,
+            lock: Arc::new(RootLock { _file: lock }),
+        })
     }
 
     /// Process-local identity of this journal allocation.
@@ -192,7 +221,19 @@ impl Journal {
         }
 
         insert_staged(&tx, &self.blobs, batch, recorded_at_millis)?;
-        verify_citations(&tx, &self.blobs, batch)?;
+        let head_moves = batch.events.iter().filter(|draft| draft.kind == RecordedHeadMove::ID).map(head_move_target);
+        verify_citations(
+            &tx,
+            &self.blobs,
+            batch
+                .staged
+                .iter()
+                .flat_map(|staged| staged.citations.iter())
+                .chain(batch.events.iter().flat_map(|draft| draft.cites.iter()))
+                .map(cited)
+                .chain(head_moves),
+            batch.required.iter().copied(),
+        )?;
         let range = insert_events(&tx, head, &batch.events, recorded_at_millis)?;
         tx.commit()?;
         Ok(range)
@@ -395,25 +436,56 @@ fn insert_staged(
     if batch.staged.is_empty() {
         return Ok(());
     }
-    let recorded_at = sqlite_i64(recorded_at_millis)?;
-    let mut stored = tx.prepare("SELECT 1 FROM artifacts WHERE digest = ?1")?;
-    let mut insert =
-        tx.prepare("INSERT INTO artifacts (digest, size_bytes, recorded_at_millis) VALUES (?1, ?2, ?3)")?;
-    let mut edges = tx.prepare("INSERT OR IGNORE INTO citations (from_digest, to_digest) VALUES (?1, ?2)")?;
+    let mut rows = ArtifactRows::prepare(tx, recorded_at_millis)?;
     for staged in &batch.staged {
-        let key = staged.digest.as_bytes().as_slice();
-        if stored.exists(params![key])? {
+        if rows.is_stored(&staged.digest)? {
             continue;
         }
         blobs.store(&staged.digest, &staged.bytes)?;
-        let size_bytes = sqlite_i64(u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?)?;
-        insert.execute(params![key, size_bytes, recorded_at])?;
-        for citation in &staged.citations {
-            let to: [u8; 32] = citation.bytes.as_slice().try_into().map_err(|_| JournalError::CorruptCitation)?;
-            edges.execute(params![staged.digest.as_bytes().as_slice(), to.as_slice()])?;
-        }
+        let size_bytes = u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?;
+        rows.insert(&staged.digest, size_bytes, &staged.citations)?;
     }
     Ok(())
+}
+
+/// The row-and-edges insert both write doors share: [`Journal::append`] and
+/// [`crate::ArtifactBatch::commit`]. The caller inserts a row only after the
+/// blob file it names is durable, and only when [`ArtifactRows::is_stored`]
+/// says the row is absent, so a stored artifact keeps the citation edges it
+/// was first stored with.
+pub struct ArtifactRows<'tx> {
+    stored: Statement<'tx>,
+    insert: Statement<'tx>,
+    edges: Statement<'tx>,
+    recorded_at: i64,
+}
+
+impl<'tx> ArtifactRows<'tx> {
+    /// Prepare the statements inside `tx`, stamping each row `recorded_at_millis`.
+    pub fn prepare(tx: &'tx Transaction<'_>, recorded_at_millis: u64) -> Result<Self, JournalError> {
+        Ok(Self {
+            stored: tx.prepare("SELECT 1 FROM artifacts WHERE digest = ?1")?,
+            insert: tx.prepare("INSERT INTO artifacts (digest, size_bytes, recorded_at_millis) VALUES (?1, ?2, ?3)")?,
+            edges: tx.prepare("INSERT OR IGNORE INTO citations (from_digest, to_digest) VALUES (?1, ?2)")?,
+            recorded_at: sqlite_i64(recorded_at_millis)?,
+        })
+    }
+
+    /// True when `digest` already has a row, committed or inserted earlier in this transaction.
+    pub fn is_stored(&mut self, digest: &Digest) -> Result<bool, JournalError> {
+        Ok(self.stored.exists(params![digest.as_bytes().as_slice()])?)
+    }
+
+    /// Insert `digest`'s row, `size_bytes` long, and one edge per citation.
+    pub fn insert(&mut self, digest: &Digest, size_bytes: u64, citations: &[Citation]) -> Result<(), JournalError> {
+        let key = digest.as_bytes().as_slice();
+        self.insert.execute(params![key, sqlite_i64(size_bytes)?, self.recorded_at])?;
+        for citation in citations {
+            let to: [u8; 32] = citation.bytes.as_slice().try_into().map_err(|_| JournalError::CorruptCitation)?;
+            self.edges.execute(params![key, to.as_slice()])?;
+        }
+        Ok(())
+    }
 }
 
 fn insert_events(
@@ -441,37 +513,49 @@ fn insert_events(
     Ok(Seq(first)..Seq(last_exclusive))
 }
 
-fn verify_citations(tx: &Transaction<'_>, blobs: &BlobDir, batch: &Batch) -> Result<(), AppendError> {
+/// A digest the check must find stored with an expected kind prefix: a
+/// citation's target, or a head move's destination.
+pub type CitedTarget = Result<([u8; 32], KindId), AppendError>;
+
+/// A citation as the target the check must find. Its identity bytes must be
+/// 32; the journal does not pad or truncate.
+pub fn cited(citation: &Citation) -> CitedTarget {
+    let digest_bytes = citation.bytes.as_slice().try_into().map_err(|_| JournalError::CorruptCitation)?;
+    Ok((digest_bytes, citation.kind))
+}
+
+/// A `bloomery.head_moved` draft's destination as the target the check must
+/// find, carrying the recorded head's kind.
+fn head_move_target(draft: &Draft) -> CitedTarget {
+    let event =
+        RecordedHeadMove::decode_storage(&draft.bytes).map(|data| data.value).map_err(AppendError::InvalidHeadMoved)?;
+    Ok((*event.to().as_bytes(), event.head().kind()))
+}
+
+/// The citation check both write doors share, run inside the write
+/// transaction after its rows are inserted: every target in `cited` must be
+/// stored with its expected prefix, in order, and every digest in `required`
+/// must be stored at all.
+pub fn verify_citations(
+    tx: &Transaction<'_>,
+    blobs: &BlobDir,
+    cited: impl IntoIterator<Item = CitedTarget>,
+    required: impl IntoIterator<Item = Digest>,
+) -> Result<(), AppendError> {
     let mut seen = HashSet::new();
     let mut stmt = tx.prepare("SELECT 1 FROM artifacts WHERE digest = ?1")?;
-    for citation in batch
-        .staged
-        .iter()
-        .flat_map(|staged| staged.citations.iter())
-        .chain(batch.events.iter().flat_map(|draft| draft.cites.iter()))
-    {
-        let digest_bytes: [u8; 32] = citation.bytes.as_slice().try_into().map_err(|_| JournalError::CorruptCitation)?;
-        verify_prefix(&mut stmt, blobs, &mut seen, digest_bytes, citation.kind)?;
+    for target in cited {
+        let (digest_bytes, expected) = target?;
+        verify_prefix(&mut stmt, blobs, &mut seen, digest_bytes, expected)?;
     }
-
-    for draft in &batch.events {
-        if draft.kind != RecordedHeadMove::ID {
-            continue;
-        }
-        let event = RecordedHeadMove::decode_storage(&draft.bytes)
-            .map(|data| data.value)
-            .map_err(AppendError::InvalidHeadMoved)?;
-        verify_prefix(&mut stmt, blobs, &mut seen, *event.to().as_bytes(), event.head().kind())?;
-    }
-
-    for digest in &batch.required {
-        verify_exists(&mut stmt, *digest)?;
+    for digest in required {
+        verify_exists(&mut stmt, digest)?;
     }
     Ok(())
 }
 
 /// A row check: a required digest needs no prefix, only a stored row.
-fn verify_exists(stored: &mut rusqlite::Statement<'_>, digest: Digest) -> Result<(), AppendError> {
+fn verify_exists(stored: &mut Statement<'_>, digest: Digest) -> Result<(), AppendError> {
     if stored.exists(params![digest.as_bytes().as_slice()])? {
         Ok(())
     } else {
@@ -482,7 +566,7 @@ fn verify_exists(stored: &mut rusqlite::Statement<'_>, digest: Digest) -> Result
 /// The row must exist, then the first eight bytes of its file must be the
 /// expected kind (ADR-0220 keeps no kind column).
 fn verify_prefix(
-    stored: &mut rusqlite::Statement<'_>,
+    stored: &mut Statement<'_>,
     blobs: &BlobDir,
     seen: &mut HashSet<([u8; 32], KindId)>,
     digest_bytes: [u8; 32],
@@ -502,6 +586,15 @@ fn verify_prefix(
     } else {
         Err(AppendError::PrefixMismatch { digest, expected, actual })
     }
+}
+
+/// The pragmas every writing connection to a root's log runs: WAL, full
+/// sync, and a busy timeout so one door's write transaction waits out the
+/// other's instead of failing `SQLITE_BUSY`.
+pub fn configure_writer(conn: &Connection) -> Result<(), JournalError> {
+    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    Ok(())
 }
 
 fn prepare_schema(conn: &Connection) -> Result<(), JournalError> {
@@ -573,6 +666,15 @@ pub enum JournalError {
     },
     /// A stored artifact's row names a digest whose blob file is missing.
     MissingBlob(Digest),
+    /// A streamed blob's payload is not the length it was opened with.
+    BlobLength {
+        /// The payload length the blob was opened with.
+        expected_bytes: u64,
+        /// The payload bytes written, or offered past the expected length.
+        actual_bytes: u64,
+    },
+    /// [`Storage::encode_storage`] refused a value staged into an artifact batch.
+    Encode(StorageError),
     /// A file-system operation on the journal root failed.
     Io {
         /// The path the operation touched.
@@ -603,6 +705,10 @@ impl fmt::Display for JournalError {
             Self::NotADirectory { root } => write!(f, "journal root {} is not a directory", root.display()),
             Self::Locked { root } => write!(f, "journal root {} is held by another open journal", root.display()),
             Self::MissingBlob(digest) => write!(f, "stored artifact {digest} has no blob file"),
+            Self::BlobLength { expected_bytes, actual_bytes } => {
+                write!(f, "streamed blob payload is {actual_bytes} bytes, opened as {expected_bytes}")
+            }
+            Self::Encode(error) => write!(f, "failed to encode staged artifact: {error}"),
             Self::Io { path, error } => write!(f, "journal root i/o at {}: {error}", path.display()),
         }
     }
@@ -613,6 +719,7 @@ impl Error for JournalError {
         match self {
             Self::Backend(error) => Some(error),
             Self::Io { error, .. } => Some(error),
+            Self::Encode(error) => Some(error),
             Self::IntegerRange
             | Self::CorruptArtifactDigest
             | Self::CorruptArtifact
@@ -621,7 +728,8 @@ impl Error for JournalError {
             | Self::ArtifactDigestMismatch(_)
             | Self::NotADirectory { .. }
             | Self::Locked { .. }
-            | Self::MissingBlob(_) => None,
+            | Self::MissingBlob(_)
+            | Self::BlobLength { .. } => None,
         }
     }
 }

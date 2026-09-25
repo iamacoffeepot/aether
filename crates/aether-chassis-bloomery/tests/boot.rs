@@ -64,3 +64,27 @@ fn unset_journal_refuses_boot() {
     let message = error.to_string();
     assert!(message.contains("AETHER_BLOOMERY_JOURNAL"), "the refusal names the env key: {message}");
 }
+
+#[test]
+fn a_root_another_engine_holds_refuses_boot_naming_the_root() {
+    // Catches a second engine booting over a root the first still holds (two
+    // writers of one journal), and a refusal that only comes late, from the
+    // journal owner's spawn after wasmtime is up, where the message is the
+    // spawn failure's debug dump rather than the lock refusal.
+    let first = SeededJournal::new([]).boot();
+    let root = first.journal_path().to_path_buf();
+    let env = BloomeryEnv {
+        base: ChassisBase { sources: ConfigSources::new(None), ..Default::default() },
+        runtime: RuntimeConfig::default(),
+        bloomery: BloomeryConfig {
+            journal: Some(root.display().to_string()),
+            closure_limit_bytes: ClosureLimit::MAX_BYTES,
+        },
+    };
+
+    let error = BloomeryChassis::build(env).expect_err("a held journal root must refuse a second boot");
+    let message = error.to_string();
+    assert!(message.contains(&root.display().to_string()), "the refusal names the root: {message}");
+    assert!(message.contains("is held by another open journal"), "the refusal is the lock refusal: {message}");
+    drop(first);
+}

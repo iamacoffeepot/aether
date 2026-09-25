@@ -17,9 +17,11 @@
 //! zero-external-integration rule), while the RPC server keeps it drivable
 //! over MCP (ADR-0155 §3).
 
+use std::io;
 use std::mem;
 use std::sync::Arc;
 
+use aether_bloomery_journal::Journal;
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
     chassis_residual_knobs, install_frame_size, with_rpc_server,
@@ -63,7 +65,7 @@ impl Chassis for BloomeryChassis {
 
 impl BloomeryChassis {
     /// Build the bloomery chassis: the hub's prologue with headless's lift —
-    /// lower the bloomery knobs, stand up the substrate, re-apply the resolved
+    /// lower the bloomery knobs, open the journal root, stand up the substrate, re-apply the resolved
     /// log filter, lift the base out of the env, compose the shared stratum
     /// plus the component host, HTTP egress, and the held RPC server, sweep for unknown env
     /// keys, install the signal-blocking driver, mount the journal owner and
@@ -77,7 +79,8 @@ impl BloomeryChassis {
     /// # Errors
     ///
     /// Returns [`BootError`] when the bloomery knobs do not lower, the
-    /// substrate or the composed chain fails to boot, either mount spawn
+    /// journal root does not open (another engine holds it, among others),
+    /// the substrate or the composed chain fails to boot, either mount spawn
     /// fails, or the RPC port cannot be bound.
     pub fn build_mounted(mut env: BloomeryEnv) -> Result<(BuiltChassis<Self>, Mounted), BootError> {
         // Lower the bloomery knobs first, before anything with a side effect:
@@ -87,14 +90,28 @@ impl BloomeryChassis {
         // `--describe` / `--print-config` exit in `run_chassis_main`'s prelude
         // before `build` is called, so they never reach this and still answer
         // with no journal configured.
-        let (journal, limit) = mem::take(&mut env.bloomery).to_journal_and_limit()?;
+        let (root, limit) = mem::take(&mut env.bloomery).to_journal_and_limit()?;
+        // Open the root before wasmtime too: a root another engine holds, or
+        // one that cannot be created, refuses boot here, naming the root.
+        let journal = Journal::open(&root).map_err(|error| {
+            BootError::Other(Box::new(io::Error::other(format!(
+                "the bloomery journal root {} does not open: {error}",
+                root.display()
+            ))))
+        })?;
         let mut boot = SubstrateBoot::build()?;
         apply_filter(&env.runtime.log_filter);
         let base = mem::take(&mut env.base);
         let builder = composed::<Self>(&mut boot, base, env)?;
         validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         let built = builder.driver(SignalDriverCapability::new(boot)).build()?;
-        let mounted = mount::mount(&built, &journal, limit)?;
+        let mounted = mount::mount(&built, journal, limit)?;
+        tracing::info!(
+            journal_root = %root.display(),
+            journal = ?mounted.journal,
+            driver = ?mounted.driver,
+            "bloomery chassis mounted the journal owner and the bundle driver",
+        );
         if let Some(gate) = built.handle::<RpcBindGate>() {
             gate.open().map_err(|error| BootError::Other(Box::new(error)))?;
         }
