@@ -42,9 +42,7 @@
 
 use std::collections::VecDeque;
 
-use aether_data::SessionToken;
-
-use crate::mail::{MailboxId, SourceAddr};
+use crate::mail::SourceAddr;
 
 /// Sentinel passed to the guest's `receive` shim when the inbound
 /// mail has no reply target (broadcast origin — ADR-0013 §1). A
@@ -74,20 +72,6 @@ impl ReplyEntry {
     #[must_use]
     pub fn new(addr: SourceAddr, correlation_id: u64) -> Self {
         Self { addr, correlation_id }
-    }
-
-    /// Back-compat shim for call sites that used the pre-correlation
-    /// `ReplyEntry::Session(token)` form. Builds an entry with no
-    /// correlation.
-    #[must_use]
-    pub fn session(token: SessionToken) -> Self {
-        Self::new(SourceAddr::Session(token), 0)
-    }
-
-    /// Back-compat shim for `ReplyEntry::Component(mailbox)`.
-    #[must_use]
-    pub fn component(mailbox: MailboxId) -> Self {
-        Self::new(SourceAddr::Component(mailbox), 0)
     }
 }
 
@@ -203,6 +187,7 @@ impl ReplyTable {
     /// Look up the entry for a guest-supplied handle. Returns `None`
     /// for `NO_REPLY_HANDLE`, for handles that were never allocated, and
     /// for a stale handle whose slot has since been freed or reused.
+    #[cfg(test)]
     #[must_use]
     pub fn resolve(&self, handle: u32) -> Option<ReplyEntry> {
         self.held(handle).and_then(|slot| slot.entry)
@@ -243,6 +228,7 @@ impl ReplyTable {
     }
 
     /// The slot a handle names, if its generation is current.
+    #[cfg(test)]
     fn held(&self, handle: u32) -> Option<&Slot> {
         if handle == NO_REPLY_HANDLE {
             return None;
@@ -256,9 +242,10 @@ impl ReplyTable {
 mod tests {
     use std::collections::HashSet;
 
-    use aether_data::Uuid;
+    use aether_data::{SessionToken, Uuid};
 
     use super::*;
+    use crate::mail::MailboxId;
 
     fn token(byte: u8) -> SessionToken {
         SessionToken(Uuid::from_bytes([byte; 16]))
@@ -267,11 +254,11 @@ mod tests {
     #[test]
     fn allocate_session_and_component_handles_roundtrip() {
         let mut t = ReplyTable::new();
-        let h_sess = t.allocate(ReplyEntry::session(token(1))).expect("room");
-        let h_comp = t.allocate(ReplyEntry::component(MailboxId(42))).expect("room");
+        let h_sess = t.allocate(ReplyEntry::new(SourceAddr::Session(token(1)), 0)).expect("room");
+        let h_comp = t.allocate(ReplyEntry::new(SourceAddr::Component(MailboxId(42)), 0)).expect("room");
         assert_ne!(h_sess, h_comp);
-        assert_eq!(t.resolve(h_sess), Some(ReplyEntry::session(token(1))));
-        assert_eq!(t.resolve(h_comp), Some(ReplyEntry::component(MailboxId(42))));
+        assert_eq!(t.resolve(h_sess), Some(ReplyEntry::new(SourceAddr::Session(token(1)), 0)));
+        assert_eq!(t.resolve(h_comp), Some(ReplyEntry::new(SourceAddr::Component(MailboxId(42)), 0)));
     }
 
     #[test]
@@ -283,7 +270,7 @@ mod tests {
     #[test]
     fn resolve_unknown_handle_is_none() {
         let mut t = ReplyTable::new();
-        let _ = t.allocate(ReplyEntry::session(token(7)));
+        let _ = t.allocate(ReplyEntry::new(SourceAddr::Session(token(7)), 0));
         assert!(t.resolve(9999).is_none());
     }
 
@@ -300,8 +287,8 @@ mod tests {
     #[test]
     fn a_late_reply_to_a_reused_slot_is_refused() {
         let mut t = ReplyTable::with_preallocated(1);
-        let a = ReplyEntry::session(token(1));
-        let b = ReplyEntry::session(token(2));
+        let a = ReplyEntry::new(SourceAddr::Session(token(1)), 0);
+        let b = ReplyEntry::new(SourceAddr::Session(token(2)), 0);
         let first = t.allocate(a).expect("room");
         assert_eq!(t.take(first), Some(a));
         let second = t.allocate(b).expect("room");
@@ -318,20 +305,20 @@ mod tests {
         let mut handles = Vec::new();
         let mut marks = Vec::new();
         for byte in 0..5 {
-            handles.push(t.allocate(ReplyEntry::session(token(byte))).expect("room"));
+            handles.push(t.allocate(ReplyEntry::new(SourceAddr::Session(token(byte)), 0)).expect("room"));
             marks.push(t.high_water());
         }
 
         assert_eq!(marks, [None, None, Some(3), None, Some(5)]);
         for (byte, handle) in (0..5).zip(&handles) {
-            assert_eq!(t.resolve(*handle), Some(ReplyEntry::session(token(byte))));
+            assert_eq!(t.resolve(*handle), Some(ReplyEntry::new(SourceAddr::Session(token(byte)), 0)));
         }
 
         for handle in handles {
             assert!(t.take(handle).is_some());
         }
         for byte in 0..5 {
-            t.allocate(ReplyEntry::session(token(byte))).expect("room");
+            t.allocate(ReplyEntry::new(SourceAddr::Session(token(byte)), 0)).expect("room");
             assert_eq!(t.high_water(), None);
         }
     }
@@ -339,7 +326,7 @@ mod tests {
     #[test]
     fn allocation_at_the_index_ceiling_is_refused() {
         let mut t = ReplyTable::new();
-        let entry = ReplyEntry::session(token(4));
+        let entry = ReplyEntry::new(SourceAddr::Session(token(4)), 0);
         let mut seen = HashSet::new();
         for _ in 0..MAX_SLOTS {
             assert!(seen.insert(t.allocate(entry).expect("below the ceiling")));
@@ -360,7 +347,7 @@ mod tests {
     #[test]
     fn take_removes_entry() {
         let mut t = ReplyTable::new();
-        let entry = ReplyEntry::session(token(9));
+        let entry = ReplyEntry::new(SourceAddr::Session(token(9)), 0);
         let h = t.allocate(entry).expect("room");
         // Tripwire: a handle is one-shot — the first `take` returns
         // the entry and removes it, so a second take (or resolve)

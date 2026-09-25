@@ -671,11 +671,11 @@ fn guided_walk_reconstructs_causal_tree() {
         return;
     };
 
-    spawn_topology(&tb, &two_level_tree());
+    let relays: Vec<ErasedActorRef> = spawn_topology(&tb, &two_level_tree()).into_iter().map(ActorRef::erase).collect();
     let (root, rx) = tb.inject_root(relay_id(0), Ping::ID, Ping { seq: 0 }.encode_into_bytes());
     assert_settled(&rx, "mlat.guided_walk");
 
-    let mails = match tb.describe_tree_walked(root) {
+    let mails = match tb.describe_tree_walked(root, &relays) {
         DescribeTreeResult::Ok { mails, .. } => mails,
         DescribeTreeResult::Err { not_found } => panic!("guided walk lost root {not_found:?}"),
     };

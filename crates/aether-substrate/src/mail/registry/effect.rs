@@ -73,14 +73,14 @@ pub struct PreparedRoute {
 /// only the target mailbox identity; it never clones or retains the parent's
 /// endpoint, dispatcher slot, or component Store.
 pub struct PreparedAliasRoute {
-    pub alias: MailboxId,
+    pub(crate) alias: MailboxId,
     pub rendered_name: Arc<str>,
-    pub target_parent: MailboxId,
+    pub(crate) target_parent: MailboxId,
 }
 
 impl PreparedAliasRoute {
     #[must_use]
-    pub fn new(alias: MailboxId, rendered_name: impl Into<Arc<str>>, target_parent: MailboxId) -> Self {
+    pub(crate) fn new(alias: MailboxId, rendered_name: impl Into<Arc<str>>, target_parent: MailboxId) -> Self {
         Self { alias, rendered_name: rendered_name.into(), target_parent }
     }
 }

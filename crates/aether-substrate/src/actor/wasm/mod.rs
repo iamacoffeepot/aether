@@ -1,7 +1,7 @@
 //! THE wasm runtime — substrate's host-side implementation of the
 //! `_p32` FFI contract that `aether_actor::wasm` defines. Owns the
 //! wasmtime engine, the host-fn linker registration, the per-instance
-//! [`reply_table`] for in-flight reply correlations, and the
+//! `reply_table` for in-flight reply correlations, and the
 //! [`kind_manifest`] reader that parses `aether.kinds` / `aether.namespace`
 //! custom sections at load time.
 //!
@@ -18,7 +18,7 @@
 //! - [`host_fns`] — `extern "C"` import linker registration matching
 //!   the `aether` wasm import-module names the guest SDK's private `raw`
 //!   declarations expect.
-//! - [`reply_table`] — wasm-only reply correlation table.
+//! - `reply_table` — wasm-only reply correlation table (crate-private).
 //! - [`kind_manifest`] — parses the `aether.kinds` custom section the
 //!   guest's [`aether_actor::export!`] macro emits.
 //!
@@ -34,6 +34,6 @@ pub mod asset_manifest;
 pub mod component;
 pub mod host_fns;
 pub mod kind_manifest;
-pub mod reply_table;
+pub(crate) mod reply_table;
 
 pub use component::{Component, ComponentCtx};
