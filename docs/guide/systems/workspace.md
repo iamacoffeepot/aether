@@ -106,3 +106,69 @@ did not open. `aether.process` is not composed on the Bloomery chassis.
 `--describe` and `--print-config` compose the chassis to list the actor and its
 knobs without a store and never boot it. A boot that reaches the actor without a
 store is refused, naming the missing journal store.
+
+## Building an environment
+
+An environment starts from two imported trees, the distro userland and the
+Rust toolchain (ADR-0237 decision 3). No upstream image carries what the build
+needs, so a checked-in recipe in `scripts/bloomery/environment/` builds both
+and publishes them where the daemon can pull them by digest.
+
+| File | What it holds |
+|---|---|
+| `base.Dockerfile` | Debian slim pinned by digest, plus the packages the workspace's build scripts need, each with a one-line reason |
+| `toolchain.Dockerfile` | the official `rust` slim image of the channel `rust-toolchain.toml` names, pinned by digest, plus that file's components and targets |
+| `publish.sh` | builds both images, pushes them to a loopback registry, and prints the two references |
+| `check.sh` | proves the base's package list with `cargo check --workspace --locked` |
+
+Run the steps on the host whose daemon the actor dials.
+
+1. **Publish.** `scripts/bloomery/environment/publish.sh` starts a
+   digest-pinned `registry:2` container bound to `127.0.0.1` unless one is
+   already running, builds both images, pushes them, and prints:
+
+   ```text
+   base=localhost:5000/aether-env/base@sha256:<digest>
+   toolchain=localhost:5000/aether-env/toolchain@sha256:<digest>
+   ```
+
+   A rerun reuses the registry and prints the same references when nothing
+   was rebuilt. `AETHER_ENV_REGISTRY_PORT` picks the port (default 5000).
+   `publish.sh --stop` removes the registry container; its named volume keeps
+   what was pushed.
+2. **Check.** `scripts/bloomery/environment/check.sh` runs `publish.sh` and
+   checks the references it prints:
+   - `cargo fetch --locked` runs in the toolchain image, so the base carries
+     no network tooling or CA certificates;
+   - a throwaway image adds only the toolchain directory to the base;
+   - `cargo check --workspace --locked --offline` runs in it with no network,
+     the repository mounted read-only, and the target directory on a tmpfs.
+
+   A missing `-dev` package fails a crate's build script here, before any
+   import: without `libasound2-dev`, `alsa-sys` fails. Add the package to
+   `base.Dockerfile` with its reason and run the check again.
+3. **Import.** Mail `aether.workspace.import { image }` to `aether.workspace`
+   on a Bloomery engine, once per reference. Each answers `Ok { tree }`, and a
+   second import of the same reference answers the same tree. Publishing the
+   trees under heads and merging them into an `Environment` is #6720.
+
+What the imported trees hold:
+
+- In the base tree, `usr/bin/cc` is the relative symlink
+  `../../etc/alternatives/cc`, and `dev/` holds no device node. It holds only
+  what Docker creates in every container: an empty `console` file and empty
+  `pts` and `shm` directories, beside an empty `.dockerenv` at the root.
+- The toolchain tree holds the toolchain at
+  `usr/local/rustup/toolchains/<channel>-<triple>`, which the merge program
+  selects, so no rustup proxy enters an environment.
+
+Pins are image digests; a tag beside one only names it for the reader.
+
+- To move the channel, edit `rust-toolchain.toml` and repin
+  `toolchain.Dockerfile` to that channel's `rust:<channel>-slim-<release>`
+  digest. The build fails while the two disagree, because the pinned image
+  would end up holding a second toolchain.
+- Keep the base on the Debian release the toolchain image is built on, so
+  both trees share one libc.
+- `apt-get` output changes from day to day, so a rebuilt base can have a new
+  digest. An environment records the imported tree digest, not the recipe.
