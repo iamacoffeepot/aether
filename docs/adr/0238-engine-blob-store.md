@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-25
+- **Amended:** 2026-09-25 — decisions 3 and 11, wording: an empty attachments field is two words, not one; `Env::open` returns a `VerifyingReader` that streams through a `BlobReader` and checks the member's claimed digest at end of stream.
 - **Amended:** 2026-09-25 — decision 3: a tag-1 field is valid only beside a matching attachment; one carried by a blob-free sender or a wire `Call` is refused at its recipient's decode; intra-cluster guest mail keeps each named value alive until the child's dispatch; a guest's reply to a session or engine mailbox is an egress path.
 - **Amended:** 2026-09-25 — decisions 3, 4 and 12: a send resolves the tag-1 hashes already in its payload against the sender's own blobs and attaches their entries, so a raw forward stays shared and a guest shares a held value by hash on send; an unresolved hash refuses the send at the sender. Supersedes the guest share-on-send follow-on below.
 - **Amended:** 2026-09-25 — decisions 2, 3, 4, 9 and 12: a tag-1 field carries the blob's hash; a guest `Blob` is the same value with an FFI-wrapper backing that takes a hold when built (`blob_hold_p32`, replacing `blob_len_p32`), and delivery pins attached entries only for the receive call, so `receive_p32` is unchanged; the egress rewrite keys on attachments, not a per-kind flag; file and journal writes use the plain encoder; the engine recovers a store entry by downcast; rehydrate re-grant and guest share-on-send are follow-ons.
@@ -231,7 +232,7 @@ tag 1 → [32-byte hash]        in-process mail only; never leaves the process
 
 | Step | What happens |
 |---|---|
-| Send | A send encodes with the envelope encoder, since most mail stays local. Each `Blob` field is interned into the store if it is `Owned`, attached to the envelope as its store entry (`attachments: Option<Box<[Arc<BlobEntry>]>>` on `Mail`, one null word when empty), and written as tag 1 with its hash. Interning already yields the entry, and a guest delivery needs the entry, which a `Blob` hides. A send borrows its payload, so the sender keeps its values. |
+| Send | A send encodes with the envelope encoder, since most mail stays local. Each `Blob` field is interned into the store if it is `Owned`, attached to the envelope as its store entry (`attachments: Option<Box<[Arc<BlobEntry>]>>` on `Mail`, two words with a null pointer when empty), and written as tag 1 with its hash. Interning already yields the entry, and a guest delivery needs the entry, which a `Blob` hides. A send borrows its payload, so the sender keeps its values. |
 | Resolve on send | A payload can already hold tag-1 fields: a raw forward of received bytes, or a guest's encode of a `Blob` it holds, which writes tag 1 with the hash (a guest's `Owned` value is written as tag 0). Before the send leaves the sender, the engine walks the kind's schema, resolves each such hash against the sender's own blobs (a guest's table: its pins and holds; a native actor: the attachments of the mail it is handling) and attaches the entry. A hash that resolves nowhere refuses the send at the sender with an error naming it. A sender that holds and pins no blob cannot carry a valid tag-1 field, so the walk runs only for senders that hold blobs, and blob-free senders pay nothing. Intra-cluster guest mail never reaches the host: the guest keeps each held value it names alive until the inline child's dispatch. |
 | Deliver | A native recipient's decode matches each tag-1 hash to its attached entry and yields a `Shared` `Blob` over it. A guest recipient's table pins every attached entry for the receive call; the guest's decode reads the hash and builds its `Blob` over the FFI wrapper, taking a hold (section 2). `receive_p32` is unchanged, and the guest needs no delivery context. Fan-out delivers per recipient. |
 | Egress | Any path that leaves the process rewrites each tag-1 field to tag 0 by copying in the bytes of the attachment its hash names: RPC reply-out (`crates/aether-rpc/src/server/runtime.rs:934`) and unresolved-recipient egress (`crates/aether-substrate/src/mail/mailer.rs:920`), and a guest's reply to a session or engine mailbox (`reply_mail_p32`). File and journal writes encode typed values with the plain encoder, so they write tag 0 by construction and never take an envelope payload. |
@@ -399,8 +400,11 @@ meaning.
 
 - `Env::read::<K>` (`crates/aether-bloomery-program/src/env.rs:393`) keeps
   returning a decoded `K`, since a typed artifact must be decoded anyway. A
-  new `Env::open` returns a `BlobReader` over an `OpaqueBytes` input. It is the
-  named production consumer of `blob_read_p32`.
+  new `Env::open` returns a `VerifyingReader` over an `OpaqueBytes` input. It
+  streams through a `BlobReader` and hashes as it reads, because a closure
+  member's digest crosses mail as an unverified claim: a read that ends at a
+  mismatch fails there, and a read that stops early proves nothing about the
+  bytes it returned. It is the named production consumer of `blob_read_p32`.
 - `BlobReader` does not implement `std::io::Read`, whose provided
   `read_to_end` is exactly the whole-load shortcut. A separately named adapter
   (`BlobReadAdapter`, behind a new `std` feature of the guest SDK, since the
