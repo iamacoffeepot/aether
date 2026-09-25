@@ -45,8 +45,6 @@ from pathlib import Path
 BASELINE_RELATIVE_PATH = "scripts/raw-mailbox-baseline.json"
 
 PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("mailer()", re.compile(r"(::|\.)mailer\(\)")),
-    ("registry()", re.compile(r"\.registry\(\)")),
     ("mailbox_id_from_name(", re.compile(r"\bmailbox_id_from_name\(")),
     ("mailbox_id_from_name_pair(", re.compile(r"\bmailbox_id_from_name_pair\(")),
     ("mailbox_id_from_path(", re.compile(r"\bmailbox_id_from_path\(")),

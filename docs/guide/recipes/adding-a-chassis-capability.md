@@ -157,9 +157,10 @@ The pieces:
   threads it into `init`.
 - **`init(config, ctx)`** builds the runtime state (it returns
   `Self::State`, not `Self`). The mailbox is already claimed; `ctx` is a
-  `NativeInitCtx` exposing `ctx.mailer()` (the shared `Mailer`, which
-  carries the `Registry`) for caps that pull a shared resource at boot —
-  text just builds plain CPU state. `init` runs before the dispatcher
+  `NativeInitCtx` exposing `self_wake::<K>()` and `actor_probe()` for a
+  thread the cap spawns, `publish_handle` for a driver-facing handle
+  bundle, and `guest_ctx` for a wasm guest host — text just builds plain
+  CPU state. `init` runs before the dispatcher
   starts and before any peer's dispatcher runs — no mail yet. Return
   `Err(BootError::…)` to abort the chassis build.
 - **`wire(&mut self, ctx)`** (optional, default no-op) is the post-init

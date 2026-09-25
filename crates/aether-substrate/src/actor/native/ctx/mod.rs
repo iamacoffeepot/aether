@@ -8,10 +8,9 @@
 //! [`NativeInitCtx`] alongside the existing inherent methods, so
 //! user-facing handler bodies are now spelled in the same
 //! cross-transport vocabulary FFI guests use. Substrate-internal
-//! accessors (`mailer`, `publish_handle`, plus the
-//! `spawn_child` builder) stay inherent — they expose
-//! types that don't belong on a cross-transport trait
-//! (`Arc<Mailer>`, `Arc<Spawner>`, the chassis [`ExportedHandles`] map,
+//! accessors (`publish_handle`, plus the `spawn_child` builder) stay
+//! inherent — they expose types that don't belong on a cross-transport
+//! trait (`Arc<Spawner>`, the chassis [`ExportedHandles`] map,
 //! the substrate-only `HandlerSpawnBuilder<'_, A>` whose
 //! `A: NativeActor + NativeDispatch` bound can't sit on a trait
 //! method declared in `aether-actor`). The inherent + trait surface
@@ -44,7 +43,6 @@ use crate::actor::native::envelope::Envelope;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
 use crate::mail::Source;
-use crate::mail::mailer::Mailer;
 #[cfg(feature = "wasm")]
 use crate::mail::outbound::HubOutbound;
 use crate::runtime::effect_chain::EffectChain;
@@ -337,17 +335,6 @@ impl<'a, A> NativeCtx<'a, A, Manual> {
 }
 
 impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
-    /// Borrow the wired `Mailer`. Issue 953: surfaced so cap handlers
-    /// (`TraceDispatchCapability` is the motivating consumer) can
-    /// reach the per-chassis trace handle for `now_nanos` without
-    /// going through `binding()`. Mirrors the `NativeInitCtx::mailer`
-    /// accessor but returns a borrow rather than a clone — handler
-    /// paths usually just need a `&Mailer` for one call.
-    #[must_use]
-    pub fn mailer(&self) -> &Arc<Mailer> {
-        self.binding.mailer()
-    }
-
     /// Build a guest ctx over this actor's own binding, with `outbound` as
     /// its hub egress. The registry the guest's host fns read is the one the
     /// binding's own mailer routes through, so the two cannot disagree.

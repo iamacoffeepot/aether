@@ -377,7 +377,7 @@ where
     // `Params`), so a local `ExportedHandles` suffices here.
     let mut handles = ExportedHandles::new();
     let init_result = {
-        let mut init_ctx = NativeInitCtx::new(&transport, &mut handles, Arc::clone(mailer));
+        let mut init_ctx = NativeInitCtx::new(&transport, &mut handles);
         local::with_stamped(&slots, || A::init(config, params, &mut init_ctx))
     };
     let mut actor = Box::new(init_result?);

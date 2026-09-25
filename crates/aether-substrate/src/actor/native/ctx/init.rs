@@ -2,8 +2,8 @@
 //!
 //! It dispatches nothing and mails nothing (issue 703: `init` is the
 //! sync constructor, ADR-0079). What it carries is what construction needs —
-//! the actor's binding, the chassis mailer, and the
-//! [`ExportedHandles`] map a cap publishes a driver-facing sub-handle into.
+//! the actor's binding and the [`ExportedHandles`] map a cap publishes a
+//! driver-facing sub-handle into.
 
 use std::any::{Any, TypeId};
 use std::sync::Arc;
@@ -15,7 +15,6 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::self_wake::SelfWake;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
-use crate::mail::mailer::Mailer;
 #[cfg(feature = "wasm")]
 use crate::mail::outbound::HubOutbound;
 
@@ -24,11 +23,9 @@ use super::ExportedHandles;
 /// Boot-time context for [`Lifecycle::init`](aether_actor::Lifecycle::init). Carries a borrow of
 /// the actor's transport (for init-time mail), a borrow of the
 /// chassis's [`ExportedHandles`] map (so the cap can publish a
-/// driver-facing sub-handle via [`Self::publish_handle`]), and a
-/// clone of the substrate's mailer for caps that need to register an
-/// outbound hook at boot. The binding stays private: the wasm trampoline
-/// builds its guest ctx over it through [`Self::guest_ctx`] rather than
-/// holding it.
+/// driver-facing sub-handle via [`Self::publish_handle`]). The binding
+/// stays private: the wasm trampoline builds its guest ctx over it
+/// through [`Self::guest_ctx`] rather than holding it.
 ///
 /// Issue 629 / Phase A: the legacy `peer::<A>() -> Arc<A>` accessor
 /// retired here (closes issue 628). Sibling caps communicate via mail
@@ -40,14 +37,13 @@ use super::ExportedHandles;
 pub struct NativeInitCtx<'a> {
     binding: &'a Arc<NativeBinding>,
     handles: &'a mut ExportedHandles,
-    mailer: Arc<Mailer>,
 }
 
 impl<'a> NativeInitCtx<'a> {
     /// Internal constructor — only [`crate::chassis::builder::Builder::with_actor`]
     /// builds these.
-    pub(crate) fn new(binding: &'a Arc<NativeBinding>, handles: &'a mut ExportedHandles, mailer: Arc<Mailer>) -> Self {
-        Self { binding, handles, mailer }
+    pub(crate) fn new(binding: &'a Arc<NativeBinding>, handles: &'a mut ExportedHandles) -> Self {
+        Self { binding, handles }
     }
 
     /// Build a guest ctx over this actor's binding, with `outbound` as its
@@ -61,14 +57,6 @@ impl<'a> NativeInitCtx<'a> {
     #[must_use]
     pub fn guest_ctx(&self, outbound: Arc<HubOutbound>) -> ComponentCtx {
         self.binding.guest_ctx(outbound)
-    }
-
-    /// Clone the substrate's mailer. Caps that need to register a
-    /// `Mailer::set_outbound`-style hook (Hub client, future
-    /// fallback routers) reach for this; most caps don't need it.
-    #[must_use]
-    pub fn mailer(&self) -> Arc<Mailer> {
-        Arc::clone(&self.mailer)
     }
 
     /// A [`SelfWake<K>`] for a thread this cap spawns during `init` — an
@@ -86,7 +74,7 @@ impl<'a> NativeInitCtx<'a> {
     /// no send.
     #[must_use]
     pub fn actor_probe(&self) -> ActorProbe {
-        self.mailer.actor_probe()
+        self.binding.actor_probe()
     }
 
     /// Issue 629 / Phase A: publish a sub-handle bundle for cross-

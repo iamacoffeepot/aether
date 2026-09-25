@@ -185,23 +185,21 @@ class ScannerTests(unittest.TestCase):
         text = "\n".join(output)
         self.assertIn('baseline row "a_retired_door(" is not tracked by this scanner; ignored.', text)
 
-    def test_comment_stripped_attribute_counted_ufcs_counted(self) -> None:
+    def test_comment_stripped_attribute_counted(self) -> None:
         self.repo.write(
             "crates/example/src/lib.rs",
             "fn f(x: Actor) {\n"
             "    // mailbox_id_from_path(y); commented out, must not count\n"
             "    mailbox_id_from_path(y); // a real call\n"
-            "    <T as Trait>::mailer();\n"
             "}\n"
             "#[allow(clippy::disallowed_methods)] // aether-suppression-request: legacy\n"
             "fn g() {}\n",
         )
-        self.repo.commit("comment stripping and UFCS coverage")
+        self.repo.commit("comment stripping and attribute coverage")
 
         counts = self.repo.count()
 
         self.assertEqual(counts["mailbox_id_from_path("], 1)
-        self.assertEqual(counts["mailer()"], 1)
         self.assertEqual(counts["clippy::disallowed_methods"], 1)
 
     def test_malformed_or_non_integer_baseline_is_an_operational_error(self) -> None:
