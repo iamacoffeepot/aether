@@ -42,21 +42,21 @@ pub use material::{
     MaterialPassRecord, MaterialPipelines, build_material_pipelines, push_coverage_params, push_material_rect_vertices,
     push_textured_params, record_material_pass,
 };
-pub use pipeline::{Pipeline, RenderError, build_main_pipeline, record_main_pass};
+pub use pipeline::{MainPassRecord, Pipeline, RenderError, build_main_pipeline, record_main_pass};
 pub use program::{
     PROGRAM_DEPTH_FORMAT, PROGRAM_FULLSCREEN_ENTRY, PROGRAM_FULLSCREEN_WGSL, PassTimestamps, ProgramComputePass,
     ProgramComputePipelineSpec, ProgramDepthAttachment, ProgramDrawCommand, ProgramDrawPass, ProgramDrawPipelineSpec,
-    ProgramPassDraw, build_fullscreen_vertex_module, build_program_compute_pipeline, build_program_draw_pipeline,
-    build_program_pipeline, create_program_depth_transient, create_program_transient, program_inputs_layout,
-    program_storage_layout, program_uniform_layout, record_program_compute_pass, record_program_draw_pass,
-    record_program_pass,
+    ProgramPassDraw, ProgramPipelineSpec, build_fullscreen_vertex_module, build_program_compute_pipeline,
+    build_program_draw_pipeline, build_program_pipeline, create_program_depth_transient, create_program_transient,
+    program_inputs_layout, program_storage_layout, program_uniform_layout, record_program_compute_pass,
+    record_program_draw_pass, record_program_pass,
 };
 pub use quad::{
     CompositeBlend, OverlayDraw, OverlaySource, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,
-    QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadPipeline, RealizedTexture, TextureBindings,
-    build_quad_pipeline, build_texture_bindings, push_screen_quad_vertices, push_screen_triangle_vertices,
-    push_world_quad_vertices, push_world_triangle_vertices, realize_texture, realize_writable_texture,
-    record_quad_overlay_pass, upload_texture_full,
+    QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadOverlayPassRecord, QuadPipeline, RealizedTexture,
+    TextureBindings, TextureSpec, build_quad_pipeline, build_texture_bindings, push_screen_quad_vertices,
+    push_screen_triangle_vertices, push_world_quad_vertices, push_world_triangle_vertices, realize_texture,
+    realize_writable_texture, record_quad_overlay_pass, upload_texture_full,
 };
 pub use shape::{
     SHAPE_VERTEX_BUFFER_BYTES, SHAPE_VERTEX_STRIDE, SHAPE_VERTICES_PER_SHAPE, ShapeParams, push_screen_shape_vertices,
