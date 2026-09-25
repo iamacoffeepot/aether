@@ -10,6 +10,7 @@
 - **Amended:** 2026-09-24 — a bundle's fetch-on-miss travels invocation → bundle root → driver, and the driver forwards it to the journal owner with the reply pinned to the root; a bundle addresses no journal position (issue #6478).
 - **Amended:** 2026-09-24 — the driver answers a bundle's fetch-on-miss itself, from a byte-bounded cache of found artifacts or one journal read shared by every fetch of that digest, and never caches a missing artifact; `SetHead` destination checks consult the same cache (issue #6258).
 - **Amended:** 2026-09-25 — the chassis opens one journal root (the SQLite database plus its `blobs` directory, ADR-0220) rather than one journal file.
+- **Amended:** 2026-09-25 — decision 10: `ReadClosure` answers with engine blob handles rather than inline bytes, and `ClosureLimit::MAX_BYTES` rises from 16 MiB to 4 GiB (ADR-0238 decision 10).
 
 ## Context
 

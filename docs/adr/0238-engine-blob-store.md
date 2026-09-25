@@ -107,7 +107,7 @@ state and so own no table.
 ### 1. A native store, not an actor
 
 ```rust
-// crates/aether-substrate/src/blob_store/ (native only; never a mailbox)
+// crates/aether-substrate/src/store/ (native only; never a mailbox)
 pub struct BlobStore { /* hash -> Weak<BlobEntry>, resident byte gauge, reclaim sender */ }
 
 pub struct BlobEntry {
@@ -140,8 +140,8 @@ boxed bytes are freed when the last strong reference drops.
 
 | Side | Handle | Table home |
 |---|---|---|
-| Native actor | `Blob` (non-`Copy`, generation-tagged `u32`) | beside `A::State`, under the slot's actor `Mutex`; lent to `NativeCtx` for the turn |
-| Wasm guest | `Blob` (same `u32` shape) | `ComponentCtx`, beside `reply_table`; moved across `replace` like `PendingReplies` |
+| Native actor | `Blob` (non-`Copy`; 64-bit: slot, generation, table incarnation; section 6) | beside `A::State`, under the slot's actor `Mutex`; lent to `NativeCtx` for the turn |
+| Wasm guest | `Blob` (same 64-bit shape) | `ComponentCtx`, beside `reply_table`; moved across `replace` like `PendingReplies` |
 
 - The table is a generation-tagged slab like `ReplyTable`: index in the low
   bits, generation in the high bits, FIFO free queue, grows and never drops a
@@ -157,7 +157,7 @@ boxed bytes are freed when the last strong reference drops.
 | Step | What happens |
 |---|---|
 | Send | The payload carries the sender's table index. The send path looks up each blob field in the sender's table and clones its `Arc` into the envelope. An index that is not live refuses the send. The sender keeps its own entry. |
-| Carry | The envelope carries the `Arc`s beside the payload: `attachments: Option<Box<[(u32, Arc<BlobEntry>)]>>` on `Mail`, one null word when empty. |
+| Carry | The envelope carries the `Arc`s beside the payload: `attachments: Option<Box<[(u64, Arc<BlobEntry>)]>>` on `Mail`, one null word when empty. |
 | Deliver | The substrate installs each `Arc` in the recipient's table and rewrites each payload index to the recipient's index before the handler runs. Fan-out installs per recipient. |
 
 A grant is a side effect of delivering mail. An actor cannot see a new blob
@@ -190,7 +190,25 @@ derived from the schema, not declared: RPC `Call` accept
 (`encode_schema` / `decode_schema`). Crossing a process means sending bytes and
 checking them in on the other side.
 
-### 6. Freeing by refcount, with a reclaim thread
+### 6. Handles serialize in the engine, never persist
+
+A handle may be encoded into a payload inside the engine; that is how mail
+carries it (section 3). It must never be persisted, because the store is
+memory only and a persisted handle names nothing after a restart. Three
+layers enforce this.
+
+| Layer | Mechanism | Catches |
+|---|---|---|
+| Static | Each kind carries `const HAS_BLOB: bool`, derived from its schema by the `Kind` derive. Every typed persistence path asserts `const { assert!(!K::HAS_BLOB) }`: the Bloomery journal's staging (`Env::stage`, `AppendRecords`), `save_state_kind`, and the wire and codec paths of section 5. | A blob-bearing kind reaching any typed persistence path is a compile error, not a runtime check. |
+| Fail closed | A handle's encoded form is 64 bits: slot and generation in the low 32, the owning table's incarnation in the high 32. The incarnation is random, drawn when the table is created. | Bytes written through an untyped path (`aether.fs.write` of raw bytes) and read back after a restart carry a stale incarnation. They resolve to nothing instead of aliasing whatever entry now holds that slot. |
+| No escalation | An index resolves only against its holder's own table. | A forged or replayed handle can reach only blobs the holder was already granted, so no untyped path can widen access. |
+
+`save_state_kind` refuses blob-bearing kinds even though a `replace` stays in
+the same process: the table moves across the swap (section 2), so a
+rehydrated actor still holds its entries and needs no handle in its saved
+state.
+
+### 7. Freeing by refcount, with a reclaim thread
 
 - Table entries and envelopes hold strong references. When the last one
   drops, no reference provably remains, and the bytes can go at any time.
@@ -199,8 +217,12 @@ checking them in on the other side.
 - Large entries do not free on the dropping thread. `BlobEntry::drop` sends
   a `Box<[u8]>` at or above `RECLAIM_THRESHOLD_BYTES` to one reclaim thread,
   which frees it. Small entries free inline.
+- The store never drops a referenced entry. Under memory pressure it grows
+  and surfaces the pressure: a resident-byte gauge warns at each new
+  high-water mark, like `ReplyTable`. Spilling referenced entries to
+  persistent storage is not part of this design.
 
-### 7. Allocation: system allocator plus off-thread reclaim
+### 8. Allocation: system allocator plus off-thread reclaim
 
 The store allocates with the system allocator. The concerns are churn and the
 cost of freeing large blocks.
@@ -210,7 +232,7 @@ cost of freeing large blocks.
 - The system allocator serves large allocations as their own mappings. Freeing
   one returns it to the OS without fragmenting the small-object heap.
 - The expensive part of freeing a large block (unmapping) moves off hot
-  dispatch threads onto the reclaim thread (section 6).
+  dispatch threads onto the reclaim thread (section 7).
 - A custom allocator over an engine-held block can come later, behind
   `BlobStore`'s interface, if measurement shows churn. Nothing outside the
   store sees how bytes are allocated.
@@ -218,7 +240,7 @@ cost of freeing large blocks.
   `Arc::new_uninit_slice`-style buffer in place, so building an entry does not
   copy the bytes twice.
 
-### 8. Reads: native borrows, wasm streams
+### 9. Reads: native borrows, wasm streams
 
 Native code borrows zero-copy: `ctx.blob_bytes(&blob) -> &[u8]`.
 
@@ -238,7 +260,7 @@ impl<'a> BlobReader<'a> {
 }
 
 // host import (crates/aether-substrate/src/actor/wasm/host_fns.rs)
-// "aether"."blob_read_p32"(handle: u32, offset: u64, dst_ptr: u32, dst_len: u32) -> i64
+// "aether"."blob_read_p32"(handle: u64, offset: u64, dst_ptr: u32, dst_len: u32) -> i64
 ```
 
 - The guest supplies the buffer. The host copies at most `MAX_READ_BYTES` per
@@ -250,13 +272,26 @@ impl<'a> BlobReader<'a> {
   Nothing makes it the easy path, and the loop is visible in review.
 - `blob_read_p32` lands with a named production consumer, per the rule that
   every FFI import needs one. The first candidate is Bloomery's `Env<Async>`
-  opening an `OpaqueBytes` input (open question 3).
+  opening an `OpaqueBytes` input (open question 2).
 
-### 9. Files that change (implementation, not this ADR)
+### 10. Closures carry handles, and the closure ceiling rises
+
+This amends ADR-0226 decision 10. `ReadClosure` answers with handles, not
+inline bytes, and `Invoke` hands the program its closure as handles. A
+program reads an `OpaqueBytes` member through `BlobReader`, so no member is
+copied into the program's memory unless it reads it.
+
+The ceiling now bounds resident bytes checked in for one closure, not a mail
+frame. `ClosureLimit::MAX_BYTES` rises from 16 MiB to 4 GiB, which admits a
+~950 MB environment plus a real source tree. The driver's configured limit
+stays within `MIN_BYTES ..= MAX_BYTES`, and `ClosureTooLarge` keeps its
+meaning.
+
+### 11. Files that change (implementation, not this ADR)
 
 | Area | Files |
 |---|---|
-| Store | new `crates/aether-substrate/src/blob_store/` |
+| Store | new `crates/aether-substrate/src/store/` |
 | Envelope | `crates/aether-substrate/src/mail/mod.rs` (`Mail`), `mail/registry/dispatch.rs` (`OwnedDispatch`, `DispatchParts`, `MailDispatch`) |
 | Native send | `crates/aether-substrate/src/actor/native/binding/{outbound,pending,flush,send}.rs` (ring entries are plain bytes, so attachments ride on `PendingMail` beside the ring entry) |
 | Native deliver | `actor/native/slot/dispatcher.rs` (install and rewrite, table under the actor `Mutex`), `actor/native/ctx/{mod,send}.rs` |
@@ -268,16 +303,12 @@ impl<'a> BlobReader<'a> {
 
 ## Consequences
 
-- **Bloomery.** A program's input closure can carry handles instead of bytes,
-  and `ReadArtifact` / `ReadClosure` replies can carry handles. The closure
-  no longer has to fit one mail frame, which dissolves the byte ceiling of
-  ADR-0226 decision 10 as a frame limit.
-- **Memory is still the limit.** The store is in memory only, so a handle
-  always names resident bytes. A closure carried by handle still loads every
-  byte into memory to check it in. For #6719 (a ~950 MB environment rootfs a
-  workspace never reads) handles move the problem from the frame to RAM. The
-  closure walk should still skip bytes a program does not read, citing them
-  by digest.
+- **Bloomery.** A program's input closure and `ReadArtifact` /
+  `ReadClosure` replies carry handles (section 10). The closure no longer has
+  to fit one mail frame or be copied into the program, which resolves #6719.
+- **Memory is the limit.** The store is in memory only, so a handle always
+  names resident bytes, and a closure's members are resident while it runs.
+  The raised ceiling (section 10) bounds that per closure.
 - **Wire callers keep bytes.** aether-mcp is a wire client, so it can never
   receive a handle. A handle-bearing read is a new kind (for example
   `aether.fs.open` answering a `Blob`), and `aether.fs.read` keeps its bytes
@@ -286,8 +317,8 @@ impl<'a> BlobReader<'a> {
   graphics data (meshes, textures) held as blobs and uploaded by the render
   cap from a borrowed slice.
 - **Naming.** `actor/native/blob/` already means ADR-0087's unit of dispatch.
-  The store takes `blob_store/` and the types `BlobStore` / `BlobEntry` /
-  `Blob`, and ADR-0087's module keeps its name.
+  The store's module is `store/`, with the types `BlobStore` / `BlobEntry` /
+  `Blob`. ADR-0087's unit of dispatch is to be renamed separately.
 - **Negative.** Blob-bearing kinds pay a schema walk on send and on delivery.
   A guest must release handles it no longer needs, or its table grows until
   the actor dies.
@@ -298,26 +329,21 @@ impl<'a> BlobReader<'a> {
 
 The owner decides each. Each carries a recommendation.
 
-1. **Memory pressure.** Recommend: grow, and surface pressure. The standing
-   rule is never to drop pending or live state, so the store never evicts a
-   referenced entry. It keeps a resident-byte gauge and warns at each new
-   high-water mark, like `ReplyTable`. Alternative: refuse check-in beyond a
-   budget with a typed error, which fails the producer rather than the
-   process.
-2. **Hash.** Recommend: sha256 over the raw bytes, matching the Bloomery
-   journal's hash function (`hash_bytes`,
+1. **Hash.** Recommend: BLAKE3, which is several times faster on large
+   inputs and parallelizes; the hash is only a dedup key, and it cannot share
+   digest values with the journal anyway (below). Alternative: sha256 over the
+   raw bytes, matching the Bloomery journal's hash function (`hash_bytes`,
    `crates/aether-bloomery-kinds/src/artifact.rs:53`), so one crate and one
    digest type serve both. Note the journal's artifact digest covers an 8-byte
    `KindId` prefix plus the payload (`artifact_digest`, `artifact.rs:47`), so
-   it is not the store's hash of the payload alone. Alternative: BLAKE3, which
-   is several times faster on large inputs and parallelizes, at the cost of a
+   it is not the store's hash of the payload alone. Sharing sha256 saves a
    second hash family. Since the hash is only a dedup key, either is safe.
-3. **Bloomery `Env::read`.** Recommend: `Env::read::<K>`
+2. **Bloomery `Env::read`.** Recommend: `Env::read::<K>`
    (`crates/aether-bloomery-program/src/env.rs:393`) keeps returning a decoded
    `K`, since a typed artifact must be decoded anyway. A new `Env::open` returns
    a `BlobReader` over an `OpaqueBytes` input. That is the named consumer for
    `blob_read_p32`.
-4. **Whether `BlobReader` implements `std::io::Read`.** Recommend: it does
+3. **Whether `BlobReader` implements `std::io::Read`.** Recommend: it does
    not. Ecosystem decoders take `impl Read`, but `Read::read_to_end` is exactly
    the whole-load shortcut. Provide a separately named adapter type (for
    example `BlobReadAdapter`) for decoders that need `Read`, so the whole-load
@@ -339,7 +365,7 @@ The owner decides each. Each carries a recommendation.
 - **Mutable blobs.** Readers would need synchronization. Rejected; a change
   is a new check-in.
 - **A bump arena.** Frees only as a whole, so one long-lived blob pins its
-  block. Rejected (section 7).
+  block. Rejected (section 8).
 - **A custom allocator now.** No measurement shows need. Deferred behind the
   store interface.
 - **Rewriting indices by decode-time lookup instead of in bytes.** The typed
