@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::mem;
 
-use aether_bloomery_kinds::{Name, Node, Ref, Tree, TreeError};
+use aether_bloomery_kinds::{Name, Node, Ref, Tree};
 
 use super::entry::EntryPath;
 use super::{DecodeError, Refusal};
@@ -21,7 +21,6 @@ struct PendingDir {
     entries: BTreeMap<Name, Pending>,
     /// Named by its own entry, rather than created as a missing parent.
     explicit: bool,
-    parent: Option<(usize, Name)>,
 }
 
 enum Pending {
@@ -38,7 +37,7 @@ pub(super) struct Vacancy {
 
 impl Skeleton {
     pub(super) fn new() -> Self {
-        Self { dirs: vec![PendingDir { entries: BTreeMap::new(), explicit: true, parent: None }] }
+        Self { dirs: vec![PendingDir { entries: BTreeMap::new(), explicit: true }] }
     }
 
     /// Reserve `path` for a non-directory entry.
@@ -112,13 +111,7 @@ impl Skeleton {
                 Pending::Dir(child) => (name, Node::Directory(sealed[last - child])),
             })
             .collect();
-        // The one place the tree's own name equality applies: two names it
-        // treats as one entry are the same path twice.
-        let tree = Tree::new(entries).map_err(|TreeError::Collides { b, .. }| DecodeError::Refused {
-            entry: self.child_path(index, &b),
-            refusal: Refusal::Duplicate,
-        })?;
-        sink.put_tree(&tree).map_err(DecodeError::Sink)
+        sink.put_tree(&Tree::new(entries)).map_err(DecodeError::Sink)
     }
 
     /// Walk to the parent directory of `path`, creating missing parents.
@@ -136,20 +129,8 @@ impl Skeleton {
 
     fn push_dir(&mut self, parent: usize, name: Name, explicit: bool) -> usize {
         let index = self.dirs.len();
-        self.dirs[parent].entries.insert(name.clone(), Pending::Dir(index));
-        self.dirs.push(PendingDir { entries: BTreeMap::new(), explicit, parent: Some((parent, name)) });
+        self.dirs[parent].entries.insert(name, Pending::Dir(index));
+        self.dirs.push(PendingDir { entries: BTreeMap::new(), explicit });
         index
-    }
-
-    /// The `/`-joined path of `name` inside directory `index`.
-    fn child_path(&self, index: usize, name: &Name) -> String {
-        let mut names = vec![name.as_str()];
-        let mut cursor = index;
-        while let Some((parent, name)) = &self.dirs[cursor].parent {
-            names.push(name.as_str());
-            cursor = *parent;
-        }
-        names.reverse();
-        names.join("/")
     }
 }

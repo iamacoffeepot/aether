@@ -26,7 +26,7 @@ impl MemoryStore {
             .into_iter()
             .map(|(name, node)| (Name::new(name).expect("valid name"), node))
             .collect::<BTreeMap<_, _>>();
-        self.put_tree(&Tree::new(entries).expect("no collision")).expect("a tree encodes")
+        self.put_tree(&Tree::new(entries)).expect("a tree encodes")
     }
 
     /// Decode `bytes` into this store.

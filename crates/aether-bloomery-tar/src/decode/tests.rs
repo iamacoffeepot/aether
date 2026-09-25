@@ -100,7 +100,7 @@ fn name(value: &str) -> Name {
 
 fn tree(entries: Vec<(&str, Node)>) -> Ref<Tree> {
     let entries = entries.into_iter().map(|(key, node)| (name(key), node)).collect::<BTreeMap<_, _>>();
-    Ref::of_encoded(&Tree::new(entries).expect("no collision")).expect("a tree encodes")
+    Ref::of_encoded(&Tree::new(entries)).expect("a tree encodes")
 }
 
 fn assert_refusals(cases: Vec<(&str, Vec<u8>, &str, Refusal)>) {
@@ -271,7 +271,7 @@ fn lenient_inputs_decode_to_their_canonical_tree() {
     // GNU keeps atime and ctime where POSIX keeps the prefix.
     let mut gnu_prefix = header(b"f", typeflag::REGULAR, 6, "");
     gnu_prefix[257..265].copy_from_slice(b"ustar  \0");
-    gnu_prefix[345..369].copy_from_slice(b"14000000000\014000000000\0");
+    gnu_prefix[345..369].copy_from_slice(b"14000000000\x0014000000000\0");
     seal(&mut gnu_prefix);
 
     let cases: Vec<(&str, Vec<u8>, Ref<Tree>)> = vec![

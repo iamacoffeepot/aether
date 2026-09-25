@@ -47,7 +47,7 @@
 //! | Other PAX keys | Ignored. |
 //! | Path | Leading `./` runs and one trailing `/` stripped; a leading `/`, a `..` segment, an invalid name, or non-UTF-8 bytes refused. A bare `.` is the root: ignored as a directory, refused otherwise. |
 //! | Missing parent | Created as a directory. |
-//! | The same path twice | [`Refusal::Duplicate`], except an explicit directory over an implicit one. Two names [`Tree::new`](aether_bloomery_kinds::Tree::new) treats as one are the same path. |
+//! | The same path twice | [`Refusal::Duplicate`], except an explicit directory over an implicit one. |
 //! | An entry under a file or symlink | [`Refusal::ParentNotDirectory`] |
 //! | More than [`MAX_DEPTH`] segments | [`Refusal::TooDeep`] |
 //! | Extended header over 1 MiB, repeated, or not followed by an entry | Refused. |
