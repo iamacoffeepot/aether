@@ -384,9 +384,9 @@ mod tests {
     use crate::chassis::settlement::SettlementRegistry;
     use crate::mail::MailRef;
     use crate::mail::SourceAddr;
-    use crate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
+    use crate::mail::registry::{DispatchParts, InboxHandler, OwnedDispatch, Registry};
+    use aether_kinds::LifecycleAdvanceComplete;
     use aether_kinds::descriptors;
-    use aether_kinds::{LifecycleAdvanceComplete, trace::Nanos};
 
     /// A mailer wired to a settlement registry on both seams (the chassis
     /// builder does both installs at boot), plus the registry handle so a
@@ -407,16 +407,7 @@ mod tests {
     /// `mail_id` is present, matching the production `route_mail` Inbox arm).
     fn armed_env(id: MailboxId, mail_id: Option<MailId>, root: Option<MailId>, sender: Source) -> Envelope {
         OwnedDispatch::armed(
-            KindId(7),
-            None,
-            sender,
-            MailRef::from(Vec::new()),
-            1,
-            mail_id,
-            root,
-            None,
-            Nanos(0),
-            0,
+            DispatchParts { sender, mail_id, root, ..DispatchParts::new(KindId(7), MailRef::from(Vec::new())) },
             id,
         )
     }

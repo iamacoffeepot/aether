@@ -35,7 +35,7 @@ use crate::mail::registry::effect::ActivationToken;
 
 /// One actor slot in the registry. `Live` carries the inbox sender
 /// (for direct mail routing into the dispatcher) and the actor's
-/// `TypeId` (read back by [`ActorRegistry::type_id_at`]). `Dead` is a sentinel for entries
+/// `TypeId`. `Dead` is a sentinel for entries
 /// whose dispatcher has joined and whose actor has dropped — mail
 /// addressed to the slot warn-drops, and `spawn_child` rejects the
 /// name for reuse. ADR-0079 §Drop / lifecycle.
@@ -101,7 +101,7 @@ pub struct ActorRegistry {
 /// without rewriting the vec storage.
 #[derive(Debug, Clone, Copy)]
 pub struct MonitorEntry {
-    pub watcher: MailboxId,
+    pub(crate) watcher: MailboxId,
 }
 
 /// Failure modes for the registry's internal `register_monitor` entry
@@ -146,7 +146,7 @@ impl ActorRegistry {
     /// `Dead` and missing both return `false` — callers can't
     /// distinguish via this path, by design (ADR-0079: `Dead` is opaque
     /// to lookup; spawn-time retirement check goes through
-    /// [`Self::is_tombstoned`]).
+    /// `is_tombstoned`).
     ///
     /// Takes the proof the caller was handed at spawn (ADR-0230): a
     /// reference claims the actor reached `Live`, and this answers whether
@@ -171,39 +171,6 @@ impl ActorRegistry {
         matches!(actors.get(&id), Some(ActorEntry::Live { .. }))
     }
 
-    /// `Some(sender)` only if the slot at `id` is `Live`. The returned
-    /// `Sender` is cloned out of the registry's `Arc<Sender>` so the
-    /// caller can push mail directly into the actor's inbox without
-    /// holding the registry lock or affecting the Arc's strong count.
-    ///
-    /// # Panics
-    /// Panics if the `actors` `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior writer panicked under
-    /// the guard, a substrate-level invariant violation.
-    pub fn live_sender(&self, id: MailboxId) -> Option<Sender<Envelope>> {
-        let actors = self.actors.read().expect("actors lock poisoned; fail-fast per ADR-0063");
-        match actors.get(&id) {
-            Some(ActorEntry::Live { sender, .. }) => Some((**sender).clone()),
-            _ => None,
-        }
-    }
-
-    /// `TypeId` of the actor occupying the slot at `id`, or `None` if
-    /// the slot is `Dead` or missing. The downcast-safety counterpart
-    /// to [`Self::is_live`].
-    ///
-    /// # Panics
-    /// Panics if the `actors` `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior writer panicked under
-    /// the guard, a substrate-level invariant violation.
-    pub fn type_id_at(&self, id: MailboxId) -> Option<TypeId> {
-        let actors = self.actors.read().expect("actors lock poisoned; fail-fast per ADR-0063");
-        match actors.get(&id) {
-            Some(ActorEntry::Live { type_id, .. }) => Some(*type_id),
-            _ => None,
-        }
-    }
-
     /// Has this id been tombstoned (its actor closed)? `spawn_child`
     /// uses this in Phase 3 to reject reuse of retired full names.
     ///
@@ -211,7 +178,7 @@ impl ActorRegistry {
     /// Panics if the `tombstones` `RwLock` is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior writer panicked under
     /// the guard, a substrate-level invariant violation.
-    pub fn is_tombstoned(&self, id: MailboxId) -> bool {
+    pub(crate) fn is_tombstoned(&self, id: MailboxId) -> bool {
         self.tombstones.read().expect("tombstones lock poisoned; fail-fast per ADR-0063").contains(&id)
     }
 
@@ -565,8 +532,6 @@ mod tests {
     fn fresh_registry_is_empty() {
         let r = ActorRegistry::new();
         assert!(!r.is_live_at(MailboxId(1)));
-        assert!(r.live_sender(MailboxId(1)).is_none());
-        assert!(r.type_id_at(MailboxId(1)).is_none());
         assert!(!r.is_tombstoned(MailboxId(1)));
         assert!(r.namespace_owner("aether.example").is_none());
         assert_eq!(r.monitor_count(MailboxId(1)), 0);

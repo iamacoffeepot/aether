@@ -9,6 +9,7 @@ use super::outbound::OutboundBuffer;
 use super::pending::{ComponentOrigin, PendingOwnerBatchWork, PendingPayload, component_origin};
 use crate::mail::registry::effect::{EffectBatch, PreparedSpawnCommit, RegistryEffect};
 use crate::mail::{KindId, Mail, MailRef, MailboxId};
+use crate::runtime::trace::SentRecord;
 
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
@@ -139,16 +140,16 @@ impl NativeBinding {
             let (Some(mail_id), Some(root)) = (mail.mail_id, mail.root) else {
                 continue;
             };
-            self.mailer.record_sent_event_at(
+            self.mailer.record_sent_event_at(SentRecord {
                 mail_id,
                 root,
-                mail.parent_mail,
-                component_origin(&component_origins, Some(mail_id)).unwrap_or(self_mailbox),
-                mail.recipient,
-                mail.kind,
-                construct_start,
-                flush_begin,
-            );
+                parent_mail: mail.parent_mail,
+                sender: component_origin(&component_origins, Some(mail_id)).unwrap_or(self_mailbox),
+                recipient: mail.recipient,
+                kind: mail.kind,
+                t_construct_start: construct_start,
+                t: flush_begin,
+            });
         }
 
         if !owner_batches.is_empty() {
@@ -225,6 +226,7 @@ impl NativeBinding {
 #[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
+    use super::super::OutboundSend;
     use super::super::fixture::forward_to_envelope_sender;
     use super::super::outbound::ACTOR_RING_BYTES;
     use super::*;
@@ -246,8 +248,22 @@ mod tests {
         let recipient = registry.lookup("test.sink").unwrap();
         let transport = NativeBinding::new_for_test(mailer, MailboxId(0x5151));
 
-        transport.push_envelope_buffered(recipient.0, 7, &[1, 2, 3], 1, None, None);
-        transport.push_envelope_buffered(recipient.0, 9, &[4, 5], 1, None, None);
+        transport.push_envelope_buffered(OutboundSend {
+            recipient: recipient.0,
+            kind: 7,
+            bytes: &[1, 2, 3],
+            count: 1,
+            parent_mail: None,
+            inherited_root: None,
+        });
+        transport.push_envelope_buffered(OutboundSend {
+            recipient: recipient.0,
+            kind: 9,
+            bytes: &[4, 5],
+            count: 1,
+            parent_mail: None,
+            inherited_root: None,
+        });
         assert!(rx.try_recv().is_err(), "buffered sends must not route before flush");
 
         transport.flush_outbound();
@@ -275,7 +291,14 @@ mod tests {
 
         // Larger than the whole ring — never fits, so the valve copies out.
         let big = vec![0xABu8; ACTOR_RING_BYTES + 4096];
-        transport.push_envelope_buffered(recipient.0, 3, &big, 1, None, None);
+        transport.push_envelope_buffered(OutboundSend {
+            recipient: recipient.0,
+            kind: 3,
+            bytes: &big,
+            count: 1,
+            parent_mail: None,
+            inherited_root: None,
+        });
         transport.flush_outbound();
 
         let env = rx.try_recv().expect("oversized mail still delivered via copy-out");
@@ -354,7 +377,14 @@ mod tests {
             let n = (i % 4 + 1) as usize;
             let payload = vec![tag; 8 + (i as usize % 24)];
             for _ in 0..n {
-                transport.push_envelope_buffered(recipient.0, 7, &payload, 1, None, None);
+                transport.push_envelope_buffered(OutboundSend {
+                    recipient: recipient.0,
+                    kind: 7,
+                    bytes: &payload,
+                    count: 1,
+                    parent_mail: None,
+                    inherited_root: None,
+                });
                 sent += 1;
             }
             transport.flush_outbound();

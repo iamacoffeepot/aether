@@ -122,7 +122,7 @@ impl Spawner {
                     cap_millis = BIRTH_PATIENCE.as_millis(),
                     "post-seal spawn wedged: the owner accepted the birth but nothing decided it",
                 );
-                Err(SpawnError::BirthWedged { mailbox_id, waited: BIRTH_PATIENCE })
+                Err(SpawnError::BirthWedged { full_name: name.to_string(), waited: BIRTH_PATIENCE })
             }
             // The finalizer dropped without deciding, so no answer is coming.
             // A birth abandoned before anything promoted it leaves the caller

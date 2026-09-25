@@ -126,6 +126,7 @@ impl NativeBinding {
 
 #[cfg(all(test, feature = "wasm"))]
 mod tests {
+    use super::super::OutboundSend;
     use super::super::fixture::{component_ctx_with_binding, forward_to_envelope_sender};
     use super::*;
     use crate::actor::native::envelope::Envelope;
@@ -230,7 +231,14 @@ mod tests {
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         binding.hold_outbound_for_activation();
-        binding.push_envelope_buffered(recipient.0, 0x0041_4532, &[7, 7], 1, None, None);
+        binding.push_envelope_buffered(OutboundSend {
+            recipient: recipient.0,
+            kind: 0x0041_4532,
+            bytes: &[7, 7],
+            count: 1,
+            parent_mail: None,
+            inherited_root: None,
+        });
         ctx.send(recipient, KindId(0x0041_4533), vec![9], 1, child);
         assert!(recipient_rx.try_recv().is_err(), "a held window publishes nothing before activation");
         assert_eq!(counter.live_roots(), 2, "both held sends record one in-flight root each");

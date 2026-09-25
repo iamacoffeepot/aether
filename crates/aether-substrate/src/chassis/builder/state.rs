@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use aether_actor::Root;
 
-use super::boot_passives::boot_passives;
+use super::boot_passives::{BootTuning, boot_passives};
 use super::built::{BuiltChassis, PassiveChassis, check_reservations_booted};
 use super::claim::claim_only;
 use super::driver::{DriverCapability, DriverCtx, DriverRunning};
@@ -15,7 +15,7 @@ use super::native_actor_boot::NativeActorBoot;
 use super::passive_boot::{FallbackRouterBoot, PassiveBoot, ReservedPumpBoot};
 use crate::actor::native::NativeActor;
 use crate::chassis::Chassis;
-use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
+use crate::chassis::ctx::{ChassisCtx, ChassisCtxParts, FallbackRouter};
 use crate::chassis::error::BootError;
 use crate::config::{
     ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigProvenance, ConfigSources, RegistryQueueCapacities,
@@ -273,11 +273,13 @@ impl<C: Chassis> Builder<C, NoDriver> {
             &self.registry,
             &self.mailer,
             &self.aborter,
-            workers,
-            self.ring_capacities,
-            self.scheduler_tuning,
-            self.registry_queues,
-            self.teardown_budget,
+            BootTuning {
+                workers,
+                ring_capacities: self.ring_capacities,
+                scheduler_tuning: self.scheduler_tuning,
+                registry_queues: self.registry_queues,
+                teardown_budget: self.teardown_budget,
+            },
             &mut config_sources,
             self.passives,
             <C::Driver as DriverCapability>::claim,
@@ -610,11 +612,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
             &registry,
             &mailer,
             &aborter,
-            workers,
-            ring_capacities,
-            scheduler_tuning,
-            registry_queues,
-            teardown_budget,
+            BootTuning { workers, ring_capacities, scheduler_tuning, registry_queues, teardown_budget },
             &mut sources,
             passives,
             <C::Driver as DriverCapability>::claim,
@@ -623,16 +621,16 @@ impl<C: Chassis> Builder<C, HasDriver> {
         // — each actor owns its own `ActorLogRing`.
         let driver_running = {
             let settlement = Arc::clone(booted.settlement_registry());
-            let chassis_ctx = ChassisCtx::new(
-                &registry,
-                &mailer,
-                &mut booted.fallback,
-                &booted.aborter,
-                &mut booted.claimed_actor_mailboxes,
-                &booted.spawner,
-                &mut booted.reserved_driver_mailboxes,
-                &booted.references,
-            );
+            let chassis_ctx = ChassisCtx::new(ChassisCtxParts {
+                registry: &registry,
+                mailer: &mailer,
+                fallback: &mut booted.fallback,
+                aborter: &booted.aborter,
+                claimed_actor_mailboxes: &mut booted.claimed_actor_mailboxes,
+                spawner: &booted.spawner,
+                reserved_driver_mailboxes: &mut booted.reserved_driver_mailboxes,
+                references: &booted.references,
+            });
             let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.handles, settlement);
             driver_boot(&mut driver_ctx)?
         };

@@ -16,14 +16,13 @@ use super::{
 use aether_actor::{Addressable, ErasedActorRef};
 use aether_data::{ActorPath, Kind, LoadName, SessionToken, Uuid};
 use aether_kinds::descriptors;
-use aether_kinds::trace::Nanos;
 use aether_substrate::ReplyTarget;
 use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::MailId;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
-use aether_substrate::mail::registry::OwnedDispatch;
+use aether_substrate::mail::registry::{DispatchParts, OwnedDispatch};
 use aether_substrate::mail::registry::{MailboxEntry, Registry};
 use aether_substrate::mail::{MailRef, Source, SourceAddr};
 use aether_substrate::testing::{TestChassis, boot_authority, drop_ref, registered_ref};
@@ -104,16 +103,12 @@ fn enqueue<K: Kind>(registry: &Arc<Registry>, target: ErasedActorRef, mail: &K, 
         panic!("expected mailbox entry");
     };
     handler.enqueue(OwnedDispatch::disarmed(
-        K::ID,
-        None,
-        source,
-        MailRef::from(mail.encode_into_bytes()),
-        1,
-        root,
-        root,
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            sender: source,
+            mail_id: root,
+            root,
+            ..DispatchParts::new(K::ID, MailRef::from(mail.encode_into_bytes()))
+        },
         target,
     ));
 }

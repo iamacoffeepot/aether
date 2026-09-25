@@ -11,10 +11,9 @@ use aether_bloomery_kinds::{
     Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_blob, artifact_digest,
 };
 use aether_data::{Kind, MailboxId, Source, SourceAddr, Storage, StorageData};
-use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::mail::MailRef;
-use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
+use aether_substrate::mail::registry::{DispatchParts, MailboxEntry, OwnedDispatch, Registry};
 use aether_substrate::testing::{bare_substrate, boot_authority, boot_test_chassis_with};
 use aether_substrate::{BootError, Subname};
 
@@ -61,16 +60,10 @@ fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: Mailbox
         panic!("actor mailbox is not an inbox");
     };
     handler.enqueue(OwnedDispatch::disarmed(
-        K::ID,
-        None,
-        Source::with_correlation(SourceAddr::Component(caller), correlation),
-        MailRef::from(mail.encode_into_bytes()),
-        1,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            sender: Source::with_correlation(SourceAddr::Component(caller), correlation),
+            ..DispatchParts::new(K::ID, MailRef::from(mail.encode_into_bytes()))
+        },
         target,
     ));
 }

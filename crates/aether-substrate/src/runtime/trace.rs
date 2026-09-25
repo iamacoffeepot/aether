@@ -42,6 +42,19 @@ use aether_actor::trace::ActorTraceRing;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::chassis::settlement_table::SettlementTable;
 
+/// One `Sent` trace event's fields, stamped at flush (issue 1150).
+#[derive(Clone, Copy)]
+pub(crate) struct SentRecord {
+    pub(crate) mail_id: MailId,
+    pub(crate) root: MailId,
+    pub(crate) parent_mail: Option<MailId>,
+    pub(crate) sender: MailboxId,
+    pub(crate) recipient: MailboxId,
+    pub(crate) kind: KindId,
+    pub(crate) t_construct_start: Nanos,
+    pub(crate) t: Nanos,
+}
+
 /// Per-chassis trace-pipeline handle. Owned by the chassis `Mailer`;
 /// producer-side hooks reach it via `mailer.trace_handle()` or the
 /// `mailer.record_*` shortcuts that wrap the methods on this type.
@@ -239,7 +252,16 @@ impl TraceHandle {
         kind: KindId,
     ) {
         let now = self.now_nanos();
-        self.record_sent_event_at(mail_id, root, parent_mail, sender, recipient, kind, now, now);
+        self.record_sent_event_at(SentRecord {
+            mail_id,
+            root,
+            parent_mail,
+            sender,
+            recipient,
+            kind,
+            t_construct_start: now,
+            t: now,
+        });
         self.record_sent_inflight(root);
     }
 
@@ -256,18 +278,8 @@ impl TraceHandle {
     /// producer's outbound blob opened (the first buffered send of the
     /// flush window). `t − t_construct_start` is the **construct** span;
     /// on the eager path the caller passes `t_construct_start == t`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_sent_event_at(
-        &self,
-        mail_id: MailId,
-        root: MailId,
-        parent_mail: Option<MailId>,
-        sender: MailboxId,
-        recipient: MailboxId,
-        kind: KindId,
-        t_construct_start: Nanos,
-        t: Nanos,
-    ) {
+    pub(crate) fn record_sent_event_at(&self, sent: SentRecord) {
+        let SentRecord { mail_id, root, parent_mail, sender, recipient, kind, t_construct_start, t } = sent;
         self.push_trace_ring(
             root,
             TraceEvent::Sent { mail_id, root, parent_mail, sender, recipient, kind, t_construct_start, t },
@@ -278,7 +290,7 @@ impl TraceHandle {
     /// hook — increment the root's emit-time `in_flight` count. The
     /// buffered send path calls this at send time (so settlement stays
     /// exact and never fires early, per ADR-0082) and defers the `Sent`
-    /// *trace* event to flush via [`Self::record_sent_event_at`].
+    /// *trace* event to flush via `record_sent_event_at`.
     pub fn record_sent_inflight(&self, root: MailId) {
         self.settlement_counter.record_sent(root);
     }

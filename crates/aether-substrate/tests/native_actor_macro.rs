@@ -29,11 +29,10 @@ use std::time::{Duration, Instant};
 
 use aether_actor::{ErasedActorRef, OutboundReply};
 use aether_data::{Kind, Source, SourceAddr};
-use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::mail::MailRef;
-use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
+use aether_substrate::mail::registry::{DispatchParts, InboxHandler, OwnedDispatch};
 use aether_substrate::runtime::lifecycle::{FatalAbortRecord, PanicAborter, RecordingAborter};
 use aether_substrate::testing::{TestChassis, bare_substrate, boot_authority, unrouted_binding};
 use aether_substrate::{
@@ -102,19 +101,7 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: ErasedActorRef, payloa
         panic!("expected mailbox entry under {recipient:?}");
     };
     let bytes = payload.encode_into_bytes();
-    handler.enqueue(OwnedDispatch::disarmed(
-        <K as Kind>::ID,
-        None,
-        Source::NONE,
-        MailRef::from(bytes),
-        1,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
-        recipient,
-    ));
+    handler.enqueue(OwnedDispatch::disarmed(DispatchParts::new(<K as Kind>::ID, MailRef::from(bytes)), recipient));
 }
 
 fn wait_for(target: u32, counter: &AtomicU32, budget: Duration) -> bool {
@@ -195,20 +182,9 @@ fn seize_and_run_dispatches_seed_in_place() {
 
     // Build one seed envelope and dispatch it in place — no inbox bounce.
     let payload = Greet { tag: 11 }.encode_into_bytes();
-    let seed = OwnedDispatch::disarmed(
-        <Greet as Kind>::ID,
-        None,
-        Source::NONE,
-        MailRef::from(payload),
-        1,
-        None,
-        None,
-        None,
-        // The #1135 contract: a direct-dispatched seed has residence ≈ 0.
-        Nanos(0),
-        0,
-        id,
-    );
+    // The #1135 contract: a direct-dispatched seed has residence ≈ 0, so
+    // it carries no deposit stamp.
+    let seed = OwnedDispatch::disarmed(DispatchParts::new(<Greet as Kind>::ID, MailRef::from(payload)), id);
     slot.seize_and_run(seed, BatchBudget::standard());
 
     // Handler ran exactly once; the slot drained empty back to `Idle`.
@@ -1242,16 +1218,7 @@ fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: ErasedActo
     };
     let bytes = payload.encode_into_bytes();
     handler.enqueue(OwnedDispatch::disarmed(
-        <K as Kind>::ID,
-        None,
-        reply_to,
-        MailRef::from(bytes),
-        1,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
+        DispatchParts { sender: reply_to, ..DispatchParts::new(<K as Kind>::ID, MailRef::from(bytes)) },
         recipient,
     ));
 }

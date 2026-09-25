@@ -83,6 +83,20 @@ impl OutboundBuffer {
     }
 }
 
+/// One outbound envelope a native actor sends: the raw recipient and kind
+/// ids, the encoded payload with its item count, and the lineage it
+/// carries — the sender's in-flight mail and the chain root it inherits
+/// (`None` mints a fresh root).
+#[derive(Clone, Copy)]
+pub struct OutboundSend<'a> {
+    pub(crate) recipient: u64,
+    pub(crate) kind: u64,
+    pub(crate) bytes: &'a [u8],
+    pub(crate) count: u32,
+    pub(crate) parent_mail: Option<MailId>,
+    pub(crate) inherited_root: Option<MailId>,
+}
+
 impl NativeBinding {
     /// ADR-0087 / 2b: the buffering counterpart to
     /// [`Self::push_envelope_returning_root_before_push`], used by the per-handler
@@ -107,16 +121,8 @@ impl NativeBinding {
     /// # Panics
     /// Panics if the outbound-buffer mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn push_envelope_buffered(
-        &self,
-        recipient: u64,
-        kind: u64,
-        bytes: &[u8],
-        count: u32,
-        parent_mail: Option<MailId>,
-        inherited_root: Option<MailId>,
-    ) -> MailId {
-        self.push_envelope_buffered_with_reply_to(recipient, kind, bytes, count, parent_mail, inherited_root, None)
+    pub(crate) fn push_envelope_buffered(&self, send: OutboundSend<'_>) -> MailId {
+        self.push_envelope_buffered_with_reply_to(send, None)
     }
 
     /// Re-dispatcher variant of [`Self::push_envelope_buffered`] that
@@ -140,21 +146,12 @@ impl NativeBinding {
     /// # Panics
     /// Panics if the outbound-buffer mutex is poisoned — fail-fast per
     /// ADR-0063.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "re-dispatch variant adds reply_to_override to the existing 6-arg shape; \
-                  splitting would force callers through two separate code paths"
-    )]
     pub(crate) fn push_envelope_buffered_with_reply_to(
         &self,
-        recipient: u64,
-        kind: u64,
-        bytes: &[u8],
-        count: u32,
-        parent_mail: Option<MailId>,
-        inherited_root: Option<MailId>,
+        send: OutboundSend<'_>,
         reply_to_override: Option<Source>,
     ) -> MailId {
+        let OutboundSend { recipient, kind, bytes, count, parent_mail, inherited_root } = send;
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let reply_to = reply_to_override
             .unwrap_or_else(|| Source::with_correlation(SourceAddr::Component(self.self_mailbox()), correlation));

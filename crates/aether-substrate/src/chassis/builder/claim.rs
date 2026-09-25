@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::passive_boot::PassiveBoot;
 use super::references::ComposedReferences;
-use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
+use crate::chassis::ctx::{ChassisCtx, ChassisCtxParts, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::config::RingCapacities;
 use crate::mail::MailboxId;
@@ -73,29 +73,29 @@ pub(super) fn claim_only(
     let references = ComposedReferences::default();
 
     for boot in &mut passives {
-        let mut ctx = ChassisCtx::new(
+        let mut ctx = ChassisCtx::new(ChassisCtxParts {
             registry,
             mailer,
-            &mut fallback,
+            fallback: &mut fallback,
             aborter,
-            &mut claimed_actor_mailboxes,
-            &spawner,
-            &mut reserved_driver_mailboxes,
-            &references,
-        );
+            claimed_actor_mailboxes: &mut claimed_actor_mailboxes,
+            spawner: &spawner,
+            reserved_driver_mailboxes: &mut reserved_driver_mailboxes,
+            references: &references,
+        });
         boot.claim(&mut ctx)?;
     }
 
-    let mut ctx = ChassisCtx::new(
+    let mut ctx = ChassisCtx::new(ChassisCtxParts {
         registry,
         mailer,
-        &mut fallback,
+        fallback: &mut fallback,
         aborter,
-        &mut claimed_actor_mailboxes,
-        &spawner,
-        &mut reserved_driver_mailboxes,
-        &references,
-    );
+        claimed_actor_mailboxes: &mut claimed_actor_mailboxes,
+        spawner: &spawner,
+        reserved_driver_mailboxes: &mut reserved_driver_mailboxes,
+        references: &references,
+    });
     driver_claim(&mut ctx)?;
 
     Ok(claimed_namespaces(registry))

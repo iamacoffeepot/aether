@@ -14,7 +14,6 @@ use aether_actor::NamespaceError;
 use aether_data::ActorPathError;
 
 use crate::chassis::error::BootError;
-use crate::mail::MailboxId;
 
 /// Failure modes for native actor spawning.
 ///
@@ -61,5 +60,5 @@ pub enum SpawnError {
     /// scheduler home, so a pool that never schedules it leaves the caller
     /// with no answer. Reported rather than fatal: the caller is an external
     /// thread that can log it, retry, or tear the chassis down.
-    BirthWedged { mailbox_id: MailboxId, waited: Duration },
+    BirthWedged { full_name: String, waited: Duration },
 }

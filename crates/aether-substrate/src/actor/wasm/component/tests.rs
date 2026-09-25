@@ -19,6 +19,7 @@ use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry;
+use crate::mail::registry::DispatchParts;
 use crate::mail::registry::InboxHandler;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
@@ -29,14 +30,13 @@ use crate::mail::{Mail, MailId, MailRef, MailboxId, Source};
 use crate::scheduler::WakeSink;
 use crate::testing::{boot_authority, token_root};
 use aether_data::tagged_id::Tag;
-use aether_kinds::trace::Nanos;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 /// A disarmed, unstamped inbound for `Component::deliver`: `payload` of `kind`
 /// routed to `recipient`, replying to `sender`.
 fn inbound(recipient: MailboxId, kind: aether_data::KindId, payload: Vec<u8>, sender: Source) -> Envelope {
-    Envelope::disarmed_at(kind, None, sender, MailRef::from(payload), 1, None, None, None, Nanos(0), 0, recipient)
+    Envelope::disarmed_at(DispatchParts { sender, ..DispatchParts::new(kind, MailRef::from(payload)) }, recipient)
 }
 
 /// Captured `(mail_id, root, parent_mail)` triple for the
@@ -1495,7 +1495,8 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
 /// Companion: with no in-flight context (chassis-bypass / test
 /// fixture), `ctx.send` mints a fresh root chain — `parent_mail`
 /// is `None` and `root == mail_id`. This is the same shape
-/// `NativeBinding::push_envelope_buffered(None, None)` produces.
+/// `NativeBinding::push_envelope_buffered` produces with no parent or
+/// inherited root.
 #[test]
 fn send_without_in_flight_mints_fresh_root_chain() {
     let registry = Arc::new(Registry::new());

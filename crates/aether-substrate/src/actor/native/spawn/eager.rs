@@ -14,12 +14,11 @@ use std::sync::Arc;
 
 use aether_actor::{ActorRef, HandlesKind, Instanced, validate_namespace_segment};
 use aether_data::{ActorMail, ActorPath, Kind};
-use aether_kinds::trace::Nanos;
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
-use crate::mail::registry::Registry;
+use crate::mail::registry::{DispatchParts, Registry};
 use crate::mail::{KindId, MailRef, MailboxId, Source};
 
 use super::spawner::Spawner;
@@ -147,21 +146,11 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         // ADR-0094: the bootstrap seed carries no settlement lineage,
         // so it is built *disarmed* — there is no obligation to discharge
         // (and `dispatch_one` no-ops its `record_finished` on an absent
-        // mail id anyway).
+        // mail id anyway). It carries no lineage either, so it never
+        // folds into a traced tree node — no deposit instant to record
+        // (iamacoffeepot/aether#1134).
         let env = Envelope::disarmed_at(
-            kind,
-            None,
-            self.sender,
-            MailRef::from(payload),
-            1,
-            None,
-            None,
-            None,
-            // Bootstrap seed carries no lineage, so it
-            // never folds into a traced tree node — no deposit instant to
-            // record (iamacoffeepot/aether#1134).
-            Nanos(0),
-            0,
+            DispatchParts { sender: self.sender, ..DispatchParts::new(kind, MailRef::from(payload)) },
             MailboxId(0),
         );
         self.after_init.push(env);
