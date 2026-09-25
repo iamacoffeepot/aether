@@ -17,6 +17,7 @@ use std::sync::Mutex;
 
 use super::*;
 use crate::actor::native::NativeBinding;
+use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::host_fns;
 use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
@@ -27,12 +28,19 @@ use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
 use crate::mail::registry::RegistryOwnerLease;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
-use crate::mail::{Mail, MailId, MailboxId};
+use crate::mail::{Mail, MailId, MailRef, MailboxId, Source};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority;
 use aether_data::tagged_id::Tag;
+use aether_kinds::trace::Nanos;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
+
+/// A disarmed, unstamped inbound for `Component::deliver`: `payload` of `kind`
+/// routed to `recipient`, replying to `sender`.
+fn inbound(recipient: MailboxId, kind: aether_data::KindId, payload: Vec<u8>, sender: Source) -> Envelope {
+    Envelope::disarmed_at(kind, None, sender, MailRef::from(payload), 1, None, None, None, Nanos(0), 0, recipient)
+}
 
 /// Captured `(mail_id, root, parent_mail)` triple for the
 /// lineage-propagation tests in this module.
@@ -824,8 +832,9 @@ fn deliver_small_payload_uses_small_region() {
     let mut component = instantiate(&wat_records_mail_ptr());
     let small_ptr = component.small_ptr;
     // 100 bytes <= SMALL_REGION_BYTES (8 KiB).
-    let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; 100], 1);
-    let rc = component.deliver(&mail).expect("deliver ok");
+    let rc = component
+        .deliver(&inbound(MailboxId(0), aether_data::KindId(0), vec![0u8; 100], Source::NONE))
+        .expect("deliver ok");
     assert_eq!(rc, 0, "guest receive should have run");
     // The fixture's `receive` recorded the pointer it was handed at offset 16.
     assert_eq!(component.read_u32(16), small_ptr, "small payload should land in the cached small region");
@@ -838,8 +847,9 @@ fn deliver_small_payload_uses_small_region() {
 fn deliver_large_payload_grows_large_region() {
     let mut component = instantiate(&wat_records_mail_ptr());
     // 900_000 > SMALL_REGION_BYTES (8 KiB), < MAX_DELIVERABLE_MAIL_BYTES.
-    let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; 900_000], 1);
-    let rc = component.deliver(&mail).expect("deliver ok");
+    let rc = component
+        .deliver(&inbound(MailboxId(0), aether_data::KindId(0), vec![0u8; 900_000], Source::NONE))
+        .expect("deliver ok");
     assert_eq!(rc, 0, "guest receive should have run");
     let large_ptr = component.large_ptr;
     assert_ne!(large_ptr, 0, "large region must have been grown");
@@ -853,8 +863,14 @@ fn deliver_large_payload_grows_large_region() {
 #[test]
 fn deliver_oversize_payload_dropped() {
     let mut component = instantiate(&wat_records_mail_ptr());
-    let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; MAX_DELIVERABLE_MAIL_BYTES + 1], 1);
-    let rc = component.deliver(&mail).expect("deliver must not trap");
+    let rc = component
+        .deliver(&inbound(
+            MailboxId(0),
+            aether_data::KindId(0),
+            vec![0u8; MAX_DELIVERABLE_MAIL_BYTES + 1],
+            Source::NONE,
+        ))
+        .expect("deliver must not trap");
     assert_eq!(rc, DISPATCH_DROPPED_OVERSIZE);
 }
 
@@ -864,8 +880,9 @@ fn deliver_oversize_payload_dropped() {
 #[test]
 fn deliver_to_guest_without_allocator_dropped() {
     let mut component = instantiate(WAT_NO_HOOKS);
-    let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; 64], 1);
-    let rc = component.deliver(&mail).expect("deliver must not trap");
+    let rc = component
+        .deliver(&inbound(MailboxId(0), aether_data::KindId(0), vec![0u8; 64], Source::NONE))
+        .expect("deliver must not trap");
     assert_eq!(rc, DISPATCH_DROPPED_OVERSIZE);
 }
 
@@ -907,17 +924,16 @@ fn call_on_rehydrate_without_export_is_noop() {
 #[test]
 fn deliver_with_nil_sender_passes_sender_none() {
     use crate::actor::wasm::reply_table::NO_REPLY_HANDLE;
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+    use crate::mail::MailboxId as M;
 
     let mut component = instantiate(&wat_stores_sender());
-    // Mail::new defaults sender to SessionToken::NIL.
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1);
-    component.deliver(&mail).expect("deliver");
+    // No reply target: the inbound carries `Source::NONE`.
+    component.deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::NONE)).expect("deliver");
     assert_eq!(component.read_u32(500), NO_REPLY_HANDLE);
 }
 
 /// ADR-0114 decision #1 end-to-end through the dispatch unit path:
-/// `Component::deliver` reads the routed `mail.recipient` and threads
+/// `Component::deliver` reads the routed `env.recipient` and threads
 /// it as the trailing `receive_p32` frame slot, so the guest reads
 /// the address its mail was sent to. The production trampoline routes
 /// a normally-addressed actor's mail with `recipient == self.mailbox`
@@ -926,7 +942,7 @@ fn deliver_with_nil_sender_passes_sender_none() {
 /// substrate routes is exactly what the guest receives.
 #[test]
 fn deliver_threads_recipient_to_guest() {
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+    use crate::mail::MailboxId as M;
 
     let mut component = instantiate(&wat_stores_recipient());
     // A recipient whose low 32 bits are observable through the WAT
@@ -934,8 +950,7 @@ fn deliver_threads_recipient_to_guest() {
     // hash) are dropped by the wrap — the low word is enough to
     // prove the routed id, not the reply handle, reached the guest.
     let recipient = M(0x9999_0000_1234_5678);
-    let mail = SubstrateMail::new(recipient, aether_data::KindId(0), vec![], 1);
-    component.deliver(&mail).expect("deliver");
+    component.deliver(&inbound(recipient, aether_data::KindId(0), vec![], Source::NONE)).expect("deliver");
     assert_eq!(
         component.read_u32(500),
         0x1234_5678,
@@ -946,14 +961,14 @@ fn deliver_threads_recipient_to_guest() {
 #[test]
 fn deliver_with_real_token_allocates_session_handle() {
     use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
     use aether_data::{SessionToken, Uuid};
 
     let mut component = instantiate(&wat_stores_sender());
     let token = SessionToken(Uuid::from_u128(0xaaaa));
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::to(SourceAddr::Session(token)));
-    component.deliver(&mail).expect("deliver");
+    component
+        .deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::to(SourceAddr::Session(token))))
+        .expect("deliver");
     let observed = component.read_u32(500);
     assert_ne!(observed, NO_REPLY_HANDLE);
     assert_eq!(
@@ -965,15 +980,15 @@ fn deliver_with_real_token_allocates_session_handle() {
 #[test]
 fn deliver_with_component_reply_target_allocates_component_handle() {
     use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
 
     let mut component = instantiate(&wat_stores_sender());
     // ADR-0017 / issue #644: component-origin mail (peer-to-peer
     // send sets `reply_to.addr = Component(sender)`) gets a
     // Component-variant handle.
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::to(SourceAddr::Component(M(7))));
-    component.deliver(&mail).expect("deliver");
+    component
+        .deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::to(SourceAddr::Component(M(7)))))
+        .expect("deliver");
     let observed = component.read_u32(500);
     assert_ne!(observed, NO_REPLY_HANDLE);
     assert_eq!(
@@ -988,12 +1003,12 @@ fn deliver_with_component_reply_target_allocates_component_handle() {
 #[test]
 fn deliver_releases_handle_after_single_dispatch() {
     use crate::actor::wasm::reply_table::NO_REPLY_HANDLE;
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
 
     let mut component = instantiate(&wat_stores_sender_returning(aether_actor::DISPATCH_HANDLED_RELEASE));
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::to(SourceAddr::Component(M(7))));
-    let rc = component.deliver(&mail).expect("deliver");
+    let rc = component
+        .deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::to(SourceAddr::Component(M(7)))))
+        .expect("deliver");
 
     assert_eq!(rc, aether_actor::DISPATCH_HANDLED_RELEASE);
     let observed = component.read_u32(500);
@@ -1006,12 +1021,12 @@ fn deliver_releases_handle_after_single_dispatch() {
 #[test]
 fn deliver_releases_handle_after_unknown_kind() {
     use crate::actor::wasm::reply_table::NO_REPLY_HANDLE;
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
 
     let mut component = instantiate(&wat_stores_sender_returning(DISPATCH_UNKNOWN_KIND));
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::to(SourceAddr::Component(M(7))));
-    let rc = component.deliver(&mail).expect("deliver");
+    let rc = component
+        .deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::to(SourceAddr::Component(M(7)))))
+        .expect("deliver");
 
     assert_eq!(rc, DISPATCH_UNKNOWN_KIND);
     let observed = component.read_u32(500);
@@ -1026,9 +1041,14 @@ fn deliver_oversize_drop_allocates_no_handle() {
     use crate::mail::{Source, SourceAddr};
 
     let mut component = instantiate(&wat_records_mail_ptr());
-    let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; MAX_DELIVERABLE_MAIL_BYTES + 1], 1)
-        .with_reply_to(Source::to(SourceAddr::Component(MailboxId(7))));
-    let rc = component.deliver(&mail).expect("deliver must not trap");
+    let rc = component
+        .deliver(&inbound(
+            MailboxId(0),
+            aether_data::KindId(0),
+            vec![0u8; MAX_DELIVERABLE_MAIL_BYTES + 1],
+            Source::to(SourceAddr::Component(MailboxId(7))),
+        ))
+        .expect("deliver must not trap");
 
     assert_eq!(rc, DISPATCH_DROPPED_OVERSIZE);
     assert_eq!(component.store.data().reply_table.resolve(0), None);
@@ -1082,12 +1102,17 @@ fn wat_stores_reply_correlation() -> String {
 /// the same contract `source_of_p32` had.
 #[test]
 fn deliver_threads_component_source_to_guest() {
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
 
     let mut component = instantiate(&wat_stores_source());
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::to(SourceAddr::Component(M(0x9999_0000_1234_5678))));
-    component.deliver(&mail).expect("deliver");
+    component
+        .deliver(&inbound(
+            M(0),
+            aether_data::KindId(0),
+            vec![],
+            Source::to(SourceAddr::Component(M(0x9999_0000_1234_5678))),
+        ))
+        .expect("deliver");
     assert_eq!(
         component.read_u32(500),
         0x1234_5678,
@@ -1097,44 +1122,48 @@ fn deliver_threads_component_source_to_guest() {
 
 #[test]
 fn deliver_threads_zero_source_for_session_origin() {
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
     use aether_data::{SessionToken, Uuid};
 
     let mut component = instantiate(&wat_stores_source());
     let token = SessionToken(Uuid::from_u128(0xdead));
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::to(SourceAddr::Session(token)));
-    component.deliver(&mail).expect("deliver");
+    component
+        .deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::to(SourceAddr::Session(token))))
+        .expect("deliver");
     assert_eq!(component.read_u32(500), 0, "a session origin must thread 0 (no source) as the source param");
 }
 
 #[test]
 fn deliver_threads_zero_source_for_no_reply_target() {
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+    use crate::mail::MailboxId as M;
 
     let mut component = instantiate(&wat_stores_source());
     // No reply target → SourceAddr::None → source param is 0. The guest's
     // store overwrites offset 500 with the threaded 0 regardless of any
     // prior value, proving the substrate threaded NONE.
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1);
-    component.deliver(&mail).expect("deliver");
+    component.deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::NONE)).expect("deliver");
     assert_eq!(component.read_u32(500), 0, "a no-reply-target origin must thread 0 as the source param");
 }
 
 #[test]
 fn reply_correlation_import_exposes_reply_envelope_only() {
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
 
     let mut component = instantiate(&wat_stores_reply_correlation());
 
-    let reply = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::with_correlation(SourceAddr::None, 0x5151));
-    component.deliver(&reply).expect("deliver reply");
+    component
+        .deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::with_correlation(SourceAddr::None, 0x5151)))
+        .expect("deliver reply");
     assert_eq!(component.read_u32(500), 0x5151, "reply envelope must expose its echoed correlation");
 
-    let request = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::with_correlation(SourceAddr::Component(M(7)), 0x9999));
-    component.deliver(&request).expect("deliver request");
+    component
+        .deliver(&inbound(
+            M(0),
+            aether_data::KindId(0),
+            vec![],
+            Source::with_correlation(SourceAddr::Component(M(7)), 0x9999),
+        ))
+        .expect("deliver request");
     assert_eq!(
         component.read_u32(500),
         0,
@@ -1207,16 +1236,16 @@ fn wat_scoped_spawns(parent: MailboxId) -> String {
 
 #[test]
 fn reply_mail_emits_session_addressed_frame() {
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
     use aether_data::{SessionToken, Uuid};
 
     let (ctx, rx, pong_id) = plane_ctx_for_reply();
     let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);
 
     let token = SessionToken(Uuid::from_u128(0xbeef));
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::to(SourceAddr::Session(token)));
-    component.deliver(&mail).expect("deliver");
+    component
+        .deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::to(SourceAddr::Session(token))))
+        .expect("deliver");
 
     let event = rx.try_recv().expect("outbound egress queued");
     let EgressEvent::ToSession { session, kind_name, .. } = event else {
@@ -1228,15 +1257,14 @@ fn reply_mail_emits_session_addressed_frame() {
 
 #[test]
 fn reply_mail_with_unknown_handle_sends_no_frame() {
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+    use crate::mail::MailboxId as M;
 
     let (ctx, rx, pong_id) = plane_ctx_for_reply();
     let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);
 
     // NIL sender → NO_REPLY_HANDLE reaches the guest → reply_mail
     // returns REPLY_UNKNOWN_HANDLE and outbound stays quiet.
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1);
-    component.deliver(&mail).expect("deliver");
+    component.deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::NONE)).expect("deliver");
     assert!(rx.try_recv().is_err(), "no frame should have been sent");
 }
 
@@ -1256,7 +1284,7 @@ fn reply_mail_with_unknown_handle_sends_no_frame() {
 /// dispatched reply's `Source`.
 #[test]
 fn reply_mail_component_target_echoes_inbound_correlation() {
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
     use aether_data::{KindDescriptor, SchemaType};
 
     // A non-trivial inbound correlation that can't be mistaken for a
@@ -1296,9 +1324,14 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
     // `INBOUND_CORRELATION`. The guest's `receive_p32` calls
     // `reply_mail_p32` with the sender handle the substrate
     // allocated for this reply target.
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::with_correlation(SourceAddr::Component(recipient), INBOUND_CORRELATION));
-    component.deliver(&mail).expect("deliver");
+    component
+        .deliver(&inbound(
+            M(0),
+            aether_data::KindId(0),
+            vec![],
+            Source::with_correlation(SourceAddr::Component(recipient), INBOUND_CORRELATION),
+        ))
+        .expect("deliver");
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1, "reply should have dispatched once");
@@ -1315,7 +1348,7 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
 /// wasm guest forging a departure notice by handing its id to the host.
 #[test]
 fn guest_send_of_an_engine_only_kind_returns_status_three_and_delivers_nothing() {
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+    use crate::mail::MailboxId as M;
     use aether_data::Kind;
     use aether_kinds::MonitorNotice;
 
@@ -1325,7 +1358,7 @@ fn guest_send_of_an_engine_only_kind_returns_status_three_and_delivers_nothing()
     let ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), M(0), None);
     let mut component = instantiate_with_ctx(&wat_sends(sink_id.0, MonitorNotice::ID.0), ctx);
 
-    component.deliver(&SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)).expect("deliver");
+    component.deliver(&inbound(M(0), aether_data::KindId(0), vec![], Source::NONE)).expect("deliver");
 
     assert_eq!(component.read_u32(500), 3, "send_mail_p32 refuses engine-only mail with status 3");
     assert!(captured.lock().unwrap().is_empty(), "no engine-only mail reached the sink");
@@ -1337,7 +1370,7 @@ fn guest_send_of_an_engine_only_kind_returns_status_three_and_delivers_nothing()
 /// settlement or departure as its reply.
 #[test]
 fn guest_reply_of_an_engine_only_kind_returns_engine_only_status_and_delivers_nothing() {
-    use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
     use aether_data::{Kind, KindDescriptor, Schema};
     use aether_kinds::MonitorNotice;
 
@@ -1353,9 +1386,14 @@ fn guest_reply_of_an_engine_only_kind_returns_engine_only_status_and_delivers_no
     let ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), M(0), None);
     let mut component = instantiate_with_ctx(&wat_replies(MonitorNotice::ID.0), ctx);
 
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-        .with_reply_to(Source::with_correlation(SourceAddr::Component(recipient), 1));
-    component.deliver(&mail).expect("deliver");
+    component
+        .deliver(&inbound(
+            M(0),
+            aether_data::KindId(0),
+            vec![],
+            Source::with_correlation(SourceAddr::Component(recipient), 1),
+        ))
+        .expect("deliver");
 
     assert_eq!(
         component.read_u32(500),
@@ -1559,7 +1597,9 @@ fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
     ctx.stage_alias(PreparedAliasRoute::new(parent, parent_name.clone(), root));
     let mut component = instantiate_with_ctx(&wat_scoped_spawns(parent), ctx);
 
-    component.deliver(&Mail::new(parent, aether_data::KindId(0), Vec::new(), 1)).expect("deliver nested spawn turn");
+    component
+        .deliver(&inbound(parent, aether_data::KindId(0), Vec::new(), Source::NONE))
+        .expect("deliver nested spawn turn");
 
     let expected_inline_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:leaf");
     let expected_inline = aether_data::mailbox_id_from_path(&expected_inline_name);
@@ -1598,7 +1638,9 @@ fn scoped_wasm_spawns_reject_a_foreign_parent() {
     let ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), root, None);
     let mut component = instantiate_with_ctx(&wat_scoped_spawns(foreign), ctx);
 
-    component.deliver(&Mail::new(root, aether_data::KindId(0), Vec::new(), 1)).expect("deliver rejected spawn turn");
+    component
+        .deliver(&inbound(root, aether_data::KindId(0), Vec::new(), Source::NONE))
+        .expect("deliver rejected spawn turn");
 
     assert!(component.drain_pending_aliases().is_empty());
     assert!(component.drain_pending_spawns().is_empty());

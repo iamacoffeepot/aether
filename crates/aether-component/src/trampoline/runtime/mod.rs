@@ -46,7 +46,7 @@ pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::Component;
 pub use aether_substrate::chassis::error::BootError;
 #[allow(unused_imports, reason = "runtime facade retains its established KindId re-export")]
-pub use aether_substrate::mail::{CostCell, CostCells, KindId, Mail};
+pub use aether_substrate::mail::{CostCell, CostCells, KindId};
 
 /// The trampoline hosts a wasm guest, and its receive surface is that
 /// guest's: the substrate reads it here through [`NativeCtx::sync_guest`].
@@ -261,10 +261,9 @@ impl NativeActor for WasmTrampoline {
     ///
     /// The framework dispatcher pulled this envelope from the
     /// trampoline's binding, dispatched against typed handlers
-    /// (none matched), and called this fallback. We synthesise a
-    /// `Mail` with the trampoline's own id as recipient, hand it
-    /// to `Component::deliver`, and let the guest's `receive_p32`
-    /// dispatch shim do the rest.
+    /// (none matched), and called this fallback. The envelope goes
+    /// to `Component::deliver` as routed, and the guest's
+    /// `receive_p32` dispatch shim does the rest.
     #[fallback]
     fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, env: &Envelope) -> bool {
         // ADR-0097: deliver the inbound, then drain every sibling spawn
@@ -281,28 +280,10 @@ impl NativeActor for WasmTrampoline {
                 );
                 return true;
             };
-            // Issue iamacoffeepot/aether#722: carry the inbound's
-            // lineage through to the synthetic `Mail`.
-            // `Component::deliver` reads `mail.mail_id` and `mail.root`
-            // to populate `ComponentCtx`'s in-flight cells, so any
-            // guest-triggered `send_mail_p32` / `reply_mail_p32` stamps
-            // `parent_mail = Some(env.mail_id)` and inherits the chain
-            // `root`. Without this, the trampoline's wrapped Mail
-            // carries no lineage and the guest's outbound looks like a
-            // fresh root.
-            // ADR-0114 §2: deliver the *routed* recipient as the guest
-            // `Mail`'s recipient, not the trampoline's own id. For a
-            // normally-addressed actor the routed recipient is the
-            // trampoline itself, so this is a no-op; for an inline-child
-            // alias it carries the child's address, which
-            // `Component::deliver` threads to the guest's `receive`
-            // frame + the `ComponentCtx` dispatch identity so the
-            // membrane demuxes to the child and the child's sends stamp
-            // its address as origin.
-            let mail = Mail::new(env.recipient, env.kind, env.payload.bytes().to_vec(), env.count)
-                .with_reply_to(env.sender)
-                .with_lineage(env.mail_id, env.root, env.parent_mail);
-            if let Err(e) = component.deliver(&mail) {
+            // The routed envelope already carries the recipient (the
+            // inline-child alias when one was addressed, ADR-0114 §2) and
+            // the inbound lineage (#722) that `deliver` threads to the guest.
+            if let Err(e) = component.deliver(env) {
                 // ADR-0063 fail-fast: a wasm trap (or host-fn error
                 // returned through `Component::deliver`) kills the
                 // substrate. Wedge detection (CPU-loop guests) waits

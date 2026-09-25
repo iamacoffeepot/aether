@@ -10,7 +10,7 @@
 //!
 //! Drives the strict `Probe` fixture (namespace `test.probe`, no
 //! `#[fallback]`, an `on_tick(Tick)` handler) directly through the pub
-//! `Component::instantiate` / `deliver` API: deliver a `Mail` carrying
+//! `Component::instantiate` / `deliver` API: deliver an `Envelope` carrying
 //! `Tick::ID` (a `#[repr(C)]` 4-byte cast-shape kind, `delta_micros: u32`) with a
 //! 2-byte payload, which the cast decoder rejects on its `len() == size_of`
 //! check, and assert the dispatch return code. Gated on `require_wasm` like the sibling integration
@@ -21,9 +21,11 @@ use std::fs;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_kinds::Tick;
+use aether_kinds::trace::Nanos;
 use aether_substrate::actor::wasm::host_fns;
-use aether_substrate::testing::{bare_substrate, unrouted_binding};
-use aether_substrate::{Component, ComponentCtx, HubOutbound, Mail, MailboxId, NativeCtx, Source};
+use aether_substrate::mail::registry::noop_handler;
+use aether_substrate::testing::{bare_substrate, registered_binding};
+use aether_substrate::{Component, ComponentCtx, Envelope, HubOutbound, MailRef, NativeCtx, Source};
 use wasmtime::{Engine, Linker, Module};
 
 #[test]
@@ -38,8 +40,8 @@ fn known_kind_bad_payload_reports_unknown_kind_not_handled() {
     host_fns::register(&mut linker).expect("register host fns");
     let module = Module::new(&engine, &wasm).expect("compile fixture module");
 
-    let (_registry, mailer) = bare_substrate();
-    let binding = unrouted_binding(&mailer);
+    let (registry, mailer) = bare_substrate();
+    let (binding, probe) = registered_binding(&registry, &mailer, "test.probe", noop_handler());
     let ctx = NativeCtx::new(&binding, Source::NONE, None, None).guest_ctx(HubOutbound::disconnected());
 
     // `type_tag = None` instantiates the module's entry actor — `Probe`, the
@@ -51,8 +53,20 @@ fn known_kind_bad_payload_reports_unknown_kind_not_handled() {
     // `Tick` is a `#[repr(C)]` 4-byte cast-shape kind (`delta_micros: u32`); a
     // 2-byte payload fails `decode_cast`'s `len() == size_of` check, so the
     // matched dispatch arm's `decode_kind::<Tick>()` is `None`.
-    let mail = Mail::new(MailboxId(0), Tick::ID, vec![0u8, 0u8], 1);
-    let rc = component.deliver(&mail).expect("deliver");
+    let inbound = Envelope::disarmed(
+        Tick::ID,
+        None,
+        Source::NONE,
+        MailRef::from(vec![0u8, 0u8]),
+        1,
+        None,
+        None,
+        None,
+        Nanos(0),
+        0,
+        probe,
+    );
+    let rc = component.deliver(&inbound).expect("deliver");
 
     // Tripwire: pre-fix the arm returned `DISPATCH_HANDLED` (0) once the kind id
     // matched, regardless of decode outcome; post-fix the failed decode falls
