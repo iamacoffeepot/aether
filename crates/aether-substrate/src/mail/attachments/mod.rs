@@ -12,7 +12,10 @@
 //! [`encode_envelope`] produces them for every typed native send and every
 //! component reply, and a native recipient's decode resolves each tag-1 hash
 //! against the attachments of the mail it is handling through
-//! [`AttachedEntries`].
+//! [`AttachedEntries`]. A payload that already carries tag-1 fields (a raw
+//! forward, or a guest's encode of a `Blob` it holds) gets its attachments
+//! from [`resolve_on_send`], which finds each hash among the sender's own
+//! blobs.
 //!
 //! A tag-1 field is written only beside an attachment, so an envelope without
 //! attachments has no tag-1 field. Every consumer that takes plain payload
@@ -32,10 +35,12 @@ use crate::mail::Registry;
 use crate::store::BlobEntry;
 
 mod encoder;
+mod resolve;
 #[cfg(test)]
 mod tests;
 
 pub use encoder::{EncodedMail, encode_envelope};
+pub use resolve::{ResolveError, resolve_on_send};
 
 /// The store entries an in-process envelope's tag-1 `Blob` fields name by
 /// hash. `None` when the payload has none.

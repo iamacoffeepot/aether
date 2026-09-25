@@ -7,10 +7,12 @@
 use core::str::from_utf8;
 
 use aether_actor::{AssetCatalog, AssetWindow};
+use aether_codec::frame::max_frame_size;
 use aether_data::{BlobHash, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
+use crate::mail::attachments::{EncodedMail, inline_payload};
 use crate::mail::boundary::is_engine_only;
 use crate::mail::registry::PreparedAliasRoute;
 use crate::mail::{KindId, MailboxId, SourceAddr};
@@ -31,6 +33,18 @@ pub const REPLY_KIND_NOT_FOUND: u32 = 4;
 /// The guest replied with engine-only mail (ADR-0233), which no actor may
 /// originate. Returned before the reply handle is taken, so nothing is sent.
 pub const REPLY_ENGINE_ONLY_KIND: u32 = 5;
+/// Resolve on send refused the reply (ADR-0238 decision 3): a tag-1 field
+/// names a hash this instance's blob table neither pins nor holds, or the
+/// payload does not match its kind's schema, both found before the reply
+/// handle is taken; or a reply leaving the process would not fit one frame
+/// once its blobs are written as bytes, found after. Nothing is sent.
+pub const REPLY_BLOB_REFUSED: u32 = 6;
+
+/// `send_mail_p32` status: resolve on send refused the send (ADR-0238
+/// decision 3), because a tag-1 field names a hash this instance's blob table
+/// neither pins nor holds, or the payload does not match its kind's schema.
+/// Nothing is sent and no correlation is minted.
+pub const SEND_BLOB_REFUSED: u32 = 4;
 
 /// ADR-0016 §2: maximum size of a single state bundle. A `save_state`
 /// call with `len > MAX_STATE_BUNDLE_BYTES` is rejected (status 3) and
@@ -69,7 +83,8 @@ pub const BLOB_NO_MEMORY: i64 = -3;
 pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // `send_mail_p32` statuses: `0` sent, `1` the guest exports no memory,
     // `2` the payload is out of bounds, `3` the kind is engine-only mail
-    // (ADR-0233), refused before anything is read or sent.
+    // (ADR-0233), refused before anything is read or sent, and
+    // `SEND_BLOB_REFUSED` (`4`) when resolve on send refuses the payload.
     linker.func_wrap(
         "aether",
         "send_mail_p32",
@@ -113,6 +128,17 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             let identity = resolve_dispatch_identity(ctx, MailboxId(from));
             let recipient = MailboxId(recipient);
             let kind = KindId(kind);
+            // ADR-0238 decision 3: each tag-1 field resolves against this
+            // instance's blob table and its entry rides the mail. An empty
+            // table skips the walk.
+            let attachments = match ctx.resolve_send(kind, &payload) {
+                Ok(attachments) => attachments,
+                Err(error) => {
+                    tracing::warn!(target: "aether_substrate::mail", kind = %kind, %error, "guest send refused at the sender");
+                    return SEND_BLOB_REFUSED;
+                }
+            };
+            let payload = EncodedMail { bytes: payload, attachments };
             if detached == 0 {
                 ctx.send(recipient, kind, payload, count, identity);
             } else {
@@ -606,6 +632,19 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             };
             let payload = data[start..end].to_vec();
 
+            // ADR-0238 decision 3: resolve the payload's tag-1 fields against
+            // this instance's blob table before the handle is taken, so a
+            // refused reply leaves it answerable. An empty table skips the
+            // walk.
+            let attachments = match caller.data().resolve_send(KindId(kind), &payload) {
+                Ok(attachments) => attachments,
+                Err(error) => {
+                    tracing::warn!(target: "aether_substrate::mail", kind = %KindId(kind), %error, "guest reply refused at the sender");
+                    return REPLY_BLOB_REFUSED;
+                }
+            };
+            let payload = EncodedMail { bytes: payload, attachments };
+
             // A reply handle is one-shot: take (not resolve) so the
             // entry is removed here, capping the table at in-flight
             // replies rather than lifetime traffic. The mutable
@@ -624,6 +663,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 SourceAddr::Session(token) => {
                     let Some(kind_name) = ctx.registry.kind_name(kind) else {
                         return REPLY_KIND_NOT_FOUND;
+                    };
+                    let Some(payload) = egress_payload(ctx, kind, payload) else {
+                        return REPLY_BLOB_REFUSED;
                     };
                     let origin = ctx.registry.mailbox_name(ctx.sender);
                     // The guest replies in its own name: stamp its own
@@ -666,6 +708,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     if ctx.registry.kind_name(kind).is_none() {
                         return REPLY_KIND_NOT_FOUND;
                     }
+                    let Some(payload) = egress_payload(ctx, kind, payload) else {
+                        return REPLY_BLOB_REFUSED;
+                    };
                     ctx.outbound.egress_to_engine_mailbox(engine_id, mailbox_id, kind, payload, count, correlation);
                 }
                 SourceAddr::None => {
@@ -1027,6 +1072,25 @@ fn resolve_dispatch_identity(ctx: &ComponentCtx, from: MailboxId) -> MailboxId {
         from
     } else {
         ctx.sender
+    }
+}
+
+/// The bytes a guest reply carries out of the process to a session or an
+/// engine mailbox (ADR-0238 decisions 3 and 5): `payload`'s bytes as they are
+/// when it attaches nothing, else each tag-1 field rewritten to tag 0 from
+/// the entry its hash names, bounded by one frame. `None`, after a warning
+/// naming the size and the limit or the fault, when the rewrite refuses.
+fn egress_payload(ctx: &ComponentCtx, kind: KindId, payload: EncodedMail) -> Option<Vec<u8>> {
+    let EncodedMail { bytes, attachments } = payload;
+    let Some(entries) = attachments else {
+        return Some(bytes);
+    };
+    match inline_payload(&ctx.registry, kind, &bytes, &entries, max_frame_size()) {
+        Ok(inline) => Some(inline),
+        Err(error) => {
+            tracing::warn!(target: "aether_substrate::mail", kind = %kind, %error, "guest reply leaving the process refused");
+            None
+        }
     }
 }
 

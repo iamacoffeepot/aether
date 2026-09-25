@@ -5,6 +5,7 @@
 use aether_data::{ActorMail, Kind, RequestId, Source};
 
 use super::WasmCtx;
+use crate::blob::guest::{EncodedGuestMail, encode_guest};
 use crate::mail::ReplyHandle;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
@@ -134,18 +135,18 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// cluster-member recipient dispatches in place; any other hands off to
     /// the host (ADR-0114 addressing amendment).
     fn push<K: ActorMail>(&self, recipient: ErasedActorRef, payload: &K, chain: ChainMode) {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(recipient.id().0, K::ID.0, &bytes, 1, chain, self.mailbox);
+        self.inline.route_or_enqueue(recipient.id().0, K::ID.0, encode_guest(payload), 1, chain, self.mailbox);
     }
 
     /// The batch form of [`Self::push`]: the cast payloads cross as one
     /// contiguous slice with their count, inheriting the handler's chain.
+    /// A cast payload cannot hold a `Blob`, so the batch keeps nothing.
     fn push_many<K: ActorMail + bytemuck::NoUninit>(&self, recipient: ErasedActorRef, payloads: &[K]) {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         self.inline.route_or_enqueue(
             recipient.id().0,
             K::ID.0,
-            bytes,
+            EncodedGuestMail::plain(bytes.to_vec()),
             payloads.len() as u32,
             ChainMode::Inherit,
             self.mailbox,
@@ -208,13 +209,13 @@ impl<A> OutboundReply for WasmCtx<'_, A, Manual> {
 
     fn reply<K: ActorMail>(&mut self, payload: &K) {
         if let Some(handle) = self.sender {
-            let bytes = payload.encode_into_bytes();
-            mail::reply_mail(handle.raw(), K::ID.0, &bytes, 1, self.mailbox);
+            let encoded = encode_guest(payload);
+            mail::reply_mail(handle.raw(), K::ID.0, &encoded.bytes, 1, self.mailbox);
         }
     }
 
     fn reply_to<K: ActorMail>(&mut self, sender: ReplyHandle, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        mail::reply_mail(sender.raw(), K::ID.0, &bytes, 1, self.mailbox);
+        let encoded = encode_guest(payload);
+        mail::reply_mail(sender.raw(), K::ID.0, &encoded.bytes, 1, self.mailbox);
     }
 }

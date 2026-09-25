@@ -45,8 +45,9 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell, UnsafeCell};
 use core::num::NonZeroU64;
 
-use aether_data::{Kind, MailboxId, RequestId};
+use aether_data::{Blob, Kind, MailboxId, RequestId};
 
+use crate::blob::guest::EncodedGuestMail;
 use crate::mail::{Mail, NO_REPLY_HANDLE};
 use crate::model::CallerScope;
 use crate::request_context::{RequestContextTable, compose_state_envelope};
@@ -147,6 +148,12 @@ struct QueuedMail {
     recipient: u64,
     kind: u64,
     bytes: Vec<u8>,
+    /// The held values the `bytes` name by hash (ADR-0238 decision 3), kept
+    /// until this mail has been dispatched, so the recipient's decode is
+    /// admitted by a live hold even when the sender dropped its own value
+    /// before the drain reached this mail. Intra-cluster mail never reaches
+    /// the host, so nothing else keeps them.
+    keep: Vec<Blob>,
     count: u32,
     /// The sending actor's own folded [`MailboxId`] raw value — the "from"
     /// half of an in-place send. An in-place dispatch carries `NO_REPLY_HANDLE`
@@ -594,25 +601,33 @@ impl Registry {
     /// the member as origin rather than the cluster's inbound recipient. The
     /// host validates the claim to this cluster, so a member's own outbound
     /// mail carries the member as origin and a guest cannot spoof a foreign id.
+    ///
+    /// `payload` carries the held values its bytes name by hash (ADR-0238
+    /// decision 3). On the `Remote` branch they stay alive for the whole host
+    /// call, whose resolve on send attaches their entries, and drop after it.
+    /// On the `Local` branch the [`QueuedMail`] keeps them until its
+    /// recipient has dispatched.
     pub(crate) fn route_or_enqueue(
         &self,
         recipient: u64,
         kind: u64,
-        bytes: &[u8],
+        payload: EncodedGuestMail,
         count: u32,
         mode: ChainMode,
         sender: u64,
     ) {
+        let EncodedGuestMail { bytes, keep } = payload;
         match self.route_decision(recipient) {
             RouteDecision::Local => {
                 // SAFETY: see [`Self::insert_child`] — the queue borrow is
                 // taken fresh and released before return, never spanning a
                 // dispatch (the drain re-borrows per item).
                 let queue = unsafe { &mut *self.queue.get() };
-                queue.push_back(QueuedMail { recipient, kind, bytes: bytes.to_vec(), count, sender });
+                queue.push_back(QueuedMail { recipient, kind, bytes, keep, count, sender });
             }
             RouteDecision::Remote => {
-                mail::send_mail(recipient, kind, bytes, count, matches!(mode, ChainMode::Detached), sender);
+                mail::send_mail(recipient, kind, &bytes, count, matches!(mode, ChainMode::Detached), sender);
+                drop(keep);
             }
         }
     }
@@ -764,8 +779,11 @@ where
     let self_id = registry.self_id();
     while let Some(item) = registry.pop_queued() {
         // Keep the owned bytes alive for the duration of this item's
-        // dispatch; the `Mail` borrows them by raw pointer + length.
+        // dispatch; the `Mail` borrows them by raw pointer + length. The
+        // held values they name stay alive as long, and drop once the
+        // dispatch has run.
         let bytes = item.bytes;
+        let keep = item.keep;
         // SAFETY: `bytes` lives for the rest of this loop iteration, longer
         // than the `Mail` built from its pointer; `Mail::__from_ptr` bounds
         // the slice to `bytes.len()`. A queued intra-cluster send carries no
@@ -790,12 +808,15 @@ where
         // re-stamp.
         let dispatch_own = mk_own(item.sender);
         dispatch_member(self_id, mail, registry, item.sender, DispatchOrigin::Cluster, dispatch_own);
+        drop(keep);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ChainMode, ChildRecord, Registry, RouteDecision, drain_cluster_queue, membrane_dispatch};
+    use crate::blob::guest::EncodedGuestMail;
+    use crate::blob::guest::tracked::tracked_blob;
     use crate::mail::{Mail, PriorState};
     use crate::reference::ErasedActorRef;
     use crate::wasm::ErasedWasmActor;
@@ -805,6 +826,7 @@ mod tests {
     use alloc::boxed::Box;
     use alloc::rc::Rc;
     use alloc::string::String;
+    use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
 
@@ -1280,9 +1302,9 @@ mod tests {
         install_recording(&registry, child, root);
 
         assert_eq!(registry.queued_len(), 0, "the queue starts empty");
-        registry.route_or_enqueue(root, 7, &[1, 2, 3], 1, ChainMode::Inherit, root);
+        registry.route_or_enqueue(root, 7, EncodedGuestMail::plain(vec![1, 2, 3]), 1, ChainMode::Inherit, root);
         assert_eq!(registry.queued_len(), 1, "an own-id send enqueues locally, no host call");
-        registry.route_or_enqueue(child, 8, &[4], 1, ChainMode::Inherit, root);
+        registry.route_or_enqueue(child, 8, EncodedGuestMail::plain(vec![4]), 1, ChainMode::Inherit, root);
         assert_eq!(registry.queued_len(), 2, "a child-alias send enqueues locally too");
     }
 
@@ -1298,7 +1320,7 @@ mod tests {
         let dispatches = install_recording(&registry, child, root);
 
         // Seed one local send addressed to the child.
-        registry.route_or_enqueue(child, 1, &[0xAB], 1, ChainMode::Inherit, root);
+        registry.route_or_enqueue(child, 1, EncodedGuestMail::plain(vec![0xAB]), 1, ChainMode::Inherit, root);
 
         let own_dispatches = Rc::new(Cell::new(0));
         let own_counter = Rc::clone(&own_dispatches);
@@ -1313,6 +1335,45 @@ mod tests {
         assert_eq!(dispatches.get(), 1, "the child-addressed item dispatched the child once");
         assert_eq!(own_dispatches.get(), 0, "a child-addressed item never ran the parent dispatch");
         assert_eq!(registry.queued_len(), 0, "the queue is empty after the drain");
+    }
+
+    /// ADR-0238 decision 3: a queued intra-cluster send keeps the values its
+    /// bytes name alive past the sender's own value, until the recipient has
+    /// dispatched, and no longer. In a guest the kept value is the hold that
+    /// admits the recipient's decode of the hash. Catches a queue that drops
+    /// the kept values before the drain reaches the mail (the recipient's
+    /// decode would find no hold) or keeps them after it (the hold would
+    /// leak until the instance ends).
+    #[test]
+    fn a_queued_send_keeps_its_named_values_until_the_recipient_dispatches() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::Ordering;
+
+        let registry = Registry::new();
+        let root = 0x4100_u64;
+        registry.set_self_id(root);
+        let (value, dropped) = tracked_blob();
+
+        let payload = EncodedGuestMail { bytes: vec![0xAB], keep: vec![value.clone()] };
+        registry.route_or_enqueue(root, 1, payload, 1, ChainMode::Inherit, root);
+        drop(value);
+
+        assert!(!dropped.load(Ordering::SeqCst), "the queued mail keeps the value the sender dropped");
+
+        let alive_at_dispatch = Rc::new(Cell::new(None));
+        let observed = Rc::clone(&alive_at_dispatch);
+        let watched = Arc::clone(&dropped);
+        drain_cluster_queue(&registry, |_source| {
+            let observed = Rc::clone(&observed);
+            let watched = Arc::clone(&watched);
+            move |_mail| {
+                observed.set(Some(!watched.load(Ordering::SeqCst)));
+                OWN_CODE
+            }
+        });
+
+        assert_eq!(alive_at_dispatch.get(), Some(true), "the value is alive while the recipient dispatches");
+        assert!(dropped.load(Ordering::SeqCst), "the value goes once the recipient has dispatched");
     }
 
     /// Addressing amendment: a cascade — a drained item whose dispatch
@@ -1330,7 +1391,7 @@ mod tests {
 
         // Seed one own-addressed item; the parent dispatch, on its first
         // run, enqueues a follow-up addressed to the child.
-        registry.route_or_enqueue(root, 1, &[0x01], 1, ChainMode::Inherit, root);
+        registry.route_or_enqueue(root, 1, EncodedGuestMail::plain(vec![0x01]), 1, ChainMode::Inherit, root);
 
         // Record the order dispatches happened in, to prove a single drain
         // loop carried both the seed and the cascaded follow-up.
@@ -1352,7 +1413,14 @@ mod tests {
                     if !own_ran_inner.get() {
                         own_ran_inner.set(true);
                         // Cascade: enqueue a follow-up to the child mid-drain.
-                        registry_ref.route_or_enqueue(child, 2, &[0x02], 1, ChainMode::Inherit, root);
+                        registry_ref.route_or_enqueue(
+                            child,
+                            2,
+                            EncodedGuestMail::plain(vec![0x02]),
+                            1,
+                            ChainMode::Inherit,
+                            root,
+                        );
                     }
                 }
                 OWN_CODE
@@ -1396,7 +1464,7 @@ mod tests {
         let (dispatches, observed) = install_recording_with_source(&registry, child, root);
 
         // The parent (root) sends to the child, stamping its own id as sender.
-        registry.route_or_enqueue(child, 1, &[0x00], 1, ChainMode::Inherit, root);
+        registry.route_or_enqueue(child, 1, EncodedGuestMail::plain(vec![0x00]), 1, ChainMode::Inherit, root);
 
         drain_cluster_queue(&registry, |_source| {
             |_mail| panic!("own dispatch must not run for a child-addressed item")
@@ -1455,7 +1523,7 @@ mod tests {
             }),
         );
 
-        registry.route_or_enqueue(child, 1, &[0x00], 1, ChainMode::Inherit, root);
+        registry.route_or_enqueue(child, 1, EncodedGuestMail::plain(vec![0x00]), 1, ChainMode::Inherit, root);
         drain_cluster_queue(&registry, |_source| {
             |_mail| panic!("own dispatch must not run for a child-addressed item")
         });

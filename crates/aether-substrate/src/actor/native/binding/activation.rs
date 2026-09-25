@@ -131,6 +131,7 @@ mod tests {
     use super::super::fixture::{component_ctx_with_binding, forward_to_envelope_sender};
     use super::*;
     use crate::actor::native::envelope::Envelope;
+    use crate::mail::attachments::EncodedMail;
     use crate::mail::{KindId, MailId, SourceAddr};
     use crate::testing::{bare_substrate, boot_authority};
     use std::sync::mpsc;
@@ -166,7 +167,7 @@ mod tests {
 
         binding.hold_outbound_for_activation();
         ctx.set_in_flight(Some(parent), Some(root));
-        ctx.send(recipient, kind, vec![1, 2, 3], 2, sender);
+        ctx.send(recipient, kind, EncodedMail { bytes: vec![1, 2, 3], attachments: None }, 2, sender);
 
         assert!(recipient_rx.try_recv().is_err(), "wire mail must remain quarantined before activation");
         assert_eq!(counter.live_roots(), 1, "accepted wire mail holds its inherited root open");
@@ -241,7 +242,7 @@ mod tests {
             parent_mail: None,
             inherited_root: None,
         });
-        ctx.send(recipient, KindId(0x0041_4533), vec![9], 1, child);
+        ctx.send(recipient, KindId(0x0041_4533), EncodedMail { bytes: vec![9], attachments: None }, 1, child);
         assert!(recipient_rx.try_recv().is_err(), "a held window publishes nothing before activation");
         assert_eq!(counter.live_roots(), 2, "both held sends record one in-flight root each");
 
@@ -281,7 +282,7 @@ mod tests {
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         binding.hold_outbound_for_activation();
-        ctx.send(recipient, KindId(0x0041_4512), vec![4, 5], 1, sender);
+        ctx.send(recipient, KindId(0x0041_4512), EncodedMail { bytes: vec![4, 5], attachments: None }, 1, sender);
         assert!(recipient_rx.try_recv().is_err(), "rejected wire mail never escapes before discard");
         assert_eq!(counter.live_roots(), 1, "accepted wire mail records one in-flight send");
 
@@ -306,7 +307,7 @@ mod tests {
         let (ctx, _binding) = component_ctx_with_binding(registry, Arc::clone(&mailer), sender);
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
-        ctx.send(recipient, KindId(0x0041_4522), vec![6], 1, sender);
+        ctx.send(recipient, KindId(0x0041_4522), EncodedMail { bytes: vec![6], attachments: None }, 1, sender);
         let envelope = recipient_rx.try_recv().expect("Live component send remains eager");
         assert_eq!(envelope.payload.bytes(), &[6]);
         assert_eq!(counter.live_roots(), 1);

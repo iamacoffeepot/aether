@@ -11,9 +11,10 @@
 //!   gives it back (`blob_drop_p32`). Holds count live values, however many
 //!   times the guest decodes one mail. An entry leaves the table, and its
 //!   `Arc` drops, once it is neither pinned nor held.
-//! - **Resolving a hash.** The `blob_*_p32` host fns resolve a guest-supplied
-//!   hash only here, so a guessed or logged hash reaches nothing this instance
-//!   is not already pinned or holding.
+//! - **Resolving a hash.** The `blob_*_p32` host fns, and resolve on send for
+//!   the tag-1 fields of a guest's `send_mail_p32` / `reply_mail_p32` payload,
+//!   resolve a guest-supplied hash only here, so a guessed or logged hash
+//!   reaches nothing this instance is not already pinned or holding.
 //! - **No lock.** Only the owning actor's handler touches the table. It lives
 //!   in the `Store` data (`ComponentCtx`) that the slot's actor `Mutex`
 //!   guards, one handler at a time.
@@ -115,6 +116,13 @@ impl BlobTable {
     /// The entry `hash` names, when this instance pins or holds it.
     pub fn entry(&self, hash: BlobHash) -> Option<&Arc<BlobEntry>> {
         self.held.get(&hash).map(|held| &held.entry)
+    }
+
+    /// Whether this instance neither pins nor holds any entry. A guest whose
+    /// table is empty cannot carry a valid tag-1 field, so its sends skip
+    /// resolve on send (ADR-0238 decision 3).
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
     }
 }
 

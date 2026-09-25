@@ -3,22 +3,30 @@
 //! `Component::deliver` with an attached mail into a WAT guest whose
 //! `receive_p32` acts on the hash at the start of its payload; the host fn
 //! tests drive a WAT guest whose exports forward straight to the imports,
-//! over entries pinned through `BlobTable::pin`. Entries come from a fresh
-//! `BlobStore`.
+//! over entries pinned through `BlobTable::pin`. The resolve-on-send tests
+//! drive a WAT guest that forwards, or replies with, the payload it received
+//! through `send_mail_p32` / `reply_mail_p32`, as a guest raw-forwarding a
+//! delivered `Blob` does. Entries come from a fresh `BlobStore`.
 
-use std::sync::Arc;
+use std::mem;
+use std::sync::{Arc, Mutex};
 
-use aether_data::{KindId, MAX_READ_BYTES};
+use aether_data::{Blob, BlobReader, Kind, KindDescriptor, KindId, MAX_READ_BYTES, Schema, SessionToken, Uuid};
 use wasmtime::{Engine, Instance, Linker, Memory, Module, Store};
 
 use super::{
-    Component, DISPATCH_DROPPED_OVERSIZE, MAX_DELIVERABLE_MAIL_BYTES, WAT_HOOKS, WAT_REALLOC, ctx, inbound, instantiate,
+    Component, DISPATCH_DROPPED_OVERSIZE, MAX_DELIVERABLE_MAIL_BYTES, WAT_HOOKS, WAT_REALLOC, ctx, ctx_at, inbound,
+    instantiate, instantiate_with_ctx,
 };
 use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::ComponentCtx;
-use crate::actor::wasm::host_fns::{self, BLOB_NOT_HELD, BLOB_OUT_OF_BOUNDS};
-use crate::mail::{MailboxId, Source};
+use crate::actor::wasm::host_fns::{self, BLOB_NOT_HELD, BLOB_OUT_OF_BOUNDS, REPLY_OK, SEND_BLOB_REFUSED};
+use crate::mail::mailer::Mailer;
+use crate::mail::outbound::{EgressEvent, HubOutbound};
+use crate::mail::registry::{OwnedDispatch, Registry};
+use crate::mail::{MailboxId, Source, SourceAddr};
 use crate::store::{BlobEntry, BlobStore};
+use crate::testing::boot_authority;
 
 /// A guest whose `hold` / `read` / `drop` exports forward their arguments to
 /// the blob imports. 40 pages of memory (2.5 MiB) leave room for a
@@ -401,4 +409,237 @@ fn dropping_a_component_releases_what_its_table_still_holds() {
     drop(component);
 
     assert_eq!(store.resident_bytes(), 0);
+}
+
+/// A registered kind with one `Blob` field, so resolve on send has a schema
+/// to walk. Its wire form is the field alone: tag 1 and a hash, or tag 0,
+/// a length and the bytes.
+#[aether_data::kind(name = "test.guest_blob.carrier")]
+struct GuestCarrier {
+    blob: Blob,
+}
+
+/// Where the resolve-on-send guests store the host fn's status. The data
+/// segment starts it at `u32::MAX`, so a guest that never made the call
+/// cannot read as a success.
+const STATUS_AT: usize = 500;
+
+/// A guest that forwards every payload it receives to `recipient` as a
+/// [`GuestCarrier`] through `send_mail_p32`, storing the status at
+/// [`STATUS_AT`].
+fn forwarding_guest(recipient: MailboxId) -> String {
+    format!(
+        r#"
+        (module
+            (import "aether" "send_mail_p32"
+                (func $send (param i64 i64 i32 i32 i32 i32 i64) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const {STATUS_AT}) "\ff\ff\ff\ff")
+            {WAT_REALLOC}
+            (func (export "receive_p32")
+                (param i64) (param $ptr i32) (param $len i32) (param i32 i32 i64 i64) (result i32)
+                (i32.store (i32.const {STATUS_AT}) (call $send
+                    (i64.const {recipient})
+                    (i64.const {carrier})
+                    (local.get $ptr)
+                    (local.get $len)
+                    (i32.const 1)
+                    (i32.const 0)
+                    (i64.const 0)))
+                i32.const 0))
+        "#,
+        recipient = recipient.0,
+        carrier = GuestCarrier::ID.0,
+    )
+}
+
+/// A guest that takes a hold on the hash its payload names (the payload is a
+/// tag-1 [`GuestCarrier`], so the hash starts one byte in), then replies with
+/// the payload as a [`GuestCarrier`] through `reply_mail_p32`, storing the
+/// status at [`STATUS_AT`].
+fn replying_guest() -> String {
+    format!(
+        r#"
+        (module
+            (import "aether" "blob_hold_p32" (func $hold (param i32) (result i64)))
+            (import "aether" "reply_mail_p32"
+                (func $reply (param i32 i64 i32 i32 i32 i64) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const {STATUS_AT}) "\ff\ff\ff\ff")
+            {WAT_REALLOC}
+            (func (export "receive_p32")
+                (param i64) (param $ptr i32) (param $len i32) (param i32) (param $sender i32) (param i64 i64)
+                (result i32)
+                (drop (call $hold (i32.add (local.get $ptr) (i32.const 1))))
+                (i32.store (i32.const {STATUS_AT}) (call $reply
+                    (local.get $sender)
+                    (i64.const {carrier})
+                    (local.get $ptr)
+                    (local.get $len)
+                    (i32.const 1)
+                    (i64.const 0)))
+                i32.const 0))
+        "#,
+        carrier = GuestCarrier::ID.0,
+    )
+}
+
+/// A [`GuestCarrier`] payload naming `entry` by hash, as a guest's encode of
+/// a held value writes it.
+fn tagged(entry: &BlobEntry) -> Vec<u8> {
+    let mut payload = vec![1];
+    payload.extend_from_slice(entry.hash().as_bytes());
+    payload
+}
+
+/// A registry that knows [`GuestCarrier`].
+fn carrier_registry() -> Arc<Registry> {
+    let registry = Arc::new(Registry::new());
+    registry
+        .register_kind_with_descriptor(
+            &boot_authority(),
+            KindDescriptor { name: GuestCarrier::NAME.into(), schema: GuestCarrier::SCHEMA },
+        )
+        .expect("register the carrier kind");
+    registry
+}
+
+/// A [`forwarding_guest`] whose recipient is a sink that keeps every
+/// dispatch it receives.
+struct Forwarder {
+    guest: Component,
+    received: Arc<Mutex<Vec<Envelope>>>,
+}
+
+impl Forwarder {
+    fn new() -> Self {
+        let registry = carrier_registry();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+        let recipient = registry
+            .try_register_inbox(
+                &boot_authority(),
+                "test.guest_blob.recipient",
+                Arc::new(move |dispatch: OwnedDispatch| {
+                    // Terminal test sink (ADR-0094): discharge before keeping.
+                    dispatch.discharge();
+                    sink.lock().expect("sink lock").push(dispatch);
+                }),
+            )
+            .expect("register the recipient");
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+        let ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), MailboxId(0), None);
+        Self { guest: instantiate_with_ctx(&forwarding_guest(recipient), ctx), received }
+    }
+
+    /// Deliver `payload`, attaching `attached`, and return the status the
+    /// guest's forward got back.
+    fn forward(&mut self, payload: Vec<u8>, attached: &[&Arc<BlobEntry>]) -> u32 {
+        let attachments = attached.iter().map(|entry| Arc::clone(entry)).collect::<Vec<_>>();
+        let mail = inbound(MailboxId(0), KindId(0), payload, Source::NONE)
+            .with_attachments(Some(attachments.into_boxed_slice()));
+        self.guest.deliver(&mail).expect("deliver");
+        self.guest.read_u32(STATUS_AT)
+    }
+
+    fn received(&self) -> Vec<Envelope> {
+        mem::take(&mut *self.received.lock().expect("sink lock"))
+    }
+}
+
+/// Every byte of `blob`.
+fn read_all(blob: &Blob) -> Vec<u8> {
+    let reader = BlobReader::open(blob);
+    let mut bytes = vec![0; usize::try_from(reader.len()).expect("fits")];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let copied = reader.read_range(filled as u64, &mut bytes[filled..]);
+        assert_ne!(copied, 0, "a blob reads to its length");
+        filled += copied;
+    }
+    bytes
+}
+
+/// (d) A guest forwarding a tag-1 payload that names an entry its table pins
+/// gets it through with that entry attached, so the recipient shares the
+/// bytes. Catches a guest send whose hashes reach the recipient with nothing
+/// behind them.
+#[test]
+fn a_guest_send_naming_a_pinned_entry_attaches_it() {
+    let store = store();
+    let entry = store.check_in(patterned(24));
+    let mut forwarder = Forwarder::new();
+
+    assert_eq!(forwarder.forward(tagged(&entry), &[&entry]), 0, "the send goes through");
+
+    let received = forwarder.received();
+    assert_eq!(received.len(), 1, "the recipient receives the forward once");
+    assert_eq!(received[0].attachments().len(), 1);
+    assert!(Arc::ptr_eq(&received[0].attachments()[0], &entry), "the forward attaches the pinned entry");
+}
+
+/// (e) A guest forwarding a hash its table neither pins nor holds is refused
+/// with `SEND_BLOB_REFUSED` while its table holds other entries, and nothing
+/// is routed. Catches a guessed or foreign hash being resolved, or leaving
+/// the sender with nothing behind it.
+#[test]
+fn a_guest_send_naming_an_unheld_hash_is_refused() {
+    let store = store();
+    let pinned = store.check_in(patterned(24));
+    let unheld = store.check_in(b"resident, but not this guest's".as_slice().into());
+    let mut forwarder = Forwarder::new();
+
+    assert_eq!(forwarder.forward(tagged(&unheld), &[&pinned]), SEND_BLOB_REFUSED);
+
+    assert!(forwarder.received().is_empty(), "a refused send routes nothing");
+}
+
+/// (g) A guest whose table is empty forwards a tag-1 payload unwalked and
+/// unattached, as ADR-0238 decision 3 says for senders that hold no blob; the
+/// recipient's decode is what refuses it. Catches resolve on send running,
+/// and refusing, for a blob-free guest.
+#[test]
+fn a_guest_with_an_empty_table_sends_unwalked() {
+    let store = store();
+    let entry = store.check_in(patterned(24));
+    let mut forwarder = Forwarder::new();
+
+    assert_eq!(forwarder.forward(tagged(&entry), &[]), 0, "the send goes through unwalked");
+
+    let received = forwarder.received();
+    assert_eq!(received.len(), 1);
+    assert!(received[0].attachments().is_empty(), "nothing was resolved, so nothing is attached");
+}
+
+/// (f) A guest replying to a session with a payload naming an entry it holds
+/// reaches the hub as tag 0 carrying the entry's bytes, which the plain
+/// decoder reads. Catches a guest reply that leaves the process with a hash
+/// no far decoder can resolve.
+#[test]
+fn a_guest_reply_to_a_session_leaves_as_bytes() {
+    let store = store();
+    let entry = store.check_in(patterned(40));
+    let (outbound, egress) = HubOutbound::attached_loopback();
+    let registry = carrier_registry();
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let mut guest = instantiate_with_ctx(&replying_guest(), ctx_at(registry, mailer, outbound, MailboxId(0), None));
+    let session = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0x6756))));
+
+    guest
+        .deliver(
+            &inbound(MailboxId(0), KindId(0), tagged(&entry), session)
+                .with_attachments(Some(Box::new([entry.clone()]))),
+        )
+        .expect("deliver");
+
+    assert_eq!(guest.read_u32(STATUS_AT), REPLY_OK);
+    let payload = egress
+        .try_iter()
+        .find_map(|event| match event {
+            EgressEvent::ToSession { payload, .. } => Some(payload),
+            _ => None,
+        })
+        .expect("the reply reaches the hub");
+    let reply = GuestCarrier::decode_from_bytes(&payload).expect("the plain decoder reads a tag-0 reply");
+    assert_eq!(read_all(&reply.blob), entry.bytes());
 }

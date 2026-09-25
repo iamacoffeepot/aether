@@ -2,6 +2,7 @@
 //! request-context table replies are matched against (ADR-0139).
 
 use super::NativeBinding;
+use crate::mail::attachments::EncodedMail;
 use crate::mail::{MailId, Source};
 use aether_data::{ActorMail, Kind, KindId, RequestId};
 
@@ -40,20 +41,22 @@ impl NativeBinding {
     /// [`Self::send_reply_for_handler`] for an already-encoded reply of
     /// `kind`: the reply id is minted from the same `reply_lineage`
     /// allocator and the reply joins the caller's chain under `root` /
-    /// `parent` the same way. Its caller is
+    /// `parent` the same way. `payload` carries the bytes and the entries
+    /// their tag-1 fields name, which the ctx resolved against the handled
+    /// mail (ADR-0238 decision 3). Its caller is
     /// [`DeferredReply::reply_envelope`](crate::actor::native::DeferredReply::reply_envelope),
-    /// through the ctx's engine-only refusal.
+    /// through the ctx's engine-only refusal and resolve.
     pub(crate) fn send_reply_envelope_for_handler(
         &self,
         sender: Source,
         kind: KindId,
-        bytes: &[u8],
+        payload: EncodedMail,
         root: Option<MailId>,
         parent: Option<MailId>,
     ) {
         let correlation = self.reply_lineage.mint();
         let reply_id = MailId::new(self.self_mailbox(), correlation);
-        self.mailer.send_reply_envelope(sender, kind, bytes, Some(reply_id), root, parent);
+        self.mailer.send_reply_envelope(sender, kind, payload, Some(reply_id), root, parent);
     }
 
     /// Store request context for a just-minted outbound request, warning

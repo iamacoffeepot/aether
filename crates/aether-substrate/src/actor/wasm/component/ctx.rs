@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::blob_table::BlobTable;
 use crate::actor::wasm::reply_table::ReplyTable;
-use crate::mail::attachments::plain_payload;
+use crate::mail::attachments::{Attachments, EncodedMail, ResolveError, plain_payload, resolve_on_send};
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{
@@ -229,13 +229,17 @@ pub struct PendingSpawn {
 const REPLY_LINEAGE_BASE: u64 = 1 << 63;
 
 /// One component-originated mail [`ComponentCtx::send_routed`] routes: the
-/// recipient, kind, payload and count, the `reply_to` and lineage `mail_id`
-/// the caller minted, whether the send detaches from the in-flight chain,
-/// and the dispatch `identity` it is sent as.
+/// recipient, kind, payload, the entries its tag-1 fields name, and count,
+/// the `reply_to` and lineage `mail_id` the caller minted, whether the send
+/// detaches from the in-flight chain, and the dispatch `identity` it is sent
+/// as.
 struct RoutedSend {
     recipient: MailboxId,
     kind: MailKind,
     payload: Vec<u8>,
+    /// ADR-0238 decision 3: the entries resolve on send found for the
+    /// payload's tag-1 fields, which ride the mail to its recipient.
+    attachments: Attachments,
     count: u32,
     reply_to: Source,
     mail_id: MailId,
@@ -434,7 +438,11 @@ impl ComponentCtx {
     /// routes to the component's inbox, warn-drops dropped/unknown
     /// mailboxes, or bubbles unknown ids up to the hub-substrate when
     /// a `HubOutbound` is wired (ADR-0037).
-    pub(crate) fn send(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
+    ///
+    /// `payload` carries the entries its tag-1 `Blob` fields name, resolved
+    /// by the host fn against this instance's blob table (ADR-0238 decision
+    /// 3); they ride the mail.
+    pub(crate) fn send(&self, recipient: MailboxId, kind: MailKind, payload: EncodedMail, count: u32, from: MailboxId) {
         // ADR-0042: mint a fresh correlation_id for this send and
         // stash it on `last_correlation` so `prev_correlation_p32`
         // can return it to the guest. The minted id rides on the
@@ -453,10 +461,12 @@ impl ComponentCtx {
         // reply routing — symmetric with `NativeBinding::push_envelope_buffered`,
         // which uses one counter for both.
         let mail_id = MailId::new(from, correlation);
+        let EncodedMail { bytes, attachments } = payload;
         self.send_routed(RoutedSend {
             recipient,
             kind,
-            payload,
+            payload: bytes,
+            attachments,
             count,
             reply_to,
             mail_id,
@@ -477,17 +487,19 @@ impl ComponentCtx {
         &self,
         recipient: MailboxId,
         kind: MailKind,
-        payload: Vec<u8>,
+        payload: EncodedMail,
         count: u32,
         from: MailboxId,
     ) {
         let correlation = self.mint_correlation();
         let reply_to = Source::with_correlation(SourceAddr::Component(from), correlation);
         let mail_id = MailId::new(from, correlation);
+        let EncodedMail { bytes, attachments } = payload;
         self.send_routed(RoutedSend {
             recipient,
             kind,
-            payload,
+            payload: bytes,
+            attachments,
             count,
             reply_to,
             mail_id,
@@ -520,7 +532,7 @@ impl ComponentCtx {
         &self,
         recipient: MailboxId,
         kind: MailKind,
-        payload: Vec<u8>,
+        payload: EncodedMail,
         count: u32,
         correlation: u64,
         from: MailboxId,
@@ -530,10 +542,12 @@ impl ComponentCtx {
         // guest-carried `from`, already resolved in-cluster by the host fn)
         // on its lineage `MailId`, like its sends.
         let mail_id = MailId::new(from, self.next_reply_lineage());
+        let EncodedMail { bytes, attachments } = payload;
         self.send_routed(RoutedSend {
             recipient,
             kind,
-            payload,
+            payload: bytes,
+            attachments,
             count,
             reply_to,
             mail_id,
@@ -556,7 +570,8 @@ impl ComponentCtx {
     /// causal chain regardless of the in-flight cells; `false` (the
     /// default `send` / a reply) inherits the dispatch's chain.
     fn send_routed(&self, send: RoutedSend) {
-        let RoutedSend { recipient, kind, payload, count, reply_to, mail_id, force_detach, identity } = send;
+        let RoutedSend { recipient, kind, payload, attachments, count, reply_to, mail_id, force_detach, identity } =
+            send;
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): the in-flight
         // cells were populated by `Component::deliver` for guest-triggered
         // sends (and remain `None` for substrate-internal call sites that
@@ -568,11 +583,10 @@ impl ComponentCtx {
             (self.in_flight_mail_id.get(), self.in_flight_root.get())
         };
         let root = inherited_root.unwrap_or(mail_id);
-        let mail = Mail::new(recipient, kind, payload, count).with_reply_to(reply_to).with_lineage(
-            Some(mail_id),
-            Some(root),
-            parent_mail,
-        );
+        let mail = Mail::new(recipient, kind, payload, count)
+            .with_reply_to(reply_to)
+            .with_lineage(Some(mail_id), Some(root), parent_mail)
+            .with_attachments(attachments);
 
         // ADR-0165: guest `wire` runs before this actor's route is
         // authoritatively Live. The ctx therefore offers its fully-stamped
@@ -691,6 +705,24 @@ impl ComponentCtx {
         //   recovered from `reply_to.addr` when it's a Component
         //   variant (warn-drops otherwise).
         queue.push(mail);
+    }
+
+    /// Resolve on send for a guest payload (ADR-0238 decision 3): the
+    /// entries the tag-1 fields of `payload`, a `kind` mail, name, found in
+    /// this instance's blob table among its pins and holds. `Ok(None)`, with
+    /// no schema lookup and no walk, when the table is empty: a guest that
+    /// pins and holds nothing cannot carry a valid tag-1 field.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::Unresolved`] for a hash the table neither pins nor
+    /// holds, and [`ResolveError::Malformed`] for a payload that does not
+    /// follow the kind's schema.
+    pub(crate) fn resolve_send(&self, kind: MailKind, payload: &[u8]) -> Result<Attachments, ResolveError> {
+        if self.blob_table.is_empty() {
+            return Ok(None);
+        }
+        resolve_on_send(&self.registry, kind, payload, |hash| self.blob_table.entry(hash).cloned())
     }
 
     /// Set the in-flight `(mail_id, root)` context the next

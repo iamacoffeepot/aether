@@ -16,6 +16,7 @@ use crate::actor::native::NativeBinding;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::host_fns;
 use crate::config::RegistryQueueCapacities;
+use crate::mail::attachments::EncodedMail;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry;
@@ -79,6 +80,13 @@ fn ctx_at(
 ) -> ComponentCtx {
     let binding = Arc::new(NativeBinding::new_for_test_with_parent(mailer, sender, parent));
     ComponentCtx::new(binding, registry, outbound)
+}
+
+/// `bytes` as a guest send's payload with nothing attached: what the
+/// `send_mail_p32` host fn hands `ComponentCtx::send` for a guest whose blob
+/// table is empty.
+fn plain(bytes: Vec<u8>) -> EncodedMail {
+    EncodedMail { bytes, attachments: None }
 }
 
 fn ctx() -> ComponentCtx {
@@ -1422,7 +1430,7 @@ fn unknown_recipient_bubbles_up_with_sender_mailbox() {
     let unknown = MailboxId(0xDEAD_BEEF_u64);
     let kind = aether_data::KindId(0xABCD_u64);
     // `from` is the dispatch identity the host fn resolves: the ctx's own id.
-    ctx.send(unknown, kind, vec![1, 2, 3], 1, sender);
+    ctx.send(unknown, kind, plain(vec![1, 2, 3]), 1, sender);
 
     let event = outbound_rx.try_recv().expect("bubble-up event emitted");
     match event {
@@ -1453,7 +1461,7 @@ fn unknown_recipient_without_outbound_warn_drops() {
 
     let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), outbound, sender, None);
 
-    ctx.send(MailboxId(0xDEAD_BEEF_u64), aether_data::KindId(0xABCD), vec![], 0, sender);
+    ctx.send(MailboxId(0xDEAD_BEEF_u64), aether_data::KindId(0xABCD), plain(vec![]), 0, sender);
     assert!(outbound_rx.try_recv().is_err(), "no bubble-up without a wired outbound");
 }
 
@@ -1480,7 +1488,7 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x99)), 42);
     ctx.set_in_flight(Some(inbound_mail), Some(inbound_root));
 
-    ctx.send(sink_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1, sender);
+    ctx.send(sink_id, aether_data::KindId(0xABCD), plain(vec![1, 2, 3]), 1, sender);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1, "sink should have been called once");
@@ -1509,7 +1517,7 @@ fn send_without_in_flight_mints_fresh_root_chain() {
     let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected(), sender, None);
     // No `set_in_flight` call.
 
-    ctx.send(sink_id, aether_data::KindId(0xCAFE), vec![], 1, sender);
+    ctx.send(sink_id, aether_data::KindId(0xCAFE), plain(vec![]), 1, sender);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
@@ -1541,7 +1549,7 @@ fn send_detached_mints_fresh_chain_despite_in_flight() {
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x77)), 13);
     ctx.set_in_flight(Some(inbound_mail), Some(inbound_root));
 
-    ctx.send_detached(sink_id, aether_data::KindId(0xF00D), vec![7, 8], 1, sender);
+    ctx.send_detached(sink_id, aether_data::KindId(0xF00D), plain(vec![7, 8]), 1, sender);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1, "sink should have been called once");
@@ -1707,7 +1715,7 @@ fn send_stamps_self_when_recipient_is_own_mailbox() {
     let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected(), sender, None);
 
     // `from == self` (a normally-addressed actor).
-    ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, sender);
+    ctx.send(sink_id, aether_data::KindId(0xABCD), plain(vec![]), 1, sender);
 
     let captured = captured.lock().unwrap();
     let mail_id = captured[0].0.expect("a component send stamps its mail id");
@@ -1727,7 +1735,7 @@ fn send_stamps_alias_when_recipient_is_inline_child() {
     let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected(), sender, None);
 
     // `from == an inline-child alias` distinct from the component's own id.
-    ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, alias);
+    ctx.send(sink_id, aether_data::KindId(0xABCD), plain(vec![]), 1, alias);
 
     let captured = captured.lock().unwrap();
     let mail_id = captured[0].0.expect("a component send stamps its mail id");
