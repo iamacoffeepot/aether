@@ -882,8 +882,9 @@ struct BlobResult {
 }
 
 /// Replies to each [`BlobRequest`] with its blob checked into the engine
-/// store and shared as an attached in-process reply carries it: tag 1 with
-/// the hash, the entry attached. The rpc server must write it out as bytes.
+/// store. The reply to the rpc server's component mailbox is in-process, so
+/// it carries the blob as tag 1 with the entry attached, and the rpc server
+/// must write it out as bytes.
 struct BlobSharer {
     /// The character each reply's padding repeats.
     padding_fill: char,
@@ -899,12 +900,12 @@ impl NativeActor for BlobSharer {
     }
 
     /// Reply with a shared blob.
-    #[handler::manual]
-    fn on_blob_request(&mut self, ctx: &mut NativeCtx<'_, Self, aether_actor::Manual>, mail: BlobRequest) {
+    #[handler::single]
+    fn on_blob_request(&mut self, ctx: &mut NativeCtx<'_, Self>, mail: BlobRequest) -> BlobResult {
         let blob = ctx.check_in(patterned(mail.blob_len).into_boxed_slice());
         let padding =
             self.padding_fill.to_string().repeat(usize::try_from(mail.padding_len).expect("test padding fits memory"));
-        ctx.reply_sharing_blobs(&BlobResult { blob, padding });
+        BlobResult { blob, padding }
     }
 }
 

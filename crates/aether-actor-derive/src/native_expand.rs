@@ -473,7 +473,9 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             // structured kinds have no batched wire shape.
             quote! { ::aether_data::__derive_runtime::decode_cast_slice::<#kind_ty>(__aether_payload) }
         } else {
-            quote! { <#kind_ty as ::aether_data::Kind>::decode_from_bytes(__aether_payload) }
+            // ADR-0238 decision 3: decode against the inbound envelope's
+            // attachments, so a tag-1 `Blob` field yields a shared value.
+            quote! { __aether_ctx.__decode_inbound::<#kind_ty>(__aether_payload) }
         };
         // iamacoffeepot/aether#4811: the arm rides the handler's own `#[cfg]`s. A
         // statement attribute is what carries them — the arm names both the kind

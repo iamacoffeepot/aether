@@ -236,6 +236,7 @@ mod tests {
             recipient: recipient.0,
             kind: 0x0041_4532,
             bytes: &[7, 7],
+            attachments: &[],
             count: 1,
             parent_mail: None,
             inherited_root: None,

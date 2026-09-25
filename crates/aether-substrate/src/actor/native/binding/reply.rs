@@ -2,8 +2,6 @@
 //! request-context table replies are matched against (ADR-0139).
 
 use super::NativeBinding;
-#[cfg(any(test, feature = "test-support"))]
-use crate::mail::attachments::Attachments;
 use crate::mail::{MailId, Source};
 use aether_data::{ActorMail, Kind, KindId, RequestId};
 
@@ -56,27 +54,6 @@ impl NativeBinding {
         let correlation = self.reply_lineage.mint();
         let reply_id = MailId::new(self.self_mailbox(), correlation);
         self.mailer.send_reply_envelope(sender, kind, bytes, Some(reply_id), root, parent);
-    }
-
-    /// Test support: [`Self::send_reply_envelope_for_handler`] to a component
-    /// reply target, carrying `attachments` for the payload's tag-1 `Blob`
-    /// fields (ADR-0238 decision 3). Nothing produces attached replies in
-    /// production yet; this lets a test drive one through the real route.
-    /// A target that is not a component sends nothing.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn send_attached_reply_for_handler(
-        &self,
-        sender: Source,
-        kind: KindId,
-        payload: Vec<u8>,
-        attachments: Attachments,
-        root: Option<MailId>,
-        parent: Option<MailId>,
-    ) {
-        let reply_id = MailId::new(self.self_mailbox(), self.reply_lineage.mint());
-        if let Some(mail) = self.mailer.component_reply_mail(sender, kind, payload, Some(reply_id), root, parent) {
-            self.mailer.push(mail.with_attachments(attachments));
-        }
     }
 
     /// Store request context for a just-minted outbound request, warning

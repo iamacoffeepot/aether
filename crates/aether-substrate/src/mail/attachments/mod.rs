@@ -9,6 +9,11 @@
 //! Each holds its entries as strong references, so the bytes stay resident
 //! until the last holder drops.
 //!
+//! [`encode_envelope`] produces them for every typed native send and every
+//! component reply, and a native recipient's decode resolves each tag-1 hash
+//! against the attachments of the mail it is handling through
+//! [`AttachedEntries`].
+//!
 //! A tag-1 field is written only beside an attachment, so an envelope without
 //! attachments has no tag-1 field. Every consumer that takes plain payload
 //! bytes checks for attachments first and uses the bytes as they are when
@@ -20,18 +25,17 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use aether_codec::{DecodeError, InlineError, inline_blobs};
-use aether_data::{BlobHash, KindId};
+use aether_data::wire::{BlobResolver, Error};
+use aether_data::{Blob, BlobHash, KindId};
 
 use crate::mail::Registry;
 use crate::store::BlobEntry;
 
-#[cfg(any(test, feature = "test-support"))]
-mod sharing;
+mod encoder;
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(test, feature = "test-support"))]
-pub use sharing::SharingEncoder;
+pub use encoder::{EncodedMail, encode_envelope};
 
 /// The store entries an in-process envelope's tag-1 `Blob` fields name by
 /// hash. `None` when the payload has none.
@@ -41,6 +45,28 @@ pub type Attachments = Option<Box<[Arc<BlobEntry>]>>;
 /// is one `is_some` wherever the set is read.
 pub fn normalized(attachments: Attachments) -> Attachments {
     attachments.filter(|entries| !entries.is_empty())
+}
+
+/// `entries` as an owned set holding one strong reference each, or `None`
+/// when there are none: what a buffered send keeps from the borrowed slice it
+/// was handed.
+pub fn owned(entries: &[Arc<BlobEntry>]) -> Attachments {
+    (!entries.is_empty()).then(|| Box::from(entries))
+}
+
+/// The resolver a native recipient's decode reads tag-1 hashes through: the
+/// entries attached to the mail it is handling (ADR-0238 decision 3). A hash
+/// resolves only to an entry the envelope carries, so a hash grants nothing.
+pub struct AttachedEntries<'a>(pub &'a [Arc<BlobEntry>]);
+
+impl BlobResolver for AttachedEntries<'_> {
+    fn resolve(&mut self, hash: BlobHash) -> Result<Blob, Error> {
+        self.0
+            .iter()
+            .find(|entry| entry.hash() == hash)
+            .map(|entry| Arc::clone(entry).into_blob())
+            .ok_or(Error::DetachedBlob(hash))
+    }
 }
 
 /// `payload`, a `kind` mail's bytes, with each tag-1 `Blob` field rewritten
