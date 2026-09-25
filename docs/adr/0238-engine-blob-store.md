@@ -208,10 +208,23 @@ An index resolves only against its holder's own table, so a replayed or
 forged handle reaches only blobs the holder was already granted. A misuse can
 cost correctness, never access.
 
-Directions recorded for a later trait rework, none chosen:
+Directions recorded for a later trait rework, none chosen. The leading one:
 
-- classifying types by where they may go (runtime-safe, universally safe),
-  as Fuchsia FIDL separates `resource` types from value types;
+- **Liveness classes and encoder accept sets.** Every kind keeps one schema
+  and carries a liveness class, derived as the most restrictive class among
+  its fields: `Universal` for plain data, `Process` for anything holding a
+  reference into this engine's memory, such as a `Blob`. Each encoder declares
+  the classes it accepts: the mail envelope accepts both; wire, file and
+  journal encoders accept only `Universal`; a log formatter accepts everything
+  for display and never reads it back. A typed path refuses a mismatch at
+  compile time (`const { assert!(K::LIVENESS <= E::ACCEPTS) }`). Decision 5's
+  wire refusal and the persistence question become one rule, logging is just
+  another destination, and further classes (for example `Session`) can be
+  added later. Fuchsia FIDL's split of `resource` types from value types is
+  the prior art.
+
+Also recorded:
+
 - a reference type that materializes its bytes when it leaves the engine and
   checks them back in when it returns;
 - a derive-generated mirror type, with each `Blob` replaced by bytes;
