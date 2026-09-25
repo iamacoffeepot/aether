@@ -12,7 +12,8 @@
 use std::io::Cursor;
 
 use super::{
-    Mesh, Vec3, brows_mesh, disc_mesh, head_mesh, lips_mesh, lower_lids_mesh, mouth_mesh, sphere_mesh, upper_lids_mesh,
+    Mesh, Vec3, brow_ridges_mesh, brows_mesh, disc_mesh, head_mesh, lips_mesh, lower_lids_mesh, mouth_mesh,
+    sphere_mesh, upper_lids_mesh,
 };
 
 const SKIN: [u8; 3] = [181, 103, 77];
@@ -166,6 +167,7 @@ pub fn render_head_preview_png(width: u32, height: u32) -> Result<Vec<u8>, png::
     }
     canvas.draw_mesh(&skin_feature, Vec3::new(0.0, -0.86, -0.14), Vec3::new(0.29, 0.40, 0.27), SKIN, yaw);
 
+    canvas.draw_mesh(&brow_ridges_mesh(24), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
     canvas.draw_mesh(&brows_mesh(24), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), [46, 20, 14], yaw);
     for x in [-0.255, 0.255] {
         canvas.draw_mesh(&upper_lids_mesh(24), Vec3::new(x, 0.225, 0.492), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);

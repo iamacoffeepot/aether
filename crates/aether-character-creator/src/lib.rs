@@ -205,6 +205,7 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let head = head_mesh(64, 64);
     let eye = sphere_mesh(18, 24);
     let disc = disc_mesh(48);
+    let brow_ridges = brow_ridges_mesh(24);
     let brows = brows_mesh(24);
     let upper_lids = upper_lids_mesh(24);
     let lower_lids = lower_lids_mesh(24);
@@ -230,6 +231,11 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let disc_normal = buffer.push_vec3(&disc.normals, false);
     let disc_uv = buffer.push_vec2(&disc.texture_coordinates);
     let disc_indices = buffer.push_indices(&disc.indices);
+
+    let brow_ridge_position = buffer.push_vec3(&brow_ridges.positions, true);
+    let brow_ridge_normal = buffer.push_vec3(&brow_ridges.normals, false);
+    let brow_ridge_uv = buffer.push_vec2(&brow_ridges.texture_coordinates);
+    let brow_ridge_indices = buffer.push_indices(&brow_ridges.indices);
 
     let brow_position = buffer.push_vec3(&brows.positions, true);
     let brow_normal = buffer.push_vec3(&brows.normals, false);
@@ -277,7 +283,7 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             "generator": "Aether AI parametric character generator 0.1"
         },
         "scene": 0,
-        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] }],
+        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] }],
         "nodes": [
             { "name": "Head", "mesh": 0 },
             { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.492], "scale": [0.115, 0.055, 0.060] },
@@ -299,7 +305,8 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             { "name": "MouthOpening", "mesh": 9 },
             { "name": "Lips", "mesh": 10 },
             { "name": "Canthus.Left", "mesh": 11, "translation": [-0.150, 0.222, 0.520], "scale": [0.012, 0.005, 0.004] },
-            { "name": "Canthus.Right", "mesh": 11, "translation": [0.150, 0.222, 0.520], "scale": [0.012, 0.005, 0.004] }
+            { "name": "Canthus.Right", "mesh": 11, "translation": [0.150, 0.222, 0.520], "scale": [0.012, 0.005, 0.004] },
+            { "name": "BrowRidges", "mesh": 12 }
         ],
         "materials": [
             material("Skin", [0.55, 0.28, 0.18, 1.0], 0.82),
@@ -366,7 +373,15 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
                     "targets": lip_targets
                 }]
             },
-            mesh_json("Canthus", eye_position, eye_normal, eye_uv, eye_indices, 8)
+            mesh_json("Canthus", eye_position, eye_normal, eye_uv, eye_indices, 8),
+            mesh_json(
+                "BrowRidge",
+                brow_ridge_position,
+                brow_ridge_normal,
+                brow_ridge_uv,
+                brow_ridge_indices,
+                0
+            )
         ],
         "bufferViews": buffer.views,
         "accessors": buffer.accessors,
@@ -507,12 +522,23 @@ fn lips_mesh(segments: u32) -> Mesh {
     mesh
 }
 
+fn brow_ridges_mesh(segments: u32) -> Mesh {
+    let mut mesh = empty_mesh((segments + 1) * 4, segments * 12);
+    for center_x in [-0.255, 0.255] {
+        append_ribbon(&mut mesh, segments, center_x, 0.335, Vec2 { x: 0.20, y: 0.20 }, 0.12, |x, y, _| {
+            let point = front_surface_point(x, y);
+            (point.z + 0.015, head_normal(point))
+        });
+    }
+    mesh
+}
+
 fn brows_mesh(segments: u32) -> Mesh {
     let mut mesh = empty_mesh((segments + 1) * 4, segments * 12);
     for center_x in [-0.255, 0.255] {
         append_ribbon(&mut mesh, segments, center_x, 0.365, Vec2 { x: 0.19, y: 0.10 }, 0.22, |x, y, _| {
             let point = front_surface_point(x, y);
-            (point.z + 0.004, head_normal(point))
+            (point.z + 0.018, head_normal(point))
         });
     }
     mesh
@@ -825,12 +851,14 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                     Vec3::new(0.0, -0.16 * weight, 0.025 * weight)
                 }
                 "CheekVolume" => {
-                    let mid_face =
-                        ((0.28 - position.y) / 0.20).clamp(0.0, 1.0) * ((position.y + 0.34) / 0.24).clamp(0.0, 1.0);
-                    let cheeks = gaussian(position.x, position.y, -0.37, -0.01, 0.25, 0.22)
-                        + gaussian(position.x, position.y, 0.37, -0.01, 0.25, 0.22);
+                    let upper_fade = ((0.20 - position.y) / 0.22).clamp(0.0, 1.0);
+                    let upper_fade = upper_fade * upper_fade * (3.0 - 2.0 * upper_fade);
+                    let mid_face = upper_fade * ((position.y + 0.34) / 0.24).clamp(0.0, 1.0);
+                    let cheeks = gaussian(position.x, position.y, -0.37, -0.08, 0.24, 0.18)
+                        + gaussian(position.x, position.y, 0.37, -0.08, 0.24, 0.18);
                     let weight = front * mid_face * cheeks;
-                    Vec3::new(position.x * 0.075 * weight, 0.0, 0.11 * weight)
+                    let normal = head_normal(position);
+                    Vec3::new(normal.x * 0.045, normal.y * 0.035, normal.z * 0.060) * weight
                 }
                 "NoseWidth" => {
                     let weight = front * gaussian(position.x, position.y, 0.0, 0.02, 0.19, 0.19);
@@ -919,8 +947,8 @@ mod tests {
                             "{name} crossed centerline"
                         );
                     }
-                    if name == "CheekVolume" && position.y >= 0.28 {
-                        assert!(delta.length() < 0.000_1, "cheek morph leaked into the brow region");
+                    if name == "CheekVolume" && position.y >= 0.20 {
+                        assert!(delta.length() < 0.000_1, "cheek morph leaked into the orbital region");
                     }
                 }
             }

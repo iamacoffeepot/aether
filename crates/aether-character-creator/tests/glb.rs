@@ -16,8 +16,8 @@ fn generated_head_is_a_self_contained_glb_with_named_morphs() {
     assert_eq!(document["asset"]["version"], "2.0");
     assert_eq!(document["buffers"][0]["uri"], Value::Null);
     assert_eq!(document["scenes"].as_array().expect("scenes array").len(), 1);
-    assert_eq!(document["nodes"].as_array().expect("nodes array").len(), 21);
-    assert_eq!(document["meshes"].as_array().expect("meshes array").len(), 12);
+    assert_eq!(document["nodes"].as_array().expect("nodes array").len(), 22);
+    assert_eq!(document["meshes"].as_array().expect("meshes array").len(), 13);
     assert_eq!(document["images"], Value::Null);
 
     let names = document["meshes"][0]["extras"]["targetNames"].as_array().expect("targetNames array");
