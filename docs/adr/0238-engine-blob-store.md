@@ -223,6 +223,30 @@ Directions recorded for a later trait rework, none chosen. The leading one:
   added later. Fuchsia FIDL's split of `resource` types from value types is
   the prior art.
 
+  Refinements noted with it:
+
+  - The classes form a partial order, not a ladder: `Process` and `Session`
+    are incomparable. A kind requires the union of its fields' scopes and an
+    encoder provides a set, so the check is `K::REQUIRES ⊆ E::PROVIDES`.
+    Candidate scopes by reach: Actor (one table), Incarnation (survives
+    `replace`, not a restart), Process (`Blob`, proven refs), Session (one
+    connection), Fleet (one hub's lifetime), Store (journal `Ref`),
+    Universal. Start with only the scopes a real type needs: Process, Store
+    and Universal.
+  - Confidentiality is a second, independent axis checked the same way: a
+    secret (ADR-0235) is accepted by no encoder but the secrets store, and the
+    log formatter redacts it.
+  - Explicit cast maps bridge classes. A reference type declares a cast pair
+    (`Blob` to `Bytes` and back by check-in; `Ref<K>` to an inline `K` and back
+    by storing it; `ActorRef<R>` to an address description and back by
+    re-proving). A kind that must cross declares an authored mirror, such as
+    `#[cast(from = Texture)] struct TextureFile { .., pixels: Bytes }`; the
+    derive verifies that every field has a cast and emits both conversions.
+    Each type keeps one schema, a costly conversion is a visible `cast` call,
+    and a kind with no declared mirror stays where its class allows. Prior
+    art: Cap'n Proto `save` / `restore`, serde's `remote` derive, `From` /
+    `TryFrom`.
+
 Also recorded:
 
 - a reference type that materializes its bytes when it leaves the engine and
