@@ -866,7 +866,15 @@ fn head_mass_sdf(point: Vec3) -> f32 {
     let cranial_point = Vec3::new(point.x * (1.0 + 0.06 * parietal_weight), point.y, point.z);
     let mut shape = superellipsoid_sdf(cranial_point, Vec3::new(0.0, 0.29, -0.12), Vec3::new(0.64, 0.56, 0.60), 2.10);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.37, 0.12), Vec3::new(0.52, 0.36, 0.42)), 0.10);
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.14, 0.18), Vec3::new(0.49, 0.47, 0.45)), 0.11);
+    let buccal_recession = (gaussian(point.x, point.y, -0.30, -0.22, 0.16, 0.24)
+        + gaussian(point.x, point.y, 0.30, -0.22, 0.16, 0.24))
+    .clamp(0.0, 1.0);
+    let midface_point = Vec3::new(point.x, point.y, point.z + 0.045 * buccal_recession);
+    shape = smooth_union(
+        shape,
+        ellipsoid_sdf(midface_point, Vec3::new(0.0, -0.14, 0.18), Vec3::new(0.49, 0.47, 0.45)),
+        0.11,
+    );
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.11, 0.505), Vec3::new(0.31, 0.24, 0.19)), 0.10);
     shape =
         smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.245, 0.525), Vec3::new(0.25, 0.115, 0.155)), 0.08);
