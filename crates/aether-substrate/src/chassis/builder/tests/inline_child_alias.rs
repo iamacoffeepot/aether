@@ -253,12 +253,12 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     use crate::actor::registry::MonitorError;
     use crate::mail::registry::MailboxEntry;
     use crate::mail::registry::RouteResolution;
-    use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
+    use crate::mail::registry::effect::{EffectBatch, PreparedAliasRetirement, PreparedAliasRoute, RegistryEffect};
     use aether_actor::HandlesKind;
     use aether_data::Kind;
     use std::sync::Mutex;
 
-    // Drives the host's `ctx.vacate_alias(target)` — the trampoline's drain of
+    // Drives the host's `ctx.vacate_alias(&retirement)` — the trampoline's drain of
     // the guest's staged despawns stands in for this in production.
     pod_kind!(DespawnOrder { target_id: u64 }, "test.alias_despawn.order", 0x5AFE_0114_4228_0001);
     // Tells the watcher which address to monitor.
@@ -296,7 +296,8 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         ) -> Option<()> {
             if kind.0 == DespawnOrder::ID.0 {
                 let target = MailboxId(DespawnOrder::decode_from_bytes(payload)?.target_id);
-                state.vacated.lock().unwrap().push(ctx.vacate_alias(target));
+                let retirement = PreparedAliasRetirement::new(target, "test.alias_despawn.target");
+                state.vacated.lock().unwrap().push(ctx.vacate_alias(&retirement));
                 return Some(());
             }
             None

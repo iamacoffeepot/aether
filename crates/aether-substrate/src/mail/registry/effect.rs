@@ -85,6 +85,32 @@ impl PreparedAliasRoute {
     }
 }
 
+/// An inline-child alias its guest despawned in one call (ADR-0114 teardown,
+/// #4228), staged by the wasm host once it proved the alias is the guest's
+/// own. The component host hands it to [`NativeCtx::vacate_alias`] for the
+/// departure notices and to [`RegistryBatch::retire_alias`] for the route.
+/// Only the substrate builds one, so host code can retire no route its guest
+/// did not despawn, and the alias position never leaves the crate.
+///
+/// [`NativeCtx::vacate_alias`]: crate::actor::native::ctx::NativeCtx::vacate_alias
+pub struct PreparedAliasRetirement {
+    pub(crate) alias: MailboxId,
+    pub rendered_name: Arc<str>,
+}
+
+impl PreparedAliasRetirement {
+    #[must_use]
+    pub(crate) fn new(alias: MailboxId, rendered_name: impl Into<Arc<str>>) -> Self {
+        Self { alias, rendered_name: rendered_name.into() }
+    }
+
+    /// Spend the token on the owner's route retirement, yielding the alias
+    /// position the crate-private effect carries.
+    fn into_alias(self) -> MailboxId {
+        self.alias
+    }
+}
+
 /// Exact actor-local cost cells carried into the fused owner commit.
 pub struct PreparedCostCells {
     table: Arc<CostTable>,
@@ -448,10 +474,11 @@ impl RegistryBatch {
 
     /// Retire one logical inline-child alias through the owner — the teardown
     /// counterpart of [`Self::publish_alias`], staged when the guest despawns
-    /// the child the alias addressed.
+    /// the child the alias addressed. The token comes from
+    /// `Component::drain_pending_alias_retirements`.
     #[must_use]
-    pub fn retire_alias(alias: MailboxId) -> Self {
-        Self { batch: EffectBatch::new(vec![RegistryEffect::RetireAlias(alias)]) }
+    pub fn retire_alias(alias: PreparedAliasRetirement) -> Self {
+        Self { batch: EffectBatch::new(vec![RegistryEffect::RetireAlias(alias.into_alias())]) }
     }
 
     pub(crate) fn into_effects(self) -> EffectBatch {

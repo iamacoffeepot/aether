@@ -14,8 +14,8 @@ use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, PendingSpawn, StateBundle};
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
-use aether_substrate::mail::registry::PreparedAliasRoute;
-use aether_substrate::mail::{KindId, MailboxId};
+use aether_substrate::mail::KindId;
+use aether_substrate::mail::registry::{PreparedAliasRetirement, PreparedAliasRoute};
 use wasmtime::Module;
 
 use crate::component::replacement_refusal;
@@ -41,14 +41,14 @@ impl WasmTrampolineState {
     /// its departure notices here, from this actor's own turn, so a cap keying
     /// rows on the child's stamped identity (ADR-0114 §4) reclaims them; the
     /// route retirement itself is staged through the owner alongside.
-    pub fn stage_inline_alias_retirements<A>(ctx: &mut NativeCtx<'_, A, Single>, aliases: Vec<MailboxId>) {
+    pub fn stage_inline_alias_retirements<A>(
+        ctx: &mut NativeCtx<'_, A, Single>,
+        aliases: Vec<PreparedAliasRetirement>,
+    ) {
         for alias in aliases {
-            ctx.vacate_alias(alias);
-            let name = ctx.tagged_id_name(&alias.to_string()).unwrap_or_else(|| alias.to_string());
-            let _ = ctx.stage_registry_batch(
-                RegistryBatch::retire_alias(alias),
-                InlineAliasContext { alias: Arc::from(name) },
-            );
+            ctx.vacate_alias(&alias);
+            let context = InlineAliasContext { alias: Arc::clone(&alias.rendered_name) };
+            let _ = ctx.stage_registry_batch(RegistryBatch::retire_alias(alias), context);
         }
     }
 

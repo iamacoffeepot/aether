@@ -6,7 +6,9 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::reply_table::ReplyTable;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
-use crate::mail::registry::{DispatchParts, MailboxEntry, OwnedDispatch, PreparedAliasRoute, Registry};
+use crate::mail::registry::{
+    DispatchParts, MailboxEntry, OwnedDispatch, PreparedAliasRetirement, PreparedAliasRoute, Registry,
+};
 use crate::mail::{Mail, MailId, MailKind, MailboxId, Source, SourceAddr};
 use crate::scheduler::pending_depth;
 
@@ -164,7 +166,7 @@ pub struct ComponentCtx {
     /// drained beside `pending_aliases`. The trampoline retires each route
     /// through the registry owner and fans a departure notice out to its
     /// watchers — the teardown mirror of the publish path.
-    pending_alias_retirements: Vec<MailboxId>,
+    pending_alias_retirements: Vec<PreparedAliasRetirement>,
     /// ADR-0163 §3 asset load window. `Some` for a component loaded
     /// through the trampoline (installed before `Component::instantiate`,
     /// so the guest's `init` and `wire` can pull assets); the
@@ -317,11 +319,12 @@ impl ComponentCtx {
         let staged = self.pending_aliases.len();
         self.pending_aliases.retain(|pending| pending.alias != alias || pending.target_parent != self.sender);
         if self.pending_aliases.len() == staged {
-            self.pending_alias_retirements.push(alias);
+            let rendered_name = self.registry.mailbox_name(alias).unwrap_or_else(|| alias.to_string());
+            self.pending_alias_retirements.push(PreparedAliasRetirement::new(alias, rendered_name));
         }
     }
 
-    pub(crate) fn take_pending_alias_retirements(&mut self) -> Vec<MailboxId> {
+    pub(crate) fn take_pending_alias_retirements(&mut self) -> Vec<PreparedAliasRetirement> {
         mem::take(&mut self.pending_alias_retirements)
     }
 
