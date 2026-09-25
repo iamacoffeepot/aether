@@ -1,6 +1,6 @@
 //! Tests for the native ctx surface, one sibling per production module.
 //!
-//! [`address`], [`handles`], [`inbound`], [`registry`] and [`send`] are named for the
+//! [`address`], [`handles`], [`inbound`], [`registry`], [`send`] and [`store`] are named for the
 //! module whose behaviour they exercise; [`mode`] covers the layout
 //! invariant the `mod.rs` coercions rest on and the per-mode reachability of
 //! the reply / emit surfaces. [`support`] holds the stub actors, peers, and
@@ -12,4 +12,5 @@ mod inbound;
 mod mode;
 mod registry;
 mod send;
+mod store;
 mod support;

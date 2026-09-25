@@ -20,8 +20,10 @@
 //! `KindShape`, `KindLabels`, `InputsRecord`, and the canonical-bytes
 //! encoders); the `Kind`, `Schema`, and `CastEligible` traits that bind a Rust
 //! type to its wire form; the `encode` / `decode` helpers for POD and
-//! structured kinds; and `__inventory`, the native-only auto-collection of
-//! `#[derive(Kind)]` types into the substrate's descriptor list.
+//! structured kinds; `BlobHash` and `BlobRef`, the hash-named references to
+//! the engine blob store's bytes (ADR-0238); and `__inventory`, the
+//! native-only auto-collection of `#[derive(Kind)]` types into the
+//! substrate's descriptor list.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -33,6 +35,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+mod blob;
 pub mod bytes;
 pub mod canonical;
 pub mod contract;
@@ -49,6 +52,12 @@ pub mod tagged_id;
 pub mod transform;
 pub mod wire;
 pub mod wire_id;
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub use blob::__mint_blob_ref;
+pub use blob::BlobHash;
+#[cfg(not(target_arch = "wasm32"))]
+pub use blob::{BlobBacking, BlobRef};
 pub use contract::first_contract_break;
 pub use hash::{
     FIELD_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError,

@@ -82,3 +82,22 @@ fn the_gauge_advances_only_when_a_mark_is_crossed() {
     assert_eq!(next_mark(200, 150), None);
     assert_eq!(next_mark(200, 900), Some(1600));
 }
+
+/// Catches a mint that holds a `Weak`, copies the bytes, or leaks the entry:
+/// a `BlobRef` must keep its entry resident through a clone's drop and free
+/// it when the last reference goes.
+#[test]
+fn a_blob_ref_keeps_its_entry_resident_until_the_last_reference_drops() {
+    let store = store();
+
+    let blob = store.check_in(boxed(b"checked in")).into_ref();
+    let clone = blob.clone();
+    drop(clone);
+
+    assert_eq!(blob.bytes(), b"checked in");
+    assert_eq!(store.resident_bytes(), b"checked in".len());
+
+    drop(blob);
+
+    assert_eq!(store.resident_bytes(), 0);
+}
