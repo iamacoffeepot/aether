@@ -14,7 +14,6 @@ use aether_substrate::actor::native::{
 };
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs, Dependency};
-use aether_substrate::mail::MailboxId;
 
 use super::LoadResult;
 use super::dependencies::{dependency_refusal, inline_dependency_refusal, missing_dependency};
@@ -53,7 +52,7 @@ pub(super) struct PreparedLoad {
 #[derive(Clone)]
 enum LoadPlacement {
     ComponentHost,
-    Under { parent: MailboxId, canonical_name: ActorPath },
+    Under { parent: ErasedActorRef },
 }
 
 impl PreparedLoad {
@@ -172,15 +171,14 @@ impl ComponentHostCapabilityState {
     pub fn begin_load_under<A>(&mut self, ctx: &mut NativeCtx<'_, A, Manual>, payload: LoadComponentUnder) {
         // ADR-0230 §1: the parent must be `Live`. A `Starting` parent resolves
         // as an address but does not prove, so a child is never staged beneath
-        // an unborn parent; the proven route names its own canonical path.
+        // an unborn parent; the proof carries the parent's own canonical path.
         let resolved = ActorPath::new(&payload.parent)
             .map_err(|error| error.to_string())
             .and_then(|parent| self.registry.resolve_address(&parent).map_err(|error| error.to_string()))
-            .and_then(|resolved| match ctx.resolve_live(resolved.mailbox_id) {
-                Ok(reference) => Ok((resolved.mailbox_id, ctx.actor_path(reference))),
-                Err(_) => Err(format!("{} is not live", resolved.canonical_path)),
+            .and_then(|resolved| {
+                ctx.resolve_live(resolved.mailbox_id).map_err(|_| format!("{} is not live", resolved.canonical_path))
             });
-        let (parent, canonical_name) = match resolved {
+        let parent = match resolved {
             Ok(parent) => parent,
             Err(error) => {
                 ctx.reply(&LoadResult::Err {
@@ -189,7 +187,7 @@ impl ComponentHostCapabilityState {
                 return;
             }
         };
-        self.begin_load_at(ctx, payload.load, LoadPlacement::Under { parent, canonical_name });
+        self.begin_load_at(ctx, payload.load, LoadPlacement::Under { parent });
     }
 
     fn begin_load_at<A>(
@@ -412,8 +410,8 @@ impl ComponentHostCapabilityState {
     ) {
         let missing = match &load.placement {
             LoadPlacement::ComponentHost => ctx.missing_child_dependency(&load.dependencies),
-            LoadPlacement::Under { parent, .. } => {
-                missing_dependency(&self.registry, Some(*parent), &load.dependencies)
+            LoadPlacement::Under { parent } => {
+                missing_dependency(&self.registry, Some(parent.id()), &load.dependencies)
             }
         };
         if let Some(namespace) = missing {
@@ -427,8 +425,8 @@ impl ComponentHostCapabilityState {
             LoadPlacement::ComponentHost => {
                 ctx.spawn_child::<WasmTrampoline>(Subname::Named(&load.name), config, ()).continue_from(owed, context)
             }
-            LoadPlacement::Under { parent, canonical_name } => ctx
-                .spawn_child_scoped::<WasmTrampoline>(parent, canonical_name, Subname::Named(&load.name), config, ())
+            LoadPlacement::Under { parent } => ctx
+                .spawn_child_scoped::<WasmTrampoline>(parent, Subname::Named(&load.name), config, ())
                 .continue_from(owed, context),
         };
         match staged {

@@ -192,15 +192,17 @@ pub const TRAMPOLINE_NAMESPACE: &str = aether_actor::EMBEDDED_SCOPE;
 
 /// ADR-0097: a sibling-spawn request the `spawn_sibling` host fn stages
 /// onto [`ComponentCtx`] for the trampoline to drain and execute.
-/// `parent` / `parent_name` are the validated executing actor identity the
-/// child extends, not necessarily the physical trampoline root. `tag`
+/// `parent` is the guest-named position the child extends — the executing
+/// actor or one of its inline aliases, admitted by the host function's cluster
+/// membership check — not necessarily the physical trampoline root. It is a
+/// request, not a proof: the trampoline proves it when it drains the spawn and
+/// refuses the spawn, staging nothing, when it does not prove. `tag`
 /// selects the exported type at `init_typed_p32`; `subname` is the resolved
 /// trampoline subname and `config` is the encoded `Config` kind handed to the
 /// new instance.
 #[derive(Debug, Clone)]
 pub struct PendingSpawn {
     pub parent: MailboxId,
-    pub parent_name: String,
     pub tag: u64,
     pub subname: String,
     pub config: Vec<u8>,

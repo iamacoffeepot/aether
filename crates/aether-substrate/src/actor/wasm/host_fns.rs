@@ -203,13 +203,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 aether_data::fold_lineage(trampoline_carry, sibling_node),
             );
             let parent = caller.data().sender;
-            let Some(parent_name) = caller.data().cluster_actor_name(parent) else {
-                tracing::warn!(target: "aether_substrate::component", "spawn_sibling: parent has no registered name");
-                return 0;
-            };
             caller.data_mut().pending_spawns.push(PendingSpawn {
                 parent,
-                parent_name,
                 tag,
                 subname: full_subname,
                 config,
@@ -244,14 +239,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 );
                 return 0;
             }
-            let Some(parent_name) = caller.data().cluster_actor_name(parent) else {
-                tracing::warn!(
-                    target: "aether_substrate::component",
-                    %parent,
-                    "spawn_sibling_scoped: parent has no registered or prepared name",
-                );
-                return 0;
-            };
 
             let copied = {
                 let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
@@ -302,7 +289,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             );
             caller.data_mut().pending_spawns.push(PendingSpawn {
                 parent,
-                parent_name,
                 tag,
                 subname: full_subname,
                 config,

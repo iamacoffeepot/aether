@@ -9,9 +9,7 @@ use aether_data::ActorPath;
 use aether_data::canonical::kind_id_from_parts;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
-use aether_substrate::actor::native::{
-    NativeCtx, RegistryBatch, RegistryBatchResult, SpawnError, SpawnOutcome, TaskDone,
-};
+use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone};
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn, StateBundle};
 use aether_substrate::actor::wasm::kind_manifest;
@@ -75,7 +73,28 @@ impl WasmTrampolineState {
     /// sibling's `wire` registers from its declaration. A
     /// spawn-time failure surfaces here, asynchronously to the guest
     /// (which already received the `MailboxId`): logged, not fatal.
+    ///
+    /// The parent is the guest's request, so it is proven here (ADR-0230)
+    /// before anything is staged. A parent that is not yet live — an inline
+    /// alias the same guest call staged, whose publication has not landed —
+    /// or one that never will be — a retired alias, or one whose publication
+    /// failed — refuses the spawn with a warning, and no birth is staged.
     pub fn spawn_sibling(&self, ctx: &mut NativeCtx<'_, WasmTrampoline, Single>, pending: PendingSpawn) {
+        // The guest named this parent; prove it before anything is staged. An
+        // inline alias the same guest call staged is not published until this
+        // turn flushes, and a retired or failed alias never will be, so neither
+        // proves and the spawn is refused.
+        let parent = match ctx.resolve_live(pending.parent) {
+            Ok(parent) => parent,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_component",
+                    subname = %pending.subname,
+                    "sibling spawn refused: parent not yet live ({error}); nothing staged",
+                );
+                return;
+            }
+        };
         let capabilities = self
             .actor_caps
             .iter()
@@ -102,27 +121,16 @@ impl WasmTrampolineState {
             // it indexes its own asset load window from the same content.
             wasm_bytes: Arc::clone(&self.wasm_bytes),
         };
-        // The parent name is the wasm cluster's rendering, possibly a
-        // not-yet-published inline alias, so it is proven here at receipt.
-        let staged = ActorPath::new(&pending.parent_name).map_err(SpawnError::PathInvalid).and_then(|parent_name| {
-            ctx.spawn_child_scoped::<WasmTrampoline>(
-                pending.parent,
-                parent_name,
-                Subname::Named(&pending.subname),
-                config,
-                (),
-            )
-            .stage_with(SiblingSpawnContext {
-                parent_name: pending.parent_name.clone(),
-                subname: pending.subname.clone(),
-            })
-        });
-        if let Err(e) = staged {
+        let parent_path = ctx.actor_path(parent);
+        let staged = ctx
+            .spawn_child_scoped::<WasmTrampoline>(parent, Subname::Named(&pending.subname), config, ())
+            .stage_with(SiblingSpawnContext { parent: parent_path.clone(), subname: pending.subname.clone() });
+        if let Err(error) = staged {
             tracing::warn!(
                 target: "aether_component",
-                parent = %pending.parent_name,
+                parent = %parent_path,
                 subname = %pending.subname,
-                "sibling spawn failed: {e:?}",
+                "sibling spawn failed: {error:?}",
             );
         }
     }
@@ -131,7 +139,7 @@ impl WasmTrampolineState {
         if let Err(error) = &done.output().result {
             tracing::warn!(
                 target: "aether_component",
-                parent = %done.context().parent_name,
+                parent = %done.context().parent,
                 subname = %done.context().subname,
                 "sibling spawn failed after owner staging: {error:?}",
             );
@@ -498,7 +506,7 @@ fn declared_kinds(wasm: &[u8]) -> Result<HashSet<KindId>, String> {
 
 #[derive(Clone)]
 pub(super) struct SiblingSpawnContext {
-    parent_name: String,
+    parent: ActorPath,
     subname: String,
 }
 
