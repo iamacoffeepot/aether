@@ -3,7 +3,7 @@
 //! When the engine delivers mail whose envelope attaches store entries, it
 //! pins each one in this instance's blob table for the receive call. The
 //! guest's decode reads each tag-1 field's hash and builds a `Shared` [`Blob`]
-//! over it through [`GuestResolver`], and building the value takes one hold
+//! over it through `GuestResolver`, and building the value takes one hold
 //! (`blob_hold_p32`) that its `GuestHold` owns. Reads stream through the
 //! `blob_read_p32` import, and the drop of the value's last clone gives the
 //! hold back through `blob_drop_p32`: `Blob` clones share one
