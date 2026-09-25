@@ -1,7 +1,9 @@
 //! `SubstrateHarness` — the in-process driver for the substrate-harness chassis (ADR-0067).
 //!
 //! Boots the same substrate machinery `main.rs` does, but attaches a
-//! [`RecordingBackend`] to `outbound` instead of relying on an external
+//! recording backend to `outbound` through
+//! [`HubOutbound::attach_recording`](aether_substrate::HubOutbound::attach_recording)
+//! instead of relying on an external
 //! egress target. Substrate-emitted replies arrive on `loopback_rx`
 //! as [`EgressEvent`]s so the test thread can correlate them to its
 //! requests by `correlation_id`.
@@ -49,8 +51,8 @@ use aether_substrate::config::{ConfigMember, SettlementConfig};
 #[cfg(test)]
 use aether_substrate::mail::MailboxId;
 use aether_substrate::{
-    Builder, ChildRefused, EgressEvent, Mailer, NativeActor, PassiveChassis, RecordingBackend, ReplyTarget,
-    RingCapacities, SchedulerTuning, SubstrateBoot,
+    Builder, ChildRefused, EgressEvent, Mailer, NativeActor, PassiveChassis, ReplyTarget, RingCapacities,
+    SchedulerTuning, SubstrateBoot,
     mail::{CapabilityRegistry, CostTable, MailId},
 };
 
@@ -706,13 +708,12 @@ impl SubstrateHarness {
             hook.pump();
         }
 
-        // Attach a `RecordingBackend` to the boot's outbound. Replies
+        // Attach a recording backend to the boot's outbound. Replies
         // to this harness's session reach the outbound through the
         // mailer's reply path and arrive here as
         // `EgressEvent::ToSession`, which `pump_until_reply`
         // correlates by `correlation_id`.
-        let (recording, loopback_rx) = RecordingBackend::new();
-        boot.outbound.attach_backend(Arc::new(recording));
+        let loopback_rx = boot.outbound.attach_recording();
 
         let queue = Arc::clone(&boot.queue);
         let registry = Arc::clone(&boot.registry);
