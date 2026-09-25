@@ -517,17 +517,14 @@ fn neck_mesh(rings: u32, segments: u32) -> Mesh {
     let mut texture_coordinates = Vec::with_capacity(positions.capacity());
     for ring in 0..=rings {
         let amount = ring as f32 / rings as f32;
-        let radius_x = 0.065_f32.mul_add(amount, 0.24);
-        let radius_z = (-0.04_f32).mul_add(amount, 0.26);
-        let center_z = (-0.06_f32).mul_add(amount, -0.04);
         for segment in 0..=segments {
             let around = TAU * segment as f32 / segments as f32;
-            let (sin, cos) = around.sin_cos();
-            let top_y = (-0.075_f32).mul_add(sin, -0.345);
-            let y = (-1.18 - top_y).mul_add(amount, top_y);
-            positions.push(Vec3::new(radius_x * cos, y, center_z + radius_z * sin));
-            let around_tangent = Vec3::new(-radius_x * sin, -0.075 * (1.0 - amount) * cos, radius_z * cos);
-            let down_tangent = Vec3::new(0.065 * cos, -1.18 - top_y, -0.06 - 0.04 * sin);
+            positions.push(neck_surface_point(amount, around));
+            let epsilon = 0.001;
+            let around_tangent =
+                neck_surface_point(amount, around + epsilon) - neck_surface_point(amount, around - epsilon);
+            let down_tangent = neck_surface_point((amount + epsilon).min(1.0), around)
+                - neck_surface_point((amount - epsilon).max(0.0), around);
             normals.push(around_tangent.cross(down_tangent).normalized());
             texture_coordinates.push(Vec2 { x: segment as f32 / segments as f32, y: amount });
         }
@@ -543,6 +540,40 @@ fn neck_mesh(rings: u32, segments: u32) -> Mesh {
         indices.extend_from_slice(&[bottom_center, bottom_start + segment, bottom_start + segment + 1]);
     }
     Mesh { positions, normals, texture_coordinates, indices }
+}
+
+fn neck_surface_point(amount: f32, around: f32) -> Vec3 {
+    let (sin, cos) = around.sin_cos();
+    let top_y = (-0.075_f32).mul_add(sin, -0.345);
+    let y = (-1.18 - top_y).mul_add(amount, top_y);
+    let base_flare = amount * amount * (3.0 - 2.0 * amount);
+    let radius_x = 0.15_f32.mul_add(base_flare, 0.31);
+    let radius_z = (-0.015_f32).mul_add(amount, 0.27);
+    let center_z = (-0.075_f32).mul_add(amount, -0.035);
+
+    // Each sternocleidomastoid begins below the mastoid process, behind the
+    // jaw, then sweeps forward toward the sternum and inner clavicle.
+    let muscle_center = 0.32_f32.mul_add(1.0 - amount, 1.22 * amount);
+    let left_distance = angular_distance(around, muscle_center);
+    let right_distance = angular_distance(around, PI - muscle_center);
+    let attachment_fade = 0.34 + 0.66 * (PI * amount).sin().max(0.0).sqrt();
+    let muscle = ((-0.5 * (left_distance / 0.18).powi(2)).exp() + (-0.5 * (right_distance / 0.18).powi(2)).exp())
+        * 0.088
+        * attachment_fade;
+    let throat_furrow = (-0.5 * ((amount - 0.58) / 0.29).powi(2)).exp()
+        * (-0.5 * (angular_distance(around, PI * 0.5) / 0.30).powi(2)).exp()
+        * 0.025;
+    let larynx = (-0.5 * ((amount - 0.29) / 0.12).powi(2)).exp()
+        * (-0.5 * (angular_distance(around, PI * 0.5) / 0.17).powi(2)).exp()
+        * 0.055;
+    let trapezius = base_flare * (-0.5 * (angular_distance(around, PI * 1.5) / 0.62).powi(2)).exp() * 0.055;
+    let surface_radius = muscle + trapezius - throat_furrow;
+
+    Vec3::new((radius_x + surface_radius) * cos, y, center_z + (radius_z + surface_radius) * sin + larynx)
+}
+
+fn angular_distance(left: f32, right: f32) -> f32 {
+    ((left - right + PI).rem_euclid(TAU) - PI).abs()
 }
 
 fn disc_mesh(segments: u32) -> Mesh {
