@@ -877,12 +877,12 @@ fn head_mass_sdf(point: Vec3) -> f32 {
     }
     shape = smooth_union(
         shape,
-        superellipsoid_sdf(point, Vec3::new(0.0, -0.46, 0.34), Vec3::new(0.38, 0.20, 0.29), 2.40),
+        superellipsoid_sdf(point, Vec3::new(0.0, -0.46, 0.34), Vec3::new(0.35, 0.20, 0.29), 2.40),
         0.08,
     );
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.49, 0.43), Vec3::new(0.23, 0.13, 0.20)), 0.08);
-    for x in [-0.29, 0.29] {
-        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.32, 0.22), Vec3::new(0.16, 0.22, 0.20)), 0.09);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.49, 0.43), Vec3::new(0.20, 0.13, 0.20)), 0.08);
+    for x in [-0.30, 0.30] {
+        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.25, 0.12), Vec3::new(0.16, 0.19, 0.18)), 0.09);
     }
     for side in [-1.0, 1.0] {
         let malar_plane = ellipsoid_sdf(point, Vec3::new(side * 0.27, -0.055, 0.39), Vec3::new(0.17, 0.20, 0.12));
@@ -897,7 +897,7 @@ fn head_mass_sdf(point: Vec3) -> f32 {
             capsule_sdf(point, Vec3::new(side * 0.38, 0.02, 0.36), Vec3::new(side * 0.48, 0.06, 0.08), 0.075);
         shape = smooth_union(shape, zygomatic_arch, 0.13);
         let masseter =
-            capsule_sdf(point, Vec3::new(side * 0.36, -0.05, 0.30), Vec3::new(side * 0.33, -0.40, 0.26), 0.10);
+            capsule_sdf(point, Vec3::new(side * 0.36, -0.05, 0.30), Vec3::new(side * 0.33, -0.34, 0.16), 0.10);
         shape = smooth_union(shape, masseter, 0.10);
     }
     for side in [-1.0, 1.0] {
