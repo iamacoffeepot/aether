@@ -1,7 +1,7 @@
 //! ADR-0080 substrate-wide mail tracing — chassis-side runtime,
 //! slimmed by ADR-0086 Phase 3c.
 //!
-//! The producer-side helpers ([`TraceHandle::record_sent`] /
+//! The producer-side helpers (`TraceHandle::record_sent` /
 //! [`TraceHandle::record_finished`], plus
 //! [`TraceHandle::acquire_settlement_hold`]) do two independent jobs:
 //!
@@ -229,7 +229,7 @@ impl TraceHandle {
     /// iamacoffeepot/aether#1158: eager paths route immediately, so the
     /// blob never lingered open — `t_construct_start` *is* the same `now`
     /// the `Sent` timestamp takes, making the **construct** span ≈ 0.
-    pub fn record_sent(
+    pub(crate) fn record_sent(
         &self,
         mail_id: MailId,
         root: MailId,
@@ -245,7 +245,7 @@ impl TraceHandle {
 
     /// iamacoffeepot/aether#1150: push the `Sent` trace event with an
     /// explicit timestamp, leaving the settlement counter untouched.
-    /// Split from [`Self::record_sent`] so the buffered send path can
+    /// Split from `record_sent` so the buffered send path can
     /// defer the timestamp to flush-begin (the frame's first flush
     /// instant) — anchoring `Sent` there instead of the smeared
     /// per-send call site — while [`Self::record_sent_inflight`] keeps

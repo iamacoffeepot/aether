@@ -70,7 +70,7 @@ mod send;
 ///
 /// - The crate-private eager send, `push_envelope_returning_root_before_push`, mints a
 ///   fresh correlation id (atomic monotonic counter), wraps the bytes
-///   in a [`Mail`](crate::mail::Mail) with
+///   in a `Mail` with
 ///   `SourceAddr::Component(self.self_mailbox)` so any reply
 ///   routes back here, and pushes through the shared
 ///   `Arc<Mailer>`.
