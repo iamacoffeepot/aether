@@ -5,6 +5,7 @@
 //! `tracing::*` calls flow through.
 
 pub mod effect_chain;
+pub(crate) mod infra_thread;
 pub mod lifecycle;
 pub mod log_install;
 pub mod panic_hook;

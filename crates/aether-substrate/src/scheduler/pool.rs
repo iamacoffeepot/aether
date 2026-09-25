@@ -44,6 +44,7 @@ use crate::actor::native::offload::fail_fast;
 use crate::scheduler::spin_park::{Acquired, SpinPark};
 use crate::scheduler::worker_deque;
 
+use crate::runtime::infra_thread;
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::slot::{BatchBudget, CycleResult, Drainable, WakeSink};
 use std::mem;
@@ -211,15 +212,12 @@ impl Pool {
             let thread_name = name.clone();
             // Scheduler worker pool — the execution floor that *runs* actors; spawned
             // at boot, below the actor model. A handler's spawn_inherit work runs here.
-            #[allow(clippy::disallowed_methods)]
-            let handle = thread::Builder::new()
-                .name(thread_name)
-                .spawn(move || {
-                    fail_fast::run_or_abort(boundary.as_ref(), &site, move || {
-                        worker_loop(idx, deque, stealers, injector, spin, aborter, template);
-                    });
-                })
-                .expect("spawn pool worker thread");
+            let handle = infra_thread::spawn(thread_name, move || {
+                fail_fast::run_or_abort(boundary.as_ref(), &site, move || {
+                    worker_loop(idx, deque, stealers, injector, spin, aborter, template);
+                });
+            })
+            .expect("spawn pool worker thread");
             workers.push(PoolWorkerJoin { handle, name });
         }
         PoolHandle { injector, spin, workers }
