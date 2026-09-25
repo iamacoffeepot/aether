@@ -20,13 +20,16 @@ const PREFIX_BYTES: u64 = 8;
 /// Opened by [`ArtifactBatch::blob`] with the payload length it must reach.
 /// Each chunk is written to a temp file in `blobs/tmp/` and hashed; memory
 /// is bounded by the caller's chunk, never by the blob. Dropping it before
-/// [`BlobFile::finish`] deletes the temp file and records nothing.
+/// [`BlobFile::finish`] deletes the temp file and records nothing. A chunk
+/// whose write fails may leave part of itself in the file, so the blob is
+/// broken from then on: every later chunk and `finish` are refused.
 pub struct BlobFile<'batch> {
     batch: &'batch mut ArtifactBatch,
     staged: NamedTempFile,
     hasher: ArtifactHasher,
     expected_bytes: u64,
     written_bytes: u64,
+    broken: bool,
 }
 
 impl<'batch> BlobFile<'batch> {
@@ -34,7 +37,14 @@ impl<'batch> BlobFile<'batch> {
     pub(super) fn open(batch: &'batch mut ArtifactBatch, expected_bytes: u64) -> Result<Self, JournalError> {
         let mut staged = batch.blobs.temp_file()?;
         staged.write_all(&artifact_prefix(OpaqueBytes::ID)).map_err(|error| JournalError::io(staged.path(), error))?;
-        Ok(Self { batch, staged, hasher: ArtifactHasher::new(OpaqueBytes::ID), expected_bytes, written_bytes: 0 })
+        Ok(Self {
+            batch,
+            staged,
+            hasher: ArtifactHasher::new(OpaqueBytes::ID),
+            expected_bytes,
+            written_bytes: 0,
+            broken: false,
+        })
     }
 
     /// Write and hash the next payload chunk.
@@ -43,8 +53,9 @@ impl<'batch> BlobFile<'batch> {
     ///
     /// [`JournalError::BlobLength`] when the chunk would carry the payload
     /// past the length the blob was opened with; nothing of it is written.
-    /// [`JournalError::Io`] when the write fails.
+    /// [`JournalError::Io`] when the write fails, or an earlier one did.
     pub fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), JournalError> {
+        self.refuse_if_broken()?;
         let offered = u64::try_from(chunk.len())
             .ok()
             .and_then(|len| self.written_bytes.checked_add(len))
@@ -52,7 +63,10 @@ impl<'batch> BlobFile<'batch> {
         if offered > self.expected_bytes {
             return Err(JournalError::BlobLength { expected_bytes: self.expected_bytes, actual_bytes: offered });
         }
-        self.staged.write_all(chunk).map_err(|error| JournalError::io(self.staged.path(), error))?;
+        if let Err(error) = self.staged.write_all(chunk) {
+            self.broken = true;
+            return Err(JournalError::io(self.staged.path(), error));
+        }
         self.hasher.update(chunk);
         self.written_bytes = offered;
         Ok(())
@@ -67,9 +81,10 @@ impl<'batch> BlobFile<'batch> {
     ///
     /// [`JournalError::BlobLength`] when fewer payload bytes were written than
     /// the blob was opened with; the temp file is deleted. [`JournalError::Io`]
-    /// when the sync or rename fails.
+    /// when the sync or rename fails, or when a chunk's write failed.
     pub fn finish(self) -> Result<Ref<OpaqueBytes>, JournalError> {
-        let Self { batch, staged, hasher, expected_bytes, written_bytes } = self;
+        self.refuse_if_broken()?;
+        let Self { batch, staged, hasher, expected_bytes, written_bytes, broken: _ } = self;
         if written_bytes != expected_bytes {
             return Err(JournalError::BlobLength { expected_bytes, actual_bytes: written_bytes });
         }
@@ -77,6 +92,16 @@ impl<'batch> BlobFile<'batch> {
         batch.blobs.place(&digest, staged)?;
         batch.record(digest, PREFIX_BYTES.checked_add(written_bytes).ok_or(JournalError::IntegerRange)?, Vec::new());
         Ok(Ref::from_digest(digest))
+    }
+
+    /// Refuse to go on once a chunk's write has failed: the file may hold
+    /// bytes the hasher never saw.
+    fn refuse_if_broken(&self) -> Result<(), JournalError> {
+        if self.broken {
+            Err(JournalError::io(self.staged.path(), io::Error::other("an earlier chunk of this blob failed to write")))
+        } else {
+            Ok(())
+        }
     }
 }
 
