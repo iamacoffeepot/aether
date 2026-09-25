@@ -22,7 +22,7 @@ fn a_tree_whose_directory_cites_an_unstaged_tree_is_dangling() -> Result<(), Box
     let mut entries = BTreeMap::new();
     entries.insert(name("sub"), Node::Directory(missing));
     let mut batch = Batch::new();
-    batch.stage_encoded(&Tree::new(entries)?)?;
+    batch.stage_encoded(&Tree::new(entries))?;
 
     let error = journal.append(Seq(0), &batch).expect_err("dangling directory must fail");
     match error {
@@ -45,7 +45,7 @@ fn a_tree_whose_file_cites_a_text_blob_is_a_prefix_mismatch() -> Result<(), Box<
     let as_bytes = Ref::<OpaqueBytes>::from_digest(text.digest());
     let mut entries = BTreeMap::new();
     entries.insert(name("readme"), Node::File(as_bytes));
-    batch.stage_encoded(&Tree::new(entries)?)?;
+    batch.stage_encoded(&Tree::new(entries))?;
 
     let error = journal.append(Seq(0), &batch).expect_err("prefix mismatch must fail");
     match error {
@@ -70,7 +70,7 @@ fn a_well_formed_tree_batch_round_trips_through_get() -> Result<(), Box<dyn Erro
     let mut entries = BTreeMap::new();
     entries.insert(name("a"), Node::File(file));
     entries.insert(name("b"), Node::Directory(child_ref));
-    let root = Tree::new(entries)?;
+    let root = Tree::new(entries);
     let root_ref = batch.stage_encoded(&root)?;
     journal.append(Seq(0), &batch)?;
     assert_eq!(journal.get::<Tree>(&root_ref.digest())?, Some(root));

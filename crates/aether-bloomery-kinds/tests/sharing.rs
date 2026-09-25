@@ -22,7 +22,7 @@ fn tree(entries: &[(&str, Node)]) -> Tree {
     for (entry, node) in entries {
         map.insert(name(entry), node.clone());
     }
-    Tree::new(map).expect("fixture names do not collide")
+    Tree::new(map)
 }
 
 fn file_ref(node: &Node) -> Ref<OpaqueBytes> {

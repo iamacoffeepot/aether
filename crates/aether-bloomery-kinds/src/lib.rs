@@ -44,4 +44,4 @@ pub use reactor::{
     WarmEntriesError, Warmed, reactor_declarations, reactor_record_len, write_reactor_record,
 };
 pub use reference::Ref;
-pub use tree::{Name, NameError, Node, Path, PathError, Tree, TreeError};
+pub use tree::{Name, NameError, Node, Path, PathError, Tree};

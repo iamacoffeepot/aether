@@ -73,6 +73,10 @@ impl StdError for NameError {}
 /// One directory entry name. These are our rules, not Unix's: a tree is
 /// something models and humans read, so a name that is not text is refused
 /// at the boundary.
+///
+/// NFC gives each run of canonically equivalent text one spelling, so a
+/// tree's byte-exact uniqueness also refuses `é` precomposed beside `e` plus
+/// a combining acute.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, aether_data::Storage)]
 #[storage(validate)]
 pub struct Name(String);
