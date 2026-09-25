@@ -9,7 +9,7 @@
 //! reply is a closed enum, not a flat struct wearing boolean flags,
 //! because the outcomes are enumerable and this repository enumerates
 //! them by rule (the neighboring edge caps do — `FsError`'s typed
-//! variants, `AnthropicError`'s taxonomy). `run` is request/reply and
+//! variants). `run` is request/reply and
 //! the reply always arrives.
 
 use serde::{Deserialize, Serialize};

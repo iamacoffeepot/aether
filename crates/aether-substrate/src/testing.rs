@@ -277,12 +277,12 @@ where
 
 /// Drain egress until a `ToSession` reply of kind `K` arrives, decoding
 /// it via the kind codec. Skips non-`ToSession` events and replies of other
-/// kinds — the content-gen caps spawn a real ephemeral dispatch thread
+/// kinds — a task-backed cap spawns a real ephemeral dispatch thread
 /// whose loopback mail (to the unregistered own mailbox of an
 /// [`unrouted_binding`]) bubbles up as a non-`ToSession` egress, so a cap
 /// test that drives the actual re-reply via `on_*_result` reads past
-/// the bubble-up to the `ToSession` re-reply. Shared by the
-/// `aether.anthropic` / `aether.gemini` test modules.
+/// the bubble-up to the `ToSession` re-reply. Shared by the cap test
+/// modules.
 pub fn decode_session_reply<K>(rx: &Receiver<EgressEvent>) -> K
 where
     K: Kind,

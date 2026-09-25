@@ -98,12 +98,13 @@ Residual id types are not evidence that those native subsystems still ship.
 
 | Topic | Records |
 |---|---|
-| Provider content generation | ADR-0050, interpreted against shipped provider code |
+| Provider content generation | ADR-0050, ADR-0159 (no provider component currently ships) |
 | Tick-native simulation | ADR-0144 (Accepted) |
 | Player sessions over TCP | ADR-0145 (Accepted, partially realized in code) |
 
-ADR-0050 contains deferred/historical provider discussion. The current
-`anthropic` and shared content-generation modules define the shipped set.
+ADR-0050 contains deferred/historical provider discussion. No provider
+component currently ships in the workspace; the shared `Usage` accounting in
+`aether-kinds` is what remains of its kind vocabulary.
 
 ## Testing and performance
 
