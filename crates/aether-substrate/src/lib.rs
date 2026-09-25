@@ -53,6 +53,8 @@ pub mod scheduler;
 // ids (render textures / geometries / programs, text fonts, audio banks)
 // share, so they agree on what happens at the ceiling.
 pub mod session_ids;
+// ADR-0238: the native, in-memory store of immutable checked-in blob bytes.
+pub mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod transform;
