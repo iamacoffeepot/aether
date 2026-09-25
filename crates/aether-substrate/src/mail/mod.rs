@@ -22,7 +22,7 @@ pub use capability::{CapabilityRegistry, MailboxCaps};
 pub use cost::{CostCell, CostCells, CostTable};
 pub use mail_ref::MailRef;
 pub use mailer::Mailer;
-pub use outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};
+pub use outbound::{EgressEvent, HubOutbound};
 pub use registry::{
     ActorAddressInventoryError, AddressResolutionError, InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch,
     Registry, ResolveLiveError, ResolvedAddress,

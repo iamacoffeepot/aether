@@ -35,16 +35,16 @@ use crate::mail::{Source, SourceAddr};
 
 /// Pluggable egress backend the substrate calls through `HubOutbound`.
 /// Every substrate egress intent is one method; implementations decide
-/// how to satisfy it (the `aether-hub::HubProtocolBackend` translates
-/// to `EngineToHub` frames and pushes onto a TCP writer channel; the
-/// substrate-side `DroppingBackend` is the no-op default for the
-/// pre-attach window and for chassis that opt out of hub bridging).
+/// how to satisfy it. The crate-private seam of ADR-0070: its one
+/// implementation is `RecordingBackend`, which embedders reach through
+/// [`HubOutbound::attach_recording`]. An outbound with no backend
+/// attached drops every egress.
 ///
 /// All methods are silent on failure — a hub disconnect, a closed
-/// writer channel, or an outright dropping backend looks the same to
-/// the caller. Substrate code already treats hub egress as
-/// fire-and-forget at every site that uses these intents.
-pub trait EgressBackend: Send + Sync {
+/// writer channel, or a missing backend looks the same to the caller.
+/// Substrate code already treats hub egress as fire-and-forget at every
+/// site that uses these intents.
+pub(crate) trait EgressBackend: Send + Sync {
     /// Whether this backend is currently delivering frames. Used by
     /// `Mailer::route_mail` to decide whether to bubble-up an
     /// unresolved mail or warn-drop locally.
@@ -109,47 +109,6 @@ pub trait EgressBackend: Send + Sync {
     fn egress_mailboxes_changed(&self, descriptors: Vec<MailboxDescriptor>);
 }
 
-/// No-op backend installed before any hub connection is attached and
-/// retained on chassis that never attach one (the hub chassis itself,
-/// some test harnesses). `is_connected` reports `false`; every egress
-/// method is a silent drop.
-pub struct DroppingBackend;
-
-impl EgressBackend for DroppingBackend {
-    fn egress_to_session(
-        &self,
-        _session: SessionToken,
-        _kind_name: &str,
-        _payload: Vec<u8>,
-        _origin: Option<String>,
-        _correlation_id: u64,
-        _sender: Option<ErasedActorRef>,
-    ) {
-    }
-    fn egress_to_engine_mailbox(
-        &self,
-        _engine_id: EngineId,
-        _mailbox_id: MailboxId,
-        _kind_id: KindId,
-        _payload: Vec<u8>,
-        _count: u32,
-        _correlation_id: u64,
-    ) {
-    }
-    fn egress_unresolved_mail(
-        &self,
-        _recipient_mailbox_id: MailboxId,
-        _kind_id: KindId,
-        _payload: Vec<u8>,
-        _count: u32,
-        _source_mailbox_id: Option<MailboxId>,
-        _correlation_id: u64,
-    ) {
-    }
-    fn egress_kinds_changed(&self, _descriptors: Vec<KindDescriptor>) {}
-    fn egress_mailboxes_changed(&self, _descriptors: Vec<MailboxDescriptor>) {}
-}
-
 /// Substrate-side mirror of every `EgressBackend` method, reified as
 /// an enum so test code can drain a `Receiver<EgressEvent>` and assert
 /// on the egress shape without depending on the hub-protocol crate.
@@ -196,13 +155,13 @@ pub enum EgressEvent {
 /// for assertion. Reports `is_connected = true` so substrate code
 /// that gates on connection (the bubble-up path in `Mailer::route_mail`)
 /// exercises the connected path under test.
-pub struct RecordingBackend {
+pub(crate) struct RecordingBackend {
     tx: mpsc::Sender<EgressEvent>,
 }
 
 impl RecordingBackend {
     #[must_use]
-    pub fn new() -> (Self, mpsc::Receiver<EgressEvent>) {
+    pub(crate) fn new() -> (Self, mpsc::Receiver<EgressEvent>) {
         let (tx, rx) = mpsc::channel();
         (Self { tx }, rx)
     }
@@ -284,9 +243,10 @@ impl EgressBackend for RecordingBackend {
 /// `log_capture`, control kind announcements, lifecycle dying-broadcast,
 /// boot-installed broadcast sink). Holds an `OnceLock<Arc<dyn EgressBackend>>`:
 /// pre-attach the lock is empty and every method drops silently;
-/// post-attach the wired backend handles the egress (the standard
-/// implementation is `aether-hub::HubProtocolBackend`, which serialises
-/// to `EngineToHub` frames and writes them to a TCP socket).
+/// post-attach the wired backend handles the egress. The public ways to
+/// attach one are [`HubOutbound::attach_recording`] and
+/// [`HubOutbound::attached_loopback`], which record every egress as an
+/// [`EgressEvent`].
 ///
 /// The crate-private `send_reply` / `send_reply_envelope_stamped` pair routes a
 /// reply for a `Session` / `EngineMailbox` sender and hands it to the
@@ -298,7 +258,7 @@ pub struct HubOutbound {
 
 impl HubOutbound {
     /// Fresh facade with no backend attached. Egress methods drop
-    /// silently until `attach_backend` is called. The boot path always
+    /// silently until a backend is attached. The boot path always
     /// constructs through this so substrate-core never holds a
     /// hub-protocol-aware default; the backend is wired later at chassis
     /// composition time.
@@ -307,11 +267,11 @@ impl HubOutbound {
         Arc::new(Self { backend: OnceLock::new() })
     }
 
-    /// Wire a backend. Called once by an in-process loopback harness
-    /// after it builds its `RecordingBackend`. Subsequent calls
-    /// warn-and-ignore — `HubOutbound` is single-backend by design so
-    /// frames can't race across two implementations.
-    pub fn attach_backend(&self, backend: Arc<dyn EgressBackend>) {
+    /// Wire a backend; [`Self::attach_recording`] is the public door
+    /// over it. Subsequent calls warn-and-ignore — `HubOutbound` is
+    /// single-backend by design so frames can't race across two
+    /// implementations.
+    pub(crate) fn attach_backend(&self, backend: Arc<dyn EgressBackend>) {
         if self.backend.set(backend).is_err() {
             tracing::warn!(
                 target: "aether_substrate::outbound",
@@ -342,7 +302,7 @@ impl HubOutbound {
     }
 
     /// Reply or push mail addressed at a component on another engine.
-    pub fn egress_to_engine_mailbox(
+    pub(crate) fn egress_to_engine_mailbox(
         &self,
         engine_id: EngineId,
         mailbox_id: MailboxId,
@@ -357,7 +317,7 @@ impl HubOutbound {
     }
 
     /// Bubble-up of mail whose recipient mailbox didn't resolve locally.
-    pub fn egress_unresolved_mail(
+    pub(crate) fn egress_unresolved_mail(
         &self,
         recipient_mailbox_id: MailboxId,
         kind_id: KindId,
@@ -385,6 +345,18 @@ impl HubOutbound {
         }
     }
 
+    /// Attach a recording backend and return the receiver every egress this
+    /// outbound sends lands on, as an [`EgressEvent`]: an in-process
+    /// embedder's view of its session replies and bubble-ups. Single-backend
+    /// like any attach: on an outbound that already has a backend this warns,
+    /// keeps the first, and the returned receiver never yields.
+    #[must_use]
+    pub fn attach_recording(&self) -> mpsc::Receiver<EgressEvent> {
+        let (backend, rx) = RecordingBackend::new();
+        self.attach_backend(Arc::new(backend));
+        rx
+    }
+
     /// Build an outbound facade pre-attached to a `RecordingBackend`,
     /// returning the receiver end so substrate-side tests can drain
     /// `EgressEvent`s. Replaces the pre-refactor `attached_loopback`,
@@ -395,9 +367,8 @@ impl HubOutbound {
     /// `EngineToHub` frames specifically.
     #[must_use]
     pub fn attached_loopback() -> (Arc<Self>, mpsc::Receiver<EgressEvent>) {
-        let (backend, rx) = RecordingBackend::new();
         let outbound = Self::disconnected();
-        outbound.attach_backend(Arc::new(backend));
+        let rx = outbound.attach_recording();
         (outbound, rx)
     }
 
