@@ -334,6 +334,13 @@ function render() {
       scale[1] *= 1 + eyeSize * 0.12;
       translation[2] -= Math.max(eyeSize, 0) * 0.040;
     }
+    if (node.name.startsWith("Canthus.")) {
+      const eyeCenter = node.name.endsWith("Left") ? -0.255 : 0.255;
+      translation[0] = eyeCenter + (translation[0] - eyeCenter) * (1 + eyeSize * 0.16);
+      scale[0] *= 1 + eyeSize * 0.16;
+      scale[1] *= 1 + eyeSize * 0.12;
+      translation[2] -= Math.max(eyeSize, 0) * 0.040;
+    }
     if (node.name === "Brows") {
       translation[1] += browHeight * 0.10;
       translation[2] += browHeight * 0.025;

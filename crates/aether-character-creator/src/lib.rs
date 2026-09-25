@@ -277,27 +277,29 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             "generator": "Aether AI parametric character generator 0.1"
         },
         "scene": 0,
-        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] }],
+        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] }],
         "nodes": [
             { "name": "Head", "mesh": 0 },
-            { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.490], "scale": [0.115, 0.055, 0.060] },
-            { "name": "Eye.Right", "mesh": 1, "translation": [0.255, 0.225, 0.490], "scale": [0.115, 0.055, 0.060] },
-            { "name": "Iris.Left", "mesh": 2, "translation": [-0.255, 0.225, 0.552], "scale": [0.032, 0.032, 0.032] },
-            { "name": "Iris.Right", "mesh": 2, "translation": [0.255, 0.225, 0.552], "scale": [0.032, 0.032, 0.032] },
-            { "name": "Iris.Left.Inner", "mesh": 3, "translation": [-0.255, 0.225, 0.554], "scale": [0.023, 0.023, 0.023] },
-            { "name": "Iris.Right.Inner", "mesh": 3, "translation": [0.255, 0.225, 0.554], "scale": [0.023, 0.023, 0.023] },
-            { "name": "Pupil.Left", "mesh": 4, "translation": [-0.255, 0.225, 0.556], "scale": [0.012, 0.012, 0.012] },
-            { "name": "Pupil.Right", "mesh": 4, "translation": [0.255, 0.225, 0.556], "scale": [0.012, 0.012, 0.012] },
+            { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.482], "scale": [0.115, 0.055, 0.060] },
+            { "name": "Eye.Right", "mesh": 1, "translation": [0.255, 0.225, 0.482], "scale": [0.115, 0.055, 0.060] },
+            { "name": "Iris.Left", "mesh": 2, "translation": [-0.255, 0.225, 0.544], "scale": [0.032, 0.032, 0.032] },
+            { "name": "Iris.Right", "mesh": 2, "translation": [0.255, 0.225, 0.544], "scale": [0.032, 0.032, 0.032] },
+            { "name": "Iris.Left.Inner", "mesh": 3, "translation": [-0.255, 0.225, 0.546], "scale": [0.023, 0.023, 0.023] },
+            { "name": "Iris.Right.Inner", "mesh": 3, "translation": [0.255, 0.225, 0.546], "scale": [0.023, 0.023, 0.023] },
+            { "name": "Pupil.Left", "mesh": 4, "translation": [-0.255, 0.225, 0.548], "scale": [0.012, 0.012, 0.012] },
+            { "name": "Pupil.Right", "mesh": 4, "translation": [0.255, 0.225, 0.548], "scale": [0.012, 0.012, 0.012] },
             { "name": "Ear.Left", "mesh": 5, "translation": [-0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
             { "name": "Ear.Right", "mesh": 5, "translation": [0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
             { "name": "Brows", "mesh": 6 },
-            { "name": "UpperLid.Left", "mesh": 7, "translation": [-0.255, 0.225, 0.490] },
-            { "name": "UpperLid.Right", "mesh": 7, "translation": [0.255, 0.225, 0.490] },
-            { "name": "LowerLid.Left", "mesh": 8, "translation": [-0.255, 0.225, 0.490] },
-            { "name": "LowerLid.Right", "mesh": 8, "translation": [0.255, 0.225, 0.490] },
+            { "name": "UpperLid.Left", "mesh": 7, "translation": [-0.255, 0.225, 0.482] },
+            { "name": "UpperLid.Right", "mesh": 7, "translation": [0.255, 0.225, 0.482] },
+            { "name": "LowerLid.Left", "mesh": 8, "translation": [-0.255, 0.225, 0.482] },
+            { "name": "LowerLid.Right", "mesh": 8, "translation": [0.255, 0.225, 0.482] },
             { "name": "Neck", "mesh": 5, "translation": [0.0, -0.86, -0.14], "scale": [0.29, 0.40, 0.27] },
             { "name": "MouthOpening", "mesh": 9 },
-            { "name": "Lips", "mesh": 10 }
+            { "name": "Lips", "mesh": 10 },
+            { "name": "Canthus.Left", "mesh": 11, "translation": [-0.150, 0.222, 0.510], "scale": [0.012, 0.005, 0.004] },
+            { "name": "Canthus.Right", "mesh": 11, "translation": [0.150, 0.222, 0.510], "scale": [0.012, 0.005, 0.004] }
         ],
         "materials": [
             material("Skin", [0.55, 0.28, 0.18, 1.0], 0.82),
@@ -307,7 +309,8 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             material("Pupil", [0.012, 0.016, 0.018, 1.0], 0.38),
             material("Brow", [0.09, 0.035, 0.022, 1.0], 0.92),
             material("Mouth", [0.16, 0.035, 0.032, 1.0], 0.88),
-            material("Lips", [0.50, 0.20, 0.16, 1.0], 0.74)
+            material("Lips", [0.50, 0.20, 0.16, 1.0], 0.74),
+            material("Canthus", [0.42, 0.18, 0.15, 1.0], 0.72)
         ],
         "meshes": [
             {
@@ -362,7 +365,8 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
                     "mode": 4,
                     "targets": lip_targets
                 }]
-            }
+            },
+            mesh_json("Canthus", eye_position, eye_normal, eye_uv, eye_indices, 8)
         ],
         "bufferViews": buffer.views,
         "accessors": buffer.accessors,
@@ -561,7 +565,7 @@ fn append_ribbon(
         let t = segment as f32 / segments as f32;
         let local_x = t.mul_add(2.0, -1.0);
         let center_y = curve_scale * (1.0 - local_x * local_x);
-        let half_width = 0.16 * (0.35 + 0.65 * (PI * t).sin());
+        let half_width = 0.16 * (PI * t).sin().max(0.0).powf(0.55);
         for (side, local_y) in [(0.0, center_y - half_width), (1.0, center_y + half_width)] {
             let x = local_x.mul_add(scale.x, center_x);
             let y = local_y.mul_add(scale.y, base_y);
