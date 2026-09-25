@@ -42,9 +42,9 @@ pub use knobs::{
     parse_workers, saturate_backlog_from_env, scheduler_tuning_from_env, tiers_from_env, wide_fanout_widths_from_env,
 };
 pub use percentiles::{Stats, TAIL_MASS_MULTIPLE, summarize};
-pub use relay::{Relay, RelayConfig, relay_id, spawn_relays};
+pub use relay::{Relay, RelayConfig, spawn_relays};
 pub use sweep::{Drive, SweepConfig, run_sweep, run_sweep_samples};
-pub use tick::{TickSource, ticksrc_id};
+pub use tick::TickSource;
 pub use topology::{
     REAL_CODEC_WORK_ITERS, REAL_FANOUT_N, REAL_LOGIC_WORK_ITERS, REAL_UI_FOLLOWUP_STEPS, Tier, Topology,
     default_topologies, depth_chain, fanout, fanout_heavy, max_out_degree, parse_topologies, socket_server,

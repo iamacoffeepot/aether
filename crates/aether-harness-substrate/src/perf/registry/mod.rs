@@ -39,11 +39,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use aether_substrate::{MailboxId, Subname};
+use aether_actor::ErasedActorRef;
+use aether_substrate::Subname;
 use serde::{Deserialize, Serialize};
 
 use crate::SubstrateHarness;
-use crate::perf::harness::{Relay, RelayConfig, relay_id};
+use crate::perf::harness::{Relay, RelayConfig};
 use kinds::KindMix;
 use owner::OwnerCeiling;
 use read::ReadScalingCell;
@@ -105,11 +106,13 @@ pub fn run_registry_benchmark() -> Option<RegistryReport> {
     // why the rate it yields is a floor rather than the ceiling.
     let spawn_start = Instant::now();
     let mut spawned = 0_u64;
+    let mut targets: Vec<ErasedActorRef> = Vec::with_capacity(POPULATED_MAILBOXES);
     for i in 0..POPULATED_MAILBOXES {
         let config = RelayConfig { downstreams: Arc::from(Vec::new()), work_iters: 0 };
-        if harness.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config, ()).finish().is_err() {
+        let Ok(relay) = harness.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config, ()).finish() else {
             break;
-        }
+        };
+        targets.push(relay.erase());
         spawned += 1;
     }
     let spawn_elapsed = spawn_start.elapsed();
@@ -129,7 +132,6 @@ pub fn run_registry_benchmark() -> Option<RegistryReport> {
         ceiling
     });
 
-    let targets: Vec<MailboxId> = (0..usize::try_from(spawned).unwrap_or(usize::MAX)).map(relay_id).collect();
     let per_reader_kinds_registered = kinds::per_reader_kinds_registered(harness.mail_registry());
     read::warm_read_path(harness.mail_registry(), &targets);
 

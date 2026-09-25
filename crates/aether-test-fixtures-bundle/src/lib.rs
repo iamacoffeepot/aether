@@ -45,9 +45,9 @@ pub use http_handler::{
     HttpHandler, RoutedHttpHandler, RoutedStreamingHttpHandler, StreamingHttpHandler, WebSocketHandler,
 };
 pub use inline_child::{
-    InlineChild, InlineConfiguredChild, InlineConfiguredParent, InlineDespawnChild, InlineDespawnParent, InlineParent,
-    InlineStatefulChild, InlineStatefulParent, InlineTagParent, NestedDetachedLeaf, NestedLineageChild,
-    NestedLineageLeaf, NestedLineageParent,
+    EagerDetachChild, InlineChild, InlineConfiguredChild, InlineConfiguredParent, InlineDespawnChild,
+    InlineDespawnParent, InlineParent, InlineStatefulChild, InlineStatefulParent, InlineTagParent, NestedDetachedLeaf,
+    NestedLineageChild, NestedLineageLeaf, NestedLineageParent,
 };
 pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};
@@ -99,6 +99,7 @@ aether_actor::export!(
         NestedLineageChild,
         NestedLineageLeaf,
         NestedDetachedLeaf,
+        EagerDetachChild,
         InlineTagParent,
         Counter,
         Sidecar,

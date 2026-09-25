@@ -72,7 +72,7 @@ pub struct ComponentCtx {
     /// dispatch return (#6412). One table per mailbox slot, not
     /// per instance: the component trampoline carries it to the slot's
     /// next occupant as [`PendingReplies`] (#6409).
-    pub reply_table: ReplyTable,
+    pub(crate) reply_table: ReplyTable,
     /// Set by the `save_state` host fn during `on_dehydrate`. The
     /// substrate extracts it after hooks return via
     /// `Component::take_saved_state`. Never read by the guest —
@@ -191,15 +191,17 @@ pub const TRAMPOLINE_NAMESPACE: &str = aether_actor::EMBEDDED_SCOPE;
 
 /// ADR-0097: a sibling-spawn request the `spawn_sibling` host fn stages
 /// onto [`ComponentCtx`] for the trampoline to drain and execute.
-/// `parent` / `parent_name` are the validated executing actor identity the
-/// child extends, not necessarily the physical trampoline root. `tag`
+/// `parent` is the guest-named position the child extends — the executing
+/// actor or one of its inline aliases, admitted by the host function's cluster
+/// membership check — not necessarily the physical trampoline root. It is a
+/// request, not a proof: the trampoline proves it when it drains the spawn and
+/// refuses the spawn, staging nothing, when it does not prove. `tag`
 /// selects the exported type at `init_typed_p32`; `subname` is the resolved
 /// trampoline subname and `config` is the encoded `Config` kind handed to the
 /// new instance.
 #[derive(Debug, Clone)]
 pub struct PendingSpawn {
     pub parent: MailboxId,
-    pub parent_name: String,
     pub tag: u64,
     pub subname: String,
     pub config: Vec<u8>,
