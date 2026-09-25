@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-16
+- **Amended:** 2026-09-24 — tree entry names are unique byte for byte, and the Windows-portability name rules are dropped; both served writing a tree to a host directory, which no longer happens (ADR-0237).
 
 ## Context
 
@@ -157,6 +158,19 @@ reserved characters or device stems, not `.git`, NFC only, 1..=255 bytes.
 A path is a relative `/`-separated symlink target of at most 1024 bytes;
 each segment is `.`, `..`, or a name. Two entries may not collide under
 NFC plus `char::to_lowercase`. Over-refusal is safe; under-refusal is not.
+
+*(Amended 2026-09-24: no tree is written to a host directory since
+ADR-0237's amendment, so the rules that served one are dropped. Two entries
+collide only when their names are equal byte for byte, as Linux, tar, and
+Git enforce; the NFC-plus-case-folding rule is gone, and a Debian userland
+ships names that fold together (`xt_CONNMARK.h` beside `xt_connmark.h`).
+The Windows reserved characters (`<` `>` `:` `"` `|` `?` `*`) and `\`,
+device stems, and the trailing-dot and edge-whitespace rules are gone too;
+Debian's Perl man pages are named like `File::Spec.3perl.gz`. A name is
+still 1..=255 bytes of NFC text with no `/`, NUL, controls, or format/bidi
+characters, not `.` or `..`, and not `.git`. NFC keeps canonically
+equivalent spellings byte-equal, so they still collide. Relaxing only admits
+more trees, so every existing tree keeps its digest.)*
 
 Owner, timestamps, and the other permission bits are dropped on purpose,
 as Git drops them. Build outputs are never entries in any tree; that is a
