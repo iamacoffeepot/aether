@@ -58,6 +58,14 @@ A consumer actor binds itself to its sessions with a `_self` kind:
 `ctx.send::<TcpCapability>(&ConnectSelf { .. })`. The capability takes the
 consumer from the proven sender, so the actor never names its own position.
 
+An agent, or a capability binding a different actor, names that actor in the
+`consumer` field of `bind_listener` or `connect` by its ADR-0166 address,
+canonical or short. The capability proves the address once, at receipt, and
+refuses the request when it names no live actor. Sessions and listeners are
+addressed as `aether.tcp/aether.tcp.session:<session_name>` and
+`aether.tcp/aether.tcp.listener:<listener_name>`, from the names the results
+return.
+
 Each session delivers `session_data` and `session_closed` as itself, so the
 host stamps the session as the envelope sender. The consumer writes or closes
 through that sender: `ctx.sender()`, then
