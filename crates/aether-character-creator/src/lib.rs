@@ -864,7 +864,7 @@ fn head_sdf(point: Vec3) -> f32 {
 fn head_mass_sdf(point: Vec3) -> f32 {
     let parietal_weight = parietal_width_weight(point.y);
     let cranial_point = Vec3::new(point.x * (1.0 + 0.06 * parietal_weight), point.y, point.z);
-    let mut shape = superellipsoid_sdf(cranial_point, Vec3::new(0.0, 0.29, -0.12), Vec3::new(0.68, 0.56, 0.60), 2.10);
+    let mut shape = superellipsoid_sdf(cranial_point, Vec3::new(0.0, 0.29, -0.12), Vec3::new(0.64, 0.56, 0.60), 2.10);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.37, 0.12), Vec3::new(0.52, 0.36, 0.42)), 0.10);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.14, 0.18), Vec3::new(0.49, 0.47, 0.45)), 0.11);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.11, 0.505), Vec3::new(0.31, 0.24, 0.19)), 0.10);
@@ -877,12 +877,12 @@ fn head_mass_sdf(point: Vec3) -> f32 {
     }
     shape = smooth_union(
         shape,
-        superellipsoid_sdf(point, Vec3::new(0.0, -0.46, 0.34), Vec3::new(0.34, 0.20, 0.29), 2.40),
+        superellipsoid_sdf(point, Vec3::new(0.0, -0.46, 0.34), Vec3::new(0.38, 0.20, 0.29), 2.40),
         0.08,
     );
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.49, 0.43), Vec3::new(0.23, 0.13, 0.20)), 0.08);
-    for x in [-0.27, 0.27] {
-        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.32, 0.22), Vec3::new(0.14, 0.22, 0.20)), 0.09);
+    for x in [-0.29, 0.29] {
+        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.32, 0.22), Vec3::new(0.16, 0.22, 0.20)), 0.09);
     }
     for side in [-1.0, 1.0] {
         let malar_plane = ellipsoid_sdf(point, Vec3::new(side * 0.27, -0.055, 0.39), Vec3::new(0.17, 0.20, 0.12));
