@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-09-24
 - **Amended:** 2026-09-24 — trees cross into and out of a container as canonical tar streams through the Engine API's archive endpoints; no tree is written to a host directory, so a remote daemon needs nothing on its host but the stream. While the blob split stays deferred, the actor's blob writes go through the journal.
+- **Amended:** 2026-09-25 — the blob split is no longer deferred: the journal is a root directory holding the SQLite database and a `blobs` directory of digest-named files for every blob, at every size (ADR-0220). Open question 1 is resolved: the journal stays the only writer, of the database and of the blob files. This replaces the previous amendment's deferred-split sentence.
 
 Amends [ADR-0229](0229-program-cap-apis-are-extra-run-arguments.md) (the
 closed, sealed set of program APIs, `Http` / `Process`, mapped through
@@ -290,8 +291,7 @@ Prerequisites (follow-on issues):
 Deferred:
 
 - **Blob bytes out of the SQLite file.** The journal stays one SQLite file:
-  imports batch their inserts, and writing a tree out streams blobs through
-  SQLite's incremental blob I/O. Split to a per-journal folder of files
+  imports batch their inserts. Split to a per-journal folder of files
   named by digest only on a measured need (write-lock contention during
   imports, cheap forks, or one toolchain shared between journals), and only
   together with an export / import pair (a database snapshot plus every blob
@@ -299,10 +299,23 @@ Deferred:
   a garbage collection that walks the journal's heads through `citations`.
   A blob folder shared between journals additionally needs a registry of
   the journals using it and a lock against writes during a sweep.
+
+  *(Amended 2026-09-25: no longer deferred, and not gated on a measured
+  need. Every blob is a digest-named file in the journal root's `blobs`
+  directory (ADR-0220). A blob or tree write streams into a temporary file
+  that the journal renames to its digest name, and writing a tree out
+  streams each file. The
+  export / import pair and the garbage collection stay deferred, and a blob
+  directory shared between journals is not proposed.)*
 - **Shipping a journal is an explicit export.** The journal runs SQLite in
   WAL mode, so a plain copy of the live file can miss committed
   transactions. Export uses `VACUUM INTO` (or the online backup API) to
   produce one consistent file.
+
+  *(Amended 2026-09-25: an export is that snapshot of `journal.sqlite`
+  followed by a copy of `blobs/` without `tmp/`. A blob file lands before
+  the row that names it commits and is never rewritten, so a copy taken
+  after the snapshot holds every blob the snapshot cites.)*
 
 - Warm build state (golden target directories keyed by the tree that built
   them, a shared read-only unpacked environment). Allowed later only as
@@ -349,9 +362,11 @@ Deferred:
    journal so citation edges keep one writer. The driver's existing
    existence check on a `Transition`'s result then holds.
 
-   *(Amended 2026-09-24: there is no blob directory while the blob split
-   stays deferred, so the proposal is that the actor hands every blob and
-   tree to the journal, which stays the only writer of its one SQLite file.)*
+   *(Amended 2026-09-25, resolved: the journal stays the only writer. The
+   actor hands every blob and tree to the journal, which writes each blob's
+   bytes to a digest-named file in its root's `blobs` directory before the
+   row that stores it commits (ADR-0220). The actor writes no file itself,
+   so blob files and citation edges keep one writer.)*
 2. **Where executor provenance lives.** `Transition.executor` was dropped
    with ADR-0224's native executors, and host identity must not enter a
    Pure result. Proposed: a small provenance record beside the

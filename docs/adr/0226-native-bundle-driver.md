@@ -9,6 +9,7 @@
 - **Amended:** 2026-09-23 — the bloomery's RPC listener binds only after the journal owner and the driver are mounted, so a reachable engine can take driver calls (issue #6399).
 - **Amended:** 2026-09-24 — a bundle's fetch-on-miss travels invocation → bundle root → driver, and the driver forwards it to the journal owner with the reply pinned to the root; a bundle addresses no journal position (issue #6478).
 - **Amended:** 2026-09-24 — the driver answers a bundle's fetch-on-miss itself, from a byte-bounded cache of found artifacts or one journal read shared by every fetch of that digest, and never caches a missing artifact; `SetHead` destination checks consult the same cache (issue #6258).
+- **Amended:** 2026-09-25 — the chassis opens one journal root (the SQLite database plus its `blobs` directory, ADR-0220) rather than one journal file.
 
 ## Context
 
@@ -73,7 +74,7 @@ Nothing on main can carry any of this yet:
    Chassis mounting has since landed in `aether-chassis-bloomery` (issue #6244):
    the chassis composes the shared base stratum plus `ComponentHostCapability`
    and the RPC server, then spawns the journal owner and the driver post-build
-   over one journal file, then binds the RPC listener (issue #6399). No
+   over one journal root (ADR-0220), then binds the RPC listener (issue #6399). No
    full-stack cap rides the engine.
 
 2. **Roots are named by digest and never dropped.** A root's `name` is the
