@@ -1221,6 +1221,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-workspace"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-bloomery-kinds",
+ "aether-data",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

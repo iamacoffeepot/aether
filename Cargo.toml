@@ -32,6 +32,7 @@ members = [
     "crates/aether-bloomery-bundle-derive",
     "crates/aether-bloomery-driver",
     "crates/aether-bloomery-muse",
+    "crates/aether-workspace",
     "crates/aether-http-derive",
     "crates/aether-data-derive",
     "crates/aether-derive",
@@ -158,6 +159,7 @@ default-members = [
     "crates/aether-bloomery-bundle-derive",
     "crates/aether-bloomery-driver",
     "crates/aether-bloomery-muse",
+    "crates/aether-workspace",
 ]
 exclude = [
     # The cargo-fuzz harness (issue 1562) is its own nested crate on the
