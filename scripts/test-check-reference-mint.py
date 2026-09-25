@@ -96,6 +96,23 @@ class ScannerTests(unittest.TestCase):
         status, _ = self.repo.run()
         self.assertEqual(status, 1)
 
+    def test_shared_blob_mint_outside_the_allowlist_fails(self) -> None:
+        self.repo.write(
+            "crates/aether-substrate/src/store/mod.rs",
+            "fn sneak(entry: Arc<BlobEntry>) -> Blob {\n    aether_data::__mint_shared_blob(entry)\n}\n",
+        )
+        self.repo.commit("sneaky blob mint")
+
+        findings = self.repo.scan()
+
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(
+            findings[0].startswith("crates/aether-substrate/src/store/mod.rs:2: "),
+            findings[0],
+        )
+        status, _ = self.repo.run()
+        self.assertEqual(status, 1)
+
     def test_attribute_and_suppression_comment_do_not_relax(self) -> None:
         self.repo.write(
             "crates/aether-substrate/src/sneaky.rs",

@@ -5,16 +5,16 @@
 //! keeps no table, so check-in mutates nothing in the ctx.
 
 use aether_actor::ReplyMode;
-use aether_data::BlobRef;
+use aether_data::Blob;
 
 use super::NativeCtx;
 
 impl<A, M: ReplyMode> NativeCtx<'_, A, M> {
-    /// Check `bytes` into the engine blob store and hold a reference to them.
-    /// Equal bytes are resident once. The bytes stay resident while any
-    /// `BlobRef` to them lives.
+    /// Check `bytes` into the engine blob store and hold them as a `Shared`
+    /// [`Blob`]. Equal bytes are resident once. The bytes stay resident while
+    /// any clone of the value lives.
     #[must_use]
-    pub fn check_in(&self, bytes: Box<[u8]>) -> BlobRef {
-        self.binding.mailer().blob_store().check_in(bytes).into_ref()
+    pub fn check_in(&self, bytes: Box<[u8]>) -> Blob {
+        self.binding.mailer().blob_store().check_in(bytes).into_blob()
     }
 }
