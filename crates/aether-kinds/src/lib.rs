@@ -1526,19 +1526,17 @@ mod control_plane {
         Err { error: String },
     }
 
-    // ADR-0050 per-provider content-gen caps. The `aether.anthropic`
-    // kinds (Role, Message, AnthropicError, MessagesSend, CliSend,
-    // MessagesSendResult, CliSendResult) are owned by the capability and
-    // live in `aether_anthropic::kinds` (ADR-0121). `Usage`
-    // stays central — it is shared with the `aether.gemini` result kinds.
+    // ADR-0050 content-gen accounting. Provider request/result kinds are
+    // owned by each provider component (ADR-0121), and none currently
+    // ships in the workspace. `Usage` stays central so every provider's
+    // result kinds share one accounting shape.
 
     /// Token + wall-clock accounting returned on a successful
-    /// content-gen completion. Shared across the Anthropic text kinds
-    /// (issue 1014) and the Gemini media kinds (issue 1015). The CLI
-    /// backend can only report `wall_clock_millis` (the subprocess gives no
-    /// token counts), leaving the token / cost fields zero / `None`;
-    /// the Messages API and the Gemini APIs populate the rest where the
-    /// provider reports them.
+    /// content-gen completion, shared across provider result kinds
+    /// (issues 1014 and 1015). A CLI backend can only report
+    /// `wall_clock_millis` (the subprocess gives no token counts),
+    /// leaving the token / cost fields zero / `None`; an HTTP API
+    /// backend populates the rest where the provider reports them.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Usage {
         pub input_tokens: u32,

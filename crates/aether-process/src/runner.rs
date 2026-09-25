@@ -2,9 +2,9 @@
 //! reviewed implementation of the deadline / drain / reap discipline the
 //! workspace previously hand-rolled per consumer.
 //!
-//! Extracted from `aether-anthropic/src/cli.rs` (stdin write + EOF, a
+//! Combines the content-gen CLI adapter's loop (stdin write + EOF, a
 //! dedicated stdout-drain thread so a full pipe cannot stall the child,
-//! a `try_wait` deadline poll, kill-and-reap on overrun) and
+//! a `try_wait` deadline poll, kill-and-reap on overrun) with
 //! `xtask/src/transform.rs` (the reap-before-surface-error ordering — the
 //! child is reaped on every path, including the wait-error path, so no
 //! zombie is left behind). The group-reap escalation
