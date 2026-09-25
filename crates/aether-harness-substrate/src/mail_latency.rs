@@ -29,7 +29,7 @@ use std::thread::{self, available_parallelism};
 use std::time::{Duration, Instant};
 
 use aether_actor::{ActorRef, ErasedActorRef};
-use aether_data::{Kind, KindId, MailId, MailboxId, ReplyContract, mailbox_id_from_name};
+use aether_data::{Kind, KindId, MailId, ReplyContract};
 use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{ComponentCapabilities, HandlerCapability};
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
@@ -38,8 +38,8 @@ use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCt
 use super::{HarnessOp, SubstrateHarness};
 use crate::perf::harness::{
     CellResult, Drive, Ping, Relay, Stats, SweepConfig, Tier, Topology, default_topologies, depth_chain, fanout,
-    fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep, spawn_relays, summarize,
-    tiers_from_env, two_level_tree, wide_fanout_widths_from_env,
+    fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, run_sweep, spawn_relays, summarize, tiers_from_env,
+    two_level_tree, wide_fanout_widths_from_env,
 };
 
 /// Self-sustaining ring actor for the multi-worker saturation profile.
@@ -144,15 +144,6 @@ impl Dispatch<Self> for RingRelay {
     }
 }
 
-const RING_NS: &str = "mlat.ring";
-
-// Harness derives a spawned ring relay's name-hashed id to seed tokens at it —
-// id derivation, not sibling-cap addressing.
-#[allow(clippy::disallowed_methods)]
-fn ring_id(i: usize) -> MailboxId {
-    MailboxId(mailbox_id_from_name(&format!("{RING_NS}:{i}")).0)
-}
-
 /// On each `Ping`, spawns an inherited worker thread (ADR-0080 §12) that
 /// outlives the handler by a short sleep before exiting. The
 /// `spawn_inherit` acquires a settlement hold before the worker starts;
@@ -217,15 +208,6 @@ impl Dispatch<Self> for HoldRelay {
         let _join = ctx.spawn_inherit(|| thread::sleep(Duration::from_millis(1)));
         Some(())
     }
-}
-
-const HOLD_NS: &str = "mlat.hold";
-
-// Harness derives the hold-relay's id from its name to wire the topology —
-// id derivation, not sibling-cap addressing.
-#[allow(clippy::disallowed_methods)]
-fn hold_id() -> MailboxId {
-    MailboxId(mailbox_id_from_name(&format!("{HOLD_NS}:0")).0)
 }
 
 /// Spawn every relay in `topo` onto `tb` (subname = relay index) through
@@ -296,10 +278,12 @@ fn mail_saturation_profile() {
         tb.spawn_actor::<RingRelay>(Subname::Named(&i.to_string()), relay, ()).finish().expect("spawn ring relay")
     };
     let first = spawn(0, RingRelay { next: None, close: None });
+    let mut ring = vec![first.erase(); n];
     let mut successor = first;
     for i in (1..n).rev() {
         let close = (i == 1).then_some(first);
         successor = spawn(i, RingRelay { next: Some(successor.erase()), close });
+        ring[i] = successor.erase();
     }
 
     // Close the ring: the settle returns once relay 0 has kept relay 1 as its
@@ -309,8 +293,7 @@ fn mail_saturation_profile() {
     let m: usize = env::var("TOKENS").ok().and_then(|s| s.parse().ok()).unwrap_or(6000);
     let ttl = 100_000_000u32;
     for k in 0..m {
-        let entry = ring_id(k % n);
-        let _ = tb.inject_root(entry, Ping::ID, Ping { seq: ttl }.encode_into_bytes());
+        let _ = tb.inject_root(ring[k % n], Ping::ID, Ping { seq: ttl }.encode_into_bytes());
     }
 
     let secs: u64 = env::var("PROFILE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
@@ -342,8 +325,7 @@ fn depth_chain_settles_every_root() {
 
     let depth = 5;
     let topo = depth_chain(depth);
-    spawn_topology(&tb, &topo);
-    let entry = relay_id(0);
+    let entry = spawn_topology(&tb, &topo)[0].erase();
 
     let roots = 800u32;
     let mut pending = Vec::with_capacity(roots as usize);
@@ -377,8 +359,7 @@ fn emit_settlement_settles_every_root(topo: &Topology) {
         return;
     };
 
-    spawn_topology(&tb, topo);
-    let entry = relay_id(0);
+    let entry = spawn_topology(&tb, topo)[0].erase();
 
     let roots = 500u32;
     let mut pending = Vec::with_capacity(roots as usize);
@@ -421,8 +402,7 @@ fn emit_settlement_settles_with_holds() {
         eprintln!("skipping emit_settlement_settles_with_holds: no wgpu adapter");
         return;
     };
-    tb.spawn_actor::<HoldRelay>(Subname::Named("0"), (), ()).finish().expect("spawn hold relay");
-    let entry = hold_id();
+    let entry = tb.spawn_actor::<HoldRelay>(Subname::Named("0"), (), ()).finish().expect("spawn hold relay").erase();
 
     let roots = 50u32;
     let mut pending = Vec::with_capacity(roots as usize);
@@ -464,7 +444,7 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
     };
 
     let relays = spawn_topology(&tb, &depth_chain(1));
-    let (root, rx) = tb.inject_root(relay_id(0), Ping::ID, Ping { seq: 0 }.encode_into_bytes());
+    let (root, rx) = tb.inject_root(relays[0].erase(), Ping::ID, Ping { seq: 0 }.encode_into_bytes());
     assert_settled(&rx, "mlat.trace_ring_dual_write");
 
     // The recipient relay's own ring holds the mail's Received + Finished.
@@ -511,14 +491,14 @@ fn small_trace_ring_cap_laps_chassis_host_ring() {
         return;
     };
 
-    // No actor at this id: each inject pushes exactly one `Sent` into the
-    // chassis-host ring (off-actor producer) and nothing else, so the
-    // ring's depth is deterministic. The mail warn-drops with no
-    // recipient; we don't await settlement.
-    let orphan = relay_id(0);
+    // A single leaf relay forwards nothing and records its `Received` /
+    // `Finished` in its own ring, so each inject adds exactly one `Sent`
+    // to the chassis-host ring (off-actor producer) and the ring's depth is
+    // deterministic. We don't await settlement.
+    let entry = spawn_topology(&tb, &depth_chain(1))[0].erase();
     for seq in 0..INJECTS {
         let _ =
-            tb.inject_root(orphan, Ping::ID, Ping { seq: u32::try_from(seq).unwrap_or(u32::MAX) }.encode_into_bytes());
+            tb.inject_root(entry, Ping::ID, Ping { seq: u32::try_from(seq).unwrap_or(u32::MAX) }.encode_into_bytes());
     }
 
     // Unfiltered tail from the start cursor: the ring holds at most CAP
@@ -571,7 +551,7 @@ fn settled_chains_reclaim_without_growing_per_actor_ring() {
     let relays = spawn_topology(&tb, &depth_chain(1));
     for seq in 0..INJECTS {
         let (_root, rx) = tb.inject_root(
-            relay_id(0),
+            relays[0].erase(),
             Ping::ID,
             Ping { seq: u32::try_from(seq).unwrap_or(u32::MAX) }.encode_into_bytes(),
         );
@@ -622,7 +602,7 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
     let relays = spawn_topology(&tb, &depth_chain(1));
     for seq in 0..INJECTS {
         let (_root, rx) = tb.inject_root(
-            relay_id(0),
+            relays[0].erase(),
             Ping::ID,
             Ping { seq: u32::try_from(seq).unwrap_or(u32::MAX) }.encode_into_bytes(),
         );
@@ -672,7 +652,7 @@ fn guided_walk_reconstructs_causal_tree() {
     };
 
     let relays: Vec<ErasedActorRef> = spawn_topology(&tb, &two_level_tree()).into_iter().map(ActorRef::erase).collect();
-    let (root, rx) = tb.inject_root(relay_id(0), Ping::ID, Ping { seq: 0 }.encode_into_bytes());
+    let (root, rx) = tb.inject_root(relays[0], Ping::ID, Ping { seq: 0 }.encode_into_bytes());
     assert_settled(&rx, "mlat.guided_walk");
 
     let mails = match tb.describe_tree_walked(root, &relays) {
@@ -850,8 +830,7 @@ fn settlement_detection_latency() {
     // nothing, returns. Its whole causal tree is the one injected mail,
     // so settlement fires on that mail's `Finished` alone.
     let topo = depth_chain(1);
-    spawn_topology(&tb, &topo);
-    let entry = relay_id(0);
+    let entry = spawn_topology(&tb, &topo)[0].erase();
 
     let samples: usize = env::var("SETTLE_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
 
