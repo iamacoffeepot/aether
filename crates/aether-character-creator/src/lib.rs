@@ -759,7 +759,7 @@ fn implicit_head_mesh(resolution: u32) -> Mesh {
             }
         }
     }
-    weld_mesh(mesh)
+    refine_mandibular_profile(weld_mesh(mesh))
 }
 
 fn weld_mesh(mesh: Mesh) -> Mesh {
@@ -790,6 +790,20 @@ fn weld_mesh(mesh: Mesh) -> Mesh {
     }
 
     welded
+}
+
+fn refine_mandibular_profile(mut mesh: Mesh) -> Mesh {
+    for position in &mut mesh.positions {
+        let posterior_weight = ((0.50 - position.z) / 0.42).clamp(0.0, 1.0);
+        let posterior_weight = posterior_weight * posterior_weight * (3.0 - 2.0 * posterior_weight);
+        let mandibular_line = -0.34 - 0.40 * position.z;
+        position.y += (mandibular_line - position.y).max(0.0) * posterior_weight;
+
+        let chin_weight = ((position.z - 0.35) / 0.20).clamp(0.0, 1.0);
+        let chin_weight = chin_weight * chin_weight * (3.0 - 2.0 * chin_weight);
+        position.y += (-0.585 - position.y).max(0.0) * chin_weight;
+    }
+    mesh
 }
 
 fn polygonise_tetrahedron(points: &[Vec3; 8], values: &[f32; 8], tetrahedron: [usize; 4], mesh: &mut Mesh) {
@@ -888,16 +902,16 @@ fn head_mass_sdf(point: Vec3) -> f32 {
         superellipsoid_sdf(point, Vec3::new(0.0, -0.46, 0.34), Vec3::new(0.30, 0.20, 0.29), 2.40),
         0.08,
     );
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.49, 0.43), Vec3::new(0.20, 0.13, 0.20)), 0.08);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.49, 0.45), Vec3::new(0.20, 0.11, 0.18)), 0.065);
     for side in [-1.0, 1.0] {
         let mandibular_ramus =
-            capsule_sdf(point, Vec3::new(side * 0.34, -0.10, 0.10), Vec3::new(side * 0.34, -0.34, 0.10), 0.12);
-        shape = smooth_union(shape, mandibular_ramus, 0.09);
+            capsule_sdf(point, Vec3::new(side * 0.34, -0.10, 0.10), Vec3::new(side * 0.34, -0.32, 0.10), 0.105);
+        shape = smooth_union(shape, mandibular_ramus, 0.07);
     }
     for side in [-1.0, 1.0] {
         let mandibular_body =
-            capsule_sdf(point, Vec3::new(side * 0.14, -0.50, 0.36), Vec3::new(side * 0.34, -0.29, 0.16), 0.10);
-        shape = smooth_union(shape, mandibular_body, 0.15);
+            capsule_sdf(point, Vec3::new(side * 0.13, -0.49, 0.42), Vec3::new(side * 0.34, -0.29, 0.13), 0.075);
+        shape = smooth_union(shape, mandibular_body, 0.09);
     }
     for side in [-1.0, 1.0] {
         let malar_plane = ellipsoid_sdf(point, Vec3::new(side * 0.28, -0.01, 0.38), Vec3::new(0.16, 0.14, 0.10));
@@ -924,8 +938,10 @@ fn head_mass_sdf(point: Vec3) -> f32 {
         shape = smooth_union(shape, lateral_orbital_rim, 0.10);
     }
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.10, 0.61), Vec3::new(0.085, 0.23, 0.16)), 0.05);
+    let nasal_dorsal_line = capsule_sdf(point, Vec3::new(0.0, 0.22, 0.72), Vec3::new(0.0, -0.03, 0.78), 0.04);
+    shape = smooth_union(shape, nasal_dorsal_line, 0.035);
     shape =
-        smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.07, 0.74), Vec3::new(0.115, 0.105, 0.115)), 0.045);
+        smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.080, 0.755), Vec3::new(0.105, 0.090, 0.105)), 0.035);
     for x in [-0.085, 0.085] {
         shape =
             smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.08, 0.69), Vec3::new(0.065, 0.055, 0.075)), 0.028);
