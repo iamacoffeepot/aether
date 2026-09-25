@@ -70,7 +70,7 @@ the sandbox, or they make the program `Sampled`.
        pub mounts: Vec<Mount>,              // extra read-only trees (e.g. vendored crates)
        pub steps: Steps,                    // 1..=MAX_STEPS, validated
        pub scratch: Vec<Path>,              // excluded from the output tree (e.g. `target`)
-       pub limits: Limits,
+       pub network: Network,                // a capability grant, not a resource: Off unless the program must fetch
    }
 
    pub struct Mount { pub at: Path, pub tree: Ref<Tree> }
@@ -82,28 +82,27 @@ the sandbox, or they make the program `Sampled`.
        pub stdin: Option<Ref<OpaqueBytes>>,
    }
 
-   pub struct Limits {
-       pub cpus: Cpus,                      // validated, >= 1
-       pub memory_bytes: MemoryBytes,       // validated, > 0
-       pub timeout_millis: TimeoutMillis,   // whole run
-       pub network: Network,                // Off unless granted
-   }
    pub enum Network { Off, On }
 
    #[aether_data::kind(name = "aether.workspace.run_result")]
    pub enum RunResult {
        Ok(Outcome),
        Refused(Refusal),
+       Exhausted(Resource),                 // the executor's allotment ran out; never reaches the program
    }
 
+   pub enum Resource { Memory, Time }
+
    pub struct Outcome {
-       pub steps: Vec<StepOutcome>,         // stops after the first non-zero exit or timeout
+       pub steps: Vec<StepOutcome>,         // stops after the first non-zero exit
        pub tree: Ref<Tree>,                 // /work after the last run step, minus `scratch`
    }
 
-   pub enum StepOutcome {
-       Exited   { exit_code: Option<i32>, stdout: Ref<OpaqueBytes>, stderr: Ref<OpaqueBytes>, tool: ToolRecord },
-       TimedOut {                           stdout: Ref<OpaqueBytes>, stderr: Ref<OpaqueBytes>, tool: ToolRecord },
+   pub struct StepOutcome {
+       pub exit_code: Option<i32>,          // None when the step died by signal
+       pub stdout: Ref<OpaqueBytes>,
+       pub stderr: Ref<OpaqueBytes>,
+       pub tool: ToolRecord,
    }
 
    pub struct ToolRecord { pub name: ToolName, pub path: Path, pub file: Ref<OpaqueBytes> }
@@ -113,7 +112,6 @@ the sandbox, or they make the program `Sampled`.
        PlatformMismatch { wanted: Platform, provided: Platform },
        ToolchainMismatch { tree_wants: RustToolchain, environment_provides: Option<RustToolchain> },
        UnknownTool(ToolName),
-       OverBudget,                          // limits exceed the whole host budget; never queued
        InputMissing(Digest),
    }
    ```
@@ -123,6 +121,15 @@ the sandbox, or they make the program `Sampled`.
    exit is an `Outcome`, not a refusal, exactly as ADR-0157 treats a
    completed run. The result carries no duration, host name, or timestamp,
    so two correct executors can produce the same digest.
+
+   The request names no resource amounts. Cores, memory, and the deadline
+   are how a run is provisioned, which decision 1 leaves to the executor
+   (decision 9). Running out of an allotment the executor chose says
+   nothing about the tree, so it is a fault about the attempt, never a
+   result: the `Workspace` binding turns `Exhausted` into the end of the
+   invocation, and the driver records `Fault { TimedOut }` for time or a
+   new `FaultReason::ResourceExhausted` for memory. The program never
+   observes it, and whether to retry is reactor policy.
 
 3. **An environment is a stored tree plus what it declares.**
 
@@ -158,9 +165,9 @@ the sandbox, or they make the program `Sampled`.
    | Tools, libc, linker, headers | `Environment::root`; nothing from the host is visible |
    | Paths baked into output | Every run's tree is mounted at `/work`; extra mounts at their declared paths |
    | Environment variables, locale, uid, hostname | Constructed: `Environment::env` then `Step::env`; fixed uid and hostname |
-   | Network | Off unless `Limits::network` is `On` |
+   | Network | Off unless `Run::network` is `On` |
    | Clock in outputs | `SOURCE_DATE_EPOCH` fixed; reading the real clock into output is Sampled |
-   | Parallelism | `Limits::cpus`; steps pass `-j` explicitly |
+   | Parallelism | The executor's allotment; the container sees only its assigned cores, and cargo's default job count follows the cores it can see |
    | Directory order | Trees are written out in canonical name order |
    | Randomness | Cannot be pinned; output that depends on it is Sampled |
    | Platform (arch, kernel) | Declared: `Environment::platform` |
@@ -205,15 +212,28 @@ the sandbox, or they make the program `Sampled`.
    | Endpoint | Actor `Config` (ADR-0090), with a per-OS default; never a `DOCKER_HOST` read |
    | Environment | Imported once per environment digest: the root tree streams as a filesystem tarball to `POST /images/create?fromSrc=-`, labelled with the environment digest. The label is checked before every use; a mismatch is refused. The daemon's image store is a rebuildable derivative of the journal. |
    | Run | Write the tree to a private host directory, then `containers/create` (argv from the tool table, `Env` constructed, `WorkingDir /work`, `NetworkMode none`, `NanoCpus`, `CpusetCpus`, `Memory` = `MemorySwap`, `PidsLimit`, read-only root, tmpfs scratch) → `start` → `wait` → `logs` → `remove` |
-   | Deadline | The actor kills the container at `timeout_millis`; the current step is `TimedOut` |
+   | Deadline | The actor kills the container at the allotment's deadline and replies `Exhausted(Time)` |
    | Output | stdout / stderr become blobs; `/work` minus `scratch` is snapshotted into the output tree; the private directory is deleted |
-   | Admission | The actor holds a host budget (cores, memory) from its `Config` and starts a run only when its `Limits` fit, otherwise queues it FIFO. A run is never dropped. Docker enforces each container's limits; it does not admit or queue. |
+   | Admission | Decision 9. Docker enforces each container's allotment (`CpusetCpus`, `NanoCpus`, `Memory` = `MemorySwap`, `PidsLimit`); it does not admit or queue. |
 
    Other backends (unprivileged namespaces, a cluster scheduler) are other
    actors answering the same `Run` / `RunResult` contract. Programs and the
    driver never learn which backend served a run.
 
-9. **Step 0 is a spike on main's machinery.** Before any workspace code, one
+9. **The executor provisions every run.** The actor alone chooses a run's
+   cores, memory, and deadline, and admits it against its host:
+
+   | Piece | Mechanism |
+   |---|---|
+   | Host budget | Actor `Config`: the cores it may hand out (a cpuset list), the memory it may reserve, headroom left for the host |
+   | Allotment | A `Config` default for a program never seen. After that, an estimate kept per (program name, environment) from observed peak memory and wall time (an EWMA), times headroom, clamped to the budget. The estimate is executor-local state: rebuildable, never in the journal, never an input to a result. |
+   | After exhaustion | The estimate for that key grows (memory doubles, the deadline grows), so a reactor's retry receives more without anyone asking for it |
+   | Admission | FIFO. A run starts when its allotment fits the free budget and is pinned to free cores; otherwise it waits. A run is never dropped. An allotment larger than the whole budget is clamped to it. |
+
+   No program can ask for resources. The only resource-shaped field a
+   program sets is `Run::network`, and that is a capability grant.
+
+10. **Step 0 is a spike on main's machinery.** Before any workspace code, one
    Sampled program runs a single
    `docker run --rm --network none -v <dir>:/work <image> cargo clippy …`
    through `aether.process`, proving the loop on the build host.
@@ -222,7 +242,8 @@ the sandbox, or they make the program `Sampled`.
 
 - Proof execution leaves Bloomery entirely. There are no lanes, no rolls,
   and no per-lane janitoring; the only execution state is the actor's
-  budget and the daemon's rebuildable image store.
+  budget, its per-program estimates, and the daemon's rebuildable image
+  store, none of which can change a result.
 - Every result names its tree, environment, and platform by digest, so the
   journal proves exactly which tools produced it.
 - `aether.workspace` is a new privileged surface. The actor holds a
@@ -237,18 +258,29 @@ the sandbox, or they make the program `Sampled`.
 
 Prerequisites (follow-on issues):
 
-1. **Blob bytes leave the SQLite file.** Artifact bytes move to files named
-   by digest; the table keeps the digest, size, and record time, and the
-   `citations` table is unchanged. A toolchain is about 54k files with a
-   few blobs over 100 MB.
-2. **Snapshot and materialize.** A directory → tree operation (imports, and
+1. **Snapshot and materialize.** A directory → tree operation (imports, and
    the output tree) and a tree → directory operation (writing inputs out),
    in canonical order.
-3. **Imports.** A native import path that snapshots a distro tarball and a
+2. **Imports.** A native import path that snapshots a distro tarball and a
    toolchain directory into trees once, and the Pure merge program that
    builds an `Environment` root.
 
 Deferred:
+
+- **Blob bytes out of the SQLite file.** The journal stays one SQLite file:
+  imports batch their inserts, and writing a tree out streams blobs through
+  SQLite's incremental blob I/O. Split to a per-journal folder of files
+  named by digest only on a measured need (write-lock contention during
+  imports, cheap forks, or one toolchain shared between journals), and only
+  together with an export / import pair (a database snapshot plus every blob
+  it reaches, re-hashed on import) so a journal still ships as one file, and
+  a garbage collection that walks the journal's heads through `citations`.
+  A blob folder shared between journals additionally needs a registry of
+  the journals using it and a lock against writes during a sweep.
+- **Shipping a journal is an explicit export.** The journal runs SQLite in
+  WAL mode, so a plain copy of the live file can miss committed
+  transactions. Export uses `VACUUM INTO` (or the online backup API) to
+  produce one consistent file.
 
 - Warm build state (golden target directories keyed by the tree that built
   them, a shared read-only unpacked environment). Allowed later only as
