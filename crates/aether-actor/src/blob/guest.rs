@@ -61,7 +61,7 @@ pub fn __mint_guest_blob(hash: BlobHash) -> Option<Blob> {
 
 /// Resolves a decode's tag-1 hashes by taking a hold on each. A decode that
 /// fails partway drops the values it already built, and their holds go back.
-pub(crate) struct GuestResolver;
+pub struct GuestResolver;
 
 impl wire::BlobResolver for GuestResolver {
     fn resolve(&mut self, hash: BlobHash) -> Result<Blob, wire::Error> {
