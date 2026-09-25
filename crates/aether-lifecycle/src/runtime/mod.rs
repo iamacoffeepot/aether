@@ -660,11 +660,11 @@ mod tests {
         // registered id at receipt; the purge takes the same raw ids.
         use aether_substrate::mail::registry::noop_handler;
         use aether_substrate::mail::{MailboxId, Source};
-        use aether_substrate::testing::{boot_authority, fresh_substrate};
+        use aether_substrate::testing::{fresh_substrate, registered_ref};
 
         let (registry, mailer) = fresh_substrate();
-        let dropped = registry.register_inbox(&boot_authority(), "test.lifecycle.dropped", noop_handler());
-        let survivor = registry.register_inbox(&boot_authority(), "test.lifecycle.survivor", noop_handler());
+        let dropped = registered_ref(&registry, "test.lifecycle.dropped", noop_handler());
+        let survivor = registered_ref(&registry, "test.lifecycle.survivor", noop_handler());
 
         let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
         let render = <Render as Kind>::ID;
@@ -679,17 +679,27 @@ mod tests {
             );
             assert!(matches!(reply, LifecycleSubscribeResult::Ok), "a registered mailbox proves and subscribes");
         };
-        subscribe(render, dropped);
-        subscribe(render, survivor);
-        subscribe(present, dropped);
+        subscribe(render, dropped.id());
+        subscribe(render, survivor.id());
+        subscribe(present, dropped.id());
 
         let mut ctx = NativeCtx::new_for_actor(&transport, Source::NONE, None, None);
-        LifecycleCapability::on_unsubscribe_all(&mut cap, &mut ctx, LifecycleUnsubscribeAll { mailbox: dropped.0 });
+        LifecycleCapability::on_unsubscribe_all(
+            &mut cap,
+            &mut ctx,
+            LifecycleUnsubscribeAll { mailbox: dropped.id().0 },
+        );
 
-        assert!(!subscribed(&cap, render, DataMailboxId(dropped.0)), "dropped mailbox must leave the Render stage");
-        assert!(!subscribed(&cap, present, DataMailboxId(dropped.0)), "dropped mailbox must leave the Present stage");
         assert!(
-            subscribed(&cap, render, DataMailboxId(survivor.0)),
+            !subscribed(&cap, render, DataMailboxId(dropped.id().0)),
+            "dropped mailbox must leave the Render stage"
+        );
+        assert!(
+            !subscribed(&cap, present, DataMailboxId(dropped.id().0)),
+            "dropped mailbox must leave the Present stage"
+        );
+        assert!(
+            subscribed(&cap, render, DataMailboxId(survivor.id().0)),
             "co-subscribers on a shared stage must survive the purge"
         );
     }
@@ -705,13 +715,12 @@ mod tests {
     fn explicit_subscribe_proves_the_mailbox_and_refuses_an_unproven_one() {
         use aether_substrate::mail::registry::noop_handler;
         use aether_substrate::mail::{MailboxId, Source};
-        use aether_substrate::testing::{boot_authority, fresh_substrate};
+        use aether_substrate::testing::{drop_ref, fresh_substrate, registered_ref};
 
         let (registry, mailer) = fresh_substrate();
-        let authority = boot_authority();
-        let live = registry.register_inbox(&authority, "test.lifecycle.live", noop_handler());
-        let gone = registry.register_inbox(&authority, "test.lifecycle.gone", noop_handler());
-        registry.drop_mailbox(&authority, gone).expect("test setup: the second inbox drops");
+        let live = registered_ref(&registry, "test.lifecycle.live", noop_handler());
+        let gone = registered_ref(&registry, "test.lifecycle.gone", noop_handler());
+        drop_ref(&registry, gone);
         let never = MailboxId(0xDEAD_BEEF);
 
         let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
@@ -726,12 +735,12 @@ mod tests {
             )
         };
 
-        assert!(matches!(subscribe(live), LifecycleSubscribeResult::Ok), "a live mailbox proves and subscribes");
-        let dropped_reply = subscribe(gone);
+        assert!(matches!(subscribe(live.id()), LifecycleSubscribeResult::Ok), "a live mailbox proves and subscribes");
+        let dropped_reply = subscribe(gone.id());
         let unknown_reply = subscribe(never);
 
-        assert!(subscribed(&cap, render, DataMailboxId(live.0)), "the proven subscriber holds the live id");
-        assert!(!subscribed(&cap, render, DataMailboxId(gone.0)), "a dropped mailbox is not subscribed");
+        assert!(subscribed(&cap, render, DataMailboxId(live.id().0)), "the proven subscriber holds the live id");
+        assert!(!subscribed(&cap, render, DataMailboxId(gone.id().0)), "a dropped mailbox is not subscribed");
         assert!(!subscribed(&cap, render, DataMailboxId(never.0)), "an unregistered mailbox is not subscribed");
         assert_eq!(cap.subscribers[&render].len(), 1, "only the proven subscriber reached the stage set");
 
@@ -788,7 +797,7 @@ mod tests {
         use aether_substrate::actor::native::Envelope;
         use aether_substrate::mail::Source;
         use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, noop_handler};
-        use aether_substrate::testing::{boot_authority, fresh_substrate, registered_binding};
+        use aether_substrate::testing::{fresh_substrate, registered_binding, registered_ref};
         use aether_substrate::{BootError, NativeActor, NativeInitCtx};
 
         struct Caller;
@@ -819,7 +828,7 @@ mod tests {
             dispatch.discharge();
             let _ = tx.send(captured);
         });
-        registry.register_inbox(&boot_authority(), <LifecycleCapability as Addressable>::NAMESPACE, handler);
+        registered_ref(&registry, <LifecycleCapability as Addressable>::NAMESPACE, handler);
 
         // The calling actor: a transport over a registered inbox, so its
         // sends carry `Source::Component` of that inbox's mailbox.

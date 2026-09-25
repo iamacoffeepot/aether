@@ -32,18 +32,20 @@ fn relay_running_prefix_owns_route_order_ahead_of_lease_close() {
     let order_for_handler = Arc::clone(&order);
     let (entered_sender, entered_receiver) = crossbeam_channel::bounded(1);
     let (release_sender, release_receiver) = crossbeam_channel::bounded(1);
-    let target = registry.register_inline(
-        &auth(),
-        "relay-close-order",
-        Arc::new(move |dispatch: MailDispatch<'_>| {
-            let value = dispatch.payload[0];
-            if value == 1 {
-                entered_sender.send(()).expect("ordering test waits for the first continuation");
-                release_receiver.recv().expect("ordering test releases the running prefix");
-            }
-            order_for_handler.lock().unwrap().push(value);
-        }),
-    );
+    let target = registry
+        .register_inline(
+            &auth(),
+            "relay-close-order",
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                let value = dispatch.payload[0];
+                if value == 1 {
+                    entered_sender.send(()).expect("ordering test waits for the first continuation");
+                    release_receiver.recv().expect("ordering test releases the running prefix");
+                }
+                order_for_handler.lock().unwrap().push(value);
+            }),
+        )
+        .id();
     mailer.relay_mail(Mail::new(target, KindId(1), vec![1], 1));
     let running = thread::spawn(move || drainable.run_cycle(BatchBudget::standard()));
     entered_receiver.recv_timeout(Duration::from_millis(100)).expect("first continuation starts routing");
@@ -80,13 +82,15 @@ fn relay_admits_owner_committed_continuations_past_capacity_in_order() {
     let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities { owner: 64, relay: 1 });
     let delivered = Arc::new(Mutex::new(Vec::new()));
     let delivered_for_handler = Arc::clone(&delivered);
-    let target = registry.register_inline(
-        &auth(),
-        "relay-past-capacity",
-        Arc::new(move |dispatch: MailDispatch<'_>| {
-            delivered_for_handler.lock().unwrap().push(dispatch.payload[0]);
-        }),
-    );
+    let target = registry
+        .register_inline(
+            &auth(),
+            "relay-past-capacity",
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                delivered_for_handler.lock().unwrap().push(dispatch.payload[0]);
+            }),
+        )
+        .id();
     for payload in 1u8..=3 {
         mailer.relay_mail(Mail::new(target, KindId(1), vec![payload], 1));
     }

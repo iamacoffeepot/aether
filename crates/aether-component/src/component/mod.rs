@@ -114,7 +114,7 @@ mod runtime;
 mod tests {
     use aether_actor::{Addressable, Embedded};
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::registered_ref;
 
     use super::ComponentHostCapability;
     use crate::trampoline::WasmTrampoline;
@@ -149,9 +149,8 @@ mod tests {
         let typed = WasmTrampoline::resolve(ComponentHostCapability::resolve(0, ()).0, name);
         let canonical = format!("{}/{}:{name}", ComponentHostCapability::NAMESPACE, WasmTrampoline::NAMESPACE);
         let registry = Registry::new();
-        registry
-            .try_register_inbox_with_id(&boot_authority(), typed, canonical.clone(), noop_handler())
-            .expect("register canonical trampoline mailbox");
+        let live = registered_ref(&registry, &canonical, noop_handler());
+        assert_eq!(live.id(), typed, "the fixture stands the route at the typed resolver's position");
 
         for address in [canonical.as_str(), "aether.component/:camera"] {
             let address = aether_data::ActorPath::new(address).expect("fixture is a well-formed actor path");

@@ -5,12 +5,11 @@ mod actor_support;
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 
-use aether_actor::ActorRef;
+use aether_actor::{ActorRef, ErasedActorRef};
 use aether_bloomery_journal::{Batch, Journal, JournalActor, Ref, Seq};
 use aether_bloomery_kinds::{
     Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult, Publish, PublishResult, RecordedHeadMove,
 };
-use aether_data::MailboxId;
 use aether_substrate::Subname;
 use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::mail::registry::{OwnedDispatch, Registry};
@@ -45,7 +44,7 @@ struct Fixture {
     registry: Arc<Registry>,
     _chassis: PassiveChassis<TestChassis>,
     actor: ActorRef<JournalActor>,
-    caller: MailboxId,
+    caller: ErasedActorRef,
     replies: mpsc::Receiver<OwnedDispatch>,
     journal: Journal,
     note: Ref<Note>,

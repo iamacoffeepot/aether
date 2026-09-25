@@ -1022,7 +1022,7 @@ mod tests {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, MailDispatch, OwnedDispatch, noop_handler};
     use aether_substrate::testing::{
-        bare_substrate, boot_authority, boot_test_chassis_with, decode_session_reply, fresh_substrate,
+        bare_substrate, boot_authority, boot_test_chassis_with, decode_session_reply, drop_ref, fresh_substrate,
         manual_dispatch_ctx, registered_binding, registered_ref, session_sender, test_mailer_and_rx, token_root,
         unrouted_binding,
     };
@@ -1101,11 +1101,12 @@ mod tests {
         ));
         assert!(state.subscribers.recipients(WindowId(1), Key::ID).is_empty());
 
-        let dropped = registry.register_inline(
+        let subscriber = registry.register_inline(
             &boot_authority(),
             "test.window.dropped",
             Arc::new(|_dispatch: MailDispatch<'_>| {}),
         );
+        let dropped = subscriber.id();
         assert!(matches!(
             DesktopWindowCapability::on_subscribe(
                 &mut state,
@@ -1114,8 +1115,7 @@ mod tests {
             ),
             SubscribeWindowResult::Ok
         ));
-        let subscriber = ctx.resolve_live(dropped).expect("the subscriber proves while it is still live");
-        registry.drop_mailbox(&boot_authority(), dropped).expect("drop subscriber mailbox");
+        drop_ref(&registry, subscriber);
 
         assert!(matches!(
             DesktopWindowCapability::on_unsubscribe(

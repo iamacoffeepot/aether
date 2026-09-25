@@ -189,15 +189,12 @@ mod tests {
     use aether_data::{KIND_DOMAIN, MAILBOX_DOMAIN, THREAD_DOMAIN};
     use aether_substrate::Registry;
     use aether_substrate::mail::registry::noop_handler;
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::registered_ref;
 
     /// The id the engine's registry assigns `aether.audio`: the position the
     /// reverse map has to name, taken from a registration rather than a hash.
     fn registered_audio_id() -> u64 {
-        Registry::new()
-            .try_register_inbox(&boot_authority(), "aether.audio", noop_handler())
-            .expect("a fresh registry has no conflicting mailbox")
-            .0
+        registered_ref(&Registry::new(), "aether.audio", noop_handler()).id().0
     }
 
     /// Build a synthetic manifest with a `NameEntry` (a mailbox name + a

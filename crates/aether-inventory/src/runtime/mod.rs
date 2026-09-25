@@ -241,7 +241,7 @@ mod tests {
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::mail::{Source, SourceAddr};
     use aether_substrate::runtime::thread_name::{register, resolve_runtime};
-    use aether_substrate::testing::{boot_authority, registered_ref, unrouted_binding};
+    use aether_substrate::testing::{registered_ref, unrouted_binding};
     use std::sync::Arc;
 
     const ADDRESS_TEST_ROOT: &str = "aether.test.inventory_address_root";
@@ -413,11 +413,8 @@ mod tests {
         // A mailbox registered at runtime, held as the tagged id its
         // registration returns. No link-time manifest carries this name, so
         // the engine `Registry` is the only table that can reverse it.
-        let component_tag = fix
-            .registry
-            .try_register_inbox(&boot_authority(), "aether.inventory-test.runtime-probe", noop_handler())
-            .expect("fresh registry has no conflicting mailbox")
-            .to_string();
+        let component_tag =
+            registered_ref(&fix.registry, "aether.inventory-test.runtime-probe", noop_handler()).id().to_string();
 
         let mut ctx = session_ctx(&fix.transport);
         let result = InventoryCapability::on_resolve(

@@ -291,7 +291,7 @@ pub struct OwnedDispatch {
     /// Set from the `recipient` parameter the two production mint sites
     /// already pass; survives release builds (where the debug-only
     /// `ObligationGuard` that previously held it is compiled out).
-    pub recipient: MailboxId,
+    pub(crate) recipient: MailboxId,
     /// ADR-0094 debug-only settlement-obligation guard. Present only
     /// under `#[cfg(debug_assertions)]`; release builds carry no field
     /// (byte-identical to the pre-ADR-0094 layout). Disarmed via

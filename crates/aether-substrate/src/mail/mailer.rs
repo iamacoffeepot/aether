@@ -1070,7 +1070,7 @@ mod tests {
                 ));
             }),
         );
-        (recorder_id, recorded)
+        (recorder_id.id(), recorded)
     }
 
     /// Issue 963: `aether.log.tail` to an unregistered mailbox (no
@@ -1464,7 +1464,7 @@ mod tests {
                     let (registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
                     let sink = CapturingSink::new();
-                    let id = registry.register_inline(&boot_authority(), "test.meta.sink", sink.inline_handler());
+                    let id = registry.register_inline(&boot_authority(), "test.meta.sink", sink.inline_handler()).id();
                     mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(
                         Some(mail_id),
                         Some(mail_id),

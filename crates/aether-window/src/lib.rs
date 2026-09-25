@@ -187,14 +187,13 @@ mod tests {
         use aether_data::name_inventory::{ParamKind, child_entries, template_entries};
         use aether_substrate::Registry;
         use aether_substrate::mail::registry::noop_handler;
-        use aether_substrate::testing::boot_authority;
+        use aether_substrate::testing::registered_ref;
 
         let typed = WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "main");
         let canonical = "aether.window/aether.window.instance:main";
         let registry = Registry::new();
-        registry
-            .try_register_inbox_with_id(&boot_authority(), typed, canonical, noop_handler())
-            .expect("register canonical live window mailbox");
+        let live = registered_ref(&registry, canonical, noop_handler());
+        assert_eq!(live.id(), typed, "the fixture stands the route at the typed resolver's position");
 
         for address in [canonical, "aether.window/:main"] {
             let address = aether_data::ActorPath::new(address).expect("fixture is a well-formed actor path");

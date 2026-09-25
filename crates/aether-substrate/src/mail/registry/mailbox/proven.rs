@@ -390,7 +390,8 @@ mod tests {
     fn resolve_live_proves_an_inline_route_and_splits_its_two_refusals() {
         let registry = Registry::new();
         let authority = boot_authority();
-        let inline = registry.register_inline(&authority, "test.proven.inline", Arc::new(|_: MailDispatch<'_>| {}));
+        let inline =
+            registry.register_inline(&authority, "test.proven.inline", Arc::new(|_: MailDispatch<'_>| {})).id();
 
         assert!(registry.resolve_live(inline).is_ok(), "an inline-handler mailbox is provable");
 

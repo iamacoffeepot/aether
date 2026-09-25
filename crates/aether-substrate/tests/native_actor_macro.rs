@@ -34,7 +34,7 @@ use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::mail::MailRef;
 use aether_substrate::mail::registry::{DispatchParts, InboxHandler, OwnedDispatch};
 use aether_substrate::runtime::lifecycle::{FatalAbortRecord, PanicAborter, RecordingAborter};
-use aether_substrate::testing::{TestChassis, bare_substrate, boot_authority, unrouted_binding};
+use aether_substrate::testing::{TestChassis, bare_substrate, registered_ref, unrouted_binding};
 use aether_substrate::{
     Addressable, BootError, Builder, Dispatch, Erased, Manual, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis,
     Registry,
@@ -278,8 +278,7 @@ fn macro_pending_request_borrow_completion_replies_once() {
     let obs = DeferredObs::new();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller =
-        registry.register_inbox(&boot_authority(), "test.macro_native_actor.deferred_caller", forward_to(reply_tx));
+    let caller = registered_ref(&registry, "test.macro_native_actor.deferred_caller", forward_to(reply_tx));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<DeferredReplyCap>(obs.clone())
@@ -288,7 +287,7 @@ fn macro_pending_request_borrow_completion_replies_once() {
 
     // The inbound names the caller as its reply target, so the deferred
     // reply routes back there.
-    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 55);
+    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller.id()), 55);
     push_envelope_replying_to(
         &registry,
         chassis.actor_ref::<DeferredReplyCap>().erase(),
@@ -323,18 +322,14 @@ fn macro_borrow_task_no_reply_releases_without_replying() {
     let obs = DeferredObs::new();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller = registry.register_inbox(
-        &boot_authority(),
-        "test.macro_native_actor.deferred_silent_caller",
-        forward_to(reply_tx),
-    );
+    let caller = registered_ref(&registry, "test.macro_native_actor.deferred_silent_caller", forward_to(reply_tx));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<DeferredReplyCap>(obs.clone())
         .build_passive()
         .expect("deferred-reply cap boots");
 
-    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 9);
+    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller.id()), 9);
     push_envelope_replying_to(
         &registry,
         chassis.actor_ref::<DeferredReplyCap>().erase(),
@@ -1391,11 +1386,10 @@ fn manual_handler_replies_through_ctx() {
     let (registry, mailer) = bare_substrate();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller =
-        registry.register_inbox(&boot_authority(), "test.macro_native_actor.manual_caller", forward_to(reply_tx));
+    let caller = registered_ref(&registry, "test.macro_native_actor.manual_caller", forward_to(reply_tx));
 
     let binding = unrouted_binding(&mailer);
-    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 91);
+    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller.id()), 91);
 
     let mut cap = ManualReplyCap;
     {

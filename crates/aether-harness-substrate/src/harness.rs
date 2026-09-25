@@ -1836,7 +1836,7 @@ mod tests {
                 "subscribe",
                 HarnessOp::send_and_settle(
                     &tb.actor_ref::<aether_lifecycle::LifecycleCapability>(),
-                    &LifecycleSubscribe { stage: Tick::ID.0, mailbox: subscriber_mbox.0 },
+                    &LifecycleSubscribe { stage: Tick::ID.0, mailbox: subscriber_mbox.id().0 },
                 ),
             ),
             ("advance", HarnessOp::advance(1)),
@@ -1924,7 +1924,7 @@ mod tests {
                 "subscribe_shutdown",
                 HarnessOp::send_and_settle(
                     &tb.actor_ref::<aether_lifecycle::LifecycleCapability>(),
-                    &LifecycleSubscribe { stage: <Shutdown as DataKind>::ID.0, mailbox: observer_mailbox.0 },
+                    &LifecycleSubscribe { stage: <Shutdown as DataKind>::ID.0, mailbox: observer_mailbox.id().0 },
                 ),
             ),
             ("quit", HarnessOp::send_and_settle(&tb.actor_ref::<aether_lifecycle::LifecycleCapability>(), &Quit {})),

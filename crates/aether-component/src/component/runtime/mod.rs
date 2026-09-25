@@ -481,7 +481,7 @@ mod tests {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::{boot_authority, registered_binding};
+    use aether_substrate::testing::{boot_authority, registered_binding, registered_ref, try_registered_ref};
 
     use super::*;
 
@@ -533,7 +533,7 @@ mod tests {
             matches!(rx.try_recv(), Ok(EgressEvent::MailboxesChanged { descriptors }) if descriptors.len() == initial_mailbox_count)
         );
 
-        registry.register_inbox(&boot_authority(), "test.component.inventory.mailbox", noop_handler());
+        registered_ref(&registry, "test.component.inventory.mailbox", noop_handler());
         state.refresh_registry_inventory();
         assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { descriptors }) if descriptors.len() == 1));
         assert!(
@@ -549,9 +549,7 @@ mod tests {
         assert!(
             matches!(rx.try_recv(), Ok(EgressEvent::MailboxesChanged { descriptors }) if descriptors.len() == initial_mailbox_count + 1)
         );
-        assert!(
-            registry.try_register_inbox(&boot_authority(), "test.component.inventory.mailbox", noop_handler()).is_err()
-        );
+        assert!(try_registered_ref(&registry, "test.component.inventory.mailbox", noop_handler()).is_err());
         state.refresh_registry_inventory();
         assert!(rx.try_recv().is_err());
         state.refresh_registry_inventory();

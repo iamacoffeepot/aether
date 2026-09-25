@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+use aether_actor::ErasedActorRef;
+
 use crate::mail::MailboxId;
 use crate::mail::registry::authority::BootAuthority;
 use crate::mail::registry::canonical_mailbox_id;
@@ -78,7 +80,7 @@ impl Registry {
     /// Panics if the inner routing lock is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
-    pub fn drop_mailbox(&self, authority: &BootAuthority, id: MailboxId) -> Result<String, DropError> {
+    pub(crate) fn drop_mailbox(&self, authority: &BootAuthority, id: MailboxId) -> Result<String, DropError> {
         match self.apply_one(authority, RegistryEffect::DropMailbox(id)) {
             Ok(RegistryApplied::Dropped(name)) => Ok(name),
             Err(RegistryEffectError::Drop(error)) => Err(error),
@@ -124,7 +126,11 @@ impl Registry {
     /// Direct write path — takes a [`BootAuthority`] so only the boot
     /// claim passes can name it (iamacoffeepot/aether#4161). A handler
     /// stages a `RegistryEffect` through the ADR-0165 owner instead.
-    pub fn register_inbox(
+    ///
+    /// Only the crate's tests and its `testing` fixtures register a
+    /// panicking inbox; production claims go through [`Self::try_register_inbox`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn register_inbox(
         &self,
         authority: &BootAuthority,
         name: impl Into<String>,
@@ -154,7 +160,7 @@ impl Registry {
     /// Panics if the inner routing lock is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
-    pub fn try_register_inbox(
+    pub(crate) fn try_register_inbox(
         &self,
         authority: &BootAuthority,
         name: impl Into<String>,
@@ -173,7 +179,7 @@ impl Registry {
     /// embedder eager spawn can name it (iamacoffeepot/aether#4156). A
     /// handler stages a `RegistryEffect` through the ADR-0165 owner
     /// instead.
-    pub fn try_register_inbox_with_id(
+    pub(crate) fn try_register_inbox_with_id(
         &self,
         authority: &BootAuthority,
         id: MailboxId,
@@ -198,7 +204,7 @@ impl Registry {
     /// the envelope is picked up. Settlement subscribers wake on
     /// the first `Finished` — before the actual work runs — so
     /// callers proceed past the gate while the dispatcher is still
-    /// processing the mail. Fix: switch to [`Self::register_inbox`].
+    /// processing the mail. Fix: switch to `Self::register_inbox`.
     ///
     /// The dispatch-type asymmetry helps catch this — Inline
     /// handlers receive borrowed
@@ -215,18 +221,23 @@ impl Registry {
     /// claim passes and the chassis diagnostic sinks can name it
     /// (iamacoffeepot/aether#4161). A handler stages a `RegistryEffect`
     /// through the ADR-0165 owner instead.
+    ///
+    /// Returns the proven reference to the new route (ADR-0230), proven by
+    /// the same liveness read a handler's `ctx.resolve_live` takes; the
+    /// position stays inside the crate.
     pub fn register_inline(
         &self,
         authority: &BootAuthority,
         name: impl Into<String>,
         handler: Arc<dyn InlineHandler>,
-    ) -> MailboxId {
-        match self.insert(authority, name.into(), MailboxEntry::Inline(handler)) {
+    ) -> ErasedActorRef {
+        let id = match self.insert(authority, name.into(), MailboxEntry::Inline(handler)) {
             Ok(id) => id,
             Err(NameConflict { name }) => {
                 panic!("mailbox name already registered: {name}")
             }
-        }
+        };
+        self.resolve_live(id).expect("a freshly registered inline route is live")
     }
 
     /// Install a `Pooled` actor's [`SeizeHandle`]
