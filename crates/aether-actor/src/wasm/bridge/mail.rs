@@ -125,7 +125,7 @@ pub fn reply_correlation() -> u64 {
 
 /// ADR-0097: stage a sibling-spawn request and return the new
 /// instance's `MailboxId`. `tag` is the sibling type's actor-type
-/// tag (`mailbox_id_from_name(NAMESPACE)`); `is_counter` selects
+/// tag (`ActorTypeTag::of::<A>()`); `is_counter` selects
 /// `Subname::Counter` (the host appends a monotonic discriminator)
 /// vs a caller-supplied name; `subname` is the full prefixed subname
 /// for `Named` or the type-namespace prefix for `Counter`; `config`

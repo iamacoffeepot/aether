@@ -215,10 +215,11 @@ recipe).
   full address `LoadResult.path` hands back.
 - **Bare names** (`"camera"`, `"player"`) are not registered and warn-drop
   silently. If mail seems to vanish, check the address first.
-- **Never hash a name into a `MailboxId` yourself.** `mailbox_id_from_name`,
-  `MailboxId::from_name` and `mailbox_id_from_path` are all
-  disallowed by `clippy.toml`, because a hand-computed address freezes the
-  target's registration shape into the caller. Boot and driver code that has no
+- **Never hash a name into a `MailboxId` yourself.** The name hashes are
+  private to `aether-data`, a written path resolves through the host registry,
+  which folds it node by node, and `MailboxId::from_name`, the one hash
+  spelling left, is disallowed by `clippy.toml`, because a hand-computed
+  address freezes the target's registration shape into the caller. Boot and driver code that has no
   ctx to resolve through still doesn't need them: `aether_actor::root_mailbox::<C>()`
   returns a root-pinned capability's mailbox, and its `C: Root` +
   `Resolver = One` bound is a compile error for an actor whose address is only

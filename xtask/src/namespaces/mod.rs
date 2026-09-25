@@ -1,7 +1,8 @@
 //! `cargo xtask namespaces` — the hand-*naming* check.
 //!
-//! `clippy.toml` already disallows hand-*hashing* an address
-//! (`mailbox_id_from_name` / `_pair`), but the step before it is unguarded: an
+//! Hand-*hashing* an address is already closed (the name hashes are private to
+//! `aether-data`, and `clippy.toml` disallows `MailboxId::from_name`), but the
+//! step before it is unguarded: an
 //! actor's `NAMESPACE` written out again as a `&str` somewhere else. The
 //! duplicate compiles, resolves, and warn-drops if the two ever diverge —
 //! there is no compile error to catch it, because the parameter that receives

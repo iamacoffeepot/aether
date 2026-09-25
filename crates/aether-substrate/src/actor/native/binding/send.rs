@@ -64,7 +64,6 @@ impl NativeBinding {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
-#[allow(clippy::disallowed_methods)] // test scaffolding — the flat hash is the negative control a send must miss
 mod tests {
     use super::super::fixture::forward_to_envelope_sender;
     use super::super::identity::BindingIdentity;

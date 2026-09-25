@@ -64,13 +64,13 @@ pub mod compose;
 ///
 /// ADR-0114 §5: the slot also records the metadata a `replace_component`
 /// swap needs to reconstruct the child in the fresh instance — the
-/// actor-type tag (`mailbox_id_from_name(NAMESPACE)`, the same tag
+/// actor-type tag (`ActorTypeTag::of::<A>()`, the same tag
 /// `init_typed_p32` matches a reconstruct on) plus the resolved
 /// `full_subname` / `is_counter` the alias id was folded from, so the
 /// rehydrate path re-folds the identical alias and re-`init`s the child
 /// by type.
 struct InlineSlot {
-    /// `mailbox_id_from_name(A::NAMESPACE)` — the actor-type tag the
+    /// `ActorTypeTag::of::<A>()` — the actor-type tag the
     /// rehydrate reconstruct matches against the module's exported types.
     type_tag: u64,
     /// The resolved discriminator the alias id was folded from (a counter
@@ -107,7 +107,7 @@ struct InlineSlot {
 pub(crate) struct InlineChildMeta {
     /// The child's alias [`MailboxId`] (the registry key).
     pub(crate) id: MailboxId,
-    /// The actor-type tag — `mailbox_id_from_name(NAMESPACE)`.
+    /// The actor-type tag — `ActorTypeTag::of::<A>()`.
     pub(crate) type_tag: u64,
     /// The resolved subname the alias id was folded from.
     pub(crate) full_subname: String,

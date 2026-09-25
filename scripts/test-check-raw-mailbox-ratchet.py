@@ -91,21 +91,21 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(output, [])
 
     def test_added_call_site_fails_with_rise_message(self) -> None:
-        self.repo.write("crates/example/src/lib.rs", "fn f(x: Actor) {\n    mailbox_id_from_path(y);\n}\n")
+        self.repo.write("crates/example/src/lib.rs", "fn f(ctx: Ctx) {\n    send_to(&peer.id(), &poke);\n}\n")
         self.repo.write_baseline(zero_baseline())
-        self.repo.commit("new mailbox_id_from_path( call site")
+        self.repo.commit("new <recipient>.id() call site at a send")
 
         status, output = self.repo.run()
 
         self.assertEqual(status, 1)
         text = "\n".join(output)
-        self.assertIn("raw-mailbox ratchet: `mailbox_id_from_path(` — baseline 0, head 1 (+1)", text)
+        self.assertIn("raw-mailbox ratchet: `<recipient>.id() at a send` — baseline 0, head 1 (+1)", text)
         self.assertIn("an old-door count may not rise during expand and migrate", text)
         self.assertIn("Raising the baseline is also a failure.", text)
 
     def test_removed_call_site_fails_naming_the_baseline_edit(self) -> None:
         baseline = zero_baseline()
-        baseline["mailbox_id_from_path("] = 2
+        baseline["<recipient>.id() at a send"] = 2
         self.repo.write("crates/example/src/lib.rs", "fn f() {}\n")
         self.repo.write_baseline(baseline)
         self.repo.commit("call sites already gone")
@@ -114,48 +114,48 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(status, 1)
         text = "\n".join(output)
-        self.assertIn("raw-mailbox ratchet: `mailbox_id_from_path(` — baseline 2, head 0 (-2)", text)
-        self.assertIn('Set "mailbox_id_from_path(" to 0 in scripts/raw-mailbox-baseline.json, in this same change.', text)
+        self.assertIn("raw-mailbox ratchet: `<recipient>.id() at a send` — baseline 2, head 0 (-2)", text)
+        self.assertIn('Set "<recipient>.id() at a send" to 0 in scripts/raw-mailbox-baseline.json, in this same change.', text)
 
     def test_absent_row_reads_as_zero_baseline(self) -> None:
         baseline = zero_baseline()
-        del baseline["mailbox_id_from_name("]
+        del baseline["<recipient>.id() at a send"]
         self.repo.write("crates/example/src/lib.rs", "fn f() {}\n")
         self.repo.write_baseline(baseline)
-        self.repo.commit("no mailbox_id_from_name( row, no mailbox_id_from_name( sites")
+        self.repo.commit("no <recipient>.id() row, no <recipient>.id() sites")
 
         status, output = self.repo.run()
         self.assertEqual(status, 0)
         self.assertEqual(output, [])
 
-        self.repo.write("crates/example/src/lib.rs", "fn f(ctx: Ctx) {\n    mailbox_id_from_name(m);\n}\n")
-        self.repo.commit("one mailbox_id_from_name( site with no baseline row")
+        self.repo.write("crates/example/src/lib.rs", "fn f(ctx: Ctx) {\n    send_to(&peer.id(), &poke);\n}\n")
+        self.repo.commit("one <recipient>.id() site with no baseline row")
 
         status, output = self.repo.run()
         self.assertEqual(status, 1)
         text = "\n".join(output)
-        self.assertIn("raw-mailbox ratchet: `mailbox_id_from_name(` — baseline 0, head 1 (+1)", text)
+        self.assertIn("raw-mailbox ratchet: `<recipient>.id() at a send` — baseline 0, head 1 (+1)", text)
 
     def test_one_way_rule_fails_when_head_baseline_exceeds_base(self) -> None:
         baseline = zero_baseline()
-        baseline["mailbox_id_from_path("] = 1
-        self.repo.write("crates/example/src/lib.rs", "fn f(x: Actor) {\n    mailbox_id_from_path(y);\n}\n")
+        baseline["<recipient>.id() at a send"] = 1
+        self.repo.write("crates/example/src/lib.rs", "fn f(ctx: Ctx) {\n    send_to(&peer.id(), &poke);\n}\n")
         self.repo.write_baseline(baseline)
-        base_sha = self.repo.commit("base: one mailbox_id_from_path( site, baseline 1")
+        base_sha = self.repo.commit("base: one <recipient>.id() site, baseline 1")
 
-        baseline["mailbox_id_from_path("] = 2
+        baseline["<recipient>.id() at a send"] = 2
         self.repo.write(
             "crates/example/src/lib.rs",
-            "fn f(x: Actor) {\n    mailbox_id_from_path(y);\n    mailbox_id_from_path(z);\n}\n",
+            "fn f(ctx: Ctx) {\n    send_to(&peer.id(), &poke);\n    send_to(&other.id(), &poke);\n}\n",
         )
         self.repo.write_baseline(baseline)
-        self.repo.commit("head: two mailbox_id_from_path( sites, baseline raised to match")
+        self.repo.commit("head: two <recipient>.id() sites, baseline raised to match")
 
         status, output = self.repo.run("--base", base_sha)
 
         self.assertEqual(status, 1)
         text = "\n".join(output)
-        self.assertIn(f"raw-mailbox ratchet: `mailbox_id_from_path(` — baseline raised 1 -> 2 against {base_sha}", text)
+        self.assertIn(f"raw-mailbox ratchet: `<recipient>.id() at a send` — baseline raised 1 -> 2 against {base_sha}", text)
         self.assertIn("The ratchet is one-way. Restore the baseline and drop the new call sites.", text)
 
     def test_base_without_baseline_file_bootstraps(self) -> None:
@@ -188,9 +188,9 @@ class ScannerTests(unittest.TestCase):
     def test_comment_stripped_attribute_counted(self) -> None:
         self.repo.write(
             "crates/example/src/lib.rs",
-            "fn f(x: Actor) {\n"
-            "    // mailbox_id_from_path(y); commented out, must not count\n"
-            "    mailbox_id_from_path(y); // a real call\n"
+            "fn f(ctx: Ctx) {\n"
+            "    // send_to(&peer.id(), &poke); commented out, must not count\n"
+            "    send_to(&peer.id(), &poke); // a real call\n"
             "}\n"
             "#[allow(clippy::disallowed_methods)] // aether-suppression-request: legacy\n"
             "fn g() {}\n",
@@ -199,7 +199,7 @@ class ScannerTests(unittest.TestCase):
 
         counts = self.repo.count()
 
-        self.assertEqual(counts["mailbox_id_from_path("], 1)
+        self.assertEqual(counts["<recipient>.id() at a send"], 1)
         self.assertEqual(counts["clippy::disallowed_methods"], 1)
 
     def test_malformed_or_non_integer_baseline_is_an_operational_error(self) -> None:
@@ -212,7 +212,7 @@ class ScannerTests(unittest.TestCase):
 
         self.repo.write(
             scanner.BASELINE_RELATIVE_PATH,
-            json.dumps({"note": "bad", "patterns": {"mailbox_id_from_path(": "3"}}),
+            json.dumps({"note": "bad", "patterns": {"clippy::disallowed_methods": "3"}}),
         )
         self.repo.commit("non-integer baseline count")
 
