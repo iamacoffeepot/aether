@@ -21,7 +21,12 @@
 //! Every typed verb encodes through the envelope encoder (ADR-0238 decision
 //! 3): each `Blob` field is shared through the engine store and its entry
 //! rides the envelope, so an in-process recipient reads the same bytes. The
-//! raw verbs carry pre-encoded bytes and attach nothing.
+//! raw verbs carry pre-encoded bytes, which may already hold tag-1 fields
+//! when a handler forwards what it received. While the handled mail has
+//! attachments, a raw verb resolves each such hash against them and attaches
+//! the entry, and a hash they do not carry refuses the send (resolve on send,
+//! ADR-0238 decision 3). A handler whose mail has no attachments holds no
+//! blob, so its raw sends go out unwalked.
 
 use aether_actor::{
     CallerAddressable, DependencyResolver, DependsOn, ErasedActorRef, MailSender, Manual, OutboundReply, ReplyMode,
@@ -30,7 +35,8 @@ use aether_actor::{
 use aether_data::{ActorMail, Kind, KindId, MailId, RequestId};
 
 use crate::actor::native::binding::OutboundSend;
-use crate::mail::attachments::{EncodedMail, encode_envelope};
+use crate::actor::native::envelope::Envelope;
+use crate::mail::attachments::{Attachments, EncodedMail, encode_envelope, resolve_on_send};
 use crate::mail::boundary::is_engine_only;
 use crate::mail::{BoundaryMail, Source};
 
@@ -63,7 +69,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// body of
     /// [`DeferredReply::reply_envelope`](crate::actor::native::DeferredReply::reply_envelope).
     /// An engine-only `kind` (ADR-0233) is refused with a warning and nothing
-    /// is sent, as the `send_envelope_*_to` verbs refuse it.
+    /// is sent, as the `send_envelope_*_to` verbs refuse it. The bytes'
+    /// tag-1 fields resolve against the handled mail's attachments as those
+    /// verbs resolve them, and a hash they do not carry is refused the same
+    /// way.
     pub(crate) fn reply_envelope_to_target(
         &mut self,
         sender: Source,
@@ -75,7 +84,11 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         if refuse_engine_only(kind) {
             return;
         }
-        self.binding.send_reply_envelope_for_handler(sender, kind, bytes, root, parent);
+        let Some(attachments) = self.resolve_forward(kind, bytes) else {
+            return;
+        };
+        let payload = EncodedMail { bytes: bytes.to_vec(), attachments };
+        self.binding.send_reply_envelope_for_handler(sender, kind, payload, root, parent);
     }
 
     /// Lineage-aware multicast: encode `payload` once, then push one copy
@@ -155,16 +168,23 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// An engine-only `kind` (ADR-0233) is refused with a warning and
     /// `None`, since no typed bound checks the raw kind here: nothing was
     /// sent, so there is no mail id to hand back.
+    ///
+    /// While the handled mail has attachments, each tag-1 field in `bytes`
+    /// resolves against them and rides with the send, so forwarding received
+    /// bytes shares their entries (ADR-0238 decision 3). A hash they do not
+    /// carry, or bytes that do not match `kind`'s schema, is refused with a
+    /// warning and `None`.
     #[must_use]
     pub fn send_envelope_tracked_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> Option<MailId> {
         if refuse_engine_only(kind) {
             return None;
         }
+        let attachments = self.resolve_forward(kind, bytes)?;
         Some(self.binding.push_envelope_buffered(OutboundSend {
             recipient: target.id().0,
             kind: kind.0,
             bytes,
-            attachments: &[],
+            attachments: attachments.as_deref().unwrap_or_default(),
             count: 1,
             parent_mail: self.outbound_parent(),
             inherited_root: self.outbound_root(),
@@ -188,17 +208,19 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// settle individually; only the chain root does).
     ///
     /// An engine-only `kind` (ADR-0233) is refused with a warning and
-    /// `None`, as [`Self::send_envelope_tracked_to`] refuses it.
+    /// `None`, as [`Self::send_envelope_tracked_to`] refuses it, and the
+    /// bytes' tag-1 fields resolve, or refuse, as they do there.
     #[must_use]
     pub fn send_envelope_detached_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> Option<MailId> {
         if refuse_engine_only(kind) {
             return None;
         }
+        let attachments = self.resolve_forward(kind, bytes)?;
         Some(self.binding.push_envelope_buffered(OutboundSend {
             recipient: target.id().0,
             kind: kind.0,
             bytes,
-            attachments: &[],
+            attachments: attachments.as_deref().unwrap_or_default(),
             count: 1,
             parent_mail: None,
             inherited_root: None,
@@ -337,6 +359,26 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         R::Resolver: DependencyResolver,
     {
         let _ = self.push_to(self.actor_ref::<R>().erase(), payload, None, None);
+    }
+
+    /// Resolve on send for a raw verb (ADR-0238 decision 3): the entries the
+    /// tag-1 fields of `bytes`, a `kind` mail, name, found among the handled
+    /// mail's attachments. `Some(None)`, with nothing walked, when the handled
+    /// mail has none. `None`, after a warning naming the kind and the hash or
+    /// the malformation, when the verb must refuse.
+    fn resolve_forward(&self, kind: KindId, bytes: &[u8]) -> Option<Attachments> {
+        let held = self.inbound().map(Envelope::attachments).unwrap_or_default();
+        if held.is_empty() {
+            return Some(None);
+        }
+        let own = |hash| held.iter().find(|entry| entry.hash() == hash).cloned();
+        match resolve_on_send(self.binding.mailer().registry(), kind, bytes, own) {
+            Ok(attachments) => Some(attachments),
+            Err(error) => {
+                tracing::warn!(target: "aether_substrate::mail", kind = %kind, %error, "raw send refused at the sender");
+                None
+            }
+        }
     }
 
     /// Encode `payload` for an in-process send: each `Blob` field shared

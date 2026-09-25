@@ -15,6 +15,12 @@
 //! second pass copies the runs between the tag-1 fields and splices each
 //! attachment's bytes in.
 //!
+//! [`blob_hashes`] runs the same walk without rewriting: it reports every
+//! tag-1 hash a payload carries, for the sender-side resolve that attaches
+//! each one's entry before the mail leaves its sender. A schema with no
+//! `Blob` anywhere in it is answered from the schema alone, so blob-free kinds
+//! never have their payload read.
+//!
 //! The walk recurses only over the schema tree, never over the payload:
 //! sequences are loops, and a schema's depth is capped at
 //! [`MAX_SCHEMA_DEPTH`]. A sequence of fixed-size elements (which cannot hold
@@ -128,6 +134,23 @@ pub fn inline_blobs(
     Ok(out)
 }
 
+/// Every tag-1 hash in `payload` (shaped by `schema`), in field order, one
+/// per field, so a hash two fields carry appears twice. A schema with no
+/// `Blob` returns empty without reading `payload`.
+///
+/// # Errors
+///
+/// [`InlineError::Malformed`], for the layout faults [`inline_blobs`] refuses,
+/// only when `schema` holds a `Blob`. It resolves nothing and sizes nothing,
+/// so it never returns [`InlineError::TooLarge`] or
+/// [`InlineError::MissingAttachment`].
+pub fn blob_hashes(schema: &SchemaType, payload: &[u8]) -> Result<Vec<BlobHash>, InlineError> {
+    if !holds_blob(schema, 0) {
+        return Ok(Vec::new());
+    }
+    Ok(hash_fields(schema, payload)?.into_iter().map(|field| field.hash).collect())
+}
+
 /// One tag-1 field the rewrite replaces: where its tag byte sits in the
 /// payload, and the bytes of the attachment its hash names with their `u32`
 /// length prefix.
@@ -137,14 +160,39 @@ struct Splice<'a> {
     len_prefix: u32,
 }
 
-/// The sizing pass: walk `payload` under `schema`, checking its layout and
-/// recording every tag-1 field in payload order.
+/// The sizing pass: find every tag-1 field and pair it with the attachment
+/// its hash names.
 fn find_splices<'a>(
     schema: &SchemaType,
     payload: &[u8],
     attachments: &[(BlobHash, &'a [u8])],
 ) -> Result<Vec<Splice<'a>>, InlineError> {
-    let mut walk = Walk { payload, pos: 0, attachments, splices: Vec::new() };
+    hash_fields(schema, payload)?
+        .into_iter()
+        .map(|HashField { offset, hash }| {
+            let bytes = attachments
+                .iter()
+                .find_map(|(candidate, bytes)| (*candidate == hash).then_some(*bytes))
+                .ok_or(InlineError::MissingAttachment { hash })?;
+            // A `u32` length prefix cannot state a longer attachment, and any
+            // limit a frame can have is far below it.
+            let len_prefix = u32::try_from(bytes.len())
+                .map_err(|_| InlineError::TooLarge { size: bytes.len(), limit: u32::MAX as usize })?;
+            Ok(Splice { offset, bytes, len_prefix })
+        })
+        .collect()
+}
+
+/// One tag-1 field: where its tag byte sits in the payload, and its hash.
+struct HashField {
+    offset: usize,
+    hash: BlobHash,
+}
+
+/// Walk `payload` under `schema`, checking its layout and recording every
+/// tag-1 field in payload order.
+fn hash_fields(schema: &SchemaType, payload: &[u8]) -> Result<Vec<HashField>, InlineError> {
+    let mut walk = Walk { payload, pos: 0, fields: Vec::new() };
     match schema {
         // A cast-shaped root is a `#[repr(C)]` image, and a `Blob` cannot sit
         // in one, so there is nothing to find.
@@ -154,17 +202,43 @@ fn find_splices<'a>(
     if walk.pos != payload.len() {
         return Err(walk.malformed(|path| DecodeError::TrailingBytes { path, remaining: payload.len() - walk.pos }));
     }
-    Ok(walk.splices)
+    Ok(walk.fields)
 }
 
-struct Walk<'p, 'a> {
+/// Whether a `Blob` sits anywhere in `schema`, read from the schema tree
+/// alone. `depth` is `schema`'s nesting depth; past [`MAX_SCHEMA_DEPTH`] the
+/// answer is `true`, which sends the caller to the walk's own depth refusal.
+fn holds_blob(schema: &SchemaType, depth: usize) -> bool {
+    if depth > MAX_SCHEMA_DEPTH {
+        return true;
+    }
+    match schema {
+        SchemaType::Blob => true,
+        SchemaType::Option(inner) | SchemaType::Vec(inner) => holds_blob(inner, depth + 1),
+        SchemaType::Array { element, .. } => holds_blob(element, depth + 1),
+        SchemaType::Struct { fields, .. } => fields.iter().any(|field| holds_blob(&field.ty, depth + 1)),
+        SchemaType::Enum { variants } => variants.iter().any(|variant| match variant {
+            EnumVariant::Unit { .. } => false,
+            EnumVariant::Tuple { fields, .. } => fields.iter().any(|ty| holds_blob(ty, depth + 1)),
+            EnumVariant::Struct { fields, .. } => fields.iter().any(|field| holds_blob(&field.ty, depth + 1)),
+        }),
+        SchemaType::Map { key, value } => holds_blob(key, depth + 1) || holds_blob(value, depth + 1),
+        SchemaType::Unit
+        | SchemaType::Bool
+        | SchemaType::Scalar(_)
+        | SchemaType::TypeId(_)
+        | SchemaType::String
+        | SchemaType::Bytes => false,
+    }
+}
+
+struct Walk<'p> {
     payload: &'p [u8],
     pos: usize,
-    attachments: &'p [(BlobHash, &'a [u8])],
-    splices: Vec<Splice<'a>>,
+    fields: Vec<HashField>,
 }
 
-impl Walk<'_, '_> {
+impl Walk<'_> {
     fn value(&mut self, schema: &SchemaType, depth: usize) -> Result<(), InlineError> {
         if depth > MAX_SCHEMA_DEPTH {
             return Err(InlineError::Malformed(DecodeError::UnsupportedSchema(
@@ -256,16 +330,7 @@ impl Walk<'_, '_> {
             }
             1 => {
                 let hash = BlobHash::from_bytes(self.take::<32>()?);
-                let bytes = self
-                    .attachments
-                    .iter()
-                    .find_map(|(candidate, bytes)| (*candidate == hash).then_some(*bytes))
-                    .ok_or(InlineError::MissingAttachment { hash })?;
-                // A `u32` length prefix cannot state a longer attachment, and
-                // any limit a frame can have is far below it.
-                let len_prefix = u32::try_from(bytes.len())
-                    .map_err(|_| InlineError::TooLarge { size: bytes.len(), limit: u32::MAX as usize })?;
-                self.splices.push(Splice { offset: at, bytes, len_prefix });
+                self.fields.push(HashField { offset: at, hash });
                 Ok(())
             }
             tag => Err(malformed_at(at, |path| DecodeError::InvalidBlobTag { path, tag })),

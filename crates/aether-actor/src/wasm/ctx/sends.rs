@@ -39,6 +39,7 @@ use core::marker::PhantomData;
 use aether_data::ActorMail;
 
 use super::WasmCtx;
+use crate::blob::guest::{EncodedGuestMail, encode_guest};
 use crate::model::ctx::Erased;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::reply_mode::ReplyMode;
@@ -83,15 +84,15 @@ impl<A> Sends<'_, A> {
     /// causal chain. Identical to [`WasmCtx::send_to`]: an [`ActorRef<R>`](crate::ActorRef) is
     /// kind-checked against `K` and an [`ErasedActorRef`] is not.
     pub fn send_to<K: ActorMail>(&mut self, target: impl Target<K>, payload: &K) {
-        self.route::<K>(target.erased().id().0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
+        self.route::<K>(target.erased().id().0, encode_guest(payload), 1, ChainMode::Inherit);
     }
 
     /// The one routing call every [`Sends`] verb funnels through: hand the
     /// recipient, kind, and chain mode to the inline registry, stamping this
     /// actor as the sender. A cluster-member recipient dispatches in place;
     /// any other hands off to the host (ADR-0114 addressing amendment).
-    fn route<K: ActorMail>(&self, recipient: u64, bytes: &[u8], count: u32, chain: ChainMode) {
-        self.inline.route_or_enqueue(recipient, K::ID.0, bytes, count, chain, self.mailbox);
+    fn route<K: ActorMail>(&self, recipient: u64, payload: EncodedGuestMail, count: u32, chain: ChainMode) {
+        self.inline.route_or_enqueue(recipient, K::ID.0, payload, count, chain, self.mailbox);
     }
 }
 
@@ -104,6 +105,6 @@ impl<A> MailSender for Sends<'_, A> {
     }
 
     fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
-        self.route::<K>(target.id().0, &payload.encode_into_bytes(), 1, ChainMode::Detached);
+        self.route::<K>(target.id().0, encode_guest(payload), 1, ChainMode::Detached);
     }
 }

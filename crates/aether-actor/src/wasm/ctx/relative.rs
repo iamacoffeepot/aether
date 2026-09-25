@@ -5,6 +5,7 @@
 use aether_data::{ActorMail, MailboxId};
 
 use super::WasmCtx;
+use crate::blob::guest::{EncodedGuestMail, encode_guest};
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::wasm::inline::{ChainMode, Registry};
 
@@ -56,8 +57,7 @@ impl RelativeMailbox<'_> {
     /// carries no host trace ids, so the flag is moot for an in-cluster
     /// send.
     pub fn send<K: ActorMail>(&self, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.sender);
+        self.inline.route_or_enqueue(self.id.0, K::ID.0, encode_guest(payload), 1, ChainMode::Inherit, self.sender);
     }
 
     /// Forward pre-encoded `bytes` of kind `kind` to this relative — the
@@ -67,8 +67,13 @@ impl RelativeMailbox<'_> {
     /// [`Self::send`] does — in place through the cluster membrane, inheriting
     /// the handler's causal chain — so the interposer stays transparent to
     /// settlement. `count` is fixed at 1: a forward carries one inbound mail.
+    ///
+    /// It keeps no value alive for the forward (ADR-0238 decision 3): a
+    /// forward made during the receive that delivered `bytes` is admitted by
+    /// that delivery's pin on each entry they name.
     pub fn send_bytes(&self, kind: aether_data::KindId, bytes: &[u8]) {
-        self.inline.route_or_enqueue(self.id.0, kind.0, bytes, 1, ChainMode::Inherit, self.sender);
+        let payload = EncodedGuestMail::plain(bytes.to_vec());
+        self.inline.route_or_enqueue(self.id.0, kind.0, payload, 1, ChainMode::Inherit, self.sender);
     }
 
     /// Fire-and-forget send to this relative (ADR-0080 §7 detach signal).
@@ -76,8 +81,7 @@ impl RelativeMailbox<'_> {
     /// flag rides through only on the cross-cluster fallback path, which a
     /// resolved relative never takes.
     pub fn send_detached<K: ActorMail>(&self, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, ChainMode::Detached, self.sender);
+        self.inline.route_or_enqueue(self.id.0, K::ID.0, encode_guest(payload), 1, ChainMode::Detached, self.sender);
     }
 }
 

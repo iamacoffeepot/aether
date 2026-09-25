@@ -4,7 +4,7 @@
 use aether_data::{BlobHash, EnumVariant, NamedField, Primitive, SchemaCell, SchemaType};
 use serde_json::json;
 
-use super::{InlineError, inline_blobs};
+use super::{InlineError, blob_hashes, inline_blobs};
 use crate::decode_schema;
 use crate::test_fixtures::{named, structured_struct};
 
@@ -160,4 +160,30 @@ fn a_hash_without_its_attachment_is_refused() {
         matches!(refused, Err(InlineError::MissingAttachment { hash }) if hash == FIRST),
         "expected MissingAttachment for FIRST, got {refused:?}",
     );
+}
+
+/// Every tag-1 hash comes back in field order, one per field, wherever it
+/// nests, and tag-0 fields contribute none. Catches a lister that loses its
+/// place after a variable-length field, skips a nesting shape, or dedups
+/// away a field the resolve must still see.
+#[test]
+fn blob_hashes_lists_nested_hash_fields_in_order() {
+    let hashes = blob_hashes(&nested_schema(), &nested_payload()).expect("a well-formed payload lists");
+
+    assert_eq!(hashes, vec![FIRST, SECOND, FIRST]);
+}
+
+/// A schema with no `Blob` is answered from the schema alone: even a payload
+/// its layout would refuse lists nothing. Catches a lister that walks the
+/// payload of a blob-free kind, the cost resolve on send must not pay.
+#[test]
+fn blob_hashes_of_a_blob_free_schema_never_reads_the_payload() {
+    let schema = structured_struct(vec![
+        named("text", SchemaType::String),
+        named("list", SchemaType::Vec(SchemaCell::owned(SchemaType::Bytes))),
+    ]);
+
+    let hashes = blob_hashes(&schema, &[0xff]).expect("a blob-free schema lists without reading");
+
+    assert!(hashes.is_empty());
 }

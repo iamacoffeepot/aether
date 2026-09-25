@@ -5,13 +5,15 @@
 //!
 //! Each send routes into an inbox sink, and the envelope it catches is then
 //! dispatched to a [`Keeper`] through its `#[actor]` arms with the envelope
-//! riding the ctx, as the native dispatcher does.
+//! riding the ctx, as the native dispatcher does. The raw-forward tests hand
+//! the caught envelope to a ctx as its inbound and forward its bytes through
+//! a raw verb, which resolves their tag-1 fields against it (resolve on send).
 
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
-use aether_actor::{ErasedActorRef, Manual, OutboundReply};
-use aether_data::{Blob, BlobReader, Kind, SessionToken, Uuid};
+use aether_actor::{Erased, ErasedActorRef, Manual, OutboundReply};
+use aether_data::{Blob, BlobReader, Kind, KindDescriptor, KindId, MailId, Schema, SessionToken, Uuid};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
@@ -20,7 +22,9 @@ use crate::chassis::error::BootError;
 use crate::mail::registry::{OwnedDispatch, Registry};
 use crate::mail::{EgressEvent, Source, SourceAddr};
 use crate::store::BlobStore;
-use crate::testing::{bare_substrate, registered_binding, registered_ref, test_mailer_and_rx, unrouted_binding};
+use crate::testing::{
+    bare_substrate, boot_authority, registered_binding, registered_ref, test_mailer_and_rx, unrouted_binding,
+};
 
 use super::support::CastOnly;
 
@@ -365,4 +369,125 @@ fn two_fields_with_equal_bytes_attach_one_entry_both_resolve() {
     deliver(&mut b, &unrouted_binding(&mailer), envelope);
 
     assert_eq!(b.kept(), vec![SHARED.to_vec(), SHARED.to_vec()]);
+}
+
+/// Register [`Carrier`], so resolve on send has its schema to walk.
+fn register_carrier(registry: &Registry) {
+    registry
+        .register_kind_with_descriptor(
+            &boot_authority(),
+            KindDescriptor { name: Carrier::NAME.into(), schema: Carrier::SCHEMA },
+        )
+        .expect("register the carrier kind");
+}
+
+/// Handle `handled` on a ctx over `binding` and raw-forward `bytes` of `kind`
+/// to `target` through `send_envelope_tracked_to`, returning what the verb
+/// returned. The forward flushes when the ctx drops.
+fn forward_raw(
+    binding: &Arc<NativeBinding>,
+    handled: Envelope,
+    target: ErasedActorRef,
+    kind: KindId,
+    bytes: &[u8],
+) -> Option<MailId> {
+    let mut ctx =
+        NativeCtx::<'_, Erased, Manual>::with_inbound(binding, handled.sender, handled.mail_id, handled.root, handled);
+    let sent = ctx.send_envelope_tracked_to(target, kind, bytes);
+    drop(ctx.take_raw_inbound());
+    sent
+}
+
+/// A [`Carrier`] payload naming `hash`, as the envelope encoder writes one.
+fn naming(hash: aether_data::BlobHash) -> Vec<u8> {
+    let mut payload = vec![1];
+    payload.extend_from_slice(hash.as_bytes());
+    payload
+}
+
+/// (h) B, handling an attached mail, raw-forwards its bytes to C: the forward
+/// attaches the entry B's mail carried, C decodes a value over it, and the
+/// engine's store does not grow. The entry lives in a second store, so a
+/// forward that copied the bytes in would show up there. Catches a raw
+/// forward that drops its attachments, leaving C a hash it must refuse.
+#[test]
+fn a_raw_forward_of_attached_bytes_shares_their_entries() {
+    let (registry, mailer) = bare_substrate();
+    register_carrier(&registry);
+    let (b_ref, b_rx) = sink(&registry, "test.blob_mail.h.b");
+    let (c_ref, c_rx) = sink(&registry, "test.blob_mail.h.c");
+    let foreign = BlobStore::new().expect("spawn the second store's reclaim thread");
+    let entry = foreign.check_in(Box::from(SHARED));
+    {
+        let sender = unrouted_binding(&mailer);
+        let mut ctx = NativeCtx::new(&sender, Source::NONE, None, None);
+        ctx.send_to(b_ref, &Carrier { blob: Arc::clone(&entry).into_blob() });
+    }
+    let to_b = b_rx.try_recv().expect("the send reaches B");
+    let bytes = to_b.payload.bytes().to_vec();
+
+    let sent = forward_raw(&unrouted_binding(&mailer), to_b, c_ref, Carrier::ID, &bytes);
+
+    assert!(sent.is_some(), "the forward is sent");
+    let to_c = c_rx.try_recv().expect("the forward reaches C");
+    assert_eq!(to_c.attachments().len(), 1);
+    assert!(Arc::ptr_eq(&to_c.attachments()[0], &entry), "the forward attaches the entry B's mail carried");
+    let mut c = Keeper::default();
+    deliver(&mut c, &unrouted_binding(&mailer), to_c);
+    assert_eq!(c.kept(), vec![SHARED.to_vec()]);
+    assert_eq!(mailer.blob_store().resident_bytes(), 0, "no hop checked the bytes into the engine store");
+}
+
+/// (i) B, handling an attached mail, raw-forwards bytes naming a hash its
+/// mail does not carry: the verb refuses with `None` and nothing is
+/// dispatched. Catches an unresolved hash leaving the sender, where no
+/// recipient could resolve it and egress would let it out unrewritten.
+#[test]
+fn a_raw_forward_naming_a_hash_the_handled_mail_lacks_is_refused() {
+    let (registry, mailer) = bare_substrate();
+    register_carrier(&registry);
+    let (b_ref, b_rx) = sink(&registry, "test.blob_mail.i.b");
+    let (c_ref, c_rx) = sink(&registry, "test.blob_mail.i.c");
+    let foreign = BlobStore::new().expect("spawn the second store's reclaim thread");
+    let other = foreign.check_in(Box::from(b"bytes B never received".as_slice()));
+    {
+        let sender = unrouted_binding(&mailer);
+        let mut ctx = NativeCtx::new(&sender, Source::NONE, None, None);
+        ctx.send_to(b_ref, &Carrier { blob: Blob::from(SHARED.to_vec()) });
+    }
+    let to_b = b_rx.try_recv().expect("the send reaches B");
+
+    let sent = forward_raw(&unrouted_binding(&mailer), to_b, c_ref, Carrier::ID, &naming(other.hash()));
+
+    assert!(sent.is_none(), "the forward is refused at the sender");
+    assert!(c_rx.try_recv().is_err(), "nothing is dispatched");
+}
+
+/// (j) A handler whose mail has no attachments holds no blob, so its raw
+/// send of a tag-1 payload goes out unwalked and unattached, and the
+/// recipient's decode refuses the detached hash. Pins ADR-0238 decision 3's
+/// boundary: a change that starts walking blob-free senders (this send would
+/// be refused) or starts attaching for them shows up here.
+#[test]
+fn a_raw_send_from_a_handler_holding_no_blob_goes_out_unwalked() {
+    let (registry, mailer) = bare_substrate();
+    register_carrier(&registry);
+    let (b_ref, b_rx) = sink(&registry, "test.blob_mail.j.b");
+    let (c_ref, c_rx) = sink(&registry, "test.blob_mail.j.c");
+    let foreign = BlobStore::new().expect("spawn the second store's reclaim thread");
+    let entry = foreign.check_in(Box::from(SHARED));
+    {
+        let sender = unrouted_binding(&mailer);
+        let mut ctx = NativeCtx::new(&sender, Source::NONE, None, None);
+        ctx.send_to(b_ref, &Note { text: "no blobs here".into() });
+    }
+    let to_b = b_rx.try_recv().expect("the send reaches B");
+    assert!(to_b.attachments().is_empty());
+
+    let sent = forward_raw(&unrouted_binding(&mailer), to_b, c_ref, Carrier::ID, &naming(entry.hash()));
+
+    assert!(sent.is_some(), "a blob-free handler's raw send is not walked");
+    let to_c = c_rx.try_recv().expect("the send reaches C");
+    assert!(to_c.attachments().is_empty(), "nothing is attached");
+    assert!(Carrier::decode_from_bytes(to_c.payload.bytes()).is_none(), "the recipient refuses the detached hash");
 }

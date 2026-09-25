@@ -630,12 +630,18 @@ impl Mailer {
     /// routes, stamps, and records exactly as the typed form does. The hub
     /// arms name the kind from its registry descriptor, since no `K::NAME`
     /// is in hand; a kind the registry cannot name is warned and not sent.
-    /// Its caller is `NativeBinding::send_reply_envelope_for_handler`.
+    ///
+    /// `payload` carries the entries its tag-1 `Blob` fields name. The
+    /// `Component` arm keeps them on the reply mail; the hub arms leave the
+    /// process, so they rewrite each tag-1 field to tag 0 from those entries,
+    /// bounded by one frame, and a reply that does not fit is warned and not
+    /// sent (ADR-0238 decisions 3 and 5). Its caller is
+    /// `NativeBinding::send_reply_envelope_for_handler`.
     pub(crate) fn send_reply_envelope(
         &self,
         sender: Source,
         kind: KindId,
-        bytes: &[u8],
+        payload: EncodedMail,
         reply_id: Option<aether_data::MailId>,
         root: Option<aether_data::MailId>,
         parent: Option<aether_data::MailId>,
@@ -647,12 +653,25 @@ impl Mailer {
                     tracing::warn!(target: "aether_substrate::mail", kind = %kind, "reply of an unregistered kind not sent");
                     return false;
                 };
-                self.send_hub_reply(sender, kind, &kind_name, bytes.to_vec(), reply_id)
+                let EncodedMail { bytes, attachments } = payload;
+                let bytes = match attachments.as_deref() {
+                    None => bytes,
+                    Some(entries) => match inline_payload(&self.registry, kind, &bytes, entries, max_frame_size()) {
+                        Ok(inline) => inline,
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "aether_substrate::mail",
+                                kind = %kind,
+                                %error,
+                                "reply leaving the process not sent",
+                            );
+                            return false;
+                        }
+                    },
+                };
+                self.send_hub_reply(sender, kind, &kind_name, bytes, reply_id)
             }
-            SourceAddr::Component(_) => {
-                let encoded = EncodedMail { bytes: bytes.to_vec(), attachments: None };
-                self.send_component_reply(sender, kind, encoded, reply_id, root, parent)
-            }
+            SourceAddr::Component(_) => self.send_component_reply(sender, kind, payload, reply_id, root, parent),
         }
     }
 
