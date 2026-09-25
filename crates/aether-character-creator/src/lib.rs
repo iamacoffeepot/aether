@@ -27,11 +27,12 @@ const JSON_CHUNK: u32 = 0x4e4f_534a;
 const BIN_CHUNK: u32 = 0x004e_4942;
 
 /// Stable facial controls authored into `mesh.extras.targetNames`.
-pub const MORPH_TARGETS: [&str; 12] = [
+pub const MORPH_TARGETS: [&str; 13] = [
     "JawWidth",
     "JawLength",
     "CheekVolume",
     "CheekboneWidth",
+    "UpperCraniumWidth",
     "NoseWidth",
     "NoseLength",
     "EyeSize",
@@ -861,7 +862,9 @@ fn head_sdf(point: Vec3) -> f32 {
 }
 
 fn head_mass_sdf(point: Vec3) -> f32 {
-    let mut shape = superellipsoid_sdf(point, Vec3::new(0.0, 0.29, -0.12), Vec3::new(0.68, 0.56, 0.60), 2.10);
+    let crown_weight = upper_cranium_weight(point.y);
+    let cranial_point = Vec3::new(point.x * (1.0 + 0.10 * crown_weight), point.y, point.z);
+    let mut shape = superellipsoid_sdf(cranial_point, Vec3::new(0.0, 0.29, -0.12), Vec3::new(0.68, 0.56, 0.60), 2.10);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.37, 0.12), Vec3::new(0.52, 0.36, 0.42)), 0.10);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.14, 0.18), Vec3::new(0.49, 0.47, 0.45)), 0.11);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.11, 0.505), Vec3::new(0.31, 0.24, 0.19)), 0.10);
@@ -958,6 +961,11 @@ fn brow_outer_delta(position: Vec3) -> Vec3 {
     Vec3::new(position.x.signum() * 0.015, -0.012, 0.035) * weight
 }
 
+fn upper_cranium_weight(y: f32) -> f32 {
+    let amount = ((y - 0.35) / 0.50).clamp(0.0, 1.0);
+    amount * amount * (3.0 - 2.0 * amount)
+}
+
 fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
     positions
         .iter()
@@ -994,6 +1002,7 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                         + gaussian(position.x, position.y, 0.35, 0.02, 0.20, 0.23);
                     Vec3::new(position.x.signum() * 0.075 * front * lateral * cheekbones, 0.0, 0.0)
                 }
+                "UpperCraniumWidth" => Vec3::new(position.x * 0.10 * upper_cranium_weight(position.y), 0.0, 0.0),
                 "NoseWidth" => {
                     let weight = front * gaussian(position.x, position.y, 0.0, 0.02, 0.19, 0.19);
                     Vec3::new(position.x * 0.45 * weight, 0.0, 0.015 * weight)
@@ -1064,7 +1073,7 @@ mod tests {
                 for (position, delta) in mesh.positions.iter().zip(&deltas) {
                     let deformed = *position + *delta * amount;
                     assert!(deformed.x.is_finite() && deformed.y.is_finite() && deformed.z.is_finite(), "{name}");
-                    if matches!(name, "JawWidth" | "CheekVolume" | "CheekboneWidth" | "NoseWidth")
+                    if matches!(name, "JawWidth" | "CheekVolume" | "CheekboneWidth" | "UpperCraniumWidth" | "NoseWidth")
                         && position.x.abs() > 0.000_1
                     {
                         assert_eq!(
@@ -1078,6 +1087,9 @@ mod tests {
                     }
                     if name == "CheekVolume" && position.x.abs() <= 0.16 {
                         assert!(delta.length() < 0.000_1, "cheek morph leaked into the nose");
+                    }
+                    if name == "UpperCraniumWidth" && position.y <= 0.35 {
+                        assert!(delta.length() < 0.000_1, "upper cranium morph leaked into the face");
                     }
                 }
             }

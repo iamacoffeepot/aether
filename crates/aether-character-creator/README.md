@@ -22,7 +22,7 @@ cargo run -p aether-character-creator --bin serve-character-creator
 ```
 
 The browser demo reads the morph names directly from the GLB and provides
-orbit and zoom controls, front/three-quarter/profile cameras, twelve facial
+orbit and zoom controls, front/three-quarter/profile cameras, thirteen facial
 sliders, variation generation, reset, and JSON recipe import/export. It uses no
 external JavaScript packages or visual assets.
 
@@ -31,6 +31,6 @@ fresh generator run, keeping the image tied to the binary asset.
 
 The asset includes a welded continuous facial surface with modeled eye sockets,
 cheeks, nose, mouth, jaw, and chin; separate procedural eyes, lids, brows, ears,
-and neck; authored materials; and twelve named facial morph targets. Later spike
+and neck; authored materials; and thirteen named facial morph targets. Later spike
 work can load the same file through Aether and connect its morph targets to
 creator controls.
