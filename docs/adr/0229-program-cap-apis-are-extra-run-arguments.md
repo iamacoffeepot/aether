@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-09-21
 - **Amended:** 2026-09-24 — program APIs are the closed, sealed set `Http` / `Process`, which `#[program]` maps by name to concrete target capabilities through an SDK table; the generated invocation declares those targets as `depends(..)` and sends a captured call through a proof minted from that declaration, and the host checks the declaration when the bundle loads (#6594).
+- **Amended:** 2026-09-24 — the closed set gains `Workspace`, the program-side binding of the `aether.workspace` run contract, required beside `Mode::Sampled` ([ADR-0237](0237-workspaces-run-steps-over-trees.md)).
 
 Amends [ADR-0228](0228-async-programs-await-sanctioned-mail.md) (async
 programs await only named `Env<Async>` methods; HTTP and a `Caps` type
