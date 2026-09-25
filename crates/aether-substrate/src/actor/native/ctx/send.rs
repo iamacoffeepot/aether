@@ -24,6 +24,7 @@ use aether_actor::{
 };
 use aether_data::{ActorMail, Kind, KindId, MailId, RequestId};
 
+use crate::actor::native::binding::OutboundSend;
 use crate::mail::boundary::is_engine_only;
 use crate::mail::{BoundaryMail, Source};
 
@@ -97,9 +98,23 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let parent = self.outbound_parent();
         let root = self.outbound_root();
         let kind = K::ID.0;
-        self.binding.push_envelope_buffered(first.id().0, kind, &bytes, 1, parent, root);
+        self.binding.push_envelope_buffered(OutboundSend {
+            recipient: first.id().0,
+            kind,
+            bytes: &bytes,
+            count: 1,
+            parent_mail: parent,
+            inherited_root: root,
+        });
         for recipient in recipients {
-            self.binding.push_envelope_buffered(recipient.id().0, kind, &bytes, 1, parent, root);
+            self.binding.push_envelope_buffered(OutboundSend {
+                recipient: recipient.id().0,
+                kind,
+                bytes: &bytes,
+                count: 1,
+                parent_mail: parent,
+                inherited_root: root,
+            });
         }
     }
 
@@ -136,14 +151,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         if refuse_engine_only(kind) {
             return None;
         }
-        Some(self.binding.push_envelope_buffered(
-            target.id().0,
-            kind.0,
+        Some(self.binding.push_envelope_buffered(OutboundSend {
+            recipient: target.id().0,
+            kind: kind.0,
             bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
-        ))
+            count: 1,
+            parent_mail: self.outbound_parent(),
+            inherited_root: self.outbound_root(),
+        }))
     }
 
     /// Dispatch already-encoded bytes of `kind` to the actor `target` proves
@@ -169,7 +184,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         if refuse_engine_only(kind) {
             return None;
         }
-        Some(self.binding.push_envelope_buffered(target.id().0, kind.0, bytes, 1, None, None))
+        Some(self.binding.push_envelope_buffered(OutboundSend {
+            recipient: target.id().0,
+            kind: kind.0,
+            bytes,
+            count: 1,
+            parent_mail: None,
+            inherited_root: None,
+        }))
     }
 
     /// Send `payload` through the held reference `target`, inheriting this
@@ -316,7 +338,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         parent: Option<MailId>,
         root: Option<MailId>,
     ) -> MailId {
-        self.binding.push_envelope_buffered(target.id().0, K::ID.0, &payload.encode_into_bytes(), 1, parent, root)
+        self.binding.push_envelope_buffered(OutboundSend {
+            recipient: target.id().0,
+            kind: K::ID.0,
+            bytes: &payload.encode_into_bytes(),
+            count: 1,
+            parent_mail: parent,
+            inherited_root: root,
+        })
     }
 
     /// Push `payload` to `target` on behalf of an owed reply: the mail's
@@ -336,12 +365,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ) {
         let bytes = payload.encode_into_bytes();
         let _ = self.binding.push_envelope_buffered_with_reply_to(
-            target.id().0,
-            K::ID.0,
-            &bytes,
-            1,
-            None,
-            root,
+            OutboundSend {
+                recipient: target.id().0,
+                kind: K::ID.0,
+                bytes: &bytes,
+                count: 1,
+                parent_mail: None,
+                inherited_root: root,
+            },
             Some(reply_to),
         );
     }
@@ -360,7 +391,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn deliver_detached(&self, item: BoundaryMail) -> MailId {
         let BoundaryMail { recipient, kind, payload } = item;
-        self.binding.push_envelope_buffered(recipient.id().0, kind.0, &payload, 1, None, None)
+        self.binding.push_envelope_buffered(OutboundSend {
+            recipient: recipient.id().0,
+            kind: kind.0,
+            bytes: &payload,
+            count: 1,
+            parent_mail: None,
+            inherited_root: None,
+        })
     }
 
     /// Deliver a proven boundary bundle item as part of the call this handler
@@ -373,12 +411,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     pub fn deliver_forwarded(&self, item: BoundaryMail) {
         let BoundaryMail { recipient, kind, payload } = item;
         self.binding.push_envelope_buffered_with_reply_to(
-            recipient.id().0,
-            kind.0,
-            &payload,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
+            OutboundSend {
+                recipient: recipient.id().0,
+                kind: kind.0,
+                bytes: &payload,
+                count: 1,
+                parent_mail: self.outbound_parent(),
+                inherited_root: self.outbound_root(),
+            },
             Some(self.source),
         );
     }
@@ -398,12 +438,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     pub fn forward_to<K: ActorMail>(&self, target: &ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered_with_reply_to(
-            target.id().0,
-            K::ID.0,
-            &bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
+            OutboundSend {
+                recipient: target.id().0,
+                kind: K::ID.0,
+                bytes: &bytes,
+                count: 1,
+                parent_mail: self.outbound_parent(),
+                inherited_root: self.outbound_root(),
+            },
             Some(self.source),
         );
     }
@@ -434,7 +476,14 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
     // `None` lineage minting a fresh root (ADR-0080 §7).
     fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(target.id().0, K::ID.0, &bytes, 1, None, None);
+        self.binding.push_envelope_buffered(OutboundSend {
+            recipient: target.id().0,
+            kind: K::ID.0,
+            bytes: &bytes,
+            count: 1,
+            parent_mail: None,
+            inherited_root: None,
+        });
     }
 }
 

@@ -6,7 +6,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::reply_table::ReplyTable;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
-use crate::mail::registry::{MailboxEntry, OwnedDispatch, PreparedAliasRoute, Registry};
+use crate::mail::registry::{DispatchParts, MailboxEntry, OwnedDispatch, PreparedAliasRoute, Registry};
 use crate::mail::{Mail, MailId, MailKind, MailboxId, Source, SourceAddr};
 use crate::scheduler::pending_depth;
 
@@ -216,6 +216,24 @@ pub struct PendingSpawn {
 /// disjoint in practice.
 const REPLY_LINEAGE_BASE: u64 = 1 << 63;
 
+/// One component-originated mail [`ComponentCtx::send_routed`] routes: the
+/// recipient, kind, payload and count, the `reply_to` and lineage `mail_id`
+/// the caller minted, whether the send detaches from the in-flight chain,
+/// and the dispatch `identity` it is sent as.
+struct RoutedSend {
+    recipient: MailboxId,
+    kind: MailKind,
+    payload: Vec<u8>,
+    count: u32,
+    reply_to: Source,
+    mail_id: MailId,
+    force_detach: bool,
+    /// The resolved dispatch identity (issue 1987) — the caller computed
+    /// it from the guest-carried `from`, so the recorded source + the
+    /// `origin` name read it directly.
+    identity: MailboxId,
+}
+
 impl ComponentCtx {
     /// Build a fresh ctx with empty state-migration slots and an
     /// empty sender table. Using this over the struct literal keeps
@@ -421,7 +439,16 @@ impl ComponentCtx {
         // reply routing — symmetric with `NativeBinding::push_envelope_buffered`,
         // which uses one counter for both.
         let mail_id = MailId::new(from, correlation);
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false, from);
+        self.send_routed(RoutedSend {
+            recipient,
+            kind,
+            payload,
+            count,
+            reply_to,
+            mail_id,
+            force_detach: false,
+            identity: from,
+        });
     }
 
     /// ADR-0080 §7 fire-and-forget escape hatch: the detached
@@ -443,7 +470,16 @@ impl ComponentCtx {
         let correlation = self.mint_correlation();
         let reply_to = Source::with_correlation(SourceAddr::Component(from), correlation);
         let mail_id = MailId::new(from, correlation);
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, true, from);
+        self.send_routed(RoutedSend {
+            recipient,
+            kind,
+            payload,
+            count,
+            reply_to,
+            mail_id,
+            force_detach: true,
+            identity: from,
+        });
     }
 
     /// Issue iamacoffeepot/aether#1465: correlation-preserving sibling
@@ -480,7 +516,16 @@ impl ComponentCtx {
         // guest-carried `from`, already resolved in-cluster by the host fn)
         // on its lineage `MailId`, like its sends.
         let mail_id = MailId::new(from, self.next_reply_lineage());
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false, from);
+        self.send_routed(RoutedSend {
+            recipient,
+            kind,
+            payload,
+            count,
+            reply_to,
+            mail_id,
+            force_detach: false,
+            identity: from,
+        });
     }
 
     /// Shared routing body of [`Self::send`] and [`Self::reply`]: stamp
@@ -496,24 +541,8 @@ impl ComponentCtx {
     /// inheritance: `true` (a guest `send_detached`) starts a fresh
     /// causal chain regardless of the in-flight cells; `false` (the
     /// default `send` / a reply) inherits the dispatch's chain.
-    // The arg list is the routing surface `send` / `send_detached` /
-    // `reply` all funnel through; bundling it into a struct would only
-    // move the same fields one indirection away with no call-site win.
-    // `identity` is the resolved dispatch identity (issue 1987) — the
-    // caller computed it from the guest-carried `from`, so the recorded
-    // source + the `origin` name read it directly.
-    #[allow(clippy::too_many_arguments)]
-    fn send_routed(
-        &self,
-        recipient: MailboxId,
-        kind: MailKind,
-        payload: Vec<u8>,
-        count: u32,
-        reply_to: Source,
-        mail_id: MailId,
-        force_detach: bool,
-        identity: MailboxId,
-    ) {
+    fn send_routed(&self, send: RoutedSend) {
+        let RoutedSend { recipient, kind, payload, count, reply_to, mail_id, force_detach, identity } = send;
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): the in-flight
         // cells were populated by `Component::deliver` for guest-triggered
         // sends (and remain `None` for substrate-internal call sites that
@@ -578,21 +607,23 @@ impl ComponentCtx {
                 // (ComponentCtx's inline send bypasses `route_mail`). Armed
                 // here; the recipient actor's dispatcher discharges it.
                 handler.enqueue(OwnedDispatch::armed(
-                    mail.kind,
-                    origin,
-                    mail.reply_to,
-                    mail.payload,
-                    mail.count,
-                    mail.mail_id,
-                    mail.root,
-                    mail.parent_mail,
-                    // iamacoffeepot/aether#1134: the second production
-                    // deposit chokepoint (ComponentCtx's inline send
-                    // bypasses `route_mail`), so stamp the deposit instant
-                    // + scheduler backlog here too — else the recipient's
-                    // `Received` would read a zeroed `t_enqueue`.
-                    queue.now_nanos(),
-                    pending_depth(),
+                    DispatchParts {
+                        kind: mail.kind,
+                        origin,
+                        sender: mail.reply_to,
+                        payload: mail.payload,
+                        count: mail.count,
+                        mail_id: mail.mail_id,
+                        root: mail.root,
+                        parent_mail: mail.parent_mail,
+                        // iamacoffeepot/aether#1134: the second production
+                        // deposit chokepoint (ComponentCtx's inline send
+                        // bypasses `route_mail`), so stamp the deposit instant
+                        // + scheduler backlog here too — else the recipient's
+                        // `Received` would read a zeroed `t_enqueue`.
+                        t_enqueue: queue.now_nanos(),
+                        enqueue_depth: pending_depth(),
+                    },
                     mail.recipient,
                 ));
                 return;

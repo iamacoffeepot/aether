@@ -60,6 +60,8 @@ mod reply;
 mod reservation;
 mod send;
 
+pub(crate) use outbound::OutboundSend;
+
 /// Per-actor binding state every native capability owns. The chassis
 /// constructs one for each actor at boot, and the actor holds it for the
 /// lifetime of its dispatcher thread; SDK helpers receive

@@ -460,10 +460,9 @@ impl NativeBinding {
 #[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
     use super::*;
-    use crate::mail::registry::OwnedDispatch;
-    use crate::mail::{KindId, MailId, MailRef, Source};
+    use crate::mail::registry::{DispatchParts, OwnedDispatch};
+    use crate::mail::{KindId, MailId, MailRef};
     use crate::testing::bare_substrate;
-    use aether_kinds::trace::Nanos;
     use std::sync::mpsc;
 
     /// `install_inbox` is single-claim — a second install panics.
@@ -516,16 +515,11 @@ mod tests {
         // Queue an armed envelope directly — bypasses the registry sink,
         // mirrors the production route_mail Inbox arm result.
         let armed = OwnedDispatch::armed(
-            KindId(7),
-            None,
-            Source::NONE,
-            MailRef::from(Vec::new()),
-            1,
-            Some(MailId::new(id, 11)),
-            Some(root),
-            None,
-            Nanos(0),
-            0,
+            DispatchParts {
+                mail_id: Some(MailId::new(id, 11)),
+                root: Some(root),
+                ..DispatchParts::new(KindId(7), MailRef::from(Vec::new()))
+            },
             id,
         );
         tx.send(armed).unwrap();

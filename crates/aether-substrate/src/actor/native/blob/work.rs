@@ -139,6 +139,7 @@ use super::lifecycle::{Lifecycle, MAX_GROUPS, Published};
 use crate::actor::native::Envelope;
 use crate::mail::cost::CostLookup;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::DispatchParts;
 use crate::mail::{KindId, Mail, MailboxId};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost_nanos, tuning};
 
@@ -667,20 +668,22 @@ impl BlobWork {
                 // here and discharged by the receiving dispatcher
                 // (`dispatch_one` / the finalized-slot seed path).
                 let seed = Envelope::armed(
-                    mail.kind,
-                    None,
-                    mail.reply_to,
-                    mail.payload,
-                    mail.count,
-                    mail.mail_id,
-                    mail.root,
-                    mail.parent_mail,
-                    // iamacoffeepot/aether#1150: the blob-pickup stamp, not
-                    // a fresh `now` — `now` here ≈ `t_received` and collapsed
-                    // residence to ~0. With the pickup instant, the recipient's
-                    // `Received` reads a real `t_received − t_enqueue` drain.
-                    received,
-                    0,
+                    DispatchParts {
+                        kind: mail.kind,
+                        origin: None,
+                        sender: mail.reply_to,
+                        payload: mail.payload,
+                        count: mail.count,
+                        mail_id: mail.mail_id,
+                        root: mail.root,
+                        parent_mail: mail.parent_mail,
+                        // iamacoffeepot/aether#1150: the blob-pickup stamp, not
+                        // a fresh `now` — `now` here ≈ `t_received` and collapsed
+                        // residence to ~0. With the pickup instant, the recipient's
+                        // `Received` reads a real `t_received − t_enqueue` drain.
+                        t_enqueue: received,
+                        enqueue_depth: 0,
+                    },
                     recipient,
                 );
                 match slot.seize_and_run(seed, budget) {

@@ -7,7 +7,7 @@ use aether_kinds::trace::Settled;
 use super::passive_boot::{DynShutdown, PassiveBoot};
 use super::references::ComposedReferences;
 use crate::actor::native::ExportedHandles;
-use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
+use crate::chassis::ctx::{ChassisCtx, ChassisCtxParts, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::config::{ConfigSources, RegistryQueueCapacities, RingCapacities, SchedulerTuning};
@@ -171,28 +171,33 @@ impl Drop for BootedPassives {
     }
 }
 
+/// The resolved chassis config values [`boot_passives`] boots under,
+/// mirroring the `Builder` fields they come from.
+#[derive(Clone, Copy)]
+pub(super) struct BootTuning {
+    pub(super) workers: Option<usize>,
+    pub(super) ring_capacities: RingCapacities,
+    pub(super) scheduler_tuning: SchedulerTuning,
+    /// Issue 4122: the ADR-0165 owner / relay admission bounds. Both leases
+    /// take the whole value and each reads its own field, so the pair can
+    /// never be crossed at a call site.
+    pub(super) registry_queues: RegistryQueueCapacities,
+    /// Issue #2509: the instanced-actor teardown patience, carried onto
+    /// [`BootedPassives`] for its shutdown.
+    pub(super) teardown_budget: Duration,
+}
+
 // Linear boot pipeline: claim mailbox -> wire FFI exports -> spawn
 // each passive in declared order, plus rollback bookkeeping. The
 // pieces share enough state that splitting into helpers obscures the
 // boot ordering — leaving it as one function keeps the chassis boot
 // sequence readable in one place.
 #[allow(clippy::too_many_lines)]
-// Issue #2509 added the teardown-budget arg; boot_passives already carries
-// the resolved chassis config values in argument position (mirroring the
-// `Builder` fields), so an extra `Duration` is the same shape.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn boot_passives(
     registry: &Arc<Registry>,
     mailer: &Arc<Mailer>,
     aborter: &Arc<dyn FatalAborter>,
-    workers: Option<usize>,
-    ring_capacities: RingCapacities,
-    scheduler_tuning: SchedulerTuning,
-    // Issue 4122: the ADR-0165 owner / relay admission bounds. Both leases
-    // take the whole value and each reads its own field, so the pair can
-    // never be crossed at a call site.
-    registry_queues: RegistryQueueCapacities,
-    teardown_budget: Duration,
+    tuning: BootTuning,
     // ADR-0156 §5: the builder's config source stack (programmatic > argv >
     // env > file > default). The Pass 0 resolve loop resolves each passive's
     // cap `Config` off this ahead of Claim.
@@ -205,6 +210,7 @@ pub(super) fn boot_passives(
     // nothing.
     driver_claim: impl FnOnce(&mut ChassisCtx<'_>) -> Result<(), BootError>,
 ) -> Result<BootedPassives, BootError> {
+    let BootTuning { workers, ring_capacities, scheduler_tuning, registry_queues, teardown_budget } = tuning;
     // Issue #4193: every abort this chassis takes goes through one
     // recorder. The wrap happens here, before the aborter is cloned into
     // the pool / spawner / each binding, so there is no abort path that
@@ -328,16 +334,16 @@ pub(super) fn boot_passives(
     // borrowed slots (e.g., claim pushes into `claimed_actor_mailboxes`).
     macro_rules! build_ctx {
         () => {
-            ChassisCtx::new(
+            ChassisCtx::new(ChassisCtxParts {
                 registry,
                 mailer,
-                &mut fallback,
+                fallback: &mut fallback,
                 aborter,
-                &mut claimed_actor_mailboxes,
-                &spawner,
-                &mut reserved_driver_mailboxes,
-                &references,
-            )
+                claimed_actor_mailboxes: &mut claimed_actor_mailboxes,
+                spawner: &spawner,
+                reserved_driver_mailboxes: &mut reserved_driver_mailboxes,
+                references: &references,
+            })
         };
     }
 
@@ -347,37 +353,18 @@ pub(super) fn boot_passives(
     //
     // Placed mid-block intentionally — sits next to the call sites in
     // the boot sequence rather than hoisted to the top of `boot_into`.
-    #[allow(clippy::too_many_arguments, clippy::items_after_statements)]
+    #[allow(clippy::items_after_statements)] // aether-suppression-request: pre-existing; the attribute only lost its other lint
     fn rollback(
-        registry: &Arc<Registry>,
-        mailer: &Arc<Mailer>,
-        fallback: &mut Option<FallbackRouter>,
-        aborter: &Arc<dyn FatalAborter>,
-        claimed_actor_mailboxes: &mut Vec<MailboxId>,
-        spawner: &Arc<crate::Spawner>,
-        references: &ComposedReferences,
+        ctx: &mut ChassisCtx<'_>,
         booted: Vec<Box<dyn PassiveBoot>>,
         already_spawned: Vec<Box<dyn DynShutdown>>,
     ) {
         for shutdown in already_spawned.into_iter().rev() {
             shutdown.shutdown_dyn();
         }
-        // ADR-0155 §4: `cleanup_after_failure` never touches driver-reserved
-        // mailboxes (they belong to the driver's Claim hook, not a passive),
-        // so the ctx borrows a throwaway stash the rollback drops.
-        let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
+        // ADR-0155 §4: `cleanup_after_failure` never touches driver reservations.
         for boot in booted.into_iter().rev() {
-            let mut ctx = ChassisCtx::new(
-                registry,
-                mailer,
-                fallback,
-                aborter,
-                claimed_actor_mailboxes,
-                spawner,
-                &mut reserved_driver_mailboxes,
-                references,
-            );
-            boot.cleanup_after_failure(&mut ctx);
+            boot.cleanup_after_failure(ctx);
         }
     }
 
@@ -408,17 +395,7 @@ pub(super) fn boot_passives(
             Ok(()) => booted.push(boot),
             Err(e) => {
                 drop(boot);
-                rollback(
-                    registry,
-                    mailer,
-                    &mut fallback,
-                    aborter,
-                    &mut claimed_actor_mailboxes,
-                    &spawner,
-                    &references,
-                    booted,
-                    Vec::new(),
-                );
+                rollback(&mut ctx, booted, Vec::new());
                 return Err(e);
             }
         }
@@ -433,17 +410,7 @@ pub(super) fn boot_passives(
     {
         let mut ctx = build_ctx!();
         if let Err(e) = driver_claim(&mut ctx) {
-            rollback(
-                registry,
-                mailer,
-                &mut fallback,
-                aborter,
-                &mut claimed_actor_mailboxes,
-                &spawner,
-                &references,
-                booted,
-                Vec::new(),
-            );
+            rollback(&mut ctx, booted, Vec::new());
             return Err(e);
         }
     }
@@ -452,17 +419,7 @@ pub(super) fn boot_passives(
     for boot in &mut *booted {
         let mut ctx = build_ctx!();
         if let Err(e) = boot.init(&mut ctx, &mut handles) {
-            rollback(
-                registry,
-                mailer,
-                &mut fallback,
-                aborter,
-                &mut claimed_actor_mailboxes,
-                &spawner,
-                &references,
-                booted,
-                Vec::new(),
-            );
+            rollback(&mut ctx, booted, Vec::new());
             return Err(e);
         }
     }
@@ -470,17 +427,8 @@ pub(super) fn boot_passives(
     // Pass 3 — wire.
     for boot in &mut *booted {
         if let Err(e) = boot.wire() {
-            rollback(
-                registry,
-                mailer,
-                &mut fallback,
-                aborter,
-                &mut claimed_actor_mailboxes,
-                &spawner,
-                &references,
-                booted,
-                Vec::new(),
-            );
+            let mut ctx = build_ctx!();
+            rollback(&mut ctx, booted, Vec::new());
             return Err(e);
         }
     }
@@ -497,17 +445,7 @@ pub(super) fn boot_passives(
             Ok(s) => shutdowns.push(s),
             Err(e) => {
                 let remaining: Vec<Box<dyn PassiveBoot>> = booted_opt.into_iter().flatten().collect();
-                rollback(
-                    registry,
-                    mailer,
-                    &mut fallback,
-                    aborter,
-                    &mut claimed_actor_mailboxes,
-                    &spawner,
-                    &references,
-                    remaining,
-                    shutdowns,
-                );
+                rollback(&mut ctx, remaining, shutdowns);
                 return Err(e);
             }
         }

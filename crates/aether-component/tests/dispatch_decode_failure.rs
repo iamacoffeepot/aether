@@ -21,9 +21,8 @@ use std::fs;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_kinds::Tick;
-use aether_kinds::trace::Nanos;
 use aether_substrate::actor::wasm::host_fns;
-use aether_substrate::mail::registry::noop_handler;
+use aether_substrate::mail::registry::{DispatchParts, noop_handler};
 use aether_substrate::testing::{bare_substrate, registered_binding};
 use aether_substrate::{Component, ComponentCtx, Envelope, HubOutbound, MailRef, NativeCtx, Source};
 use wasmtime::{Engine, Linker, Module};
@@ -53,19 +52,7 @@ fn known_kind_bad_payload_reports_unknown_kind_not_handled() {
     // `Tick` is a `#[repr(C)]` 4-byte cast-shape kind (`delta_micros: u32`); a
     // 2-byte payload fails `decode_cast`'s `len() == size_of` check, so the
     // matched dispatch arm's `decode_kind::<Tick>()` is `None`.
-    let inbound = Envelope::disarmed(
-        Tick::ID,
-        None,
-        Source::NONE,
-        MailRef::from(vec![0u8, 0u8]),
-        1,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
-        probe,
-    );
+    let inbound = Envelope::disarmed(DispatchParts::new(Tick::ID, MailRef::from(vec![0u8, 0u8])), probe);
     let rc = component.deliver(&inbound).expect("deliver");
 
     // Tripwire: pre-fix the arm returned `DISPATCH_HANDLED` (0) once the kind id

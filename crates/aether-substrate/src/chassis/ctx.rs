@@ -429,20 +429,33 @@ pub struct ChassisCtx<'a> {
     references: &'a ComposedReferences,
 }
 
+/// The borrowed boot accumulators a [`ChassisCtx`] is built over, one per
+/// field of the same name.
+pub(in crate::chassis) struct ChassisCtxParts<'a> {
+    pub(in crate::chassis) registry: &'a Arc<Registry>,
+    pub(in crate::chassis) mailer: &'a Arc<Mailer>,
+    pub(in crate::chassis) fallback: &'a mut Option<FallbackRouter>,
+    pub(in crate::chassis) aborter: &'a Arc<dyn FatalAborter>,
+    pub(in crate::chassis) claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
+    pub(in crate::chassis) spawner: &'a Arc<crate::Spawner>,
+    pub(in crate::chassis) reserved_driver_mailboxes: &'a mut HashMap<String, MailboxClaim>,
+    pub(in crate::chassis) references: &'a ComposedReferences,
+}
+
 impl<'a> ChassisCtx<'a> {
     /// Internal constructor used by the ADR-0071
     /// [`crate::chassis::builder::Builder`].
-    #[allow(clippy::too_many_arguments)] // aether-suppression-request: one borrowed boot accumulator per argument
-    pub(in crate::chassis) fn new(
-        registry: &'a Arc<Registry>,
-        mailer: &'a Arc<Mailer>,
-        fallback: &'a mut Option<FallbackRouter>,
-        aborter: &'a Arc<dyn FatalAborter>,
-        claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
-        spawner: &'a Arc<crate::Spawner>,
-        reserved_driver_mailboxes: &'a mut HashMap<String, MailboxClaim>,
-        references: &'a ComposedReferences,
-    ) -> Self {
+    pub(in crate::chassis) fn new(parts: ChassisCtxParts<'a>) -> Self {
+        let ChassisCtxParts {
+            registry,
+            mailer,
+            fallback,
+            aborter,
+            claimed_actor_mailboxes,
+            spawner,
+            reserved_driver_mailboxes,
+            references,
+        } = parts;
         Self {
             registry,
             mailer,
@@ -715,12 +728,11 @@ mod tests {
     use aether_kinds::descriptors;
 
     use aether_data::ActorPath;
-    use aether_kinds::trace::Nanos;
 
     use crate::actor::registry::ActorRegistry;
     use crate::config::RingCapacities;
-    use crate::mail::registry::MailboxEntry;
-    use crate::mail::{KindId, MailId, MailRef, Source};
+    use crate::mail::registry::{DispatchParts, MailboxEntry};
+    use crate::mail::{KindId, MailId, MailRef};
     use crate::runtime::lifecycle::PanicAborter;
     use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 
@@ -744,16 +756,16 @@ mod tests {
         let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
         let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
         let references = ComposedReferences::default();
-        let mut ctx = ChassisCtx::new(
-            &registry,
-            &mailer,
-            &mut fallback,
-            &aborter,
-            &mut claimed_actor_mailboxes,
-            &spawner,
-            &mut reserved_driver_mailboxes,
-            &references,
-        );
+        let mut ctx = ChassisCtx::new(ChassisCtxParts {
+            registry: &registry,
+            mailer: &mailer,
+            fallback: &mut fallback,
+            aborter: &aborter,
+            claimed_actor_mailboxes: &mut claimed_actor_mailboxes,
+            spawner: &spawner,
+            reserved_driver_mailboxes: &mut reserved_driver_mailboxes,
+            references: &references,
+        });
 
         let claim = ctx.claim_mailbox_with_override("test.iamacoffeepot.1272.driver").expect("first claim succeeds");
 
@@ -791,16 +803,16 @@ mod tests {
         let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
         let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
         let references = ComposedReferences::default();
-        let mut ctx = ChassisCtx::new(
-            &registry,
-            &mailer,
-            &mut fallback,
-            &aborter,
-            &mut claimed_actor_mailboxes,
-            &spawner,
-            &mut reserved_driver_mailboxes,
-            &references,
-        );
+        let mut ctx = ChassisCtx::new(ChassisCtxParts {
+            registry: &registry,
+            mailer: &mailer,
+            fallback: &mut fallback,
+            aborter: &aborter,
+            claimed_actor_mailboxes: &mut claimed_actor_mailboxes,
+            spawner: &spawner,
+            reserved_driver_mailboxes: &mut reserved_driver_mailboxes,
+            references: &references,
+        });
         let name = "test.unclaim.retire";
         let expected = ActorPath::new(name).expect("the claimed name is a canonical path");
 
@@ -844,16 +856,11 @@ mod tests {
     /// trips the ADR-0094 guard in a debug build.
     fn armed_subscribe_self(id: MailboxId) -> OwnedDispatch {
         OwnedDispatch::armed(
-            KindId(7),
-            None,
-            Source::NONE,
-            MailRef::from(Vec::new()),
-            1,
-            Some(MailId::new(id, 1)),
-            Some(MailId::new(id, 1)),
-            None,
-            Nanos(0),
-            0,
+            DispatchParts {
+                mail_id: Some(MailId::new(id, 1)),
+                root: Some(MailId::new(id, 1)),
+                ..DispatchParts::new(KindId(7), MailRef::from(Vec::new()))
+            },
             id,
         )
     }
@@ -874,16 +881,16 @@ mod tests {
             let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
             let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
             let references = ComposedReferences::default();
-            let mut ctx = ChassisCtx::new(
-                &registry,
-                &mailer,
-                &mut fallback,
-                &aborter,
-                &mut claimed_actor_mailboxes,
-                &spawner,
-                &mut reserved_driver_mailboxes,
-                &references,
-            );
+            let mut ctx = ChassisCtx::new(ChassisCtxParts {
+                registry: &registry,
+                mailer: &mailer,
+                fallback: &mut fallback,
+                aborter: &aborter,
+                claimed_actor_mailboxes: &mut claimed_actor_mailboxes,
+                spawner: &spawner,
+                reserved_driver_mailboxes: &mut reserved_driver_mailboxes,
+                references: &references,
+            });
             let claim =
                 ctx.claim_mailbox_drop_on_shutdown_with_override("test.1564.sender_gone").expect("claim succeeds");
             claim_id = claim.id;
@@ -914,16 +921,16 @@ mod tests {
             let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
             let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
             let references = ComposedReferences::default();
-            let mut ctx = ChassisCtx::new(
-                &registry,
-                &mailer,
-                &mut fallback,
-                &aborter,
-                &mut claimed_actor_mailboxes,
-                &spawner,
-                &mut reserved_driver_mailboxes,
-                &references,
-            );
+            let mut ctx = ChassisCtx::new(ChassisCtxParts {
+                registry: &registry,
+                mailer: &mailer,
+                fallback: &mut fallback,
+                aborter: &aborter,
+                claimed_actor_mailboxes: &mut claimed_actor_mailboxes,
+                spawner: &spawner,
+                reserved_driver_mailboxes: &mut reserved_driver_mailboxes,
+                references: &references,
+            });
             let claim =
                 ctx.claim_mailbox_drop_on_shutdown_with_override("test.1564.receiver_gone").expect("claim succeeds");
             claim_id = claim.id;

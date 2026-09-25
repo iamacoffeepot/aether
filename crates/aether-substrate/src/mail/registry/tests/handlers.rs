@@ -5,13 +5,11 @@ use std::panic;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use aether_kinds::trace::Nanos;
-
 use crate::mail::registry::{
-    InboxHandler, InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch, Registry, test_dispatch,
+    DispatchParts, InboxHandler, InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch, Registry, test_dispatch,
     test_owned_dispatch,
 };
-use crate::mail::{KindId, MailRef, MailboxId, Source};
+use crate::mail::{KindId, MailRef, MailboxId};
 use crate::testing::boot_authority as auth;
 
 #[test]
@@ -32,16 +30,11 @@ fn closure_handler_runs_on_call() {
     // Test-side id is irrelevant — the handler ignores it.
     h.enqueue(test_owned_dispatch(KindId(0), &[], 7));
     h.enqueue(OwnedDispatch::disarmed_at(
-        KindId(0),
-        Some("physics".to_owned()),
-        Source::NONE,
-        MailRef::from(Vec::new()),
-        3,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            origin: Some("physics".to_owned()),
+            count: 3,
+            ..DispatchParts::new(KindId(0), MailRef::from(Vec::new()))
+        },
         MailboxId(0),
     ));
     assert_eq!(counter.load(Ordering::SeqCst), 10);
@@ -85,30 +78,10 @@ fn inbox_handler_blanket_impl_moves_owned_payload() {
         collected_for_handler.lock().unwrap().push(dispatch.payload.into_vec());
     });
 
+    handler
+        .enqueue(OwnedDispatch::disarmed_at(DispatchParts::new(KindId(0), MailRef::from(vec![1, 2, 3])), MailboxId(0)));
     handler.enqueue(OwnedDispatch::disarmed_at(
-        KindId(0),
-        None,
-        Source::NONE,
-        MailRef::from(vec![1, 2, 3]),
-        1,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
-        MailboxId(0),
-    ));
-    handler.enqueue(OwnedDispatch::disarmed_at(
-        KindId(0),
-        None,
-        Source::NONE,
-        MailRef::from(vec![4, 5, 6, 7]),
-        1,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
+        DispatchParts::new(KindId(0), MailRef::from(vec![4, 5, 6, 7])),
         MailboxId(0),
     ));
 
@@ -140,16 +113,10 @@ fn inbox_handler_hand_rolled_impl_dispatches_per_call() {
     let (tx, rx) = mpsc::channel();
     let handler: Arc<dyn InboxHandler> = Arc::new(ChannelForwarder { tx });
     handler.enqueue(OwnedDispatch::disarmed_at(
-        KindId(42),
-        Some("aether.fs".to_owned()),
-        Source::NONE,
-        MailRef::from(vec![0xAB, 0xCD]),
-        1,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            origin: Some("aether.fs".to_owned()),
+            ..DispatchParts::new(KindId(42), MailRef::from(vec![0xAB, 0xCD]))
+        },
         MailboxId(0),
     ));
 

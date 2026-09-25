@@ -5,11 +5,10 @@ use std::time::Duration;
 
 use aether_actor::{ActorRef, actor};
 use aether_data::{Kind, MailboxId, Source, SourceAddr};
-use aether_kinds::trace::Nanos;
 use aether_substrate::BootError;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::mail::MailRef;
-use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
+use aether_substrate::mail::registry::{DispatchParts, MailboxEntry, OwnedDispatch, Registry};
 use aether_substrate::testing::boot_authority;
 
 /// Mail the anchor accepts so it has a handler.
@@ -57,16 +56,10 @@ pub fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: Mai
         panic!("actor mailbox is not an inbox");
     };
     handler.enqueue(OwnedDispatch::disarmed(
-        K::ID,
-        None,
-        Source::with_correlation(SourceAddr::Component(caller), correlation),
-        MailRef::from(mail.encode_into_bytes()),
-        1,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            sender: Source::with_correlation(SourceAddr::Component(caller), correlation),
+            ..DispatchParts::new(K::ID, MailRef::from(mail.encode_into_bytes()))
+        },
         target,
     ));
 }
