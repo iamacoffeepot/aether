@@ -41,6 +41,7 @@ use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::thread_name;
 use crate::runtime::trace::{SentRecord, SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
+use crate::store::BlobStore;
 use aether_actor::ErasedActorRef;
 use aether_data::tagged_id::{self, Tag};
 use aether_data::{ActorPath, Kind, KindDescriptor, KindId};
@@ -125,6 +126,10 @@ pub struct Mailer {
     /// chassis-root push mints `MailId(CHASSIS_MAILBOX_ID, n)` from here, so no
     /// two senders can mint the same root. Starts at 1; 0 is the sentinel.
     chassis_roots: AtomicU64,
+    /// ADR-0238 decision 1: the engine's one blob store. There is one
+    /// `Mailer` per engine and every ctx reaches it through its binding, so
+    /// `NativeCtx::check_in` lands every native check-in here.
+    blob_store: BlobStore,
 }
 
 /// A chassis root minted from the [`Mailer`]'s counter, its `Sent` recorded,
@@ -155,6 +160,11 @@ impl Mailer {
     /// `SubstrateBoot::build` is the production caller; tests build the
     /// same pair with `Registry::new()`. Call [`Self::with_outbound`] to
     /// attach a hub outbound if the chassis needs ADR-0037 bubble-up.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the OS refuses the engine blob store's reclaim thread,
+    /// as the scheduler pool's worker spawn does.
     pub fn new(registry: Arc<Registry>) -> Self {
         Self {
             registry,
@@ -166,7 +176,14 @@ impl Mailer {
             capability_registry: Arc::new(CapabilityRegistry::new()),
             cost_table: Arc::new(CostTable::new()),
             chassis_roots: AtomicU64::new(1),
+            blob_store: BlobStore::new().expect("spawn the blob reclaim thread"),
         }
+    }
+
+    /// The engine's blob store (ADR-0238 decision 1). Crate-private, so the
+    /// only public route to it is `NativeCtx::check_in`.
+    pub(crate) const fn blob_store(&self) -> &BlobStore {
+        &self.blob_store
     }
 
     /// ADR-0080 §5 chassis-mail router installation. Called once by

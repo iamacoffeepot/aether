@@ -5,18 +5,13 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use aether_data::{BlobBacking, BlobHash, BlobRef};
+
 use super::{Index, Shared, reclaim};
 
-/// The BLAKE3 digest of an entry's bytes: the dedup index's key and nothing
-/// more. It has no public constructor, and knowing one grants no access to
-/// the bytes it names (ADR-0238 decision 4).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct BlobHash([u8; blake3::OUT_LEN]);
-
-impl BlobHash {
-    pub(super) fn of(bytes: &[u8]) -> Self {
-        Self(*blake3::hash(bytes).as_bytes())
-    }
+/// The BLAKE3 digest of `bytes` as the entry's identity and dedup key.
+pub(super) fn hash_of(bytes: &[u8]) -> BlobHash {
+    BlobHash::from_bytes(*blake3::hash(bytes).as_bytes())
 }
 
 /// Immutable checked-in bytes, shared as an `Arc`. Reading them takes no lock.
@@ -53,6 +48,19 @@ impl BlobEntry {
     #[must_use]
     pub fn hash(&self) -> BlobHash {
         self.hash
+    }
+
+    /// Hold this entry as a [`BlobRef`]: the store's one mint site. The
+    /// reference keeps the entry, and so its bytes, resident until it and
+    /// every clone of it drop.
+    pub(crate) fn into_ref(self: Arc<Self>) -> BlobRef {
+        aether_data::__mint_blob_ref(self.hash, self)
+    }
+}
+
+impl BlobBacking for BlobEntry {
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 }
 

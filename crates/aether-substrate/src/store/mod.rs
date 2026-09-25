@@ -3,14 +3,24 @@
 //!
 //! - **In memory only.** Nothing backs an entry with a file, so a restart
 //!   forgets every blob.
-//! - **Check-in only.** [`BlobStore::check_in`] takes ownership of a buffer
+//! - **Check-in only.** `BlobStore::check_in` takes ownership of a buffer
 //!   and returns a shared [`BlobEntry`]. Bytes never change after check-in; a
 //!   change is a new check-in. Reading an entry's bytes takes no lock.
 //! - **Deduplicated by BLAKE3.** Check-in hashes the bytes before it locks
 //!   the dedup index. When a live entry with that hash is resident, check-in
 //!   returns it and frees the new buffer, so equal bytes are resident once.
-//! - **The hash grants nothing.** [`BlobHash`] is a dedup key with no public
-//!   constructor, and nothing here looks an entry up by hash.
+//! - **The hash grants nothing.** An entry's identity is an
+//!   [`aether_data::BlobHash`], and nothing here looks an entry up by hash.
+//!
+//! # How actors reach it
+//!
+//! The engine's one store is owned by its `Mailer`. A native handler checks
+//! bytes in through `NativeCtx::check_in`, which holds the resulting entry as
+//! an [`aether_data::BlobRef`]: the entry's `Arc` behind the
+//! [`aether_data::BlobBacking`] this module implements. `BlobEntry::into_ref`
+//! is the only place that mints one, so a `BlobRef` always comes from this
+//! store. Cloning a `BlobRef` adds a strong reference and dropping it lets one
+//! go; native actors keep no table of their own.
 //!
 //! # How entries are freed
 //!
@@ -39,6 +49,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
+use aether_data::BlobHash;
 use rustc_hash::FxHashMap;
 
 mod entry;
@@ -47,7 +58,7 @@ mod reclaim;
 #[cfg(test)]
 mod tests;
 
-pub use entry::{BlobEntry, BlobHash};
+pub use entry::BlobEntry;
 
 /// Buffers at or above this length are freed on the reclaim thread rather
 /// than on the thread that drops them.
@@ -99,8 +110,8 @@ impl BlobStore {
     /// Check `bytes` in, returning the resident entry for their hash: the
     /// already-resident one when a live entry has it (the new buffer is then
     /// freed), otherwise a new entry.
-    pub fn check_in(&self, bytes: Box<[u8]>) -> Arc<BlobEntry> {
-        let hash = BlobHash::of(&bytes);
+    pub(crate) fn check_in(&self, bytes: Box<[u8]>) -> Arc<BlobEntry> {
+        let hash = entry::hash_of(&bytes);
 
         let mut index = self.shared.lock_index();
         if let Some(resident) = index.get(&hash).and_then(Weak::upgrade) {
