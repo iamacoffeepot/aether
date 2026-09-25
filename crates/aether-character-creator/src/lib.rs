@@ -937,9 +937,7 @@ fn head_mass_sdf(point: Vec3) -> f32 {
             capsule_sdf(point, Vec3::new(side * 0.31, 0.30, 0.46), Vec3::new(side * 0.40, 0.04, 0.455), 0.10);
         shape = smooth_union(shape, lateral_orbital_rim, 0.10);
     }
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.10, 0.61), Vec3::new(0.085, 0.23, 0.16)), 0.05);
-    let nasal_dorsal_line = capsule_sdf(point, Vec3::new(0.0, 0.22, 0.72), Vec3::new(0.0, -0.03, 0.78), 0.04);
-    shape = smooth_union(shape, nasal_dorsal_line, 0.035);
+    shape = smooth_union(shape, nasal_bridge_sdf(point), 0.11);
     shape =
         smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.080, 0.755), Vec3::new(0.105, 0.090, 0.105)), 0.035);
     for x in [-0.085, 0.085] {
@@ -982,6 +980,20 @@ fn capsule_sdf(point: Vec3, start: Vec3, end: Vec3, radius: f32) -> f32 {
     let offset = point - start;
     let projection = (offset.dot(segment) / segment.dot(segment)).clamp(0.0, 1.0);
     (offset - segment * projection).length() - radius
+}
+
+fn nasal_bridge_sdf(point: Vec3) -> f32 {
+    let start = Vec3::new(0.0, 0.29, 0.55);
+    let end = Vec3::new(0.0, -0.025, 0.75);
+    let segment = end - start;
+    let amount = ((point - start).dot(segment) / segment.dot(segment)).clamp(0.0, 1.0);
+    let center = start + segment * amount;
+    let width = 0.11 + (0.085 - 0.11) * amount;
+    let depth = 0.055 + (0.045 - 0.055) * amount;
+    let local = point - center;
+    let radial =
+        (local.x * local.x / (width * width) + (local.y * local.y + local.z * local.z) / (depth * depth)).sqrt();
+    (radial - 1.0) * depth.min(width)
 }
 
 fn superellipsoid_sdf(point: Vec3, center: Vec3, radii: Vec3, exponent: f32) -> f32 {
