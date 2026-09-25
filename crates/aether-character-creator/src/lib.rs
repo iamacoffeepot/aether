@@ -865,24 +865,23 @@ fn head_mass_sdf(point: Vec3) -> f32 {
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.18, 0.18), Vec3::new(0.49, 0.54, 0.45)), 0.11);
     shape = smooth_union(
         shape,
-        superellipsoid_sdf(point, Vec3::new(0.0, -0.52, 0.27), Vec3::new(0.36, 0.24, 0.28), 2.40),
+        superellipsoid_sdf(point, Vec3::new(0.0, -0.52, 0.34), Vec3::new(0.36, 0.24, 0.29), 2.40),
         0.08,
     );
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.58, 0.43), Vec3::new(0.26, 0.17, 0.20)), 0.08);
     for x in [-0.28, 0.28] {
-        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.35, 0.15), Vec3::new(0.15, 0.26, 0.19)), 0.09);
+        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.35, 0.22), Vec3::new(0.15, 0.26, 0.20)), 0.09);
     }
     for x in [-0.33, 0.33] {
-        shape =
-            smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.01, 0.38), Vec3::new(0.21, 0.15, 0.115)), 0.14);
-    }
-    for x in [-0.255, 0.255] {
-        shape =
-            smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, 0.34, 0.445), Vec3::new(0.21, 0.14, 0.115)), 0.07);
+        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.01, 0.46), Vec3::new(0.22, 0.15, 0.13)), 0.14);
     }
     for side in [-1.0, 1.0] {
+        let brow_ridge =
+            capsule_sdf(point, Vec3::new(side * 0.11, 0.35, 0.48), Vec3::new(side * 0.34, 0.30, 0.465), 0.085);
+        shape = smooth_union(shape, brow_ridge, 0.09);
         let lateral_orbital_rim =
-            capsule_sdf(point, Vec3::new(side * 0.29, 0.35, 0.45), Vec3::new(side * 0.42, 0.045, 0.38), 0.095);
-        shape = smooth_union(shape, lateral_orbital_rim, 0.08);
+            capsule_sdf(point, Vec3::new(side * 0.32, 0.30, 0.46), Vec3::new(side * 0.42, 0.04, 0.455), 0.10);
+        shape = smooth_union(shape, lateral_orbital_rim, 0.10);
     }
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.10, 0.61), Vec3::new(0.085, 0.23, 0.16)), 0.05);
     shape =
@@ -949,10 +948,10 @@ fn smooth_maximum(left: f32, right: f32, radius: f32) -> f32 {
 fn brow_outer_delta(position: Vec3) -> Vec3 {
     let front = ((position.z + 0.05) / 0.78).clamp(0.0, 1.0);
     let lateral = ((position.x.abs() - 0.245) / 0.17).clamp(0.0, 1.0);
-    let outer_region = gaussian(position.x, position.y, -0.39, 0.35, 0.18, 0.17)
-        + gaussian(position.x, position.y, 0.39, 0.35, 0.18, 0.17);
+    let outer_region = gaussian(position.x, position.y, -0.38, 0.23, 0.17, 0.24)
+        + gaussian(position.x, position.y, 0.38, 0.23, 0.17, 0.24);
     let weight = front * lateral * outer_region;
-    Vec3::new(position.x.signum() * 0.020, 0.0, 0.055) * weight
+    Vec3::new(position.x.signum() * 0.015, -0.012, 0.035) * weight
 }
 
 fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
