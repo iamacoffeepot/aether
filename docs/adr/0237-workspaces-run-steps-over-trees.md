@@ -5,6 +5,7 @@
 - **Amended:** 2026-09-24 — trees cross into and out of a container as canonical tar streams through the Engine API's archive endpoints; no tree is written to a host directory, so a remote daemon needs nothing on its host but the stream. While the blob split stays deferred, the actor's blob writes go through the journal.
 - **Amended:** 2026-09-25 — the blob split is no longer deferred: the journal is a root directory holding the SQLite database and a `blobs` directory of digest-named files for every blob, at every size (ADR-0220). Open question 1 is resolved: the journal stays the only writer, of the database and of the blob files. This replaces the previous amendment's deferred-split sentence.
 - **Amended:** 2026-09-25 — RunResult gains Failed { detail } for executor failures during a run; like Exhausted it never reaches the program.
+- **Amended:** 2026-09-25 — imports are an `Import` request on the workspace actor: it pulls a digest-pinned image through the Engine API and decodes its exported filesystem into a tree in the journal, under userland rules and `Config` bounds; no tarball, host path, or host pipe is read. Open question 3 is resolved (a new `aether-workspace` crate; the tar codec stays in `aether-bloomery-tar`). Open question 2 waits for a second executor. Open question 1's single writer gains a streaming artifact store the journal hands the workspace actor.
 
 Amends [ADR-0229](0229-program-cap-apis-are-extra-run-arguments.md) (the
 closed, sealed set of program APIs, `Http` / `Process`, mapped through
@@ -176,6 +177,31 @@ the sandbox, or they make the program `Sampled`.
      with `provides`; a mismatch is `Refused(ToolchainMismatch)`, so a wrong
      toolchain can neither run silently nor be fetched mid-run.
 
+   *(Amended 2026-09-25: both layers are imported the same way, by a request
+   to the workspace actor:*
+
+   ```rust
+   #[aether_data::kind(name = "aether.workspace.import")]
+   pub struct Import { pub image: ImageRef }   // <repository>@sha256:<hex>; never a tag
+
+   #[aether_data::kind(name = "aether.workspace.import_result")]
+   pub enum ImportResult { Ok { tree: Ref<Tree> }, Failed { detail: Detail } }
+   ```
+
+   *The actor pulls the image, creates a container from it without starting
+   it, decodes `GET /containers/{id}/export` into a tree in the journal, and
+   removes the container on every path. The decode rewrites an absolute
+   symlink target to the relative target that resolves the same inside the
+   tree, drops device nodes under `dev/` (the container runtime supplies
+   `/dev`), and refuses an export over the entry and byte bounds in actor
+   `Config`. The toolchain layer is a whole-image import too; the merge
+   program selects the toolchain directory from that tree by reference. No
+   tarball, host path, or host pipe is read. Import is operator mail like
+   the journal writes (ADR-0226 Consequences), so it can make the daemon pull
+   any digest-pinned image; its tree is published under a head by an
+   operator or consumed by the merge program, and the actor records no
+   event.)*
+
 4. **The sandbox pins what it can; the rest makes a program Sampled.**
 
    | Hidden input | Handling |
@@ -300,9 +326,16 @@ Prerequisites (follow-on issues):
    serves the run's input and output (decision 8) and the imports, which
    read a distro tarball directly and a toolchain directory tarred once.
    There is no tree ↔ directory operation, since nothing consumes one.)*
+
+   *(Amended 2026-09-25: the imports read the export stream of a container
+   created from a digest-pinned image (decision 3), not a distro tarball or
+   a toolchain directory tarred by hand.)*
 2. **Imports.** A native import path that snapshots a distro tarball and a
    toolchain directory into trees once, and the Pure merge program that
    builds an `Environment` root.
+
+   *(Amended 2026-09-25: the native import path is the workspace actor's
+   `Import` request (decision 3).)*
 
 Deferred:
 
@@ -365,6 +398,10 @@ Deferred:
   state the journal already holds as data, leaks when a close is missed, and
   cannot be forked at a point in time; a chain of runs over tree digests
   gives the same agent loop.
+- **Importing a tarball from a host path, or streaming one to an operator
+  binary's stdin.** A host path inside mail is a file-read door on an
+  addressable actor; a stdin pipe is a writer outside the engine's journal
+  process.
 - **A general Docker actor with the workspace on top.** A root-equivalent
   door any addressable actor could use, with one consumer; the Docker code
   is a private backend instead.
@@ -383,11 +420,27 @@ Deferred:
    bytes to a digest-named file in its root's `blobs` directory before the
    row that stores it commits (ADR-0220). The actor writes no file itself,
    so blob files and citation edges keep one writer.)*
+
+   *(Amended 2026-09-25: the journal writes through two doors over one root
+   lock and one insert-and-verify path: `append`, and a streaming artifact
+   store the journal hands out, whose batches the workspace actor fills from
+   its worker thread.)*
 2. **Where executor provenance lives.** `Transition.executor` was dropped
    with ADR-0224's native executors, and host identity must not enter a
    Pure result. Proposed: a small provenance record beside the
    `Transition`, outside the result digest.
+
+   *(Amended 2026-09-25: deferred. Nothing reads provenance until a second
+   executor of the same platform class exists (decision 5), so the first
+   backend ships without a record; keeping it out of `RunResult` stays
+   fixed.)*
 3. **Crate placement.** The kinds cite `Ref<Tree>` and `OpaqueBytes` from
    `aether-bloomery-kinds`. Proposed: a new `aether-workspace` crate that
    depends on that kinds crate, rather than moving tree kinds into
    `aether-data`.
+
+   *(Amended 2026-09-25, resolved: a new `aether-workspace` crate with the
+   ADR-0122 identity/runtime split. Its identity half holds these kinds and
+   depends on `aether-bloomery-kinds`; its runtime half holds the actor and
+   depends on `aether-bloomery-journal` and on `aether-bloomery-tar`, which
+   stays its own crate.)*
