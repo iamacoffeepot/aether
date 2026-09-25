@@ -21,7 +21,9 @@ mod reactor;
 mod reference;
 mod tree;
 
-pub use artifact::{OpaqueBytes, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, hash_bytes};
+pub use artifact::{
+    ArtifactHasher, OpaqueBytes, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, hash_bytes,
+};
 pub use bundle::{BUNDLE_NAMESPACE, PROGRAMS_SECTION};
 pub use digest::Digest;
 pub use driver::{AwaitProcessed, Call, CallOutcome, CallProgram, CallRefusal, Processed, SetHead};

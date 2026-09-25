@@ -10,9 +10,9 @@ use std::time::Duration;
 use aether_bloomery_journal::{Batch, Clock, Draft, Journal, JournalActor, Seq};
 use aether_bloomery_kinds::{JournalEntry, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult};
 use aether_data::Kind;
+use aether_substrate::Subname;
 use aether_substrate::mail::registry::OwnedDispatch;
 use aether_substrate::testing::{bare_substrate, boot_test_chassis_with};
-use aether_substrate::{SpawnError, Subname};
 
 use actor_support::{TestAnchor, caller, reply, request};
 
@@ -81,9 +81,22 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
     let (first_caller, first_rx) = caller(&registry, "test.journal_actor.caller_first");
     let (second_caller, second_rx) = caller(&registry, "test.journal_actor.caller_second");
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
-    let alpha =
-        chassis.spawn_actor::<JournalActor>(Subname::Named("alpha"), alpha_path, ()).finish().expect("alpha birth");
-    let beta = chassis.spawn_actor::<JournalActor>(Subname::Named("beta"), beta_path, ()).finish().expect("beta birth");
+    let alpha = chassis
+        .spawn_actor::<JournalActor>(
+            Subname::Named("alpha"),
+            (),
+            Journal::open(&alpha_path).expect("open the journal root"),
+        )
+        .finish()
+        .expect("alpha birth");
+    let beta = chassis
+        .spawn_actor::<JournalActor>(
+            Subname::Named("beta"),
+            (),
+            Journal::open(&beta_path).expect("open the journal root"),
+        )
+        .finish()
+        .expect("beta birth");
     assert_ne!(alpha, beta);
 
     // Four outstanding requests exercise both addresses and two independent reply targets.
@@ -137,15 +150,4 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
             ReadEventsResult::Err { after: 1, message } if message.contains("limit")
         ));
     }
-}
-
-#[test]
-fn a_root_whose_parent_is_missing_fails_actor_birth() {
-    let temp = tempfile::tempdir().expect("temporary journal directory");
-    let invalid_path = temp.path().join("missing-parent").join("journal");
-    let (registry, mailer) = bare_substrate();
-    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
-
-    let result = chassis.spawn_actor::<JournalActor>(Subname::Named("invalid"), invalid_path, ()).finish();
-    assert!(matches!(result, Err(SpawnError::InitFailed(_))), "invalid path must fail birth: {result:?}");
 }

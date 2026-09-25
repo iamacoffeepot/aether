@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 
 use aether_actor::{ActorRef, ErasedActorRef};
-use aether_bloomery_journal::{Entry, JournalActor, JournalReader, Seq};
+use aether_bloomery_journal::{Entry, Journal, JournalActor, JournalReader, Seq};
 use aether_bloomery_kinds::{
     Activated, AppendRecords, AppendRecordsResult, Detail, Digest, DriverRecord, EncodedArtifact, Head, NativeOrigin,
     OpaqueBytes, ProgramName, ProgramRef, ReactionFailed, ReactorName, RecordedHead, RecordedHeadMove, RequestSource,
@@ -35,7 +35,11 @@ impl Fixture {
         let (caller, replies) = caller(&registry, "test.append_records.caller");
         let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
         let actor = chassis
-            .spawn_actor::<JournalActor>(Subname::Named("append-records"), path.to_owned(), ())
+            .spawn_actor::<JournalActor>(
+                Subname::Named("append-records"),
+                (),
+                Journal::open(path).expect("open the journal root"),
+            )
             .finish()
             .expect("birth");
         let journal = JournalReader::open(path).expect("observe journal");

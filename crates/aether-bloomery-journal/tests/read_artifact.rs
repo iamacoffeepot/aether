@@ -150,11 +150,19 @@ fn named_owners_return_isolated_artifacts_with_order_independent_correlation() {
     let (caller_id, rx) = caller(&registry, "test.journal_actor.artifact_caller");
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
     let alpha = chassis
-        .spawn_actor::<JournalActor>(Subname::Named("artifact_alpha"), alpha_path.clone(), ())
+        .spawn_actor::<JournalActor>(
+            Subname::Named("artifact_alpha"),
+            (),
+            Journal::open(&alpha_path).expect("open the journal root"),
+        )
         .finish()
         .expect("alpha birth");
     let beta = chassis
-        .spawn_actor::<JournalActor>(Subname::Named("artifact_beta"), beta_path.clone(), ())
+        .spawn_actor::<JournalActor>(
+            Subname::Named("artifact_beta"),
+            (),
+            Journal::open(&beta_path).expect("open the journal root"),
+        )
         .finish()
         .expect("beta birth");
     assert_ne!(alpha, beta);
@@ -207,8 +215,14 @@ fn text_kind_and_absent_digest_are_distinct_from_opaque_or_empty_bytes() {
     let (registry, mailer) = bare_substrate();
     let (caller_id, rx) = caller(&registry, "test.journal_actor.text_caller");
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
-    let owner =
-        chassis.spawn_actor::<JournalActor>(Subname::Named("artifact_text"), path.clone(), ()).finish().expect("birth");
+    let owner = chassis
+        .spawn_actor::<JournalActor>(
+            Subname::Named("artifact_text"),
+            (),
+            Journal::open(&path).expect("open the journal root"),
+        )
+        .finish()
+        .expect("birth");
 
     request(&registry, owner, caller_id, 71, &ReadArtifact { digest: seeded.text });
     assert_eq!(
@@ -238,11 +252,19 @@ fn changed_payload_and_short_prefix_are_errors_without_journal_writes() {
     let (caller_id, rx) = caller(&registry, "test.journal_actor.corruption_caller");
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
     let mismatch_owner = chassis
-        .spawn_actor::<JournalActor>(Subname::Named("artifact_mismatch"), mismatch_path.clone(), ())
+        .spawn_actor::<JournalActor>(
+            Subname::Named("artifact_mismatch"),
+            (),
+            Journal::open(&mismatch_path).expect("open the journal root"),
+        )
         .finish()
         .expect("mismatch owner birth");
     let short_owner = chassis
-        .spawn_actor::<JournalActor>(Subname::Named("artifact_short"), short_path.clone(), ())
+        .spawn_actor::<JournalActor>(
+            Subname::Named("artifact_short"),
+            (),
+            Journal::open(&short_path).expect("open the journal root"),
+        )
         .finish()
         .expect("short owner birth");
     request(&registry, mismatch_owner, caller_id, 81, &ReadArtifact { digest: mismatch });

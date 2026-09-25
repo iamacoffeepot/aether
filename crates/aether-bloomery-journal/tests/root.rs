@@ -78,6 +78,22 @@ fn a_regular_file_at_the_root_path_is_not_a_directory() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn a_root_whose_parent_is_missing_refuses_open() -> Result<(), Box<dyn Error>> {
+    // Catches the root created with its missing parents: a typo in the
+    // configured path would then silently start an empty journal elsewhere.
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("missing-parent").join("journal");
+
+    match Journal::open(&root) {
+        Err(JournalError::Io { path, .. }) => assert_eq!(path, root),
+        Err(other) => panic!("expected an i/o refusal naming the root, got {other:?}"),
+        Ok(_) => panic!("a root whose parent is missing must not open"),
+    }
+    assert!(!temp.path().join("missing-parent").exists());
+    Ok(())
+}
+
+#[test]
 fn open_sweeps_what_an_interrupted_write_left_in_tmp() -> Result<(), Box<dyn Error>> {
     // Catches a sweep that is skipped, or that leaves nested entries behind.
     let (root, journal) = common::temp_journal(0)?;

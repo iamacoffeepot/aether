@@ -59,8 +59,14 @@ impl Fixture {
         let (watcher, watcher_replies) = caller(&registry, "test.watch_head.watcher");
         let (caller, replies) = caller(&registry, "test.watch_head.caller");
         let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
-        let actor =
-            chassis.spawn_actor::<JournalActor>(Subname::Named("watch"), path.to_owned(), ()).finish().expect("birth");
+        let actor = chassis
+            .spawn_actor::<JournalActor>(
+                Subname::Named("watch"),
+                (),
+                Journal::open(path).expect("open the journal root"),
+            )
+            .finish()
+            .expect("birth");
         Self { registry, _chassis: chassis, actor, caller, replies, watcher, watcher_replies, note }
     }
 
