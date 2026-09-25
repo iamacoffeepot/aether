@@ -544,7 +544,8 @@ fn neck_mesh(rings: u32, segments: u32) -> Mesh {
 
 fn neck_surface_point(amount: f32, around: f32) -> Vec3 {
     let (sin, cos) = around.sin_cos();
-    let top_y = (-0.075_f32).mul_add(sin, -0.345);
+    let posterior_weight = (-sin).max(0.0).powf(1.35);
+    let top_y = (-0.075_f32).mul_add(sin, -0.345) + 0.11 * posterior_weight;
     let y = (-1.18 - top_y).mul_add(amount, top_y);
     let base_flare = amount * amount * (3.0 - 2.0 * amount);
     let radius_x = 0.15_f32.mul_add(base_flare, 0.31);
@@ -567,7 +568,8 @@ fn neck_surface_point(amount: f32, around: f32) -> Vec3 {
         * (-0.5 * (angular_distance(around, PI * 0.5) / 0.17).powi(2)).exp()
         * 0.055;
     let trapezius = base_flare * (-0.5 * (angular_distance(around, PI * 1.5) / 0.62).powi(2)).exp() * 0.055;
-    let surface_radius = muscle + trapezius - throat_furrow;
+    let occipital_taper = posterior_weight * 0.20_f32.mul_add((1.0 - amount).powf(1.35), 0.03);
+    let surface_radius = muscle + trapezius + occipital_taper - throat_furrow;
 
     Vec3::new((radius_x + surface_radius) * cos, y, center_z + (radius_z + surface_radius) * sin + larynx)
 }
