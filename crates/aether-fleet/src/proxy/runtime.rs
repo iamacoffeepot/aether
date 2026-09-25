@@ -14,7 +14,7 @@ use super::config::ProxyTarget;
 use super::{FleetProxy, FleetProxyConfig};
 use crate::kinds::EngineHeartbeatTick;
 pub use crate::kinds::{EngineAlive, EngineDied};
-use aether_actor::{Manual, Single, runtime};
+use aether_actor::{Manual, OutboundReply, Single, runtime};
 pub use aether_data::EngineId;
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
@@ -303,7 +303,8 @@ impl NativeActor for FleetProxy {
     /// as written for the substrate to resolve, and `kind` + `payload`
     /// the mail to deliver there. Every reply the substrate streams back
     /// relays to the sender of this `ForwardEnvelope`, and a
-    /// `CallSettled` ends the exchange.
+    /// `CallSettled` ends the exchange, a `CallSettled::Err` naming the
+    /// failure when the call cannot be written to the engine.
     #[handler::manual]
     fn on_forward(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: ForwardEnvelope) {
         let envelope = MailEnvelope { to: Recipient::local(mail.recipient), kind: mail.kind, payload: mail.payload };
@@ -316,8 +317,13 @@ impl NativeActor for FleetProxy {
                     target: "aether_substrate::fleet_proxy",
                     engine_id = ?state.engine_id,
                     error = %e,
-                    "engine proxy: Call write failed; dropping forward",
+                    "engine proxy: Call write failed; answering the forward with the error",
                 );
+                ctx.reply(&CallSettled::Err {
+                    error: RpcError::Other {
+                        reason: format!("engine proxy could not write the call to its engine: {e}"),
+                    },
+                });
             }
         }
     }

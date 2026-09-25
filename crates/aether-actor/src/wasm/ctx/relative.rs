@@ -29,7 +29,7 @@ use crate::wasm::inline::{ChainMode, Registry};
 /// an [`InlineChild<C>`](super::InlineChild) whose sends are checked against
 /// `C`'s handler set.
 pub struct RelativeMailbox<'a> {
-    id: MailboxId,
+    pub(super) id: MailboxId,
     /// The addressing actor's own folded [`MailboxId`] raw value — the "from"
     /// half stamped on the in-place send so the relative recipient's
     /// `ctx.sender()` resolves who sent it. Set by
@@ -40,12 +40,6 @@ pub struct RelativeMailbox<'a> {
 }
 
 impl RelativeMailbox<'_> {
-    /// The relative's resolved [`MailboxId`].
-    #[must_use]
-    pub fn mailbox_id(&self) -> MailboxId {
-        self.id
-    }
-
     /// Resolve a sendable handle to this relative's inline child whose
     /// subname is `name`, preserving the original addresser for any send
     /// through the returned handle. This is the multi-hop continuation of

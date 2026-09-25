@@ -23,9 +23,9 @@ use crate::wasm::inline::Registry;
 use alloc::string::String;
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
-/// capability handle for FFI guests. Exposes send, reply, and the
-/// inherent [`mailbox_id`](WasmCtx::mailbox_id) for cases that need to
-/// address this component explicitly.
+/// capability handle for FFI guests. Exposes send, reply, and
+/// cluster-relative addressing; it never reveals the actor's own mailbox
+/// position (ADR-0230).
 // The `Wasm` prefix carries the native/wasm split signal; bare `Ctx` loses that.
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
@@ -245,13 +245,6 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     pub fn take_context<C: Kind>(&mut self) -> Option<C> {
         let request = self.in_reply_to()?;
         self.inline.take_request_context(request)
-    }
-
-    /// The component's own mailbox id — the value the substrate uses to
-    /// address `receive` calls to this instance.
-    #[must_use]
-    pub fn mailbox_id(&self) -> MailboxId {
-        MailboxId(self.mailbox)
     }
 
     /// Proven reference to a declared dependency (ADR-0230): mints an
