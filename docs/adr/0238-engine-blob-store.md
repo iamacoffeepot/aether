@@ -142,8 +142,8 @@ boxed bytes are freed when the last strong reference drops.
 
 | Side | Handle | Table home |
 |---|---|---|
-| Native actor | `Blob` (non-`Copy`; 64-bit: slot, generation, table incarnation; section 6) | beside `A::State`, under the slot's actor `Mutex`; lent to `NativeCtx` for the turn |
-| Wasm guest | `Blob` (same 64-bit shape) | `ComponentCtx`, beside `reply_table`; moved across `replace` like `PendingReplies` |
+| Native actor | `Blob` (non-`Copy`, generation-tagged `u32`) | beside `A::State`, under the slot's actor `Mutex`; lent to `NativeCtx` for the turn |
+| Wasm guest | `Blob` (same `u32` shape) | `ComponentCtx`, beside `reply_table`; moved across `replace` like `PendingReplies` |
 
 - The table is a generation-tagged slab like `ReplyTable`: index in the low
   bits, generation in the high bits, FIFO free queue, grows and never drops a
@@ -159,7 +159,7 @@ boxed bytes are freed when the last strong reference drops.
 | Step | What happens |
 |---|---|
 | Send | The payload carries the sender's table index. The send path looks up each blob field in the sender's table and clones its `Arc` into the envelope. An index that is not live refuses the send. The sender keeps its own entry. |
-| Carry | The envelope carries the `Arc`s beside the payload: `attachments: Option<Box<[(u64, Arc<BlobEntry>)]>>` on `Mail`, one null word when empty. |
+| Carry | The envelope carries the `Arc`s beside the payload: `attachments: Option<Box<[(u32, Arc<BlobEntry>)]>>` on `Mail`, one null word when empty. |
 | Deliver | The substrate installs each `Arc` in the recipient's table and rewrites each payload index to the recipient's index before the handler runs. Fan-out installs per recipient. |
 
 A grant is a side effect of delivering mail. An actor cannot see a new blob
@@ -192,23 +192,25 @@ derived from the schema, not declared: RPC `Call` accept
 (`encode_schema` / `decode_schema`). Crossing a process means sending bytes and
 checking them in on the other side.
 
-### 6. Handles serialize in the engine, never persist
+### 6. Persisting a handle: deferred
 
-A handle may be encoded into a payload inside the engine; that is how mail
-carries it (section 3). It must never be persisted, because the store is
-memory only and a persisted handle names nothing after a restart. Three
-layers enforce this.
+A handle is encoded into a payload inside the engine; that is how mail
+carries it (section 3). A persisted handle names nothing after a restart,
+because the store is memory only. Whether and how the engine refuses to
+persist one is deferred until the `Kind` / `Schema` traits are reconsidered.
+Until then nothing refuses it. The candidates recorded so far:
 
-| Layer | Mechanism | Catches |
-|---|---|---|
-| Static | Each kind carries `const HAS_BLOB: bool`, derived from its schema by the `Kind` derive. Every typed persistence path asserts `const { assert!(!K::HAS_BLOB) }`: the Bloomery journal's staging (`Env::stage`, `AppendRecords`), `save_state_kind`, and the wire and codec paths of section 5. | A blob-bearing kind reaching any typed persistence path is a compile error, not a runtime check. |
-| Fail closed | A handle's encoded form is 64 bits: slot and generation in the low 32, the owning table's incarnation in the high 32. The incarnation is random, drawn when the table is created. | Bytes written through an untyped path (`aether.fs.write` of raw bytes) and read back after a restart carry a stale incarnation. They resolve to nothing instead of aliasing whatever entry now holds that slot. |
-| No escalation | An index resolves only against its holder's own table. | A forged or replayed handle can reach only blobs the holder was already granted, so no untyped path can widen access. |
+- a schema-derived `const HAS_BLOB: bool` on each kind, with a
+  `const { assert!(!K::HAS_BLOB) }` in every typed persistence path (journal
+  staging, `save_state_kind`, the wire and codec paths), making a typed
+  persist a compile error;
+- a random per-table incarnation in the handle's encoded form (widening it to
+  64 bits), so a handle written through an untyped path and read back after a
+  restart resolves to nothing instead of aliasing a live slot.
 
-`save_state_kind` refuses blob-bearing kinds even though a `replace` stays in
-the same process: the table moves across the swap (section 2), so a
-rehydrated actor still holds its entries and needs no handle in its saved
-state.
+What holds regardless: an index resolves only against its holder's own
+table, so a replayed or forged handle can reach only blobs the holder was
+already granted.
 
 ### 7. Freeing by refcount, with a reclaim thread
 
@@ -262,7 +264,7 @@ impl<'a> BlobReader<'a> {
 }
 
 // host import (crates/aether-substrate/src/actor/wasm/host_fns.rs)
-// "aether"."blob_read_p32"(handle: u64, offset: u64, dst_ptr: u32, dst_len: u32) -> i64
+// "aether"."blob_read_p32"(handle: u32, offset: u64, dst_ptr: u32, dst_len: u32) -> i64
 ```
 
 - The guest supplies the buffer. The host copies at most `MAX_READ_BYTES` per
