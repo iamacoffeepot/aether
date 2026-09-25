@@ -9,7 +9,7 @@
 //! It loads the `ui_widget` fixture N times in each of two profiles
 //! (`naive` = re-emit every tick, `cached` = early-return on an unchanged
 //! frame), advances the platform, and reads each widget's per-handler
-//! `Tick` cost from the EWMA table (ADR-0036) via `cost_table()`. The
+//! `Tick` cost from the EWMA table (ADR-0036) via `harness.actor_cost`. The
 //! per-widget mean is one widget's per-frame cost; multiplied by the widget
 //! count it is the aggregate the 60fps frame budget has to absorb.
 //!
@@ -73,7 +73,7 @@ use aether_actor::ErasedActorRef;
 use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::require_runtime;
-use aether_kinds::{CostTail, CostTailResult, LoadComponent, Tick};
+use aether_kinds::{CostTailResult, LoadComponent, Tick};
 use aether_test_fixtures_kinds::UiWidgetConfig;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries land
@@ -118,7 +118,7 @@ fn load_widgets(
 /// nanoseconds — its per-frame cost. Zero if the cell is missing (it should
 /// always be seeded at load).
 fn tick_mean_nanos(harness: &SubstrateHarness, widget: ErasedActorRef) -> u64 {
-    let CostTailResult::Ok { rows } = harness.cost_table().tail(widget, &CostTail { kind: None }) else {
+    let CostTailResult::Ok { rows } = harness.actor_cost(widget) else {
         panic!("cost tail for widget mailbox");
     };
     rows.iter().find(|r| r.kind_id == Tick::ID).map_or(0, |r| r.mean_nanos)

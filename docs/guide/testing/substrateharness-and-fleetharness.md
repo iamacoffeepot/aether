@@ -172,9 +172,8 @@ harness constructor does not add an MCP or production-hub load mode.
 A load reply carries the component's path and no position: the loaded
 trampoline sends the successful reply itself, so the reference to the loaded
 actor is the reply's stamped sender. When a test needs that reference — to ask
-the `capability_registry()` through `accepts_actor`, or the `cost_table()`
-through `tail` — load through the harness directly instead of through an
-operation:
+`harness.accepts(reference, kind)` or `harness.actor_cost(reference)` — load
+through the harness directly instead of through an operation:
 
 ```rust,ignore
 let (panel, path) = harness.load::<WidgetPanel>(LoadComponent {
