@@ -12,7 +12,7 @@
 //! appended ([`SeededJournal::assert_appended`] over [`Record`]s), plus any
 //! view the scenario folds over the actual journal
 //! ([`SeededJournal::fold`]). The seed owns those reads because it owns the
-//! journal file, so they work the same whether the in-process chassis wrote
+//! journal root, so they work the same whether the in-process chassis wrote
 //! it or a forked `aether-bloomery` did; [`BloomeryHarness`] forwards each one
 //! to the seed it booted over.
 //!
@@ -61,7 +61,7 @@ pub use seed::SeededJournal;
 /// Built by [`BloomeryHarness::start`] (or [`BloomeryHarness::start_allowing`]
 /// when the scenario opens HTTP egress), or by [`SeededJournal::boot`] /
 /// [`SeededJournal::boot_with_argv`] when a scenario must observe the journal
-/// file before boot or stage the binary's flags. Dropping the harness tears
+/// root before boot or stage the binary's flags. Dropping the harness tears
 /// the chassis down before the scratch directory is removed.
 pub struct BloomeryHarness {
     chassis: BuiltChassis<BloomeryChassis>,

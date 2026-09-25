@@ -23,7 +23,7 @@ pub const MAX_READ_EVENTS: u32 = 128;
 /// anticipating real concurrent demand.
 pub const MAX_HEAD_WATCHERS: usize = 64;
 
-/// One independently named, file-backed journal owner.
+/// One independently named journal owner over its own journal root.
 pub struct JournalActor {
     journal: Journal,
     watchers: Watchers,
@@ -35,9 +35,9 @@ impl NativeActor for JournalActor {
 
     const NAMESPACE: &'static str = "aether.bloomery.journal";
 
-    fn init(path: PathBuf, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(root: PathBuf, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
-            journal: Journal::open(&path).map_err(|error| BootError::Other(Box::new(error)))?,
+            journal: Journal::open(&root).map_err(|error| BootError::Other(Box::new(error)))?,
             watchers: Watchers::new(),
         })
     }

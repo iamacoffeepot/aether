@@ -1,22 +1,23 @@
-//! SQLite-backed journal: constructors, fence, append, read, decode.
+//! The journal over one root: constructors, fence, append, read, decode.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::fmt;
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{self, ErrorKind};
 use std::ops::Range;
-use std::path::Path;
-use std::slice;
-use std::str;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{fmt, slice, str};
 
 use aether_bloomery_kinds::{ClosureLimit, RecordedHeadMove};
 use aether_data::wire::WireDecode;
 use aether_data::{Kind, KindId, Storage, StorageError, storage_kind_id_from_name};
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params, params_from_iter};
 
 use crate::artifact::{ARTIFACTS_DDL, CITATIONS_DDL, split_artifact};
 use crate::batch::Batch;
+use crate::blobs::{BlobDir, create_synced};
 use crate::clock::{Clock, SystemClock};
 use crate::closure::{Closure, walk_closure};
 use crate::draft::Draft;
@@ -24,6 +25,12 @@ use crate::{DecodeError, Digest, Entry, Seq};
 
 /// Kind prefix and payload of one stored artifact, or `None` when absent.
 type LoadedArtifact = Option<(KindId, Vec<u8>)>;
+
+/// The `SQLite` log inside a journal root.
+pub const DATABASE_FILE: &str = "journal.sqlite";
+
+/// The file a live journal holds an exclusive lock on.
+const LOCK_FILE: &str = "lock";
 
 const ENTRIES_DDL: &str = "
 CREATE TABLE IF NOT EXISTS entries (
@@ -69,53 +76,63 @@ impl fmt::Debug for JournalIdentity {
     }
 }
 
-/// Append-only log of typed events and content-addressed artifacts.
+/// Append-only log of typed events and content-addressed artifacts, the
+/// only writer of one journal root.
 ///
+/// The root holds `journal.sqlite` and a `blobs` directory with one
+/// digest-named file per artifact. The journal holds an exclusive lock on
+/// the root for its whole life, released when it drops or its process dies.
 /// The injected clock is `Send` so a journal can be owned by a native actor.
 pub struct Journal {
-    pub(crate) conn: Connection,
-    pub(crate) clock: Box<dyn Clock + Send>,
+    conn: Connection,
+    clock: Box<dyn Clock + Send>,
     identity: JournalIdentity,
+    blobs: BlobDir,
+    /// Dropped last, so the lock outlives the connection.
+    _lock: File,
 }
 
 impl Journal {
-    /// Open a file-backed journal with [`SystemClock`].
+    /// Open the journal root at `root` with [`SystemClock`].
     ///
     /// # Errors
     ///
-    /// Returns [`JournalError`] when `SQLite` cannot open the path or apply DDL.
-    pub fn open(path: &Path) -> Result<Self, JournalError> {
-        Self::open_with_clock(path, Box::new(SystemClock))
+    /// As [`Journal::open_with_clock`].
+    pub fn open(root: &Path) -> Result<Self, JournalError> {
+        Self::open_with_clock(root, Box::new(SystemClock))
     }
 
-    /// Open a file-backed journal with an injected clock.
+    /// Open the journal root at `root` with an injected clock.
+    ///
+    /// Creates the root when it is missing (its parent must exist), takes the
+    /// exclusive lock, creates `blobs/` and `blobs/tmp/`, deletes whatever
+    /// `blobs/tmp/` holds, then opens `journal.sqlite` and applies the DDL.
     ///
     /// # Errors
     ///
-    /// Returns [`JournalError`] when `SQLite` cannot open the path or apply DDL.
-    pub fn open_with_clock(path: &Path, clock: Box<dyn Clock + Send>) -> Result<Self, JournalError> {
-        let conn = Connection::open(path)?;
+    /// [`JournalError::NotADirectory`] when `root` exists and is not a
+    /// directory, such as a single-file journal. [`JournalError::Locked`] when
+    /// another open journal, in this process or another, holds the root.
+    /// [`JournalError::Io`] when the root's layout cannot be created or swept.
+    /// [`JournalError::Backend`] when `SQLite` cannot open the log or apply DDL.
+    pub fn open_with_clock(root: &Path, clock: Box<dyn Clock + Send>) -> Result<Self, JournalError> {
+        create_root(root)?;
+        let lock = lock_root(root)?;
+
+        let blobs = BlobDir::of_root(root);
+        blobs.create()?;
+        blobs.sweep_tmp()?;
+
+        let conn = Connection::open(root.join(DATABASE_FILE))?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")?;
         prepare_schema(&conn)?;
-        Ok(Self { conn, clock, identity: JournalIdentity::new() })
-    }
-
-    /// Open an in-memory journal. Tests use this with a fixed clock.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`JournalError`] when `SQLite` cannot create the connection or schema.
-    pub fn open_in_memory_with_clock(clock: Box<dyn Clock + Send>) -> Result<Self, JournalError> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch("PRAGMA synchronous = FULL;")?;
-        prepare_schema(&conn)?;
-        Ok(Self { conn, clock, identity: JournalIdentity::new() })
+        Ok(Self { conn, clock, identity: JournalIdentity::new(), blobs, _lock: lock })
     }
 
     /// Process-local identity of this journal allocation.
     ///
     /// Stable across moves. Distinct from any other constructed journal,
-    /// including a reopen of the same file.
+    /// including a reopen of the same root.
     #[must_use]
     pub fn identity(&self) -> JournalIdentity {
         self.identity.clone()
@@ -174,8 +191,8 @@ impl Journal {
             return Ok(next..next);
         }
 
-        insert_staged(&tx, batch, recorded_at_millis)?;
-        verify_citations(&tx, batch)?;
+        insert_staged(&tx, &self.blobs, batch, recorded_at_millis)?;
+        verify_citations(&tx, &self.blobs, batch)?;
         let range = insert_events(&tx, head, &batch.events, recorded_at_millis)?;
         tx.commit()?;
         Ok(range)
@@ -187,7 +204,7 @@ impl Journal {
     /// edges: the root first, then each member's children in ascending digest
     /// byte order, each distinct artifact once. The budget is the sum of each
     /// member's stored blob length (kind prefix plus payload), checked before
-    /// the member's bytes load; a total equal to `limit` fits. Over the limit
+    /// the member's file is read; a total equal to `limit` fits. Over the limit
     /// is [`Closure::TooLarge`] and nothing is returned. Artifacts stored
     /// before the journal recorded citation edges have none, so their closure
     /// is the artifact alone.
@@ -198,7 +215,7 @@ impl Journal {
     /// and payload do not hash to its digest. [`JournalError`] on a backend or
     /// corrupt-blob failure.
     pub fn read_closure(&self, root: &Digest, limit: ClosureLimit) -> Result<Closure, JournalError> {
-        walk_closure(&self.conn, *root, limit)
+        walk_closure(&self.conn, &self.blobs, *root, limit)
     }
 
     /// Entries with `seq > since`, ascending, at most `limit`.
@@ -210,32 +227,7 @@ impl Journal {
     ///
     /// Returns [`JournalError`] on a backend failure.
     pub fn read(&self, since: Seq, limit: usize) -> Result<Vec<Entry>, JournalError> {
-        let since_i64 = sqlite_i64(since.0)?;
-        let limit_i64 = i64::try_from(limit).map_err(|_| JournalError::IntegerRange)?;
-        let mut stmt = self.conn.prepare(
-            "SELECT seq, kind, cause, recorded_at_millis, bytes FROM entries WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![since_i64, limit_i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                decode_entry_kind(row.get_ref(1)?),
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Vec<u8>>(4)?,
-            ))
-        })?;
-        let mut entries = Vec::new();
-        for row in rows {
-            let (seq, kind, cause, recorded_at_millis, bytes) = row?;
-            entries.push(Entry {
-                seq: Seq(from_sqlite_i64(seq)?),
-                kind: kind?,
-                cause: cause.map(from_sqlite_i64).transpose()?.map(Seq),
-                recorded_at_millis: from_sqlite_i64(recorded_at_millis)?,
-                bytes,
-            });
-        }
-        Ok(entries)
+        read_entries(&self.conn, since, limit)
     }
 
     /// Decode `entry` as `K`. Refuses when `entry.kind` is not `K::ID`.
@@ -263,64 +255,159 @@ impl Journal {
     /// [`GetError::PrefixMismatch`] when the prefix is not `K::ID`.
     /// [`GetError::Decode`] when the payload does not decode as `K`.
     pub fn get<K: Storage>(&self, digest: &Digest) -> Result<Option<K>, GetError> {
-        match self.get_bytes(digest)? {
-            None => Ok(None),
-            Some((kind, payload)) if kind == K::ID => K::decode_storage(&payload)
-                .map(|data| Some(data.value))
-                .map_err(|error| GetError::Decode(DecodeError::Storage(error))),
-            Some((actual, _)) => Err(GetError::PrefixMismatch { expected: K::ID, actual }),
-        }
+        decode_artifact(self.get_bytes(digest)?)
     }
 
     /// Load one artifact as `(kind, payload)`. `Ok(None)` when absent.
     ///
     /// # Errors
     ///
-    /// Returns [`JournalError`] on a backend or corrupt-blob failure.
+    /// Returns [`JournalError`] on a backend or corrupt-blob failure, and
+    /// [`JournalError::MissingBlob`] when the artifact's row has no file.
     pub fn get_bytes(&self, digest: &Digest) -> Result<Option<(KindId, Vec<u8>)>, JournalError> {
-        self.get_bytes_many(slice::from_ref(digest))?.into_iter().next().ok_or(JournalError::IntegerRange)
+        load_artifact(&self.conn, &self.blobs, digest)
     }
 
-    /// Load many artifacts in one query. Results are in input order; absent
-    /// digests are `None`.
+    /// Load many artifacts: one query for the stored rows, then each row's
+    /// file. Results are in input order; absent digests are `None`.
     ///
     /// # Errors
     ///
-    /// Returns [`JournalError`] on a backend or corrupt-blob failure, never a short result.
+    /// Returns [`JournalError`] on a backend or corrupt-blob failure, never a
+    /// short result. A row whose file is missing is
+    /// [`JournalError::MissingBlob`]; a file whose length is not the row's
+    /// recorded size is [`JournalError::CorruptArtifact`].
     pub fn get_bytes_many(&self, digests: &[Digest]) -> Result<Vec<LoadedArtifact>, JournalError> {
-        if digests.is_empty() {
-            return Ok(Vec::new());
-        }
-        let placeholders = vec!["?"; digests.len()].join(", ");
-        let sql = format!("SELECT digest, bytes FROM artifacts WHERE digest IN ({placeholders})");
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut rows = stmt.query(params_from_iter(digests.iter().map(|digest| digest.as_bytes().as_slice())))?;
-        let mut found = HashMap::with_capacity(digests.len());
-        while let Some(row) = rows.next()? {
-            let raw: Vec<u8> = row.get(0)?;
-            let bytes: Vec<u8> = row.get(1)?;
-            let key = Digest::from_bytes(raw.try_into().map_err(|_| JournalError::CorruptArtifactDigest)?);
-            let (kind, payload) = split_artifact(&bytes)?;
-            found.insert(key, (kind, payload.to_vec()));
-        }
-        Ok(digests.iter().map(|digest| found.get(digest).cloned()).collect())
+        load_artifacts(&self.conn, &self.blobs, digests)
     }
 }
 
-fn insert_staged(tx: &Transaction<'_>, batch: &Batch, recorded_at_millis: u64) -> Result<(), JournalError> {
+/// Entries with `seq > since`, ascending, at most `limit`. Shared by
+/// [`Journal::read`] and [`crate::JournalReader::read`].
+pub fn read_entries(conn: &Connection, since: Seq, limit: usize) -> Result<Vec<Entry>, JournalError> {
+    let since_i64 = sqlite_i64(since.0)?;
+    let limit_i64 = i64::try_from(limit).map_err(|_| JournalError::IntegerRange)?;
+    let mut stmt = conn.prepare(
+        "SELECT seq, kind, cause, recorded_at_millis, bytes FROM entries WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![since_i64, limit_i64], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            decode_entry_kind(row.get_ref(1)?),
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, Vec<u8>>(4)?,
+        ))
+    })?;
+    let mut entries = Vec::new();
+    for row in rows {
+        let (seq, kind, cause, recorded_at_millis, bytes) = row?;
+        entries.push(Entry {
+            seq: Seq(from_sqlite_i64(seq)?),
+            kind: kind?,
+            cause: cause.map(from_sqlite_i64).transpose()?.map(Seq),
+            recorded_at_millis: from_sqlite_i64(recorded_at_millis)?,
+            bytes,
+        });
+    }
+    Ok(entries)
+}
+
+/// One artifact as `(kind, payload)`, or `None` when absent. Shared by
+/// [`Journal::get_bytes`] and [`crate::JournalReader::get_bytes`].
+pub fn load_artifact(conn: &Connection, blobs: &BlobDir, digest: &Digest) -> Result<LoadedArtifact, JournalError> {
+    load_artifacts(conn, blobs, slice::from_ref(digest))?.into_iter().next().ok_or(JournalError::IntegerRange)
+}
+
+/// Many artifacts in input order: the stored rows' sizes in one query, then
+/// each row's file.
+fn load_artifacts(conn: &Connection, blobs: &BlobDir, digests: &[Digest]) -> Result<Vec<LoadedArtifact>, JournalError> {
+    if digests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = vec!["?"; digests.len()].join(", ");
+    let sql = format!("SELECT digest, size_bytes FROM artifacts WHERE digest IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params_from_iter(digests.iter().map(|digest| digest.as_bytes().as_slice())))?;
+    let mut found = HashMap::with_capacity(digests.len());
+    while let Some(row) = rows.next()? {
+        let raw: Vec<u8> = row.get(0)?;
+        let key = Digest::from_bytes(raw.try_into().map_err(|_| JournalError::CorruptArtifactDigest)?);
+        let bytes = blobs.read(&key, from_sqlite_i64(row.get(1)?)?)?;
+        let (kind, payload) = split_artifact(&bytes)?;
+        found.insert(key, (kind, payload.to_vec()));
+    }
+    Ok(digests.iter().map(|digest| found.get(digest).cloned()).collect())
+}
+
+/// Decode a loaded artifact as `K`. Shared by [`Journal::get`] and
+/// [`crate::JournalReader::get`].
+pub fn decode_artifact<K: Storage>(loaded: LoadedArtifact) -> Result<Option<K>, GetError> {
+    match loaded {
+        None => Ok(None),
+        Some((kind, payload)) if kind == K::ID => K::decode_storage(&payload)
+            .map(|data| Some(data.value))
+            .map_err(|error| GetError::Decode(DecodeError::Storage(error))),
+        Some((actual, _)) => Err(GetError::PrefixMismatch { expected: K::ID, actual }),
+    }
+}
+
+/// Create `root` when it is missing, or confirm that it is a directory.
+fn create_root(root: &Path) -> Result<(), JournalError> {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(JournalError::NotADirectory { root: root.to_path_buf() }),
+        Err(error) if error.kind() == ErrorKind::NotFound => create_synced(root),
+        Err(error) => Err(JournalError::io(root, error)),
+    }
+}
+
+/// Take the exclusive lock on `<root>/lock`. The lock belongs to the open
+/// file description, so a second open fails in this process as well as in
+/// another one.
+fn lock_root(root: &Path) -> Result<File, JournalError> {
+    let path = root.join(LOCK_FILE);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| JournalError::io(&path, error))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(JournalError::Locked { root: root.to_path_buf() }),
+        Err(TryLockError::Error(error)) => Err(JournalError::io(&path, error)),
+    }
+}
+
+/// Store each staged blob whose row is absent: its file lands through
+/// [`BlobDir::store`] before its row and citation edges are inserted, so a
+/// committed row always names a complete file. A refusal later in the
+/// append rolls the rows back and leaves any renamed file as a harmless
+/// orphan, since the same content has the same name.
+fn insert_staged(
+    tx: &Transaction<'_>,
+    blobs: &BlobDir,
+    batch: &Batch,
+    recorded_at_millis: u64,
+) -> Result<(), JournalError> {
     if batch.staged.is_empty() {
         return Ok(());
     }
     let recorded_at = sqlite_i64(recorded_at_millis)?;
-    let mut stmt = tx.prepare(
-        "INSERT OR IGNORE INTO artifacts (digest, size_bytes, recorded_at_millis, bytes) VALUES (?1, ?2, ?3, ?4)",
-    )?;
+    let mut stored = tx.prepare("SELECT 1 FROM artifacts WHERE digest = ?1")?;
+    let mut insert =
+        tx.prepare("INSERT INTO artifacts (digest, size_bytes, recorded_at_millis) VALUES (?1, ?2, ?3)")?;
     let mut edges = tx.prepare("INSERT OR IGNORE INTO citations (from_digest, to_digest) VALUES (?1, ?2)")?;
     for staged in &batch.staged {
-        let size_bytes = sqlite_i64(u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?)?;
-        if stmt.execute(params![staged.digest.as_bytes().as_slice(), size_bytes, recorded_at, staged.bytes])? == 0 {
+        let key = staged.digest.as_bytes().as_slice();
+        if stored.exists(params![key])? {
             continue;
         }
+        blobs.store(&staged.digest, &staged.bytes)?;
+        let size_bytes = sqlite_i64(u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?)?;
+        insert.execute(params![key, size_bytes, recorded_at])?;
         for citation in &staged.citations {
             let to: [u8; 32] = citation.bytes.as_slice().try_into().map_err(|_| JournalError::CorruptCitation)?;
             edges.execute(params![staged.digest.as_bytes().as_slice(), to.as_slice()])?;
@@ -354,9 +441,9 @@ fn insert_events(
     Ok(Seq(first)..Seq(last_exclusive))
 }
 
-fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendError> {
+fn verify_citations(tx: &Transaction<'_>, blobs: &BlobDir, batch: &Batch) -> Result<(), AppendError> {
     let mut seen = HashSet::new();
-    let mut stmt = tx.prepare("SELECT substr(bytes, 1, 8) FROM artifacts WHERE digest = ?1")?;
+    let mut stmt = tx.prepare("SELECT 1 FROM artifacts WHERE digest = ?1")?;
     for citation in batch
         .staged
         .iter()
@@ -364,7 +451,7 @@ fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendErr
         .chain(batch.events.iter().flat_map(|draft| draft.cites.iter()))
     {
         let digest_bytes: [u8; 32] = citation.bytes.as_slice().try_into().map_err(|_| JournalError::CorruptCitation)?;
-        verify_prefix(&mut stmt, &mut seen, digest_bytes, citation.kind)?;
+        verify_prefix(&mut stmt, blobs, &mut seen, digest_bytes, citation.kind)?;
     }
 
     for draft in &batch.events {
@@ -374,7 +461,7 @@ fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendErr
         let event = RecordedHeadMove::decode_storage(&draft.bytes)
             .map(|data| data.value)
             .map_err(AppendError::InvalidHeadMoved)?;
-        verify_prefix(&mut stmt, &mut seen, *event.to().as_bytes(), event.head().kind())?;
+        verify_prefix(&mut stmt, blobs, &mut seen, *event.to().as_bytes(), event.head().kind())?;
     }
 
     for digest in &batch.required {
@@ -383,16 +470,20 @@ fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendErr
     Ok(())
 }
 
-fn verify_exists(stmt: &mut rusqlite::Statement<'_>, digest: Digest) -> Result<(), AppendError> {
-    let found: Option<Vec<u8>> = stmt.query_row(params![digest.as_bytes().as_slice()], |row| row.get(0)).optional()?;
-    match found {
-        Some(_) => Ok(()),
-        None => Err(AppendError::MissingArtifact { digest }),
+/// A row check: a required digest needs no prefix, only a stored row.
+fn verify_exists(stored: &mut rusqlite::Statement<'_>, digest: Digest) -> Result<(), AppendError> {
+    if stored.exists(params![digest.as_bytes().as_slice()])? {
+        Ok(())
+    } else {
+        Err(AppendError::MissingArtifact { digest })
     }
 }
 
+/// The row must exist, then the first eight bytes of its file must be the
+/// expected kind (ADR-0220 keeps no kind column).
 fn verify_prefix(
-    stmt: &mut rusqlite::Statement<'_>,
+    stored: &mut rusqlite::Statement<'_>,
+    blobs: &BlobDir,
     seen: &mut HashSet<([u8; 32], KindId)>,
     digest_bytes: [u8; 32],
     expected: KindId,
@@ -400,20 +491,16 @@ fn verify_prefix(
     if !seen.insert((digest_bytes, expected)) {
         return Ok(());
     }
-    let prefix: Option<Vec<u8>> = stmt.query_row(params![digest_bytes.as_slice()], |row| row.get(0)).optional()?;
     let digest = Digest::from_bytes(digest_bytes);
-    match prefix {
-        None => Err(AppendError::DanglingRef { digest, expected }),
-        Some(bytes) if bytes.len() != 8 => Err(JournalError::CorruptArtifact.into()),
-        Some(bytes) => {
-            let mut cursor = bytes.as_slice();
-            let actual = KindId::decode(&mut cursor).map_err(|_| JournalError::CorruptArtifact)?;
-            if actual == expected {
-                Ok(())
-            } else {
-                Err(AppendError::PrefixMismatch { digest, expected, actual })
-            }
-        }
+    if !stored.exists(params![digest_bytes.as_slice()])? {
+        return Err(AppendError::DanglingRef { digest, expected });
+    }
+    let prefix = blobs.read_prefix(&digest)?;
+    let actual = KindId::decode(&mut prefix.as_slice()).map_err(|_| JournalError::CorruptArtifact)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(AppendError::PrefixMismatch { digest, expected, actual })
     }
 }
 
@@ -424,7 +511,9 @@ fn prepare_schema(conn: &Connection) -> Result<(), JournalError> {
     Ok(())
 }
 
-fn head_of(conn: &Connection) -> Result<Seq, JournalError> {
+/// The last stored sequence, `Seq(0)` when empty. Shared by [`Journal::head`]
+/// and [`crate::JournalReader::head`].
+pub fn head_of(conn: &Connection) -> Result<Seq, JournalError> {
     let seq: Option<i64> = conn.query_row("SELECT MAX(seq) FROM entries", [], |row| row.get(0))?;
     match seq {
         None => Ok(Seq(0)),
@@ -461,7 +550,8 @@ pub enum JournalError {
     IntegerRange,
     /// A stored artifact digest was not 32 bytes.
     CorruptArtifactDigest,
-    /// A stored blob is shorter than the eight-byte kind prefix.
+    /// A stored blob is shorter than the eight-byte kind prefix, or its file
+    /// is not the length its row records.
     CorruptArtifact,
     /// A stored journal entry has an invalid kind value.
     CorruptEntryKind(&'static str),
@@ -470,6 +560,32 @@ pub enum JournalError {
     CorruptCitation,
     /// A stored artifact's kind and payload do not hash to its digest.
     ArtifactDigestMismatch(Digest),
+    /// The journal root path exists and is not a directory, such as a
+    /// single-file journal from before the root layout.
+    NotADirectory {
+        /// The path given as the root.
+        root: PathBuf,
+    },
+    /// Another open journal, in this process or another, holds the root's lock.
+    Locked {
+        /// The root that is already held.
+        root: PathBuf,
+    },
+    /// A stored artifact's row names a digest whose blob file is missing.
+    MissingBlob(Digest),
+    /// A file-system operation on the journal root failed.
+    Io {
+        /// The path the operation touched.
+        path: PathBuf,
+        /// The underlying failure.
+        error: io::Error,
+    },
+}
+
+impl JournalError {
+    pub(crate) fn io(path: &Path, error: io::Error) -> Self {
+        Self::Io { path: path.to_path_buf(), error }
+    }
 }
 
 impl fmt::Display for JournalError {
@@ -478,10 +594,16 @@ impl fmt::Display for JournalError {
             Self::Backend(error) => write!(f, "journal backend: {error}"),
             Self::IntegerRange => write!(f, "integer does not fit in sqlite INTEGER"),
             Self::CorruptArtifactDigest => write!(f, "stored artifact digest is not 32 bytes"),
-            Self::CorruptArtifact => write!(f, "stored artifact is shorter than the eight-byte kind prefix"),
+            Self::CorruptArtifact => {
+                write!(f, "stored artifact is shorter than the eight-byte kind prefix or not its recorded size")
+            }
             Self::CorruptEntryKind(reason) => write!(f, "stored entry kind is corrupt: {reason}"),
             Self::CorruptCitation => write!(f, "citation identity is not 32 bytes"),
             Self::ArtifactDigestMismatch(digest) => write!(f, "stored artifact bytes do not hash to {digest}"),
+            Self::NotADirectory { root } => write!(f, "journal root {} is not a directory", root.display()),
+            Self::Locked { root } => write!(f, "journal root {} is held by another open journal", root.display()),
+            Self::MissingBlob(digest) => write!(f, "stored artifact {digest} has no blob file"),
+            Self::Io { path, error } => write!(f, "journal root i/o at {}: {error}", path.display()),
         }
     }
 }
@@ -490,12 +612,16 @@ impl Error for JournalError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Backend(error) => Some(error),
+            Self::Io { error, .. } => Some(error),
             Self::IntegerRange
             | Self::CorruptArtifactDigest
             | Self::CorruptArtifact
             | Self::CorruptEntryKind(_)
             | Self::CorruptCitation
-            | Self::ArtifactDigestMismatch(_) => None,
+            | Self::ArtifactDigestMismatch(_)
+            | Self::NotADirectory { .. }
+            | Self::Locked { .. }
+            | Self::MissingBlob(_) => None,
         }
     }
 }

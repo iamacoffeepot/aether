@@ -4,9 +4,8 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{AppendError, Batch, Digest, Journal, JournalError, OpaqueBytes, Ref, Seq, Utf8Text};
+use aether_bloomery_journal::{AppendError, Batch, Digest, JournalError, OpaqueBytes, Ref, Seq, Utf8Text};
 use aether_data::{Citations, Cites, Kind};
-use common::FixedClock;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.referenced")]
@@ -47,7 +46,7 @@ struct WrongWidth {
 fn a_batch_whose_event_cites_an_absent_digest_is_refused_whole() -> Result<(), Box<dyn Error>> {
     // Catches insert-then-verify with no rollback, which leaves orphan rows a
     // later retry silently reuses.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let staged = batch.stage_bytes(b"should-not-land");
     let missing = Ref::<OpaqueBytes>::from_digest(Digest::from_bytes([7; 32]));
@@ -69,7 +68,7 @@ fn a_batch_whose_event_cites_an_absent_digest_is_refused_whole() -> Result<(), B
 #[test]
 fn a_citation_whose_target_blob_carries_another_prefix_is_refused() -> Result<(), Box<dyn Error>> {
     // Catches a verifier that checks existence only.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let text = batch.stage_text("hello");
     let as_bytes = Ref::<OpaqueBytes>::from_digest(text.digest());
@@ -93,7 +92,7 @@ fn a_citation_whose_target_blob_carries_another_prefix_is_refused() -> Result<()
 fn an_artifact_staged_earlier_may_cite_an_artifact_staged_later() -> Result<(), Box<dyn Error>> {
     // Catches a verifier that runs per insert instead of after all inserts,
     // which would fail a correct batch on entry order alone.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let later = Ref::of_text("hello");
     batch.stage_encoded(&CiteText { text: later })?;
@@ -111,7 +110,7 @@ fn a_ref_nested_inside_a_vec_and_inside_an_enum_variant_is_found() -> Result<(),
     // A walker that only visits top-level struct fields returns no citation
     // and the batch wrongly commits. A Ref inside a container never passes
     // through a RecordWriter.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let missing_bytes = Ref::<OpaqueBytes>::from_digest(Digest::from_bytes([3; 32]));
     let mut batch = Batch::new();
     batch.push_event(&Nested::Many(vec![missing_bytes]), None)?;
@@ -143,7 +142,7 @@ fn a_ref_nested_inside_a_vec_and_inside_an_enum_variant_is_found() -> Result<(),
 #[test]
 fn a_citation_whose_identity_is_not_thirty_two_bytes_is_refused() -> Result<(), Box<dyn Error>> {
     // Catches a boundary that pads or truncates instead of refusing.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let staged = batch.stage_bytes(b"should-not-land");
     batch.push_event(&WrongWidth { leaf: vec![WrongWidthCite] }, None)?;

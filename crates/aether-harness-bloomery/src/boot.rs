@@ -126,7 +126,7 @@ impl BloomeryHarness {
         SeededJournal::new(batches).boot_with(Some(http))
     }
 
-    /// The journal file the chassis opened.
+    /// The journal root the chassis opened.
     #[must_use]
     pub fn journal_path(&self) -> &Path {
         self.journal.journal_path()

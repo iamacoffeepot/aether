@@ -1,8 +1,9 @@
-//! File-backed reopen preserves the head.
+//! Reopening a journal root preserves the head.
 
 mod common;
 
 use std::error::Error;
+use std::fs;
 
 use aether_bloomery_journal::{Batch, Draft, Journal, JournalError, Seq};
 use aether_bloomery_kinds::{Digest, Head, RecordedHeadMove, Ref, Tree};
@@ -31,17 +32,13 @@ impl Note {
 }
 
 #[test]
-fn a_file_backed_journal_closed_and_reopened_at_the_same_path_reports_the_same_head() -> Result<(), Box<dyn Error>> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("journal.sqlite");
+fn a_journal_closed_and_reopened_at_the_same_root_reports_the_same_head() -> Result<(), Box<dyn Error>> {
+    let (root, mut journal) = common::temp_journal(0)?;
+    journal.append(Seq(0), &batch_from_drafts([Note::draft("persist")]))?;
+    assert_eq!(journal.head()?, Seq(1));
+    drop(journal);
 
-    {
-        let mut journal = Journal::open_with_clock(&path, Box::new(FixedClock(0)))?;
-        journal.append(Seq(0), &batch_from_drafts([Note::draft("persist")]))?;
-        assert_eq!(journal.head()?, Seq(1));
-    }
-
-    let conn = rusqlite::Connection::open(&path)?;
+    let conn = rusqlite::Connection::open(root.path().join("journal.sqlite"))?;
     let (storage_class, length, bytes): (String, i64, Vec<u8>) =
         conn.query_row("SELECT typeof(kind), length(kind), kind FROM entries WHERE seq = 1", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -51,7 +48,7 @@ fn a_file_backed_journal_closed_and_reopened_at_the_same_path_reports_the_same_h
     assert_eq!(bytes.as_slice(), Note::ID.0.to_le_bytes().as_slice());
     drop(conn);
 
-    let journal = Journal::open_with_clock(&path, Box::new(FixedClock(0)))?;
+    let journal = Journal::open_with_clock(root.path(), Box::new(FixedClock(0)))?;
     assert_eq!(journal.head()?, Seq(1));
     let entry = journal.read(Seq(0), 1)?.into_iter().next().expect("persisted entry");
     assert_eq!(entry.kind, Note::ID);
@@ -70,8 +67,8 @@ CREATE TABLE entries (
 
 #[test]
 fn legacy_text_rows_read_and_new_blob_rows_append_without_migration() -> Result<(), Box<dyn Error>> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("journal.sqlite");
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("journal.sqlite");
     let conn = rusqlite::Connection::open(&path)?;
     conn.execute_batch(LEGACY_ENTRIES_DDL)?;
     conn.execute(
@@ -94,7 +91,7 @@ fn legacy_text_rows_read_and_new_blob_rows_append_without_migration() -> Result<
     )?;
     drop(conn);
 
-    let mut journal = Journal::open_with_clock(&path, Box::new(FixedClock(0)))?;
+    let mut journal = Journal::open_with_clock(root.path(), Box::new(FixedClock(0)))?;
     let before = journal.read(Seq(0), 8)?;
     assert_eq!(before[0].kind, Note::ID);
     assert_eq!(Journal::decode::<Note>(&before[0])?.text, "old");
@@ -112,7 +109,7 @@ fn legacy_text_rows_read_and_new_blob_rows_append_without_migration() -> Result<
         "blob"
     );
     drop(conn);
-    let journal = Journal::open_with_clock(&path, Box::new(FixedClock(0)))?;
+    let journal = Journal::open_with_clock(root.path(), Box::new(FixedClock(0)))?;
     let entries = journal.read(Seq(0), 8)?;
     assert_eq!(entries.len(), 4);
     assert_eq!(&entries[0..3], before.as_slice());
@@ -123,8 +120,8 @@ fn legacy_text_rows_read_and_new_blob_rows_append_without_migration() -> Result<
 
 #[test]
 fn corrupt_legacy_kind_values_are_rejected() -> Result<(), Box<dyn Error>> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("journal.sqlite");
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("journal.sqlite");
     let conn = rusqlite::Connection::open(&path)?;
     conn.execute_batch(LEGACY_ENTRIES_DDL)?;
     conn.execute_batch(
@@ -133,7 +130,7 @@ fn corrupt_legacy_kind_values_are_rejected() -> Result<(), Box<dyn Error>> {
     )?;
     drop(conn);
 
-    let journal = Journal::open_with_clock(&path, Box::new(FixedClock(0)))?;
+    let journal = Journal::open_with_clock(root.path(), Box::new(FixedClock(0)))?;
     for (since, reason) in [(Seq(0), "kind blob is not eight bytes"), (Seq(1), "legacy kind name is not UTF-8")] {
         match journal.read(since, 1).expect_err("corrupt kind must fail") {
             JournalError::CorruptEntryKind(actual) => assert_eq!(actual, reason),
@@ -141,12 +138,13 @@ fn corrupt_legacy_kind_values_are_rejected() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let path = dir.path().join("other-class.sqlite");
-    let conn = rusqlite::Connection::open(&path)?;
+    let other = root.path().join("other-class");
+    fs::create_dir(&other)?;
+    let conn = rusqlite::Connection::open(other.join("journal.sqlite"))?;
     conn.execute_batch(&LEGACY_ENTRIES_DDL.replace("kind TEXT NOT NULL", "kind NOT NULL"))?;
     conn.execute_batch("INSERT INTO entries (seq, kind, recorded_at_millis, bytes) VALUES (1, 123, 0, X'')")?;
     drop(conn);
-    let journal = Journal::open_with_clock(&path, Box::new(FixedClock(0)))?;
+    let journal = Journal::open_with_clock(&other, Box::new(FixedClock(0)))?;
     assert!(matches!(
         journal.read(Seq(0), 1),
         Err(JournalError::CorruptEntryKind("kind is neither a blob nor legacy text"))

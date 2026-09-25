@@ -6,7 +6,6 @@ use std::error::Error;
 
 use aether_bloomery_journal::{Batch, Journal, OpaqueBytes, Ref, Seq};
 use aether_data::Kind;
-use common::FixedClock;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.referenced")]
@@ -18,7 +17,7 @@ struct Referenced {
 fn a_batch_event_cites_an_artifact_staged_in_the_same_batch_and_the_citation_resolves() -> Result<(), Box<dyn Error>> {
     // Catches a batch that writes events and blobs in separate transactions
     // or drops the staged blob.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let payload = b"transcript";
     let mut batch = Batch::new();
     let digest = batch.stage_bytes(payload);

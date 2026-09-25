@@ -39,15 +39,15 @@ pub struct Mounted {
 /// [`Mounted`].
 ///
 /// Takes the already-lowered pair rather than the config: `BloomeryChassis::build_mounted`
-/// lowers the knobs before it stands up the substrate, so a bad journal path
+/// lowers the knobs before it stands up the substrate, so an unset journal root
 /// never reaches this seam.
 ///
 /// # Errors
 ///
 /// Returns [`BootError`] when either spawn fails.
-pub fn mount(built: &BuiltChassis<BloomeryChassis>, path: &Path, limit: ClosureLimit) -> Result<Mounted, BootError> {
+pub fn mount(built: &BuiltChassis<BloomeryChassis>, root: &Path, limit: ClosureLimit) -> Result<Mounted, BootError> {
     let journal = built
-        .spawn_actor::<JournalActor>(Subname::Named("journal"), path.to_path_buf(), ())
+        .spawn_actor::<JournalActor>(Subname::Named("journal"), root.to_path_buf(), ())
         .finish()
         .map_err(|error| spawn_failed("aether.bloomery.journal:journal", &error))?;
     let driver = built
@@ -55,7 +55,7 @@ pub fn mount(built: &BuiltChassis<BloomeryChassis>, path: &Path, limit: ClosureL
         .finish()
         .map_err(|error| spawn_failed("aether.bloomery.driver:driver", &error))?;
     tracing::info!(
-        journal = %path.display(),
+        journal_root = %root.display(),
         ?journal,
         ?driver,
         "bloomery chassis mounted the journal owner and the bundle driver",

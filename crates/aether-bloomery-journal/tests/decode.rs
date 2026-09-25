@@ -6,7 +6,6 @@ use std::error::Error;
 
 use aether_bloomery_journal::{Batch, DecodeError, Draft, Journal, Seq};
 use aether_data::Kind;
-use common::FixedClock;
 
 fn batch_from_drafts(drafts: impl IntoIterator<Item = Draft>) -> Batch {
     let mut batch = Batch::new();
@@ -36,7 +35,7 @@ struct Other {
 
 #[test]
 fn decode_round_trips_the_appended_kind_and_refuses_a_different_kind_id() -> Result<(), Box<dyn Error>> {
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     journal.append(Seq(0), &batch_from_drafts([Note::draft("hello")]))?;
     let entry = journal.read(Seq(0), 1)?.into_iter().next().expect("one entry");
 

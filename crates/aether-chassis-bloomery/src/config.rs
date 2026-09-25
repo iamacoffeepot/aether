@@ -1,4 +1,4 @@
-//! The bloomery chassis knobs: the journal file and the closure byte budget.
+//! The bloomery chassis knobs: the journal root and the closure byte budget.
 //!
 //! [`BloomeryConfig`] is the chassis's own derive-`Config` member, resolved off
 //! the source stack into [`BloomeryEnv`](crate::chassis::BloomeryEnv) and declared
@@ -23,10 +23,13 @@ use aether_substrate::chassis::error::BootError;
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_BLOOMERY", cli_prefix = "bloomery")]
 pub struct BloomeryConfig {
-    /// `SQLite` journal file the engine opens and drives.
+    /// Journal root directory the engine opens and drives: `journal.sqlite`
+    /// plus the `blobs` directory of artifact files (ADR-0220).
     ///
-    /// Created when absent, but its parent directory must already exist — the
-    /// chassis creates no directories. Required: an unset journal refuses boot
+    /// Created when absent, but its parent directory must already exist. A
+    /// path that is a regular file, such as an old single-file journal, is
+    /// refused. The engine holds the root's exclusive lock while it runs, so
+    /// two engines cannot share one root. Required: an unset journal refuses boot
     /// with a named error. It stays an `Option` rather than a mandatory flag so
     /// `--describe` / `--print-config` answer with no journal configured
     /// (ADR-0155 §4) — they exit in the shared prelude, before `build`.
@@ -52,7 +55,7 @@ impl Default for BloomeryConfig {
 
 impl BloomeryConfig {
     /// Lower the resolved knobs to the typed pair the mount seam spawns over:
-    /// the journal path and the driver's closure limit. Called at the top of
+    /// the journal root and the driver's closure limit. Called at the top of
     /// [`BloomeryChassis::build`](crate::BloomeryChassis), ahead of every boot
     /// side effect.
     ///
@@ -65,7 +68,7 @@ impl BloomeryConfig {
     pub(crate) fn to_journal_and_limit(&self) -> Result<(PathBuf, ClosureLimit), BootError> {
         let Some(journal) = self.journal.as_deref().filter(|path| !path.is_empty()) else {
             return Err(BootError::Other(Box::new(io::Error::other(
-                "the bloomery chassis needs a journal path: set AETHER_BLOOMERY_JOURNAL or pass --bloomery-journal <PATH>",
+                "the bloomery chassis needs a journal root: set AETHER_BLOOMERY_JOURNAL or pass --bloomery-journal <PATH>",
             ))));
         };
         let limit = ClosureLimit::new(self.closure_limit_bytes).map_err(|error| {
@@ -93,7 +96,7 @@ mod tests {
         let mut sources = ConfigSources::new(None);
         let mut config = sources.resolve::<BloomeryConfig>().expect("resolve off an empty stack");
         assert_eq!(config.closure_limit_bytes, ClosureLimit::MAX_BYTES);
-        config.journal = Some("journal.sqlite".to_owned());
+        config.journal = Some("journal".to_owned());
         let (_, limit) = config.to_journal_and_limit().expect("the default limit lowers");
         assert_eq!(limit.get(), ClosureLimit::MAX_BYTES);
     }

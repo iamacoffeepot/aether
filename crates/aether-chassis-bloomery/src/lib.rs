@@ -1,7 +1,7 @@
 //! aether-chassis-bloomery: the bloomery chassis (issue #6244), the
 //! journal-driven engine. Boots the shared base stratum plus the component
 //! host, HTTP egress, and the RPC server, mounts the journal owner and the
-//! bundle driver over one journal file, and only then binds the RPC listener
+//! bundle driver over one journal root, and only then binds the RPC listener
 //! (issue #6399). Produces the `aether-bloomery` binary over the shared
 //! `aether-chassis` composition layer.
 //!

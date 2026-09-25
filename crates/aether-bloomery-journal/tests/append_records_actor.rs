@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 
 use aether_actor::{ActorRef, ErasedActorRef};
-use aether_bloomery_journal::{Entry, Journal, JournalActor, Seq};
+use aether_bloomery_journal::{Entry, JournalActor, JournalReader, Seq};
 use aether_bloomery_kinds::{
     Activated, AppendRecords, AppendRecordsResult, Detail, Digest, DriverRecord, EncodedArtifact, Head, NativeOrigin,
     OpaqueBytes, ProgramName, ProgramRef, ReactionFailed, ReactorName, RecordedHead, RecordedHeadMove, RequestSource,
@@ -19,14 +19,14 @@ use aether_substrate::testing::{TestChassis, bare_substrate, boot_test_chassis_w
 
 use actor_support::{TestAnchor, caller, reply, request};
 
-/// One journal actor over a fresh, empty file.
+/// One journal actor over a fresh, empty root, observed by a reader.
 struct Fixture {
     registry: Arc<Registry>,
     _chassis: PassiveChassis<TestChassis>,
     actor: ActorRef<JournalActor>,
     caller: ErasedActorRef,
     replies: mpsc::Receiver<OwnedDispatch>,
-    journal: Journal,
+    journal: JournalReader,
 }
 
 impl Fixture {
@@ -38,7 +38,7 @@ impl Fixture {
             .spawn_actor::<JournalActor>(Subname::Named("append-records"), path.to_owned(), ())
             .finish()
             .expect("birth");
-        let journal = Journal::open(path).expect("observe journal");
+        let journal = JournalReader::open(path).expect("observe journal");
         Self { registry, _chassis: chassis, actor, caller, replies, journal }
     }
 
@@ -82,7 +82,7 @@ fn stale_fence_writes_no_records_or_artifacts() {
     // Catches a handler that staged before the fence was judged, or skipped
     // the fence check entirely.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
 
     let first_input = EncodedArtifact::opaque_bytes(b"first-input");
     let first_digest = first_input.digest();
@@ -111,7 +111,7 @@ fn a_cause_outside_the_fenced_prefix_is_refused() {
     // Catches a missing or off-by-one range check (`<` versus `<=`), or
     // accepting a zero cause.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
 
     let seed_input = EncodedArtifact::opaque_bytes(b"seed-input");
     let seed_digest = seed_input.digest();
@@ -146,7 +146,7 @@ fn a_transition_commits_only_with_its_input_and_result() {
     // Catches staged results committed separately from the record, a lost
     // cause, and a transition recorded over nothing.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
 
     let input = EncodedArtifact::opaque_bytes(b"transition-input");
     let input_digest = input.digest();
@@ -198,7 +198,7 @@ fn records_take_consecutive_seqs_in_request_order() {
     // entry, a wrong reported head, or a head move not decoded as
     // RecordedHeadMove.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
 
     let seed_input = EncodedArtifact::opaque_bytes(b"seed-input");
     let seed_digest = seed_input.digest();

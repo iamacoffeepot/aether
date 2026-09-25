@@ -1,12 +1,13 @@
-//! Named journal owners return exact stored artifacts and refuse corrupt rows.
+//! Named journal owners return exact stored artifacts and refuse corrupt blob files.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use aether_actor::{ActorRef, ErasedActorRef, actor};
-use aether_bloomery_journal::{Batch, Journal, JournalActor, Seq};
+use aether_bloomery_journal::{Batch, Journal, JournalActor, JournalReader, Seq};
 use aether_bloomery_kinds::{
     Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_blob, artifact_digest,
 };
@@ -83,7 +84,7 @@ struct Seeded {
     set_bytes: Vec<u8>,
 }
 
-fn seed(path: &Path, blob: &[u8]) -> Seeded {
+fn seed(root: &Path, blob: &[u8]) -> Seeded {
     let set = ReactorSet::new(vec![CLUSTER]).expect("one canonical reactor head");
     let set_bytes = ReactorSet::encode_storage(&StorageData::from_value(set.clone())).expect("encode set");
     let mut batch = Batch::new();
@@ -91,7 +92,7 @@ fn seed(path: &Path, blob: &[u8]) -> Seeded {
     let empty = batch.stage_bytes(b"").digest();
     let text = batch.stage_text("stored text").digest();
     let set = batch.stage_encoded(&set).expect("stage set").digest();
-    Journal::open(path).expect("open seed journal").append(Seq(0), &batch).expect("commit artifacts");
+    Journal::open(root).expect("open seed journal").append(Seq(0), &batch).expect("commit artifacts");
     Seeded { blob, empty, text, set, set_bytes }
 }
 
@@ -118,30 +119,28 @@ fn replies_by_correlation(
     replies
 }
 
-fn assert_no_events(path: &Path) {
-    let journal = Journal::open(path).expect("inspect journal");
+fn assert_no_events(root: &Path) {
+    let journal = JournalReader::open(root).expect("inspect journal");
     assert_eq!(journal.head().expect("head"), Seq(0));
     assert!(journal.read(Seq(0), 1).expect("read events").is_empty());
 }
 
-fn overwrite_blob(path: &Path, digest: Digest, bytes: &[u8]) {
-    assert_eq!(
-        rusqlite::Connection::open(path)
-            .expect("open fixture database")
-            .execute(
-                "UPDATE artifacts SET bytes = ?1 WHERE digest = ?2",
-                rusqlite::params![bytes, digest.as_bytes().as_slice()],
-            )
-            .expect("alter staged row"),
-        1
-    );
+fn blob_path(root: &Path, digest: &Digest) -> PathBuf {
+    let hex = digest.to_string();
+    root.join("blobs").join(&hex[..2]).join(hex)
+}
+
+fn overwrite_blob(root: &Path, digest: Digest, bytes: &[u8]) {
+    let path = blob_path(root, &digest);
+    assert!(path.is_file(), "the seeded blob file exists before it is overwritten");
+    fs::write(path, bytes).expect("overwrite the blob file");
 }
 
 #[test]
 fn named_owners_return_isolated_artifacts_with_order_independent_correlation() {
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let alpha_path = temp.path().join("alpha.sqlite");
-    let beta_path = temp.path().join("beta.sqlite");
+    let alpha_path = temp.path().join("alpha");
+    let beta_path = temp.path().join("beta");
     let alpha_seed = seed(&alpha_path, b"alpha component");
     let beta_seed = seed(&beta_path, b"beta component");
     let read = ReadArtifact { digest: alpha_seed.blob };
@@ -202,7 +201,7 @@ fn named_owners_return_isolated_artifacts_with_order_independent_correlation() {
 #[test]
 fn text_kind_and_absent_digest_are_distinct_from_opaque_or_empty_bytes() {
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let path = temp.path().join("text.sqlite");
+    let path = temp.path().join("text");
     let seeded = seed(&path, b"component");
     let absent = Digest::from_bytes([0; 32]);
     let (registry, mailer) = bare_substrate();
@@ -227,11 +226,12 @@ fn text_kind_and_absent_digest_are_distinct_from_opaque_or_empty_bytes() {
 #[test]
 fn changed_payload_and_short_prefix_are_errors_without_journal_writes() {
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let mismatch_path = temp.path().join("mismatch.sqlite");
-    let short_path = temp.path().join("short.sqlite");
+    let mismatch_path = temp.path().join("mismatch");
+    let short_path = temp.path().join("short");
     let mismatch = seed(&mismatch_path, b"original component").blob;
     let short = seed(&short_path, b"another component").blob;
-    overwrite_blob(&mismatch_path, mismatch, &artifact_blob(OpaqueBytes::ID, b"changed component"));
+    // Same length as the original, so the file passes the size check and only the digest check catches it.
+    overwrite_blob(&mismatch_path, mismatch, &artifact_blob(OpaqueBytes::ID, b"modified component"));
     overwrite_blob(&short_path, short, b"short");
 
     let (registry, mailer) = bare_substrate();

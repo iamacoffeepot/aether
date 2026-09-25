@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 
 use aether_actor::{ActorRef, ErasedActorRef};
-use aether_bloomery_journal::{Batch, Journal, JournalActor, Ref, Seq};
+use aether_bloomery_journal::{Batch, Journal, JournalActor, JournalReader, Ref, Seq};
 use aether_bloomery_kinds::{
     Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult, Publish, PublishResult, RecordedHeadMove,
 };
@@ -39,14 +39,14 @@ struct LinkedNote {
 const NOTES: Head<Note> = Head::new("notes");
 const MAIN: Head<LinkedNote> = Head::new("main");
 
-/// One journal actor over a file seeded with a stored note and a stored marker, and no events.
+/// One journal actor over a root seeded with a stored note and a stored marker, and no events, observed by a reader.
 struct Fixture {
     registry: Arc<Registry>,
     _chassis: PassiveChassis<TestChassis>,
     actor: ActorRef<JournalActor>,
     caller: ErasedActorRef,
     replies: mpsc::Receiver<OwnedDispatch>,
-    journal: Journal,
+    journal: JournalReader,
     note: Ref<Note>,
     marker: Digest,
 }
@@ -67,7 +67,7 @@ impl Fixture {
         let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
         let actor =
             chassis.spawn_actor::<JournalActor>(Subname::Named("writes"), path.to_owned(), ()).finish().expect("birth");
-        let journal = Journal::open(path).expect("observe journal");
+        let journal = JournalReader::open(path).expect("observe journal");
         Self { registry, _chassis: chassis, actor, caller, replies, journal, note, marker }
     }
 
@@ -111,7 +111,7 @@ fn move_head_points_at_stored_content_and_refuses_missing_or_wrong_kind_destinat
     // Catches a head move that re-staged content or skipped the journal's
     // destination check, so a head could point at nothing or at another kind.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
 
     assert_eq!(fixture.move_head(1, &MoveHead::new(&NOTES, fixture.note, 0)), MoveHeadResult::Committed { seq: 1 });
     assert_eq!(fixture.head(), Seq(1));
@@ -129,7 +129,7 @@ fn stale_fences_write_nothing() {
     // Catches a handler that appended without the whole-journal fence, or
     // staged a publish's artifacts before the fence was judged.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
     let event = NOTES.move_to(fixture.note);
     assert_eq!(fixture.move_head(1, &MoveHead::from_event(&event, 0)), MoveHeadResult::Committed { seq: 1 });
 
@@ -147,7 +147,7 @@ fn publish_stages_artifacts_citing_each_other_and_moves_heads_atomically() {
     // citation dangled), reported the wrong head for the appended moves, or
     // returned digests out of request order.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
     let note = EncodedArtifact::new(&Note { text: "fresh".into() }).expect("encode note");
     let note_ref = Ref::<Note>::from_digest(note.digest());
     let value = linked("published", note_ref);
@@ -171,7 +171,7 @@ fn publish_stages_artifacts_citing_each_other_and_moves_heads_atomically() {
 fn artifact_only_publish_stores_content_without_events() {
     // Catches a head computed from an empty event range as `head + 1`.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
     let artifact = EncodedArtifact::new(&linked("unpointed", fixture.note)).expect("encode artifact");
     let digest = artifact.digest();
 
@@ -188,7 +188,7 @@ fn publish_with_a_bad_citation_rolls_back_every_artifact_and_move() {
     // Catches a publish that committed its valid artifacts or moves when one
     // artifact cited a missing or wrong-kind digest.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
 
     for (correlation, cited) in [(1, Digest::from_bytes([6; 32])), (2, fixture.marker)] {
         let good = EncodedArtifact::new(&Note { text: format!("good-{correlation}") }).expect("encode good note");

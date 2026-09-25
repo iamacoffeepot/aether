@@ -20,8 +20,8 @@ use crate::config::BloomeryOverlay;
 #[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
 #[command(
     name = "aether-bloomery",
-    about = "Bloomery chassis — journal-driven engine: the bundle driver over one journal file. Issue #6244.",
-    long_about = "Bloomery chassis — journal-driven engine: the bundle driver over one journal file. Issue #6244.\n\n\
+    about = "Bloomery chassis — journal-driven engine: the bundle driver over one journal root. Issue #6244.",
+    long_about = "Bloomery chassis — journal-driven engine: the bundle driver over one journal root. Issue #6244.\n\n\
         Each flag below carries its resolved env key and default in brackets; unset flags fall \
         through to env then the default. For the full source-resolved value of every knob use \
         --print-config, and for this binary's linked caps and build provenance use --describe.",

@@ -97,7 +97,7 @@ the bundle driver on the `aether-bloomery` binary.
 | Crate | Owns |
 |---|---|
 | `aether-bloomery-kinds` | the shared `no_std` vocabulary: digests, typed citations, the tree, programs, heads, driver and reactor records and mail |
-| `aether-bloomery-journal` | the append-only, single-writer `SQLite` log of typed events and content-addressed artifacts (ADR-0220) |
+| `aether-bloomery-journal` | the append-only, single-writer journal root: a `SQLite` log of typed events plus one digest-named blob file per content-addressed artifact, held under an exclusive lock (ADR-0220) |
 | `aether-bloomery-view` | folds over a journal prefix: the typed `Heads` last-move fold and the ADR-0226 request and activation folds |
 | `aether-bloomery-program`, `aether-bloomery-program-derive` | the guest SDK for stateless wasm programs (`Program`, `Env`, invoke mail) and its `#[program]` macro |
 | `aether-bloomery-reactor`, `aether-bloomery-reactor-derive` | reactor preparation and pure evaluation of typed stored-event arms, and the `#[reactor]` / `#[rule]` macros (ADR-0222) |

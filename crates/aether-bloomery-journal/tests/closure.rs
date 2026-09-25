@@ -3,7 +3,8 @@
 mod common;
 
 use std::error::Error;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use aether_bloomery_journal::{Batch, Closure, Digest, Journal, JournalError, OpaqueBytes, Ref, Seq, artifact_blob};
 use aether_bloomery_kinds::{ClosureArtifact, ClosureLimit};
@@ -64,14 +65,19 @@ fn found_digests(closure: Closure) -> Vec<Digest> {
     }
 }
 
-fn open(path: &Path) -> Result<Journal, JournalError> {
-    Journal::open_with_clock(path, Box::new(FixedClock(0)))
+fn open(root: &Path) -> Result<Journal, JournalError> {
+    Journal::open_with_clock(root, Box::new(FixedClock(0)))
+}
+
+fn blob_path(root: &Path, digest: &Digest) -> PathBuf {
+    let hex = digest.to_string();
+    root.join("blobs").join(&hex[..2]).join(hex)
 }
 
 #[test]
 fn a_diamond_closure_is_root_first_breadth_first_and_deduplicated() -> Result<(), Box<dyn Error>> {
     // Catches a non-transitive walk, a shared leaf returned twice, and a nondeterministic child order.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let diamond = stage_diamond(&mut journal)?;
 
     let closure = journal.read_closure(&diamond.root, ClosureLimit::new(ClosureLimit::MAX_BYTES)?)?;
@@ -82,7 +88,7 @@ fn a_diamond_closure_is_root_first_breadth_first_and_deduplicated() -> Result<()
 #[test]
 fn a_limit_equal_to_the_total_blob_length_fits_and_one_byte_less_does_not() -> Result<(), Box<dyn Error>> {
     // Catches an off-by-one at the budget and counting payload bytes instead of the prefixed blob length.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let diamond = stage_diamond(&mut journal)?;
 
     let exact = journal.read_closure(&diamond.root, ClosureLimit::new(diamond.total_bytes)?)?;
@@ -95,7 +101,7 @@ fn a_limit_equal_to_the_total_blob_length_fits_and_one_byte_less_does_not() -> R
 #[test]
 fn a_root_larger_than_the_limit_is_too_large_not_an_empty_list() -> Result<(), Box<dyn Error>> {
     // Catches a walk that leaves the root out of the budget or truncates to an empty or partial `Found`.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let root = batch.stage_bytes(&[9; 64]);
     journal.append(Seq(0), &batch)?;
@@ -107,7 +113,7 @@ fn a_root_larger_than_the_limit_is_too_large_not_an_empty_list() -> Result<(), B
 #[test]
 fn an_unstored_root_is_missing() -> Result<(), Box<dyn Error>> {
     // Catches an absent root answered as an empty `Found`.
-    let journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, journal) = common::temp_journal(0)?;
     let absent = Digest::from_bytes([4; 32]);
 
     assert_eq!(journal.read_closure(&absent, ClosureLimit::new(ClosureLimit::MAX_BYTES)?)?, Closure::Missing(absent));
@@ -118,10 +124,9 @@ fn an_unstored_root_is_missing() -> Result<(), Box<dyn Error>> {
 fn citation_edges_survive_a_reopen() -> Result<(), Box<dyn Error>> {
     // Catches edges kept only in memory, or DDL that drops or recreates the table on open.
     let temp = tempfile::tempdir()?;
-    let path = temp.path().join("journal.sqlite");
-    let diamond = stage_diamond(&mut open(&path)?)?;
+    let diamond = stage_diamond(&mut open(temp.path())?)?;
 
-    let closure = open(&path)?.read_closure(&diamond.root, ClosureLimit::new(ClosureLimit::MAX_BYTES)?)?;
+    let closure = open(temp.path())?.read_closure(&diamond.root, ClosureLimit::new(ClosureLimit::MAX_BYTES)?)?;
     assert_eq!(found_digests(closure), diamond.expected_order());
     Ok(())
 }
@@ -130,16 +135,12 @@ fn citation_edges_survive_a_reopen() -> Result<(), Box<dyn Error>> {
 fn a_member_whose_bytes_do_not_hash_to_its_digest_is_an_error() -> Result<(), Box<dyn Error>> {
     // Catches a walk that returns stored bytes without rechecking them against the digest key.
     let temp = tempfile::tempdir()?;
-    let path = temp.path().join("journal.sqlite");
-    let diamond = stage_diamond(&mut open(&path)?)?;
+    let diamond = stage_diamond(&mut open(temp.path())?)?;
 
-    let forged = artifact_blob(OpaqueBytes::ID, b"forged leaf");
-    rusqlite::Connection::open(&path)?.execute(
-        "UPDATE artifacts SET bytes = ?1 WHERE digest = ?2",
-        rusqlite::params![forged, diamond.leaf.as_bytes().as_slice()],
-    )?;
+    // Same length as `shared leaf`, so only the hash check can catch it.
+    fs::write(blob_path(temp.path(), &diamond.leaf), artifact_blob(OpaqueBytes::ID, b"forged leaf"))?;
 
-    let error = open(&path)?
+    let error = open(temp.path())?
         .read_closure(&diamond.root, ClosureLimit::new(ClosureLimit::MAX_BYTES)?)
         .expect_err("forged member must fail");
     assert!(

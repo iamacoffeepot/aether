@@ -7,7 +7,6 @@ use std::error::Error;
 use aether_bloomery_journal::{AppendError, Batch, Digest, Draft, Journal, OpaqueBytes, Seq, Utf8Text};
 use aether_bloomery_kinds::{Head, HeadMoved, RecordedHeadMove, Ref, Tree};
 use aether_data::{Kind, KindId, Storage, StorageData};
-use common::FixedClock;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.head_note")]
@@ -33,10 +32,6 @@ struct CitedHeadMoved {
     to: Ref<OpaqueBytes>,
 }
 
-fn journal() -> Result<Journal, Box<dyn Error>> {
-    Ok(Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?)
-}
-
 fn tree_head(name: &'static str) -> Head<Tree> {
     Head::<Tree>::new(name)
 }
@@ -49,7 +44,7 @@ fn move_event<K: Kind + 'static>(head: &Head<K>, target: Ref<K>) -> HeadMoved<K>
 fn a_move_to_an_already_stored_target_appends() -> Result<(), Box<dyn Error>> {
     // Catches a verifier that only inspects the current batch's staged set, so a
     // target committed earlier is treated as missing.
-    let mut journal = journal()?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut setup = Batch::new();
     let tree = setup.stage_encoded(&Tree::empty())?;
     setup.push_event(&Note { text: "keep".into() }, None)?;
@@ -74,7 +69,7 @@ fn a_move_to_an_already_stored_target_appends() -> Result<(), Box<dyn Error>> {
 fn a_move_to_a_same_batch_target_appends() -> Result<(), Box<dyn Error>> {
     // Catches a check that runs before insert_staged, or against the
     // pre-transaction store, so a new target has to predate the move.
-    let mut journal = journal()?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let tree = batch.stage_encoded(&Tree::empty())?;
     batch.push_event(&move_event(&tree_head("main"), tree), None)?;
@@ -91,7 +86,7 @@ fn a_missing_head_target_rolls_back_the_whole_batch() -> Result<(), Box<dyn Erro
     // Catches trusting Draft citation metadata (Digest walks nothing) or
     // insert-then-verify with no rollback, which would leave the sibling blob
     // and note in the store.
-    let mut journal = journal()?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let missing = Ref::<Tree>::from_digest(Digest::from_bytes([7; 32]));
     let mut batch = Batch::new();
     let staged = batch.stage_bytes(b"should-not-land");
@@ -116,7 +111,7 @@ fn a_missing_head_target_rolls_back_the_whole_batch() -> Result<(), Box<dyn Erro
 fn a_wrong_kind_head_target_rolls_back_the_whole_batch() -> Result<(), Box<dyn Error>> {
     // Catches a destination check that tests existence only, so a text blob
     // would be accepted as a tree head.
-    let mut journal = journal()?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let text = batch.stage_text("hello");
     let as_tree = Ref::<Tree>::from_digest(text.digest());
@@ -147,7 +142,7 @@ fn push_event_and_push_draft_both_refuse_a_malformed_head_moved_payload() -> Res
     let decode_error =
         RecordedHeadMove::decode_storage(&bytes).expect_err("canonical decode must refuse invalid head-name bytes");
 
-    let mut journal = journal()?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut via_event = Batch::new();
     via_event.push_event(&twin, None)?;
     match journal.append(Seq(0), &via_event).expect_err("malformed push_event must fail") {
@@ -171,7 +166,7 @@ fn push_event_and_push_draft_both_refuse_a_wrong_kind_head_destination() -> Resu
     // Catches an entry path that skips the recognized-event check, and a
     // verifier that trusts draft citation metadata: the twin walks a valid
     // opaque-bytes blob while the encoded target_kind is Tree.
-    let mut journal = journal()?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut via_event = Batch::new();
     let text = via_event.stage_text("hello");
     let as_tree = Ref::<Tree>::from_digest(text.digest());
@@ -208,7 +203,7 @@ fn push_event_and_push_draft_both_refuse_a_wrong_kind_head_destination() -> Resu
 fn a_stale_fence_writes_nothing_for_a_valid_move() -> Result<(), Box<dyn Error>> {
     // Catches skipping the global sequence fence for a recognized head-move,
     // or writing the move after returning AppendError::HeadMoved.
-    let mut journal = journal()?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut setup = Batch::new();
     let tree = setup.stage_encoded(&Tree::empty())?;
     setup.push_event(&Note { text: "kept".into() }, None)?;
@@ -234,7 +229,7 @@ fn multiple_moves_replay_and_repeat_remain_distinct_ordered_events() -> Result<(
     // Catches hidden deduplication or last-wins collapsing at append time.
     // A move back to an old target and a repeated identical assignment are
     // still recorded in order.
-    let mut journal = journal()?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let first = batch.stage_bytes(b"first");
     let second = batch.stage_bytes(b"second");

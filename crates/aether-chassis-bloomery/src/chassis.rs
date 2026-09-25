@@ -1,7 +1,7 @@
 //! Bloomery chassis: [`BloomeryChassis`] (issue #6244), the journal-driven
 //! engine. Boots the shared base stratum plus the component host and a held
 //! RPC server, then the mount seam spawns the journal owner and the bundle
-//! driver over one journal file, and only then does the RPC listener bind
+//! driver over one journal root, and only then does the RPC listener bind
 //! (issue #6399), so an engine a caller can reach can already take driver
 //! calls.
 //!
@@ -116,7 +116,7 @@ pub struct BloomeryEnv {
     /// [`BloomeryChassis::build_mounted`]); the field carries the whole resolved
     /// member so its values resolve once.
     pub runtime: RuntimeConfig,
-    /// The bloomery knobs. Lowered to the journal path and the driver's
+    /// The bloomery knobs. Lowered to the journal root and the driver's
     /// closure limit at the top of [`BloomeryChassis::build_mounted`], then applied off
     /// the builder at the mount seam.
     pub bloomery: BloomeryConfig,
