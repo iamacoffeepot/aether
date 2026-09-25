@@ -27,7 +27,7 @@ struct Node {
 }
 
 /// Stage root → leaf and return the digests root-first plus their total blob length.
-fn seed(path: &Path) -> Result<(Vec<Digest>, u64), Box<dyn Error>> {
+fn seed(journal_root: &Path) -> Result<(Vec<Digest>, u64), Box<dyn Error>> {
     let mut batch = Batch::new();
     let leaf = batch.stage_bytes(b"closure leaf");
     let root = batch.stage_encoded(&Node { leaf })?;
@@ -37,7 +37,7 @@ fn seed(path: &Path) -> Result<(Vec<Digest>, u64), Box<dyn Error>> {
         total_bytes += u64::try_from(batch.staged_blob(digest).ok_or("staged blob")?.len())?;
     }
 
-    Journal::open_with_clock(path, Box::new(FixedClock))?.append(Seq(0), &batch)?;
+    Journal::open_with_clock(journal_root, Box::new(FixedClock))?.append(Seq(0), &batch)?;
     Ok((digests, total_bytes))
 }
 
@@ -45,7 +45,7 @@ fn seed(path: &Path) -> Result<(Vec<Digest>, u64), Box<dyn Error>> {
 fn read_closure_replies_found_too_large_and_missing() -> Result<(), Box<dyn Error>> {
     // Catches a missing handler or a `Closure` outcome mapped to the wrong reply variant or root.
     let temp = tempfile::tempdir()?;
-    let path = temp.path().join("journal.sqlite");
+    let path = temp.path().join("journal");
     let (digests, total_bytes) = seed(&path)?;
     let root = digests[0];
 

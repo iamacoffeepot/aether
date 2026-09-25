@@ -6,7 +6,6 @@ use std::error::Error;
 
 use aether_bloomery_journal::{AppendError, Batch, Draft, Journal, Seq};
 use aether_data::Kind;
-use common::FixedClock;
 
 fn batch_from_drafts(drafts: impl IntoIterator<Item = Draft>) -> Batch {
     let mut batch = Batch::new();
@@ -32,7 +31,7 @@ impl Note {
 
 #[test]
 fn an_append_against_a_stale_expected_head_returns_head_moved_and_does_not_write() -> Result<(), Box<dyn Error>> {
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(STAMP_MILLIS)))?;
+    let (_root, mut journal) = common::temp_journal(STAMP_MILLIS)?;
     journal.append(Seq(0), &batch_from_drafts([Note::draft("first")]))?;
     let before = journal.read(Seq(0), 16)?;
 
@@ -48,7 +47,7 @@ fn an_append_against_a_stale_expected_head_returns_head_moved_and_does_not_write
 
 #[test]
 fn a_three_draft_batch_on_an_empty_journal_returns_the_range_and_stamps_the_clock() -> Result<(), Box<dyn Error>> {
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(STAMP_MILLIS)))?;
+    let (_root, mut journal) = common::temp_journal(STAMP_MILLIS)?;
     let range = journal.append(Seq(0), &batch_from_drafts([Note::draft("a"), Note::draft("b"), Note::draft("c")]))?;
     assert_eq!(range, Seq(1)..Seq(4));
     assert_eq!(journal.head()?, Seq(3));
@@ -68,10 +67,9 @@ fn a_three_draft_batch_on_an_empty_journal_returns_the_range_and_stamps_the_cloc
 
 #[test]
 fn fresh_schema_requires_an_eight_byte_blob_kind() -> Result<(), Box<dyn Error>> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("journal.sqlite");
-    drop(Journal::open_with_clock(&path, Box::new(FixedClock(STAMP_MILLIS)))?);
-    let conn = rusqlite::Connection::open(path)?;
+    let (root, journal) = common::temp_journal(STAMP_MILLIS)?;
+    drop(journal);
+    let conn = rusqlite::Connection::open(root.path().join("journal.sqlite"))?;
     let insert = "INSERT INTO entries (seq, kind, recorded_at_millis, bytes) VALUES (1, ?1, 0, X'')";
     assert!(conn.execute(insert, [b"short".as_slice()]).is_err());
     assert!(conn.execute(insert, [b"ninebytes".as_slice()]).is_err());

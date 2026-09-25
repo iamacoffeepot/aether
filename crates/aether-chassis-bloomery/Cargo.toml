@@ -7,7 +7,7 @@ publish = false
 
 # The bloomery chassis (issue #6244): the journal-driven engine. Boots the
 # shared base stratum plus the component host, HTTP egress, and the RPC server,
-# then spawns the journal owner and the bundle driver over one journal file.
+# then spawns the journal owner and the bundle driver over one journal root.
 # Produces the `aether-bloomery` binary over the shared `aether-chassis`
 # composition layer. HTTP egress is its one sanctioned integration (ADR-0234
 # decision 7), deny-by-default until an operator names hosts on the allowlist.

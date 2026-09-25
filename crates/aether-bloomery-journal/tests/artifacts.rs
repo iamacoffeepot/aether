@@ -4,9 +4,8 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Batch, Digest, GetError, Journal, OpaqueBytes, Seq, Utf8Text};
+use aether_bloomery_journal::{Batch, Digest, GetError, OpaqueBytes, Seq, Utf8Text};
 use aether_data::Kind;
-use common::FixedClock;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.note")]
@@ -18,7 +17,7 @@ struct Note {
 fn the_same_payload_staged_under_two_kinds_yields_two_blobs() -> Result<(), Box<dyn Error>> {
     // Catches a store that hashes the payload without the prefix, which
     // collapses the two and silently makes one kind win.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let payload = "shared";
     let mut batch = Batch::new();
     let as_bytes = batch.stage_bytes(payload.as_bytes());
@@ -45,7 +44,7 @@ fn get_returns_the_value_for_a_matching_prefix_refuses_a_wrong_prefix_and_none_w
 -> Result<(), Box<dyn Error>> {
     // The refusal is what earns the test: a prefix-blind decode would accept
     // any same-shape payload.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let encoded = batch.stage_encoded(&Note { text: "hello".into() })?;
     let text = batch.stage_text("hello");
@@ -67,7 +66,7 @@ fn get_returns_the_value_for_a_matching_prefix_refuses_a_wrong_prefix_and_none_w
 fn get_bytes_many_keeps_absent_slots_in_input_order() -> Result<(), Box<dyn Error>> {
     // The positional mapping is this crate's own logic; a batch that drops the
     // absent slot or reorders is the bug.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let a = batch.stage_bytes(b"present-a");
     let b = batch.stage_bytes(b"present-b");

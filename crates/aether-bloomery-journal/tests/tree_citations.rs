@@ -5,10 +5,9 @@ mod common;
 use std::collections::BTreeMap;
 use std::error::Error;
 
-use aether_bloomery_journal::{AppendError, Batch, Digest, Journal, Seq, Utf8Text};
+use aether_bloomery_journal::{AppendError, Batch, Digest, Seq, Utf8Text};
 use aether_bloomery_kinds::{Name, Node, OpaqueBytes, Ref, Tree};
 use aether_data::Kind;
-use common::FixedClock;
 
 fn name(value: &str) -> Name {
     Name::new(value).expect("valid name")
@@ -17,7 +16,7 @@ fn name(value: &str) -> Name {
 #[test]
 fn a_tree_whose_directory_cites_an_unstaged_tree_is_dangling() -> Result<(), Box<dyn Error>> {
     // Catches Cites for Node forwarding the Directory variant as nothing.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let missing = Ref::<Tree>::from_digest(Digest::from_bytes([7; 32]));
     let mut entries = BTreeMap::new();
     entries.insert(name("sub"), Node::Directory(missing));
@@ -39,7 +38,7 @@ fn a_tree_whose_directory_cites_an_unstaged_tree_is_dangling() -> Result<(), Box
 #[test]
 fn a_tree_whose_file_cites_a_text_blob_is_a_prefix_mismatch() -> Result<(), Box<dyn Error>> {
     // Catches Cites for Node forwarding File as the wrong kind, or nothing.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let text = batch.stage_text("hello");
     let as_bytes = Ref::<OpaqueBytes>::from_digest(text.digest());
@@ -62,7 +61,7 @@ fn a_tree_whose_file_cites_a_text_blob_is_a_prefix_mismatch() -> Result<(), Box<
 
 #[test]
 fn a_well_formed_tree_batch_round_trips_through_get() -> Result<(), Box<dyn Error>> {
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
     let file = batch.stage_bytes(b"hi");
     let child = Tree::empty();

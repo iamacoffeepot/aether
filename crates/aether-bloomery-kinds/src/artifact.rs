@@ -1,7 +1,8 @@
 //! Artifact kinds and blob framing above a raw content-addressed store.
 //!
-//! The store stays raw: a row is `sha256(bytes)` plus the bytes. An artifact
-//! is an abstraction above that row, whose bytes are an eight-byte [`KindId`]
+//! The store stays raw: a stored blob is a row naming `sha256(bytes)` plus a
+//! file of exactly those bytes, named by that digest. An artifact is an
+//! abstraction above that blob, whose bytes are an eight-byte [`KindId`]
 //! prefix followed by a payload. The digest covers the kind, so a digest names
 //! one kind and one payload.
 

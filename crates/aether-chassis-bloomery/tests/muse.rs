@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_bloomery_journal::{Batch, Journal, Seq};
+use aether_bloomery_journal::{Batch, JournalReader, Seq};
 use aether_bloomery_kinds::{
     Call, CallOutcome, Detail, Digest, Fault, FaultReason, Head, NativeOrigin, OpaqueBytes, ProgramName, ProgramRef,
     RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, artifact_digest,
@@ -180,7 +180,7 @@ fn a_muse_turn_records_the_reply_a_loopback_server_sends() -> Result<(), Box<dyn
     };
     harness.assert_appended(Seq(1), &[Record::equal(None, requested), Record::equal(Some(Seq(2)), transition.clone())]);
 
-    let result = Journal::open(harness.journal_path())?
+    let result = JournalReader::open(harness.journal_path())?
         .get::<TurnResult>(&transition.result)?
         .expect("the transition cites a stored turn result");
     assert_eq!(result.status().get(), 200);
@@ -301,13 +301,22 @@ fn a_bound_secret_refuses_a_plain_http_turn_without_dialing() -> Result<(), Box<
     );
     assert!(nothing_dialed(&listener)?, "a refused fetch opens no connection");
 
-    for entry in fs::read_dir(&scratch)? {
-        let path = entry?.path();
-        if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("journal.sqlite")) {
+    // Every file under the journal root, `blobs/` included: an artifact's bytes are a blob file, not a row.
+    let mut scanned = 0;
+    let mut pending = vec![harness.journal_path().to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
             let bytes = fs::read(&path)?;
             let leaked = bytes.windows(FAKE_SECRET.len()).any(|window| window == FAKE_SECRET.as_bytes());
             assert!(!leaked, "{} carries the secret value", path.display());
+            scanned += 1;
         }
     }
+    assert!(scanned > 1, "the scan reached the journal's log and its blob files");
     Ok(())
 }

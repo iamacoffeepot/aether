@@ -29,7 +29,7 @@ struct Note {
 const NOTES: Head<Note> = Head::new("notes");
 const ALSO: Head<Note> = Head::new("also");
 
-/// One journal actor over a file seeded with one stored note to move heads
+/// One journal actor over a root seeded with one stored note to move heads
 /// to, and no events. `caller` issues writes and `watcher` issues watches on
 /// its own mailbox, so a woken watch reply (sent synchronously inside the
 /// committing write's own handler, before that handler's reply goes out)
@@ -117,7 +117,7 @@ fn a_watch_behind_the_head_answers_at_once() {
     // Catches an off-by-one comparison (`>=` versus `>`) that either parks a
     // watch already passed or answers one the head has only reached.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
 
     assert_eq!(fixture.move_head(1, &MoveHead::new(&NOTES, fixture.note, 0)), MoveHeadResult::Committed { seq: 1 });
 
@@ -131,7 +131,7 @@ fn a_parked_watch_wakes_on_commit_not_on_conflict_or_refusal() {
     // Catches waking on the conflict or error path, waking before the
     // append commits, and reporting the wrong head.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
     assert_eq!(fixture.move_head(1, &MoveHead::new(&NOTES, fixture.note, 0)), MoveHeadResult::Committed { seq: 1 });
 
     fixture.send_watch(fixture.watcher, 2, 1);
@@ -158,7 +158,7 @@ fn each_parked_watch_is_answered_exactly_once() {
     // head has not yet passed. Between them, the two parked-wake tests
     // drive all three writers through `commit`.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
     assert_eq!(fixture.move_head(1, &MoveHead::new(&NOTES, fixture.note, 0)), MoveHeadResult::Committed { seq: 1 });
 
     let (caller_b, replies_b) = caller(&fixture.registry, "test.watch_head.caller_b");
@@ -183,7 +183,7 @@ fn a_full_watcher_table_refuses_instead_of_parking() {
     // Catches an unbounded table and a full table that parks or silently
     // drops the reply.
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let fixture = Fixture::start(&temp.path().join("journal.sqlite"));
+    let fixture = Fixture::start(&temp.path().join("journal"));
 
     for correlation in 1..=MAX_HEAD_WATCHERS as u64 {
         fixture.send_watch(fixture.watcher, correlation, 0);

@@ -10,11 +10,11 @@ use tempfile::TempDir;
 ///
 /// [`BloomeryHarness::start`](crate::BloomeryHarness::start) seeds and boots
 /// in one step; this split exists for a scenario that must observe the
-/// journal file between the two, or that hands the file to an engine outside
+/// journal root between the two, or that hands the root to an engine outside
 /// this process, such as a forked `aether-bloomery`. Either way the
 /// expectation reads ([`assert_appended`](Self::assert_appended),
 /// [`record`](Self::record), [`head`](Self::head), [`stores`](Self::stores),
-/// [`fold`](Self::fold)) open the file afresh, so they see what the engine
+/// [`fold`](Self::fold)) open the root afresh, so they see what the engine
 /// committed.
 pub struct SeededJournal {
     pub(crate) journal: PathBuf,
@@ -26,7 +26,7 @@ impl SeededJournal {
     /// Append each batch, in order, at the running head of a fresh journal in
     /// a scratch directory this seed owns.
     ///
-    /// An empty seed opens nothing, so the journal file does not exist until
+    /// An empty seed opens nothing, so the journal root does not exist until
     /// the chassis boots over it: boot then takes the first-run path.
     ///
     /// # Panics
@@ -36,7 +36,7 @@ impl SeededJournal {
     #[must_use]
     pub fn new(batches: impl IntoIterator<Item = Batch>) -> Self {
         let scratch = tempfile::tempdir().expect("a scratch directory for the seeded journal");
-        let journal = scratch.path().join("journal.sqlite");
+        let journal = scratch.path().join("journal");
         let mut batches = batches.into_iter().peekable();
         if batches.peek().is_some() {
             let mut seed = Journal::open(&journal).expect("open the seed journal");
@@ -48,7 +48,7 @@ impl SeededJournal {
         Self { journal, _scratch: scratch }
     }
 
-    /// The journal file the engine opens.
+    /// The journal root the engine opens.
     #[must_use]
     pub fn journal_path(&self) -> &Path {
         &self.journal

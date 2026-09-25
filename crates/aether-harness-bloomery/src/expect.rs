@@ -1,14 +1,15 @@
 //! Expect: the actual journal against the values a scenario states.
 //!
-//! Every read here opens a fresh handle on the journal file the engine
-//! writes — the in-process chassis or a forked `aether-bloomery` — so it sees
-//! exactly what the loop committed. Expected values come
+//! Every read here opens a fresh [`JournalReader`] on the journal root the
+//! engine writes — the in-process chassis or a forked `aether-bloomery` — so
+//! it sees exactly what the loop committed. A reader takes no lock, so it
+//! reads while the engine holds the root. Expected values come
 //! from the scenario — literals, or the handles its seed returned — and the
 //! only fold this module runs reduces the actual journal.
 
 use std::fmt::{Debug, Write};
 
-use aether_bloomery_journal::{Digest, Entry, Journal, Seq};
+use aether_bloomery_journal::{Digest, Entry, Journal, JournalReader, Seq};
 use aether_bloomery_view::View;
 use aether_data::{KindId, Storage};
 
@@ -165,9 +166,9 @@ impl SeededJournal {
         }
     }
 
-    /// A fresh handle on the journal the engine writes.
-    fn open(&self) -> Journal {
-        Journal::open(&self.journal).expect("open the journal the engine writes")
+    /// A fresh read-only handle on the journal root the engine writes.
+    fn open(&self) -> JournalReader {
+        JournalReader::open(&self.journal).expect("open the journal root the engine writes")
     }
 }
 

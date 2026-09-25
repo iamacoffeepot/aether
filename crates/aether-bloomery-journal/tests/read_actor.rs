@@ -1,4 +1,4 @@
-//! Two named owners answer isolated, correlated pages from their own files.
+//! Two named owners answer isolated, correlated pages from their own roots.
 
 mod actor_support;
 
@@ -38,8 +38,8 @@ struct Marker {
     value: u64,
 }
 
-fn seed(path: &Path, notes: &[&str]) -> Vec<aether_bloomery_journal::Entry> {
-    let mut journal = Journal::open_with_clock(path, Box::new(FixedClock)).expect("create seed journal");
+fn seed(root: &Path, notes: &[&str]) -> Vec<aether_bloomery_journal::Entry> {
+    let mut journal = Journal::open_with_clock(root, Box::new(FixedClock)).expect("create seed journal");
     let mut batch = Batch::new();
     for (index, note) in notes.iter().enumerate() {
         batch.push_draft(
@@ -72,8 +72,8 @@ fn replies_by_correlation<K: Kind>(rx: &mpsc::Receiver<OwnedDispatch>, correlati
 #[test]
 fn named_journals_return_isolated_pages_and_correlated_replies() {
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let alpha_path = temp.path().join("alpha.sqlite");
-    let beta_path = temp.path().join("beta.sqlite");
+    let alpha_path = temp.path().join("alpha");
+    let beta_path = temp.path().join("beta");
     let alpha_expected = seed(&alpha_path, &["alpha one", "alpha two"]);
     let beta_expected = seed(&beta_path, &["beta one"]);
 
@@ -140,9 +140,9 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
 }
 
 #[test]
-fn invalid_path_fails_actor_birth() {
+fn a_root_whose_parent_is_missing_fails_actor_birth() {
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let invalid_path = temp.path().join("missing-parent").join("journal.sqlite");
+    let invalid_path = temp.path().join("missing-parent").join("journal");
     let (registry, mailer) = bare_substrate();
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
 

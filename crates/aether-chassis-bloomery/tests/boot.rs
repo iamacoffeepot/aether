@@ -1,5 +1,5 @@
 //! Boot the bloomery chassis for real: build [`BloomeryChassis`] over a journal
-//! path, then observe `Processed` through the mounted driver.
+//! root, then observe `Processed` through the mounted driver.
 //!
 //! The booting tests go through `aether-harness-bloomery`, which builds the
 //! chassis with default base members and never calls `run()`, so the passives
@@ -31,13 +31,16 @@ fn single_entry_batch() -> Batch {
 fn fresh_journal_boots_and_quiesces_at_zero() {
     // Catches three bugs: a driver not spawned or not wired to the journal id
     // (its startup reads warn-drop and `check_processed` never sees
-    // `routing.started`), a chassis that fails on a first-run absent file, and
-    // a journal opened somewhere other than the configured path.
+    // `routing.started`), a chassis that fails on a first-run absent root, and
+    // a journal opened somewhere other than the configured root.
     let seeded = SeededJournal::new([]);
-    assert!(!seeded.journal_path().exists(), "the journal file must not exist before boot");
+    assert!(!seeded.journal_path().exists(), "the journal root must not exist before boot");
     let mut harness = seeded.boot();
     assert_eq!(harness.settle(Seq(0)), Seq(0));
-    assert!(harness.journal_path().exists(), "boot creates the journal file at the configured path");
+    assert!(
+        harness.journal_path().join("journal.sqlite").is_file(),
+        "boot creates the journal root, with its log, at the configured path"
+    );
 }
 
 #[test]
@@ -57,7 +60,7 @@ fn unset_journal_refuses_boot() {
         runtime: RuntimeConfig::default(),
         bloomery: BloomeryConfig { journal: None, closure_limit_bytes: ClosureLimit::MAX_BYTES },
     };
-    let error = BloomeryChassis::build(env).expect_err("boot without a journal path must fail");
+    let error = BloomeryChassis::build(env).expect_err("boot without a journal root must fail");
     let message = error.to_string();
     assert!(message.contains("AETHER_BLOOMERY_JOURNAL"), "the refusal names the env key: {message}");
 }

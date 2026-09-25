@@ -1,9 +1,17 @@
-//! Append-only, single-writer log of typed events, backed by `SQLite`.
+//! Append-only, single-writer log of typed events over one journal root.
+//!
+//! A root is a directory holding `journal.sqlite` (the event log and one
+//! row per stored artifact) and `blobs/<first two hex>/<digest hex>`, one
+//! file per artifact holding exactly the bytes its digest hashes. Each blob
+//! file is written temp file, fsync, rename, directory fsync before the row
+//! that names it commits. [`Journal::open`] takes an exclusive lock on the
+//! root, so a second open fails in any process, and sweeps `blobs/tmp/`.
+//! [`JournalReader`] observes a root without the lock. See ADR-0220.
 //!
 //! Two layers, and the split is the point:
 //!
-//! - **The store stays raw.** The `artifacts` table is content-addressed
-//!   (`digest` = `sha256(bytes)`) and knows nothing about kinds.
+//! - **The store stays raw.** Artifacts are content-addressed
+//!   (`digest` = `sha256(bytes)`) and the store knows nothing about kinds.
 //! - **An artifact is an abstraction above the store:** a blob whose bytes
 //!   are an eight-byte [`aether_data::KindId`] prefix followed by a payload.
 //!   The digest covers the kind, so a digest names one kind and one payload.
@@ -21,7 +29,7 @@
 //! constructor so a view registry can detect replacement. It is not persisted
 //! and is not a SQL column.
 //!
-//! [`JournalActor`] is the native owner for one named journal path. It answers
+//! [`JournalActor`] is the native owner for one named journal root. It answers
 //! read, head, and artifact mail plus three fenced writes while keeping its
 //! journal handle inside the actor: [`aether_bloomery_kinds::MoveHead`] moves
 //! one head to an already-stored artifact, [`aether_bloomery_kinds::Publish`]
@@ -45,10 +53,12 @@
 mod actor;
 mod artifact;
 mod batch;
+mod blobs;
 mod clock;
 mod closure;
 mod draft;
 mod journal;
+mod reader;
 mod watch;
 
 pub use actor::{JournalActor, MAX_HEAD_WATCHERS, MAX_READ_EVENTS};
@@ -62,3 +72,4 @@ pub use clock::{Clock, SystemClock};
 pub use closure::Closure;
 pub use draft::{Draft, DraftError};
 pub use journal::{AppendError, GetError, Journal, JournalError, JournalIdentity};
+pub use reader::JournalReader;

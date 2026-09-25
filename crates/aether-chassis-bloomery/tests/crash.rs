@@ -22,7 +22,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use aether_bloomery_journal::{Batch, Journal, Seq};
+use aether_bloomery_journal::{Batch, JournalReader, Seq};
 use aether_bloomery_kinds::{
     AwaitProcessed, Call, CallOutcome, Digest, Fault, FaultReason, Head, NativeOrigin, OpaqueBytes, Processed,
     ProgramName, ProgramRef, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, Utf8Text,
@@ -101,10 +101,12 @@ fn request(name: &ProgramName, input: Digest, origin: &NativeOrigin, key: u64) -
     Call { program: PROGRAM, name: name.clone(), input, origin: origin.clone(), key }
 }
 
-/// Whether the journal at `journal` has committed through `seq`. The engine
-/// holds the file open in WAL mode, so an open or read error reads as not yet.
+/// Whether the journal root at `journal` has committed through `seq`. The
+/// engine holds the root's lock and its log open in WAL mode, so this reads
+/// through a lock-free [`JournalReader`], and an open or read error reads as
+/// not yet.
 fn head_reached(journal: &Path, seq: Seq) -> bool {
-    Journal::open(journal).and_then(|journal| journal.head()).is_ok_and(|head| head >= seq)
+    JournalReader::open(journal).and_then(|journal| journal.head()).is_ok_and(|head| head >= seq)
 }
 
 /// SIGKILL `pid` once the journal has committed through `seq`, or once the

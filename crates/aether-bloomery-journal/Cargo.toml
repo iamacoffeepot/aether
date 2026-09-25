@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Append-only SQLite log of typed Storage events and content-addressed artifacts (ADR-0220)."
+description = "Append-only journal root: a SQLite log of typed Storage events plus digest-named artifact files (ADR-0220)."
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
@@ -12,13 +12,13 @@ aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-substrate = { path = "../aether-substrate" }
 rusqlite = { workspace = true }
+tempfile = "3"
 
 [dev-dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
-tempfile = "3"
 
 [lints]
 workspace = true
