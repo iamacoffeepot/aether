@@ -1,6 +1,8 @@
 //! The directory arena decode fills entry by entry, then seals bottom-up.
 //!
-//! It holds a [`Name`] and a node or arena index per entry, never a blob.
+//! It holds a [`Name`] and a node or arena index per entry, never a blob, and
+//! it charges the entry limit for every entry it makes, so its size is bounded
+//! by that limit.
 
 use std::collections::BTreeMap;
 use std::mem;
@@ -15,6 +17,8 @@ use crate::store::TreeSink;
 /// every directory's index is greater than its parent's.
 pub(super) struct Skeleton {
     dirs: Vec<PendingDir>,
+    /// How many more entries, explicit or implicit, the entry limit allows.
+    entries_left: u32,
 }
 
 struct PendingDir {
@@ -28,24 +32,28 @@ enum Pending {
     Dir(usize),
 }
 
-/// A slot checked free for one non-directory entry, handed out before its
-/// bytes stream so a refused path costs no blob.
+/// A slot checked free and charged to the entry limit for one non-directory
+/// entry, handed out before its bytes stream so a refused path, or one over
+/// the limit, costs no blob.
 pub(super) struct Vacancy {
     dir: usize,
     name: Name,
 }
 
 impl Skeleton {
-    pub(super) fn new() -> Self {
-        Self { dirs: vec![PendingDir { entries: BTreeMap::new(), explicit: true }] }
+    /// An empty root, and a limit of `entries` entries below it.
+    pub(super) fn new(entries: u32) -> Self {
+        Self { dirs: vec![PendingDir { entries: BTreeMap::new(), explicit: true }], entries_left: entries }
     }
 
-    /// Reserve `path` for a non-directory entry.
+    /// Reserve `path` for a non-directory entry, charging the entry limit for
+    /// it and for every missing parent it creates.
     pub(super) fn vacancy(&mut self, path: &EntryPath) -> Result<Vacancy, Refusal> {
         let dir = self.parent_of(path)?;
         if self.dirs[dir].entries.contains_key(path.name()) {
             return Err(Refusal::Duplicate);
         }
+        self.charge()?;
         Ok(Vacancy { dir, name: path.name().clone() })
     }
 
@@ -58,7 +66,7 @@ impl Skeleton {
         let dir = self.parent_of(path)?;
         match self.dirs[dir].entries.get(path.name()) {
             None => {
-                self.push_dir(dir, path.name().clone(), true);
+                self.push_dir(dir, path.name().clone(), true)?;
                 Ok(())
             }
             Some(&Pending::Dir(child)) if !self.dirs[child].explicit => {
@@ -121,16 +129,24 @@ impl Skeleton {
             dir = match self.dirs[dir].entries.get(segment) {
                 Some(&Pending::Dir(child)) => child,
                 Some(Pending::Node(_)) => return Err(Refusal::ParentNotDirectory),
-                None => self.push_dir(dir, segment.clone(), false),
+                None => self.push_dir(dir, segment.clone(), false)?,
             };
         }
         Ok(dir)
     }
 
-    fn push_dir(&mut self, parent: usize, name: Name, explicit: bool) -> usize {
+    /// Add a directory under `parent`, charged to the entry limit.
+    fn push_dir(&mut self, parent: usize, name: Name, explicit: bool) -> Result<usize, Refusal> {
+        self.charge()?;
         let index = self.dirs.len();
         self.dirs[parent].entries.insert(name, Pending::Dir(index));
         self.dirs.push(PendingDir { entries: BTreeMap::new(), explicit });
-        index
+        Ok(index)
+    }
+
+    /// Spend one entry of the limit.
+    fn charge(&mut self) -> Result<(), Refusal> {
+        self.entries_left = self.entries_left.checked_sub(1).ok_or(Refusal::TooManyEntries)?;
+        Ok(())
     }
 }

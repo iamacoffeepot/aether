@@ -21,8 +21,10 @@ pub enum Refusal {
     UnknownFormat,
     /// A numeric header field is neither octal nor positive base-256.
     BadNumber,
-    /// A typeflag a tree has no node for: devices, FIFOs, contiguous files,
-    /// PAX global headers, GNU sparse and multi-volume entries, and the rest.
+    /// A typeflag a tree has no node for: devices (except those
+    /// [`crate::Rules::userland`] drops under `dev/`), FIFOs, contiguous
+    /// files, PAX global headers, GNU sparse and multi-volume entries, and the
+    /// rest.
     UnsupportedType(u8),
     /// A PAX `GNU.sparse.*` record.
     Sparse,
@@ -46,7 +48,7 @@ pub enum Refusal {
     RootNotDirectory,
     /// The entry path has more than [`MAX_DEPTH`] segments.
     TooDeep,
-    /// A directory, symlink, or hardlink entry carries content. Other readers
+    /// A directory, symlink, hardlink, or dropped device entry carries content. Other readers
     /// treat these headers as header-only (Go's `archive/tar` ignores their
     /// size), so skipping the content would decode a different tree.
     HeaderOnlyContent,
@@ -58,6 +60,13 @@ pub enum Refusal {
     Duplicate,
     /// An entry under a path an earlier entry made a file or symlink.
     ParentNotDirectory,
+    /// The entry, or a missing parent directory it creates, would exceed the
+    /// entry limit of the [`crate::Limits`] in force.
+    TooManyEntries,
+    /// The file's claimed size exceeds what the byte limit of the
+    /// [`crate::Limits`] in force has left. Refused before the sink is asked
+    /// for a blob.
+    TooManyBytes,
 }
 
 impl fmt::Display for Refusal {
@@ -87,6 +96,8 @@ impl fmt::Display for Refusal {
             Self::HardlinkTarget => f.write_str("hardlink target is not an earlier file"),
             Self::Duplicate => f.write_str("duplicate path"),
             Self::ParentNotDirectory => f.write_str("parent is not a directory"),
+            Self::TooManyEntries => f.write_str("more entries than the entry limit"),
+            Self::TooManyBytes => f.write_str("file content over the byte limit"),
         }
     }
 }
