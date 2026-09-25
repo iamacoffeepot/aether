@@ -2,16 +2,16 @@
 //!
 //! A small hand-rolled HTTP/1.1 client that runs on the actor's worker thread
 //! with no async runtime. Every request opens its own connection and sends
-//! `Connection: close`; a response body is framed by `Content-Length`, by
-//! chunked transfer encoding, or by the connection closing. The endpoint comes
-//! only from [`crate::WorkspaceConfig`], never from `DOCKER_HOST`, and the API
-//! version is pinned in every request path.
-//!
-//! The client covers only the endpoints import uses; the run endpoints arrive
-//! with their consumer.
+//! `Connection: close`, except a stdin attach, which the daemon hijacks; a
+//! request body is a small JSON document or a chunked stream, and a response
+//! body is framed by `Content-Length`, by chunked transfer encoding, or by
+//! the connection closing. The endpoint comes only from
+//! [`crate::WorkspaceConfig`], never from `DOCKER_HOST`, and the API version
+//! is pinned in every request path.
 
 mod api;
 mod http;
+pub mod logs;
 mod progress;
 mod transport;
 
@@ -24,8 +24,8 @@ use std::io;
 #[cfg(unix)]
 use std::path::PathBuf;
 
-pub use api::ContainerId;
-use transport::Transport;
+pub use api::{ContainerId, VolumeName, Waited};
+pub use transport::Transport;
 
 /// The config key an endpoint refusal names.
 const ENDPOINT_KEY: &str = "AETHER_WORKSPACE_ENDPOINT";
@@ -146,6 +146,15 @@ impl Error for EngineError {
             Self::Protocol(_) | Self::Status { .. } | Self::Pull(_) => None,
         }
     }
+}
+
+/// Why a call whose request body the caller streams failed.
+#[derive(Debug)]
+pub enum UploadError<E> {
+    /// The call itself failed, including a daemon that refused the body.
+    Engine(EngineError),
+    /// The caller's body writer failed.
+    Body(E),
 }
 
 impl From<io::Error> for EngineError {

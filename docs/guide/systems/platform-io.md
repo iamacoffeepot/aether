@@ -11,7 +11,7 @@ credential.
 | Inbound HTTP/routes/streams | [HTTP server](http-server.md) |
 | Framed connections | [TCP](tcp.md) |
 | Internal process transport | [RPC](rpc.md) |
-| Container images into the journal | [Workspace imports](workspace.md) |
+| Container images and runs over stored trees | [Workspace imports and runs](workspace.md) |
 | Text clipboard | [Clipboard](clipboard.md) |
 | Provider APIs/subprocesses | [Content generation](content-generation.md) |
 

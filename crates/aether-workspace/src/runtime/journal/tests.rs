@@ -1,4 +1,4 @@
-//! The journal sink over a real journal root.
+//! The journal sink and source over a real journal root.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -6,9 +6,9 @@ use std::fs;
 
 use aether_bloomery_journal::Journal;
 use aether_bloomery_kinds::{Name, Node, Ref, Tree};
-use aether_bloomery_tar::{DecodeError, Limits, Refusal, Rules, decode};
+use aether_bloomery_tar::{DecodeError, Limits, Refusal, Rules, decode, encode};
 
-use super::JournalSink;
+use super::{JournalSink, JournalSource};
 use crate::runtime::testing::{TarWriter, artifact_rows};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -75,5 +75,35 @@ fn a_stream_cut_inside_the_large_blob_leaves_no_row_and_no_temp_file() -> TestRe
     assert!(matches!(error, DecodeError::Refused { refusal: Refusal::Truncated, .. }), "{error}");
     assert_eq!(artifact_rows(&root)?, 0);
     assert_eq!(fs::read_dir(root.join("blobs").join("tmp"))?.count(), 0);
+    Ok(())
+}
+
+#[test]
+fn a_decoded_tree_encodes_back_through_the_source_to_the_same_tree() -> TestResult {
+    // Catches a source that hands the encoder other bytes than the row
+    // stores: a blob cut at a copy-buffer boundary, a length taken from the
+    // wrong row, or a tree loaded under the wrong digest. Decoding the encoded
+    // stream into a second, empty journal must land on the same digest, which
+    // hashes every byte of every blob and tree.
+    let temp = tempfile::tempdir()?;
+    let store = Journal::open(&temp.path().join("first"))?.artifact_store();
+    let archive = TarWriter::new()
+        .directory("bin/")
+        .file("bin/tool", b"#!tool\n")
+        .file("large.bin", &large_payload())
+        .symlink("link", "bin/tool")
+        .finish();
+    let mut batch = store.batch()?;
+    let tree = decode(archive.as_slice(), &mut JournalSink::new(&mut batch), &rules()?)?;
+    batch.commit()?;
+
+    let reader = store.batch()?;
+    let mut encoded = Vec::new();
+    encode(&tree, &mut JournalSource::new(&reader), &mut encoded)?;
+
+    let second = Journal::open(&temp.path().join("second"))?.artifact_store();
+    let mut batch = second.batch()?;
+    let round_trip = decode(encoded.as_slice(), &mut JournalSink::new(&mut batch), &rules()?)?;
+    assert_eq!(round_trip, tree);
     Ok(())
 }

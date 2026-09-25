@@ -1,21 +1,24 @@
 //! The `aether.workspace` runtime half (ADR-0122 split), compiled only under
 //! `feature = "runtime"`.
 //!
-//! Each `Import` runs on a worker thread through ADR-0093's hold-until-resolve
-//! dispatch, bounded by a cap-level [`TaskQueue`]: the handler submits the
-//! whole import sequence and returns at once, the caller's settlement chain
-//! stays held until the `#[handler(task)]` completion re-replies the result,
-//! and a request past the bound queues rather than being dropped. No
-//! dispatcher thread ever blocks on the daemon or the journal.
+//! Each `Import` and each `Run` runs on a worker thread through ADR-0093's
+//! hold-until-resolve dispatch, bounded by one cap-level [`TaskQueue`]: the
+//! handler submits the whole sequence and returns at once, the caller's
+//! settlement chain stays held until the `#[handler(task)]` completion
+//! re-replies the result, and a request past the bound queues rather than
+//! being dropped. No dispatcher thread ever blocks on the daemon or the
+//! journal.
 
 mod engine;
 mod import;
 mod journal;
+mod run;
 
 #[cfg(all(unix, any(test, feature = "test-support")))]
 pub mod testing;
 
 use std::io;
+use std::time::Duration;
 
 use aether_actor::runtime;
 use aether_bloomery_journal::ArtifactStore;
@@ -24,9 +27,10 @@ use aether_bloomery_tar::{Limits, LimitsError, Rules};
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 pub use aether_substrate::chassis::error::BootError;
 
-use crate::{DEFAULT_ENDPOINT, Import, ImportResult, WorkspaceCapability, WorkspaceConfig};
+use crate::{DEFAULT_ENDPOINT, Import, ImportResult, Run, RunResult, WorkspaceCapability, WorkspaceConfig};
 use engine::{Endpoint, Engine};
 use import::Importer;
+use run::{Allotment, Runner};
 
 /// Composer-supplied construction params (ADR-0156 §3): the live artifact
 /// store of the journal the chassis opened. It is a value the composer holds,
@@ -38,10 +42,12 @@ pub struct WorkspaceParams {
     pub artifacts: Option<ArtifactStore>,
 }
 
-/// `aether.workspace` runtime state: the importer each request clones onto
-/// its worker, and the queue that bounds how many run at once.
+/// `aether.workspace` runtime state: the importer and the runner each request
+/// clones onto its worker, and the queue that bounds how many requests talk
+/// to the daemon at once.
 pub struct WorkspaceCapabilityState {
     importer: Importer,
+    runner: Runner,
     tasks: TaskQueue,
 }
 
@@ -54,8 +60,9 @@ impl NativeActor for WorkspaceCapability {
 
     const NAMESPACE: &'static str = "aether.workspace";
 
-    /// Check the endpoint and the import bounds and take the journal's store.
-    /// Nothing dials the daemon here, so an engine boots without one.
+    /// Check the endpoint, the import bounds, and the run allotment, and take
+    /// the journal's store. Nothing dials the daemon here, so an engine boots
+    /// without one.
     fn init(
         config: WorkspaceConfig,
         params: WorkspaceParams,
@@ -66,13 +73,13 @@ impl NativeActor for WorkspaceCapability {
         })?;
         let endpoint = Endpoint::parse(config.endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT))
             .map_err(|error| BootError::Other(Box::new(error)))?;
-        let limits = Limits::new(config.import_max_entries, config.import_max_bytes).map_err(|error| {
-            let key = match error {
-                LimitsError::ZeroEntries => "AETHER_WORKSPACE_IMPORT_MAX_ENTRIES",
-                LimitsError::ZeroBytes => "AETHER_WORKSPACE_IMPORT_MAX_BYTES",
-            };
-            boot_error(&format!("{key} must be at least 1: {error}"))
-        })?;
+        let import_limits = limits(config.import_max_entries, config.import_max_bytes, "IMPORT")?;
+        let allotment = Allotment {
+            deadline: Duration::from_millis(at_least_one(config.run_deadline_millis, "RUN_DEADLINE_MILLIS")?),
+            memory_bytes: at_least_one(config.memory_limit_bytes, "MEMORY_LIMIT_BYTES")?,
+            pids: at_least_one(config.pids_limit, "PIDS_LIMIT")?,
+            output: limits(config.output_max_entries, config.output_max_bytes, "OUTPUT")?,
+        };
 
         tracing::info!(
             target: "aether_workspace",
@@ -80,10 +87,21 @@ impl NativeActor for WorkspaceCapability {
             max_in_flight = config.max_in_flight,
             import_max_entries = config.import_max_entries,
             import_max_bytes = config.import_max_bytes,
+            run_deadline_millis = config.run_deadline_millis,
+            memory_limit_bytes = config.memory_limit_bytes,
+            pids_limit = config.pids_limit,
+            output_max_entries = config.output_max_entries,
+            output_max_bytes = config.output_max_bytes,
             "workspace actor configured",
         );
+        let engine = Engine::new(endpoint);
         Ok(WorkspaceCapabilityState {
-            importer: Importer { engine: Engine::new(endpoint), artifacts, rules: Rules::userland(limits) },
+            importer: Importer {
+                engine: engine.clone(),
+                artifacts: artifacts.clone(),
+                rules: Rules::userland(import_limits),
+            },
+            runner: Runner { engine, artifacts, allotment },
             tasks: TaskQueue::new(config.max_in_flight),
         })
     }
@@ -102,11 +120,56 @@ impl NativeActor for WorkspaceCapability {
     }
 
     /// ADR-0093 completion: re-reply the worker's result to the original
-    /// caller, then free the slot for the next queued import.
+    /// caller, then free the slot for the next queued request.
     #[handler(task)]
     fn on_import_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<ImportResult>) {
         done.resolve(ctx);
         state.tasks.on_complete(ctx);
+    }
+
+    /// Run steps over a stored tree in a stored environment.
+    ///
+    /// # Agent
+    /// Reply: `run_result`. Runs each step in its own container over the
+    /// tree at `/work`, under the sandbox pins and the fixed allotment, and
+    /// answers `Ok(Outcome)` with each step's exit code and stored stdout and
+    /// stderr and the output tree minus `scratch`; `Refused` when the run
+    /// cannot start as asked; `Exhausted(Time | Memory)` when a step outran
+    /// the allotment; or `Failed { detail }` when the executor failed. No
+    /// container or volume is left behind, and rows commit only for `Ok`.
+    /// The reply lands when the whole run is done.
+    #[handler::single]
+    fn on_run(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Run) -> Pending<RunResult> {
+        let runner = state.runner.clone();
+        state.tasks.submit(ctx, move || runner.answer(&mail))
+    }
+
+    /// ADR-0093 completion: re-reply the run's result to the original caller,
+    /// then free the slot for the next queued request.
+    #[handler(task)]
+    fn on_run_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<RunResult>) {
+        done.resolve(ctx);
+        state.tasks.on_complete(ctx);
+    }
+}
+
+/// Decode bounds from a pair of knobs, refusing boot naming a zero one.
+fn limits(entries: u32, bytes: u64, knob: &str) -> Result<Limits, BootError> {
+    Limits::new(entries, bytes).map_err(|error| {
+        let key = match error {
+            LimitsError::ZeroEntries => "MAX_ENTRIES",
+            LimitsError::ZeroBytes => "MAX_BYTES",
+        };
+        boot_error(&format!("AETHER_WORKSPACE_{knob}_{key} must be at least 1: {error}"))
+    })
+}
+
+/// A knob that must not be zero, refusing boot naming it.
+fn at_least_one<T: PartialEq + Default>(value: T, knob: &str) -> Result<T, BootError> {
+    if value == T::default() {
+        Err(boot_error(&format!("AETHER_WORKSPACE_{knob} must be at least 1")))
+    } else {
+        Ok(value)
     }
 }
 

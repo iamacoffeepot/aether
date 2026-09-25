@@ -55,7 +55,7 @@
     - [HTTP server and typed routes](systems/http-server.md)
     - [TCP listeners and sessions](systems/tcp.md)
     - [RPC wire and engine routing](systems/rpc.md)
-    - [Workspace imports](systems/workspace.md)
+    - [Workspace imports and runs](systems/workspace.md)
     - [Clipboard](systems/clipboard.md)
     - [Content-generation capabilities](systems/content-generation.md)
   - [Media, interaction, and product tools](systems/media-and-tools.md)

@@ -3,13 +3,18 @@
 
 #![cfg(unix)]
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::thread;
 
-use aether_bloomery_journal::Journal;
+use aether_bloomery_journal::{ArtifactBatch, Journal};
+use aether_bloomery_kinds::{Name, Node, Ref, Tree};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_workspace::testing::{StubDaemon, StubReply, TarWriter};
-use aether_workspace::{ImageRef, Import, ImportResult, WorkspaceCapability, WorkspaceConfig, WorkspaceParams};
+use aether_workspace::testing::{RunScript, StubDaemon, StubReply, TarWriter};
+use aether_workspace::{
+    Environment, ImageRef, Import, ImportResult, Mounts, Network, Platform, Provides, Run, RunResult, Scratch, Step,
+    Steps, Tool, ToolName, Tools, TreePath, WorkspaceCapability, WorkspaceConfig, WorkspaceParams,
+};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -69,4 +74,80 @@ fn no_artifact_store_refuses_boot_naming_it() {
 
     let message = error.to_string();
     assert!(message.contains("artifact store"), "the refusal names the store: {message}");
+}
+
+#[test]
+fn a_run_answers_its_result_and_holds_settlement_until_it_is_done() -> TestResult {
+    // Catches `on_run` answering on the dispatcher or detached from the
+    // caller's chain (settlement would come back while the worker still talks
+    // to the daemon), or its result routed to the import completion.
+    let temp = tempfile::tempdir()?;
+    let store = Journal::open(&temp.path().join("journal"))?.artifact_store();
+    let mut batch = store.batch()?;
+    let (environment, tree) = stage_inputs(&mut batch)?;
+    batch.commit()?;
+    let stub = StubDaemon::bind()?;
+    let config = WorkspaceConfig { endpoint: Some(stub.endpoint()), ..WorkspaceConfig::default() };
+    let mut harness = SubstrateHarness::builder()
+        .with_actor_configured::<WorkspaceCapability>(WorkspaceParams { artifacts: Some(store) }, config)
+        .build()?;
+    let workspace = harness.actor_ref::<WorkspaceCapability>();
+    let step = Step { tool: ToolName::new("tool")?, args: Vec::new(), env: Vec::new(), stdin: None };
+    let run = Run {
+        tree,
+        environment,
+        mounts: Mounts::new(Vec::new())?,
+        steps: Steps::new(vec![step])?,
+        scratch: Scratch::new(Vec::new())?,
+        network: Network::Off,
+    };
+    let hex = environment.digest().to_string();
+    let output = TarWriter::new().directory("work/").file("work/out", b"o\n").finish();
+    let script = RunScript { environment: &hex, logs: &[(1, b"ok\n")], exit_code: 0, output: &output };
+
+    let served_before_settling = thread::scope(|scope| -> Result<bool, Box<dyn Error>> {
+        let served = scope.spawn(|| stub.answer(script.replies()));
+        harness.execute(vec![("settle", HarnessOp::send_and_settle(&workspace, &run))])?;
+        let finished = served.is_finished();
+        served.join().map_err(|_| "the stub thread panicked")??;
+        Ok(finished)
+    })?;
+    assert!(served_before_settling, "the chain settled before the run's last request was served");
+
+    let answer = thread::scope(|scope| -> Result<RunResult, Box<dyn Error>> {
+        let served = scope.spawn(|| stub.serve(script.replies()));
+        let result = harness.execute(vec![("reply", HarnessOp::send_and_await_reply(&workspace, &run))])?;
+        served.join().map_err(|_| "the stub thread panicked")??;
+        Ok(result.reply::<RunResult>("reply")?)
+    })?;
+    assert!(matches!(answer, RunResult::Ok(_)), "{answer:?}");
+    Ok(())
+}
+
+/// Commit an environment whose root holds the executable `usr/bin/tool`,
+/// and an empty run tree.
+fn stage_inputs(batch: &mut ArtifactBatch) -> Result<(Ref<Environment>, Ref<Tree>), Box<dyn Error>> {
+    let mut file = batch.blob(4)?;
+    file.write_chunk(b"tool")?;
+    let tool = file.finish()?;
+    let bin = batch.stage_encoded(&tree(vec![("tool", Node::Executable(tool))])?)?;
+    let usr = batch.stage_encoded(&tree(vec![("bin", Node::Directory(bin))])?)?;
+    let root = batch.stage_encoded(&tree(vec![("usr", Node::Directory(usr))])?)?;
+    let environment = batch.stage_encoded(&Environment {
+        root,
+        platform: Platform::new("x86_64-unknown-linux-gnu")?,
+        provides: Provides { rust: None },
+        tools: Tools::new(vec![Tool { name: ToolName::new("tool")?, path: TreePath::new("usr/bin/tool")? }])?,
+        env: Vec::new(),
+    })?;
+    let work = batch.stage_encoded(&Tree::empty())?;
+    Ok((environment, work))
+}
+
+fn tree(entries: Vec<(&str, Node)>) -> Result<Tree, Box<dyn Error>> {
+    let mut map = BTreeMap::new();
+    for (name, node) in entries {
+        map.insert(Name::new(name)?, node);
+    }
+    Ok(Tree::new(map))
 }
