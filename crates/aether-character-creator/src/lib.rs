@@ -959,11 +959,6 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                     let weight = front * gaussian(position.x, position.y, 0.0, 0.10, 0.13, 0.30);
                     Vec3::new(0.0, 0.0, 0.17 * weight)
                 }
-                "EyeSize" => {
-                    let left = gaussian(position.x, position.y, -0.275, 0.275, 0.22, 0.14);
-                    let right = gaussian(position.x, position.y, 0.275, 0.275, 0.22, 0.14);
-                    Vec3::new(0.0, 0.025 * front * (left + right), -0.045 * front * (left + right))
-                }
                 "BrowOuterSize" => brow_outer_delta(position),
                 "LipFullness" => {
                     let weight = front
@@ -1039,5 +1034,11 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn eye_size_does_not_deform_the_surrounding_face() {
+        let mesh = head_mesh(32, 32);
+        assert!(morph_deltas("EyeSize", &mesh.positions).iter().all(|delta| delta.length() < 0.000_1));
     }
 }
