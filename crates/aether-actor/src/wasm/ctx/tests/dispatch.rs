@@ -6,11 +6,10 @@ use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inlin
 use crate::mail::Mail;
 use crate::model::ctx::{Erased, Manual, Single};
 use crate::model::{Addressable, Embedded, HandlesKind, Resolve};
-use crate::wasm::inline::RouteDecision;
+use crate::wasm::inline::{ChildRecord, RouteDecision};
 use crate::wasm::{ActorInitError, WasmInitCtx};
 use aether_data::{ActorId, MailboxId, Source};
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::mem::{align_of, size_of};
 
 struct EmbeddedPeer;
@@ -70,27 +69,24 @@ fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents()
     let nested_peer = Embedded::resolve(entry.0, EmbeddedPeer::NAMESPACE, ());
     registry.set_self_id(entry.0);
     registry.set_parent_id(entry_parent);
-    install_inline_child::<SucceedingChild>(&registry, child, 0, String::from("child"), false, entry.0, Vec::new(), ())
-        .expect("install inline child");
+    install_inline_child::<SucceedingChild>(
+        &registry,
+        child,
+        ChildRecord { full_subname: String::from("child"), parent: entry.0, ..ChildRecord::default() },
+        (),
+    )
+    .expect("install inline child");
     install_inline_child::<SucceedingChild>(
         &registry,
         default_entry_peer,
-        0,
-        String::from("default-peer"),
-        false,
-        entry.0,
-        Vec::new(),
+        ChildRecord { full_subname: String::from("default-peer"), parent: entry.0, ..ChildRecord::default() },
         (),
     )
     .expect("install default embedded peer");
     install_inline_child::<SucceedingChild>(
         &registry,
         nested_peer,
-        0,
-        String::from("nested-peer"),
-        false,
-        entry.0,
-        Vec::new(),
+        ChildRecord { full_subname: String::from("nested-peer"), parent: entry.0, ..ChildRecord::default() },
         (),
     )
     .expect("install nested embedded peer");
@@ -123,16 +119,17 @@ fn ctx_relative_verbs_resolve_and_route_in_place() {
     // would.
     let widget = MailboxId(0x7101);
     let label = MailboxId(0x7102);
-    install_inline_child::<SucceedingChild>(&registry, widget, 0, String::from("widget"), false, root, Vec::new(), ())
-        .expect("a succeeding init installs the inline child");
+    install_inline_child::<SucceedingChild>(
+        &registry,
+        widget,
+        ChildRecord { full_subname: String::from("widget"), parent: root, ..ChildRecord::default() },
+        (),
+    )
+    .expect("a succeeding init installs the inline child");
     install_inline_child::<SucceedingChild>(
         &registry,
         label,
-        0,
-        String::from("label"),
-        false,
-        widget.0,
-        Vec::new(),
+        ChildRecord { full_subname: String::from("label"), parent: widget.0, ..ChildRecord::default() },
         (),
     )
     .expect("a succeeding init installs the inline grandchild");
@@ -176,8 +173,13 @@ fn send_tracked_local_route_enqueues_and_returns_no_correlation() {
     registry.set_self_id(root);
     registry.set_parent_id(parent);
     let peer = Embedded::resolve(parent, EmbeddedPeer::NAMESPACE, ());
-    install_inline_child::<SucceedingChild>(&registry, peer, 0, String::from("peer"), false, root, Vec::new(), ())
-        .expect("install inline child");
+    install_inline_child::<SucceedingChild>(
+        &registry,
+        peer,
+        ChildRecord { full_subname: String::from("peer"), parent: root, ..ChildRecord::default() },
+        (),
+    )
+    .expect("install inline child");
 
     let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
     let request = ctx.__for_actor::<PeerDependent>().send_tracked::<EmbeddedPeer>(&());

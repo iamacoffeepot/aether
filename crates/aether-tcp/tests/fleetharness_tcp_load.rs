@@ -232,33 +232,32 @@ mod tests {
             release.push(release_tx);
             let ready_tx = ready_tx.clone();
             joins.push(thread::spawn(move || {
-                run_socket_worker(
-                    stream,
-                    topology,
-                    connection_index,
-                    frame_count,
-                    frame_bytes,
-                    timeout,
-                    &ready_tx,
-                    &release_rx,
-                )
+                let plan = WorkerPlan { topology, connection_index, frame_count, frame_bytes, timeout };
+                run_socket_worker(stream, plan, &ready_tx, &release_rx)
             }));
         }
         drop(ready_tx);
         RunningSocketWorkers { ready_rx, release, joins }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn run_socket_worker(
-        mut stream: TcpStream,
+    /// One socket worker's share of the load: which connection it drives,
+    /// how many frames of what size it echoes, and its I/O timeout.
+    #[derive(Clone, Copy)]
+    struct WorkerPlan {
         topology: SocketWorkerTopology,
         connection_index: usize,
         frame_count: usize,
         frame_bytes: usize,
         timeout: Duration,
+    }
+
+    fn run_socket_worker(
+        mut stream: TcpStream,
+        plan: WorkerPlan,
         ready_tx: &mpsc::Sender<SocketWorkerTraffic>,
         release_rx: &mpsc::Receiver<()>,
     ) -> SocketWorkerResult {
+        let WorkerPlan { topology, connection_index, frame_count, frame_bytes, timeout } = plan;
         stream.set_read_timeout(Some(timeout)).expect("set socket worker read timeout");
         stream.set_write_timeout(Some(timeout)).expect("set socket worker write timeout");
         stream.set_nodelay(true).expect("disable loopback Nagle delay");
@@ -427,17 +426,24 @@ mod tests {
         TcpLoadSnapshot::decode_from_bytes(&reply.payload).expect("decode TcpLoadSnapshot")
     }
 
-    #[allow(clippy::too_many_arguments, reason = "phase assertion keeps its independent exact dimensions explicit")]
+    /// The exact session/frame/byte totals one load phase must report: the
+    /// phase's topology, the sessions that predate it, and its dimensions.
+    #[derive(Clone, Copy)]
+    struct ExpectedSessions<'a> {
+        topology: TcpLoadTopology,
+        previous_names: &'a BTreeSet<String>,
+        connection_count: usize,
+        frame_count: usize,
+        frame_bytes: usize,
+    }
+
     fn wait_for_sessions(
         harness: &mut FleetHarness,
         engine: EngineId,
         probe_addr: &str,
-        topology: TcpLoadTopology,
-        previous_names: &BTreeSet<String>,
-        connection_count: usize,
-        frame_count: usize,
-        frame_bytes: usize,
+        expected: ExpectedSessions<'_>,
     ) -> Vec<TcpLoadSessionSnapshot> {
+        let ExpectedSessions { topology, previous_names, connection_count, frame_count, frame_bytes } = expected;
         let expected_payload_bytes =
             u64::try_from(frame_count.checked_mul(frame_bytes).expect("expected per-session payload total fits usize"))
                 .expect("expected per-session payload total fits u64");
@@ -671,11 +677,13 @@ mod tests {
             &mut harness,
             engine,
             &probe.addr,
-            TcpLoadTopology::Accepted,
-            &accepted_before,
-            profile.connections,
-            profile.frames_per_connection,
-            profile.frame_bytes,
+            ExpectedSessions {
+                topology: TcpLoadTopology::Accepted,
+                previous_names: &accepted_before,
+                connection_count: profile.connections,
+                frame_count: profile.frames_per_connection,
+                frame_bytes: profile.frame_bytes,
+            },
         );
         let accepted_costs = accepted_sessions
             .iter()
@@ -723,11 +731,13 @@ mod tests {
             &mut harness,
             engine,
             &probe.addr,
-            TcpLoadTopology::Outbound,
-            &outbound_before,
-            profile.connections,
-            profile.frames_per_connection,
-            profile.frame_bytes,
+            ExpectedSessions {
+                topology: TcpLoadTopology::Outbound,
+                previous_names: &outbound_before,
+                connection_count: profile.connections,
+                frame_count: profile.frames_per_connection,
+                frame_bytes: profile.frame_bytes,
+            },
         );
         let outbound_costs = outbound_sessions
             .iter()
@@ -765,11 +775,13 @@ mod tests {
                 &mut harness,
                 engine,
                 &probe.addr,
-                TcpLoadTopology::Accepted,
-                &before,
-                profile.connections,
-                1,
-                profile.frame_bytes,
+                ExpectedSessions {
+                    topology: TcpLoadTopology::Accepted,
+                    previous_names: &before,
+                    connection_count: profile.connections,
+                    frame_count: 1,
+                    frame_bytes: profile.frame_bytes,
+                },
             );
             for session in &sessions {
                 churn_costs.extend(sample_live_session(&mut harness, engine, &accepted_path(&session.session_name)));
@@ -806,11 +818,13 @@ mod tests {
                 &mut harness,
                 engine,
                 &probe.addr,
-                TcpLoadTopology::Outbound,
-                &before,
-                profile.connections,
-                1,
-                profile.frame_bytes,
+                ExpectedSessions {
+                    topology: TcpLoadTopology::Outbound,
+                    previous_names: &before,
+                    connection_count: profile.connections,
+                    frame_count: 1,
+                    frame_bytes: profile.frame_bytes,
+                },
             );
             for session in &sessions {
                 churn_costs.extend(sample_live_session(&mut harness, engine, &outbound_path(&session.session_name)));

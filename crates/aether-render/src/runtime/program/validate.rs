@@ -311,7 +311,7 @@ struct PassValidation<'a> {
 // One linear walk per pass — entry point, inputs, output, window,
 // repeat — reads better in sequence than split into per-check helpers
 // that would each re-thread the same pass context.
-#[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing; too_many_arguments left this attribute
+#[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing; the attribute only lost its argument-count lint
 fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass) -> Result<PassPlan, String> {
     let &PassValidation { mail, module, info, earlier, transients } = context;
     let entry_stage = if matches!(&pass.stage, PassStage::Compute(_)) {

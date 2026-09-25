@@ -442,7 +442,7 @@ struct PassEncoding<'a, 'c> {
 // Staging, bind groups, and pass encoding share the per-pass borrow
 // structure; splitting them would re-thread the same context
 // arguments — the same shape `record_overlay_batches` keeps.
-#[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing; too_many_arguments left this attribute
+#[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing; the attribute only lost its argument-count lint
 fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: PassEncoding<'_, '_>) {
     let PassEncoding { plan, passes_gpu, cache, pool, textures, geometries, dispatch, mut queries } = encoding;
     let layout = cache.layout;

@@ -12,12 +12,12 @@ use crate::model::Subname;
 use crate::model::ctx::{Erased, Manual};
 use crate::reference::ErasedActorRef;
 use crate::wasm::__validate_inline_child_alias;
+use crate::wasm::inline::ChildRecord;
 use crate::wasm::inline::compose::spawn_one_child;
 use crate::wasm::inline::compose::{InlineChildToReconstruct, reconstruct_one_child};
 use aether_data::{Kind, MailboxId};
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::vec::Vec;
 
 /// Step 3: a synchronous `init` `Err` surfaces as
 /// [`SpawnError::InitFailed`] (the inline child runs `init` in-process,
@@ -30,11 +30,7 @@ fn install_inline_child_reports_init_failure() {
     let result = install_inline_child::<FailingChild>(
         &registry,
         MailboxId(0x5555),
-        0,
-        String::from("child"),
-        false,
-        0,
-        Vec::new(),
+        ChildRecord { full_subname: String::from("child"), ..ChildRecord::default() },
         (),
     );
     assert!(
@@ -133,11 +129,12 @@ fn spawn_inline_child_by_tag_parents_to_the_spawner_not_the_root() {
     registry.set_entry_actor_tag(ActorTypeTag::of::<LifecycleProbe>());
     registry.insert_child(
         MailboxId(0x5AFE),
-        ActorTypeTag::of::<NestingParent>().0,
-        String::from("spawner"),
-        false,
-        0x1111,
-        Vec::new(),
+        ChildRecord {
+            type_tag: ActorTypeTag::of::<NestingParent>().0,
+            full_subname: String::from("spawner"),
+            parent: 0x1111,
+            ..ChildRecord::default()
+        },
         Box::new(NestingParent),
     );
     registry.set_spawn_resolver(stub_resolver);
@@ -345,11 +342,12 @@ fn install_inline_child_runs_wire_and_supports_nested_spawn() {
     install_inline_child::<NestingParent>(
         &registry,
         parent,
-        ActorTypeTag::of::<NestingParent>().0,
-        String::from("nesting"),
-        false,
-        0x9000,
-        Vec::new(),
+        ChildRecord {
+            type_tag: ActorTypeTag::of::<NestingParent>().0,
+            full_subname: String::from("nesting"),
+            parent: 0x9000,
+            ..ChildRecord::default()
+        },
         (),
     )
     .expect("the nesting parent installs");
@@ -380,8 +378,13 @@ fn despawn_inline_child_runs_unwire() {
     PROBE_UNWIRE_COUNT.set(0);
 
     let probe = MailboxId(0x9201);
-    install_inline_child::<LifecycleProbe>(&registry, probe, 0, String::from("probe"), false, 0x9200, Vec::new(), ())
-        .expect("the probe installs");
+    install_inline_child::<LifecycleProbe>(
+        &registry,
+        probe,
+        ChildRecord { full_subname: String::from("probe"), parent: 0x9200, ..ChildRecord::default() },
+        (),
+    )
+    .expect("the probe installs");
     assert_eq!(PROBE_WIRE_COUNT.get(), 1, "a fresh inline spawn runs the child's wire exactly once");
 
     let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x9200, &registry, NO_INBOUND_SOURCE);

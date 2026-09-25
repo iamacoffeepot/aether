@@ -125,22 +125,6 @@ fn flat_fill(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Shape {
     Shape { x, y, width, height, corner_radius: 0.0, fill: Some(color), stroke: None, shadow: None, texture: None }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn textured_quad(
-    texture_id: u32,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    u0: f32,
-    v0: f32,
-    u1: f32,
-    v1: f32,
-    tint: Rgba,
-) -> WidgetDrawItem {
-    WidgetDrawItem::TexturedQuad { texture_id, x, y, width, height, u0, v0, u1, v1, tint, clip: None }
-}
-
 fn four_color_texture_pixels(size: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((size * size * 4) as usize);
     for y in 0..size {
@@ -548,8 +532,32 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
         root: false,
         chrome: vec![
             quad(0.0, 0.0, 28.0, 26.0, GREEN),
-            textured_quad(texture_id, 0.0, 0.0, 16.0, 16.0, 0.0, 0.0, 0.5, 0.5, Rgba::WHITE),
-            textured_quad(texture_id, 12.0, 8.0, 16.0, 16.0, 0.0, 0.5, 0.5, 1.0, Rgba::new(0.75, 1.0, 1.0, 1.0)),
+            WidgetDrawItem::TexturedQuad {
+                texture_id,
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 16.0,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 0.5,
+                v1: 0.5,
+                tint: Rgba::WHITE,
+                clip: None,
+            },
+            WidgetDrawItem::TexturedQuad {
+                texture_id,
+                x: 12.0,
+                y: 8.0,
+                width: 16.0,
+                height: 16.0,
+                u0: 0.0,
+                v0: 0.5,
+                u1: 0.5,
+                v1: 1.0,
+                tint: Rgba::new(0.75, 1.0, 1.0, 1.0),
+                clip: None,
+            },
             quad(20.0, 14.0, 8.0, 8.0, YELLOW),
         ],
         intrinsic: None,

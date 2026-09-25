@@ -6,9 +6,9 @@ use super::{
     install_inline_child,
 };
 use crate::model::ctx::{Erased, Manual};
+use crate::wasm::inline::ChildRecord;
 use aether_data::MailboxId;
 use alloc::string::String;
-use alloc::vec::Vec;
 
 /// `child_as::<C>` admits the resident child only when the registry recorded
 /// it as a `C`. The wrong-type arm is the one that matters: without the tag
@@ -24,11 +24,12 @@ fn child_as_admits_only_the_recorded_child_type() {
     install_inline_child::<SucceedingChild>(
         &registry,
         child,
-        ActorTypeTag::of::<SucceedingChild>().0,
-        String::from("slot"),
-        false,
-        parent.0,
-        Vec::new(),
+        ChildRecord {
+            type_tag: ActorTypeTag::of::<SucceedingChild>().0,
+            full_subname: String::from("slot"),
+            parent: parent.0,
+            ..ChildRecord::default()
+        },
         (),
     )
     .expect("the child installs");
@@ -55,11 +56,12 @@ fn sibling_as_resolves_through_the_recorded_parent() {
         install_inline_child::<SucceedingChild>(
             &registry,
             alias,
-            ActorTypeTag::of::<SucceedingChild>().0,
-            String::from(subname),
-            false,
-            parent.0,
-            Vec::new(),
+            ChildRecord {
+                type_tag: ActorTypeTag::of::<SucceedingChild>().0,
+                full_subname: String::from(subname),
+                parent: parent.0,
+                ..ChildRecord::default()
+            },
             (),
         )
         .expect("the child installs");

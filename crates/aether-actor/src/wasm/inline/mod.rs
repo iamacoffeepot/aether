@@ -99,6 +99,18 @@ struct InlineSlot {
     actor: Option<Box<dyn ErasedWasmActor>>,
 }
 
+/// An inline child's reconstruct record (ADR-0114 §5): what a slot keeps
+/// beside the actor so a `replace_component` swap can rebuild the child.
+#[derive(Default)]
+pub(crate) struct ChildRecord {
+    pub(crate) type_tag: u64,
+    pub(crate) full_subname: String,
+    pub(crate) is_counter: bool,
+    /// Raw id of the logical parent; `0` records none (the init ABI's encoding).
+    pub(crate) parent: u64,
+    pub(crate) config_bytes: Vec<u8>,
+}
+
 /// A cloneable snapshot of one resident inline child's reconstruct
 /// metadata (no actor box), produced by [`Registry::child_metas`]
 /// for the dehydrate walk. The compose path reads each child's state
@@ -408,19 +420,8 @@ impl Registry {
     /// alongside the actor box. Replaces the actor + metadata if `id` is
     /// already present (a re-spawn / rehydrate re-register of the same
     /// alias). O(log n).
-    // The parameters are the slot's reconstruct record (ADR-0114 §5); see
-    // `install_inline_child` for the same shape on the spawn side.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn insert_child(
-        &self,
-        id: MailboxId,
-        type_tag: u64,
-        full_subname: String,
-        is_counter: bool,
-        parent: u64,
-        config_bytes: Vec<u8>,
-        actor: Box<dyn ErasedWasmActor>,
-    ) {
+    pub(crate) fn insert_child(&self, id: MailboxId, record: ChildRecord, actor: Box<dyn ErasedWasmActor>) {
+        let ChildRecord { type_tag, full_subname, is_counter, parent, config_bytes } = record;
         // SAFETY: single-threaded guest + serialized delivery — no other
         // live borrow of the cell (the `Sync` argument). The borrow is
         // released before this returns, so it never spans a dispatch.
@@ -794,7 +795,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainMode, Registry, RouteDecision, drain_cluster_queue, membrane_dispatch};
+    use super::{ChainMode, ChildRecord, Registry, RouteDecision, drain_cluster_queue, membrane_dispatch};
     use crate::mail::{Mail, PriorState};
     use crate::reference::ErasedActorRef;
     use crate::wasm::ErasedWasmActor;
@@ -959,7 +960,11 @@ mod tests {
         let id = MailboxId(0x1111);
 
         assert!(registry.take(id).is_none(), "empty registry has no child");
-        registry.insert_child(id, 0, String::from("widget"), false, 0, Vec::new(), Box::new(RecordingChild::new().0));
+        registry.insert_child(
+            id,
+            ChildRecord { full_subname: String::from("widget"), ..ChildRecord::default() },
+            Box::new(RecordingChild::new().0),
+        );
         let taken = registry.take(id).expect("insert then take returns the child");
         assert!(registry.take(id).is_none(), "a taken-out slot is empty until reinsert");
         registry.reinsert(id, taken);
@@ -977,11 +982,12 @@ mod tests {
         let tag = 0xABCD_u64;
         registry.insert_child(
             id,
-            tag,
-            String::from("widget"),
-            false,
-            parent.0,
-            Vec::new(),
+            ChildRecord {
+                type_tag: tag,
+                full_subname: String::from("widget"),
+                parent: parent.0,
+                ..ChildRecord::default()
+            },
             Box::new(RecordingChild::new().0),
         );
 
@@ -1006,11 +1012,7 @@ mod tests {
         registry.set_parent_id(entry_parent.0);
         registry.insert_child(
             child,
-            0,
-            String::from("child"),
-            false,
-            entry.0,
-            Vec::new(),
+            ChildRecord { full_subname: String::from("child"), parent: entry.0, ..ChildRecord::default() },
             Box::new(RecordingChild::new().0),
         );
 
@@ -1040,20 +1042,22 @@ mod tests {
         registry.set_self_id(entry.0);
         registry.insert_child(
             parent,
-            0xA201,
-            String::from("parent"),
-            false,
-            entry.0,
-            Vec::new(),
+            ChildRecord {
+                type_tag: 0xA201,
+                full_subname: String::from("parent"),
+                parent: entry.0,
+                ..ChildRecord::default()
+            },
             Box::new(RecordingChild::new().0),
         );
         registry.insert_child(
             nested,
-            nested_tag.0,
-            String::from("nested"),
-            false,
-            parent.0,
-            Vec::new(),
+            ChildRecord {
+                type_tag: nested_tag.0,
+                full_subname: String::from("nested"),
+                parent: parent.0,
+                ..ChildRecord::default()
+            },
             Box::new(RecordingChild::new().0),
         );
 
@@ -1076,11 +1080,12 @@ mod tests {
         let tag = ActorTypeTag(0xA401);
         registry.insert_child(
             child,
-            tag.0,
-            String::from("child"),
-            false,
-            0x8400,
-            Vec::new(),
+            ChildRecord {
+                type_tag: tag.0,
+                full_subname: String::from("child"),
+                parent: 0x8400,
+                ..ChildRecord::default()
+            },
             Box::new(RecordingChild::new().0),
         );
 
@@ -1107,7 +1112,11 @@ mod tests {
         let own = 0x3000_u64;
         let child = 0x3001_u64;
         let (recording, dispatches) = RecordingChild::new();
-        registry.insert_child(MailboxId(child), 0, String::from("widget"), false, 0, Vec::new(), Box::new(recording));
+        registry.insert_child(
+            MailboxId(child),
+            ChildRecord { full_subname: String::from("widget"), ..ChildRecord::default() },
+            Box::new(recording),
+        );
 
         let rc = membrane_dispatch(own, mail_to(child), &registry, NO_INBOUND_SOURCE, |_mail| {
             panic!("own dispatch must not run for a child recipient")
@@ -1149,11 +1158,7 @@ mod tests {
         let drops = Rc::new(Cell::new(0));
         registry.insert_child(
             MailboxId(child),
-            0,
-            String::from("widget"),
-            false,
-            0,
-            Vec::new(),
+            ChildRecord { full_subname: String::from("widget"), ..ChildRecord::default() },
             Box::new(SelfDespawningChild { id: ErasedActorRef::new(MailboxId(child)), drops: Rc::clone(&drops) }),
         );
 
@@ -1177,11 +1182,7 @@ mod tests {
         let (recording, dispatches) = RecordingChild::new();
         registry.insert_child(
             MailboxId(id),
-            0,
-            String::from("recording"),
-            false,
-            parent,
-            Vec::new(),
+            ChildRecord { full_subname: String::from("recording"), parent, ..ChildRecord::default() },
             Box::new(recording),
         );
         dispatches
@@ -1201,15 +1202,19 @@ mod tests {
         let bar = MailboxId(0x1001);
         let baz = MailboxId(0x1002);
         let button = MailboxId(0x1003);
-        registry.insert_child(bar, 0, String::from("bar"), false, root, Vec::new(), Box::new(RecordingChild::new().0));
-        registry.insert_child(baz, 0, String::from("baz"), false, root, Vec::new(), Box::new(RecordingChild::new().0));
+        registry.insert_child(
+            bar,
+            ChildRecord { full_subname: String::from("bar"), parent: root, ..ChildRecord::default() },
+            Box::new(RecordingChild::new().0),
+        );
+        registry.insert_child(
+            baz,
+            ChildRecord { full_subname: String::from("baz"), parent: root, ..ChildRecord::default() },
+            Box::new(RecordingChild::new().0),
+        );
         registry.insert_child(
             button,
-            0,
-            String::from("button"),
-            false,
-            bar.0,
-            Vec::new(),
+            ChildRecord { full_subname: String::from("button"), parent: bar.0, ..ChildRecord::default() },
             Box::new(RecordingChild::new().0),
         );
 
@@ -1371,11 +1376,7 @@ mod tests {
         let (recording, dispatches, source) = RecordingChild::new_with_source();
         registry.insert_child(
             MailboxId(id),
-            0,
-            String::from("recording"),
-            false,
-            parent,
-            Vec::new(),
+            ChildRecord { full_subname: String::from("recording"), parent, ..ChildRecord::default() },
             Box::new(recording),
         );
         (dispatches, source)
@@ -1447,11 +1448,7 @@ mod tests {
         let observed_reply = Rc::new(Cell::new(None));
         registry.insert_child(
             MailboxId(child),
-            0,
-            String::from("reply_probe"),
-            false,
-            root,
-            Vec::new(),
+            ChildRecord { full_subname: String::from("reply_probe"), parent: root, ..ChildRecord::default() },
             Box::new(ReplyProbeChild {
                 dispatched: Rc::clone(&dispatched),
                 observed_reply: Rc::clone(&observed_reply),
