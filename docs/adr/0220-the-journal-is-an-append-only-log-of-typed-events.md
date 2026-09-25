@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-09-16
 - **Amended:** 2026-09-24 — tree entry names are unique byte for byte, and the Windows-portability name rules are dropped; both served writing a tree to a host directory, which no longer happens (ADR-0237).
+- **Amended:** 2026-09-25 — the journal is a root directory holding the SQLite database and a `blobs` directory; every artifact's bytes, at every size, are one digest-named file there, and the `artifacts` row keeps only the digest, size, and time; opening a root takes an exclusive lock (resolves ADR-0237 open question 1).
 
 ## Context
 
@@ -88,6 +89,34 @@ unwalked field. The recognized head-move check is not that walk: it decodes
   no migration: an existing journal file reopens, and blobs written before
   this change have no prefix and are simply blobs nobody can cite typed.
   The crate is pre-1.0 and there are no production journals.
+
+  *(Amended 2026-09-25: the journal is a root directory, not one file.
+  `open` takes the root, which holds `<root>/journal.sqlite` (with its WAL
+  sidecars) and `<root>/blobs/`, and creates the root and its
+  subdirectories when missing; the parent must exist, as it must for a
+  journal file today. `open` takes an exclusive advisory lock on a lock
+  file in the root, and a second open of the same root fails with an
+  error, so one process is the only writer. A `Ref` is a bare sha256
+  digest with no algorithm tag, so every artifact's bytes, at every size,
+  are one file at `<root>/blobs/<first two hex>/<digest hex>`, where the
+  two-hex level is a fan-out shard. The file holds the prefixed blob
+  exactly as hashed; nothing is stored inline. The `artifacts` row keeps
+  `digest`, `size_bytes`, and `recorded_at_millis` and drops `bytes`. A
+  row, not a file, is what makes an artifact stored. The journal stays the
+  only writer: for each staged blob it streams the bytes into a temporary
+  file in `<root>/blobs/tmp/`, fsyncs it, renames it to its digest name,
+  and fsyncs that directory, all before the transaction that inserts the
+  row commits. A digest-named file already present is complete, since
+  only a rename creates one, so it is not rewritten. A crash before commit
+  leaves an orphan file, which is harmless: the same content has the same
+  name, and a later write of it finds the file. Because the lock excludes
+  any other writer, `open` safely deletes whatever is left in
+  `<root>/blobs/tmp/`. Reads stream from the file; `append`'s prefix check
+  reads its first eight bytes, and the closure walk still re-hashes every
+  member. Streaming applies inside the journal process only: the
+  `ReadArtifact` / `ReadClosure` mail replies still carry whole bytes.
+  There is no in-memory backend; tests open a temporary root. There is no
+  migration: a single-file journal does not open as a root.)*
 - An artifact is an abstraction above the store: a blob whose bytes are an
   eight-byte `KindId` prefix followed by a payload. The digest is the store's
   ordinary `sha256` over the whole blob, so the digest covers the kind and a
@@ -365,8 +394,11 @@ Batch input is an interface contract, not a performance claim.
   `bloomery.head_moved` is not a schema registry, and ADR-0059 already
   carries field tags in the bytes.
 - **Writer lease** — deferred; a single process owns the file for now.
+  *(Amended 2026-09-25: an exclusive advisory lock on the root is taken at
+  open; a lease stays deferred.)*
 - **In-memory second backend behind a Store trait** — deferred; tests use
-  SQLite `:memory:`.
+  SQLite `:memory:`. *(Amended 2026-09-25: no in-memory backend; tests open
+  a temporary root.)*
 - **Idempotency keys** — deferred; land with the driver that retries.
 - **Genesis event** — deferred; `Seq(0)` as the empty head is enough.
 - **Kind column on the artifacts table** — rejected; it puts the kind beside
