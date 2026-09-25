@@ -509,7 +509,7 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
         matches!(queue.pop(), Some(AudioEvent::RegisterInstrument { .. })),
         "instrument load should register a bank"
     );
-    assert!(matches!(queue.pop(), Some(AudioEvent::TrackStart { .. })), "track load should start a track");
+    assert!(matches!(queue.pop(), Some(AudioEvent::TrackStart(..))), "track load should start a track");
 }
 
 #[test]
