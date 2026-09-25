@@ -43,7 +43,7 @@ pub use aether_substrate::actor::native::{
     Dispatch, NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
 };
 pub use aether_substrate::actor::wasm::asset_manifest;
-pub use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
+pub use aether_substrate::actor::wasm::component::Component;
 pub use aether_substrate::chassis::error::BootError;
 #[allow(unused_imports, reason = "runtime facade retains its established KindId re-export")]
 pub use aether_substrate::mail::{CostCell, CostCells, KindId};
@@ -79,8 +79,7 @@ impl NativeActor for WasmTrampoline {
     const NAMESPACE: &'static str = EMBEDDED_SCOPE;
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
-        let mut substrate_ctx =
-            ComponentCtx::new(Arc::clone(ctx.binding()), Arc::clone(&config.registry), Arc::clone(&config.outbound));
+        let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&config.outbound));
         // ADR-0163 §3 (#3984): index an asset load window over the module's
         // `aether.asset.*` sections and install it before instantiate, so
         // the guest's `init` (run inside `instantiate`) and its later `wire`
@@ -133,7 +132,6 @@ impl NativeActor for WasmTrampoline {
             component: Some(component),
             engine: config.engine,
             linker: config.linker,
-            registry: config.registry,
             outbound: config.outbound,
             capabilities: config.capabilities,
             type_tag: config.type_tag,
@@ -178,7 +176,7 @@ impl NativeActor for WasmTrampoline {
             (component.drain_pending_aliases(), component.drain_pending_alias_retirements())
         });
         WasmTrampolineState::stage_inline_aliases(ctx, aliases);
-        state.stage_inline_alias_retirements(ctx, retired);
+        WasmTrampolineState::stage_inline_alias_retirements(ctx, retired);
     }
 
     /// Drop the **wasm component**. Runs the guest's `unwire`
@@ -302,7 +300,7 @@ impl NativeActor for WasmTrampoline {
             )
         };
         WasmTrampolineState::stage_inline_aliases(ctx, aliases);
-        state.stage_inline_alias_retirements(ctx, retired);
+        WasmTrampolineState::stage_inline_alias_retirements(ctx, retired);
         for pending in pendings {
             state.spawn_sibling(ctx, pending);
         }

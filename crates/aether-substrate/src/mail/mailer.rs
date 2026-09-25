@@ -22,6 +22,11 @@
 use std::sync::Arc;
 
 use crate::actor::native::ActorProbe;
+#[cfg(feature = "wasm")]
+use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::ctx::ResolvePathError;
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::component::ComponentCtx;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::capability::CapabilityRegistry;
 use crate::mail::cost::CostTable;
@@ -29,7 +34,7 @@ use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::effect::ACTIVATION_BARRIER_KIND;
 use crate::mail::registry::{
     AddressResolutionError, CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry,
-    RegistryQueueMetrics, RegistrySubscription, RouteContinuation, RouteEndpoint, RouteRelayHandle,
+    RegistryQueueMetrics, RegistrySubscription, ResolvedAddress, RouteContinuation, RouteEndpoint, RouteRelayHandle,
 };
 use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::thread_name;
@@ -38,6 +43,7 @@ use crate::scheduler::pending_depth;
 use aether_actor::ErasedActorRef;
 use aether_data::tagged_id::{self, Tag};
 use aether_data::{ActorPath, Kind, KindDescriptor, KindId};
+use aether_kinds::ComponentCapabilities;
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use std::sync::OnceLock;
 
@@ -385,17 +391,45 @@ impl Mailer {
         self.registry.stamped_sender(position)
     }
 
-    /// The first declared dependency with no `Live` route for a child placed
-    /// under `parent`, as [`Registry::missing_dependency`] answers it. The
-    /// crate-private path behind
-    /// [`NativeCtx::missing_child_dependency`](crate::actor::native::ctx::NativeCtx::missing_child_dependency).
+    /// Prove an address that arrived in a payload: [`Registry::resolve_address`]
+    /// expands and resolves it, and the answered position is proven at once
+    /// through [`Registry::resolve_live`]. The crate-private path behind
+    /// [`NativeCtx::resolve_path`](crate::actor::native::ctx::NativeCtx::resolve_path).
+    pub(crate) fn resolve_path(&self, address: &ActorPath) -> Result<ErasedActorRef, ResolvePathError> {
+        let ResolvedAddress { mailbox_id, canonical_path } =
+            self.registry.resolve_address(address).map_err(ResolvePathError::Unresolved)?;
+        self.registry.resolve_live(mailbox_id).map_err(|_| ResolvePathError::NotLive { canonical_path })
+    }
+
+    /// The first declared dependency with no `Live` route for an actor placed
+    /// under `parent` (`None` for a root placement), as
+    /// [`Registry::missing_dependency`] answers it. The crate-private path
+    /// behind [`NativeCtx::missing_dependency`](crate::actor::native::ctx::NativeCtx::missing_dependency)
+    /// and [`NativeCtx::missing_child_dependency`](crate::actor::native::ctx::NativeCtx::missing_child_dependency).
     #[cfg(feature = "wasm")]
-    pub(crate) fn missing_dependency_under<'a>(
+    pub(crate) fn missing_dependency<'a>(
         &self,
-        parent: aether_data::MailboxId,
+        parent: Option<aether_data::MailboxId>,
         dependencies: impl IntoIterator<Item = (u8, &'a str)>,
     ) -> Option<&'a str> {
-        self.registry.missing_dependency(Some(parent), dependencies)
+        self.registry.missing_dependency(parent, dependencies)
+    }
+
+    /// The receive surface the capability registry retains for the actor
+    /// `actor` proves. The crate-private path behind
+    /// [`NativeCtx::receive_surface`](crate::actor::native::ctx::NativeCtx::receive_surface).
+    pub(crate) fn receive_surface(&self, actor: ErasedActorRef) -> Option<ComponentCapabilities> {
+        self.capability_registry.describe(actor.id())
+    }
+
+    /// Build a guest ctx over `binding`, which is always a binding over this
+    /// mailer, reading the registry from this mailer's own field. The
+    /// crate-private builder behind
+    /// [`NativeInitCtx::guest_ctx`](crate::actor::native::NativeInitCtx::guest_ctx) and
+    /// [`NativeCtx::guest_ctx`](crate::actor::native::ctx::NativeCtx::guest_ctx).
+    #[cfg(feature = "wasm")]
+    pub(crate) fn guest_ctx(&self, binding: Arc<NativeBinding>, outbound: Arc<HubOutbound>) -> ComponentCtx {
+        ComponentCtx::new(binding, Arc::clone(&self.registry), outbound)
     }
 
     /// Subscribe `target` to the registry's inventory changes, as

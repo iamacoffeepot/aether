@@ -6,7 +6,6 @@ use aether_kinds::ComponentCapabilities;
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::outbound::HubOutbound;
-use aether_substrate::mail::registry::Registry;
 use wasmtime::{Engine, Linker, Module};
 
 /// Configuration handed to [`Lifecycle::init`](aether_actor::Lifecycle::init) by the spawn
@@ -17,7 +16,6 @@ pub struct WasmTrampolineConfig {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
     pub module: Module,
-    pub registry: Arc<Registry>,
     pub outbound: Arc<HubOutbound>,
     /// Component capabilities parsed from the wasm's
     /// `aether.kinds.inputs` custom section, surfaced through

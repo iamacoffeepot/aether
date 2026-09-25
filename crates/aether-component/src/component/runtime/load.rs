@@ -16,7 +16,7 @@ use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs, Dependency};
 
 use super::LoadResult;
-use super::dependencies::{dependency_refusal, inline_dependency_refusal, missing_dependency};
+use super::dependencies::{dependency_refusal, inline_dependency_refusal};
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
 use crate::component::{ComponentHostCapability, LoadDelivered};
 use crate::kinds::BootTeardown;
@@ -61,7 +61,6 @@ impl PreparedLoad {
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),
-            registry: Arc::clone(&state.registry),
             outbound: Arc::clone(&state.outbound),
             capabilities: self.capabilities.clone(),
             config: self.config.clone(),
@@ -106,7 +105,6 @@ impl PreparedBoot {
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),
-            registry: Arc::clone(&state.registry),
             outbound: Arc::clone(&state.outbound),
             capabilities: self.capabilities.clone(),
             config: Vec::new(),
@@ -174,10 +172,7 @@ impl ComponentHostCapabilityState {
         // an unborn parent; the proof carries the parent's own canonical path.
         let resolved = ActorPath::new(&payload.parent)
             .map_err(|error| error.to_string())
-            .and_then(|parent| self.registry.resolve_address(&parent).map_err(|error| error.to_string()))
-            .and_then(|resolved| {
-                ctx.resolve_live(resolved.mailbox_id).map_err(|_| format!("{} is not live", resolved.canonical_path))
-            });
+            .and_then(|parent| ctx.resolve_path(&parent).map_err(|error| error.to_string()));
         let parent = match resolved {
             Ok(parent) => parent,
             Err(error) => {
@@ -196,7 +191,7 @@ impl ComponentHostCapabilityState {
         payload: LoadComponent,
         placement: LoadPlacement,
     ) {
-        let (descriptors, load) = match self.prepare_load(payload, placement) {
+        let (descriptors, load) = match self.prepare_load(ctx, payload, placement) {
             Ok(prepared) => prepared,
             Err(result) => {
                 ctx.reply(&result);
@@ -211,8 +206,9 @@ impl ComponentHostCapabilityState {
         clippy::result_large_err,
         reason = "cold synchronous preparation returns the exact public LoadResult error shape"
     )]
-    fn prepare_load(
+    fn prepare_load<A, M: ReplyMode>(
         &mut self,
+        ctx: &NativeCtx<'_, A, M>,
         payload: LoadComponent,
         placement: LoadPlacement,
     ) -> Result<(Vec<KindDescriptor>, Arc<PreparedLoad>), LoadResult> {
@@ -231,9 +227,7 @@ impl ComponentHostCapabilityState {
         // ADR-0230 §3: an actor the module can spawn inline runs before the
         // host sees it, so its declared dependencies are checked here, before
         // kind registration, the module boot actor, or the requested actor.
-        if let Some(error) =
-            inline_dependency_refusal(&self.registry, &actors, &private, &lineage, module_namespace.as_deref())
-        {
+        if let Some(error) = inline_dependency_refusal(ctx, &actors, &private, &lineage, module_namespace.as_deref()) {
             return Err(LoadResult::Err { error });
         }
 
@@ -410,9 +404,7 @@ impl ComponentHostCapabilityState {
     ) {
         let missing = match &load.placement {
             LoadPlacement::ComponentHost => ctx.missing_child_dependency(&load.dependencies),
-            LoadPlacement::Under { parent } => {
-                missing_dependency(&self.registry, Some(parent.id()), &load.dependencies)
-            }
+            LoadPlacement::Under { parent } => ctx.missing_dependency(Some(*parent), &load.dependencies),
         };
         if let Some(namespace) = missing {
             owed.reply(ctx, &LoadResult::Err { error: dependency_refusal(&load.name, namespace) });
@@ -624,17 +616,11 @@ impl ComponentHostCapabilityState {
 
     pub fn begin_replace<A>(&mut self, ctx: &mut NativeCtx<'_, A>, payload: ReplaceComponent) {
         let source = ctx.reply_target();
-        // ADR-0230: parse the target address with the host's boundary parser
-        // and prove the answer at once. A dropped trampoline keeps its `Live`
-        // route (vacate, not close), so a replace that refills it still
-        // proves; an address with no live route answers `Err` here instead of
-        // parking a forward nothing will answer.
-        let proven = self
-            .registry
-            .resolve_address(&payload.target)
-            .map_err(|error| error.to_string())
-            .and_then(|resolved| ctx.resolve_live(resolved.mailbox_id).map_err(|error| error.to_string()));
-        let actor = match proven {
+        // ADR-0230: prove the target address at receipt. A dropped
+        // trampoline keeps its `Live` route (vacate, not close), so a replace
+        // that refills it still proves; an address with no live route answers
+        // `Err` here instead of parking a forward nothing will answer.
+        let actor = match ctx.resolve_path(&payload.target) {
             Ok(proven) => proven,
             Err(error) => {
                 let error = format!("no component to replace at {}: {error}", payload.target);
@@ -651,7 +637,7 @@ impl ComponentHostCapabilityState {
             && let Ok(lineage) = kind_manifest::read_actor_lineage_from_bytes(&payload.wasm)
             && let Ok(module_namespace) = kind_manifest::read_namespace_from_bytes(&payload.wasm)
             && let Some(error) =
-                inline_dependency_refusal(&self.registry, &actors, &private, &lineage, module_namespace.as_deref())
+                inline_dependency_refusal(ctx, &actors, &private, &lineage, module_namespace.as_deref())
         {
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;
@@ -786,16 +772,16 @@ mod tests {
     use super::*;
     use crate::component::runtime::module_cache::ModuleCache;
 
-    fn state() -> ComponentHostCapabilityState {
+    /// A host state beside the registry its tests register into and a binding
+    /// over the mailer that routes through that registry.
+    fn fixture() -> (ComponentHostCapabilityState, Arc<Registry>, Arc<NativeBinding>) {
         let registry = Arc::new(Registry::new());
         let (outbound, _events) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
         let engine = Arc::new(Engine::default());
-        ComponentHostCapabilityState {
+        let state = ComponentHostCapabilityState {
             linker: Arc::new(Linker::new(&engine)),
             engine,
-            registry,
-            mailer,
             outbound,
             registry_subscription: None,
             last_egressed_inventory: None,
@@ -808,34 +794,31 @@ mod tests {
             pending_replace: HashMap::new(),
             boot_operation_sequence_by_actor: HashMap::new(),
             dominant_boot_operation_by_actor: HashMap::new(),
-        }
-    }
-
-    fn binding(state: &ComponentHostCapabilityState) -> Arc<NativeBinding> {
-        unrouted_binding(&state.mailer)
+        };
+        let binding = unrouted_binding(&mailer);
+        (state, registry, binding)
     }
 
     /// Register a test-local inbox under `name` and take its reference from
     /// the test-support `registered_ref`, proven by the same registry read a
     /// drop or replace receipt takes.
-    fn proven_actor(state: &ComponentHostCapabilityState, name: &str) -> ErasedActorRef {
-        registered_ref(&state.registry, name, noop_handler())
+    fn proven_actor(registry: &Registry, name: &str) -> ErasedActorRef {
+        registered_ref(registry, name, noop_handler())
     }
 
     /// A boot entry over a test-local inbox registered under `name`, proven
     /// like the boot spawn outcome's reference.
-    fn boot_entry(state: &ComponentHostCapabilityState, name: &str, refcount: u32, pending_requests: u32) -> BootEntry {
-        BootEntry { boot: proven_actor(state, name), refcount, pending_requests }
+    fn boot_entry(registry: &Registry, name: &str, refcount: u32, pending_requests: u32) -> BootEntry {
+        BootEntry { boot: proven_actor(registry, name), refcount, pending_requests }
     }
 
     #[test]
     fn manual_interleaving_last_live_drop_then_pending_rejection_drops_boot() {
-        let mut state = state();
-        let binding = binding(&state);
+        let (mut state, registry, binding) = fixture();
         let hash = "boot-with-one-pending-request".to_owned();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let live_actor = proven_actor(&state, "test.component.live-actor");
-        let boot = boot_entry(&state, "test.component.boot-pending", 1, 1);
+        let live_actor = proven_actor(&registry, "test.component.live-actor");
+        let boot = boot_entry(&registry, "test.component.boot-pending", 1, 1);
         state.register_boot(hash.clone(), boot);
         state.boot_hash_by_actor.insert(live_actor, hash.clone());
 
@@ -851,18 +834,17 @@ mod tests {
 
     #[test]
     fn manual_interleaving_reverse_replacement_boot_completion_keeps_newest_epoch() {
-        let mut state = state();
-        let binding = binding(&state);
+        let (mut state, registry, binding) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let actor = proven_actor(&state, "test.component.reverse-replacement");
+        let actor = proven_actor(&registry, "test.component.reverse-replacement");
         let old_hash = "replacement-n1".to_owned();
         let new_hash = "replacement-n2".to_owned();
         let old_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, old_operation));
         let new_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, new_operation));
-        let old_boot = boot_entry(&state, "test.component.boot-n1", 0, 0);
-        let new_boot = boot_entry(&state, "test.component.boot-n2", 0, 0);
+        let old_boot = boot_entry(&registry, "test.component.boot-n1", 0, 0);
+        let new_boot = boot_entry(&registry, "test.component.boot-n2", 0, 0);
         state.register_boot(old_hash.clone(), old_boot);
         state.register_boot(new_hash.clone(), new_boot);
 
@@ -881,8 +863,8 @@ mod tests {
 
     #[test]
     fn later_failed_replacement_does_not_dominate_earlier_success() {
-        let mut state = state();
-        let actor = proven_actor(&state, "test.component.later-failure");
+        let (mut state, registry, _binding) = fixture();
+        let actor = proven_actor(&registry, "test.component.later-failure");
         let earlier_success = state.next_boot_operation(actor);
         let later_failure = state.next_boot_operation(actor);
 
@@ -896,15 +878,14 @@ mod tests {
 
     #[test]
     fn manual_interleaving_drop_before_replacement_boot_completion_cannot_resurrect_ref() {
-        let mut state = state();
-        let binding = binding(&state);
+        let (mut state, registry, binding) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let actor = proven_actor(&state, "test.component.drop-before-completion");
+        let actor = proven_actor(&registry, "test.component.drop-before-completion");
         let hash = "replacement-completes-after-drop".to_owned();
         let replacement_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, replacement_operation));
         state.invalidate_replacement_boot_operation(actor);
-        let boot = boot_entry(&state, "test.component.boot-after-drop", 0, 0);
+        let boot = boot_entry(&registry, "test.component.boot-after-drop", 0, 0);
         state.register_boot(hash.clone(), boot);
 
         // Manual state-machine proof: DropComponent invalidates the actor

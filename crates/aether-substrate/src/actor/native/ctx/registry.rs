@@ -6,6 +6,7 @@
 
 use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::{ActorPath, KindDescriptor, KindId};
+use aether_kinds::ComponentCapabilities;
 
 use crate::actor::native::offload::blocking::DispatchId;
 use crate::mail::registry::AddressResolutionError;
@@ -94,6 +95,17 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn actor_path(&self, reference: ErasedActorRef) -> ActorPath {
         self.binding.actor_path(reference)
+    }
+
+    /// The receive surface — handler kinds, docs, fallback, and config kind —
+    /// the capability registry retains for the actor `actor` proves, or
+    /// `None` when it retains none (an actor that declared no surface, or a
+    /// guest slot left empty by a drop).
+    ///
+    /// Consumer: the component host's `DescribeComponent` handler.
+    #[must_use]
+    pub fn receive_surface(&self, actor: ErasedActorRef) -> Option<ComponentCapabilities> {
+        self.binding.receive_surface(actor)
     }
 
     /// Stage a typed registry-owner batch from the current handler. The batch

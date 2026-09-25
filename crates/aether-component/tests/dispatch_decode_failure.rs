@@ -17,7 +17,6 @@
 //! tests, so it skips cleanly on a wasm-not-built box.
 
 use std::fs;
-use std::sync::Arc;
 
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -25,8 +24,8 @@ use aether_kinds::Tick;
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::wasm::host_fns;
 use aether_substrate::mail::registry::noop_handler;
-use aether_substrate::testing::registered_binding;
-use aether_substrate::{Component, ComponentCtx, Envelope, HubOutbound, MailRef, Mailer, Registry, Source};
+use aether_substrate::testing::{bare_substrate, registered_binding};
+use aether_substrate::{Component, ComponentCtx, Envelope, HubOutbound, MailRef, NativeCtx, Source};
 use wasmtime::{Engine, Linker, Module};
 
 #[test]
@@ -41,10 +40,9 @@ fn known_kind_bad_payload_reports_unknown_kind_not_handled() {
     host_fns::register(&mut linker).expect("register host fns");
     let module = Module::new(&engine, &wasm).expect("compile fixture module");
 
-    let registry = Arc::new(Registry::new());
-    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let (registry, mailer) = bare_substrate();
     let (binding, probe) = registered_binding(&registry, &mailer, "test.probe", noop_handler());
-    let ctx = ComponentCtx::new(binding, registry, HubOutbound::disconnected());
+    let ctx = NativeCtx::new(&binding, Source::NONE, None, None).guest_ctx(HubOutbound::disconnected());
 
     // `type_tag = None` instantiates the module's entry actor — `Probe`, the
     // strict (no-`#[fallback]`) receiver (`export!(default = Probe, …)` makes

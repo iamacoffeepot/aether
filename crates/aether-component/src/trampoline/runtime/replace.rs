@@ -11,7 +11,7 @@ use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone};
 use aether_substrate::actor::wasm::asset_manifest;
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn, StateBundle};
+use aether_substrate::actor::wasm::component::{Component, PendingSpawn, StateBundle};
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::registry::PreparedAliasRoute;
@@ -41,10 +41,10 @@ impl WasmTrampolineState {
     /// its departure notices here, from this actor's own turn, so a cap keying
     /// rows on the child's stamped identity (ADR-0114 §4) reclaims them; the
     /// route retirement itself is staged through the owner alongside.
-    pub fn stage_inline_alias_retirements<A>(&self, ctx: &mut NativeCtx<'_, A, Single>, aliases: Vec<MailboxId>) {
+    pub fn stage_inline_alias_retirements<A>(ctx: &mut NativeCtx<'_, A, Single>, aliases: Vec<MailboxId>) {
         for alias in aliases {
             ctx.vacate_alias(alias);
-            let name = self.registry.mailbox_name(alias).unwrap_or_else(|| alias.to_string());
+            let name = ctx.tagged_id_name(&alias.to_string()).unwrap_or_else(|| alias.to_string());
             let _ = ctx.stage_registry_batch(
                 RegistryBatch::retire_alias(alias),
                 InlineAliasContext { alias: Arc::from(name) },
@@ -111,7 +111,6 @@ impl WasmTrampolineState {
             engine: Arc::clone(&self.engine),
             linker: Arc::clone(&self.linker),
             module: self.module.clone(),
-            registry: Arc::clone(&self.registry),
             outbound: Arc::clone(&self.outbound),
             capabilities,
             config: pending.config,
@@ -210,11 +209,15 @@ impl WasmTrampolineState {
     /// dependency live, checked before anything is touched. `own` is this
     /// trampoline's canonical path, which names it in the refusal. A module
     /// that declares no group has nothing to refuse and passes.
-    fn check_dependencies(&self, own: &ActorPath, group: Option<&ActorInputs>) -> Result<(), String> {
+    fn check_dependencies(
+        ctx: &NativeCtx<'_, WasmTrampoline>,
+        own: &ActorPath,
+        group: Option<&ActorInputs>,
+    ) -> Result<(), String> {
         let Some(group) = group else {
             return Ok(());
         };
-        replacement_refusal(&self.registry, own.as_str(), &group.dependencies).map_or(Ok(()), Err)
+        replacement_refusal(ctx, own.as_str(), &group.dependencies).map_or(Ok(()), Err)
     }
 
     /// ADR-0231 §5: the replacement's hosted type must keep every handler
@@ -222,14 +225,17 @@ impl WasmTrampolineState {
     /// one a refill takes over from — and may add rows. The predecessor
     /// resolves from the retained module the way the replacement does, and a
     /// failure to resolve it refuses the replace.
-    fn check_contract(&self, target: &impl Display, replacement: &ComponentCapabilities) -> Result<(), String> {
+    fn check_contract(
+        &self,
+        ctx: &NativeCtx<'_, WasmTrampoline>,
+        target: &impl Display,
+        replacement: &ComponentCapabilities,
+    ) -> Result<(), String> {
         let old_boot = kind_manifest::read_boot_namespace_from_bytes(&self.wasm_bytes)?;
         let (predecessor, _) = self.resolve_replace_target(None, &self.actor_caps, old_boot.as_deref())?;
         let predecessor = predecessor.map(|group| group.capabilities.clone()).unwrap_or_default();
-        contract::contract_break(&predecessor, replacement).map_or(Ok(()), |kind| {
-            let name = self.registry.kind_name(kind).unwrap_or_else(|| kind.to_string());
-            Err(contract::contract_refusal(target, &name))
-        })
+        contract::contract_break(&predecessor, replacement)
+            .map_or(Ok(()), |kind| Err(contract::contract_refusal(target, &ctx.kind_label(kind))))
     }
 
     /// ADR-0139 §4 (#6429): every request context the old instance carries
@@ -239,6 +245,7 @@ impl WasmTrampolineState {
     /// the host has no record to judge it by.
     fn check_carried_contexts(
         &self,
+        ctx: &NativeCtx<'_, WasmTrampoline>,
         target: &impl Display,
         saved: Option<&StateBundle>,
         replacement: &HashSet<KindId>,
@@ -252,10 +259,8 @@ impl WasmTrampolineState {
         }
 
         let predecessor = declared_kinds(&self.wasm_bytes)?;
-        contract::undeclared_context(table.kinds(), &predecessor, replacement).map_or(Ok(()), |kind| {
-            let name = self.registry.kind_name(kind).unwrap_or_else(|| kind.to_string());
-            Err(contract::context_refusal(target, &name))
-        })
+        contract::undeclared_context(table.kinds(), &predecessor, replacement)
+            .map_or(Ok(()), |kind| Err(contract::context_refusal(target, &ctx.kind_label(kind))))
     }
 
     /// Run `unwire` then `on_dehydrate` on the old instance and lift any
@@ -267,6 +272,7 @@ impl WasmTrampolineState {
     /// instance can announce its retirement before the swap.
     fn retire_guest(
         &mut self,
+        ctx: &NativeCtx<'_, WasmTrampoline>,
         target: &impl Display,
         replacement: &HashSet<KindId>,
     ) -> Result<Option<(Component, Option<StateBundle>)>, String> {
@@ -288,7 +294,7 @@ impl WasmTrampolineState {
         // guest keeps both, and its context table was only borrowed to
         // compose the bundle. Whatever `unwire` and `on_dehydrate` tore down
         // stays gone, as ADR-0016 §4 accepts for a rollback after the hooks.
-        if let Err(error) = self.check_carried_contexts(target, saved.as_ref(), replacement) {
+        if let Err(error) = self.check_carried_contexts(ctx, target, saved.as_ref(), replacement) {
             self.component = Some(old);
             return Err(error);
         }
@@ -345,11 +351,11 @@ impl WasmTrampolineState {
         // ADR-0230 and ADR-0231 §5: checked before anything is touched, so a
         // refusal leaves the old module (or the empty post-drop slot) as it
         // was.
-        if let Err(error) = self.check_dependencies(&ctx.path(), group) {
+        if let Err(error) = Self::check_dependencies(ctx, &ctx.path(), group) {
             return ReplaceResult::Err { error };
         }
         let mut capabilities = group.map(|group| group.capabilities.clone()).unwrap_or_default();
-        if let Err(error) = self.check_contract(&payload.target, &capabilities) {
+        if let Err(error) = self.check_contract(ctx, &payload.target, &capabilities) {
             return ReplaceResult::Err { error };
         }
 
@@ -377,13 +383,12 @@ impl WasmTrampolineState {
         capabilities.assets = load_window.catalog();
 
         // Build a fresh `ComponentCtx` for the new instance — same
-        // binding + registry/outbound references. The binding
+        // binding + outbound reference. The binding
         // carries the mailbox id, so it is preserved across replace per
         // ADR-0022 §4. The correlation cursor and reply table it inherits
         // are known only once the old guest's hooks have run, so both are
         // resumed after instantiate, below.
-        let mut substrate_ctx =
-            ComponentCtx::new(ctx.transport_arc(), Arc::clone(&self.registry), Arc::clone(&self.outbound));
+        let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&self.outbound));
         // ADR-0163 §3 (#3984): install the load window before instantiate so
         // the replacement's `init` can pull assets; closed after instantiate
         // (replace re-runs `init`, not `wire`).
@@ -412,7 +417,7 @@ impl WasmTrampolineState {
             }
         };
 
-        let predecessor = match self.retire_guest(&payload.target, &replacement_kinds) {
+        let predecessor = match self.retire_guest(ctx, &payload.target, &replacement_kinds) {
             Ok(predecessor) => predecessor,
             Err(error) => return ReplaceResult::Err { error },
         };
@@ -471,7 +476,7 @@ impl WasmTrampolineState {
         self.capabilities = capabilities.clone();
         self.component = Some(new_component);
         Self::stage_inline_aliases(ctx, aliases);
-        self.stage_inline_alias_retirements(ctx, retired);
+        Self::stage_inline_alias_retirements(ctx, retired);
 
         // Sync the post-replace declaration. iamacoffeepot/aether#1037: the
         // mailbox id is stable across replace (ADR-0022 §4), so the accept set
