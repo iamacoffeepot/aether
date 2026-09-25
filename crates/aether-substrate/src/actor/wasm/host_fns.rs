@@ -7,7 +7,7 @@
 use core::str::from_utf8;
 
 use aether_actor::{AssetCatalog, AssetWindow};
-use aether_data::wire;
+use aether_data::{BlobHash, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
@@ -46,6 +46,17 @@ pub const SAVE_STATE_OK: u32 = 0;
 pub const SAVE_STATE_NO_MEMORY: u32 = 1;
 pub const SAVE_STATE_OOB: u32 = 2;
 pub const SAVE_STATE_TOO_LARGE: u32 = 3;
+
+// Negative statuses returned by `blob_len_p32` and `blob_read_p32` (ADR-0238
+// decision 9); a non-negative return is a length or a byte count. Nothing is
+// written into guest memory on any of them.
+
+/// The hash is not in this instance's blob table.
+pub const BLOB_NOT_HELD: i64 = -1;
+/// The hash or destination range lies outside guest memory.
+pub const BLOB_OUT_OF_BOUNDS: i64 = -2;
+/// The guest exports no memory.
+pub const BLOB_NO_MEMORY: i64 = -3;
 
 /// Register the substrate host functions on `linker`. Components that
 /// want these capabilities must be instantiated via a linker that this
@@ -838,7 +849,105 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
+    // HOST_FN_OK: ADR-0238 decision 9 — a guest's read of a blob it holds
+    // happens inside its handler, synchronously, into its own linear memory
+    // (`BlobBacking::read_at`, under `BlobReader`), which no mail capability
+    // can serve. Resolves the hash only against this instance's blob table
+    // (decision 4), so a guessed hash reaches nothing.
+    //
+    // The blob's length, or a negative `BLOB_*` status. `GuestHold` reads it
+    // once, when delivery's grant builds the guest's value.
+    linker.func_wrap("aether", "blob_len_p32", |mut caller: Caller<'_, ComponentCtx>, hash_ptr: u32| -> i64 {
+        let hash = match read_guest_hash(&mut caller, hash_ptr) {
+            Ok(hash) => hash,
+            Err(status) => return status,
+        };
+        // No resident entry nears `i64::MAX` bytes, so the length always fits.
+        caller
+            .data()
+            .blob_table
+            .entry(hash)
+            .map_or(BLOB_NOT_HELD, |entry| i64::try_from(entry.len()).unwrap_or(i64::MAX))
+    })?;
+
+    // HOST_FN_OK: ADR-0238 decision 9 — the streaming half of the read
+    // above, the body of `GuestHold`'s `BlobBacking::read_at`: the caller
+    // supplies the buffer and the host copies into it before returning.
+    // Same table-scoped resolution (decision 4).
+    //
+    // Copies `min(dst_len, MAX_READ_BYTES, len - offset)` bytes from `offset`
+    // into `(dst_ptr, dst_len)` and returns that count, `0` at or past the
+    // end. A negative `BLOB_*` status writes nothing: the whole destination
+    // range is bounds-checked before any copy. The entry's `Arc` is cloned out
+    // of the table first, so the table borrow ends before `memory.write`.
+    linker.func_wrap(
+        "aether",
+        "blob_read_p32",
+        |mut caller: Caller<'_, ComponentCtx>, hash_ptr: u32, offset: u64, dst_ptr: u32, dst_len: u32| -> i64 {
+            let hash = match read_guest_hash(&mut caller, hash_ptr) {
+                Ok(hash) => hash,
+                Err(status) => return status,
+            };
+            let Some(entry) = caller.data().blob_table.entry(hash).cloned() else {
+                return BLOB_NOT_HELD;
+            };
+            let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
+                return BLOB_NO_MEMORY;
+            };
+
+            let start = dst_ptr as usize;
+            if start.checked_add(dst_len as usize).is_none_or(|end| end > memory.data_size(&caller)) {
+                return BLOB_OUT_OF_BOUNDS;
+            }
+            let Some(rest) = usize::try_from(offset).ok().and_then(|from| entry.bytes().get(from..)) else {
+                return 0;
+            };
+            let copied = rest.len().min(MAX_READ_BYTES).min(dst_len as usize);
+            if memory.write(&mut caller, start, &rest[..copied]).is_err() {
+                return BLOB_OUT_OF_BOUNDS;
+            }
+            // At most `MAX_READ_BYTES`, so the count always fits.
+            i64::try_from(copied).unwrap_or(i64::MAX)
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0238 decision 2 — `GuestHold`'s `Drop` gives the
+    // instance's count back when a guest's last clone of a held `Blob` drops.
+    // It runs synchronously inside guest code with no ctx to mail from, and
+    // mail-carried release counts are what ADR-0045 retired. Clones share one
+    // hold, so there is no clone import.
+    //
+    // Lowers the count for the hash; at zero the entry leaves the table and
+    // its `Arc` drops. An unheld hash, an out-of-bounds pointer or a guest
+    // without memory warns and changes nothing: no blob import traps.
+    linker.func_wrap("aether", "blob_drop_p32", |mut caller: Caller<'_, ComponentCtx>, hash_ptr: u32| {
+        let Ok(hash) = read_guest_hash(&mut caller, hash_ptr) else {
+            tracing::warn!(
+                target: "aether_substrate::component",
+                component = %caller.data().actor_name(),
+                "blob_drop: no guest memory holds the hash pointer; nothing released",
+            );
+            return;
+        };
+        if caller.data_mut().blob_table.release(hash).is_err() {
+            tracing::warn!(
+                target: "aether_substrate::component",
+                component = %caller.data().actor_name(),
+                "blob_drop: this instance holds no count for the hash; nothing released",
+            );
+        }
+    })?;
+
     Ok(())
+}
+
+/// Copy the 32-byte blob hash at `hash_ptr` out of the caller's guest memory,
+/// or the `BLOB_*` status the blob host fns return when it cannot.
+fn read_guest_hash(caller: &mut Caller<'_, ComponentCtx>, hash_ptr: u32) -> Result<BlobHash, i64> {
+    let memory = caller.get_export("memory").and_then(wasmtime::Extern::into_memory).ok_or(BLOB_NO_MEMORY)?;
+    let mut bytes = [0; 32];
+    memory.read(&*caller, hash_ptr as usize, &mut bytes).map_err(|_| BLOB_OUT_OF_BOUNDS)?;
+    Ok(BlobHash::from_bytes(bytes))
 }
 
 /// ADR-0163 packed-return marker for "the load window is open but carries

@@ -170,6 +170,24 @@ unsafe extern "C" {
     /// (the catalog metadata is retained past the window close).
     #[link_name = "asset_catalog_p32"]
     pub fn asset_catalog() -> u64;
+    /// ADR-0238 decision 9: the length of the blob whose 32-byte hash sits at
+    /// `hash_ptr`, resolved only against this instance's blob table. Negative
+    /// when the table does not hold the hash or the pointer is out of bounds.
+    #[link_name = "blob_len_p32"]
+    pub fn blob_len(hash_ptr: u32) -> i64;
+    /// ADR-0238 decision 9: copy at most `dst_len` bytes (and at most
+    /// `MAX_READ_BYTES`) of the blob whose hash sits at `hash_ptr`, from
+    /// `offset`, into `(dst_ptr, dst_len)`, and return how many; `0` at or
+    /// past the end. Negative, with nothing written, when the table does not
+    /// hold the hash or either range is out of bounds.
+    #[link_name = "blob_read_p32"]
+    pub fn blob_read(hash_ptr: u32, offset: u64, dst_ptr: u32, dst_len: u32) -> i64;
+    /// ADR-0238 decision 2: lower this instance's count for the blob whose
+    /// hash sits at `hash_ptr`; `GuestHold::drop` is the one caller. An
+    /// unheld hash or out-of-bounds pointer is warn-logged host-side and
+    /// changes nothing.
+    #[link_name = "blob_drop_p32"]
+    pub fn blob_drop(hash_ptr: u32);
 }
 
 /// Host-side stub for the FFI `aether::send_mail` import. Always

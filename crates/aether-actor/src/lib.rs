@@ -36,6 +36,7 @@ extern crate alloc;
 extern crate self as aether_actor;
 
 pub mod asset;
+mod blob;
 pub mod local;
 pub mod log;
 pub mod mail;
@@ -46,6 +47,9 @@ pub mod trace;
 pub mod wasm;
 
 pub use asset::{AssetCatalog, AssetInfo, AssetWindow};
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub use blob::guest::__mint_guest_blob;
 pub use local::Local;
 pub use model::address::{address, address_at, address_named, child_address};
 pub use model::ctx::{Erased, MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single};

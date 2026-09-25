@@ -3,6 +3,7 @@ use std::mem;
 use std::sync::Arc;
 
 use crate::actor::native::binding::NativeBinding;
+use crate::actor::wasm::blob_table::BlobTable;
 use crate::actor::wasm::reply_table::ReplyTable;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
@@ -75,6 +76,13 @@ pub struct ComponentCtx {
     /// per instance: the component trampoline carries it to the slot's
     /// next occupant as [`PendingReplies`] (#6409).
     pub(crate) reply_table: ReplyTable,
+    /// ADR-0238 decisions 2 and 4: the blob-store entries this instance's
+    /// guest holds, keyed by hash, with the count of live `GuestHold`s over
+    /// each. The `blob_len_p32` / `blob_read_p32` / `blob_drop_p32` host fns
+    /// resolve a guest's hash only here. One table per instance, unlike
+    /// `reply_table`: a replacement starts empty, and the table drops with its
+    /// instance, releasing whatever is still counted.
+    pub(crate) blob_table: BlobTable,
     /// Set by the `save_state` host fn during `on_dehydrate`. The
     /// substrate extracts it after hooks return via
     /// `Component::take_saved_state`. Never read by the guest —
@@ -255,6 +263,7 @@ impl ComponentCtx {
             registry,
             outbound,
             reply_table: ReplyTable::new(),
+            blob_table: BlobTable::default(),
             saved_state: None,
             save_state_error: None,
             init_failure: None,

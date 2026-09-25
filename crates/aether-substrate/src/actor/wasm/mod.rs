@@ -19,6 +19,9 @@
 //!   the `aether` wasm import-module names the guest SDK's private `raw`
 //!   declarations expect.
 //! - `reply_table` — wasm-only reply correlation table (crate-private).
+//! - `blob_table` — one instance's held blob-store entries, keyed by hash,
+//!   that the `blob_*_p32` host fns resolve against (crate-private,
+//!   ADR-0238).
 //! - [`kind_manifest`] — parses the `aether.kinds` custom section the
 //!   guest's [`aether_actor::export!`] macro emits.
 //!
@@ -31,6 +34,7 @@
 //! host-fn linker; only the actor wrapper moved.
 
 pub mod asset_manifest;
+pub(crate) mod blob_table;
 pub mod component;
 pub mod host_fns;
 pub mod kind_manifest;

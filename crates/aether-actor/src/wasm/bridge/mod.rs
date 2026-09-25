@@ -18,6 +18,9 @@
 //!   (`save_state`), used during `on_dehydrate` only.
 //! - `asset` — ADR-0163 load-window asset pull (`asset_fetch`,
 //!   `asset_catalog`), used during `init` / `wire` only.
+//! - `blob` — ADR-0238 guest blob reads (`blob_len`, `blob_read`,
+//!   `blob_drop`), the transport under the guest's `GuestHold` backing.
+//!   wasm32-only: every caller is.
 //!
 //! Per-stage capability ctx impls in [`crate::wasm::ctx`] call these
 //! functions directly; the cross-target abstraction layer is the
@@ -25,6 +28,8 @@
 //! transport trait.
 
 pub(crate) mod asset;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod blob;
 pub(crate) mod log;
 pub(crate) mod mail;
 pub(crate) mod persist;
