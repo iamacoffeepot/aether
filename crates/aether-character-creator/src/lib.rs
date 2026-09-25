@@ -280,26 +280,26 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
         "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] }],
         "nodes": [
             { "name": "Head", "mesh": 0 },
-            { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.482], "scale": [0.115, 0.055, 0.060] },
-            { "name": "Eye.Right", "mesh": 1, "translation": [0.255, 0.225, 0.482], "scale": [0.115, 0.055, 0.060] },
-            { "name": "Iris.Left", "mesh": 2, "translation": [-0.255, 0.225, 0.544], "scale": [0.032, 0.032, 0.032] },
-            { "name": "Iris.Right", "mesh": 2, "translation": [0.255, 0.225, 0.544], "scale": [0.032, 0.032, 0.032] },
-            { "name": "Iris.Left.Inner", "mesh": 3, "translation": [-0.255, 0.225, 0.546], "scale": [0.023, 0.023, 0.023] },
-            { "name": "Iris.Right.Inner", "mesh": 3, "translation": [0.255, 0.225, 0.546], "scale": [0.023, 0.023, 0.023] },
-            { "name": "Pupil.Left", "mesh": 4, "translation": [-0.255, 0.225, 0.548], "scale": [0.012, 0.012, 0.012] },
-            { "name": "Pupil.Right", "mesh": 4, "translation": [0.255, 0.225, 0.548], "scale": [0.012, 0.012, 0.012] },
+            { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.492], "scale": [0.115, 0.055, 0.060] },
+            { "name": "Eye.Right", "mesh": 1, "translation": [0.255, 0.225, 0.492], "scale": [0.115, 0.055, 0.060] },
+            { "name": "Iris.Left", "mesh": 2, "translation": [-0.255, 0.225, 0.554], "scale": [0.032, 0.032, 0.032] },
+            { "name": "Iris.Right", "mesh": 2, "translation": [0.255, 0.225, 0.554], "scale": [0.032, 0.032, 0.032] },
+            { "name": "Iris.Left.Inner", "mesh": 3, "translation": [-0.255, 0.225, 0.556], "scale": [0.023, 0.023, 0.023] },
+            { "name": "Iris.Right.Inner", "mesh": 3, "translation": [0.255, 0.225, 0.556], "scale": [0.023, 0.023, 0.023] },
+            { "name": "Pupil.Left", "mesh": 4, "translation": [-0.255, 0.225, 0.558], "scale": [0.012, 0.012, 0.012] },
+            { "name": "Pupil.Right", "mesh": 4, "translation": [0.255, 0.225, 0.558], "scale": [0.012, 0.012, 0.012] },
             { "name": "Ear.Left", "mesh": 5, "translation": [-0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
             { "name": "Ear.Right", "mesh": 5, "translation": [0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
             { "name": "Brows", "mesh": 6 },
-            { "name": "UpperLid.Left", "mesh": 7, "translation": [-0.255, 0.225, 0.482] },
-            { "name": "UpperLid.Right", "mesh": 7, "translation": [0.255, 0.225, 0.482] },
-            { "name": "LowerLid.Left", "mesh": 8, "translation": [-0.255, 0.225, 0.482] },
-            { "name": "LowerLid.Right", "mesh": 8, "translation": [0.255, 0.225, 0.482] },
+            { "name": "UpperLid.Left", "mesh": 7, "translation": [-0.255, 0.225, 0.492] },
+            { "name": "UpperLid.Right", "mesh": 7, "translation": [0.255, 0.225, 0.492] },
+            { "name": "LowerLid.Left", "mesh": 8, "translation": [-0.255, 0.225, 0.492] },
+            { "name": "LowerLid.Right", "mesh": 8, "translation": [0.255, 0.225, 0.492] },
             { "name": "Neck", "mesh": 5, "translation": [0.0, -0.86, -0.14], "scale": [0.29, 0.40, 0.27] },
             { "name": "MouthOpening", "mesh": 9 },
             { "name": "Lips", "mesh": 10 },
-            { "name": "Canthus.Left", "mesh": 11, "translation": [-0.150, 0.222, 0.510], "scale": [0.012, 0.005, 0.004] },
-            { "name": "Canthus.Right", "mesh": 11, "translation": [0.150, 0.222, 0.510], "scale": [0.012, 0.005, 0.004] }
+            { "name": "Canthus.Left", "mesh": 11, "translation": [-0.150, 0.222, 0.520], "scale": [0.012, 0.005, 0.004] },
+            { "name": "Canthus.Right", "mesh": 11, "translation": [0.150, 0.222, 0.520], "scale": [0.012, 0.005, 0.004] }
         ],
         "materials": [
             material("Skin", [0.55, 0.28, 0.18, 1.0], 0.82),
@@ -520,7 +520,7 @@ fn brows_mesh(segments: u32) -> Mesh {
 
 fn upper_lids_mesh(segments: u32) -> Mesh {
     let mut mesh = empty_mesh((segments + 1) * 2, segments * 6);
-    append_ribbon(&mut mesh, segments, 0.0, 0.020, Vec2 { x: 0.112, y: 0.075 }, 0.22, eye_surface);
+    append_ribbon(&mut mesh, segments, 0.0, 0.010, Vec2 { x: 0.112, y: 0.20 }, 0.20, upper_lid_surface);
     mesh
 }
 
@@ -531,8 +531,15 @@ fn lower_lids_mesh(segments: u32) -> Mesh {
 }
 
 fn eye_surface(x: f32, y: f32, center_x: f32) -> (f32, Vec3) {
+    ellipsoid_surface(x, y, center_x, Vec3::new(0.115, 0.055, 0.060))
+}
+
+fn upper_lid_surface(x: f32, y: f32, center_x: f32) -> (f32, Vec3) {
+    ellipsoid_surface(x, y, center_x, Vec3::new(0.115, 0.090, 0.060))
+}
+
+fn ellipsoid_surface(x: f32, y: f32, center_x: f32, radii: Vec3) -> (f32, Vec3) {
     let center = Vec3::new(center_x, 0.0, 0.0);
-    let radii = Vec3::new(0.115, 0.055, 0.060);
     let normalized_x = (x - center.x) / radii.x;
     let normalized_y = (y - center.y) / radii.y;
     let z = center.z + radii.z * (1.0 - normalized_x * normalized_x - normalized_y * normalized_y).max(0.0).sqrt();
@@ -765,7 +772,7 @@ fn head_sdf(point: Vec3) -> f32 {
     }
 
     for x in [-0.255, 0.255] {
-        let socket = ellipsoid_sdf(point, Vec3::new(x, 0.22, 0.58), Vec3::new(0.145, 0.080, 0.125));
+        let socket = ellipsoid_sdf(point, Vec3::new(x, 0.22, 0.57), Vec3::new(0.147, 0.092, 0.115));
         shape = smooth_maximum(shape, -socket, 0.025);
     }
     let mouth = ellipsoid_sdf(point, Vec3::new(0.0, -0.27, 0.62), Vec3::new(0.19, 0.022, 0.06));

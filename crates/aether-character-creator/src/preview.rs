@@ -150,14 +150,14 @@ pub fn render_head_preview_png(width: u32, height: u32) -> Result<Vec<u8>, png::
 
     let eye = sphere_mesh(18, 24);
     for x in [-0.255, 0.255] {
-        canvas.draw_mesh(&eye, Vec3::new(x, 0.225, 0.482), Vec3::new(0.115, 0.055, 0.060), SCLERA, yaw);
+        canvas.draw_mesh(&eye, Vec3::new(x, 0.225, 0.492), Vec3::new(0.115, 0.055, 0.060), SCLERA, yaw);
     }
 
     let disc = disc_mesh(48);
     for x in [-0.255, 0.255] {
-        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.544), Vec3::new(0.032, 0.032, 0.032), IRIS, yaw);
-        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.546), Vec3::new(0.023, 0.023, 0.023), IRIS_INNER, yaw);
-        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.548), Vec3::new(0.012, 0.012, 0.012), PUPIL, yaw);
+        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.554), Vec3::new(0.032, 0.032, 0.032), IRIS, yaw);
+        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.556), Vec3::new(0.023, 0.023, 0.023), IRIS_INNER, yaw);
+        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.558), Vec3::new(0.012, 0.012, 0.012), PUPIL, yaw);
     }
 
     let skin_feature = sphere_mesh(18, 24);
@@ -168,11 +168,11 @@ pub fn render_head_preview_png(width: u32, height: u32) -> Result<Vec<u8>, png::
 
     canvas.draw_mesh(&brows_mesh(24), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), [46, 20, 14], yaw);
     for x in [-0.255, 0.255] {
-        canvas.draw_mesh(&upper_lids_mesh(24), Vec3::new(x, 0.225, 0.482), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
-        canvas.draw_mesh(&lower_lids_mesh(24), Vec3::new(x, 0.225, 0.482), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
+        canvas.draw_mesh(&upper_lids_mesh(24), Vec3::new(x, 0.225, 0.492), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
+        canvas.draw_mesh(&lower_lids_mesh(24), Vec3::new(x, 0.225, 0.492), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
     }
     for x in [-0.150, 0.150] {
-        canvas.draw_mesh(&skin_feature, Vec3::new(x, 0.222, 0.510), Vec3::new(0.012, 0.005, 0.004), CANTHUS, yaw);
+        canvas.draw_mesh(&skin_feature, Vec3::new(x, 0.222, 0.520), Vec3::new(0.012, 0.005, 0.004), CANTHUS, yaw);
     }
 
     canvas.draw_mesh(&mouth_mesh(48), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), [56, 18, 17], yaw);

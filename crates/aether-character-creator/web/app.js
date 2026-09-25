@@ -325,20 +325,20 @@ function render() {
     const eyeSize = weights[morphNames.indexOf("EyeSize")] ?? 0;
     const browHeight = weights[morphNames.indexOf("BrowHeight")] ?? 0;
     if (node.name.startsWith("Eye.") || node.name.startsWith("Iris.") || node.name.startsWith("Pupil.")) {
-      scale[0] *= 1 + eyeSize * 0.16;
-      scale[1] *= 1 + eyeSize * 0.12;
+      scale[0] *= 1 + eyeSize * 0.10;
+      scale[1] *= 1 + eyeSize * 0.08;
       translation[2] -= Math.max(eyeSize, 0) * 0.040;
     }
     if (node.name.startsWith("UpperLid.") || node.name.startsWith("LowerLid.")) {
-      scale[0] *= 1 + eyeSize * 0.16;
-      scale[1] *= 1 + eyeSize * 0.12;
+      scale[0] *= 1 + eyeSize * 0.10;
+      scale[1] *= 1 + eyeSize * 0.08;
       translation[2] -= Math.max(eyeSize, 0) * 0.040;
     }
     if (node.name.startsWith("Canthus.")) {
       const eyeCenter = node.name.endsWith("Left") ? -0.255 : 0.255;
-      translation[0] = eyeCenter + (translation[0] - eyeCenter) * (1 + eyeSize * 0.16);
-      scale[0] *= 1 + eyeSize * 0.16;
-      scale[1] *= 1 + eyeSize * 0.12;
+      translation[0] = eyeCenter + (translation[0] - eyeCenter) * (1 + eyeSize * 0.10);
+      scale[0] *= 1 + eyeSize * 0.10;
+      scale[1] *= 1 + eyeSize * 0.08;
       translation[2] -= Math.max(eyeSize, 0) * 0.040;
     }
     if (node.name === "Brows") {
