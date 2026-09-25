@@ -1,7 +1,8 @@
-# ADR-0238: Engine Blob Store of Immutable Checked-In Bytes Passed as Hash-Named References
+# ADR-0238: Engine Blob Store of Immutable Checked-In Bytes Shared as Blob Values
 
 - **Status:** Proposed
 - **Date:** 2026-09-25
+- **Amended:** 2026-09-25 — decisions 2–6 and 9–12 rewritten: `Blob` is a value of immutable bytes, not a handle. In-process mail shares it through the store; every other path writes its bytes. Supersedes the reference designs in the amendments below, which stay as history.
 - **Amended:** 2026-09-25 — decision 6: persisting a handle is a documented misuse, not enforced; later directions recorded.
 - **Amended:** 2026-09-25 — decision 10: `ReadArtifact` replies carry handles too; `aether.fs` recorded as a blob consumer.
 - **Amended:** 2026-09-25 — decisions 2, 3, 9, 11: `BlobRef` is opaque (identity plus an engine-supplied keep-alive, no methods); reading goes through `ctx.read_blob`; guest imports are `blob_len_p32`, `blob_read_p32` and `blob_drop_p32`; the guest SDK's `std` feature is new; a general resource-type pattern is recorded.
@@ -126,7 +127,7 @@ impl BlobStore {
 
 - In memory only. Never backed by files. A restart forgets every blob.
 - Check-in only. Bytes are immutable once checked in. A change is a new
-  check-in and a new handle.
+  check-in and a new value.
 - Check-in hashes the bytes with BLAKE3. The hash is the blob's identity and dedup key, and
   it never matches the Bloomery journal's digests, which cover a kind prefix
   plus the payload, so it need not share their sha256. If the hash is already resident, check-in
@@ -142,169 +143,147 @@ the last weak reference drops, so a weak index over bare `Arc<[u8]>` would free
 nothing. `Weak<BlobEntry>` pins only the small `BlobEntry` header, and the
 boxed bytes are freed when the last strong reference drops.
 
-### 2. A handle is an opaque reference named by the blob's hash
+### 2. A `Blob` is a value, not a handle
 
 ```rust
-// crates/aether-data: one definition for every target; no cfg, no FFI
-pub struct BlobRef { hash: BlobHash, keep: Arc<dyn Keep> }   // no methods beyond Clone and Debug
-pub trait Keep: Send + Sync {}   // no methods: the engine's type decides what the last drop does
+// crates/aether-data: one definition for every target; no store, no cfg, no FFI
+pub struct Blob(Repr);                       // immutable bytes; Clone is cheap
+enum Repr {
+    Owned(Arc<[u8]>),                        // bytes in hand
+    Shared(Arc<dyn BlobBacking>),            // an engine store entry, reached through the trait
+}
+pub trait BlobBacking: Send + Sync + 'static {
+    fn len(&self) -> u64;
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> usize;
+}
+impl From<Vec<u8>> for Blob { /* Owned */ }
 ```
 
-A `BlobRef` is a symbol. Held on its own it can be kept, cloned, sent and
-dropped, and nothing else: it has no read, length or inspection methods.
-Everything a caller can do with the bytes goes through engine APIs that take
-`&BlobRef` (section 9). Its identity is the hash, the same in every actor.
+A `Blob` means its bytes wherever it goes: in an actor, over the wire, in a
+file, in a tool. Only its backing changes, and the backing is the engine's
+business. Aether's one communication model treats every kind as data that can
+go anywhere; a value type keeps `Blob` inside that model, where a handle that
+names one process's memory would sit outside it. Erlang's reference-counted
+binaries are the prior art: a binary is a value, shared by pointer inside a
+node and sent as bytes between nodes, and no program ever holds a handle.
 
-`keep` is the engine patching in drop behavior. `aether-data` declares only
-"something that runs when the last copy goes"; the engine supplies the type:
-
-| Side | `keep` is | What the last drop does | Holdings |
+| Backing | Where it comes from | What reads do | What the last drop does |
 |---|---|---|---|
-| Native actor | the store's `BlobEntry` | frees or reclaims the bytes (section 7) | nothing beyond its `BlobRef`s: the `Arc`'s count is the accounting |
-| Wasm guest | `aether-actor`'s `GuestHold` | calls `blob_drop_p32` once, lowering the host table's count | a table on `ComponentCtx`, beside `reply_table`: hash to (entry `Arc`, count of live `GuestHold`s), moved across `replace` like `PendingReplies` |
+| `Owned` | decoded from the wire, a file or JSON; built with `Blob::from` | read the slice | frees the buffer |
+| `Shared`, native | the store: an in-process send interns an `Owned` value (section 3) | read the store's `BlobEntry` | frees or reclaims the entry (section 7) |
+| `Shared`, guest | delivery into a wasm guest | `blob_read_p32` against the guest's table | `GuestHold::drop` calls `blob_drop_p32` once |
 
-- Cloning is a local `Arc` increment on both sides. No actor code releases a
-  blob: going out of scope does it, and other holders are unaffected.
-- A native table would be state that `Drop` could reach only through an
-  ambient door, so a native `BlobRef` keeps its entry directly and native
-  actors keep no table. Nothing is stored on `NativeBinding` (see Context).
-- The alternative patch point, a process-global drop hook installed at boot,
-  would drop the pointer from the ref but needs a global count keyed by hash:
-  a lookup under one contended lock on every clone and drop, and one hook
-  shared by every engine in the process.
-- The guest table is keyed by hash, so it needs no generation bits and has no
-  stale-reuse case: a hash always names the same bytes, and the only failure
-  is "not held by this actor".
-- Only the owning actor's handler touches its table. There is no shared table
-  and no `RwLock`. The table grows and never drops a held entry.
+- Retrieval never looks anything up. A `Blob` carries its bytes or a strong
+  reference to them, so a read cannot find them missing.
+- `aether-data` holds only the value and the trait. The store stays in the
+  substrate, and the guest backing lives in `aether-actor`.
+- A guest's table on `ComponentCtx` maps hash to (entry `Arc`, count of live
+  `GuestHold`s). It is scoped to one instance: a `replace` starts the new
+  instance with an empty table, and values carried in the saved state are
+  granted again on rehydrate the way delivery grants them. References that
+  died with the old instance's memory take their counts with them, so a
+  `replace` cannot leak.
+- Only the owning actor's handler touches its table. The table grows and never
+  drops a held entry. Entries still counted when an instance is torn down are
+  logged as guest leaks.
 
-### 3. Handles move only inside mail
+### 3. In-process mail shares; every other path writes bytes
+
+The encoder decides whether a `Blob` field is shared or materialized. The
+representation only says where the bytes live now.
+
+```rust
+trait Encoder {
+    // default: write the bytes. Every codec gets this for free.
+    fn blob(&mut self, value: &Blob) { /* tag 0, then length-prefixed bytes */ }
+}
+impl Encoder for EnvelopeEncoder {          // in-process mail: the only override
+    fn blob(&mut self, value: &Blob) { /* intern if Owned, attach, write tag 1 + index */ }
+}
+```
+
+The derive emits one `blob` call per `Blob` field. The field's binary form
+carries a one-byte tag:
+
+```text
+tag 0 → [len][bytes]          inline: every path out of the process, and every decode source
+tag 1 → [attachment index]    in-process mail only; never leaves the process
+```
 
 | Step | What happens |
 |---|---|
-| Send | The payload carries hashes. The send path attaches a native `BlobRef` per blob field: a native sender's is cloned, and a guest's hash is looked up in its table, where a hash the guest does not hold refuses the send. A send borrows its payload, so the sender keeps its references. |
-| Carry | The envelope carries the `Arc`s beside the payload: `attachments: Option<Box<[BlobRef]>>` on `Mail`, one null word when empty. |
-| Deliver | A native recipient's decoded `BlobRef`s are the attachments. A guest recipient's table gains one count per `BlobRef` in the payload before the handler runs, and each decoded guest `BlobRef` owns one `GuestHold`. A hash is the same in every actor, so the payload is never rewritten. Fan-out delivers per recipient. |
+| Send | A send encodes with the envelope encoder, since most mail stays local. Each `Blob` field is interned into the store if it is `Owned`, attached to the envelope (`attachments: Option<Box<[Blob]>>` on `Mail`, one null word when empty), and written as tag 1. A send borrows its payload, so the sender keeps its values. |
+| Deliver | A native recipient's decoded fields are the attached `Blob`s. A guest recipient's table gains one count per field before the handler runs, and each decoded guest `Blob` owns one `GuestHold`. Fan-out delivers per recipient. |
+| Egress | Any path that leaves the process rewrites each tag-1 field to tag 0 by copying its attachment's bytes in: RPC reply-out (`crates/aether-rpc/src/server/runtime.rs:934`), unresolved-recipient egress (`crates/aether-substrate/src/mail/mailer.rs:920`), and file and journal writes. |
+| Ingress | Nothing. Tag 0 decodes to an `Owned` value, interned only if it is later sent in-process. |
 
-A grant is a side effect of delivering mail. An actor cannot see a new blob
-until mail carrying it is delivered. Prior art: Unix `SCM_RIGHTS`, Fuchsia
-VMO handles over channels, Mach out-of-line memory, and wasm component-model
-resources.
+Blob fields are a schema variant, `SchemaType::Blob`: its binary form differs
+from plain bytes by the tag, so the schema must say so. Every outside codec
+treats it as bytes: the JSON codec (`encode_schema` / `decode_schema`) reads
+and writes plain bytes, so MCP never sees a tag. Each kind descriptor records
+whether its schema contains a `Blob`, so the egress rewrite walks only those
+kinds and blob-free mail pays nothing.
 
-Blob fields are a new schema variant, `SchemaType::BlobRef`. Each kind
-descriptor records whether its schema contains one. The send-side lookup and
-the delivery rewrite walk only those kinds, so blob-free mail pays nothing.
-The mail layer stays byte-transparent for everything else.
+### 4. No lookup by hash
 
-### 4. Knowing a hash grants nothing
+The BLAKE3 hash is internal: the store's dedup key and the guest table's key.
+There is no fetch by hash, no store lookup by hash, and no public way to build
+a `Shared` value. The guest's host imports take a hash but resolve it only
+against the caller's own table, so a guessed or logged hash reaches nothing the
+caller does not already hold. Only the engine constructs `Shared` values (the
+store's interning and delivery), behind a hidden constructor that the existing
+mint scanner (`scripts/check-reference-mint.py`) confines. Anyone may build an
+`Owned` value: it is just bytes.
 
-A hash names bytes; it is not access. Access is holding a `BlobRef`, and a
-`BlobRef` comes only from check-in or delivery. There is no check-out by hash
-and no store lookup by hash. The guest's host imports take a hash but resolve
-it only against the caller's own table, so a guessed, logged or replayed hash
-reaches nothing the caller does not already hold.
+### 5. Crossing a process: bytes, bounded by the frame limit
 
-`BlobRef` lives in `aether-data`, not in `aether-actor`'s reference module:
-kind crates depend only on `aether-data`, and a type in `aether-actor` could
-never appear in their kinds. Its constructor and the accessor engine APIs
-use to reach the hash and `keep` are hidden. Only the engine calls them (the
-store's check-in, delivery, and the read APIs), and the existing mint scanner
-(`scripts/check-reference-mint.py`) confines them.
+A `Blob` that leaves the process is its bytes, so kinds with `Blob` fields are
+ordinary wire kinds and aether-mcp sends and receives them like any other. A
+materialized value must fit one frame (`AETHER_MAX_FRAME_SIZE`). A larger one
+is refused with an error naming its size and the limit, until chunked transfer
+has a consumer. Inside one engine, which is where Bloomery moves large bytes,
+nothing is copied.
 
-### 5. Handles never cross the wire
+### 6. Persistence writes bytes
 
-A handle cannot keep its invariant across serialization, so it is not
-exportable. Any kind whose schema contains `SchemaType::BlobRef` is
-process-local. The boundary refuses it both ways, like
-`is_engine_only` (`crates/aether-substrate/src/mail/boundary.rs:127`) but
-derived from the schema, not declared: RPC `Call` accept
-(`crates/aether-rpc/src/server/runtime.rs:446`), RPC reply-out
-(`runtime.rs:934`), unresolved-recipient egress
-(`crates/aether-substrate/src/mail/mailer.rs:920`), and the JSON codec
-(`encode_schema` / `decode_schema`). Crossing a process means sending bytes and
-checking them in on the other side.
-
-### 6. Persisting a handle: a documented misuse, not enforced
-
-A handle names an entry in one engine's memory, so a persisted handle names
-nothing after a restart. Writing a handle out is a misuse: code that needs a
-blob's contents outside the engine writes the bytes. The engine documents
-this and does not enforce it. Enforcement costs more than the correctness it
-buys, and an enforced rule would get in the way of legitimate uses such as
-logging a value that holds a handle. Passing a handle over the wire is
-already refused (decision 5), and a program that wants to do it is doing
-something odd.
-
-A hash resolves only against its holder's own table, so a replayed or
-forged hash reaches only blobs the holder already holds. A misuse can
-cost correctness, never access.
+Writing a `Blob` to a file, the journal or a log writes its bytes, and reading
+it back yields an `Owned` value. Nothing about a `Blob` names one engine's
+memory, so there is no persistence misuse to document or enforce.
 
 Directions recorded for a later trait rework, none chosen.
 
-- **A general resource-type pattern.** `BlobRef` is the first instance of a
-  category: an opaque identity plus an engine-supplied keep-alive whose type
-  decides what the last drop does, process-local by construction, and operated
-  only through APIs that take it. `ActorRef` arguably fits already, and GPU
-  textures or sockets would too. Prior art: Erlang NIF resource objects (a
-  per-type destructor registered by the native library, operations only
-  through NIF functions), wasm component-model resources (`own<T>` /
-  `borrow<T>`, a host-side drop through an import, no methods on the handle),
-  FIDL `resource` types, Lua userdata with `__gc`, Rust `bytes::Bytes`'s
-  per-instance vtable, and C++ `shared_ptr` with a custom deleter.
-
-The leading one for kinds:
-
+- **A general pattern for types with a local form.** `Blob` is the first type
+  with a universal form that every codec speaks (bytes) and a local form one
+  encoder may use (a shared entry). The encoder hook of section 3 generalizes
+  to a trait for that pair, with materialize as the default. `ActorRef` is the
+  natural second case: universal form an address description, re-proved on
+  receipt.
+- **A general resource-type pattern** for things that genuinely cannot move,
+  such as sockets and GPU textures: an opaque identity plus an engine-supplied
+  keep-alive whose type decides what the last drop does, process-local by
+  construction, and operated only through APIs that take it. Prior art: Erlang
+  NIF resource objects, wasm component-model resources (`own<T>` /
+  `borrow<T>`), FIDL `resource` types, Lua userdata with `__gc`, Rust
+  `bytes::Bytes`'s per-instance vtable, and C++ `shared_ptr` with a custom
+  deleter.
 - **Liveness classes and encoder accept sets.** Every kind keeps one schema
   and carries a liveness class, derived as the most restrictive class among
-  its fields: `Universal` for plain data, `Process` for anything holding a
-  reference into this engine's memory, such as a `BlobRef`. Each encoder declares
-  the classes it accepts: the mail envelope accepts both; wire, file and
-  journal encoders accept only `Universal`; a log formatter accepts everything
-  for display and never reads it back. A typed path refuses a mismatch at
-  compile time (`const { assert!(K::LIVENESS <= E::ACCEPTS) }`). Decision 5's
-  wire refusal and the persistence question become one rule, logging is just
-  another destination, and further classes (for example `Session`) can be
-  added later. Fuchsia FIDL's split of `resource` types from value types is
-  the prior art.
-
-  Refinements noted with it:
-
-  - The classes form a partial order, not a ladder: `Process` and `Session`
-    are incomparable. A kind requires the union of its fields' scopes and an
-    encoder provides a set, so the check is `K::REQUIRES ⊆ E::PROVIDES`.
-    Candidate scopes by reach: Actor (one table), Incarnation (survives
-    `replace`, not a restart), Process (`BlobRef`, proven refs), Session (one
-    connection), Fleet (one hub's lifetime), Store (journal `Ref`),
-    Universal. Start with only the scopes a real type needs: Process, Store
-    and Universal.
-  - Confidentiality is a second, independent axis checked the same way: a
-    secret (ADR-0235) is accepted by no encoder but the secrets store, and the
-    log formatter redacts it.
-  - Explicit cast maps bridge classes. A reference type declares a cast pair
-    (`BlobRef` to `Bytes` and back by check-in; `Ref<K>` to an inline `K` and back
-    by storing it; `ActorRef<R>` to an address description and back by
-    re-proving). A kind that must cross declares an authored mirror, such as
-    `#[cast(from = Texture)] struct TextureFile { .., pixels: Bytes }`; the
-    derive verifies that every field has a cast and emits both conversions.
-    Each type keeps one schema, a costly conversion is a visible `cast` call,
-    and a kind with no declared mirror stays where its class allows. Prior
-    art: Cap'n Proto `save` / `restore`, serde's `remote` derive, `From` /
-    `TryFrom`.
-
-Also recorded:
-
-- a reference type that materializes its bytes when it leaves the engine and
-  checks them back in when it returns;
-- a derive-generated mirror type, with each `BlobRef` replaced by bytes;
-- an encoder and decoder parameterized by destination, after serde's
-  `Serializer` and `DeserializeSeed`;
-- a schema-derived `HAS_BLOB` flag with compile-time asserts in typed
-  persistence paths. A restored hash already fails closed: after a restart it
-  is in no table.
+  its fields: `Universal` for plain data, `Process` for anything that names
+  this engine's memory. Each encoder declares the classes it accepts, and a
+  typed path refuses a mismatch at compile time
+  (`const { assert!(K::LIVENESS <= E::ACCEPTS) }`). The classes form a partial
+  order (Actor, Incarnation, Process, Session, Fleet, Store, Universal), so the
+  check is `K::REQUIRES ⊆ E::PROVIDES`. Confidentiality is a second axis
+  checked the same way: a secret (ADR-0235) is accepted by no encoder but the
+  secrets store. Explicit cast maps bridge classes (`Ref<K>` to an inline `K`,
+  `ActorRef<R>` to an address description), with authored mirrors such as
+  `#[cast(from = Texture)] struct TextureFile { .., pixels: Blob }`. Prior art:
+  FIDL's `resource` split, Cap'n Proto `save` / `restore`, serde's `remote`
+  derive and `DeserializeSeed`.
 
 ### 7. Freeing by refcount, with a reclaim thread
 
-- `BlobRef`s, guest table entries and envelopes hold strong references.
+- `Shared` `Blob`s, guest table entries and envelopes hold strong references.
   When the last one drops, no reference provably remains, and the bytes can go at any time.
 - `BlobEntry::drop` removes its own index slot if the slot still points at
   it (a concurrent check-in of the same hash may already have replaced it).
@@ -334,16 +313,12 @@ cost of freeing large blocks.
   `Arc::new_uninit_slice`-style buffer in place, so building an entry does not
   copy the bytes twice.
 
-### 9. Reads: through ctx APIs, streamed on both sides
-
-A `BlobRef` has no read methods. Reading is an engine API on both ctxs, and
-it streams everywhere:
+### 9. Reads stream on both sides
 
 ```rust
-// NativeCtx and WasmCtx alike
-ctx.read_blob(&blob) -> BlobReader
-
-impl BlobReader<'_> {
+// aether-actor, both targets
+impl<'a> BlobReader<'a> {
+    pub fn open(blob: &'a Blob) -> BlobReader<'a>;
     pub fn len(&self) -> u64;
     pub fn read(&mut self, buf: &mut [u8]) -> usize;                  // at most MAX_READ_BYTES per call
     pub fn seek(&mut self, to: u64);
@@ -351,31 +326,31 @@ impl BlobReader<'_> {
 }
 
 // host imports (crates/aether-substrate/src/actor/wasm/host_fns.rs); hash_ptr points at the 32-byte hash
-// "aether"."blob_len_p32"(hash_ptr: u32) -> i64            // ctx.read_blob
+// "aether"."blob_len_p32"(hash_ptr: u32) -> i64
 // "aether"."blob_read_p32"(hash_ptr: u32, offset: u64, dst_ptr: u32, dst_len: u32) -> i64
 // "aether"."blob_drop_p32"(hash_ptr: u32)                 // GuestHold::drop
 ```
 
-- Native reads resolve `keep` to the store entry and copy from it. Guest reads
-  go through the imports, which resolve a hash only against the caller's own
-  table.
+- A `Blob` has no whole-bytes accessor. Reading streams everywhere, through
+  `BlobBacking::read_at`: the slice for `Owned`, the entry for native
+  `Shared`, the imports for guest `Shared`.
 - The caller supplies the buffer. The host copies at most `MAX_READ_BYTES` per
   call and returns the length (negative for a hash the guest does not hold).
 - Streaming is the paradigm on both sides: a caller has to ask why it would
   load something large into memory. A caller can still loop the reader into a
   `Vec`; nothing makes it the easy path, and the loop is visible in review.
 - There is no zero-copy view yet. One arrives as its own API when a consumer
-  needs contiguous bytes (the render cap uploading textures, for example).
+  needs contiguous bytes, such as the render cap uploading textures.
 - `blob_drop_p32` is consumed by `GuestHold`'s own `Drop`. `blob_len_p32` and
   `blob_read_p32` land with a named production consumer, per the rule that
   every FFI import needs one: Bloomery's `Env::open` over an `OpaqueBytes`
   input (section 11).
 
-### 10. Closures carry handles, and the closure ceiling rises
+### 10. Closures carry `Blob`s, and the closure ceiling rises
 
 This amends ADR-0226 decision 10. `ReadArtifact` and `ReadClosure` answer
-with handles, not inline bytes, and `Invoke` hands the program its closure
-as handles. A program reads an `OpaqueBytes` member through `BlobReader`,
+with `Blob`s, not inline byte vectors, and `Invoke` hands the program its
+closure as `Blob`s. A program reads an `OpaqueBytes` member through `BlobReader`,
 so no member is copied into the program's memory unless it reads it.
 
 The ceiling now bounds resident bytes checked in for one closure, not a mail
@@ -403,49 +378,66 @@ meaning.
 | Store | new `crates/aether-substrate/src/store/` |
 | Envelope | `crates/aether-substrate/src/mail/mod.rs` (`Mail`), `mail/registry/dispatch.rs` (`OwnedDispatch`, `DispatchParts`, `MailDispatch`) |
 | Native send | `crates/aether-substrate/src/actor/native/binding/{outbound,pending,flush,send}.rs` (ring entries are plain bytes, so attachments ride on `PendingMail` beside the ring entry) |
-| Native deliver | `actor/native/slot/dispatcher.rs` (decoded `BlobRef`s take the attachments' `Arc`s), `actor/native/ctx/{mod,send}.rs` |
+| Native deliver | `actor/native/slot/dispatcher.rs` (decoded `Blob` fields are the attachments), `actor/native/ctx/{mod,send}.rs` |
 | Armed hand-offs | `actor/native/blob/work.rs:670`, `actor/native/spawn/activation.rs:564`, `mail/mailer.rs` (`route_tail`) |
-| Wasm | `actor/wasm/host_fns.rs` (`send_mail_p32` lookup, `blob_len_p32`, `blob_read_p32`, `blob_drop_p32`, `read_blob`), `actor/wasm/component/{ctx,dispatch}.rs`, `crates/aether-component/src/trampoline/runtime/mod.rs` (table across `replace`) |
+| Wasm | `actor/wasm/host_fns.rs` (`send_mail_p32` lookup, `blob_len_p32`, `blob_read_p32`, `blob_drop_p32`), `actor/wasm/component/{ctx,dispatch}.rs`, `crates/aether-component/src/trampoline/runtime/mod.rs` (table across `replace`) |
 | Guest SDK | `crates/aether-actor/src/wasm/{raw.rs,bridge/mail.rs}` |
-| `BlobRef` and schema | `crates/aether-data/src/{blob.rs,schema.rs}` (`BlobRef`, `SchemaType::BlobRef`), `crates/aether-codec/src/{encode,decode}.rs` (refuse) |
-| Boundary | `crates/aether-substrate/src/mail/boundary.rs`, `crates/aether-rpc/src/server/runtime.rs` |
+| `Blob` and schema | `crates/aether-data/src/{blob.rs,schema.rs}` (`Blob`, `BlobBacking`, `SchemaType::Blob`), `crates/aether-codec/src/{encode,decode}.rs` (read and write plain bytes) |
+| Egress rewrite | `crates/aether-substrate/src/mail/mailer.rs` (`route_tail` egress), `crates/aether-rpc/src/server/runtime.rs` (reply-out) |
 
 ## Consequences
 
 - **Bloomery.** A program's input closure and `ReadArtifact` /
-  `ReadClosure` replies carry handles (section 10). The closure no longer has
-  to fit one mail frame or be copied into the program, which resolves #6719.
-- **Memory is the limit.** The store is in memory only, so a handle always
-  names resident bytes, and a closure's members are resident while it runs.
-  The raised ceiling (section 10) bounds that per closure.
-- **Wire callers keep bytes.** aether-mcp is a wire client, so it can never
-  receive a `BlobRef`. A handle-bearing read is a new kind (for example
-  `aether.fs.open` answering a `BlobRef`), and `aether.fs.read` keeps its bytes
-  for wire callers. The same holds for process output, captures and HTTP.
-- **`aether.fs` moves to blobs.** In-engine readers should get a `BlobRef`
-  rather than inline bytes, and writes should take one once guest-side
-  check-in exists (see Follow-on). Wire callers keep `aether.fs.read` /
-  `write` with bytes (section 5). The move needs its own issue and a named
-  in-engine consumer.
-- **Other consumers.** Process stdout, fs reads, and future mostly-static
-  graphics data (meshes, textures) held as blobs and uploaded by the render
-  cap, which is the likely first consumer of a zero-copy view.
+  `ReadClosure` replies carry `Blob`s (section 10). Inside the engine the
+  closure no longer has to fit one mail frame or be copied into the program,
+  which resolves #6719.
+- **Memory is the limit.** The store is in memory only, so a `Shared` value's
+  bytes are resident while anyone holds it, and a closure's members are
+  resident while it runs. The raised ceiling (section 10) bounds that per
+  closure.
+- **One kind for every caller.** A kind with a `Blob` field works in-process
+  and over the wire alike, so no reply needs a separate bytes twin for wire
+  callers. aether-mcp sends and receives such fields as bytes, and its
+  existing large-reply spill applies.
+- **`aether.fs` moves to blobs.** `aether.fs.read` can answer a `Blob` and
+  `aether.fs.write` can take one, for in-engine readers and MCP alike. The move
+  needs its own issue and a named in-engine consumer.
+- **Other consumers.** Process stdout, captures, HTTP bodies, and future
+  mostly-static graphics data (meshes, textures) held as blobs and uploaded by
+  the render cap, the likely first consumer of a zero-copy view.
 - **Naming.** `actor/native/blob/` already means ADR-0087's unit of dispatch.
-  The store's module is `store/`, with the types `BlobStore` / `BlobEntry` /
-  `BlobHash`, and a handle is a `BlobRef`. ADR-0087's unit of dispatch is to be renamed separately.
-- **Negative.** Blob-bearing kinds pay a schema walk on send and on delivery.
-  A guest's last drop of a `GuestHold` costs one host call, and a guest that
-  leaks a `BlobRef` (for example with `mem::forget`) keeps its entry until the
-  actor dies. A `replace` carries the guest table across, and references that
-  lived in the old instance's memory die without running `Drop`, so their
-  counts stay and those blobs remain resident until the actor dies.
-- **Follow-on.** Guest-side check-in (a chunked writer that finishes into a
-  `BlobRef`) needs its own named consumer and is not decided here.
+  The store's module is `store/`, with the internal types `BlobStore` /
+  `BlobEntry`, and the value is `Blob`. ADR-0087's unit of dispatch is to be
+  renamed separately.
+- **Negative.**
+  - Blob-bearing kinds pay a schema walk at egress.
+  - The first in-process send of an `Owned` value copies it into the store
+    once.
+  - A value larger than one wire frame is refused off-process until chunked
+    transfer exists.
+  - A guest's last drop of a `GuestHold` costs one host call, and a guest that
+    leaks a `Blob` (for example with `mem::forget`) keeps its entry until that
+    instance ends.
+- **Follow-on.**
+  - Chunked wire transfer, when a consumer sends large values off-process.
+  - A zero-copy view, when a consumer needs contiguous bytes.
+  - Guest-side creation needs no new mechanism: a guest builds an `Owned`
+    value with `Blob::from`, and its first in-process send copies it to the
+    host once.
 
 ## Alternatives considered
 
 - **A global table of handles by id (ADR-0045).** Any holder of an id can
   read, so access is ambient. Rejected.
+- **A process-local handle refused at every boundary** (this ADR's second
+  version, `BlobRef`). It kept the store and the counting but made a class of
+  values the one communication model could not carry: refused at the wire, a
+  documented misuse when persisted, a separate bytes twin for wire callers,
+  and reading as a capability of the handle. Replaced by value semantics, as
+  Erlang's reference-counted binaries do.
+- **Distributed liveness** (Cap'n Proto, E, Java RMI). References cross the
+  wire and a protocol of releases or leases tracks them. Heavy, and the
+  mail-based refcounts of ADR-0045 already showed the cost. Rejected.
 - **A per-actor generation-tagged index as the handle** (this ADR's first
   version). The same blob gets a different number in each actor, delivery
   rewrites every payload index, generation bits are needed to catch stale
@@ -465,9 +457,9 @@ meaning.
   block. Rejected (section 8).
 - **A custom allocator now.** No measurement shows need. Deferred behind the
   store interface.
-- **Rewriting indices by decode-time lookup instead of in bytes.** The typed
-  decode is context-free (`Kind::decode_from_bytes`), so a lookup at decode
-  would need an ambient delivery context. Rejected in favor of rewriting the
-  payload before the handler sees it.
+- **A decode that needs a delivery context.** The typed decode is
+  context-free (`Kind::decode_from_bytes`). A tag-0 field decodes to an
+  `Owned` value with no context; only the envelope decoder, which already has
+  the attachments, produces `Shared` values.
 - **Evicting unreferenced entries under an LRU (ADR-0045).** With refcounts,
   an unreferenced entry is already freed. Nothing is left to evict.
