@@ -52,6 +52,7 @@ in vec3 vNormal;
 in vec3 vWorldPosition;
 uniform vec4 uColor;
 uniform vec3 uCamera;
+uniform float uRoughness;
 out vec4 color;
 void main() {
   vec3 normal = normalize(vNormal);
@@ -60,9 +61,13 @@ void main() {
   float diffuse = max(dot(normal, light), 0.0);
   float fillLight = max(dot(normal, fill), 0.0) * 0.22;
   vec3 viewDirection = normalize(uCamera - vWorldPosition);
+  vec3 halfDirection = normalize(light + viewDirection);
+  float specularPower = mix(80.0, 12.0, uRoughness);
+  float specularStrength = mix(0.28, 0.025, uRoughness);
+  float specular = pow(max(dot(normal, halfDirection), 0.0), specularPower) * specularStrength;
   float rim = pow(1.0 - max(dot(normal, viewDirection), 0.0), 2.8) * 0.18;
   float lighting = 0.24 + diffuse * 0.73 + fillLight + rim;
-  color = vec4(uColor.rgb * lighting, uColor.a);
+  color = vec4(uColor.rgb * lighting + vec3(specular), uColor.a);
 }`;
 
 const program = createProgram(vertexSource, fragmentSource);
@@ -76,6 +81,7 @@ const locations = {
   weights: gl.getUniformLocation(program, "uWeights"),
   color: gl.getUniformLocation(program, "uColor"),
   camera: gl.getUniformLocation(program, "uCamera"),
+  roughness: gl.getUniformLocation(program, "uRoughness"),
 };
 
 let scene;
@@ -150,11 +156,13 @@ function createPrimitive(primitive, access, document) {
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices.values, gl.STATIC_DRAW);
   gl.bindVertexArray(null);
+  const material = document.materials?.[primitive.material]?.pbrMetallicRoughness;
   return {
     vao,
     count: indices.count,
     indexType: indices.componentType,
-    color: document.materials?.[primitive.material]?.pbrMetallicRoughness?.baseColorFactor ?? [0.7, 0.7, 0.7, 1],
+    color: material?.baseColorFactor ?? [0.7, 0.7, 0.7, 1],
+    roughness: material?.roughnessFactor ?? 1,
     targetCount: targets.length,
     vertexCount: positions.count,
   };
@@ -321,8 +329,9 @@ function render() {
       scale[1] *= 1 + eyeSize * 0.12;
       translation[2] -= Math.max(eyeSize, 0) * 0.040;
     }
-    if (node.name === "UpperLids") {
-      translation[1] += eyeSize * 0.006;
+    if (node.name.startsWith("UpperLid.") || node.name.startsWith("LowerLid.")) {
+      scale[0] *= 1 + eyeSize * 0.16;
+      scale[1] *= 1 + eyeSize * 0.12;
       translation[2] -= Math.max(eyeSize, 0) * 0.040;
     }
     if (node.name === "Brows") {
@@ -340,6 +349,7 @@ function render() {
         gl.vertexAttrib3f(location, 0, 0, 0);
       });
       gl.uniform4fv(locations.color, primitive.color);
+      gl.uniform1f(locations.roughness, primitive.roughness);
       gl.drawElements(gl.TRIANGLES, primitive.count, primitive.indexType, 0);
     }
   }

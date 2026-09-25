@@ -16,8 +16,8 @@ fn generated_head_is_a_self_contained_glb_with_named_morphs() {
     assert_eq!(document["asset"]["version"], "2.0");
     assert_eq!(document["buffers"][0]["uri"], Value::Null);
     assert_eq!(document["scenes"].as_array().expect("scenes array").len(), 1);
-    assert_eq!(document["nodes"].as_array().expect("nodes array").len(), 13);
-    assert_eq!(document["meshes"].as_array().expect("meshes array").len(), 8);
+    assert_eq!(document["nodes"].as_array().expect("nodes array").len(), 19);
+    assert_eq!(document["meshes"].as_array().expect("meshes array").len(), 11);
     assert_eq!(document["images"], Value::Null);
 
     let names = document["meshes"][0]["extras"]["targetNames"].as_array().expect("targetNames array");
@@ -30,8 +30,12 @@ fn generated_head_is_a_self_contained_glb_with_named_morphs() {
         MORPH_TARGETS.len()
     );
     assert_eq!(
-        document["meshes"][7]["primitives"][0]["targets"].as_array().expect("mouth targets array").len(),
+        document["meshes"][9]["primitives"][0]["targets"].as_array().expect("mouth targets array").len(),
         MORPH_TARGETS.len()
     );
-    assert_eq!(document["meshes"][7]["extras"], Value::Null);
+    assert_eq!(document["meshes"][9]["extras"], Value::Null);
+    assert_eq!(
+        document["meshes"][10]["primitives"][0]["targets"].as_array().expect("lip targets array").len(),
+        MORPH_TARGETS.len()
+    );
 }

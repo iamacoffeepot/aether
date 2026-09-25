@@ -11,11 +11,14 @@
 
 use std::io::Cursor;
 
-use super::{Mesh, Vec3, brows_mesh, disc_mesh, head_mesh, mouth_mesh, sphere_mesh, upper_lids_mesh};
+use super::{
+    Mesh, Vec3, brows_mesh, disc_mesh, head_mesh, lips_mesh, lower_lids_mesh, mouth_mesh, sphere_mesh, upper_lids_mesh,
+};
 
 const SKIN: [u8; 3] = [181, 103, 77];
 const SCLERA: [u8; 3] = [232, 225, 207];
 const IRIS: [u8; 3] = [35, 111, 116];
+const IRIS_INNER: [u8; 3] = [43, 151, 151];
 const PUPIL: [u8; 3] = [8, 11, 13];
 
 #[derive(Clone, Copy)]
@@ -152,7 +155,8 @@ pub fn render_head_preview_png(width: u32, height: u32) -> Result<Vec<u8>, png::
     let disc = disc_mesh(48);
     for x in [-0.255, 0.255] {
         canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.552), Vec3::new(0.032, 0.032, 0.032), IRIS, yaw);
-        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.554), Vec3::new(0.014, 0.014, 0.014), PUPIL, yaw);
+        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.554), Vec3::new(0.023, 0.023, 0.023), IRIS_INNER, yaw);
+        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.556), Vec3::new(0.012, 0.012, 0.012), PUPIL, yaw);
     }
 
     let skin_feature = sphere_mesh(18, 24);
@@ -162,9 +166,13 @@ pub fn render_head_preview_png(width: u32, height: u32) -> Result<Vec<u8>, png::
     canvas.draw_mesh(&skin_feature, Vec3::new(0.0, -0.86, -0.14), Vec3::new(0.29, 0.40, 0.27), SKIN, yaw);
 
     canvas.draw_mesh(&brows_mesh(24), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), [46, 20, 14], yaw);
-    canvas.draw_mesh(&upper_lids_mesh(24), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
+    for x in [-0.255, 0.255] {
+        canvas.draw_mesh(&upper_lids_mesh(24), Vec3::new(x, 0.225, 0.490), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
+        canvas.draw_mesh(&lower_lids_mesh(24), Vec3::new(x, 0.225, 0.490), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
+    }
 
     canvas.draw_mesh(&mouth_mesh(48), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), [56, 18, 17], yaw);
+    canvas.draw_mesh(&lips_mesh(48), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), [156, 79, 65], yaw);
 
     let mut png = Vec::new();
     {

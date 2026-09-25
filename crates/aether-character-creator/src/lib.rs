@@ -207,7 +207,9 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let disc = disc_mesh(48);
     let brows = brows_mesh(24);
     let upper_lids = upper_lids_mesh(24);
+    let lower_lids = lower_lids_mesh(24);
     let mouth = mouth_mesh(48);
+    let lips = lips_mesh(48);
     let mut buffer = BufferBuilder::default();
 
     let head_position = buffer.push_vec3(&head.positions, true);
@@ -239,6 +241,11 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let lid_uv = buffer.push_vec2(&upper_lids.texture_coordinates);
     let lid_indices = buffer.push_indices(&upper_lids.indices);
 
+    let lower_lid_position = buffer.push_vec3(&lower_lids.positions, true);
+    let lower_lid_normal = buffer.push_vec3(&lower_lids.normals, false);
+    let lower_lid_uv = buffer.push_vec2(&lower_lids.texture_coordinates);
+    let lower_lid_indices = buffer.push_indices(&lower_lids.indices);
+
     let mouth_position = buffer.push_vec3(&mouth.positions, true);
     let mouth_normal = buffer.push_vec3(&mouth.normals, false);
     let mouth_uv = buffer.push_vec2(&mouth.texture_coordinates);
@@ -248,9 +255,19 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
         .map(|name| buffer.push_vec3(&mouth_morph_deltas(name, &mouth.positions), false))
         .collect::<Vec<_>>();
 
+    let mouth_surface_position = buffer.push_vec3(&lips.positions, true);
+    let mouth_surface_normal = buffer.push_vec3(&lips.normals, false);
+    let mouth_surface_uv = buffer.push_vec2(&lips.texture_coordinates);
+    let mouth_surface_indices = buffer.push_indices(&lips.indices);
+    let lip_morph_accessors = MORPH_TARGETS
+        .iter()
+        .map(|name| buffer.push_vec3(&morph_deltas(name, &lips.positions), false))
+        .collect::<Vec<_>>();
+
     let targets = morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
     let mouth_targets =
         mouth_morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
+    let lip_targets = lip_morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
     let target_names = MORPH_TARGETS.iter().map(|name| json!(name)).collect::<Vec<_>>();
     let weights = MORPH_TARGETS.iter().map(|_| json!(0.0)).collect::<Vec<_>>();
 
@@ -260,29 +277,37 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             "generator": "Aether AI parametric character generator 0.1"
         },
         "scene": 0,
-        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] }],
+        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] }],
         "nodes": [
             { "name": "Head", "mesh": 0 },
             { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.490], "scale": [0.115, 0.055, 0.060] },
             { "name": "Eye.Right", "mesh": 1, "translation": [0.255, 0.225, 0.490], "scale": [0.115, 0.055, 0.060] },
             { "name": "Iris.Left", "mesh": 2, "translation": [-0.255, 0.225, 0.552], "scale": [0.032, 0.032, 0.032] },
             { "name": "Iris.Right", "mesh": 2, "translation": [0.255, 0.225, 0.552], "scale": [0.032, 0.032, 0.032] },
-            { "name": "Pupil.Left", "mesh": 3, "translation": [-0.255, 0.225, 0.554], "scale": [0.014, 0.014, 0.014] },
-            { "name": "Pupil.Right", "mesh": 3, "translation": [0.255, 0.225, 0.554], "scale": [0.014, 0.014, 0.014] },
-            { "name": "Ear.Left", "mesh": 4, "translation": [-0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
-            { "name": "Ear.Right", "mesh": 4, "translation": [0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
-            { "name": "Brows", "mesh": 5 },
-            { "name": "UpperLids", "mesh": 6 },
-            { "name": "Neck", "mesh": 4, "translation": [0.0, -0.86, -0.14], "scale": [0.29, 0.40, 0.27] },
-            { "name": "MouthOpening", "mesh": 7 }
+            { "name": "Iris.Left.Inner", "mesh": 3, "translation": [-0.255, 0.225, 0.554], "scale": [0.023, 0.023, 0.023] },
+            { "name": "Iris.Right.Inner", "mesh": 3, "translation": [0.255, 0.225, 0.554], "scale": [0.023, 0.023, 0.023] },
+            { "name": "Pupil.Left", "mesh": 4, "translation": [-0.255, 0.225, 0.556], "scale": [0.012, 0.012, 0.012] },
+            { "name": "Pupil.Right", "mesh": 4, "translation": [0.255, 0.225, 0.556], "scale": [0.012, 0.012, 0.012] },
+            { "name": "Ear.Left", "mesh": 5, "translation": [-0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
+            { "name": "Ear.Right", "mesh": 5, "translation": [0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
+            { "name": "Brows", "mesh": 6 },
+            { "name": "UpperLid.Left", "mesh": 7, "translation": [-0.255, 0.225, 0.490] },
+            { "name": "UpperLid.Right", "mesh": 7, "translation": [0.255, 0.225, 0.490] },
+            { "name": "LowerLid.Left", "mesh": 8, "translation": [-0.255, 0.225, 0.490] },
+            { "name": "LowerLid.Right", "mesh": 8, "translation": [0.255, 0.225, 0.490] },
+            { "name": "Neck", "mesh": 5, "translation": [0.0, -0.86, -0.14], "scale": [0.29, 0.40, 0.27] },
+            { "name": "MouthOpening", "mesh": 9 },
+            { "name": "Lips", "mesh": 10 }
         ],
         "materials": [
             material("Skin", [0.55, 0.28, 0.18, 1.0], 0.82),
             material("Sclera", [0.88, 0.85, 0.76, 1.0], 0.32),
-            material("Iris", [0.08, 0.32, 0.34, 1.0], 0.48),
+            material("IrisOuter", [0.045, 0.18, 0.20, 1.0], 0.38),
+            material("IrisInner", [0.10, 0.42, 0.43, 1.0], 0.30),
             material("Pupil", [0.012, 0.016, 0.018, 1.0], 0.38),
             material("Brow", [0.09, 0.035, 0.022, 1.0], 0.92),
-            material("Mouth", [0.16, 0.035, 0.032, 1.0], 0.88)
+            material("Mouth", [0.16, 0.035, 0.032, 1.0], 0.88),
+            material("Lips", [0.50, 0.20, 0.16, 1.0], 0.74)
         ],
         "meshes": [
             {
@@ -298,20 +323,44 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
                 }]
             },
             mesh_json("Eyeball", eye_position, eye_normal, eye_uv, eye_indices, 1),
-            mesh_json("Iris", disc_position, disc_normal, disc_uv, disc_indices, 2),
-            mesh_json("Pupil", disc_position, disc_normal, disc_uv, disc_indices, 3),
+            mesh_json("IrisOuter", disc_position, disc_normal, disc_uv, disc_indices, 2),
+            mesh_json("IrisInner", disc_position, disc_normal, disc_uv, disc_indices, 3),
+            mesh_json("Pupil", disc_position, disc_normal, disc_uv, disc_indices, 4),
             mesh_json("SkinFeature", eye_position, eye_normal, eye_uv, eye_indices, 0),
-            mesh_json("Brow", brow_position, brow_normal, brow_uv, brow_indices, 4),
-            mesh_json("Lid", lid_position, lid_normal, lid_uv, lid_indices, 0),
+            mesh_json("Brow", brow_position, brow_normal, brow_uv, brow_indices, 5),
+            mesh_json("UpperLid", lid_position, lid_normal, lid_uv, lid_indices, 0),
+            mesh_json(
+                "LowerLid",
+                lower_lid_position,
+                lower_lid_normal,
+                lower_lid_uv,
+                lower_lid_indices,
+                0
+            ),
             {
                 "name": "Mouth",
                 "weights": weights,
                 "primitives": [{
                     "attributes": { "POSITION": mouth_position, "NORMAL": mouth_normal, "TEXCOORD_0": mouth_uv },
                     "indices": mouth_indices,
-                    "material": 5,
+                    "material": 6,
                     "mode": 4,
                     "targets": mouth_targets
+                }]
+            },
+            {
+                "name": "Lips",
+                "weights": weights,
+                "primitives": [{
+                    "attributes": {
+                        "POSITION": mouth_surface_position,
+                        "NORMAL": mouth_surface_normal,
+                        "TEXCOORD_0": mouth_surface_uv
+                    },
+                    "indices": mouth_surface_indices,
+                    "material": 7,
+                    "mode": 4,
+                    "targets": lip_targets
                 }]
             }
         ],
@@ -421,17 +470,43 @@ fn mouth_morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
             "LipFullness" => Vec3::new(0.0, 0.0, 0.10),
             "MouthSmile" => {
                 let corner = (position.x.abs() / 0.165).clamp(0.0, 1.0).powf(1.5);
-                Vec3::new(0.0, 0.13 * corner, 0.025 * corner)
+                Vec3::new(0.0, 0.075 * corner, 0.015 * corner)
             }
             _ => Vec3::default(),
         })
         .collect()
 }
 
+fn lips_mesh(segments: u32) -> Mesh {
+    let mut mesh = empty_mesh((segments + 1) * 4, segments * 12);
+    for (base_y, curve, height) in [(-0.270_f32, 0.024_f32, 0.012_f32), (-0.270_f32, -0.024_f32, 0.014_f32)] {
+        let base = mesh.positions.len() as u32;
+        for segment in 0..=segments {
+            let t = segment as f32 / segments as f32;
+            let local_x = t.mul_add(2.0, -1.0);
+            let x = local_x * 0.17;
+            let center_y = curve.mul_add(1.0 - local_x * local_x, base_y);
+            let half_height = height * (PI * t).sin().max(0.0).powf(0.65);
+            for (side, offset) in [(0.0, -half_height), (1.0, half_height)] {
+                let mut point = front_surface_point(x, center_y + offset);
+                point.z += 0.005;
+                mesh.positions.push(point);
+                mesh.normals.push(head_normal(point));
+                mesh.texture_coordinates.push(Vec2 { x: t, y: side });
+            }
+        }
+        for segment in 0..segments {
+            let left = base + segment * 2;
+            mesh.indices.extend_from_slice(&[left, left + 2, left + 1, left + 1, left + 2, left + 3]);
+        }
+    }
+    mesh
+}
+
 fn brows_mesh(segments: u32) -> Mesh {
     let mut mesh = empty_mesh((segments + 1) * 4, segments * 12);
     for center_x in [-0.255, 0.255] {
-        append_ribbon(&mut mesh, segments, center_x, 0.365, 0.19, 0.10, |x, y, _| {
+        append_ribbon(&mut mesh, segments, center_x, 0.365, Vec2 { x: 0.19, y: 0.10 }, 0.22, |x, y, _| {
             let point = front_surface_point(x, y);
             (point.z + 0.004, head_normal(point))
         });
@@ -440,25 +515,27 @@ fn brows_mesh(segments: u32) -> Mesh {
 }
 
 fn upper_lids_mesh(segments: u32) -> Mesh {
-    let mut mesh = empty_mesh((segments + 1) * 4, segments * 12);
-    for center_x in [-0.255, 0.255] {
-        append_ribbon(&mut mesh, segments, center_x, 0.245, 0.112, 0.075, |x, y, center_x| {
-            let center = Vec3::new(center_x, 0.225, 0.490);
-            let radii = Vec3::new(0.115, 0.055, 0.060);
-            let normalized_x = (x - center.x) / radii.x;
-            let normalized_y = (y - center.y) / radii.y;
-            let z =
-                center.z + radii.z * (1.0 - normalized_x * normalized_x - normalized_y * normalized_y).max(0.0).sqrt();
-            let normal = Vec3::new(
-                (x - center.x) / radii.x.powi(2),
-                (y - center.y) / radii.y.powi(2),
-                (z - center.z) / radii.z.powi(2),
-            )
-            .normalized();
-            (z + 0.003, normal)
-        });
-    }
+    let mut mesh = empty_mesh((segments + 1) * 2, segments * 6);
+    append_ribbon(&mut mesh, segments, 0.0, 0.020, Vec2 { x: 0.112, y: 0.075 }, 0.22, eye_surface);
     mesh
+}
+
+fn lower_lids_mesh(segments: u32) -> Mesh {
+    let mut mesh = empty_mesh((segments + 1) * 2, segments * 6);
+    append_ribbon(&mut mesh, segments, 0.0, -0.020, Vec2 { x: 0.108, y: 0.048 }, -0.16, eye_surface);
+    mesh
+}
+
+fn eye_surface(x: f32, y: f32, center_x: f32) -> (f32, Vec3) {
+    let center = Vec3::new(center_x, 0.0, 0.0);
+    let radii = Vec3::new(0.115, 0.055, 0.060);
+    let normalized_x = (x - center.x) / radii.x;
+    let normalized_y = (y - center.y) / radii.y;
+    let z = center.z + radii.z * (1.0 - normalized_x * normalized_x - normalized_y * normalized_y).max(0.0).sqrt();
+    let normal =
+        Vec3::new((x - center.x) / radii.x.powi(2), (y - center.y) / radii.y.powi(2), (z - center.z) / radii.z.powi(2))
+            .normalized();
+    (z + 0.003, normal)
 }
 
 fn empty_mesh(vertex_capacity: u32, index_capacity: u32) -> Mesh {
@@ -475,19 +552,19 @@ fn append_ribbon(
     segments: u32,
     center_x: f32,
     base_y: f32,
-    x_scale: f32,
-    y_scale: f32,
+    scale: Vec2,
+    curve_scale: f32,
     surface: impl Fn(f32, f32, f32) -> (f32, Vec3),
 ) {
     let base = mesh.positions.len() as u32;
     for segment in 0..=segments {
         let t = segment as f32 / segments as f32;
         let local_x = t.mul_add(2.0, -1.0);
-        let center_y = 0.22 * (1.0 - local_x * local_x);
+        let center_y = curve_scale * (1.0 - local_x * local_x);
         let half_width = 0.16 * (0.35 + 0.65 * (PI * t).sin());
         for (side, local_y) in [(0.0, center_y - half_width), (1.0, center_y + half_width)] {
-            let x = local_x.mul_add(x_scale, center_x);
-            let y = local_y.mul_add(y_scale, base_y);
+            let x = local_x.mul_add(scale.x, center_x);
+            let y = local_y.mul_add(scale.y, base_y);
             let (z, normal) = surface(x, y, center_x);
             mesh.positions.push(Vec3::new(x, y, z));
             mesh.normals.push(normal);
@@ -772,7 +849,7 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                 "MouthSmile" => {
                     let corners = gaussian(position.x, position.y, -0.27, -0.245, 0.13, 0.10)
                         + gaussian(position.x, position.y, 0.27, -0.245, 0.13, 0.10);
-                    Vec3::new(0.0, 0.13 * front * corners, 0.025 * front * corners)
+                    Vec3::new(0.0, 0.075 * front * corners, 0.015 * front * corners)
                 }
                 "ChinShape" => {
                     let weight = front * gaussian(position.x, position.y, 0.0, -0.60, 0.33, 0.20);
