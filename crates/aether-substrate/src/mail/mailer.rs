@@ -173,12 +173,12 @@ impl Mailer {
     /// the chassis builder at boot to wire the closure that handles
     /// mail addressed to [`aether_data::MailboxId::CHASSIS_MAILBOX_ID`].
     /// Subsequent calls are no-ops — the router slot is single-claim.
-    pub fn install_chassis_router(&self, router: Box<dyn Fn(Mail) + Send + Sync>) {
+    pub(crate) fn install_chassis_router(&self, router: Box<dyn Fn(Mail) + Send + Sync>) {
         let _ = self.chassis_router.set(router);
     }
 
     /// ADR-0080 §6 settlement-registry installation. Called once by the
-    /// chassis builder at boot alongside [`Self::install_chassis_router`]
+    /// chassis builder at boot alongside `install_chassis_router`
     /// so capability handlers can reach the registry through
     /// [`NativeCtx::subscribe_settlement`](crate::actor::native::ctx::NativeCtx::subscribe_settlement).
     /// Single-claim; subsequent calls are no-ops.
@@ -188,9 +188,9 @@ impl Mailer {
 
     /// Borrow the wired [`SettlementRegistry`], or `None` if no
     /// registry was installed (test fixtures, chassis
-    /// that don't bring up the trace pipeline). Capabilities subscribe
-    /// via
-    /// [`SettlementRegistry::subscribe_settlement_mail`].
+    /// that don't bring up the trace pipeline). A capability subscribes
+    /// through
+    /// [`NativeCtx::subscribe_settlement`](crate::actor::native::ctx::NativeCtx::subscribe_settlement).
     pub fn settlement_registry(&self) -> Option<&Arc<SettlementRegistry>> {
         self.settlement_registry.get()
     }
@@ -218,7 +218,7 @@ impl Mailer {
     /// ADR-0080 §2 producer hook for the `Sent` event: pushes the trace
     /// event into the producing actor's ring and bumps the root's
     /// emit-time `in_flight` count.
-    pub fn record_sent(
+    pub(crate) fn record_sent(
         &self,
         mail_id: aether_data::MailId,
         root: aether_data::MailId,
@@ -507,7 +507,7 @@ impl Mailer {
     /// mailboxes run their handler on the caller thread; dropped /
     /// unknown recipients warn-and-discard (or bubble up to the
     /// hub-substrate when a `HubOutbound` is connected, per ADR-0037).
-    pub fn push(&self, mail: Mail) {
+    pub(crate) fn push(&self, mail: Mail) {
         route_mail(mail, self);
     }
 

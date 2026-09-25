@@ -242,7 +242,8 @@ Every causal chain starts with a **root** — mail sent from outside any handler
 ([Tracing & settlement](tracing-and-settlement.md)). Roots reach the scheduler
 from threads that are *outside* the pool: through `RootPusher::push_root` (a
 driver's or embedder's loop), `PassiveChassis::send_tracked` (an embedder's
-tracked send), or `Mailer::push` (`mail/mailer.rs`). The first two mint their
+tracked send), or `Mailer::push` (`mail/mailer.rs`). The third is internal to
+`aether-substrate`, and no crate outside it can call it. The first two mint their
 root from the engine's one chassis-root counter on the `Mailer`, so no two
 senders mint the same root. Roots arrive from:
 

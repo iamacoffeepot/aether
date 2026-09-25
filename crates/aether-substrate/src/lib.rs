@@ -100,7 +100,7 @@ pub use mail::registry::{
     ActorAddressInventoryError, AddressResolutionError, AdoptRefused, BootAuthority, ChildRefused, InboxHandler,
     InlineHandler, MailboxEntry, OwnedDispatch, Registry, ResolvedAddress,
 };
-pub use mail::{KindId, Mail, MailKind, MailRef, MailboxId, RequestId, Source, SourceAddr};
+pub use mail::{KindId, MailKind, MailRef, MailboxId, RequestId, Source, SourceAddr};
 pub use runtime::panic_hook::init_panic_hook;
 
 /// Well-known mailbox name for substrate-level diagnostic events

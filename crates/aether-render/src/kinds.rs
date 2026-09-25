@@ -40,7 +40,7 @@ pub struct Frame {
 /// `RenderCapability::on_pre_settled` decrements the pending capture's
 /// `pre_remaining`. Wire-identical to `aether.trace.settled` (a single
 /// `MailId` field) so the settlement registry's notice-mail bridge
-/// (`subscribe_settlement_mail`) delivers it directly. Chassis-internal —
+/// (`ctx.subscribe_settlement`) delivers it directly. Chassis-internal —
 /// the settlement bridge is its sole sender. Engine-only mail (ADR-0233): the
 /// settlement registry pushes it from host code through the mailer.
 #[aether_data::kind(name = "aether.render.pre_settled", copy, eq, engine_only)]

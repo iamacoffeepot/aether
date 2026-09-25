@@ -46,7 +46,7 @@ use crate::actor::native::Envelope;
 /// just-seized slot to dispatch in place (ADR-0087 §4,
 /// iamacoffeepot/aether#1135). Alias for the actor-layer
 /// [`Envelope`] the `BlobWork` demuxer
-/// builds from the blob's [`Mail`](crate::mail::Mail), with
+/// builds from the blob's `Mail`, with
 /// `enqueue_depth = 0` and (iamacoffeepot/aether#1150) `t_enqueue` set to
 /// the blob-pickup instant, so the recipient's `Received` reads a real
 /// `t_received − t_enqueue` drain rather than the pre-#1150 ≈ 0.
