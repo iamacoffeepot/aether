@@ -111,8 +111,8 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
 
     /// The namespace of the first declared dependency with no `Live` route
     /// for a child placed under the calling actor, or `None` when every entry
-    /// is live: [`Registry::missing_dependency`](crate::mail::registry::Registry::missing_dependency)
-    /// with this ctx's actor as the placement parent. A `One` entry folds from
+    /// is live: [`Self::missing_dependency`] with this ctx's actor as the
+    /// placement parent. A `One` entry folds from
     /// the root and an `Embedded` entry folds beneath this actor. It is a read
     /// and nothing else: no ordering, no retry, no wait.
     ///
@@ -125,5 +125,31 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn missing_child_dependency<'d>(&self, dependencies: &'d [Dependency]) -> Option<&'d str> {
         self.binding.missing_child_dependency(dependencies.iter().map(|d| (d.resolver, d.namespace.as_str())))
+    }
+}
+
+/// The dependency read under a placement the caller names: unlike
+/// [`NativeCtx::missing_child_dependency`], the parent is explicit, so the
+/// erased ctx reaches it too.
+impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
+    /// The namespace of the first declared dependency with no `Live` route
+    /// for an actor placed under `parent`, or `None` when every entry is live.
+    /// A `One` entry folds from the root and an `Embedded` entry folds beneath
+    /// `parent`; `None` is a root placement, which has no parent to host an
+    /// embedded peer, so every `Embedded` entry refuses there. It is a read
+    /// and nothing else: no ordering, no retry, no wait.
+    ///
+    /// Its consumers are the component host's load-under placement, beneath
+    /// the proven parent, and its module-wide inline check, with no parent,
+    /// and the trampoline's replacement check, beneath the replaced actor's
+    /// own parent.
+    #[cfg(feature = "wasm")]
+    #[must_use]
+    pub fn missing_dependency<'d>(
+        &self,
+        parent: Option<ErasedActorRef>,
+        dependencies: &'d [Dependency],
+    ) -> Option<&'d str> {
+        self.binding.missing_dependency(parent, dependencies.iter().map(|d| (d.resolver, d.namespace.as_str())))
     }
 }

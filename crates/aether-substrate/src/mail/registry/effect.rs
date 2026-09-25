@@ -598,6 +598,16 @@ impl RegistrySubscription {
         Self { subscriber, inventory }
     }
 
+    /// The coherent inventory this subscription wakes its holder about, read
+    /// from the same publication [`Self::acknowledge`] compares against.
+    ///
+    /// Consumers: the component host's inventory refresh, which egresses it
+    /// to the hub, and its `ListComponents` handler.
+    #[must_use]
+    pub fn inventory(&self) -> RegistryInventory {
+        self.inventory.load().table().clone()
+    }
+
     /// Acknowledge the generation just consumed. Clearing `pending` before
     /// re-reading both views closes the publish-vs-clear race: a publication
     /// in the gap either sends its own wake or is observed and re-armed here.

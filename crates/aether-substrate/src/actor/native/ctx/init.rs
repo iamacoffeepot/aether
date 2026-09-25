@@ -13,7 +13,11 @@ use aether_data::ActorMail;
 use crate::actor::native::ActorProbe;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::self_wake::SelfWake;
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::component::ComponentCtx;
 use crate::mail::mailer::Mailer;
+#[cfg(feature = "wasm")]
+use crate::mail::outbound::HubOutbound;
 
 use super::ExportedHandles;
 
@@ -22,7 +26,9 @@ use super::ExportedHandles;
 /// chassis's [`ExportedHandles`] map (so the cap can publish a
 /// driver-facing sub-handle via [`Self::publish_handle`]), and a
 /// clone of the substrate's mailer for caps that need to register an
-/// outbound hook at boot.
+/// outbound hook at boot. The binding stays private: the wasm trampoline
+/// builds its guest ctx over it through [`Self::guest_ctx`] rather than
+/// holding it.
 ///
 /// Issue 629 / Phase A: the legacy `peer::<A>() -> Arc<A>` accessor
 /// retired here (closes issue 628). Sibling caps communicate via mail
@@ -44,16 +50,17 @@ impl<'a> NativeInitCtx<'a> {
         Self { binding, handles, mailer }
     }
 
-    /// Borrow the Arc'd cap-bound [`NativeBinding`]. Used by the wasm
-    /// trampoline at init to install itself on the
-    /// [`crate::actor::wasm::component::ComponentCtx`] so the
-    /// reply / outbound-mail host fns can route through this binding.
-    /// Promoted from `pub(crate)` to `pub` by issue 654 when the
-    /// trampoline moved to `aether-component` next to its consumer;
-    /// no other external caller is intended.
+    /// Build a guest ctx over this actor's binding, with `outbound` as its
+    /// hub egress, so the guest's reply / outbound-mail host fns route
+    /// through this binding. The registry those host fns read is the one the
+    /// binding's own mailer routes through, so the two cannot disagree.
+    ///
+    /// Consumer: the wasm trampoline's `init`, which instantiates its guest
+    /// against the ctx this builds.
+    #[cfg(feature = "wasm")]
     #[must_use]
-    pub fn binding(&self) -> &Arc<NativeBinding> {
-        self.binding
+    pub fn guest_ctx(&self, outbound: Arc<HubOutbound>) -> ComponentCtx {
+        self.binding.guest_ctx(outbound)
     }
 
     /// Clone the substrate's mailer. Caps that need to register a

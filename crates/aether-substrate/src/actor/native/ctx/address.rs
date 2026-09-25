@@ -1,8 +1,9 @@
 //! Who this ctx is, and who it can address.
 //!
 //! "Who it can address" is answered by proof. [`NativeCtx::actor_ref`] mints
-//! one for a declared dependency and [`NativeCtx::resolve_live`] proves a
-//! position that arrived in a payload; each hands back a proven reference,
+//! one for a declared dependency, [`NativeCtx::resolve_live`] proves a
+//! position that arrived in a payload, and [`NativeCtx::resolve_path`] proves
+//! an [`ActorPath`] that arrived in one; each hands back a proven reference,
 //! which is what ADR-0230 lets a cap keep past the handler that received it
 //! and what the flat send verbs route through. [`NativeCtx::accept_bundle`] is
 //! the bundle front of the payload-borne door: it proves a mail bundle's
@@ -14,6 +15,9 @@
 //! every inheriting send stamps so it joins the handler's causal chain
 //! (ADR-0080 §7).
 
+use std::error::Error;
+use std::fmt;
+
 use aether_actor::{
     ActorRef, Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef, ReplyMode,
     Singleton,
@@ -21,10 +25,38 @@ use aether_actor::{
 use aether_data::{ActorPath, KindId, MailId, MailboxId};
 use aether_kinds::NamedMail;
 
-use crate::mail::registry::{Registry, ResolveLiveError};
+use crate::mail::registry::{AddressResolutionError, Registry, ResolveLiveError};
 use crate::mail::{BoundaryMail, boundary};
 
 use super::NativeCtx;
+
+/// Why an [`ActorPath`] that arrived in a payload could not be proven (ADR-0230 §3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvePathError {
+    /// The registry's own refusal: an unknown or instanced root, an illegal or
+    /// ambiguous segment, an over-cap path, or no route at the canonical path.
+    Unresolved(AddressResolutionError),
+    /// The path names a route whose actor is not `Live` (its birth is still `Starting`).
+    NotLive { canonical_path: String },
+}
+
+impl fmt::Display for ResolvePathError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unresolved(error) => write!(formatter, "{error}"),
+            Self::NotLive { canonical_path } => write!(formatter, "{canonical_path} is not live"),
+        }
+    }
+}
+
+impl Error for ResolvePathError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Unresolved(error) => Some(error),
+            Self::NotLive { .. } => None,
+        }
+    }
+}
 
 impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Proven reference to a declared dependency (ADR-0230): mints an
@@ -66,6 +98,25 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// liveness question, and the two answers drift.
     pub fn resolve_live(&self, position: MailboxId) -> Result<ErasedActorRef, ResolveLiveError> {
         self.binding.mailer().registry().resolve_live(position)
+    }
+
+    /// Prove an [`ActorPath`] that arrived in a payload: the address front of
+    /// [`Self::resolve_live`]. The host's `resolve_address` expands and
+    /// resolves the path — ADR-0166 short-path expansion and canonical
+    /// validation are the registry's own — and the answered position is
+    /// proven at once; it never leaves the verb.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolvePathError::Unresolved`] with the registry's refusal when the
+    /// path resolves to no route, and [`ResolvePathError::NotLive`] naming
+    /// the canonical path when its route is not `Live`. Neither names a
+    /// position.
+    ///
+    /// Its consumers are the component host's drop, replace, load-under, and
+    /// describe receipts, and the trampoline's replacement dependency check.
+    pub fn resolve_path(&self, address: &ActorPath) -> Result<ErasedActorRef, ResolvePathError> {
+        self.binding.resolve_path(address)
     }
 
     /// Prove a mail bundle that crossed the MCP or harness boundary inside a

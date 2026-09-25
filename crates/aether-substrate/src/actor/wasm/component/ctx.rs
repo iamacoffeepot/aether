@@ -224,7 +224,12 @@ impl ComponentCtx {
     /// never set them directly. The ctx's own position, and the mailer
     /// its sends go through, are read from `binding`, so the two cannot
     /// disagree.
-    pub fn new(binding: Arc<NativeBinding>, registry: Arc<Registry>, outbound: Arc<HubOutbound>) -> Self {
+    ///
+    /// Crate-private: a guest ctx is built through
+    /// [`NativeInitCtx::guest_ctx`](crate::actor::native::NativeInitCtx::guest_ctx) /
+    /// [`NativeCtx::guest_ctx`](crate::actor::native::NativeCtx::guest_ctx),
+    /// which read `registry` from the binding's own mailer.
+    pub(crate) fn new(binding: Arc<NativeBinding>, registry: Arc<Registry>, outbound: Arc<HubOutbound>) -> Self {
         Self {
             sender: binding.self_mailbox(),
             registry,

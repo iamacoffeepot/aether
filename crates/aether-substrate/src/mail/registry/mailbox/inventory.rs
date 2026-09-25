@@ -8,7 +8,9 @@ use rustc_hash::FxHashMap;
 use aether_data::{KindDescriptor, MailboxCategory, MailboxDescriptor};
 
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::effect::{ChangeSubscriber, RegistryInventory, RegistrySubscription, subscriber};
+#[cfg(test)]
+use crate::mail::registry::effect::RegistryInventory;
+use crate::mail::registry::effect::{ChangeSubscriber, RegistrySubscription, subscriber};
 use crate::mail::registry::names::categorise_mailbox_name;
 use crate::mail::{KindId, MailboxId};
 
@@ -59,9 +61,11 @@ impl Registry {
         subscription
     }
 
-    #[doc(hidden)]
+    /// The published inventory, for the registry's own tests; production
+    /// holders read it through their [`RegistrySubscription::inventory`].
+    #[cfg(test)]
     #[must_use]
-    pub fn inventory(&self) -> RegistryInventory {
+    pub(crate) fn inventory(&self) -> RegistryInventory {
         self.inventory.load().table().clone()
     }
 

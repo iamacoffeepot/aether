@@ -5,7 +5,6 @@ use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, CorrelationCursor, PendingReplies};
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::outbound::HubOutbound;
-use aether_substrate::mail::registry::Registry;
 use wasmtime::{Engine, Linker, Module};
 
 use crate::trampoline::WasmTrampoline;
@@ -34,7 +33,6 @@ pub struct WasmTrampolineState {
     /// is reachable from the handler.
     pub(crate) engine: Arc<Engine>,
     pub(crate) linker: Arc<Linker<ComponentCtx>>,
-    pub(crate) registry: Arc<Registry>,
     pub(crate) outbound: Arc<HubOutbound>,
     /// The receive surface of the guest this slot hosts, or last hosted:
     /// what [`GuestHost::guest`](aether_substrate::actor::native::ctx::GuestHost::guest)

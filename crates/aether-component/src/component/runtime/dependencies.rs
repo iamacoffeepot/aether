@@ -9,13 +9,17 @@
 //! route, before anything in the module runs. Those actors are the exported
 //! inline-spawnable types and every private inline child (issue 6590), read
 //! from the module's `aether.kinds.inputs.private` section.
+//!
+//! Every site asks one read, the ctx's `missing_dependency` under an explicit
+//! placement (or `missing_child_dependency` for a child of the host itself),
+//! whose fold-and-liveness core is the registry's own for both transports.
 
 use std::collections::HashSet;
 
+use aether_actor::ReplyMode;
 use aether_data::{ActorLineageRecord, ActorPath};
+use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::wasm::kind_manifest::{ActorInputs, Dependency};
-use aether_substrate::mail::MailboxId;
-use aether_substrate::mail::registry::Registry;
 
 /// The refusal error naming the actor and its missing dependency. One
 /// constructor for all four refusal sites, so the load, boot, and
@@ -24,39 +28,29 @@ pub(super) fn dependency_refusal(actor: &str, namespace: &str) -> String {
     format!("{actor} depends on {namespace}, which is not live")
 }
 
-/// The namespace of the first declared dependency with no `Live` route, or
-/// `None` when every entry is live. One derivation and one read for both
-/// transports: the fold-and-`is_live` core lives on the registry as
-/// [`Registry::missing_dependency`], and this is the component host's call
-/// to it.
-pub(super) fn missing_dependency<'a>(
-    registry: &Registry,
-    parent: Option<MailboxId>,
-    dependencies: &'a [Dependency],
-) -> Option<&'a str> {
-    registry.missing_dependency(parent, dependencies.iter().map(|d| (d.resolver, d.namespace.as_str())))
-}
-
 /// The refusal error for a replacement whose hosted type declares a
 /// dependency with no `Live` route, or `None` when the replacement may
 /// proceed. The caller is the trampoline, which passes its own canonical
 /// name and the dependencies of the type the replacement will host: the
 /// named export, or its current hosted type for a bare replace. The parent
 /// is the replaced actor's own, derived from `canonical`.
-pub fn replacement_refusal(registry: &Registry, canonical: &str, dependencies: &[Dependency]) -> Option<String> {
+pub fn replacement_refusal<A, M: ReplyMode>(
+    ctx: &NativeCtx<'_, A, M>,
+    canonical: &str,
+    dependencies: &[Dependency],
+) -> Option<String> {
     // The parent path is the canonical path minus its leaf (`/` is
-    // structural — a subname cannot contain it), resolved through the
-    // registry like any other address. A parent that no longer resolves —
-    // a live route is required, so a dead parent fails here even though the
-    // child outlives it — or a root-placed actor with no parent path,
-    // cannot prove an embedded peer live, so it passes no parent and
-    // refuses closed.
+    // structural — a subname cannot contain it), proven like any other
+    // address. A parent whose route is not `Live` — a dead parent fails
+    // here even though the child outlives it, and a `Starting` one is not
+    // yet provable — or a root-placed actor with no parent path, cannot
+    // prove an embedded peer live, so it passes no parent and refuses
+    // closed.
     let parent = canonical
         .rsplit_once('/')
         .and_then(|(path, _)| ActorPath::new(path).ok())
-        .and_then(|path| registry.resolve_address(&path).ok())
-        .map(|resolved| resolved.mailbox_id);
-    missing_dependency(registry, parent, dependencies).map(|namespace| dependency_refusal(canonical, namespace))
+        .and_then(|path| ctx.resolve_path(&path).ok());
+    ctx.missing_dependency(parent, dependencies).map(|namespace| dependency_refusal(canonical, namespace))
 }
 
 /// The module's inline-spawnable exported groups, in declaration order, each
@@ -108,8 +102,8 @@ fn inline_spawnable<'a>(
 /// inline child's embedded peer folds beneath the child's own spawner,
 /// which does not exist while its module loads, so nothing here can prove
 /// it live.
-pub(super) fn inline_dependency_refusal(
-    registry: &Registry,
+pub(super) fn inline_dependency_refusal<A, M: ReplyMode>(
+    ctx: &NativeCtx<'_, A, M>,
     actors: &[ActorInputs],
     private: &[ActorInputs],
     lineage: &[ActorLineageRecord],
@@ -117,7 +111,7 @@ pub(super) fn inline_dependency_refusal(
 ) -> Option<String> {
     let private_groups = private.iter().filter_map(|group| Some((group.namespace.as_deref()?, group)));
     inline_spawnable(actors, private, lineage, module_namespace).chain(private_groups).find_map(|(namespace, group)| {
-        missing_dependency(registry, None, &group.dependencies).map(|missing| dependency_refusal(namespace, missing))
+        ctx.missing_dependency(None, &group.dependencies).map(|missing| dependency_refusal(namespace, missing))
     })
 }
 

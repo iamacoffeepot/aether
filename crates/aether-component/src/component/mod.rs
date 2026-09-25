@@ -26,8 +26,8 @@
 //! always-on, so a transport-only build addresses the cap without naming the
 //! substrate-typed state. The state-bearing runtime
 //! (`ComponentHostCapabilityState`,
-//! holding the wasmtime `engine` + `linker`, the `registry`, the egress
-//! handles, and the default-name counter) lives behind the one
+//! holding the wasmtime `engine` + `linker`, the registry-inventory
+//! subscription, the egress handle, and the default-name counter) lives behind the one
 //! `feature = "runtime"` gate. Plain fields (no `Arc<Inner>` wrapper) per
 //! ADR-0078 — the cap is single-threaded, every handler runs on the cap's
 //! dispatcher thread.

@@ -11,7 +11,7 @@
 //! / `HandlesKind<BootTeardown>` markers, and the `OnePer("component")` name-inventory entry — all emitted
 //! always-on by `#[actor]`. The state-bearing runtime
 //! (`WasmTrampolineState`, which owns the wasmtime `Component` plus the
-//! `Engine` / `Linker` / `Registry` / `HubOutbound` handles) and
+//! `Engine` / `Linker` / `HubOutbound` handles) and
 //! its init config ([`WasmTrampolineConfig`], substrate/wasmtime-typed) live
 //! behind the one `feature = "runtime"` gate (the `mod runtime` directory), so
 //! a transport-only build of the identity never names the state nor pulls

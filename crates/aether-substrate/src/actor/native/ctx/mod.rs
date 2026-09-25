@@ -8,7 +8,7 @@
 //! [`NativeInitCtx`] alongside the existing inherent methods, so
 //! user-facing handler bodies are now spelled in the same
 //! cross-transport vocabulary FFI guests use. Substrate-internal
-//! accessors (`mailer`, `publish_handle`, `transport_arc`, plus the
+//! accessors (`mailer`, `publish_handle`, plus the
 //! `spawn_child` builder) stay inherent — they expose
 //! types that don't belong on a cross-transport trait
 //! (`Arc<Mailer>`, `Arc<Spawner>`, the chassis [`ExportedHandles`] map,
@@ -41,8 +41,12 @@ use core::ptr;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::component::ComponentCtx;
 use crate::mail::Source;
 use crate::mail::mailer::Mailer;
+#[cfg(feature = "wasm")]
+use crate::mail::outbound::HubOutbound;
 use crate::runtime::effect_chain::EffectChain;
 
 mod address;
@@ -60,6 +64,7 @@ mod spawn;
 #[cfg(test)]
 mod tests;
 
+pub use address::ResolvePathError;
 #[cfg(feature = "wasm")]
 pub use guest::GuestHost;
 pub use handles::ExportedHandles;
@@ -343,13 +348,16 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.binding.mailer()
     }
 
-    /// Clone this actor's transport. Runtime adapters that rebuild an
-    /// embedded execution context during a handler (the Wasm trampoline's
-    /// replacement path) use the same binding as the actor they remain behind.
-    #[doc(hidden)]
+    /// Build a guest ctx over this actor's own binding, with `outbound` as
+    /// its hub egress. The registry the guest's host fns read is the one the
+    /// binding's own mailer routes through, so the two cannot disagree.
+    ///
+    /// Consumer: the wasm trampoline's replacement path, which rebuilds the
+    /// guest ctx behind the same binding.
+    #[cfg(feature = "wasm")]
     #[must_use]
-    pub fn transport_arc(&self) -> Arc<NativeBinding> {
-        Arc::clone(self.binding)
+    pub fn guest_ctx(&self, outbound: Arc<HubOutbound>) -> ComponentCtx {
+        self.binding.guest_ctx(outbound)
     }
 }
 
