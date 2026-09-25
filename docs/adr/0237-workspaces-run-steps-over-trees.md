@@ -142,8 +142,10 @@ the sandbox, or they make the program `Sampled`.
    refuse), with `detail` (the bounded fault text `Detail` from
    `aether-bloomery-kinds`) naming the cause or the path. Nothing about the
    step is recorded as a result or reused, so it is safe to retry; the
-   `Workspace` binding turns it into a fault exactly as it does `Exhausted`,
-   and the program never sees it. `Refused(EnvironmentUnavailable)` stays
+   `Workspace` binding ends the invocation exactly as it does for
+   `Exhausted`, and the driver records a new
+   `FaultReason::ExecutorFailed { reason: Detail }` carrying the same
+   detail. The program never sees it. `Refused(EnvironmentUnavailable)` stays
    reserved for an environment that cannot be provided, never a mid-run
    failure.
 
