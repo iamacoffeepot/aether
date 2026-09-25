@@ -119,7 +119,7 @@ pub fn run_registry_benchmark() -> Option<RegistryReport> {
     if spawned == 0 {
         return None;
     }
-    let owner_unloaded = owner::sample("sequential-spawn", harness.mail_registry(), None, spawned, spawn_elapsed);
+    let owner_unloaded = owner::sample("sequential-spawn", &harness.route_read_probe(), None, spawned, spawn_elapsed);
 
     // The staging parent serves both remaining phases: it drives the loaded
     // ceiling, and it is the writer the contended read cells churn against.
@@ -132,8 +132,9 @@ pub fn run_registry_benchmark() -> Option<RegistryReport> {
         ceiling
     });
 
-    let per_reader_kinds_registered = kinds::per_reader_kinds_registered(harness.mail_registry());
-    read::warm_read_path(harness.mail_registry(), &targets);
+    let probe = harness.route_read_probe();
+    let per_reader_kinds_registered = kinds::per_reader_kinds_registered(&probe);
+    read::warm_read_path(&probe, &targets);
 
     // Every (churn × kind-mix × spread) column is swept over the same reader
     // counts, and each column is scaled against its own single-reader cell — so

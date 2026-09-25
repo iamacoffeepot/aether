@@ -51,7 +51,7 @@ use aether_substrate::config::{ConfigMember, SettlementConfig};
 #[cfg(test)]
 use aether_substrate::mail::MailboxId;
 use aether_substrate::{
-    Builder, ChildRefused, EgressEvent, Mailer, NativeActor, PassiveChassis, ReplyTarget, RingCapacities,
+    Builder, ChildRefused, EgressEvent, NativeActor, PassiveChassis, ReplyTarget, RingCapacities, RouteReadProbe,
     SchedulerTuning, SubstrateBoot, mail::MailId,
 };
 
@@ -231,8 +231,6 @@ impl error::Error for SubstrateHarnessError {}
 /// mutate frame state and pump events; concurrent calls are not
 /// supported.
 pub struct SubstrateHarness {
-    queue: Arc<Mailer>,
-    registry: Arc<aether_substrate::Registry>,
     loopback_rx: mpsc::Receiver<EgressEvent>,
 
     events_rx: EventReceiver,
@@ -302,6 +300,7 @@ pub struct SubstrateHarness {
 
     /// Lifetime guard. Boot owns the scheduler; dropping the
     /// `SubstrateHarness` drops the boot which joins the worker threads.
+    /// Only the `#[cfg(test)]` fixtures read it, through `Self::boot`.
     _boot: SubstrateBoot,
 
     /// `PassiveChassis<SubstrateHarnessChassis>` holding the booted Log +
@@ -714,16 +713,12 @@ impl SubstrateHarness {
         // correlates by `correlation_id`.
         let loopback_rx = boot.outbound.attach_recording();
 
-        let queue = Arc::clone(&boot.queue);
-        let registry = Arc::clone(&boot.registry);
         // The loopback driver's route to the lifecycle cap: the reference the
         // chassis recorded when it composed the cap.
         let lifecycle = passive.actor_ref::<aether_lifecycle::LifecycleCapability>();
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
 
         Ok(Self {
-            queue,
-            registry,
             loopback_rx,
             events_rx,
             hook,
@@ -766,7 +761,7 @@ impl SubstrateHarness {
         // One name-to-id resolution per assertion, against a recorder that
         // stores ids. An unregistered name matches nothing, which is the same
         // answer the name-comparing version gave.
-        let Some(wanted) = self.mail_registry().kind_id(kind_name) else {
+        let Some(wanted) = self.passive.kind_id(kind_name) else {
             return 0;
         };
         self.observed_kinds
@@ -786,12 +781,11 @@ impl SubstrateHarness {
     /// per ADR-0063: a poisoned mutex means a prior holder panicked
     /// under the guard.
     pub fn observed_kinds(&self) -> Vec<String> {
-        let registry = self.mail_registry();
         self.observed_kinds
             .lock()
             .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
             .iter()
-            .map(|kind| registry.kind_label(*kind))
+            .map(|kind| self.passive.kind_label(*kind))
             .collect()
     }
 
@@ -799,10 +793,9 @@ impl SubstrateHarness {
     /// assertion-facing [`Self::observed_kinds`], a poisoned recorder must not
     /// obscure the execution error that triggered evidence retention.
     pub(super) fn diagnostic_observed_kinds(&self) -> Vec<String> {
-        let registry = self.mail_registry();
         self.observed_kinds
             .lock()
-            .map(|kinds| kinds.iter().map(|kind| registry.kind_label(*kind)).collect())
+            .map(|kinds| kinds.iter().map(|kind| self.passive.kind_label(*kind)).collect())
             .unwrap_or_default()
     }
 
@@ -882,14 +875,14 @@ impl SubstrateHarness {
     /// Consumers: `aether-substrate/tests/cap_registry.rs`.
     #[must_use]
     pub fn accepts(&self, actor: ErasedActorRef, kind: KindId) -> bool {
-        self.queue.capability_registry().accepts_actor(actor, kind)
+        self.passive.accepts(actor, kind)
     }
 
     /// `actor`'s per-handler cost rows (ADR-0036), what the `actor_cost` MCP tool reports.
     /// Consumers: `aether-substrate/tests/cost_table.rs`, `aether-widget/tests/widget_actor_cost.rs`.
     #[must_use]
     pub fn actor_cost(&self, actor: ErasedActorRef) -> CostTailResult {
-        self.queue.cost_table().tail(actor, &CostTail { kind: None })
+        self.passive.actor_cost(actor, &CostTail { kind: None })
     }
 
     /// Load the component export `R` and return its proven reference and
@@ -1028,7 +1021,7 @@ impl SubstrateHarness {
     /// The registry's label for `kind` — its registered name, or a tagged
     /// id when none is registered. Names a sent kind in a harness failure.
     pub(crate) fn kind_label(&self, kind: KindId) -> String {
-        self.registry.kind_label(kind)
+        self.passive.kind_label(kind)
     }
 
     /// Build a [`SubstrateHarnessError::SettlementTimeout`] carrying a dump of the
@@ -1038,7 +1031,7 @@ impl SubstrateHarness {
     /// chain never reaches — names the stuck root(s) and their
     /// `(in_flight, held_open)` counts instead of surfacing a bare timeout.
     fn settlement_timeout(&self, kind: String, gate: &str) -> SubstrateHarnessError {
-        let pending = format_pending_roots(&self.queue.trace_handle().settlement_counter().pending_roots());
+        let pending = format_pending_roots(&self.passive.pending_settlement_roots());
         tracing::error!(
             target: "aether_substrate::substrate_harness",
             gate,
@@ -1070,11 +1063,11 @@ impl SubstrateHarness {
         self.passive.spawn_actor::<A>(subname, config, params)
     }
 
-    /// The chassis's mail [`Registry`](aether_substrate::Registry) — the real
-    /// route table, reached by `perf::registry`'s benchmark so it measures the
-    /// published view a running engine dispatches against.
-    pub(crate) fn mail_registry(&self) -> &Arc<aether_substrate::Registry> {
-        &self.registry
+    /// A read-only probe of the chassis's real route table, reached by
+    /// `perf::registry`'s benchmark so it measures the published view a
+    /// running engine dispatches against.
+    pub(crate) fn route_read_probe(&self) -> RouteReadProbe {
+        self.passive.route_read_probe()
     }
 
     /// iamacoffeepot/aether#1057: inject a chassis-root mail and return its
@@ -1095,6 +1088,14 @@ impl SubstrateHarness {
         self.passive.send_tracked(recipient, kind, payload, None)
     }
 
+    /// The lifetime-guard boot, for this crate's `#[cfg(test)]` fixtures,
+    /// which take its handles through `SubstrateBoot::handles_for_test`.
+    #[cfg(test)]
+    const fn boot(&self) -> &SubstrateBoot {
+        let Self { _boot: boot, .. } = self;
+        boot
+    }
+
     /// ADR-0086 Phase 3: read the chassis-host trace ring — where the
     /// `Sent` for off-actor / injected root mail (e.g. [`Self::inject_root`])
     /// lands, since it's produced outside any actor's stamped slots.
@@ -1102,7 +1103,8 @@ impl SubstrateHarness {
     /// ring belongs to no actor, so the test reads it directly.
     #[cfg(test)]
     pub(crate) fn chassis_host_trace_tail(&self, request: &TraceTail) -> TraceTailResult {
-        self.queue.trace_handle().chassis_host_tail(request)
+        let (_, mailer) = self.boot().handles_for_test();
+        mailer.trace_handle().chassis_host_tail(request)
     }
 
     /// ADR-0086 Phase 3: reconstruct `root`'s trace tree via the
@@ -1748,7 +1750,8 @@ mod tests {
         };
         // A synthetic root that never settles: one `Sent`, no `Finished`.
         let stuck = MailId { sender: MailboxId(0xDEAD), correlation_id: 0xBEEF };
-        tb.queue.trace_handle().settlement_counter().record_sent(stuck);
+        let (_, mailer) = tb.boot().handles_for_test();
+        mailer.trace_handle().settlement_counter().record_sent(stuck);
 
         let err = tb.settlement_timeout("StuckKind".to_owned(), "test.wedge");
         let SubstrateHarnessError::SettlementTimeout { pending, .. } = &err else {
@@ -1801,7 +1804,8 @@ mod tests {
         // contract via the variant choice.
         let captured: Arc<Mutex<Vec<CapturedRow>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
-        let subscriber_mbox = tb.registry.register_inline(
+        let (registry, _) = tb.boot().handles_for_test();
+        let subscriber_mbox = registry.register_inline(
             &boot_authority(),
             "issue_723_test_subscriber",
             Arc::new(move |dispatch: MailDispatch<'_>| {
@@ -1894,7 +1898,8 @@ mod tests {
         // call site — the same shape the Tick-fanout test above relies on.
         let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let observed_for_handler = Arc::clone(&observed);
-        let observer_mailbox = tb.registry.register_inline(
+        let (registry, _) = tb.boot().handles_for_test();
+        let observer_mailbox = registry.register_inline(
             &boot_authority(),
             "issue_1489_shutdown_observer",
             Arc::new(move |dispatch: MailDispatch<'_>| {

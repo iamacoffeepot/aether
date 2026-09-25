@@ -42,18 +42,27 @@ use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::actor::native::local as actor_local;
-use crate::mail::registry::{BootAuthority, MailDispatch};
+use crate::chassis::error::BootError;
+use crate::mail::registry::{BootAuthority, InlineHandler, MailDispatch};
 use crate::runtime::log_install;
 use crate::runtime::panic_hook;
 use crate::{AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry, actor::wasm::host_fns};
 use aether_kinds::descriptors;
 
-/// Everything a chassis needs after shared boot setup. The handle
-/// fields are `pub` so chassis code destructures and takes ownership of
-/// the pieces it actually uses; anything unused stays on the struct and
-/// gets dropped when the chassis shuts down. The one exception is the
-/// [`BootAuthority`], which is private behind [`Self::take_authority`]
-/// because it is spent rather than shared (iamacoffeepot/aether#4171).
+/// Everything a chassis needs after shared boot setup. The component-host
+/// inputs (`engine`, `linker`, `outbound`) and the descriptor list are `pub`
+/// so chassis code takes the pieces it actually uses; anything unused stays
+/// on the struct and gets dropped when the chassis shuts down.
+///
+/// The live engine's `Registry` and `Mailer` stay inside the crate
+/// (iamacoffeepot/aether#6693): a chassis mints its builder through
+/// [`composed`](crate::chassis::composed) or [`Builder::from_boot`], and
+/// registers an inline sink through [`Self::register_inline`], so no host code
+/// holds a handle that could mail or mutate the engine by position. The
+/// [`BootAuthority`] is private too, behind [`Self::take_authority`], because
+/// it is spent rather than shared (iamacoffeepot/aether#4171).
+///
+/// [`Builder::from_boot`]: crate::chassis::builder::Builder::from_boot
 ///
 /// Issue 603: `engine`, `linker`, `outbound` are the inputs
 /// `ComponentHostCapability` consumes through `ComponentHostConfig`
@@ -63,9 +72,9 @@ use aether_kinds::descriptors;
 /// dependencies the cap will need.
 pub struct SubstrateBoot {
     pub engine: Arc<Engine>,
-    pub registry: Arc<Registry>,
+    pub(crate) registry: Arc<Registry>,
     pub linker: Arc<Linker<ComponentCtx>>,
-    pub queue: Arc<Mailer>,
+    pub(crate) queue: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
     /// Retained so `connect_hub` / `connect_hub_from_env` can hand
     /// the descriptor list to `HubClient::connect`, the chassis can
@@ -175,21 +184,56 @@ impl SubstrateBoot {
         Ok(Self { engine, registry, linker, queue, outbound, boot_descriptors, authority: Some(authority) })
     }
 
-    /// Borrow the boot path's [`BootAuthority`] — the proof a composition
-    /// delta needs to name the registry's direct mutators
-    /// (`register_inline`, `try_register_inbox_with_id`,
-    /// `register_kind_with_descriptor`) while the chassis is still composing.
-    /// `None` once the token has been spent.
+    /// Borrow the boot path's [`BootAuthority`] — the proof the registry's
+    /// direct mutators (`register_inline`, `try_register_inbox_with_id`,
+    /// `register_kind_with_descriptor`) take while the chassis is still
+    /// composing. `None` once the token has been spent.
     ///
-    /// The borrow is the bound: it lives no longer than the `&SubstrateBoot`
-    /// it came from, so a delta can use the token but cannot stash it. The
-    /// sibling of [`ChassisCtx::boot_authority`], which lends the same proof
-    /// to a capability's own boot pass.
+    /// Crate-private: outside the crate a composition delta registers through
+    /// [`Self::register_inline`], which uses the token without handing it out.
+    /// The sibling of [`ChassisCtx::boot_authority`], which lends the same
+    /// proof to a capability's own boot pass.
     ///
     /// [`ChassisCtx::boot_authority`]: crate::ChassisCtx::boot_authority
     #[must_use]
-    pub fn authority(&self) -> Option<&BootAuthority> {
+    pub(crate) fn authority(&self) -> Option<&BootAuthority> {
         self.authority.as_ref()
+    }
+
+    /// Register a synchronous inline sink under `name` while the boot still
+    /// holds its authority: a composition delta's or an embedder's way to add
+    /// a sink ahead of the ADR-0165 seal without ever holding the token or the
+    /// registry. The mailer brackets `handler` with `Received` / `Finished`,
+    /// so chains touching the sink settle (ADR-0080 §6).
+    ///
+    /// Consumer: the substrate harness's observer sink
+    /// (`SubstrateHarnessChassis::build_passive`).
+    ///
+    /// # Errors
+    ///
+    /// [`BootError::AlreadyComposed`] once the authority is spent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is already registered — fail-fast per ADR-0063, the
+    /// same contract as every boot-path registration.
+    pub fn register_inline(&self, name: &str, handler: Arc<dyn InlineHandler>) -> Result<(), BootError> {
+        let authority = self.authority().ok_or(BootError::AlreadyComposed)?;
+        let _route = self.registry.register_inline(authority, name, handler);
+        Ok(())
+    }
+
+    /// Test-support only: the boot's registry and mailer, the pair
+    /// [`testing::bare_substrate`](crate::testing::bare_substrate) hands a
+    /// fixture. Gated on `test-support`, which a crate enables only from its
+    /// `[dev-dependencies]`, so no production build can name it.
+    ///
+    /// Consumer: the substrate harness's `#[cfg(test)]` wedge and observer
+    /// fixtures.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn handles_for_test(&self) -> (Arc<Registry>, Arc<Mailer>) {
+        (Arc::clone(&self.registry), Arc::clone(&self.queue))
     }
 
     /// Move the boot path's [`BootAuthority`] out of this handle, or `None`

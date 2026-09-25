@@ -59,7 +59,7 @@
 //! other kind, and each gets its own `KindSlot` with its own name allocation.
 
 use aether_data::{Kind, KindId};
-use aether_substrate::Registry;
+use aether_substrate::RouteReadProbe;
 
 use crate::perf::harness::Ping;
 
@@ -109,7 +109,7 @@ impl KindMix {
     }
 }
 
-/// Whether every probe kind resolves in `registry` — the `PerReader` arm's
+/// Whether every probe kind resolves in `probe`'s registry — the `PerReader` arm's
 /// positive control, and it is not optional.
 ///
 /// The arm's whole claim is that each reader clones a *different* `Arc<str>`.
@@ -120,8 +120,8 @@ impl KindMix {
 /// looks like a clean negative result. Checking is the only way to tell a real
 /// negative from a broken arm, so the sweep checks and says so.
 #[must_use]
-pub fn per_reader_kinds_registered(registry: &Registry) -> bool {
-    let missing: Vec<_> = PROBE_KIND_IDS.iter().filter(|id| registry.kind_name(**id).is_none()).collect();
+pub fn per_reader_kinds_registered(probe: &RouteReadProbe) -> bool {
+    let missing: Vec<_> = PROBE_KIND_IDS.iter().filter(|id| !probe.kind_registered(**id)).collect();
     if !missing.is_empty() {
         tracing::warn!(
             target: "aether_perf",
