@@ -56,7 +56,7 @@ lineage is one node, so its `MailboxId` equals its `ActorId` — the name hash o
 name *plus its schema* ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md)). Two consequences you can lean on:
 
 - **Stable across processes.** Every id is computed from names and lineage,
-  never assigned — `Kind::ID` and `mailbox_id_from_name` are compile-time
+  never assigned — `Kind::ID` and the actor-type tag are compile-time
   constants, and the lineage fold (`fold_lineage`) is the same pure function on
   every substrate and guest — so two processes that hold the same names and the
   same lineage produce the same ids, and addressing works across a fleet
@@ -68,8 +68,8 @@ name *plus its schema* ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/
   scenario guards it).
 
 One sharp edge follows from the lineage fold: a `/`-rendered address
-(`aether.component/aether.embedded:camera`) resolves by parsing it into
-segments and folding their ActorIds (`mailbox_id_from_path`). Hashing the
+(`aether.component/aether.embedded:camera`) resolves in the host registry,
+which parses it into segments and folds their ActorIds node by node. Hashing the
 joined string as a flat name yields an id the registry never registered, and
 mail to it warn-drops — the string is a rendering of the lineage, never the
 hash input.

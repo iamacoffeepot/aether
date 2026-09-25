@@ -9,6 +9,7 @@ use crate::chassis::builder::Builder;
 use crate::mail::KindId;
 use crate::mail::MailboxId;
 use crate::mail::registry;
+use crate::mail::registry::lineage_mailbox_id;
 use crate::testing::{TestChassis, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, ErasedActorRef};
@@ -156,7 +157,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     // lineage name under the host, folded to its own `MailboxId`.
     let host_name = registry.mailbox_name(host_id).expect("host registers a canonical name");
     let alias_name = format!("{host_name}/aether.embedded:widget");
-    let alias_id = aether_data::mailbox_id_from_path(&alias_name);
+    let alias_id = lineage_mailbox_id(&alias_name);
     let published = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
             alias_id,
@@ -377,7 +378,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     // the `spawn_inline_child` host fn stages it.
     let host_name = registry.mailbox_name(host_id).expect("host registers a canonical name");
     let alias_name = format!("{host_name}/aether.embedded:widget");
-    let alias_id = aether_data::mailbox_id_from_path(&alias_name);
+    let alias_id = lineage_mailbox_id(&alias_name);
     let published = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
             alias_id, alias_name, host_id,

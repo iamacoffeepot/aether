@@ -130,14 +130,10 @@ impl TaskQueue {
 
 #[cfg(test)]
 mod tests {
-    // Test harness derives its own actor mailbox ids by name so worker wake
-    // pushes route to a registered inbox — fixture id derivation, not
-    // sibling-cap addressing.
-    #![allow(clippy::disallowed_methods)]
     use super::TaskQueue;
     use crate::actor::native::binding::NativeBinding;
     use crate::actor::native::ctx::NativeCtx;
-    use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
+    use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr};
     use std::sync::Arc;
 
     use crate::testing::{boot_authority, fresh_substrate};
@@ -185,10 +181,9 @@ mod tests {
     #[test]
     fn submit_under_bound_dispatches_and_overflow_queues() {
         let (registry, mailer) = fresh_substrate();
-        let actor_mailbox = mailbox_id_from_name("test.task_queue.actor");
         // Register a sink for the worker's completion-wake push so it
         // routes to a real inbox rather than warn-dropping.
-        registry.register_inbox(&boot_authority(), "test.task_queue.actor", Arc::new(|_d| {}));
+        let actor_mailbox = registry.register_inbox(&boot_authority(), "test.task_queue.actor", Arc::new(|_d| {}));
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
 
         let mut q = TaskQueue::new(2);
@@ -209,8 +204,7 @@ mod tests {
     fn on_complete_drains_pending_and_holds_queued_chain() {
         let (registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let actor_mailbox = mailbox_id_from_name("test.task_queue.actor2");
-        registry.register_inbox(&boot_authority(), "test.task_queue.actor2", Arc::new(|_d| {}));
+        let actor_mailbox = registry.register_inbox(&boot_authority(), "test.task_queue.actor2", Arc::new(|_d| {}));
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
 
         // Bound of 1 so the second submit queues.

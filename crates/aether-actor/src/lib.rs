@@ -113,7 +113,7 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 pub mod __macro_internals {
     pub use crate::wasm::{ActorTypeTag, WasmPlacementFacts};
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
-    pub use aether_data::{ActorId, Kind, KindId, ReplyContract, Schema, mailbox_id_from_name};
+    pub use aether_data::{ActorId, Kind, KindId, ReplyContract, Schema};
     // Section-version bytes the `#[actor]` / `export!` writers emit as
     // token references so the literals const-fold from one source of
     // truth in `aether-data`.

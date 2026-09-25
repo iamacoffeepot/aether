@@ -75,8 +75,8 @@ pub const fn fnv1a_64_bytes(bytes: &[u8]) -> u64 {
 /// id helpers compose several byte runs (a domain prefix, scope
 /// segments, the separators between them) into one hash without
 /// allocating a joined buffer. Public so the storage leaf walk can
-/// thread a path carry the same way [`mailbox_id_from_name_pair`] and
-/// [`fold_lineage`] already do.
+/// thread a path carry the same way the crate's scoped mailbox-name
+/// hash (`mailbox_id_from_name_pair`) and [`fold_lineage`] already do.
 #[must_use]
 pub const fn fnv1a_64_fold(mut hash: u64, bytes: &[u8]) -> u64 {
     let mut i = 0;
@@ -99,13 +99,13 @@ pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
 
 /// The `/` that separates two lineage nodes in a rendered actor path
 /// (ADR-0099 §4). Structural — never valid inside a single segment — so
-/// a `/` in a value handed to [`mailbox_id_from_name`] is always a
+/// a `/` in a value handed to `mailbox_id_from_name` is always a
 /// caller mistake (a rendered path reached the single-segment hasher).
 const PATH_SEPARATOR: u8 = b'/';
 
 /// `const`-safe scan for the lineage [`PATH_SEPARATOR`]. `str::contains`
 /// is not `const`, so the single-segment guards (`debug_assert!` in
-/// [`mailbox_id_from_name`] / [`mailbox_id_from_name_pair`]) fold over
+/// `mailbox_id_from_name` / `mailbox_id_from_name_pair`) fold over
 /// the bytes directly, the same way [`fnv1a_64_fold`] does.
 #[must_use]
 const fn has_path_separator(name: &str) -> bool {
@@ -128,18 +128,18 @@ const fn has_path_separator(name: &str) -> bool {
 ///
 /// This hashes `name` as **one atom**. A `/`-rendered lineage path (the
 /// form `LoadResult.path` carries for a hosted actor, e.g.
-/// `aether.component/aether.embedded:NAME`) must resolve through
-/// [`mailbox_id_from_path`] instead — that folds over the path's nodes,
-/// whereas hashing the joined string here yields an id the registry
-/// never registered, which mail silently warn-drops. A `debug_assert!`
+/// `aether.component/aether.embedded:NAME`) resolves through the host
+/// registry instead, which folds the path node by node; hashing the
+/// joined string here yields an id the registry never registered, which
+/// mail silently warn-drops. A `debug_assert!`
 /// catches a `/` in `name`: it panics in debug builds (and fails
 /// const-evaluation for a const caller) rather than mis-routing, and
 /// compiles out in release so the hot const hash is unchanged.
 #[must_use]
-pub const fn mailbox_id_from_name(name: &str) -> MailboxId {
+pub(crate) const fn mailbox_id_from_name(name: &str) -> MailboxId {
     debug_assert!(
         !has_path_separator(name),
-        "mailbox_id_from_name received a `/`-rendered path; resolve it through mailbox_id_from_path"
+        "mailbox_id_from_name received a `/`-rendered path; a lineage path folds node by node"
     );
     MailboxId(with_tag(Tag::Mailbox, fnv1a_64_prefixed(MAILBOX_DOMAIN, name.as_bytes())))
 }
@@ -161,13 +161,14 @@ const SCOPE_SEPARATOR: u8 = b':';
 ///
 /// Both `prefix` and `segment` are single lineage segments; a `/` in
 /// either is a rendered path reaching the wrong hasher, so the same
-/// `debug_assert!` as [`mailbox_id_from_name`] guards each arm (resolve
-/// a `/`-path through [`mailbox_id_from_path`]).
+/// `debug_assert!` as [`mailbox_id_from_name`] guards each arm (a
+/// `/`-path resolves through the host registry, which folds it node by
+/// node).
 #[must_use]
-pub const fn mailbox_id_from_name_pair(prefix: &str, segment: &str) -> MailboxId {
+pub(crate) const fn mailbox_id_from_name_pair(prefix: &str, segment: &str) -> MailboxId {
     debug_assert!(
         !has_path_separator(prefix) && !has_path_separator(segment),
-        "mailbox_id_from_name_pair received a `/`-rendered path; resolve it through mailbox_id_from_path"
+        "mailbox_id_from_name_pair received a `/`-rendered path; a lineage path folds node by node"
     );
     let hash = fnv1a_64_prefixed(MAILBOX_DOMAIN, prefix.as_bytes());
     let hash = fnv1a_64_fold(hash, &[SCOPE_SEPARATOR]);
@@ -194,41 +195,6 @@ pub const fn mailbox_id_from_name_pair(prefix: &str, segment: &str) -> MailboxId
 #[must_use]
 pub const fn fold_lineage(parent_carry: u64, child: ActorId) -> u64 {
     fnv1a_64_fold(parent_carry, &child.0.to_le_bytes())
-}
-
-/// The [`ActorId`] of one rendered path segment (ADR-0099 §4): a bare
-/// `atom` is a singleton node `hash(atom)`; an `atom:discriminator` is
-/// an instanced node `hash(atom:discriminator)`. The inverse of the
-/// per-segment render.
-#[must_use]
-fn segment_actor_id(segment: &str) -> ActorId {
-    match segment.split_once(':') {
-        Some((namespace, discriminator)) => ActorId::instanced(namespace, discriminator),
-        None => ActorId::singleton(segment),
-    }
-}
-
-/// Resolve a rendered `/`-path to its [`MailboxId`] by the ADR-0099 §4
-/// parse → fold (the inverse of the display render): split on `/` into
-/// per-node segments, map each to its [`ActorId`] (`segment_actor_id`),
-/// and chain-fold root → leaf. A `MailboxId` is **never** the hash of a
-/// joined path string — it is this fold over the path's nodes — so
-/// string-addressing callers (the registry's name lookup, the MCP
-/// `address` surface, the substrate harness) resolve a hosted / nested
-/// actor through here rather than hashing the whole name. The cold path:
-/// type addressing stays a const fold, and only written paths pay this
-/// parse. A single-segment path (every root cap) folds to that segment's
-/// `ActorId`, identical to [`mailbox_id_from_name`].
-#[must_use]
-pub fn mailbox_id_from_path(path: &str) -> MailboxId {
-    let mut segments = path.split('/');
-    // A non-empty `split` always yields at least one item; default the
-    // empty-string edge case to the empty-segment ActorId.
-    let mut carry = segment_actor_id(segments.next().unwrap_or("")).0;
-    for segment in segments {
-        carry = fold_lineage(carry, segment_actor_id(segment));
-    }
-    MailboxId(with_tag(Tag::Mailbox, carry))
 }
 
 /// ADR-0098: maximum number of segments in a composed mailbox path
@@ -281,7 +247,7 @@ pub const fn validate_scope_path(segments: &[&str]) -> Result<(), ScopePathError
 
 /// ADR-0088 §7: compute the deterministic [`ThreadId`] for an OS thread
 /// name. FNV-1a with the `THREAD_DOMAIN` prefix, ADR-0064 tag bits
-/// stamped into the high nibble. Uniform with [`mailbox_id_from_name`]
+/// stamped into the high nibble. Uniform with `mailbox_id_from_name`
 /// so a thread id encodes to the `thr-XXXX-XXXX-XXXX` string form and
 /// reverses through the same inventory chain. Computed once per worker
 /// thread off the dispatch hot path (the value is `Copy`), so storing
@@ -303,23 +269,8 @@ pub const fn storage_kind_id_from_name(name: &str) -> KindId {
 
 #[cfg(test)]
 mod tests {
-    // The id/hash primitive's own unit tests call `mailbox_id_from_name` /
-    // `_pair` directly — they are the unit under test, not sibling-cap
-    // addressing.
-    #![allow(clippy::disallowed_methods)]
     use super::*;
     use alloc::string::String;
-
-    #[test]
-    fn flat_name_guard_lets_legitimate_names_through() {
-        // The guard only rejects `/`. A `:`-scoped name (ADR-0079 /
-        // ADR-0098, the legitimate single-segment form) and a dotted
-        // chassis namespace both pass, and resolve to the same id a
-        // single-segment path does — the guard adds no behavior to a
-        // valid name, it only fences the `/`-path footgun.
-        assert_eq!(mailbox_id_from_name("aether.component"), mailbox_id_from_path("aether.component"),);
-        assert_eq!(mailbox_id_from_name("aether.embedded:camera"), mailbox_id_from_path("aether.embedded:camera"),);
-    }
 
     #[test]
     fn flat_name_guard_evaluates_in_const() {
@@ -335,7 +286,7 @@ mod tests {
     // `cargo test --release` run (assertions compiled out) stays green.
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic = "resolve it through mailbox_id_from_path"]
+    #[should_panic = "a lineage path folds node by node"]
     fn from_name_panics_on_a_rendered_path() {
         // The exact footgun from #1472: a `/`-rendered lineage address
         // handed to the single-segment hasher. Without the guard this
@@ -345,14 +296,14 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic = "resolve it through mailbox_id_from_path"]
+    #[should_panic = "a lineage path folds node by node"]
     fn from_name_pair_panics_on_a_slash_in_prefix() {
         let _ = mailbox_id_from_name_pair("aether.component/aether.embedded", "camera");
     }
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic = "resolve it through mailbox_id_from_path"]
+    #[should_panic = "a lineage path folds node by node"]
     fn from_name_pair_panics_on_a_slash_in_segment() {
         let _ = mailbox_id_from_name_pair("aether.embedded", "host/leaf");
     }
@@ -423,29 +374,6 @@ mod tests {
         let ab = fold_lineage(a.0, b);
         let ba = fold_lineage(b.0, a);
         assert_ne!(ab, ba);
-    }
-
-    #[test]
-    fn path_resolves_to_the_chain_fold() {
-        // A single-segment path is the depth-1 fixed point — identical to
-        // the name hash, so every root cap resolves unchanged.
-        assert_eq!(mailbox_id_from_path("root"), mailbox_id_from_name("root"));
-
-        // A multi-segment `/`-path folds each node's ActorId root → leaf:
-        // a bare atom is a singleton node, `atom:disc` an instanced one.
-        // This is the inverse of the render (ADR-0099 §4).
-        let s0 = ActorId::singleton("root").0;
-        let s1 = fold_lineage(s0, ActorId::instanced("scope", "7"));
-        let expected = MailboxId(with_tag(Tag::Mailbox, fold_lineage(s1, ActorId::singleton("leaf"))));
-        assert_eq!(mailbox_id_from_path("root/scope:7/leaf"), expected);
-
-        // And it is NOT the flat hash of the joined string — names don't
-        // hash to nested ids. The flat hash is computed inline here:
-        // feeding the `/`-joined string to `mailbox_id_from_name` is the
-        // exact footgun its guard now forbids, so the contrast is drawn
-        // against the bare domain-prefixed FNV the function would apply.
-        let flat = MailboxId(with_tag(Tag::Mailbox, fnv1a_64_prefixed(MAILBOX_DOMAIN, b"root/scope:7/leaf")));
-        assert_ne!(mailbox_id_from_path("root/scope:7/leaf"), flat);
     }
 
     #[test]

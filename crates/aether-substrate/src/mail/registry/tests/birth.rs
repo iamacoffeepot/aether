@@ -17,7 +17,8 @@ use crate::mail::registry::effect::{
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
 use crate::mail::registry::{
-    DropError, InboxHandler, MailboxEntry, OwnedDispatch, Registry, canonical_mailbox_id, noop_handler,
+    DropError, InboxHandler, MailboxEntry, OwnedDispatch, Registry, canonical_mailbox_id, lineage_mailbox_id,
+    noop_handler,
 };
 use crate::mail::{KindId, Mail, MailRef};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -250,8 +251,7 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     let initial_route_generation = registry.route_generation();
     let initial_mailbox_generation = registry.mailbox_generation();
     let name = "aether.component/starting-only";
-    #[allow(clippy::disallowed_methods, reason = "the test exercises the registry's canonical path lookup")]
-    let id = aether_data::mailbox_id_from_path(name);
+    let id = lineage_mailbox_id(name);
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::reserve_with_id(id, name.to_owned())]))
         .expect("owner accepts Starting reservation");

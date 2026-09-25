@@ -182,8 +182,8 @@ where
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
-// Test fixtures derive mailbox ids by name and spin worker threads that hold
-// no settlement contract; both trip the disallowed-methods lint by design.
+// Test fixtures spin worker threads that hold no settlement contract, which
+// trips the disallowed-methods lint by design.
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
@@ -198,7 +198,7 @@ mod tests {
     use aether_actor::log::ActorLogRing;
     use aether_actor::trace::ActorTraceRing;
     use aether_actor::{Addressable, HandlesKind, Local as _, MailSender, Manual, One};
-    use aether_data::{ActorPath, Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
+    use aether_data::{ActorPath, Kind, KindId, MailId, MailboxId, Source, SourceAddr};
     use aether_kinds::trace::TraceEvent;
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
 
@@ -246,9 +246,9 @@ mod tests {
     }
 
     /// A pure addressing identity for the peer `on_emit` sends to (test 6).
-    /// `One` makes it a root singleton, so `Peer::resolve(_, ())` equals
-    /// `mailbox_id_from_name("test.pumped.peer")` regardless of the caller's
-    /// carry.
+    /// `One` makes it a root singleton, so `Peer::resolve(_, ())` is the
+    /// depth-1 id a registration under `"test.pumped.peer"` takes, regardless
+    /// of the caller's carry.
     struct Peer;
     impl Addressable for Peer {
         const NAMESPACE: &'static str = "test.pumped.peer";
@@ -635,14 +635,13 @@ mod tests {
         let fx = fixtures();
         let self_id = MailboxId(0x_0DED_0006);
 
-        // Register the peer inbox at its resolved (carry-independent) id.
-        let peer_id = mailbox_id_from_name(Peer::NAMESPACE);
+        // Register the peer inbox under its namespace: the depth-1 id `One`
+        // resolves to, carry-independent.
         let (poke_tx, poke_rx) = mpsc::channel::<Envelope>();
         fx.registry
-            .try_register_inbox_with_id(
+            .try_register_inbox(
                 &boot_authority(),
-                peer_id,
-                "test.pumped.peer",
+                Peer::NAMESPACE,
                 Arc::new(move |d: Envelope| {
                     d.discharge();
                     let _ = poke_tx.send(d);
@@ -676,13 +675,12 @@ mod tests {
     fn host_turn_runs_stamped_on_caller_and_flushes_fresh_peer_roots() {
         let fx = fixtures();
         let self_id = MailboxId(0x_0DED_0010);
-        let peer_id = mailbox_id_from_name(Peer::NAMESPACE);
         let (poke_tx, poke_rx) = mpsc::channel::<(Envelope, thread::ThreadId)>();
-        fx.registry
-            .try_register_inbox_with_id(
+        let peer_id = fx
+            .registry
+            .try_register_inbox(
                 &boot_authority(),
-                peer_id,
-                "test.pumped.peer",
+                Peer::NAMESPACE,
                 Arc::new(move |d: Envelope| {
                     d.discharge();
                     let _ = poke_tx.send((d, thread::current().id()));

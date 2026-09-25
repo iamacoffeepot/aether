@@ -26,8 +26,8 @@ Three things close the obvious routes.
   fails.
 - **Text is not a door.** `send_to_named` is gone
   ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)
-  §5), and hand-folding a name with `mailbox_id_from_name` is disallowed in
-  `clippy.toml`.
+  §5), and hand-hashing a name is closed: the name hashes are private to
+  `aether-data`, and `MailboxId::from_name` is disallowed in `clippy.toml`.
 
 So one direction is a declared dependency and the other is a reference the
 receiver was handed.

@@ -15,17 +15,13 @@
 //! `::aether_substrate::*` paths, and the index that reads the result is owned
 //! here.
 
-// The fixtures register their own canonical mailboxes: the fold of an expanded
-// path is the reference value under test, not a sibling-cap address.
-#![allow(clippy::disallowed_methods)]
-
 use aether_actor::{Addressable, actor};
-use aether_data::{ActorPath, mailbox_id_from_path};
+use aether_data::ActorPath;
+use aether_substrate::Registry;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::registry::noop_handler;
-use aether_substrate::testing::boot_authority;
-use aether_substrate::{Registry, ResolvedAddress};
+use aether_substrate::testing::registered_ref;
 
 #[aether_data::kind(name = "test.unsplit_lineage.poke", copy, default, eq)]
 struct Poke {
@@ -69,15 +65,6 @@ impl NativeActor for UnsplitChild {
     fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
 }
 
-fn register(registry: &Registry, canonical: &str) -> ResolvedAddress {
-    let mailbox_id = mailbox_id_from_path(canonical);
-    registry
-        .try_register_inbox_with_id(&boot_authority(), mailbox_id, canonical, noop_handler())
-        .expect("canonical name is free");
-
-    ResolvedAddress { mailbox_id, canonical_path: canonical.to_owned() }
-}
-
 /// Tripwire: the short path below is expanded from link-time `#[actor]`
 /// output, and it resolves only when the *cardinality* half of both
 /// declarations is present alongside its placement half: the root's singleton
@@ -91,9 +78,10 @@ fn register(registry: &Registry, canonical: &str) -> ResolvedAddress {
 #[test]
 fn an_unsplit_declaration_is_not_gated_out_of_its_cardinality_fact() {
     let registry = Registry::new();
-    let child = register(&registry, &format!("{}/{}:one", UnsplitRoot::NAMESPACE, UnsplitChild::NAMESPACE));
+    let canonical = format!("{}/{}:one", UnsplitRoot::NAMESPACE, UnsplitChild::NAMESPACE);
+    registered_ref(&registry, &canonical, noop_handler());
 
     let path =
         ActorPath::new(&format!("{}/:one", UnsplitRoot::NAMESPACE)).expect("fixture is a well-formed actor path");
-    assert_eq!(registry.resolve_address(&path), Ok(child));
+    assert_eq!(registry.resolve_address(&path).map(|resolved| resolved.canonical_path), Ok(canonical));
 }

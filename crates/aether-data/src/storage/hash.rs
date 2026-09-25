@@ -2,7 +2,7 @@
 //!
 //! A leaf's dotted path is never materialized. The parent hands each
 //! child an in-progress carry and the child folds its own segment onto
-//! it, the way [`crate::mailbox_id_from_name_pair`] folds a prefixed
+//! it, the way `mailbox_id_from_name_pair` folds a prefixed
 //! segment. The preimage is `FIELD_DOMAIN`, then the path bytes, then a
 //! `0x00` terminator, then the type's canonical schema bytes. Rust
 //! identifiers and the dot join both exclude NUL, so the boundary is
