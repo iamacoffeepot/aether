@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use aether_actor::{DependsOn, OutboundReply};
 
+use super::event::TrackStart;
 use super::sample::SampleBank;
 use super::{
     AudioCapabilityState, AudioEvent, AudioLoadContext, BankAssemblyContext, BankAssemblyOutput, DecodeOutput,
@@ -252,7 +253,7 @@ impl AudioCapabilityState {
             Ok(pcm) => {
                 let cx = done.context();
                 if let Some(sender) = self.sender.as_ref() {
-                    let event = AudioEvent::TrackStart {
+                    let event = AudioEvent::TrackStart(TrackStart {
                         sender: cx.sender,
                         lane: cx.lane.clone(),
                         namespace: cx.namespace.clone(),
@@ -260,7 +261,7 @@ impl AudioCapabilityState {
                         pcm: Arc::from(pcm.as_slice()),
                         gain: cx.gain,
                         looping: cx.looping,
-                    };
+                    });
                     if sender.push(event).is_err() {
                         tracing::warn!(
                             target: "aether_substrate::audio",

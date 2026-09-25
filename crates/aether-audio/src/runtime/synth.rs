@@ -11,7 +11,7 @@ use crossbeam_queue::ArrayQueue;
 use aether_actor::ErasedActorRef;
 
 use super::super::kinds::ScheduledNote;
-use super::event::AudioEvent;
+use super::event::{AudioEvent, TrackStart};
 use super::instrument::{BUILTINS, instrument_by_id};
 use super::reverb::Reverb;
 use super::sample::{SampleBank, SampleVoice};
@@ -244,9 +244,7 @@ impl Synth {
                     // sounding voices on the next block (ADR-0127).
                     self.sender_gains.insert(sender, gain);
                 }
-                AudioEvent::TrackStart { sender, lane, namespace, path, pcm, gain, looping } => {
-                    self.start_track(sender, lane, namespace, path, pcm, gain, looping);
-                }
+                AudioEvent::TrackStart(track) => self.start_track(track),
                 AudioEvent::TrackStop { sender, lane, namespace, path } => {
                     self.stop_track(sender, lane.as_ref(), &namespace, &path);
                 }
@@ -287,21 +285,12 @@ impl Synth {
     /// Start (or restart) a track in the lane. Re-playing the same
     /// `(sender, lane, namespace, path)` key drops the existing
     /// track first, so a key never stacks.
-    #[allow(clippy::too_many_arguments)]
-    pub fn start_track(
-        &mut self,
-        sender: Option<ErasedActorRef>,
-        lane: Option<String>,
-        namespace: String,
-        path: String,
-        pcm: Arc<[f32]>,
-        gain: f32,
-        looping: bool,
-    ) {
-        if let Some(i) = self.tracks.iter().position(|t| t.matches(sender, lane.as_ref(), &namespace, &path)) {
+    pub fn start_track(&mut self, track: TrackStart) {
+        let TrackStart { sender, lane, namespace, path, .. } = &track;
+        if let Some(i) = self.tracks.iter().position(|t| t.matches(*sender, lane.as_ref(), namespace, path)) {
             self.tracks.swap_remove(i);
         }
-        self.tracks.push(TrackVoice::new(sender, lane, namespace, path, pcm, gain, looping));
+        self.tracks.push(TrackVoice::new(track));
     }
 
     /// Arm the fade-out on the track at this key, if one is playing.

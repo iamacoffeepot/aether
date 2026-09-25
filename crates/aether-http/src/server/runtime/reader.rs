@@ -335,6 +335,18 @@ fn reject_and_close(stream: &mut TcpStream, sink: &WakeSink, conn_id: ConnId, st
     sink.post(InboundEvent::ReaderClosed { conn_id, reason: message.to_string() });
 }
 
+/// One connection's reader-thread inputs, built inside the reader thread
+/// closure so [`run_reader_loop`] borrows the state the closure owns.
+pub struct ReaderConnection<'a> {
+    pub read_half: TcpStream,
+    pub conn_id: ConnId,
+    pub shutdown: &'a AtomicBool,
+    pub sink: &'a WakeSink,
+    pub control_rx: &'a mpsc::Receiver<ReaderControl>,
+    pub tuning: ReaderTuning,
+    pub shared: &'a ReaderShared,
+}
+
 /// Per-connection reader thread body. An outer per-request loop reads one
 /// HTTP/1.1 request head and makes the request-path decision itself
 /// (ADR-0135 §2): it resolves the handler against the shared route
@@ -354,16 +366,9 @@ fn reject_and_close(stream: &mut TcpStream, sink: &WakeSink, conn_id: ConnId, st
 /// request's bytes start arriving the in-flight `request_timeout`
 /// (slow-loris) governs, and the handler-response deadline is the
 /// control wait.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub fn run_reader_loop(
-    read_half: TcpStream,
-    conn_id: ConnId,
-    shutdown: &AtomicBool,
-    sink: &WakeSink,
-    control_rx: &mpsc::Receiver<ReaderControl>,
-    tuning: ReaderTuning,
-    shared: &ReaderShared,
-) {
+#[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing allow the plan keeps; this change only removes the argument-count lint from the same attribute
+pub fn run_reader_loop(connection: ReaderConnection<'_>) {
+    let ReaderConnection { read_half, conn_id, shutdown, sink, control_rx, tuning, shared } = connection;
     let ReaderTuning { request_timeout, idle_timeout, max_header_bytes, max_request_bytes, .. } = tuning;
     let mut stream = read_half;
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
@@ -557,17 +562,18 @@ pub fn run_reader_loop(
                 return;
             };
             let leftover = buf[head.head_len..].to_vec();
-            match stream_request_body(
-                &mut stream,
+            let streamer = BodyStreamer {
+                stream: &mut stream,
                 conn_id,
                 shutdown,
                 sink,
                 control_rx,
-                head.framing,
-                leftover,
-                credit,
                 request_timeout,
-            ) {
+                credit,
+                work: leftover,
+                pos: 0,
+            };
+            match streamer.stream_body(head.framing) {
                 StreamOutcome::Complete { next_buf } => next_buf,
                 StreamOutcome::Closed => return,
             }
@@ -583,7 +589,7 @@ pub fn run_reader_loop(
                         peer_addr: shared.peer.clone(),
                     }
                     .encode_into_bytes();
-                    if !sink.post(InboundEvent::RequestParsed {
+                    if !sink.post(InboundEvent::RequestParsed(PreparedRequest {
                         conn_id,
                         payload,
                         handler,
@@ -591,7 +597,7 @@ pub fn run_reader_loop(
                         method,
                         keep_alive,
                         ws_key,
-                    }) {
+                    })) {
                         return;
                     }
                     next_buf
@@ -742,54 +748,6 @@ enum StreamOutcome {
     Closed,
 }
 
-/// Stream a request body to the dispatcher as credit-paced
-/// [`InboundEvent::RequestBodyChunk`] mails, then post
-/// [`InboundEvent::RequestBodyEnd`] (ADR-0128). A `Content-Length` body counts
-/// down; a `chunked` body is decoded frame by frame. The reader parks on the
-/// control channel when its send window is exhausted, so a fast peer backs up
-/// into TCP rather than growing the handler's inbox.
-#[allow(clippy::too_many_arguments)]
-fn stream_request_body(
-    stream: &mut TcpStream,
-    conn_id: ConnId,
-    shutdown: &AtomicBool,
-    sink: &WakeSink,
-    control_rx: &mpsc::Receiver<ReaderControl>,
-    framing: BodyFraming,
-    leftover: Vec<u8>,
-    initial_credit: u32,
-    request_timeout: Duration,
-) -> StreamOutcome {
-    let mut streamer = BodyStreamer {
-        stream,
-        conn_id,
-        shutdown,
-        sink,
-        control_rx,
-        request_timeout,
-        credit: initial_credit,
-        work: leftover,
-        pos: 0,
-    };
-    let result = match framing {
-        BodyFraming::Length(n) => streamer.stream_length_body(n),
-        BodyFraming::Chunked => streamer.stream_chunked_body(),
-        // The dispatcher never signals `Stream` for `Invalid` framing.
-        BodyFraming::Invalid => Err(()),
-    };
-    match result {
-        Ok(()) => {
-            let next_buf = streamer.work[streamer.pos..].to_vec();
-            if sink.post(InboundEvent::RequestBodyEnd { conn_id }) {
-                StreamOutcome::Complete { next_buf }
-            } else {
-                StreamOutcome::Closed
-            }
-        }
-        Err(()) => StreamOutcome::Closed,
-    }
-}
-
 /// The reader-side state for streaming one request body (ADR-0128): the socket,
 /// a working buffer with a cursor over unconsumed bytes, and the send-window
 /// credit shared with the dispatcher through the control channel. All methods
@@ -812,6 +770,32 @@ struct BodyStreamer<'a> {
 }
 
 impl BodyStreamer<'_> {
+    /// Stream a request body to the dispatcher as credit-paced
+    /// [`InboundEvent::RequestBodyChunk`] mails, then post
+    /// [`InboundEvent::RequestBodyEnd`] (ADR-0128). A `Content-Length` body
+    /// counts down; a `chunked` body is decoded frame by frame. The reader
+    /// parks on the control channel when its send window is exhausted, so a
+    /// fast peer backs up into TCP rather than growing the handler's inbox.
+    fn stream_body(mut self, framing: BodyFraming) -> StreamOutcome {
+        let result = match framing {
+            BodyFraming::Length(n) => self.stream_length_body(n),
+            BodyFraming::Chunked => self.stream_chunked_body(),
+            // The dispatcher never signals `Stream` for `Invalid` framing.
+            BodyFraming::Invalid => Err(()),
+        };
+        match result {
+            Ok(()) => {
+                let next_buf = self.work[self.pos..].to_vec();
+                if self.sink.post(InboundEvent::RequestBodyEnd { conn_id: self.conn_id }) {
+                    StreamOutcome::Complete { next_buf }
+                } else {
+                    StreamOutcome::Closed
+                }
+            }
+            Err(()) => StreamOutcome::Closed,
+        }
+    }
+
     /// Unconsumed byte count.
     fn avail(&self) -> usize {
         self.work.len() - self.pos

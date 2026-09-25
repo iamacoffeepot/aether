@@ -18,6 +18,21 @@ use super::sample::SampleBank;
 /// limitation (tight-burst percussion may drop notes under load).
 pub const EVENT_QUEUE_CAPACITY: usize = 1024;
 
+/// A track to start (or restart) in the dedicated mixer lane. `pcm`
+/// is already mono and resampled to the device rate, so the
+/// callback walks it by index. Keyed by `(sender, lane,
+/// namespace, path)` — re-sending the same key restarts the track.
+#[derive(Clone, Debug)]
+pub struct TrackStart {
+    pub sender: Option<ErasedActorRef>,
+    pub lane: Option<String>,
+    pub namespace: String,
+    pub path: String,
+    pub pcm: Arc<[f32]>,
+    pub gain: f32,
+    pub looping: bool,
+}
+
 /// Event a handler pushes into the audio callback's queue. The proven
 /// envelope `sender` key is baked in here (not re-derived on the callback
 /// side) so the callback stays branch-minimal. `None` is the key every
@@ -61,19 +76,8 @@ pub enum AudioEvent {
         sender: Option<ErasedActorRef>,
         gain: f32,
     },
-    /// Start (or restart) a track in the dedicated mixer lane. `pcm`
-    /// is already mono and resampled to the device rate, so the
-    /// callback walks it by index. Keyed by `(sender, lane,
-    /// namespace, path)` — re-sending the same key restarts the track.
-    TrackStart {
-        sender: Option<ErasedActorRef>,
-        lane: Option<String>,
-        namespace: String,
-        path: String,
-        pcm: Arc<[f32]>,
-        gain: f32,
-        looping: bool,
-    },
+    /// Start (or restart) a track in the dedicated mixer lane.
+    TrackStart(TrackStart),
     /// Fade out and retire the track at this key. A no-op if no track
     /// matches (matching `note_off`).
     TrackStop {

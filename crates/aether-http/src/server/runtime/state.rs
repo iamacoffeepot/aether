@@ -646,7 +646,15 @@ impl HttpShardState {
         // inbound mail in; no inbound chain to inherit, no settlement
         // umbrella.
         let thread = match self.wake.spawn_sidecar(format!("aether-http-reader-{conn_id}"), move || {
-            run_reader_loop(read_half, conn_id, &shutdown_for_thread, &sink, &control_rx, tuning, &shared);
+            run_reader_loop(ReaderConnection {
+                read_half,
+                conn_id,
+                shutdown: &shutdown_for_thread,
+                sink: &sink,
+                control_rx: &control_rx,
+                tuning,
+                shared: &shared,
+            });
         }) {
             Ok(thread) => thread,
             Err(e) => {
@@ -689,24 +697,14 @@ impl HttpShardState {
     /// the in-flight entry. A handler that died since the reader's
     /// check is caught by the settlement `502` net — the same net that
     /// covers the dispatch-to-delivery gap.
-    #[allow(clippy::too_many_arguments)]
-    pub fn dispatch_prepared<A: HandlesKind<Settled>>(
-        &mut self,
-        ctx: &mut NativeCtx<'_, A>,
-        conn_id: ConnId,
-        payload: &[u8],
-        handler: ErasedActorRef,
-        kind: KindId,
-        method: HttpMethod,
-        keep_alive: bool,
-        ws_key: Option<String>,
-    ) {
+    pub fn dispatch_prepared<A: HandlesKind<Settled>>(&mut self, ctx: &mut NativeCtx<'_, A>, request: PreparedRequest) {
+        let PreparedRequest { conn_id, payload, handler, kind, method, keep_alive, ws_key } = request;
         if ws_key.is_some()
             && let Some(conn) = self.connections.get_mut(&conn_id)
         {
             conn.ws_pending_key = ws_key;
         }
-        let Some(mail_id) = ctx.send_envelope_detached_to(handler, kind, payload) else {
+        let Some(mail_id) = ctx.send_envelope_detached_to(handler, kind, &payload) else {
             return;
         };
         // Safety net (ADR-0108 §5): if the chain settles with no
