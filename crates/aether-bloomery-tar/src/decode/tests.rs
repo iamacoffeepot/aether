@@ -6,7 +6,7 @@ use std::convert::Infallible;
 
 use aether_bloomery_kinds::{Name, NameError, Node, OpaqueBytes, Path, PathError, Ref, Tree};
 
-use super::{DecodeError, Refusal, decode};
+use super::{DecodeError, Limits, LimitsError, Refusal, Rules, decode};
 use crate::MAX_DEPTH;
 use crate::block::{BLOCK_BYTES, Header, padding_len, seal, typeflag};
 use crate::pax;
@@ -87,11 +87,50 @@ fn archive(parts: &[Vec<u8>]) -> Vec<u8> {
     bytes
 }
 
-fn refusal_of(bytes: &[u8]) -> (String, Refusal) {
-    match decode(bytes, &mut HashingSink) {
+/// Records every size claim `begin_blob` is handed, so a test can show
+/// which claims reached the sink.
+#[derive(Default)]
+struct ClaimLog {
+    claims: Vec<u64>,
+}
+
+impl TreeSink for ClaimLog {
+    type Error = Infallible;
+    type Blob<'a> = HashingBlob;
+
+    fn begin_blob(&mut self, len: u64) -> Result<HashingBlob, Infallible> {
+        self.claims.push(len);
+        Ok(HashingBlob(Vec::new()))
+    }
+
+    fn put_tree(&mut self, tree: &Tree) -> Result<Ref<Tree>, Infallible> {
+        Ok(Ref::of_encoded(tree).expect("a tree encodes"))
+    }
+}
+
+fn limits(entries: u32, bytes: u64) -> Limits {
+    Limits::new(entries, bytes).expect("non-zero limits")
+}
+
+/// Canonical rules whose limits no test archive approaches.
+fn canonical() -> Rules {
+    Rules::canonical(limits(u32::MAX, u64::MAX))
+}
+
+/// Userland rules whose limits no test archive approaches.
+fn userland() -> Rules {
+    Rules::userland(limits(u32::MAX, u64::MAX))
+}
+
+fn refusal_under(bytes: &[u8], rules: &Rules) -> (String, Refusal) {
+    match decode(bytes, &mut HashingSink, rules) {
         Err(DecodeError::Refused { entry, refusal }) => (entry, refusal),
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+fn refusal_of(bytes: &[u8]) -> (String, Refusal) {
+    refusal_under(bytes, &canonical())
 }
 
 fn name(value: &str) -> Name {
@@ -304,6 +343,168 @@ fn lenient_inputs_decode_to_their_canonical_tree() {
     ];
 
     for (case, bytes, expected) in cases {
-        assert_eq!(decode(bytes.as_slice(), &mut HashingSink).expect(case), expected, "{case}");
+        assert_eq!(decode(bytes.as_slice(), &mut HashingSink, &canonical()).expect(case), expected, "{case}");
     }
+}
+
+#[test]
+fn the_entry_limit_charges_implicit_parents_before_the_blob_streams() {
+    // Catches implicit parents created for free (one small entry with a deep
+    // path growing the arena a directory per segment), an off-by-one at the
+    // limit, a charge taken only after the file's bytes reached the sink, and
+    // an explicit directory charged again when it merges into an implicit one.
+    let hello = Ref::of_bytes(b"hello!");
+    let deep = archive(&[file("a/b/c/f", b"hello!")]);
+
+    let mut sink = ClaimLog::default();
+    let refused = decode(deep.as_slice(), &mut sink, &Rules::canonical(limits(3, u64::MAX)));
+    assert!(
+        matches!(&refused, Err(DecodeError::Refused { entry, refusal: Refusal::TooManyEntries }) if entry == "a/b/c/f"),
+        "{refused:?}"
+    );
+    assert_eq!(sink.claims, Vec::<u64>::new(), "the entry over the limit reached begin_blob");
+
+    let nested = tree(vec![(
+        "a",
+        Node::Directory(tree(vec![(
+            "b",
+            Node::Directory(tree(vec![("c", Node::Directory(tree(vec![("f", Node::File(hello))])))])),
+        )])),
+    )]);
+    assert_eq!(
+        decode(deep.as_slice(), &mut HashingSink, &Rules::canonical(limits(4, u64::MAX))).expect("fits"),
+        nested
+    );
+
+    let merged = archive(&[file("d/f", b"hello!"), directory("d/")]);
+    assert_eq!(
+        decode(merged.as_slice(), &mut HashingSink, &Rules::canonical(limits(2, u64::MAX))).expect("fits"),
+        tree(vec![("d", Node::Directory(tree(vec![("f", Node::File(hello))])))]),
+    );
+}
+
+#[test]
+fn the_byte_limit_refuses_a_claim_before_begin_blob() {
+    // Catches a byte budget checked after the sink was handed the claim, a
+    // budget that is not cumulative across files, and an off-by-one at the
+    // limit. The lone claim carries no content, so a missing check reads as
+    // Truncated rather than TooManyBytes.
+    /// One archive under a 10-byte limit: the entry refused for crossing
+    /// it, if any, and every claim the sink was handed.
+    struct Case {
+        label: &'static str,
+        archive: Vec<u8>,
+        refused: Option<&'static str>,
+        claims: Vec<u64>,
+    }
+
+    let rules = Rules::canonical(limits(u32::MAX, 10));
+    let cases = vec![
+        Case {
+            label: "one claim over the limit",
+            archive: header(b"big", typeflag::REGULAR, 11, "").to_vec(),
+            refused: Some("big"),
+            claims: vec![],
+        },
+        Case {
+            label: "the second file crosses it",
+            archive: archive(&[file("a", &[1; 6]), file("b", &[2; 5])]),
+            refused: Some("b"),
+            claims: vec![6],
+        },
+        Case {
+            label: "exactly the limit",
+            archive: archive(&[file("a", &[1; 6]), file("b", &[2; 4])]),
+            refused: None,
+            claims: vec![6, 4],
+        },
+    ];
+
+    for Case { label, archive, refused, claims } in cases {
+        let mut sink = ClaimLog::default();
+        let result = decode(archive.as_slice(), &mut sink, &rules);
+        match refused {
+            Some(expected) => assert!(
+                matches!(&result, Err(DecodeError::Refused { entry, refusal: Refusal::TooManyBytes }) if entry == expected),
+                "{label}: {result:?}"
+            ),
+            None => assert!(result.is_ok(), "{label}: {result:?}"),
+        }
+        assert_eq!(sink.claims, claims, "{label}");
+    }
+}
+
+#[test]
+fn userland_rewrites_absolute_link_targets_by_entry_depth() {
+    // Catches a rewrite that counts the entry's own name as a level, ignores
+    // the depth, or turns `/` into an empty or trailing-slash target.
+    let target = |value: &str| Node::Symlink(Path::new(value).expect("valid target"));
+    let cases: Vec<(&str, Vec<u8>, Ref<Tree>)> = vec![
+        ("depth 0", archive(&[link("l", typeflag::SYMLINK, "/etc/x")]), tree(vec![("l", target("etc/x"))])),
+        (
+            "depth 2",
+            archive(&[link("usr/bin/cc", typeflag::SYMLINK, "/etc/alternatives/cc")]),
+            tree(vec![(
+                "usr",
+                Node::Directory(tree(vec![(
+                    "bin",
+                    Node::Directory(tree(vec![("cc", target("../../etc/alternatives/cc"))])),
+                )])),
+            )]),
+        ),
+        (
+            "the root at depth 2",
+            archive(&[link("a/b/up", typeflag::SYMLINK, "/")]),
+            tree(vec![("a", Node::Directory(tree(vec![("b", Node::Directory(tree(vec![("up", target("../.."))])))])))]),
+        ),
+        ("the root at depth 0", archive(&[link("up", typeflag::SYMLINK, "/")]), tree(vec![("up", target("."))])),
+    ];
+
+    for (case, bytes, expected) in cases {
+        assert_eq!(decode(bytes.as_slice(), &mut HashingSink, &userland()).expect(case), expected, "{case}");
+    }
+}
+
+#[test]
+fn userland_drops_devices_under_dev_and_nowhere_else() {
+    // Catches a dropped device that still creates its parents, a block
+    // device not dropped, a `dev` prefix matched as a string (`devices/`),
+    // a device outside `dev/` or another special file dropped, a dropped
+    // device whose content would desynchronise the stream, and canonical
+    // rules that drop devices too.
+    let with_devices = archive(&[
+        directory("dev/"),
+        link("dev/null", b'3', ""),
+        link("dev/pts/0", b'3', ""),
+        link("dev/sda", b'4', ""),
+    ]);
+    assert_eq!(
+        decode(with_devices.as_slice(), &mut HashingSink, &userland()).expect("devices drop"),
+        tree(vec![("dev", Node::Directory(tree(vec![])))]),
+    );
+
+    let userland = userland();
+    for (case, bytes, entry, refusal) in [
+        ("device at the top", archive(&[link("tty", b'3', "")]), "tty", Refusal::UnsupportedType(b'3')),
+        ("device under devices/", archive(&[link("devices/x", b'4', "")]), "devices/x", Refusal::UnsupportedType(b'4')),
+        ("fifo under dev/", archive(&[link("dev/fifo", b'6', "")]), "dev/fifo", Refusal::UnsupportedType(b'6')),
+        (
+            "device with content",
+            archive(&[record(&header(b"dev/null", b'3', 1, ""), b"x")]),
+            "dev/null",
+            Refusal::HeaderOnlyContent,
+        ),
+    ] {
+        assert_eq!(refusal_under(&bytes, &userland), (entry.to_owned(), refusal), "{case}");
+    }
+
+    assert_eq!(refusal_of(&with_devices), ("dev/null".to_owned(), Refusal::UnsupportedType(b'3')), "canonical");
+}
+
+#[test]
+fn limits_refuse_a_zero_budget() {
+    // Catches a zero budget accepted, which would refuse every archive with
+    // an entry or a byte of content.
+    assert_eq!(Limits::new(0, 1), Err(LimitsError::ZeroEntries));
+    assert_eq!(Limits::new(1, 0), Err(LimitsError::ZeroBytes));
 }

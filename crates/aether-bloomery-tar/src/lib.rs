@@ -30,6 +30,13 @@
 //!
 //! # Decoding
 //!
+//! Every [`decode()`] call runs under one of two [`Rules`]:
+//! [`Rules::canonical`] for archives a run produced, and [`Rules::userland`]
+//! for an imported userland. Both carry [`Limits`] that bound the decoder's
+//! memory by an entry budget and the content it hands the sink by a byte
+//! budget. The table gives the canonical result; the userland rules differ
+//! only where a row says so.
+//!
 //! Accepted formats are POSIX ustar (prefix applied), GNU `ustar  \0` (prefix
 //! ignored), PAX `x` records, and GNU `L` / `K` long names. PAX wins over GNU
 //! `L` / `K`, which win over the header fields. The checksum may be the signed
@@ -40,8 +47,10 @@
 //! | `0` or NUL | File, or Executable when `mode & 0o100`. |
 //! | `5` | Directory. |
 //! | `2` | Symlink, the target checked by [`Path::new`](aether_bloomery_kinds::Path::new). |
+//! | `2` with an absolute target `/rest` | [`Refusal::LinkTarget`]. Userland: rewritten to `..` once per parent segment of the entry, then `rest` (`.` for `/` at the root), then checked. |
 //! | `1` | A copy of an earlier File or Executable entry's node. |
-//! | `5`, `2`, or `1` with a non-zero size | [`Refusal::HeaderOnlyContent`] |
+//! | `5`, `2`, `1`, or a device userland drops, with a non-zero size | [`Refusal::HeaderOnlyContent`] |
+//! | `3` or `4` (device) | [`Refusal::UnsupportedType`]. Userland: dropped when its path is under `dev/`, creating no parent. |
 //! | Any other typeflag | [`Refusal::UnsupportedType`] |
 //! | PAX `GNU.sparse.*` | [`Refusal::Sparse`] |
 //! | Other PAX keys | Ignored. |
@@ -50,6 +59,8 @@
 //! | The same path twice | [`Refusal::Duplicate`], except an explicit directory over an implicit one. |
 //! | An entry under a file or symlink | [`Refusal::ParentNotDirectory`] |
 //! | More than [`MAX_DEPTH`] segments | [`Refusal::TooDeep`] |
+//! | An entry, or a missing parent it creates, past the entry limit | [`Refusal::TooManyEntries`] |
+//! | A file whose claimed size exceeds what the byte limit has left | [`Refusal::TooManyBytes`], before the sink is asked for a blob. |
 //! | Extended header over 1 MiB, repeated, or not followed by an entry | Refused. |
 //! | EOF before an all-zero header block | [`Refusal::Truncated`]. Nothing after the first zero block is read. |
 //! | Owner, group, times, mode bits other than owner-exec, xattrs | Dropped. |
@@ -65,7 +76,7 @@ mod encode;
 mod pax;
 mod store;
 
-pub use decode::{DecodeError, Refusal, decode};
+pub use decode::{DecodeError, Limits, LimitsError, Refusal, Rules, decode};
 pub use encode::{EncodeError, encode};
 pub use store::{BlobWriter, SourceBlob, TreeSink, TreeSource};
 

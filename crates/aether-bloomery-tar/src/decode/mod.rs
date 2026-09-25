@@ -2,6 +2,7 @@
 
 mod entry;
 mod refusal;
+mod rules;
 mod skeleton;
 
 use std::error::Error;
@@ -12,6 +13,7 @@ use std::mem;
 use aether_bloomery_kinds::{Node, OpaqueBytes, Ref, Tree};
 
 pub use refusal::Refusal;
+pub use rules::{Limits, LimitsError, Rules};
 
 use crate::block::{self, BLOCK_BYTES, RawHeader, chunk_len, padding_len, typeflag};
 use crate::pax::{self, Records};
@@ -58,19 +60,21 @@ impl<E: Error + 'static> Error for DecodeError<E> {
     }
 }
 
-/// Read a tar stream from `input` into trees and blobs stored through `sink`,
-/// and return the root tree's reference.
+/// Read a tar stream from `input` into trees and blobs stored through `sink`
+/// under `rules`, and return the root tree's reference.
 ///
 /// A file's bytes stream through one copy buffer into the sink; the only
-/// state kept across entries is a name and a reference per entry. Nothing
-/// after the first all-zero header block is read.
+/// state kept across entries is a name and a reference per entry, at most
+/// as many as the rules' entry limit. Nothing after the first all-zero header
+/// block is read.
 ///
 /// # Errors
 ///
 /// [`DecodeError`] names the failing read, sink call, or refused entry.
-pub fn decode<K: TreeSink, R: Read>(input: R, sink: &mut K) -> Result<Ref<Tree>, DecodeError<K::Error>> {
+pub fn decode<K: TreeSink, R: Read>(input: R, sink: &mut K, rules: &Rules) -> Result<Ref<Tree>, DecodeError<K::Error>> {
     let mut reader = Reader { input, buffer: vec![0; COPY_BUFFER_BYTES] };
-    let mut skeleton = Skeleton::new();
+    let mut placer =
+        Placer { skeleton: Skeleton::new(rules.limits().entries()), bytes_left: rules.limits().bytes(), rules };
     let mut extended = Extended::default();
     let mut block = [0; BLOCK_BYTES];
 
@@ -99,14 +103,14 @@ pub fn decode<K: TreeSink, R: Read>(input: R, sink: &mut K) -> Result<Ref<Tree>,
                 once(slot, value).map_err(|refusal| refused(&header.name, refusal))?;
                 extended.header_name = header.name;
             }
-            _ => place(&mut reader, &mut skeleton, sink, header, extended.take())?,
+            _ => placer.place(&mut reader, sink, header, extended.take())?,
         }
     }
 
     if !extended.is_empty() {
         return Err(refused(&extended.header_name, Refusal::ExtendedDangling));
     }
-    skeleton.finish(sink)
+    placer.skeleton.finish(sink)
 }
 
 /// The extended headers collected for the next entry: at most one of each.
@@ -137,57 +141,77 @@ fn once<T>(slot: &mut Option<T>, value: T) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Apply the extended headers to one entry header and place the entry in
-/// the skeleton, streaming a file's bytes to the sink.
-fn place<K: TreeSink, R: Read>(
-    reader: &mut Reader<R>,
-    skeleton: &mut Skeleton,
-    sink: &mut K,
-    header: RawHeader,
-    extended: Extended,
-) -> Result<(), DecodeError<K::Error>> {
-    let pax = extended.pax.unwrap_or_default();
-    let path = pax.path.or(extended.long_name).unwrap_or_else(|| header.path());
-    let link = pax.linkpath.or(extended.long_link).unwrap_or(header.linkname);
-    let size = pax.size.unwrap_or(header.size);
-    let name = String::from_utf8_lossy(&path).into_owned();
-    let refuse = |refusal| DecodeError::Refused { entry: name.clone(), refusal };
+/// Everything decode keeps across entries apart from the input: the
+/// directory arena, which holds the entry budget, and the byte budget.
+struct Placer<'r> {
+    skeleton: Skeleton,
+    /// How many more content bytes the byte limit allows.
+    bytes_left: u64,
+    rules: &'r Rules,
+}
 
-    let kind = entry::classify(header.typeflag, header.mode).map_err(refuse)?;
-    match (entry::normalize(&path).map_err(refuse)?, kind) {
-        (Target::Root, EntryKind::Directory) if size == 0 => Ok(()),
-        (_, EntryKind::Directory | EntryKind::Symlink | EntryKind::Hardlink) if size != 0 => {
-            Err(refuse(Refusal::HeaderOnlyContent))
-        }
-        (Target::Root, _) => Err(refuse(Refusal::RootNotDirectory)),
-        (Target::Entry(path), EntryKind::Directory) => skeleton.directory(&path).map_err(refuse),
-        (Target::Entry(path), EntryKind::Regular { executable }) => {
-            let vacancy = skeleton.vacancy(&path).map_err(refuse)?;
-            let blob = reader.blob(size, sink, &name)?;
-            skeleton.fill(
-                vacancy,
-                if executable {
-                    Node::Executable(blob)
+impl Placer<'_> {
+    /// Apply the extended headers to one entry header and place the entry in
+    /// the skeleton, streaming a file's bytes to the sink.
+    fn place<K: TreeSink, R: Read>(
+        &mut self,
+        reader: &mut Reader<R>,
+        sink: &mut K,
+        header: RawHeader,
+        extended: Extended,
+    ) -> Result<(), DecodeError<K::Error>> {
+        let pax = extended.pax.unwrap_or_default();
+        let path = pax.path.or(extended.long_name).unwrap_or_else(|| header.path());
+        let link = pax.linkpath.or(extended.long_link).unwrap_or(header.linkname);
+        let size = pax.size.unwrap_or(header.size);
+        let name = String::from_utf8_lossy(&path).into_owned();
+        let refuse = |refusal| DecodeError::Refused { entry: name.clone(), refusal };
+
+        let kind = entry::classify(header.typeflag, header.mode, self.rules).map_err(refuse)?;
+        match (entry::normalize(&path).map_err(refuse)?, kind) {
+            (Target::Entry(path), EntryKind::Device { .. }) if path.in_dev() => {
+                if size == 0 {
+                    Ok(())
                 } else {
-                    Node::File(blob)
-                },
-            );
-            Ok(())
-        }
-        (Target::Entry(path), EntryKind::Symlink) => {
-            let target = entry::link_target(&link).map_err(refuse)?;
-            let vacancy = skeleton.vacancy(&path).map_err(refuse)?;
-            skeleton.fill(vacancy, Node::Symlink(target));
-            Ok(())
-        }
-        (Target::Entry(path), EntryKind::Hardlink) => {
-            let Ok(Target::Entry(target)) = entry::normalize(&link) else {
-                return Err(refuse(Refusal::HardlinkTarget));
-            };
-            let node = skeleton.hardlink(&target).map_err(refuse)?;
-            let vacancy = skeleton.vacancy(&path).map_err(refuse)?;
-            skeleton.fill(vacancy, node);
-            Ok(())
+                    Err(refuse(Refusal::HeaderOnlyContent))
+                }
+            }
+            (_, EntryKind::Device { flag }) => Err(refuse(Refusal::UnsupportedType(flag))),
+            (Target::Root, EntryKind::Directory) if size == 0 => Ok(()),
+            (_, EntryKind::Directory | EntryKind::Symlink | EntryKind::Hardlink) if size != 0 => {
+                Err(refuse(Refusal::HeaderOnlyContent))
+            }
+            (Target::Root, _) => Err(refuse(Refusal::RootNotDirectory)),
+            (Target::Entry(path), EntryKind::Directory) => self.skeleton.directory(&path).map_err(refuse),
+            (Target::Entry(path), EntryKind::Regular { executable }) => {
+                let vacancy = self.skeleton.vacancy(&path).map_err(refuse)?;
+                self.bytes_left = self.bytes_left.checked_sub(size).ok_or_else(|| refuse(Refusal::TooManyBytes))?;
+                let blob = reader.blob(size, sink, &name)?;
+                self.skeleton.fill(
+                    vacancy,
+                    if executable {
+                        Node::Executable(blob)
+                    } else {
+                        Node::File(blob)
+                    },
+                );
+                Ok(())
+            }
+            (Target::Entry(path), EntryKind::Symlink) => {
+                let target = entry::link_target(&link, &path, self.rules).map_err(refuse)?;
+                let vacancy = self.skeleton.vacancy(&path).map_err(refuse)?;
+                self.skeleton.fill(vacancy, Node::Symlink(target));
+                Ok(())
+            }
+            (Target::Entry(path), EntryKind::Hardlink) => {
+                let Ok(Target::Entry(target)) = entry::normalize(&link) else {
+                    return Err(refuse(Refusal::HardlinkTarget));
+                };
+                let node = self.skeleton.hardlink(&target).map_err(refuse)?;
+                let vacancy = self.skeleton.vacancy(&path).map_err(refuse)?;
+                self.skeleton.fill(vacancy, node);
+                Ok(())
+            }
         }
     }
 }

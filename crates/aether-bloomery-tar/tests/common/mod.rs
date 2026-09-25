@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use aether_bloomery_kinds::{Name, Node, OpaqueBytes, Ref, Tree};
-use aether_bloomery_tar::{BlobWriter, SourceBlob, TreeSink, TreeSource, decode};
+use aether_bloomery_tar::{BlobWriter, Limits, Rules, SourceBlob, TreeSink, TreeSource, decode};
 
 /// Blobs and trees keyed by digest, the way a journal keys them.
 #[derive(Default)]
@@ -29,9 +29,11 @@ impl MemoryStore {
         self.put_tree(&Tree::new(entries)).expect("a tree encodes")
     }
 
-    /// Decode `bytes` into this store.
+    /// Decode `bytes` into this store under canonical rules whose limits no
+    /// fixture approaches.
     pub fn decode(&mut self, bytes: &[u8]) -> Ref<Tree> {
-        decode(bytes, self).expect("the archive decodes")
+        let rules = Rules::canonical(Limits::new(u32::MAX, u64::MAX).expect("non-zero limits"));
+        decode(bytes, self, &rules).expect("the archive decodes")
     }
 }
 

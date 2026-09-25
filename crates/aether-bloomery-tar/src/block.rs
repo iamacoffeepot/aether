@@ -34,6 +34,8 @@ pub mod typeflag {
     pub const REGULAR_OLD: u8 = 0;
     pub const HARDLINK: u8 = b'1';
     pub const SYMLINK: u8 = b'2';
+    pub const CHAR_DEVICE: u8 = b'3';
+    pub const BLOCK_DEVICE: u8 = b'4';
     pub const DIRECTORY: u8 = b'5';
     pub const PAX: u8 = b'x';
     pub const GNU_LONG_NAME: u8 = b'L';
