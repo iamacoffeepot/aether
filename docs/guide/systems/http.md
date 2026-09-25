@@ -161,10 +161,10 @@ it warn-drops like any unaddressed name.
 ### Where this page's authority ends: parallel egress paths
 
 `aether.http` is the general-purpose egress mailbox, and the `AETHER_HTTP_*`
-knobs gate it. The `aether.anthropic` provider component owns no HTTP client of
-its own: its Messages backend mails `aether.http.fetch` (ADR-0159), so this
-page's allowlist, body cap, timeout, and secret bindings govern it — its API key
-is an `--http-secrets` binding here, never component config. Network reach by
+knobs gate it. A provider component owns no HTTP client of its own: it mails
+`aether.http.fetch` (ADR-0159), so this page's allowlist, body cap, timeout, and
+secret bindings govern it — its API key is an `--http-secrets` binding here,
+never component config. Network reach by
 other routes — a subprocess run through `aether.process`, the RPC links between
 the hub and its engines — is outside this page; a deployer locking down egress
 reckons with that configuration separately. Content generation is a subject of its own

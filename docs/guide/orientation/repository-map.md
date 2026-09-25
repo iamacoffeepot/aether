@@ -59,7 +59,6 @@ compares these with native capabilities.
 | `aether-process` | deny-by-default, allowlisted one-shot subprocess execution and captured typed replies (Accepted ADR-0157) |
 | `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
 | `aether-fleet` | hub fleet supervision and the content-addressed artifact store |
-| `aether-anthropic` | the content-gen provider component (loaded on demand, not a chassis fixture), a self-contained guest carrying its own pure DTO/string helpers |
 | `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, boot-manifest and package-depot formats |
 | `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` / `aether-chassis-bloomery` | the five checked-in chassis binaries |
 | `aether-substrate-harness-cap` | the `aether.substrate_harness` mailbox: the harness-chassis drive and the fail-fast stub every other chassis composes |
