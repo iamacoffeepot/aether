@@ -202,7 +202,7 @@ impl BufferBuilder {
 /// The geometry, materials, and morph deltas are derived only from the
 /// deterministic equations in this crate. No external asset bytes are read.
 pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
-    let head = head_mesh(48, 64);
+    let head = head_mesh(64, 64);
     let eye = sphere_mesh(18, 24);
     let disc = disc_mesh(48);
     let brow = brow_mesh(24);
@@ -242,7 +242,7 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             "generator": "Aether AI parametric character generator 0.1"
         },
         "scene": 0,
-        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] }],
+        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] }],
         "nodes": [
             { "name": "Head", "mesh": 0 },
             { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.590], "scale": [0.115, 0.055, 0.085] },
@@ -258,9 +258,7 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             { "name": "UpperLid.Left", "mesh": 6, "translation": [-0.255, 0.247, 0.681], "scale": [0.122, 0.105, 0.02] },
             { "name": "UpperLid.Right", "mesh": 6, "translation": [0.255, 0.247, 0.681], "scale": [0.122, 0.105, 0.02] },
             { "name": "Neck", "mesh": 4, "translation": [0.0, -0.86, -0.14], "scale": [0.29, 0.40, 0.27] },
-            { "name": "MouthOpening", "mesh": 7, "translation": [0.0, -0.252, 0.665], "scale": [0.165, 0.018, 0.02] },
-            { "name": "Nostril.Left", "mesh": 3, "translation": [-0.065, -0.055, 0.850], "scale": [0.016, 0.008, 0.01] },
-            { "name": "Nostril.Right", "mesh": 3, "translation": [0.065, -0.055, 0.850], "scale": [0.016, 0.008, 0.01] }
+            { "name": "MouthOpening", "mesh": 7, "translation": [0.0, -0.252, 0.665], "scale": [0.165, 0.018, 0.02] }
         ],
         "materials": [
             material("Skin", [0.55, 0.28, 0.18, 1.0], 0.82),
@@ -560,6 +558,10 @@ fn head_sdf(point: Vec3) -> f32 {
     for x in [-0.085, 0.085] {
         shape =
             smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.08, 0.69), Vec3::new(0.065, 0.055, 0.075)), 0.028);
+    }
+    for x in [-0.070, 0.070] {
+        let nostril = ellipsoid_sdf(point, Vec3::new(x, -0.125, 0.770), Vec3::new(0.025, 0.016, 0.035));
+        shape = smooth_maximum(shape, -nostril, 0.006);
     }
 
     for x in [-0.255, 0.255] {

@@ -4,7 +4,7 @@ use serde_json::Value;
 #[test]
 fn generated_head_is_a_self_contained_glb_with_named_morphs() {
     let glb = generate_head_glb().expect("head document should serialize");
-    assert!(glb.len() < 6_000_000, "generated GLB should keep welded geometry compact");
+    assert!(glb.len() < 10_000_000, "generated GLB should keep welded geometry compact");
     assert_eq!(&glb[..4], b"glTF");
     assert_eq!(u32::from_le_bytes(glb[4..8].try_into().expect("version bytes")), 2);
     assert_eq!(u32::from_le_bytes(glb[8..12].try_into().expect("length bytes")) as usize, glb.len());
@@ -16,7 +16,7 @@ fn generated_head_is_a_self_contained_glb_with_named_morphs() {
     assert_eq!(document["asset"]["version"], "2.0");
     assert_eq!(document["buffers"][0]["uri"], Value::Null);
     assert_eq!(document["scenes"].as_array().expect("scenes array").len(), 1);
-    assert_eq!(document["nodes"].as_array().expect("nodes array").len(), 17);
+    assert_eq!(document["nodes"].as_array().expect("nodes array").len(), 15);
     assert_eq!(document["meshes"].as_array().expect("meshes array").len(), 8);
     assert_eq!(document["images"], Value::Null);
 

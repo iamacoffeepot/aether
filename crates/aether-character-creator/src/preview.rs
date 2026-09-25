@@ -142,7 +142,7 @@ impl Canvas {
 pub fn render_head_preview_png(width: u32, height: u32) -> Result<Vec<u8>, png::EncodingError> {
     let mut canvas = Canvas::new(width as usize, height as usize);
     let yaw = -0.045;
-    canvas.draw_mesh(&head_mesh(48, 64), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
+    canvas.draw_mesh(&head_mesh(64, 64), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
 
     let eye = sphere_mesh(18, 24);
     for x in [-0.255, 0.255] {
@@ -168,9 +168,6 @@ pub fn render_head_preview_png(width: u32, height: u32) -> Result<Vec<u8>, png::
     }
 
     canvas.draw_mesh(&disc, Vec3::new(0.0, -0.252, 0.665), Vec3::new(0.165, 0.018, 0.02), [56, 18, 17], yaw);
-    for x in [-0.065, 0.065] {
-        canvas.draw_mesh(&disc, Vec3::new(x, -0.055, 0.850), Vec3::new(0.016, 0.008, 0.01), PUPIL, yaw);
-    }
 
     let mut png = Vec::new();
     {
