@@ -27,10 +27,11 @@ const JSON_CHUNK: u32 = 0x4e4f_534a;
 const BIN_CHUNK: u32 = 0x004e_4942;
 
 /// Stable facial controls authored into `mesh.extras.targetNames`.
-pub const MORPH_TARGETS: [&str; 11] = [
+pub const MORPH_TARGETS: [&str; 12] = [
     "JawWidth",
     "JawLength",
     "CheekVolume",
+    "CheekboneWidth",
     "NoseWidth",
     "NoseLength",
     "EyeSize",
@@ -872,15 +873,15 @@ fn head_mass_sdf(point: Vec3) -> f32 {
     for x in [-0.28, 0.28] {
         shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.35, 0.22), Vec3::new(0.15, 0.26, 0.20)), 0.09);
     }
-    for x in [-0.33, 0.33] {
-        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.01, 0.46), Vec3::new(0.22, 0.15, 0.13)), 0.14);
+    for x in [-0.31, 0.31] {
+        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.01, 0.46), Vec3::new(0.20, 0.15, 0.13)), 0.14);
     }
     for side in [-1.0, 1.0] {
         let brow_ridge =
-            capsule_sdf(point, Vec3::new(side * 0.11, 0.35, 0.48), Vec3::new(side * 0.34, 0.30, 0.465), 0.085);
+            capsule_sdf(point, Vec3::new(side * 0.11, 0.35, 0.48), Vec3::new(side * 0.33, 0.30, 0.465), 0.085);
         shape = smooth_union(shape, brow_ridge, 0.09);
         let lateral_orbital_rim =
-            capsule_sdf(point, Vec3::new(side * 0.32, 0.30, 0.46), Vec3::new(side * 0.42, 0.04, 0.455), 0.10);
+            capsule_sdf(point, Vec3::new(side * 0.31, 0.30, 0.46), Vec3::new(side * 0.40, 0.04, 0.455), 0.10);
         shape = smooth_union(shape, lateral_orbital_rim, 0.10);
     }
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.10, 0.61), Vec3::new(0.085, 0.23, 0.16)), 0.05);
@@ -977,11 +978,18 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                     let upper_fade = ((0.20 - position.y) / 0.22).clamp(0.0, 1.0);
                     let upper_fade = upper_fade * upper_fade * (3.0 - 2.0 * upper_fade);
                     let mid_face = upper_fade * ((position.y + 0.34) / 0.24).clamp(0.0, 1.0);
-                    let cheeks = gaussian(position.x, position.y, -0.37, -0.08, 0.24, 0.18)
-                        + gaussian(position.x, position.y, 0.37, -0.08, 0.24, 0.18);
-                    let weight = front * mid_face * cheeks;
+                    let lateral = ((position.x.abs() - 0.16) / 0.14).clamp(0.0, 1.0);
+                    let cheeks = gaussian(position.x, position.y, -0.35, -0.08, 0.19, 0.18)
+                        + gaussian(position.x, position.y, 0.35, -0.08, 0.19, 0.18);
+                    let weight = front * mid_face * lateral * cheeks;
                     let normal = head_normal(position);
                     Vec3::new(normal.x * 0.045, normal.y * 0.035, normal.z * 0.060) * weight
+                }
+                "CheekboneWidth" => {
+                    let lateral = ((position.x.abs() - 0.18) / 0.18).clamp(0.0, 1.0);
+                    let cheekbones = gaussian(position.x, position.y, -0.35, 0.02, 0.20, 0.23)
+                        + gaussian(position.x, position.y, 0.35, 0.02, 0.20, 0.23);
+                    Vec3::new(position.x.signum() * 0.075 * front * lateral * cheekbones, 0.0, 0.0)
                 }
                 "NoseWidth" => {
                     let weight = front * gaussian(position.x, position.y, 0.0, 0.02, 0.19, 0.19);
@@ -1053,7 +1061,9 @@ mod tests {
                 for (position, delta) in mesh.positions.iter().zip(&deltas) {
                     let deformed = *position + *delta * amount;
                     assert!(deformed.x.is_finite() && deformed.y.is_finite() && deformed.z.is_finite(), "{name}");
-                    if matches!(name, "JawWidth" | "CheekVolume" | "NoseWidth") && position.x.abs() > 0.000_1 {
+                    if matches!(name, "JawWidth" | "CheekVolume" | "CheekboneWidth" | "NoseWidth")
+                        && position.x.abs() > 0.000_1
+                    {
                         assert_eq!(
                             position.x.is_sign_positive(),
                             deformed.x.is_sign_positive(),
@@ -1062,6 +1072,9 @@ mod tests {
                     }
                     if name == "CheekVolume" && position.y >= 0.20 {
                         assert!(delta.length() < 0.000_1, "cheek morph leaked into the orbital region");
+                    }
+                    if name == "CheekVolume" && position.x.abs() <= 0.16 {
+                        assert!(delta.length() < 0.000_1, "cheek morph leaked into the nose");
                     }
                 }
             }

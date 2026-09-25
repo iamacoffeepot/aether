@@ -23,10 +23,11 @@ in vec3 aTarget7;
 in vec3 aTarget8;
 in vec3 aTarget9;
 in vec3 aTarget10;
+in vec3 aTarget11;
 uniform mat4 uViewProjection;
 uniform mat4 uModel;
 uniform mat3 uNormal;
-uniform float uWeights[11];
+uniform float uWeights[12];
 out vec3 vNormal;
 out vec3 vWorldPosition;
 void main() {
@@ -41,7 +42,8 @@ void main() {
     + aTarget7 * uWeights[7]
     + aTarget8 * uWeights[8]
     + aTarget9 * uWeights[9]
-    + aTarget10 * uWeights[10];
+    + aTarget10 * uWeights[10]
+    + aTarget11 * uWeights[11];
   vec4 world = uModel * vec4(position, 1.0);
   vWorldPosition = world.xyz;
   vNormal = normalize(uNormal * aNormal);
@@ -76,7 +78,7 @@ const program = createProgram(vertexSource, fragmentSource);
 const locations = {
   position: gl.getAttribLocation(program, "aPosition"),
   normal: gl.getAttribLocation(program, "aNormal"),
-  targets: Array.from({ length: 11 }, (_, index) => gl.getAttribLocation(program, `aTarget${index}`)),
+  targets: Array.from({ length: 12 }, (_, index) => gl.getAttribLocation(program, `aTarget${index}`)),
   viewProjection: gl.getUniformLocation(program, "uViewProjection"),
   model: gl.getUniformLocation(program, "uModel"),
   normalMatrix: gl.getUniformLocation(program, "uNormal"),
@@ -88,7 +90,7 @@ const locations = {
 
 let scene;
 let morphNames = [];
-let weights = new Float32Array(11);
+let weights = new Float32Array(12);
 let yaw = 0;
 let pitch = 0.02;
 let distance = 3.45;
@@ -134,7 +136,7 @@ function createScene(arrayBuffer) {
     }));
   return {
     nodes,
-    morphNames: meshes.flatMap((mesh) => mesh.targetNames).slice(0, 11),
+    morphNames: meshes.flatMap((mesh) => mesh.targetNames).slice(0, 12),
     triangleCount: meshes.reduce(
       (total, mesh) => total + mesh.primitives.reduce((sum, primitive) => sum + primitive.count / 3, 0),
       0,
@@ -198,6 +200,7 @@ function createControls() {
     JawWidth: "Jaw width",
     JawLength: "Jaw length",
     CheekVolume: "Cheek volume",
+    CheekboneWidth: "Cheekbone width",
     NoseWidth: "Nose width",
     NoseLength: "Nose length",
     EyeSize: "Eye size",
@@ -251,7 +254,7 @@ function bindInterface() {
       document.querySelectorAll("[data-view]").forEach((candidate) => candidate.classList.toggle("active", candidate === button));
     });
   });
-  document.querySelector("#reset").addEventListener("click", () => setWeights(new Array(11).fill(0)));
+  document.querySelector("#reset").addEventListener("click", () => setWeights(new Array(12).fill(0)));
   document.querySelector("#randomize").addEventListener("click", () => {
     setWeights(morphNames.map(() => (Math.random() * 1.3) - 0.65));
   });
@@ -261,7 +264,7 @@ function bindInterface() {
 
 function setWeights(values) {
   const inputs = controls.querySelectorAll("input");
-  values.slice(0, 11).forEach((value, index) => {
+  values.slice(0, 12).forEach((value, index) => {
     weights[index] = clamp(Number(value) || 0, -1, 1);
     inputs[index].value = weights[index];
     updateControl(inputs[index].closest(".morph-control"), weights[index]);
