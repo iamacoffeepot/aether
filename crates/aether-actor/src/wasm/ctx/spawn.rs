@@ -11,11 +11,10 @@ use crate::model::ctx::reply_mode::{Manual, ReplyMode};
 use crate::model::{Addressable, ChildOf, Instanced, NamespaceError, Subname, validate_namespace_segment};
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
-use crate::wasm::inline::Registry;
+use crate::wasm::inline::{ChildRecord, Registry};
 use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, Spawns, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::vec::Vec;
 
 /// A runtime selector for one of a module's `export!`ed actor types — the
 /// `hash(NAMESPACE)` folded id [`WasmCtx::spawn_inline_child_by_tag`]
@@ -245,8 +244,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         let type_tag = ActorTypeTag::of::<C>().0;
         // The executing actor is both the scoped host fold seed and the
         // logical parent recorded for relative addressing and reconstruction.
-        install_inline_child::<C>(self.inline, alias, type_tag, full_subname, is_counter, self.mailbox, bytes, owned)
-            .map(InlineChild::new)
+        let record = ChildRecord { type_tag, full_subname, is_counter, parent: self.mailbox, config_bytes: bytes };
+        install_inline_child::<C>(self.inline, alias, record, owned).map(InlineChild::new)
     }
 
     /// The actor type this ctx is executing, per the registry — the logical
@@ -437,18 +436,10 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
 /// `replace_component` reconstruct path (`reconstruct_one_child`) has its
 /// own insert and runs `init` + `on_rehydrate`, not `wire`, so a reload
 /// never fires `wire`.
-// The parameters are the slot's reconstruct record (ADR-0114 §5) plus the
-// decoded config — a fixed set with no meaningful grouping short of a
-// one-use struct.
-#[allow(clippy::too_many_arguments)]
 pub fn install_inline_child<A>(
     registry: &Registry,
     alias: MailboxId,
-    type_tag: u64,
-    full_subname: String,
-    is_counter: bool,
-    parent: u64,
-    config_bytes: Vec<u8>,
+    record: ChildRecord,
     config: A::Config,
 ) -> Result<MailboxId, SpawnError>
 where
@@ -462,7 +453,7 @@ where
     // (empty params for now), mirroring the `()`-config round-trip.
     let params = <A::Params as Default>::default();
     let child = A::init(config, params, &mut ctx).map_err(SpawnError::InitFailed)?;
-    registry.insert_child(alias, type_tag, full_subname, is_counter, parent, config_bytes, Box::new(child));
+    registry.insert_child(alias, record, Box::new(child));
     // Run the fresh child's `wire` (issue 2746). Take it back onto the stack
     // so its slot is empty for the duration — a `wire` that spawns a nested
     // inline child then re-enters the registry (a different slot) with no

@@ -5,9 +5,8 @@ use super::{NO_INBOUND_SOURCE, Registry, WasmCtx, recording_target};
 use crate::model::ctx::{Erased, Manual};
 use crate::model::{Addressable, Embedded, HandlesKind};
 use crate::reference::{ActorRef, ErasedActorRef};
-use crate::wasm::inline::drain_cluster_queue;
+use crate::wasm::inline::{ChildRecord, drain_cluster_queue};
 use alloc::string::String;
-use alloc::vec::Vec;
 
 struct SendsPeer;
 
@@ -36,7 +35,11 @@ fn sends_view_routes_and_stamps_like_the_ctx_it_came_from() {
 
     let target_id = MailboxId(0x7401);
     let probe = recording_target();
-    registry.insert_child(target_id, 0, String::from("test.wasm.sends_child"), false, root.0, Vec::new(), probe.actor);
+    registry.insert_child(
+        target_id,
+        ChildRecord { full_subname: String::from("test.wasm.sends_child"), parent: root.0, ..ChildRecord::default() },
+        probe.actor,
+    );
     let target = ErasedActorRef::new(target_id);
 
     let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
@@ -78,7 +81,11 @@ fn send_to_sends_through_a_proven_reference_on_ctx_and_view() {
 
     let target = MailboxId(0x7301);
     let probe = recording_target();
-    registry.insert_child(target, 0, String::from("test.wasm.sends_child"), false, root.0, Vec::new(), probe.actor);
+    registry.insert_child(
+        target,
+        ChildRecord { full_subname: String::from("test.wasm.sends_child"), parent: root.0, ..ChildRecord::default() },
+        probe.actor,
+    );
 
     let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
     let reference = ActorRef::<SendsPeer>::new(target);

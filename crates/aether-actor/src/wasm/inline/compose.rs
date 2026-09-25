@@ -27,8 +27,8 @@ use aether_data::{Kind, MailboxId};
 
 use crate::mail::PriorState;
 use crate::wasm::ctx::{CapturedState, NO_INBOUND_SOURCE, SpawnError, WasmDropCtx, WasmInitCtx, install_inline_child};
-use crate::wasm::inline::Registry;
 use crate::wasm::inline::bundle::{self, ChildEntry};
+use crate::wasm::inline::{ChildRecord, Registry};
 use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmCtx};
 
 /// Run the parent's `on_dehydrate` and every inline child's, packing one
@@ -292,11 +292,13 @@ where
     // one reconstructed lineage.
     registry.insert_child(
         to_reconstruct.alias,
-        to_reconstruct.type_tag,
-        String::from(to_reconstruct.full_subname),
-        to_reconstruct.is_counter,
-        parent.0,
-        to_reconstruct.config_bytes.to_vec(),
+        ChildRecord {
+            type_tag: to_reconstruct.type_tag,
+            full_subname: String::from(to_reconstruct.full_subname),
+            is_counter: to_reconstruct.is_counter,
+            parent: parent.0,
+            config_bytes: to_reconstruct.config_bytes.to_vec(),
+        },
         Box::new(child),
     );
     true
@@ -349,11 +351,7 @@ where
     install_inline_child::<A>(
         registry,
         alias,
-        type_tag,
-        full_subname,
-        is_counter,
-        parent,
-        config_bytes.to_vec(),
+        ChildRecord { type_tag, full_subname, is_counter, parent, config_bytes: config_bytes.to_vec() },
         config,
     )
 }
@@ -363,7 +361,7 @@ mod tests {
     use super::{InlineChildToReconstruct, Registry, dehydrate, reconstruct_inline_children, reconstruct_one_child};
     use crate::mail::{Mail, PriorState};
     use crate::wasm::ctx::{NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
-    use crate::wasm::inline::bundle;
+    use crate::wasm::inline::{ChildRecord, bundle};
     use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmCtx};
     use crate::{Addressable, Erased, Lifecycle, Manual};
     use aether_data::{Kind, KindId, MailboxId};
@@ -410,11 +408,13 @@ mod tests {
     fn install_reconstructed(registry: &Registry, parent: MailboxId, child: &InlineChildToReconstruct<'_>) -> bool {
         registry.insert_child(
             child.alias,
-            child.type_tag,
-            String::from(child.full_subname),
-            child.is_counter,
-            parent.0,
-            child.config_bytes.to_vec(),
+            ChildRecord {
+                type_tag: child.type_tag,
+                full_subname: String::from(child.full_subname),
+                is_counter: child.is_counter,
+                parent: parent.0,
+                config_bytes: child.config_bytes.to_vec(),
+            },
             Box::new(SavingChild { tag: 0 }),
         );
         true
@@ -434,20 +434,24 @@ mod tests {
         registry.set_self_id(root.0);
         registry.insert_child(
             id_a,
-            0xAAAA,
-            String::from("a"),
-            false,
-            root.0,
-            vec![0x11, 0x22],
+            ChildRecord {
+                type_tag: 0xAAAA,
+                full_subname: String::from("a"),
+                parent: root.0,
+                config_bytes: vec![0x11, 0x22],
+                ..ChildRecord::default()
+            },
             Box::new(SavingChild { tag: 0x1111_2222 }),
         );
         registry.insert_child(
             id_b,
-            0xBBBB,
-            String::from("b"),
-            true,
-            id_a.0,
-            Vec::new(),
+            ChildRecord {
+                type_tag: 0xBBBB,
+                full_subname: String::from("b"),
+                is_counter: true,
+                parent: id_a.0,
+                ..ChildRecord::default()
+            },
             Box::new(SavingChild { tag: 0x3333_4444 }),
         );
 

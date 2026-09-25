@@ -455,10 +455,7 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
             engine,
             &engine_id,
             &selector,
-            resolved.wasm,
-            args.name,
-            config,
-            export,
+            LoadComponent { wasm: resolved.wasm, name: args.name, config, export },
             args.full,
         )
         .await;
@@ -530,23 +527,18 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
 
 /// Preserve the original single-instance response shape while keeping the
 /// replica orchestration in [`load_component`] focused on fan-out.
-// `full` is the issue-3006 projection flag; keeps the single-load path's
-// existing positional args rather than a new options struct.
-#[allow(clippy::too_many_arguments)]
+// `full` is the issue-3006 projection flag.
 async fn load_single_component(
     mcp: &Mcp,
     engine: EngineId,
     engine_id: &str,
     selector: &str,
-    wasm: Vec<u8>,
-    name: Option<String>,
-    config: Vec<u8>,
-    export: Option<String>,
+    load: LoadComponent,
     full: bool,
 ) -> Result<String, McpError> {
     let reply = mcp
         .session
-        .call_one(engine_envelope(engine, COMPONENT_CAP, &LoadComponent { wasm, name, config, export }))
+        .call_one(engine_envelope(engine, COMPONENT_CAP, &load))
         .await
         .map_err(|e| frame_size_aware_error(&format!("load_component {selector:?}"), e))?;
     match LoadResult::decode_from_bytes(&reply.payload) {
