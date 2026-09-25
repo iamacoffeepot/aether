@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-25
+- **Amended:** 2026-09-25 — a `Blob` is a reference type: a handle inside the engine, its bytes outside it. Decision 5 materializes handles at the process boundary instead of refusing them, and decision 6 settles persistence the same way.
 
 Builds on [ADR-0038](0038-actor-per-component-dispatch.md) and
 [ADR-0087](0087-blob-unit-of-dispatch.md) (one handler at a time per actor,
@@ -179,38 +180,53 @@ check-out by hash, no lookup by hash, and no host import that takes a hash.
 Knowing a hash grants nothing. `Blob` handles are minted only in the
 reference module: by check-in (into the caller's own table) and by delivery.
 
-### 5. Handles never cross the wire
+### 5. Handles materialize at the process boundary
 
-A handle cannot keep its invariant across serialization, so it is not
-exportable. Any kind whose schema contains `SchemaType::Blob` is
-process-local. The boundary refuses it both ways, like
-`is_engine_only` (`crates/aether-substrate/src/mail/boundary.rs:127`) but
-derived from the schema, not declared: RPC `Call` accept
+A handle names an entry in one engine's memory, so it never leaves the
+engine as a handle. A blob-bearing kind still crosses: going out, each
+handle field is encoded as the blob's bytes; coming in, those bytes are
+checked into the receiving engine's store and become a handle in the
+recipient's table (decision 6). The boundary points are RPC `Call` accept
 (`crates/aether-rpc/src/server/runtime.rs:446`), RPC reply-out
 (`runtime.rs:934`), unresolved-recipient egress
 (`crates/aether-substrate/src/mail/mailer.rs:920`), and the JSON codec
-(`encode_schema` / `decode_schema`). Crossing a process means sending bytes and
-checking them in on the other side.
+(`encode_schema` / `decode_schema`). A wire client such as aether-mcp sees
+plain bytes and never holds a handle.
 
-### 6. Persisting a handle: deferred
+### 6. A blob is a reference type: a handle in the engine, bytes outside it
 
-A handle is encoded into a payload inside the engine; that is how mail
-carries it (section 3). A persisted handle names nothing after a restart,
-because the store is memory only. Whether and how the engine refuses to
-persist one is deferred until the `Kind` / `Schema` traits are reconsidered.
-Until then nothing refuses it. The candidates recorded so far:
+`Blob` is a reference to bytes that is either materialized or not. It has two
+encodings, and which one applies depends on where the value goes, not on the
+kind.
 
-- a schema-derived `const HAS_BLOB: bool` on each kind, with a
-  `const { assert!(!K::HAS_BLOB) }` in every typed persistence path (journal
-  staging, `save_state_kind`, the wire and codec paths), making a typed
-  persist a compile error;
-- a random per-table incarnation in the handle's encoded form (widening it to
-  64 bits), so a handle written through an untyped path and read back after a
-  restart resolves to nothing instead of aliasing a live slot.
+| Destination | Encoded as | Decoded into |
+|---|---|---|
+| Mail inside the engine | the handle index, with the `Arc` in the envelope (decision 3) | the recipient's table |
+| Anything outside the engine: a file, saved state, the wire, the journal | the blob's bytes, length-prefixed | a check-in to the store, giving a fresh handle in the decoder's table |
 
-What holds regardless: an index resolves only against its holder's own
-table, so a replayed or forged handle can reach only blobs the holder was
-already granted.
+- **The handle form is the substrate's alone.** Only the envelope path
+  (decision 3) encodes a handle as an index; it is minted in the reference
+  module like every other handle. Every public encode materializes, so bytes
+  an actor writes anywhere contain the data, never a table index. There is
+  nothing to smuggle and nothing to alias after a restart.
+- **Pulling bytes back in makes a reference again.** Decoding the
+  materialized form checks the bytes in by default. A consumer with a reason
+  not to, such as a one-pass tool that only scans the bytes, may read the
+  materialized bytes without checking them in.
+- **The Bloomery journal materializes by reference.** The journal stores each
+  blob as its own content-addressed artifact, and the persisted kind cites it
+  by `Ref`, so two kinds citing the same bytes store them once. Reading the
+  kind back checks the cited bytes in.
+- **Other types can take the same shape.** Any type that is a reference inside
+  the engine and a value outside it can follow this pattern. `Blob` is the
+  first. This ADR fixes the behaviour, not its expression in the `Kind` /
+  `Schema` traits, which is left to their rework. The candidates: one type
+  whose encoding depends on the destination; a derive-generated mirror type
+  (each `Blob` field replaced by bytes) with typed `resolve` and `check_in`
+  conversions; or one kind generic over its representation.
+- **Access is unchanged.** An index resolves only against its holder's own
+  table, so a replayed or forged handle reaches only blobs the holder was
+  already granted.
 
 ### 7. Freeing by refcount, with a reclaim thread
 
@@ -325,10 +341,11 @@ meaning.
 - **Memory is the limit.** The store is in memory only, so a handle always
   names resident bytes, and a closure's members are resident while it runs.
   The raised ceiling (section 10) bounds that per closure.
-- **Wire callers keep bytes.** aether-mcp is a wire client, so it can never
-  receive a handle. A handle-bearing read is a new kind (for example
-  `aether.fs.open` answering a `Blob`), and `aether.fs.read` keeps its bytes
-  for wire callers. The same holds for process output, captures and HTTP.
+- **Wire callers get bytes.** aether-mcp is a wire client, so it receives
+  materialized bytes (decision 5). A kind such as `aether.fs.read_result` can
+  carry a `Blob` and still answer wire callers with bytes, so no parallel
+  handle-bearing kind is needed. The same holds for process output, captures
+  and HTTP.
 - **Other consumers.** Process stdout, fs reads, and future mostly-static
   graphics data (meshes, textures) held as blobs and uploaded by the render
   cap from a borrowed slice.
