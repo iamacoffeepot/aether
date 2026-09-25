@@ -198,7 +198,8 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
     let mut passes: Vec<PassPlan> = Vec::with_capacity(mail.passes.len());
     let mut written_bindings: Vec<u32> = Vec::new();
     for (index, pass) in mail.passes.iter().enumerate() {
-        let plan = validate_pass(mail, &module, &info, &passes, &transients, index, pass)?;
+        let context = PassValidation { mail, module: &module, info: &info, earlier: &passes, transients: &transients };
+        let plan = validate_pass(&context, index, pass)?;
         let sequence = u32::try_from(index).expect("pass sequence index fits u32");
         if let Some(ResolvedSlot::Transient(transient)) = plan.output {
             let live = &mut transients[transient as usize];
@@ -296,19 +297,23 @@ fn check_geometry_slot(index: usize, slot: &GeometrySlotSpec) -> Result<(), Stri
     Ok(())
 }
 
+/// The register-wide context one pass validates against: the mail, its
+/// parsed and validated module, the plans of the passes before it, and
+/// the transients' liveness so far.
+struct PassValidation<'a> {
+    mail: &'a ProgramRegister,
+    module: &'a Module,
+    info: &'a ModuleInfo,
+    earlier: &'a [PassPlan],
+    transients: &'a [TransientPlan],
+}
+
 // One linear walk per pass — entry point, inputs, output, window,
 // repeat — reads better in sequence than split into per-check helpers
-// that would each re-thread the same five context arguments.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn validate_pass(
-    mail: &ProgramRegister,
-    module: &Module,
-    info: &ModuleInfo,
-    earlier: &[PassPlan],
-    transients: &[TransientPlan],
-    index: usize,
-    pass: &ProgramPass,
-) -> Result<PassPlan, String> {
+// that would each re-thread the same pass context.
+#[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing; too_many_arguments left this attribute
+fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass) -> Result<PassPlan, String> {
+    let &PassValidation { mail, module, info, earlier, transients } = context;
     let entry_stage = if matches!(&pass.stage, PassStage::Compute(_)) {
         ShaderStage::Compute
     } else {

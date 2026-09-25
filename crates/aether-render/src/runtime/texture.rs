@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use aether_substrate::render::{
-    RealizedTexture, TextureBindings, realize_texture, realize_writable_texture, upload_texture_full,
+    RealizedTexture, TextureBindings, TextureSpec, realize_texture, realize_writable_texture, upload_texture_full,
 };
 use aether_substrate::session_ids::SessionIds;
 
@@ -70,7 +70,6 @@ impl StagedTexture {
     /// cleared render target (ADR-0170) and has no staging to re-upload
     /// (`update` rejects it, so `dirty` never sets).
     pub fn ensure_realized(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, texture_bindings: &TextureBindings) {
-        let nearest = self.sampling == TextureSampling::Nearest;
         if let Some(realized) = &self.realized {
             // Already on the GPU; re-upload only if `update_texture`
             // dirtied the staging buffer since the last record.
@@ -78,26 +77,15 @@ impl StagedTexture {
                 upload_texture_full(queue, realized, &self.pixels);
             }
         } else {
+            let spec = TextureSpec {
+                width: self.width,
+                height: self.height,
+                format: wgpu_texture_format(self.format),
+                nearest: self.sampling == TextureSampling::Nearest,
+            };
             self.realized = Some(match self.usage {
-                TextureUsage::Sampled => realize_texture(
-                    device,
-                    queue,
-                    texture_bindings,
-                    self.width,
-                    self.height,
-                    wgpu_texture_format(self.format),
-                    nearest,
-                    &self.pixels,
-                ),
-                TextureUsage::Writable => realize_writable_texture(
-                    device,
-                    queue,
-                    texture_bindings,
-                    self.width,
-                    self.height,
-                    wgpu_texture_format(self.format),
-                    nearest,
-                ),
+                TextureUsage::Sampled => realize_texture(device, queue, texture_bindings, spec, &self.pixels),
+                TextureUsage::Writable => realize_writable_texture(device, queue, texture_bindings, spec),
             });
         }
         self.dirty = false;

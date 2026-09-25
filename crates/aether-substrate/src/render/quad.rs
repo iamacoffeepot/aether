@@ -309,29 +309,33 @@ pub fn build_quad_pipeline(
     QuadPipeline { straight, premultiplied, shape, vertex_buffer, viewport_buffer, viewport_bind_group }
 }
 
+/// The shape of one registry texture [`realize_texture`] or
+/// [`realize_writable_texture`] creates. `nearest` selects the nearest
+/// sampler for label planes; a non-filterable `format` binds through the
+/// non-filtering data layout regardless.
+#[derive(Clone, Copy, Debug)]
+pub struct TextureSpec {
+    pub width: u32,
+    pub height: u32,
+    pub format: wgpu::TextureFormat,
+    pub nearest: bool,
+}
+
 /// Create a GPU texture from staged `pixels` and build its group-1 bind
 /// group against shared texture bindings. `pixels` must be exactly
 /// `width * height * bytes_per_pixel(format)` bytes (the render cap
-/// validates this at `create_texture` time). `nearest` selects the
-/// nearest sampler for label planes; a non-filterable `format` binds
-/// through the non-filtering data layout regardless. Pair with
+/// validates this at `create_texture` time). Pair with
 /// [`upload_texture_full`] to refresh the pixels later without rebuilding
 /// the bind group.
-// Eight arguments mirror the same all-in-one shape `record_quad_overlay_pass`
-// uses; bundling into a struct for the one render-cap call site adds no
-// clarity.
-#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn realize_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture_bindings: &TextureBindings,
-    width: u32,
-    height: u32,
-    format: wgpu::TextureFormat,
-    nearest: bool,
+    spec: TextureSpec,
     pixels: &[u8],
 ) -> RealizedTexture {
+    let TextureSpec { width, height, format, nearest } = spec;
     let texture = create_registry_texture(
         device,
         "aether quad texture",
@@ -357,11 +361,9 @@ pub fn realize_writable_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture_bindings: &TextureBindings,
-    width: u32,
-    height: u32,
-    format: wgpu::TextureFormat,
-    nearest: bool,
+    spec: TextureSpec,
 ) -> RealizedTexture {
+    let TextureSpec { width, height, format, nearest } = spec;
     let texture = create_registry_texture(
         device,
         "aether writable texture",
@@ -607,30 +609,41 @@ pub fn push_world_quad_vertices(
     }
 }
 
-/// Record the overlay pass: upload `vertex_bytes` (quads and triangles)
-/// and `shape_vertex_bytes` (ADR-0213 shapes) + the `view_proj` /
-/// `viewport` uniform, then draw each `OverlayDraw` range through the
-/// pipeline its source selects into the offscreen color target. The pass
-/// loads (does not clear) the existing color so the world pass beneath
-/// shows through, and binds no depth target. Empty `draws` is a no-op;
-/// either byte buffer exceeding its cap ([`QUAD_VERTEX_BUFFER_BYTES`] /
-/// [`SHAPE_VERTEX_BUFFER_BYTES`]) drops the pass with a warn. `view_proj`
-/// is column-major — the World paths transform anchors through it in
-/// the vertex shader.
-// Nine arguments mirror the same all-in-one pattern `record_main_pass`
-// uses; bundling into a struct here for one call site adds no clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn record_quad_overlay_pass(
-    queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
-    pipeline: &QuadPipeline,
-    targets: &Targets,
-    vertex_bytes: &[u8],
-    shape_vertex_bytes: &[u8],
-    draws: &[OverlayDraw<'_>],
-    viewport: [f32; 2],
-    view_proj: [f32; 16],
-) {
+/// The GPU resources and frame inputs [`record_quad_overlay_pass`]
+/// binds. `vertex_bytes` carries quads and triangles,
+/// `shape_vertex_bytes` ADR-0213 shapes. `view_proj` is column-major —
+/// the World paths transform anchors through it in the vertex shader.
+#[derive(Clone, Copy)]
+pub struct QuadOverlayPassRecord<'a> {
+    pub queue: &'a wgpu::Queue,
+    pub pipeline: &'a QuadPipeline,
+    pub targets: &'a Targets,
+    pub vertex_bytes: &'a [u8],
+    pub shape_vertex_bytes: &'a [u8],
+    pub draws: &'a [OverlayDraw<'a>],
+    pub viewport: [f32; 2],
+    pub view_proj: [f32; 16],
+}
+
+/// Record the overlay pass: upload `vertex_bytes` and
+/// `shape_vertex_bytes` + the `view_proj` / `viewport` uniform, then draw
+/// each `OverlayDraw` range through the pipeline its source selects into
+/// the offscreen color target. The pass loads (does not clear) the
+/// existing color so the world pass beneath shows through, and binds no
+/// depth target. Empty `draws` is a no-op; either byte buffer exceeding
+/// its cap ([`QUAD_VERTEX_BUFFER_BYTES`] / [`SHAPE_VERTEX_BUFFER_BYTES`])
+/// drops the pass with a warn.
+pub fn record_quad_overlay_pass(encoder: &mut wgpu::CommandEncoder, record: QuadOverlayPassRecord<'_>) {
+    let QuadOverlayPassRecord {
+        queue,
+        pipeline,
+        targets,
+        vertex_bytes,
+        shape_vertex_bytes,
+        draws,
+        viewport,
+        view_proj,
+    } = record;
     if draws.is_empty() || (vertex_bytes.is_empty() && shape_vertex_bytes.is_empty()) {
         return;
     }

@@ -134,27 +134,35 @@ pub fn program_storage_layout(device: &wgpu::Device, read_only: &[bool]) -> wgpu
     })
 }
 
-/// Build one program pass pipeline: the shared fullscreen vertex stage
-/// over the authored module's fragment `entry_point`, rendering into a
-/// color attachment of `color_format`. `blend` is `Some` for blendable
-/// color formats (alpha over the target) and `None` for `R32Float`,
-/// which core WebGPU cannot blend — the pass replaces instead. No
+/// One program pass's pipeline shape: the shared fullscreen vertex stage
+/// (`vertex_module`) over the authored module's fragment `entry_point`,
+/// rendering into a color attachment of `color_format`. `blend` is
+/// `Some` for blendable color formats (alpha over the target) and `None`
+/// for `R32Float`, which core WebGPU cannot blend — the pass replaces
+/// instead.
+pub struct ProgramPipelineSpec<'a> {
+    pub vertex_module: &'a wgpu::ShaderModule,
+    pub fragment_module: &'a wgpu::ShaderModule,
+    pub entry_point: &'a str,
+    pub color_format: wgpu::TextureFormat,
+    pub blend: Option<wgpu::BlendState>,
+    pub uniform_layout: &'a wgpu::BindGroupLayout,
+    pub inputs_layout: &'a wgpu::BindGroupLayout,
+}
+
+/// Build one program pass pipeline from its [`ProgramPipelineSpec`]. No
 /// vertex buffers, no depth: program passes are pure image work.
-// Eight arguments mirror the same all-in-one shape `realize_texture` and
-// `record_quad_overlay_pass` use; bundling into a struct for the one
-// register call site adds no clarity.
-#[allow(clippy::too_many_arguments)]
 #[must_use]
-pub fn build_program_pipeline(
-    device: &wgpu::Device,
-    vertex_module: &wgpu::ShaderModule,
-    fragment_module: &wgpu::ShaderModule,
-    entry_point: &str,
-    color_format: wgpu::TextureFormat,
-    blend: Option<wgpu::BlendState>,
-    uniform_layout: &wgpu::BindGroupLayout,
-    inputs_layout: &wgpu::BindGroupLayout,
-) -> wgpu::RenderPipeline {
+pub fn build_program_pipeline(device: &wgpu::Device, spec: &ProgramPipelineSpec<'_>) -> wgpu::RenderPipeline {
+    let &ProgramPipelineSpec {
+        vertex_module,
+        fragment_module,
+        entry_point,
+        color_format,
+        blend,
+        uniform_layout,
+        inputs_layout,
+    } = spec;
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("aether program pipeline layout"),
         bind_group_layouts: &[Some(uniform_layout), Some(inputs_layout)],
