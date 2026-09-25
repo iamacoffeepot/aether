@@ -30,17 +30,17 @@ impl aether_actor::WasmActor for TypedProbe {
     }
 
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
-        let _ = ctx.mailbox_id();
+        let _ = ctx.sender();
     }
 
     #[handler::single]
     fn on_ping(&mut self, ctx: &mut WasmCtx<'_, Self>, ping: Ping) {
-        let _ = (ctx.mailbox_id(), ping.seq);
+        let _ = (ctx.sender(), ping.seq);
     }
 
     #[handler::single]
     fn on_pong(&mut self, ctx: &mut WasmCtx<'_>, pong: Pong) {
-        let _ = (ctx.mailbox_id(), pong.seq);
+        let _ = (ctx.sender(), pong.seq);
     }
 }
 

@@ -459,12 +459,10 @@ pub struct MatrixReport {
     pub child_to_self_arrived: u32,
     /// child a → self: the source child a read (expected: child a id).
     pub child_to_self_source: u64,
-    /// child a's own folded `MailboxId` raw value, so the test can assert
-    /// the child-origin sources equal the actual child id.
+    /// child a's folded `MailboxId` raw value, read from the parent's
+    /// spawn-registry handle, so the test can assert the child-origin sources
+    /// equal the actual child id.
     pub child_a_id: u64,
-    /// The parent's own folded `MailboxId` raw value, so the test can assert
-    /// the parent-origin source (and the cross-cluster observed source).
-    pub parent_id: u64,
 }
 
 /// [`MatrixPing::cell`] marker — parent to child a (in place).

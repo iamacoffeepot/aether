@@ -35,9 +35,6 @@
 // `mul_add` rewrite obscures the layout math for no accuracy that matters to a
 // pixel region.
 #![allow(clippy::suboptimal_flops)]
-// The scenario addresses loaded widget components by their rendered lineage
-// paths — the recipient-name resolution surface the interaction drives.
-#![allow(clippy::disallowed_methods)]
 
 use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use std::env;
@@ -47,7 +44,7 @@ use std::path::{Path, PathBuf};
 use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced};
 use aether_clipboard::{ClipboardCapability, ClipboardParams, GetClipboardText, GetClipboardTextResult};
 use aether_component::ComponentHostCapability;
-use aether_data::{Kind, LoadName, mailbox_id_from_path};
+use aether_data::{Kind, LoadName};
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::{
@@ -145,18 +142,9 @@ fn panel_child<C: ChildOf<WidgetPanel> + Instanced>(
 }
 
 /// The full trampoline path the loaded panel registers at (ADR-0099 §4) — the
-/// recipient a capture bundle's `NamedMail` carries, and the root of the
-/// paths the guest-printed container ids below are folded from.
+/// recipient a capture bundle's `NamedMail` carries.
 fn panel_address() -> String {
     format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
-}
-
-fn child_address(subname: &str) -> String {
-    nested_child_address(&panel_address(), subname)
-}
-
-fn nested_child_address(parent: &str, subname: &str) -> String {
-    format!("{parent}/{}:{subname}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 /// The widget crate's `assets/` dir — where `RobotoMono.ttf` ships, resolved under
@@ -1039,6 +1027,14 @@ fn log_f32(message: &str, field: &str) -> Option<f32> {
 
 fn log_u64(message: &str, field: &str) -> Option<u64> {
     message.split_once(&format!("{field}="))?.1.split_whitespace().next()?.parse().ok()
+}
+
+/// The container a logged scroll outcome belongs to: the panel's direct child
+/// the outcome arrived from (`widget=`) and how many scroll actors relayed it
+/// inward of that child (`relays=`).
+fn scroll_owner(message: &str) -> Option<(&str, u64)> {
+    let widget = message.split_once("widget=")?.1.split_whitespace().next()?;
+    Some((widget, log_u64(message, "relays")?))
 }
 
 fn image_rgb(image: &Image, x: u32, y: u32) -> [u8; 3] {
@@ -2916,33 +2912,32 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
         ])
         .expect("nested wheel routing while button capture is held");
 
-    let outer_address = child_address("outer");
-    // The inner scroll is born from the outer scroll, so its alias extends
-    // that executing actor's lineage rather than restarting at the panel.
-    let inner_address = nested_child_address(&outer_address, "inner");
-    let outer_id = mailbox_id_from_path(&outer_address).0;
-    let inner_id = mailbox_id_from_path(&inner_address).0;
+    // The inner scroll is the outer scroll's content root, so its outcomes
+    // reach the panel through the outer child after one relay; the outer's
+    // own arrive unrelayed.
+    let inner_owner = Some(("outer", 1));
+    let outer_owner = Some(("outer", 0));
     let first_log = panel_log_messages(&mut harness, panel);
     let outcomes: Vec<_> = first_log.iter().filter(|message| message.contains("widget scroll outcome")).collect();
     assert_eq!(outcomes.len(), 5, "inner-only, split, and pinned requests emit 1 + 2 + 2 typed outcomes: {outcomes:?}");
-    assert_eq!(log_u64(outcomes[0], "container"), Some(inner_id));
+    assert_eq!(scroll_owner(outcomes[0]), inner_owner);
     assert_eq!(log_f32(outcomes[0], "offset_y_pixels"), Some(20.0));
     assert_eq!(log_f32(outcomes[0], "consumed_y_pixels"), Some(20.0));
     assert_eq!(log_f32(outcomes[0], "residual_y_pixels"), Some(0.0));
 
-    assert_eq!(log_u64(outcomes[1], "container"), Some(inner_id));
+    assert_eq!(scroll_owner(outcomes[1]), inner_owner);
     assert_eq!(log_f32(outcomes[1], "offset_y_pixels"), Some(40.0));
     assert_eq!(log_f32(outcomes[1], "consumed_y_pixels"), Some(20.0));
     assert_eq!(log_f32(outcomes[1], "residual_y_pixels"), Some(10.0));
-    assert_eq!(log_u64(outcomes[2], "container"), Some(outer_id));
+    assert_eq!(scroll_owner(outcomes[2]), outer_owner);
     assert_eq!(log_f32(outcomes[2], "offset_y_pixels"), Some(10.0));
     assert_eq!(log_f32(outcomes[2], "consumed_y_pixels"), Some(10.0));
     assert_eq!(log_f32(outcomes[2], "residual_y_pixels"), Some(0.0));
 
-    assert_eq!(log_u64(outcomes[3], "container"), Some(inner_id));
+    assert_eq!(scroll_owner(outcomes[3]), inner_owner);
     assert_eq!(log_f32(outcomes[3], "consumed_y_pixels"), Some(0.0));
     assert_eq!(log_f32(outcomes[3], "residual_y_pixels"), Some(20.0));
-    assert_eq!(log_u64(outcomes[4], "container"), Some(outer_id));
+    assert_eq!(scroll_owner(outcomes[4]), outer_owner);
     assert_eq!(log_f32(outcomes[4], "offset_y_pixels"), Some(20.0));
     assert_eq!(log_f32(outcomes[4], "consumed_y_pixels"), Some(10.0));
     assert_eq!(log_f32(outcomes[4], "residual_y_pixels"), Some(10.0));
@@ -3002,21 +2997,20 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
     let final_log = panel_log_messages(&mut harness, panel);
     let final_outcomes: Vec<_> = final_log.iter().filter(|message| message.contains("widget scroll outcome")).collect();
     assert_eq!(final_outcomes.len(), 10, "all outcome events remain observable");
-    assert_eq!(log_u64(final_outcomes[5], "container"), Some(inner_id));
+    assert_eq!(scroll_owner(final_outcomes[5]), inner_owner);
     assert_eq!(log_f32(final_outcomes[5], "consumed_y_pixels"), Some(-40.0));
     assert_eq!(log_f32(final_outcomes[5], "residual_y_pixels"), Some(-40.0));
-    assert_eq!(log_u64(final_outcomes[6], "container"), Some(outer_id));
+    assert_eq!(scroll_owner(final_outcomes[6]), outer_owner);
     assert_eq!(log_f32(final_outcomes[6], "consumed_y_pixels"), Some(-20.0));
     assert_eq!(log_f32(final_outcomes[6], "residual_y_pixels"), Some(-20.0));
-    assert_eq!(log_u64(final_outcomes[7], "container"), Some(inner_id));
+    assert_eq!(scroll_owner(final_outcomes[7]), inner_owner);
     assert_eq!(log_f32(final_outcomes[7], "consumed_x_pixels"), Some(20.0));
     assert_eq!(log_f32(final_outcomes[7], "consumed_y_pixels"), Some(0.0));
-    assert_eq!(log_u64(final_outcomes[8], "container"), Some(outer_id));
+    assert_eq!(scroll_owner(final_outcomes[8]), outer_owner);
     assert_eq!(log_f32(final_outcomes[8], "consumed_x_pixels"), Some(20.0));
     assert_eq!(log_f32(final_outcomes[8], "residual_x_pixels"), Some(10.0));
 
-    let side_id = mailbox_id_from_path(&child_address("side")).0;
-    assert_eq!(log_u64(final_outcomes[9], "container"), Some(side_id));
+    assert_eq!(scroll_owner(final_outcomes[9]), Some(("side", 0)));
     assert_eq!(log_f32(final_outcomes[9], "offset_y_pixels"), Some(12.0));
     assert_eq!(log_f32(final_outcomes[9], "consumed_y_pixels"), Some(12.0));
     let final_terminals: Vec<_> =

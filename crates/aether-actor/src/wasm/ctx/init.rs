@@ -5,8 +5,6 @@
 use core::cell::OnceCell;
 use core::marker::PhantomData;
 
-use aether_data::MailboxId;
-
 use crate::asset::{AssetCatalog, AssetInfo, AssetWindow};
 use crate::wasm::bridge::asset;
 use alloc::vec::Vec;
@@ -17,7 +15,6 @@ use alloc::vec::Vec;
 // The `Wasm` prefix carries the native/wasm split signal; bare `InitCtx` loses that.
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmInitCtx<'a> {
-    mailbox: u64,
     /// ADR-0163 §3 asset catalog, fetched lazily on the first
     /// [`AssetCatalog::assets`] call and cached for the ctx's life —
     /// `init` is inside the load window, so asset access is live here.
@@ -29,15 +26,8 @@ impl WasmInitCtx<'_> {
     /// Not part of the public API; called only by [`crate::export!`].
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(mailbox: u64) -> Self {
-        Self { mailbox, catalog: OnceCell::new(), _borrow: PhantomData }
-    }
-
-    /// The component's own mailbox id — the value the substrate uses to
-    /// address `receive` calls to this instance.
-    #[must_use]
-    pub fn mailbox_id(&self) -> MailboxId {
-        MailboxId(self.mailbox)
+    pub fn __new() -> Self {
+        Self { catalog: OnceCell::new(), _borrow: PhantomData }
     }
 
     // Issue 1987: the init ctx exposes no send verbs. Every send routes

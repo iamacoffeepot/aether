@@ -490,7 +490,7 @@ mod tests {
     /// speed must be exactly zero after `init`.
     #[test]
     fn default_camera_boots_with_zero_speed() {
-        let mut ctx = WasmInitCtx::__new(0);
+        let mut ctx = WasmInitCtx::__new();
         let comp = <CameraComponent as aether_actor::Lifecycle<CameraComponent>>::init((), (), &mut ctx).expect("init");
         let main = comp.cameras.get("main").expect("\"main\" camera present");
         match main.mode {
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn eye_result_is_none_without_a_live_active_camera() {
-        let mut ctx = WasmInitCtx::__new(0);
+        let mut ctx = WasmInitCtx::__new();
         let mut component =
             <CameraComponent as aether_actor::Lifecycle<CameraComponent>>::init((), (), &mut ctx).expect("init");
         component.active = None;
