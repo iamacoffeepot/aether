@@ -250,11 +250,11 @@ impl NativeActor for TcpCapability {
     /// remains available while the OS resolves and connects `mail.addr`.
     #[handler::manual]
     fn on_connect(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: Connect) {
-        // ADR-0230: prove the consumer once, at receipt.
-        let consumer = match mail.consumer.map(|position| ctx.resolve_live(position)).transpose() {
+        // ADR-0230 §3: prove the consumer's address once, at receipt.
+        let consumer = match mail.consumer.as_ref().map(|address| ctx.resolve_path(address)).transpose() {
             Ok(consumer) => consumer,
             Err(error) => {
-                ctx.reply(&ConnectResult::Err { addr: mail.addr, error: format!("consumer not live: {error}") });
+                ctx.reply(&ConnectResult::Err { addr: mail.addr, error: format!("consumer refused: {error}") });
                 return;
             }
         };
@@ -349,11 +349,11 @@ impl NativeActor for TcpCapability {
     /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
     #[handler::manual]
     fn on_bind(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: BindListener) {
-        // ADR-0230: prove the consumer once, at receipt, before binding.
-        let consumer = match mail.consumer.map(|position| ctx.resolve_live(position)).transpose() {
+        // ADR-0230 §3: prove the consumer's address once, at receipt, before binding.
+        let consumer = match mail.consumer.as_ref().map(|address| ctx.resolve_path(address)).transpose() {
             Ok(consumer) => consumer,
             Err(error) => {
-                ctx.reply(&BindListenerResult::Err { addr: mail.addr, error: format!("consumer not live: {error}") });
+                ctx.reply(&BindListenerResult::Err { addr: mail.addr, error: format!("consumer refused: {error}") });
                 return;
             }
         };
@@ -387,7 +387,7 @@ impl NativeActor for TcpCapability {
     ) {
         let OutboundSessionSpawn { addr, session_name, peer } = done.context().clone();
         done.resolve_with(ctx, move |outcome, _| match &outcome.result {
-            Ok(child) => ConnectResult::Ok { session_name, session_id: child.id(), peer },
+            Ok(_) => ConnectResult::Ok { session_name, peer },
             Err(error) => ConnectResult::Err { addr, error: format!("spawn failed: {error:?}") },
         });
     }
@@ -428,11 +428,7 @@ impl NativeActor for TcpCapability {
                 _monitor_handle: monitor_handle,
             },
         );
-        done.resolve_with(ctx, move |_, _| BindListenerResult::Ok {
-            listener_name,
-            listener_id: listener.id(),
-            local_port,
-        });
+        done.resolve_with(ctx, move |_, _| BindListenerResult::Ok { listener_name, local_port });
     }
 
     /// Mail `Close` to the named listener and park the
@@ -445,7 +441,7 @@ impl NativeActor for TcpCapability {
     /// `MonitorNotice` arrives at this cap.
     #[handler::manual]
     fn on_unbind(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: UnbindListener) {
-        // Resolve listener_id from the cap-local supervisor map by
+        // Find the listener in the cap-local supervisor map by
         // name. The cap is the source of truth for "what listeners
         // exist"; no registry walk needed.
         let Some(entry) = state.listeners.values_mut().find(|entry| entry.name == mail.listener_name) else {

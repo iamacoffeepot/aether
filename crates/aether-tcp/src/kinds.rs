@@ -14,19 +14,18 @@ use serde::{Deserialize, Serialize};
 /// (so `"127.0.0.1:8080"` and `"0.0.0.0:0"` both work; the
 /// latter asks the OS to pick a free port). Optional `name`
 /// overrides the default subname (the bound port string); pass
-/// `None` for the default. Optional `consumer` is the late-bound
-/// mailbox every accepted session delivers inbound frames and close
-/// notices to; `None` leaves the listener observer-less and drops
-/// inbound bytes. Addressed by [`MailboxId`](aether_data::MailboxId),
-/// like `aether.window.subscribe`'s `mailbox` — a name cannot name a
-/// nested actor, so a `String` here would exclude the loaded wasm
-/// components that are the field's main audience. Reply:
+/// `None` for the default. Optional `consumer` is the ADR-0166 address
+/// (canonical or short) of the actor every accepted session delivers
+/// inbound frames and close notices to. The cap proves it once, at
+/// receipt, and replies `Err` without binding when it names no live
+/// actor; `None` leaves the listener observer-less and drops inbound
+/// bytes. A consumer binding itself sends [`BindListenerSelf`]. Reply:
 /// `BindListenerResult`.
 #[aether_data::kind(name = "aether.tcp.bind_listener")]
 pub struct BindListener {
     pub addr: String,
     pub name: Option<String>,
-    pub consumer: Option<aether_data::MailboxId>,
+    pub consumer: Option<aether_data::ActorPath>,
 }
 
 /// `aether.tcp.bind_listener_self` — [`BindListener`] with the sender as
@@ -46,16 +45,17 @@ pub struct BindListenerSelf {
 /// connected stream. Mirrors [`BindListener`]: `addr` is resolved
 /// via `std::net::ToSocketAddrs`, and optional `name` overrides
 /// the default `conn-N` session subname. Optional `consumer` is the
-/// late-bound mailbox the dialed session delivers inbound frames and
-/// close notices to, addressed by
-/// [`MailboxId`](aether_data::MailboxId) exactly as [`BindListener`]'s;
-/// `None` leaves the session observer-less and drops inbound bytes.
-/// Reply: [`ConnectResult`].
+/// ADR-0166 address (canonical or short) of the actor the dialed session
+/// delivers inbound frames and close notices to. The cap proves it once,
+/// at receipt, and replies `Err` without dialing when it names no live
+/// actor; `None` leaves the session observer-less and drops inbound
+/// bytes. A consumer dialing for itself sends [`ConnectSelf`]. Reply:
+/// [`ConnectResult`].
 #[aether_data::kind(name = "aether.tcp.connect")]
 pub struct Connect {
     pub addr: String,
     pub name: Option<String>,
-    pub consumer: Option<aether_data::MailboxId>,
+    pub consumer: Option<aether_data::ActorPath>,
 }
 
 /// `aether.tcp.connect_self` — [`Connect`] with the sender as the
@@ -71,7 +71,7 @@ pub struct ConnectSelf {
 }
 
 /// Reply to [`Connect`] and [`ConnectSelf`]. `Ok` carries the resolved connect-session
-/// subname, the session's `MailboxId`, and the connected peer address.
+/// subname and the connected peer address.
 /// `Err` carries the requested address and a human-readable dial or
 /// spawn failure.
 ///
@@ -79,32 +79,26 @@ pub struct ConnectSelf {
 /// of the [`SessionData`] it receives (`ctx.sender()`, then `ctx.send_to`).
 /// An MCP agent addresses the session by the full ADR-0099 lineage path
 /// `aether.tcp/aether.tcp.session:<session_name>` as a mail recipient address —
-/// the bare subname is not a mailbox address. `session_id` is the same
-/// mailbox as a wire id, usable wherever a `MailboxId` is taken (a
-/// `consumer` field, say); it renders as a tagged `mbx-…` string over
-/// JSON and round-trips exactly (ADR-0064).
+/// the bare subname is not a mailbox address. The same path is what a
+/// `consumer` field takes.
 #[aether_data::kind(name = "aether.tcp.connect_result")]
 pub enum ConnectResult {
-    Ok { session_name: String, session_id: aether_data::MailboxId, peer: String },
+    Ok { session_name: String, peer: String },
     Err { addr: String, error: String },
 }
 
 /// Reply to `BindListener`. `Ok` carries the resolved listener
 /// name (the deterministic subname under
-/// `aether.tcp.listener:<name>`), the listener's `MailboxId`,
-/// and the actually-bound local port (load-bearing when `addr`
-/// requested port 0). `Err` carries a human-readable reason —
-/// addr parse failures, port-in-use, OS bind errors, namespace
-/// collisions.
+/// `aether.tcp.listener:<name>`) and the actually-bound local port
+/// (load-bearing when `addr` requested port 0). `Err` carries a
+/// human-readable reason — consumer refusals, addr parse failures,
+/// port-in-use, OS bind errors, namespace collisions.
 ///
-/// `listener_id` is the listener's mailbox as a wire id; it renders as
-/// a tagged `mbx-…` string over JSON and round-trips exactly
-/// (ADR-0064). Agents addressing the listener as a mail *recipient*
-/// still use `listener_name` (the deterministic full name), since
-/// a mail recipient address is a name surface.
+/// The listener is addressed as
+/// `aether.tcp/aether.tcp.listener:<listener_name>`.
 #[aether_data::kind(name = "aether.tcp.bind_listener_result")]
 pub enum BindListenerResult {
-    Ok { listener_name: String, listener_id: aether_data::MailboxId, local_port: u16 },
+    Ok { listener_name: String, local_port: u16 },
     Err { addr: String, error: String },
 }
 
