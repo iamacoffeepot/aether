@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-25
+- **Amended:** 2026-09-25 — decisions 2, 3, 9 and 12: `BlobReader` lives in `aether-data`; `is_empty` is added; the `read_at` and `blob_drop_p32` contracts are stated; teardown releases a guest's holds without a leak warning; envelope attachments hold store entries.
 - **Amended:** 2026-09-25 — decisions 2–6 and 9–12 rewritten: `Blob` is a value of immutable bytes, not a handle. In-process mail shares it through the store; every other path writes its bytes. Supersedes the reference designs in the amendments below, which stay as history.
 - **Amended:** 2026-09-25 — decision 6: persisting a handle is a documented misuse, not enforced; later directions recorded.
 - **Amended:** 2026-09-25 — decision 10: `ReadArtifact` replies carry handles too; `aether.fs` recorded as a blob consumer.
@@ -104,7 +105,7 @@ state and so own no table.
 | 0048 | Content-addressed ids for native transform outputs | Content addressing is right for dedup. It stays the dedup key here, not the capability. |
 | 0049 | Persisted the store to disk | Persistence duplicated `aether.fs` and was removed with its only producer. This store is in memory only. |
 | 0120 | Handles as `{owner, token}` resolved by mailing a sharded fs actor | Resolving by mail puts a round trip and an actor on every read. Kept: no implicit byte transfers, bytes immutable once owned. |
-| 0133 | Reply-based stream handles for HTTP | A per-instance handle table already exists: the wasm `ReplyTable` (`crates/aether-substrate/src/actor/wasm/reply_table.rs`), a generation-tagged slab that grows and never drops a held handle, moved across `replace` as `PendingReplies`. Its growth rule (grow, never drop a held entry, move across `replace`) is the model for the guest's blob table, which is keyed by hash instead of an index. Its limit (instance-local, not transferable) is solved here by carrying the bytes' `Arc` in the envelope. |
+| 0133 | Reply-based stream handles for HTTP | A per-instance handle table already exists: the wasm `ReplyTable` (`crates/aether-substrate/src/actor/wasm/reply_table.rs`), a generation-tagged slab that grows and never drops a held handle, moved across `replace` as `PendingReplies`. Its growth rule (grow, never drop a held entry) is the model for the guest's blob table, which is keyed by hash instead of an index and, unlike `PendingReplies`, starts empty in each instance (section 2). Its limit (instance-local, not transferable) is solved here by carrying the bytes' `Arc` in the envelope. |
 | 0165 | Published views over `arc-swap`, staged effects | Readers of immutable published data never take the writer's lock. Blob bytes are the simplest case: immutable from check-in, so an `Arc` read needs no synchronization at all. |
 
 ## Decision
@@ -154,10 +155,15 @@ enum Repr {
 }
 pub trait BlobBacking: Send + Sync + 'static {
     fn len(&self) -> u64;
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> usize;
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> usize;   // at most buf.len(); 0 only at or past the end
+    fn is_empty(&self) -> bool { self.len() == 0 }
 }
 impl From<Vec<u8>> for Blob { /* Owned */ }
 ```
+
+`read_at` copies at most `buf.len()` bytes and may copy fewer: a guest backing
+copies at most `MAX_READ_BYTES` per call. It returns `0` only at or past the
+end, so a caller loops until it sees `0`.
 
 A `Blob` means its bytes wherever it goes: in an actor, over the wire, in a
 file, in a tool. Only its backing changes, and the backing is the engine's
@@ -184,8 +190,10 @@ node and sent as bytes between nodes, and no program ever holds a handle.
   died with the old instance's memory take their counts with them, so a
   `replace` cannot leak.
 - Only the owning actor's handler touches its table. The table grows and never
-  drops a held entry. Entries still counted when an instance is torn down are
-  logged as guest leaks.
+  drops a held entry. Teardown releases every entry still counted and logs one
+  debug-level count. The engine frees a guest's memory without running its
+  `Drop`s, so a counted entry at teardown is the normal case for a guest that
+  keeps blobs in its state, not a leak.
 
 ### 3. In-process mail shares; every other path writes bytes
 
@@ -212,8 +220,8 @@ tag 1 → [attachment index]    in-process mail only; never leaves the process
 
 | Step | What happens |
 |---|---|
-| Send | A send encodes with the envelope encoder, since most mail stays local. Each `Blob` field is interned into the store if it is `Owned`, attached to the envelope (`attachments: Option<Box<[Blob]>>` on `Mail`, one null word when empty), and written as tag 1. A send borrows its payload, so the sender keeps its values. |
-| Deliver | A native recipient's decoded fields are the attached `Blob`s. A guest recipient's table gains one count per field before the handler runs, and each decoded guest `Blob` owns one `GuestHold`. Fan-out delivers per recipient. |
+| Send | A send encodes with the envelope encoder, since most mail stays local. Each `Blob` field is interned into the store if it is `Owned`, attached to the envelope as its store entry (`attachments: Option<Box<[Arc<BlobEntry>]>>` on `Mail`, one null word when empty), and written as tag 1. Interning already yields the entry, and a guest delivery needs the entry and its hash, which a `Blob` hides. A send borrows its payload, so the sender keeps its values. |
+| Deliver | A native recipient's decoded fields are `Shared` `Blob`s over the attached entries. A guest recipient's table gains one count per field before the handler runs, and each decoded guest `Blob` owns one `GuestHold`. Fan-out delivers per recipient. |
 | Egress | Any path that leaves the process rewrites each tag-1 field to tag 0 by copying its attachment's bytes in: RPC reply-out (`crates/aether-rpc/src/server/runtime.rs:934`), unresolved-recipient egress (`crates/aether-substrate/src/mail/mailer.rs:920`), and file and journal writes. |
 | Ingress | Nothing. Tag 0 decodes to an `Owned` value, interned only if it is later sent in-process. |
 
@@ -316,10 +324,11 @@ cost of freeing large blocks.
 ### 9. Reads stream on both sides
 
 ```rust
-// aether-actor, both targets
+// aether-data (re-exported by aether-actor), both targets
 impl<'a> BlobReader<'a> {
     pub fn open(blob: &'a Blob) -> BlobReader<'a>;
     pub fn len(&self) -> u64;
+    pub fn is_empty(&self) -> bool;
     pub fn read(&mut self, buf: &mut [u8]) -> usize;                  // at most MAX_READ_BYTES per call
     pub fn seek(&mut self, to: u64);
     pub fn read_range(&self, offset: u64, buf: &mut [u8]) -> usize;   // does not move the cursor
@@ -336,6 +345,10 @@ impl<'a> BlobReader<'a> {
   `Shared`, the imports for guest `Shared`.
 - The caller supplies the buffer. The host copies at most `MAX_READ_BYTES` per
   call and returns the length (negative for a hash the guest does not hold).
+  `blob_drop_p32` on a hash the guest does not hold logs a warning and does
+  nothing. No blob import traps.
+- The reader lives in `aether-data` beside `Blob`, whose representation is
+  private there, so `Blob` needs no public `read_at` and reading has one door.
 - Streaming is the paradigm on both sides: a caller has to ask why it would
   load something large into memory. A caller can still loop the reader into a
   `Vec`; nothing makes it the easy path, and the loop is visible in review.
@@ -380,9 +393,9 @@ meaning.
 | Native send | `crates/aether-substrate/src/actor/native/binding/{outbound,pending,flush,send}.rs` (ring entries are plain bytes, so attachments ride on `PendingMail` beside the ring entry) |
 | Native deliver | `actor/native/slot/dispatcher.rs` (decoded `Blob` fields are the attachments), `actor/native/ctx/{mod,send}.rs` |
 | Armed hand-offs | `actor/native/blob/work.rs:670`, `actor/native/spawn/activation.rs:564`, `mail/mailer.rs` (`route_tail`) |
-| Wasm | `actor/wasm/host_fns.rs` (`send_mail_p32` lookup, `blob_len_p32`, `blob_read_p32`, `blob_drop_p32`), `actor/wasm/component/{ctx,dispatch}.rs`, `crates/aether-component/src/trampoline/runtime/mod.rs` (table across `replace`) |
+| Wasm | `actor/wasm/host_fns.rs` (`send_mail_p32` lookup, `blob_len_p32`, `blob_read_p32`, `blob_drop_p32`), `actor/wasm/component/{ctx,dispatch}.rs`, `actor/wasm/blob_table.rs` (the instance's table) |
 | Guest SDK | `crates/aether-actor/src/wasm/{raw.rs,bridge/mail.rs}` |
-| `Blob` and schema | `crates/aether-data/src/{blob.rs,schema.rs}` (`Blob`, `BlobBacking`, `SchemaType::Blob`), `crates/aether-codec/src/{encode,decode}.rs` (read and write plain bytes) |
+| `Blob` and schema | `crates/aether-data/src/{blob/,schema.rs}` (`Blob`, `BlobBacking`, `BlobReader`, `SchemaType::Blob`), `crates/aether-codec/src/{encode,decode}.rs` (read and write plain bytes) |
 | Egress rewrite | `crates/aether-substrate/src/mail/mailer.rs` (`route_tail` egress), `crates/aether-rpc/src/server/runtime.rs` (reply-out) |
 
 ## Consequences
