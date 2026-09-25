@@ -884,13 +884,7 @@ fn head_mass_sdf(point: Vec3) -> f32 {
     for x in [-0.27, 0.27] {
         shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.32, 0.22), Vec3::new(0.14, 0.22, 0.20)), 0.09);
     }
-    for x in [-0.69, 0.69] {
-        let temporal_fossa = ellipsoid_sdf(point, Vec3::new(x, 0.17, 0.03), Vec3::new(0.05, 0.22, 0.28));
-        shape = smooth_maximum(shape, -temporal_fossa, 0.04);
-    }
     for side in [-1.0, 1.0] {
-        let temporal_plane = ellipsoid_sdf(point, Vec3::new(side * 0.45, 0.12, 0.25), Vec3::new(0.10, 0.20, 0.31));
-        shape = smooth_union(shape, temporal_plane, 0.18);
         let malar_plane = ellipsoid_sdf(point, Vec3::new(side * 0.27, -0.055, 0.39), Vec3::new(0.17, 0.20, 0.12));
         shape = smooth_union(shape, malar_plane, 0.16);
         let cheekbone =
@@ -899,9 +893,6 @@ fn head_mass_sdf(point: Vec3) -> f32 {
         let zygomatic_arch =
             capsule_sdf(point, Vec3::new(side * 0.38, 0.02, 0.36), Vec3::new(side * 0.48, 0.06, 0.08), 0.075);
         shape = smooth_union(shape, zygomatic_arch, 0.13);
-        let orbital_temporal_buttress =
-            capsule_sdf(point, Vec3::new(side * 0.38, 0.22, 0.43), Vec3::new(side * 0.48, 0.16, 0.16), 0.095);
-        shape = smooth_union(shape, orbital_temporal_buttress, 0.13);
     }
     for side in [-1.0, 1.0] {
         let brow_ridge =
@@ -917,6 +908,10 @@ fn head_mass_sdf(point: Vec3) -> f32 {
     for x in [-0.085, 0.085] {
         shape =
             smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.08, 0.69), Vec3::new(0.065, 0.055, 0.075)), 0.028);
+    }
+    for x in [-0.69, 0.69] {
+        let temporal_fossa = ellipsoid_sdf(point, Vec3::new(x, 0.17, 0.03), Vec3::new(0.05, 0.22, 0.28));
+        shape = smooth_maximum(shape, -temporal_fossa, 0.04);
     }
     shape
 }
