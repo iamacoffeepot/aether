@@ -874,6 +874,9 @@ fn head_mass_sdf(point: Vec3) -> f32 {
         let perioral_support =
             capsule_sdf(point, Vec3::new(side * 0.10, -0.10, 0.535), Vec3::new(side * 0.16, -0.33, 0.505), 0.095);
         shape = smooth_union(shape, perioral_support, 0.075);
+        let perioral_column =
+            capsule_sdf(point, Vec3::new(side * 0.16, -0.12, 0.61), Vec3::new(side * 0.19, -0.34, 0.57), 0.045);
+        shape = smooth_union(shape, perioral_column, 0.05);
     }
     shape = smooth_union(
         shape,
@@ -887,12 +890,18 @@ fn head_mass_sdf(point: Vec3) -> f32 {
     for side in [-1.0, 1.0] {
         let malar_plane = ellipsoid_sdf(point, Vec3::new(side * 0.27, -0.055, 0.39), Vec3::new(0.17, 0.20, 0.12));
         shape = smooth_union(shape, malar_plane, 0.16);
+        let maxillary_buttress =
+            capsule_sdf(point, Vec3::new(side * 0.27, 0.08, 0.48), Vec3::new(side * 0.14, -0.11, 0.56), 0.075);
+        shape = smooth_union(shape, maxillary_buttress, 0.09);
         let cheekbone =
             capsule_sdf(point, Vec3::new(side * 0.18, 0.08, 0.45), Vec3::new(side * 0.39, -0.015, 0.37), 0.085);
         shape = smooth_union(shape, cheekbone, 0.10);
         let zygomatic_arch =
             capsule_sdf(point, Vec3::new(side * 0.38, 0.02, 0.36), Vec3::new(side * 0.48, 0.06, 0.08), 0.075);
         shape = smooth_union(shape, zygomatic_arch, 0.13);
+        let masseter =
+            capsule_sdf(point, Vec3::new(side * 0.36, -0.05, 0.30), Vec3::new(side * 0.33, -0.40, 0.26), 0.10);
+        shape = smooth_union(shape, masseter, 0.10);
     }
     for side in [-1.0, 1.0] {
         let brow_ridge =
