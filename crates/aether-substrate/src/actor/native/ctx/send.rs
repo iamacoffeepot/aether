@@ -17,6 +17,11 @@
 //! [`MailSender`] on every mode and [`OutboundReply`] on [`Manual`] only, so
 //! a handler whose class disagrees with what it does fails to unify rather
 //! than lying in its manifest.
+//!
+//! Every typed verb encodes through the envelope encoder (ADR-0238 decision
+//! 3): each `Blob` field is shared through the engine store and its entry
+//! rides the envelope, so an in-process recipient reads the same bytes. The
+//! raw verbs carry pre-encoded bytes and attach nothing.
 
 use aether_actor::{
     CallerAddressable, DependencyResolver, DependsOn, ErasedActorRef, MailSender, Manual, OutboundReply, ReplyMode,
@@ -25,8 +30,7 @@ use aether_actor::{
 use aether_data::{ActorMail, Kind, KindId, MailId, RequestId};
 
 use crate::actor::native::binding::OutboundSend;
-#[cfg(any(test, feature = "test-support"))]
-use crate::mail::attachments::SharingEncoder;
+use crate::mail::attachments::{EncodedMail, encode_envelope};
 use crate::mail::boundary::is_engine_only;
 use crate::mail::{BoundaryMail, Source};
 
@@ -96,14 +100,16 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let Some(first) = recipients.next() else {
             return;
         };
-        let bytes = payload.encode_into_bytes();
+        let encoded = self.encode_in_process(payload);
+        let attachments = encoded.attachments.as_deref().unwrap_or_default();
         let parent = self.outbound_parent();
         let root = self.outbound_root();
         let kind = K::ID.0;
         self.binding.push_envelope_buffered(OutboundSend {
             recipient: first.id().0,
             kind,
-            bytes: &bytes,
+            bytes: &encoded.bytes,
+            attachments,
             count: 1,
             parent_mail: parent,
             inherited_root: root,
@@ -112,7 +118,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             self.binding.push_envelope_buffered(OutboundSend {
                 recipient: recipient.id().0,
                 kind,
-                bytes: &bytes,
+                bytes: &encoded.bytes,
+                attachments,
                 count: 1,
                 parent_mail: parent,
                 inherited_root: root,
@@ -157,6 +164,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             recipient: target.id().0,
             kind: kind.0,
             bytes,
+            attachments: &[],
             count: 1,
             parent_mail: self.outbound_parent(),
             inherited_root: self.outbound_root(),
@@ -190,6 +198,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             recipient: target.id().0,
             kind: kind.0,
             bytes,
+            attachments: &[],
             count: 1,
             parent_mail: None,
             inherited_root: None,
@@ -330,6 +339,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let _ = self.push_to(self.actor_ref::<R>().erase(), payload, None, None);
     }
 
+    /// Encode `payload` for an in-process send: each `Blob` field shared
+    /// through the engine store and attached (ADR-0238 decision 3).
+    fn encode_in_process<K: Kind>(&self, payload: &K) -> EncodedMail {
+        encode_envelope(self.binding.mailer().blob_store(), payload)
+    }
+
     /// The push behind the `send_to` family: encode `payload` and push it to
     /// `target` under the `(parent, root)` lineage, returning the minted
     /// [`MailId`].
@@ -340,10 +355,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         parent: Option<MailId>,
         root: Option<MailId>,
     ) -> MailId {
+        let encoded = self.encode_in_process(payload);
         self.binding.push_envelope_buffered(OutboundSend {
             recipient: target.id().0,
             kind: K::ID.0,
-            bytes: &payload.encode_into_bytes(),
+            bytes: &encoded.bytes,
+            attachments: encoded.attachments.as_deref().unwrap_or_default(),
             count: 1,
             parent_mail: parent,
             inherited_root: root,
@@ -365,12 +382,13 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         root: Option<MailId>,
         reply_to: Source,
     ) {
-        let bytes = payload.encode_into_bytes();
+        let encoded = self.encode_in_process(payload);
         let _ = self.binding.push_envelope_buffered_with_reply_to(
             OutboundSend {
                 recipient: target.id().0,
                 kind: K::ID.0,
-                bytes: &bytes,
+                bytes: &encoded.bytes,
+                attachments: encoded.attachments.as_deref().unwrap_or_default(),
                 count: 1,
                 parent_mail: None,
                 inherited_root: root,
@@ -397,6 +415,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             recipient: recipient.id().0,
             kind: kind.0,
             bytes: &payload,
+            attachments: &[],
             count: 1,
             parent_mail: None,
             inherited_root: None,
@@ -417,6 +436,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
                 recipient: recipient.id().0,
                 kind: kind.0,
                 bytes: &payload,
+                attachments: &[],
                 count: 1,
                 parent_mail: self.outbound_parent(),
                 inherited_root: self.outbound_root(),
@@ -438,12 +458,13 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// addressed trampoline and the `aether.window` root's forward of a
     /// per-window command to the sole live window.
     pub fn forward_to<K: ActorMail>(&self, target: &ErasedActorRef, payload: &K) {
-        let bytes = payload.encode_into_bytes();
+        let encoded = self.encode_in_process(payload);
         self.binding.push_envelope_buffered_with_reply_to(
             OutboundSend {
                 recipient: target.id().0,
                 kind: K::ID.0,
-                bytes: &bytes,
+                bytes: &encoded.bytes,
+                attachments: encoded.attachments.as_deref().unwrap_or_default(),
                 count: 1,
                 parent_mail: self.outbound_parent(),
                 inherited_root: self.outbound_root(),
@@ -477,11 +498,12 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
     // By-id detached send — the by-name body with the caller's id, `None` /
     // `None` lineage minting a fresh root (ADR-0080 §7).
     fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
-        let bytes = payload.encode_into_bytes();
+        let encoded = self.encode_in_process(payload);
         self.binding.push_envelope_buffered(OutboundSend {
             recipient: target.id().0,
             kind: K::ID.0,
-            bytes: &bytes,
+            bytes: &encoded.bytes,
+            attachments: encoded.attachments.as_deref().unwrap_or_default(),
             count: 1,
             parent_mail: None,
             inherited_root: None,
@@ -516,28 +538,5 @@ impl<A> OutboundReply for NativeCtx<'_, A, Manual> {
 
     fn reply_to<K: ActorMail>(&mut self, sender: Source, payload: &K) {
         self.binding.send_reply_for_handler(sender, payload, self.in_flight_root, self.outbound_parent());
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl<A> NativeCtx<'_, A, Manual> {
-    /// Test support: reply to this handler's sender with `payload`, sharing
-    /// each `Blob` field backed by this engine's store the way an attached
-    /// in-process reply carries it: tag 1 with the blob's hash, and the store
-    /// entry attached to the envelope (ADR-0238 decision 3). No production
-    /// sender attaches entries yet, so a test of a consumer that must rewrite
-    /// attached mail (the rpc server's reply-out) drives one through here.
-    /// Only a component reply target is served; any other sends nothing.
-    #[doc(hidden)]
-    pub fn reply_sharing_blobs<K: ActorMail>(&mut self, payload: &K) {
-        let (bytes, attachments) = SharingEncoder::encode(payload);
-        self.binding.send_attached_reply_for_handler(
-            self.source,
-            K::ID,
-            bytes,
-            attachments,
-            self.in_flight_root,
-            self.outbound_parent(),
-        );
     }
 }

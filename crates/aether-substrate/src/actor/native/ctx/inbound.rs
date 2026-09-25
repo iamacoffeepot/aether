@@ -14,6 +14,7 @@ use aether_data::{Kind, MailId, RequestId};
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::inbox::InboundMail;
+use crate::mail::attachments::AttachedEntries;
 use crate::mail::{Source, SourceAddr};
 use crate::runtime::trace::SettlementHold;
 
@@ -69,6 +70,26 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     pub(crate) fn inbound(&self) -> Option<&Envelope> {
         self.inbound.as_ref()
     }
+
+    /// Decode `payload` as `K` against the inbound envelope's attachments
+    /// (ADR-0238 decision 3): each tag-1 `Blob` field resolves to the entry
+    /// its hash names and yields a `Shared` value over it, and a hash no
+    /// attachment carries fails the decode. Without attachments it is
+    /// `K::decode_from_bytes`, unchanged.
+    ///
+    /// The `#[actor]` typed arms and native handler-set arms call it; a hand
+    /// decoder of an `&Envelope` is not affected, since it sees only blob-free
+    /// kinds today. It decodes only the mail being handled, so it grants
+    /// nothing the handler does not already receive.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __decode_inbound<K: Kind>(&self, payload: &[u8]) -> Option<K> {
+        match self.inbound.as_ref().map(Envelope::attachments) {
+            Some(entries) if !entries.is_empty() => K::decode_with(payload, &mut AttachedEntries(entries)),
+            _ => K::decode_from_bytes(payload),
+        }
+    }
+
     /// ADR-0080 §5: the [`MailId`] of the mail currently being
     /// dispatched. Read by outbound `send` paths to stamp
     /// `parent_mail` on child mail. `None` when the ctx was

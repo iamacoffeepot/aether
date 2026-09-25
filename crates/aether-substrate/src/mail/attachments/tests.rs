@@ -10,7 +10,7 @@ use aether_codec::frame::max_frame_size;
 use aether_data::{Blob, Kind, KindDescriptor, Schema};
 use serde_json::{Value, json};
 
-use super::{Attachments, SharingEncoder};
+use super::{Attachments, EncodedMail, encode_envelope};
 use crate::mail::registry::{MailDispatch, OwnedDispatch};
 use crate::mail::{EgressEvent, Mail, MailboxId, Mailer, Registry};
 use crate::testing::{bare_substrate, boot_authority, test_mailer_and_rx};
@@ -35,12 +35,13 @@ fn register_carrier(registry: &Registry) {
         .expect("register the carrier kind");
 }
 
-/// A carrier whose blob is `SHARED` checked into `mailer`'s engine store,
-/// encoded as an attached in-process send writes it. Only the returned
-/// attachments hold the entry.
+/// A carrier whose blob is `SHARED`, encoded by the in-process envelope
+/// encoder against `mailer`'s engine store. Only the returned attachments
+/// hold the entry.
 fn attached_carrier(mailer: &Mailer, note: String) -> (Vec<u8>, Attachments) {
-    let blob = mailer.blob_store().check_in(Box::from(SHARED)).into_blob();
-    SharingEncoder::encode(&Carrier { note, blob })
+    let EncodedMail { bytes, attachments } =
+        encode_envelope(mailer.blob_store(), &Carrier { note, blob: Blob::from(SHARED.to_vec()) });
+    (bytes, attachments)
 }
 
 fn unresolved_payloads(rx: &Receiver<EgressEvent>) -> Vec<Vec<u8>> {

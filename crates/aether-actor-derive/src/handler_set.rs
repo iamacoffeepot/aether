@@ -188,7 +188,9 @@ impl SetTransport {
             ),
             Self::Native => (
                 quote! { __aether_kind.0 == <#kind_ty as ::aether_data::Kind>::ID.0 },
-                quote! { <#kind_ty as ::aether_data::Kind>::decode_from_bytes(__aether_payload) },
+                // ADR-0238 decision 3: resolve tag-1 `Blob` fields against the
+                // inbound envelope's attachments, as the `#[actor]` arm does.
+                quote! { __aether_ctx.__decode_inbound::<#kind_ty>(__aether_payload) },
             ),
         }
     }

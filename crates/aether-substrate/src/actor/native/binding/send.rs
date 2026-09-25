@@ -4,6 +4,7 @@
 use std::sync::atomic::Ordering;
 
 use super::{NativeBinding, OutboundSend};
+use crate::mail::attachments;
 use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 
 /// Inherent send / `prev_correlation` entry points the
@@ -23,7 +24,7 @@ impl NativeBinding {
         send: OutboundSend<'_>,
         before_push: impl FnOnce(MailId),
     ) -> MailId {
-        let OutboundSend { recipient, kind, bytes, count, parent_mail, inherited_root } = send;
+        let OutboundSend { recipient, kind, bytes, attachments, count, parent_mail, inherited_root } = send;
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let recipient_id = MailboxId(recipient);
         let reply_to = Source::with_correlation(SourceAddr::Component(self.self_mailbox()), correlation);
@@ -35,11 +36,10 @@ impl NativeBinding {
         // (per-chassis post iamacoffeepot/aether#953), so producer
         // calls are unconditional; the drainer is the optional piece.
         self.mailer.record_sent(mail_id, root, parent_mail, self.self_mailbox(), recipient_id, KindId(kind));
-        let mail = Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count).with_reply_to(reply_to).with_lineage(
-            Some(mail_id),
-            Some(root),
-            parent_mail,
-        );
+        let mail = Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count)
+            .with_reply_to(reply_to)
+            .with_lineage(Some(mail_id), Some(root), parent_mail)
+            .with_attachments(attachments::owned(attachments));
         self.mailer.push(mail);
         mail_id
     }
@@ -93,6 +93,7 @@ mod tests {
                 recipient: recipient.0,
                 kind: 1,
                 bytes: &[],
+                attachments: &[],
                 count: 1,
                 parent_mail: None,
                 inherited_root: None,
@@ -105,6 +106,7 @@ mod tests {
                 recipient: recipient.0,
                 kind: 1,
                 bytes: &[],
+                attachments: &[],
                 count: 1,
                 parent_mail: None,
                 inherited_root: None,
@@ -138,6 +140,7 @@ mod tests {
                 recipient: recipient.0,
                 kind: KindId(1).0,
                 bytes: &[],
+                attachments: &[],
                 count: 1,
                 parent_mail: None,
                 inherited_root: None,

@@ -8,9 +8,11 @@ use aether_kinds::trace::Nanos;
 
 use super::NativeBinding;
 use super::pending::{ComponentOrigin, PendingMail, PendingOwnerBatchWork, PendingPayload};
+use crate::mail::attachments;
 use crate::mail::registry::effect::{PreparedSpawnCommit, RegistryBatch, RegistryBatchResult};
 use crate::mail::ring::{MailRing, RingFull};
 use crate::mail::{MailId, Source, SourceAddr};
+use crate::store::BlobEntry;
 
 /// Per-actor outbound ring capacity (ADR-0087). Sized to hold a typical
 /// handler's small-mail fan-out as one blob; a mail that doesn't fit (a
@@ -84,14 +86,16 @@ impl OutboundBuffer {
 }
 
 /// One outbound envelope a native actor sends: the raw recipient and kind
-/// ids, the encoded payload with its item count, and the lineage it
-/// carries — the sender's in-flight mail and the chain root it inherits
-/// (`None` mints a fresh root).
+/// ids, the encoded payload with its item count, the store entries its
+/// tag-1 `Blob` fields name (ADR-0238 decision 3; empty for blob-free
+/// mail), and the lineage it carries — the sender's in-flight mail and the
+/// chain root it inherits (`None` mints a fresh root).
 #[derive(Clone, Copy)]
 pub struct OutboundSend<'a> {
     pub(crate) recipient: u64,
     pub(crate) kind: u64,
     pub(crate) bytes: &'a [u8],
+    pub(crate) attachments: &'a [Arc<BlobEntry>],
     pub(crate) count: u32,
     pub(crate) parent_mail: Option<MailId>,
     pub(crate) inherited_root: Option<MailId>,
@@ -151,7 +155,7 @@ impl NativeBinding {
         send: OutboundSend<'_>,
         reply_to_override: Option<Source>,
     ) -> MailId {
-        let OutboundSend { recipient, kind, bytes, count, parent_mail, inherited_root } = send;
+        let OutboundSend { recipient, kind, bytes, attachments, count, parent_mail, inherited_root } = send;
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let reply_to = reply_to_override
             .unwrap_or_else(|| Source::with_correlation(SourceAddr::Component(self.self_mailbox()), correlation));
@@ -189,8 +193,9 @@ impl NativeBinding {
                 Err(RingFull) => PendingPayload::Owned(bytes.to_vec()),
             }
         };
-        // No native send attaches blob entries yet; the envelope encoder
-        // that interns `Blob` fields fills this.
+        // The pending mail keeps its own strong reference to each entry, so a
+        // fan-out that pushes one encoding to many recipients gives each its
+        // own (ADR-0238 decision 3).
         buf.mails.push(PendingMail {
             recipient,
             kind,
@@ -200,7 +205,7 @@ impl NativeBinding {
             mail_id,
             root,
             parent_mail,
-            attachments: None,
+            attachments: attachments::owned(attachments),
         });
         mail_id
     }

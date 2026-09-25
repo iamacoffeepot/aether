@@ -29,7 +29,7 @@ use crate::actor::native::ctx::ResolvePathError;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
 use crate::chassis::settlement::SettlementRegistry;
-use crate::mail::attachments::{inline_payload, plain_payload};
+use crate::mail::attachments::{EncodedMail, encode_envelope, inline_payload, plain_payload};
 use crate::mail::capability::CapabilityRegistry;
 use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
@@ -609,14 +609,19 @@ impl Mailer {
         K: Kind,
     {
         // ADR-0100: each arm encodes the reply through the kind's declared
-        // codec (cast or wire), not a hardcoded codec path.
+        // codec (cast or wire), not a hardcoded codec path. ADR-0238
+        // decision 3: only the in-process `Component` arm uses the envelope
+        // encoder, which shares `Blob` fields through the store; a reply that
+        // leaves the process is plain-encoded, so it is tag 0 by
+        // construction.
         match sender.addr {
             SourceAddr::None => false,
             SourceAddr::Session(_) | SourceAddr::EngineMailbox { .. } => {
                 self.send_hub_reply(sender, K::ID, K::NAME, result.encode_into_bytes(), reply_id)
             }
             SourceAddr::Component(_) => {
-                self.send_component_reply(sender, K::ID, result.encode_into_bytes(), reply_id, root, parent)
+                let encoded = encode_envelope(self.blob_store(), result);
+                self.send_component_reply(sender, K::ID, encoded, reply_id, root, parent)
             }
         }
     }
@@ -644,7 +649,10 @@ impl Mailer {
                 };
                 self.send_hub_reply(sender, kind, &kind_name, bytes.to_vec(), reply_id)
             }
-            SourceAddr::Component(_) => self.send_component_reply(sender, kind, bytes.to_vec(), reply_id, root, parent),
+            SourceAddr::Component(_) => {
+                let encoded = EncodedMail { bytes: bytes.to_vec(), attachments: None };
+                self.send_component_reply(sender, kind, encoded, reply_id, root, parent)
+            }
         }
     }
 
@@ -668,37 +676,19 @@ impl Mailer {
     }
 
     /// The `Component` arm of the reply path: record the reply's `Sent` and
-    /// push a lineage-stamped `Mail` into the target component's inbox.
+    /// push a lineage-stamped `Mail` into the target component's inbox,
+    /// carrying the entries the payload's tag-1 `Blob` fields name.
     fn send_component_reply(
         &self,
         sender: Source,
         kind: KindId,
-        payload: Vec<u8>,
+        payload: EncodedMail,
         reply_id: Option<aether_data::MailId>,
         root: Option<aether_data::MailId>,
         parent: Option<aether_data::MailId>,
     ) -> bool {
-        let Some(mail) = self.component_reply_mail(sender, kind, payload, reply_id, root, parent) else {
-            return false;
-        };
-        self.push(mail);
-        true
-    }
-
-    /// The reply mail [`Self::send_component_reply`] pushes, with its `Sent`
-    /// already recorded, or `None` when `sender` is not a component. Split out
-    /// so a test-support reply can attach blob entries before the push.
-    pub(crate) fn component_reply_mail(
-        &self,
-        sender: Source,
-        kind: KindId,
-        payload: Vec<u8>,
-        reply_id: Option<aether_data::MailId>,
-        root: Option<aether_data::MailId>,
-        parent: Option<aether_data::MailId>,
-    ) -> Option<Mail> {
         let SourceAddr::Component(mailbox) = sender.addr else {
-            return None;
+            return false;
         };
         // ADR-0042: echo the caller's correlation_id onto the reply envelope
         // so the originating handler can pick the right reply out of the
@@ -713,7 +703,14 @@ impl Mailer {
         if let (Some(reply_id), Some(root)) = (reply_id, root) {
             self.record_sent(reply_id, root, parent, reply_id.sender, mailbox, kind);
         }
-        Some(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to).with_lineage(reply_id, root, parent))
+        let EncodedMail { bytes, attachments } = payload;
+        self.push(
+            Mail::new(mailbox, kind, bytes, 1)
+                .with_reply_to(reply_to)
+                .with_lineage(reply_id, root, parent)
+                .with_attachments(attachments),
+        );
+        true
     }
 }
 

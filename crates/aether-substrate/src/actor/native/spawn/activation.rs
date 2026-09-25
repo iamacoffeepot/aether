@@ -439,6 +439,7 @@ impl<A: NativeActor> Drainable for ActivationJob<A> {
                     recipient: id.0,
                     kind: ACTIVATION_BARRIER_KIND.0,
                     bytes: &self.token.value().to_le_bytes(),
+                    attachments: &[],
                     count: 1,
                     parent_mail: None,
                     inherited_root: None,
