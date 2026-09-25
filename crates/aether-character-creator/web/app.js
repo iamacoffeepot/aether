@@ -202,7 +202,7 @@ function createControls() {
     NoseLength: "Nose length",
     EyeSize: "Eye size",
     BrowHeight: "Brow height",
-    BrowOuterSize: "Outer brow size",
+    BrowOuterSize: "Outer brow ridge",
     LipFullness: "Lip fullness",
     MouthSmile: "Mouth smile",
     ChinShape: "Chin shape",

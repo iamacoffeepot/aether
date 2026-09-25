@@ -237,6 +237,10 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let brow_ridge_normal = buffer.push_vec3(&brow_ridges.normals, false);
     let brow_ridge_uv = buffer.push_vec2(&brow_ridges.texture_coordinates);
     let brow_ridge_indices = buffer.push_indices(&brow_ridges.indices);
+    let brow_ridge_morph_accessors = MORPH_TARGETS
+        .iter()
+        .map(|name| buffer.push_vec3(&brow_ridge_morph_deltas(name, &brow_ridges.positions), false))
+        .collect::<Vec<_>>();
 
     let brow_position = buffer.push_vec3(&brows.positions, true);
     let brow_normal = buffer.push_vec3(&brows.normals, false);
@@ -276,6 +280,8 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
         .collect::<Vec<_>>();
 
     let targets = morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
+    let brow_ridge_targets =
+        brow_ridge_morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
     let brow_targets = brow_morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
     let mouth_targets =
         mouth_morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
@@ -390,14 +396,21 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
                 }]
             },
             mesh_json("Canthus", eye_position, eye_normal, eye_uv, eye_indices, 8),
-            mesh_json(
-                "BrowRidge",
-                brow_ridge_position,
-                brow_ridge_normal,
-                brow_ridge_uv,
-                brow_ridge_indices,
-                0
-            )
+            {
+                "name": "BrowRidge",
+                "weights": weights,
+                "primitives": [{
+                    "attributes": {
+                        "POSITION": brow_ridge_position,
+                        "NORMAL": brow_ridge_normal,
+                        "TEXCOORD_0": brow_ridge_uv
+                    },
+                    "indices": brow_ridge_indices,
+                    "material": 0,
+                    "mode": 4,
+                    "targets": brow_ridge_targets
+                }]
+            }
         ],
         "bufferViews": buffer.views,
         "accessors": buffer.accessors,
@@ -546,6 +559,17 @@ fn brow_ridges_mesh(segments: u32) -> Mesh {
     mesh
 }
 
+fn brow_ridge_morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
+    positions
+        .iter()
+        .copied()
+        .map(|position| match name {
+            "BrowOuterSize" => brow_outer_delta(position),
+            _ => Vec3::default(),
+        })
+        .collect()
+}
+
 fn brows_mesh(segments: u32) -> Mesh {
     let mut mesh = empty_mesh((segments + 1) * 4, segments * 12);
     for center_x in [-0.255, 0.255] {
@@ -560,23 +584,11 @@ fn brows_mesh(segments: u32) -> Mesh {
 fn brow_morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
     positions
         .iter()
-        .enumerate()
-        .map(|(index, position)| match name {
+        .map(|position| match name {
             "BrowHeight" => {
                 let target_y = position.y + 0.055;
                 let target = front_surface_point(position.x, target_y);
                 Vec3::new(0.0, target_y - position.y, target.z + 0.018 - position.z)
-            }
-            "BrowOuterSize" => {
-                let outer = ((position.x.abs() - 0.255) / 0.19).clamp(0.0, 1.0).powf(1.2);
-                let target_x = position.x + position.x.signum() * 0.035 * outer;
-                let edge_direction = if index.is_multiple_of(2) {
-                    -1.0
-                } else {
-                    1.0
-                };
-                let target_y = position.y + edge_direction * 0.012 * outer;
-                Vec3::new(target_x - position.x, target_y - position.y, 0.0)
             }
             _ => Vec3::default(),
         })
@@ -901,6 +913,15 @@ fn smooth_maximum(left: f32, right: f32, radius: f32) -> f32 {
     -smooth_union(-left, -right, radius)
 }
 
+fn brow_outer_delta(position: Vec3) -> Vec3 {
+    let front = ((position.z + 0.05) / 0.78).clamp(0.0, 1.0);
+    let lateral = ((position.x.abs() - 0.245) / 0.17).clamp(0.0, 1.0);
+    let outer_region = gaussian(position.x, position.y, -0.39, 0.35, 0.18, 0.17)
+        + gaussian(position.x, position.y, 0.39, 0.35, 0.18, 0.17);
+    let weight = front * lateral * outer_region;
+    Vec3::new(position.x.signum() * 0.020, 0.0, 0.055) * weight
+}
+
 fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
     positions
         .iter()
@@ -943,6 +964,7 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                     let right = gaussian(position.x, position.y, 0.275, 0.275, 0.22, 0.14);
                     Vec3::new(0.0, 0.025 * front * (left + right), -0.045 * front * (left + right))
                 }
+                "BrowOuterSize" => brow_outer_delta(position),
                 "LipFullness" => {
                     let weight = front
                         * (gaussian(position.x, position.y, 0.0, -0.205, 0.27, 0.06)

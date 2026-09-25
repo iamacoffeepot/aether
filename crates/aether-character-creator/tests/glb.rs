@@ -42,4 +42,8 @@ fn generated_head_is_a_self_contained_glb_with_named_morphs() {
         document["meshes"][10]["primitives"][0]["targets"].as_array().expect("lip targets array").len(),
         MORPH_TARGETS.len()
     );
+    assert_eq!(
+        document["meshes"][12]["primitives"][0]["targets"].as_array().expect("brow ridge targets array").len(),
+        MORPH_TARGETS.len()
+    );
 }
