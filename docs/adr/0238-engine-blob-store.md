@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-25
+- **Amended:** 2026-09-25 — decisions 3, 4 and 12: a send resolves the tag-1 hashes already in its payload against the sender's own blobs and attaches their entries, so a raw forward stays shared and a guest shares a held value by hash on send; an unresolved hash refuses the send at the sender. Supersedes the guest share-on-send follow-on below.
 - **Amended:** 2026-09-25 — decisions 2, 3, 4, 9 and 12: a tag-1 field carries the blob's hash; a guest `Blob` is the same value with an FFI-wrapper backing that takes a hold when built (`blob_hold_p32`, replacing `blob_len_p32`), and delivery pins attached entries only for the receive call, so `receive_p32` is unchanged; the egress rewrite keys on attachments, not a per-kind flag; file and journal writes use the plain encoder; the engine recovers a store entry by downcast; rehydrate re-grant and guest share-on-send are follow-ons.
 - **Amended:** 2026-09-25 — decisions 2, 3, 9 and 12: `BlobReader` lives in `aether-data`; `is_empty` is added; the `read_at` and `blob_drop_p32` contracts are stated; teardown releases a guest's holds without a leak warning; envelope attachments hold store entries.
 - **Amended:** 2026-09-25 — decisions 2–6 and 9–12 rewritten: `Blob` is a value of immutable bytes, not a handle. In-process mail shares it through the store; every other path writes its bytes. Supersedes the reference designs in the amendments below, which stay as history.
@@ -230,6 +231,7 @@ tag 1 → [32-byte hash]        in-process mail only; never leaves the process
 | Step | What happens |
 |---|---|
 | Send | A send encodes with the envelope encoder, since most mail stays local. Each `Blob` field is interned into the store if it is `Owned`, attached to the envelope as its store entry (`attachments: Option<Box<[Arc<BlobEntry>]>>` on `Mail`, one null word when empty), and written as tag 1 with its hash. Interning already yields the entry, and a guest delivery needs the entry, which a `Blob` hides. A send borrows its payload, so the sender keeps its values. |
+| Resolve on send | A payload can already hold tag-1 fields: a raw forward of received bytes, or a guest's encode of a `Blob` it holds, which writes tag 1 with the hash (a guest's `Owned` value is written as tag 0). Before the send leaves the sender, the engine walks the kind's schema, resolves each such hash against the sender's own blobs (a guest's table: its pins and holds; a native actor: the attachments of the mail it is handling) and attaches the entry. A hash that resolves nowhere refuses the send at the sender with an error naming it. A sender that holds and pins no blob cannot carry a valid tag-1 field, so the walk runs only for senders that hold blobs, and blob-free senders pay nothing. |
 | Deliver | A native recipient's decode matches each tag-1 hash to its attached entry and yields a `Shared` `Blob` over it. A guest recipient's table pins every attached entry for the receive call; the guest's decode reads the hash and builds its `Blob` over the FFI wrapper, taking a hold (section 2). `receive_p32` is unchanged, and the guest needs no delivery context. Fan-out delivers per recipient. |
 | Egress | Any path that leaves the process rewrites each tag-1 field to tag 0 by copying in the bytes of the attachment its hash names: RPC reply-out (`crates/aether-rpc/src/server/runtime.rs:934`) and unresolved-recipient egress (`crates/aether-substrate/src/mail/mailer.rs:920`). File and journal writes encode typed values with the plain encoder, so they write tag 0 by construction and never take an envelope payload. |
 | Ingress | Nothing. Tag 0 decodes to an `Owned` value, interned only if it is later sent in-process. |
@@ -239,16 +241,17 @@ from plain bytes by the tag, so the schema must say so. Every outside codec
 treats it as bytes: the JSON codec (`encode_schema` / `decode_schema`) reads
 and writes plain bytes, so MCP never sees a tag. The egress rewrite runs only
 for mail whose envelope carries attachments: a tag-1 field is written only
-beside an attachment, so blob-free mail pays nothing and no per-kind record is
-kept.
+beside an attachment (resolve on send guarantees it), so blob-free mail pays
+nothing and no per-kind record is kept.
 
 ### 4. No lookup by hash
 
 The BLAKE3 hash is internal: the store's dedup key and the guest table's key.
 There is no fetch by hash, no store lookup by hash, and no public way to build
 a `Shared` value. The guest's host imports take a hash but resolve it only
-against the caller's own table, so a guessed or logged hash reaches nothing the
-caller does not already hold. Only the engine constructs `Shared` values (the
+against the caller's own table, and resolve on send (section 3) resolves a
+payload's hashes only against the sender's own blobs, so a guessed or logged
+hash reaches nothing the caller does not already hold. Only the engine constructs `Shared` values (the
 store's interning and delivery), behind a hidden constructor that the existing
 mint scanner (`scripts/check-reference-mint.py`) confines. Anyone may build an
 `Owned` value: it is just bytes. When a native `Shared` value is sent on, the
@@ -410,7 +413,7 @@ meaning.
 | Native send | `crates/aether-substrate/src/actor/native/binding/{outbound,pending,flush,send}.rs` (ring entries are plain bytes, so attachments ride on `PendingMail` beside the ring entry) |
 | Native deliver | `actor/native/slot/dispatcher.rs` (decoded `Blob` fields are the attachments), `actor/native/ctx/{mod,send}.rs` |
 | Armed hand-offs | `actor/native/blob/work.rs:670`, `actor/native/spawn/activation.rs:564`, `mail/mailer.rs` (`route_tail`) |
-| Wasm | `actor/wasm/host_fns.rs` (`blob_hold_p32`, `blob_read_p32`, `blob_drop_p32`), `actor/wasm/component/{ctx,dispatch}.rs`, `actor/wasm/blob_table.rs` (the instance's table) |
+| Wasm | `actor/wasm/host_fns.rs` (`send_mail_p32` resolve on send, `blob_hold_p32`, `blob_read_p32`, `blob_drop_p32`), `actor/wasm/component/{ctx,dispatch}.rs`, `actor/wasm/blob_table.rs` (the instance's table) |
 | Guest SDK | `crates/aether-actor/src/wasm/{raw.rs,bridge/mail.rs}` |
 | `Blob` and schema | `crates/aether-data/src/{blob/,schema.rs}` (`Blob`, `BlobBacking`, `BlobReader`, `SchemaType::Blob`), `crates/aether-codec/src/{encode,decode}.rs` (read and write plain bytes) |
 | Egress rewrite | `crates/aether-substrate/src/mail/mailer.rs` (`route_tail` egress), `crates/aether-rpc/src/server/runtime.rs` (reply-out), `crates/aether-codec/src/inline/` |
@@ -454,9 +457,6 @@ meaning.
   - Guest-side creation needs no new mechanism: a guest builds an `Owned`
     value with `Blob::from`, and its first in-process send copies it to the
     host once.
-  - A guest's send writes each `Blob` field as bytes. Sharing a guest-held
-    value by hash on send (`send_mail_p32` resolving hashes against the
-    sender's table) waits for a consumer.
   - Granting `Blob`s carried in saved state again on rehydrate, instead of
     carrying them as bytes, waits for a consumer.
 
@@ -479,6 +479,11 @@ meaning.
   reuse, and code needs a release verb that reads as freeing shared bytes.
   Replaced by the hash: holding the hash in your own table is what grants
   access, so knowing a hash grants nothing and it can serve as the handle.
+- **Leaving raw forwards detached** (recipients refuse them, and they leave
+  the process unrewritten), or refusing them at egress. The first leaves a
+  tag-1 field outside the process; the second walks every egress payload.
+  Rejected: resolving on send fixes the forward at its source, keeps it
+  shared, and walks only for senders that hold blobs.
 - **Carrying attachment hashes beside the payload** (extending `receive_p32`,
   a second receive export, or a pull import). Each adds ABI for what the
   payload can carry itself, and a per-decode mint breaks the hold count when a
