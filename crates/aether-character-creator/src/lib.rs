@@ -861,17 +861,17 @@ fn head_sdf(point: Vec3) -> f32 {
 }
 
 fn head_mass_sdf(point: Vec3) -> f32 {
-    let mut shape = superellipsoid_sdf(point, Vec3::new(0.0, 0.34, -0.12), Vec3::new(0.68, 0.63, 0.60), 2.10);
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.40, 0.12), Vec3::new(0.52, 0.42, 0.42)), 0.10);
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.18, 0.18), Vec3::new(0.49, 0.54, 0.45)), 0.11);
+    let mut shape = superellipsoid_sdf(point, Vec3::new(0.0, 0.29, -0.12), Vec3::new(0.68, 0.56, 0.60), 2.10);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.37, 0.12), Vec3::new(0.52, 0.36, 0.42)), 0.10);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.14, 0.18), Vec3::new(0.49, 0.47, 0.45)), 0.11);
     shape = smooth_union(
         shape,
-        superellipsoid_sdf(point, Vec3::new(0.0, -0.52, 0.34), Vec3::new(0.36, 0.24, 0.29), 2.40),
+        superellipsoid_sdf(point, Vec3::new(0.0, -0.46, 0.34), Vec3::new(0.36, 0.20, 0.29), 2.40),
         0.08,
     );
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.58, 0.43), Vec3::new(0.26, 0.17, 0.20)), 0.08);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.50, 0.43), Vec3::new(0.26, 0.135, 0.20)), 0.08);
     for x in [-0.28, 0.28] {
-        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.35, 0.22), Vec3::new(0.15, 0.26, 0.20)), 0.09);
+        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.32, 0.22), Vec3::new(0.15, 0.22, 0.20)), 0.09);
     }
     for x in [-0.31, 0.31] {
         shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.01, 0.46), Vec3::new(0.20, 0.15, 0.13)), 0.14);
@@ -972,7 +972,7 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                 "JawLength" => {
                     let lower_face = ((-0.10 - position.y) / 0.42).clamp(0.0, 1.0);
                     let weight = front * lower_face * gaussian(position.x, position.y, 0.0, -0.55, 0.50, 0.30);
-                    Vec3::new(0.0, -0.16 * weight, 0.025 * weight)
+                    Vec3::new(0.0, -0.11 * weight, 0.020 * weight)
                 }
                 "CheekVolume" => {
                     let upper_fade = ((0.20 - position.y) / 0.22).clamp(0.0, 1.0);
@@ -1013,7 +1013,7 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                 }
                 "ChinShape" => {
                     let weight = front * gaussian(position.x, position.y, 0.0, -0.60, 0.33, 0.20);
-                    Vec3::new(0.0, -0.07 * weight, 0.12 * weight)
+                    Vec3::new(0.0, -0.04 * weight, 0.09 * weight)
                 }
                 _ => Vec3::default(),
             }
