@@ -343,7 +343,7 @@ mod tests {
     use aether_substrate::mail::Source;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::MailDispatch;
-    use aether_substrate::testing::{bare_substrate, boot_authority, unrouted_binding};
+    use aether_substrate::testing::{bare_substrate, boot_authority, drop_ref, unrouted_binding};
 
     use super::*;
     // The subscription request kinds moved to the `WindowManagerSurface` set,
@@ -423,11 +423,12 @@ mod tests {
         ));
         assert!(state.subscribers.recipients(WindowId(1), Key::ID).is_empty());
 
-        let dropped = registry.register_inline(
+        let subscriber = registry.register_inline(
             &boot_authority(),
             "test.synthetic.dropped",
             Arc::new(|_dispatch: MailDispatch<'_>| {}),
         );
+        let dropped = subscriber.id();
         assert!(matches!(
             SyntheticWindowCapability::on_subscribe(
                 &mut state,
@@ -436,8 +437,7 @@ mod tests {
             ),
             SubscribeWindowResult::Ok
         ));
-        let subscriber = ctx.resolve_live(dropped).expect("the subscriber proves while it is still live");
-        registry.drop_mailbox(&boot_authority(), dropped).expect("drop subscriber mailbox");
+        drop_ref(&registry, subscriber);
 
         assert!(matches!(
             SyntheticWindowCapability::on_unsubscribe(

@@ -23,11 +23,11 @@
 /// itself can mint one (`BootAuthority::new` is crate-private) and only the
 /// boot-owned infrastructure that holds one can name an eager mutator.
 /// iamacoffeepot/aether#4161 closed the set: the token now sits on
-/// `Registry::apply_batches` itself, and every public mutator above it —
-/// [`Registry::register_inbox`], [`Registry::try_register_inbox`],
-/// [`Registry::try_register_inbox_with_id`], [`Registry::register_inline`],
+/// `Registry::apply_batches` itself, and every eager mutator above it —
+/// `Registry::register_inbox`, `Registry::try_register_inbox`,
+/// `Registry::try_register_inbox_with_id`, [`Registry::register_inline`],
 /// [`Registry::register_kind`], [`Registry::register_kind_with_descriptor`],
-/// [`Registry::drop_mailbox`], and `Registry::install_seize_handle` —
+/// `Registry::drop_mailbox`, and `Registry::install_seize_handle` —
 /// forwards one down through the private `insert` / `insert_with_id` /
 /// `register_kind_internal` helpers. A
 /// capability, a component, or any other downstream crate reaches those
@@ -38,13 +38,9 @@
 /// `RegistryOwnerLease::attach` takes one **by value**: the proof handed to
 /// the owner is spent there and cannot be reused for a second writer.
 ///
-/// [`Registry::register_inbox`]: crate::mail::registry::Registry::register_inbox
-/// [`Registry::try_register_inbox`]: crate::mail::registry::Registry::try_register_inbox
-/// [`Registry::try_register_inbox_with_id`]: crate::mail::registry::Registry::try_register_inbox_with_id
 /// [`Registry::register_inline`]: crate::mail::registry::Registry::register_inline
 /// [`Registry::register_kind`]: crate::mail::registry::Registry::register_kind
 /// [`Registry::register_kind_with_descriptor`]: crate::mail::registry::Registry::register_kind_with_descriptor
-/// [`Registry::drop_mailbox`]: crate::mail::registry::Registry::drop_mailbox
 pub struct BootAuthority(());
 
 impl BootAuthority {

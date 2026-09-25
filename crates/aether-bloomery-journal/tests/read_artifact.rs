@@ -5,16 +5,16 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use aether_actor::{ActorRef, actor};
+use aether_actor::{ActorRef, ErasedActorRef, actor};
 use aether_bloomery_journal::{Batch, Journal, JournalActor, Seq};
 use aether_bloomery_kinds::{
     Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_blob, artifact_digest,
 };
-use aether_data::{Kind, MailboxId, Source, SourceAddr, Storage, StorageData};
+use aether_data::{Kind, Source, SourceAddr, Storage, StorageData};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::mail::MailRef;
 use aether_substrate::mail::registry::{DispatchParts, MailboxEntry, OwnedDispatch, Registry};
-use aether_substrate::testing::{bare_substrate, boot_authority, boot_test_chassis_with};
+use aether_substrate::testing::{bare_substrate, boot_test_chassis_with, registered_ref};
 use aether_substrate::{BootError, Subname};
 
 const CLUSTER: Head<OpaqueBytes> = Head::new("cluster.alpha");
@@ -41,10 +41,10 @@ impl NativeActor for TestAnchor {
     }
 }
 
-fn caller(registry: &Registry, name: &str) -> (MailboxId, mpsc::Receiver<OwnedDispatch>) {
+fn caller(registry: &Registry, name: &str) -> (ErasedActorRef, mpsc::Receiver<OwnedDispatch>) {
     let (tx, rx) = mpsc::channel();
-    let mailbox = registry.register_inbox(
-        &boot_authority(),
+    let mailbox = registered_ref(
+        registry,
         name,
         Arc::new(move |dispatch: OwnedDispatch| {
             dispatch.discharge();
@@ -54,14 +54,14 @@ fn caller(registry: &Registry, name: &str) -> (MailboxId, mpsc::Receiver<OwnedDi
     (mailbox, rx)
 }
 
-fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: MailboxId, correlation: u64, mail: &K) {
+fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: ErasedActorRef, correlation: u64, mail: &K) {
     let target = target.erase();
     let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("actor mailbox registered") else {
         panic!("actor mailbox is not an inbox");
     };
     handler.enqueue(OwnedDispatch::disarmed(
         DispatchParts {
-            sender: Source::with_correlation(SourceAddr::Component(caller), correlation),
+            sender: Source::with_correlation(SourceAddr::Component(caller.id()), correlation),
             ..DispatchParts::new(K::ID, MailRef::from(mail.encode_into_bytes()))
         },
         target,

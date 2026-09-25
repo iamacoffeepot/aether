@@ -47,7 +47,7 @@ use crate::config::ConfigMember;
 use crate::mail::MailRef;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
-use crate::mail::registry::{BootAuthority, InboxHandler, Registry, lineage_mailbox_id};
+use crate::mail::registry::{BootAuthority, InboxHandler, NameConflict, Registry, lineage_mailbox_id};
 use crate::mail::registry::{DispatchParts, OwnedDispatch};
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
@@ -177,13 +177,19 @@ pub fn registered_binding(
 /// # Panics
 /// Panics if `name` is already registered.
 pub fn registered_ref(registry: &Registry, name: &str, handler: Arc<dyn InboxHandler>) -> ErasedActorRef {
+    try_registered_ref(registry, name, handler).expect("the fixture name is free")
+}
+
+/// [`registered_ref`] for a fixture that needs the refusal: `Err` when `name`
+/// is already registered, where `registered_ref` panics.
+pub fn try_registered_ref(
+    registry: &Registry,
+    name: &str,
+    handler: Arc<dyn InboxHandler>,
+) -> Result<ErasedActorRef, NameConflict> {
     registry
-        .resolve_live(
-            registry
-                .try_register_inbox_with_id(&boot_authority(), lineage_mailbox_id(name), name, handler)
-                .expect("the fixture name is free"),
-        )
-        .expect("a freshly registered inbox proves")
+        .try_register_inbox_with_id(&boot_authority(), lineage_mailbox_id(name), name, handler)
+        .map(|id| registry.resolve_live(id).expect("a freshly registered inbox proves"))
 }
 
 /// Retire the route `reference` proves the way `Registry::drop_mailbox`

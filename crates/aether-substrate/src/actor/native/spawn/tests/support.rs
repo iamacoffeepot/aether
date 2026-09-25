@@ -156,14 +156,14 @@ pub(super) fn activation_sink(
     name: &str,
 ) -> (ErasedActorRef, crossbeam_channel::Receiver<KindId>) {
     let (sender, receiver) = crossbeam_channel::unbounded();
-    let id = registry.register_inline(
+    let sink = registry.register_inline(
         &boot_authority(),
         name,
         Arc::new(move |dispatch: MailDispatch<'_>| {
             let _ = sender.send(dispatch.kind);
         }),
     );
-    (registry.resolve_live(id).expect("a freshly registered inline sink proves"), receiver)
+    (sink, receiver)
 }
 
 pub(super) fn finalized_probe(

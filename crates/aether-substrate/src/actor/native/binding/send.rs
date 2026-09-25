@@ -122,13 +122,15 @@ mod tests {
         let published = Arc::new(Mutex::new(None));
         let observed = Arc::clone(&published);
         let (tx, rx) = mpsc::channel();
-        let recipient = registry.register_inline(
-            &boot_authority(),
-            "test.binding.before-push",
-            Arc::new(move |_dispatch: MailDispatch<'_>| {
-                tx.send(*observed.lock().unwrap()).unwrap();
-            }),
-        );
+        let recipient = registry
+            .register_inline(
+                &boot_authority(),
+                "test.binding.before-push",
+                Arc::new(move |_dispatch: MailDispatch<'_>| {
+                    tx.send(*observed.lock().unwrap()).unwrap();
+                }),
+            )
+            .id();
         let binding = NativeBinding::new_for_test(mailer, MailboxId(0xB4_221E));
 
         let mail_id = binding.push_envelope_returning_root_before_push(

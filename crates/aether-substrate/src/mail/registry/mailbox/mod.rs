@@ -94,8 +94,8 @@ pub enum MailboxEntry {
     /// dispatch loop owns the bracket. Installed by
     /// `claim_mailbox` / `Spawner::register_inbox` (instanced +
     /// singleton actors, including the wasm trampoline) and by the
-    /// public [`Registry::register_inbox`] /
-    /// [`Registry::try_register_inbox`] for callers that own a
+    /// crate's own `Registry::register_inbox` /
+    /// `Registry::try_register_inbox` for callers that own a
     /// separate dispatcher loop. Handler receives
     /// [`OwnedDispatch`](crate::mail::registry::OwnedDispatch)
     /// so payload + `kind_name` move into the downstream envelope —

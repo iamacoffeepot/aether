@@ -402,13 +402,15 @@ fn owner_inventory_publication_only_invokes_inline_on_the_relay_turn() {
     );
     let wakes = Arc::new(AtomicU32::new(0));
     let wakes_for_handler = Arc::clone(&wakes);
-    let target = registry.register_inline(
-        &auth(),
-        "inline-inventory-subscriber",
-        Arc::new(move |_dispatch: MailDispatch<'_>| {
-            wakes_for_handler.fetch_add(1, Ordering::SeqCst);
-        }),
-    );
+    let target = registry
+        .register_inline(
+            &auth(),
+            "inline-inventory-subscriber",
+            Arc::new(move |_dispatch: MailDispatch<'_>| {
+                wakes_for_handler.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+        .id();
     let subscription = registry.subscribe_inventory(target, Arc::clone(&mailer));
 
     assert_eq!(wakes.load(Ordering::SeqCst), 1, "initial subscription notification remains synchronous");

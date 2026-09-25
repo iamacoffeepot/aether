@@ -6,14 +6,13 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use aether_actor::ActorRef;
+use aether_actor::{ActorRef, ErasedActorRef};
 use aether_bloomery_journal::{Batch, Journal, JournalActor, MAX_HEAD_WATCHERS, Seq};
 use aether_bloomery_kinds::{
     AppendRecords, AppendRecordsResult, Digest, DriverRecord, Head, MoveHead, MoveHeadResult, NativeOrigin,
     ProgramName, ProgramRef, Publish, PublishResult, RecordedHeadMove, Ref, RequestSource, Requested, WatchHead,
     WatchHeadResult,
 };
-use aether_data::MailboxId;
 use aether_substrate::Subname;
 use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::mail::registry::{OwnedDispatch, Registry};
@@ -39,9 +38,9 @@ struct Fixture {
     registry: Arc<Registry>,
     _chassis: PassiveChassis<TestChassis>,
     actor: ActorRef<JournalActor>,
-    caller: MailboxId,
+    caller: ErasedActorRef,
     replies: mpsc::Receiver<OwnedDispatch>,
-    watcher: MailboxId,
+    watcher: ErasedActorRef,
     watcher_replies: mpsc::Receiver<OwnedDispatch>,
     note: Ref<Note>,
 }
@@ -81,7 +80,7 @@ impl Fixture {
     }
 
     /// Send a watch from an arbitrary caller without waiting for its reply — it may park.
-    fn send_watch(&self, caller: MailboxId, correlation: u64, after: u64) {
+    fn send_watch(&self, caller: ErasedActorRef, correlation: u64, after: u64) {
         request(&self.registry, self.actor, caller, correlation, &WatchHead { after });
     }
 
