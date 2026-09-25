@@ -1,9 +1,6 @@
 //! Tests for the `aether.tcp` control plane: connect / bind / list / unbind
 //! round-trips through a passive chassis with a real loopback socket.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "these tests register and address session consumers by rendered lineage path — the nested-name registration surface under test"
-)]
+#![allow(clippy::disallowed_methods, reason = "these tests boot a bare `TestChassis` through `Builder::new`")] // aether-suppression-request: pre-existing file-level allow whose reason is rewritten; the tests still build a bare chassis with the disallowed `Builder::new`
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -17,7 +14,7 @@ use super::{
     SessionData, SessionWrite, TcpCapability, TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
 use aether_actor::{Addressable, ErasedActorRef};
-use aether_data::{Kind, LoadName, SessionToken, Uuid, mailbox_id_from_path};
+use aether_data::{ActorPath, Kind, LoadName, SessionToken, Uuid};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
 use aether_substrate::ReplyTarget;
@@ -167,6 +164,10 @@ fn register_session_consumer(registry: &Registry, name: &str) -> mpsc::Receiver<
         }),
     );
     rx
+}
+
+fn address(text: &str) -> ActorPath {
+    ActorPath::new(text).expect("test address is a valid actor path")
 }
 
 fn framed_body(body: &[u8]) -> Vec<u8> {
@@ -607,18 +608,18 @@ fn connect_roundtrip_spawns_writable_session() {
         &registry,
         &rx,
         tcp,
-        &Connect { addr: addr.to_string(), name: None, consumer: Some(mailbox_id_from_path(CONSUMER)) },
+        &Connect { addr: addr.to_string(), name: None, consumer: Some(address(CONSUMER)) },
     );
-    let (session_name, session_id, peer) = match connect_reply {
-        ConnectResult::Ok { session_name, session_id, peer } => (session_name, session_id, peer),
+    let (session_name, peer) = match connect_reply {
+        ConnectResult::Ok { session_name, peer } => (session_name, peer),
         ConnectResult::Err { error, .. } => panic!("connect failed: {error}"),
     };
     assert!(!session_name.is_empty(), "connect result should name the spawned session");
     let session_path = format!("{}/{}:{session_name}", TcpCapability::NAMESPACE, TcpSessionActor::NAMESPACE);
     assert_eq!(
-        mailbox_id_from_path(&session_path),
-        session_id,
-        "the documented MCP lineage path must fold to the spawned session id",
+        registry.resolve_address(&address(&session_path)).map(|resolved| resolved.canonical_path),
+        Ok(session_path),
+        "the documented MCP lineage path resolves to the spawned session",
     );
     let peer = peer.parse::<SocketAddr>().expect("connect result peer is a socket address");
     assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST), "connect result peer should be on 127.0.0.1");
@@ -779,6 +780,35 @@ fn unbind_unknown_listener_errors() {
     }
 }
 
+/// A refused consumer binds no socket and spawns no listener: a `consumer`
+/// address that names no live actor replies `Err` and leaves the listener
+/// fleet empty, rather than binding a listener whose frames go nowhere.
+#[test]
+fn bind_refuses_a_consumer_address_with_no_live_actor() {
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+
+    let reply: BindListenerResult = drive_and_decode(
+        &registry,
+        &rx,
+        tcp,
+        &BindListener {
+            addr: "127.0.0.1:0".into(),
+            name: Some("orphan".into()),
+            consumer: Some(address("test.tcp.unregistered-consumer")),
+        },
+    );
+    match reply {
+        BindListenerResult::Err { error, .. } => {
+            assert!(error.starts_with("consumer refused:"), "expected a consumer refusal, got: {error}");
+        }
+        BindListenerResult::Ok { .. } => panic!("a consumer address with no live actor must refuse the bind"),
+    }
+
+    let list: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
+    assert!(list.listeners.is_empty(), "a refused bind must spawn no listener: {:?}", list.listeners);
+}
+
 /// A bound consumer receives one mail per complete frame even when a
 /// frame body spans TCP writes, followed by a close notice on peer EOF.
 #[test]
@@ -792,11 +822,7 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
         &registry,
         &rx,
         tcp,
-        &BindListener {
-            addr: "127.0.0.1:0".into(),
-            name: Some("delivery".into()),
-            consumer: Some(mailbox_id_from_path(CONSUMER)),
-        },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("delivery".into()), consumer: Some(address(CONSUMER)) },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
@@ -845,10 +871,9 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
 /// Tripwire: a consumer that is a *nested* actor still receives its
 /// session mail. A loaded wasm component lives at the ADR-0099 lineage
 /// path `aether.component/aether.embedded:<name>`, which is precisely
-/// what the `consumer` field exists to serve — and precisely what a
-/// runtime *name* cannot address, since `mailbox_id_from_name` refuses a
-/// `/`-bearing path. Typing `consumer` as a `MailboxId` is what makes
-/// this reachable; regressing it to a name would silently drop every
+/// what the `consumer` field exists to serve. The written lineage path
+/// resolves through the registry's fold, so a nested consumer is
+/// reachable; resolving it as a flat name would silently drop every
 /// frame bound for a component.
 #[test]
 fn nested_lineage_consumer_receives_session_mail() {
@@ -861,11 +886,7 @@ fn nested_lineage_consumer_receives_session_mail() {
         &registry,
         &rx,
         tcp,
-        &BindListener {
-            addr: "127.0.0.1:0".into(),
-            name: Some("nested".into()),
-            consumer: Some(mailbox_id_from_path(CONSUMER)),
-        },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("nested".into()), consumer: Some(address(CONSUMER)) },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
@@ -896,11 +917,7 @@ fn session_reports_frame_rejection_to_bound_consumer() {
         &registry,
         &rx,
         tcp,
-        &BindListener {
-            addr: "127.0.0.1:0".into(),
-            name: Some("rejection".into()),
-            consumer: Some(mailbox_id_from_path(CONSUMER)),
-        },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("rejection".into()), consumer: Some(address(CONSUMER)) },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,

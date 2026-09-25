@@ -258,18 +258,25 @@ enum WsLoop {
     Stop,
 }
 
+/// The continuation-reassembly cells [`run_ws_reader_loop`] owns across frames.
+struct WsReassembly {
+    /// The fragmented message accumulated so far.
+    msg: Vec<u8>,
+    /// Whether the fragmented message opened as a binary frame.
+    binary: bool,
+    /// Whether a fragmented message is in progress.
+    fragmenting: bool,
+}
+
 /// Act on one parsed inbound frame (ADR-0129 §4/§5), driving continuation
 /// reassembly and control-frame handling. Application messages / pings / peer
 /// closes post an [`InboundEvent`]; the cap (dispatcher + writer thread) does
 /// all the writing — the reader only reads and reports.
-#[allow(clippy::too_many_arguments)]
 fn handle_ws_frame(
     frame: WsFrame,
     conn_id: ConnId,
     sink: &WakeSink,
-    msg: &mut Vec<u8>,
-    msg_binary: &mut bool,
-    fragmenting: &mut bool,
+    reassembly: &mut WsReassembly,
     max_message_bytes: usize,
 ) -> WsLoop {
     let protocol_close = |code: u16, reason: &str| {
@@ -295,7 +302,7 @@ fn handle_ws_frame(
             WsLoop::Stop
         }
         OPCODE_TEXT | OPCODE_BINARY => {
-            if *fragmenting {
+            if reassembly.fragmenting {
                 return protocol_close(1002, "interleaved data frame");
             }
             let binary = frame.opcode == OPCODE_BINARY;
@@ -306,24 +313,24 @@ fn handle_ws_frame(
                     WsLoop::Stop
                 }
             } else {
-                *msg = frame.payload;
-                *msg_binary = binary;
-                *fragmenting = true;
+                reassembly.msg = frame.payload;
+                reassembly.binary = binary;
+                reassembly.fragmenting = true;
                 WsLoop::Continue
             }
         }
         OPCODE_CONTINUATION => {
-            if !*fragmenting {
+            if !reassembly.fragmenting {
                 return protocol_close(1002, "unexpected continuation frame");
             }
-            if msg.len() + frame.payload.len() > max_message_bytes {
+            if reassembly.msg.len() + frame.payload.len() > max_message_bytes {
                 return protocol_close(1009, "message too large");
             }
-            msg.extend_from_slice(&frame.payload);
+            reassembly.msg.extend_from_slice(&frame.payload);
             if frame.fin {
-                *fragmenting = false;
-                let data = mem::take(msg);
-                if sink.post(InboundEvent::WebSocketMessage { conn_id, binary: *msg_binary, data }) {
+                reassembly.fragmenting = false;
+                let data = mem::take(&mut reassembly.msg);
+                if sink.post(InboundEvent::WebSocketMessage { conn_id, binary: reassembly.binary, data }) {
                     WsLoop::Continue
                 } else {
                     WsLoop::Stop
@@ -366,9 +373,7 @@ pub fn run_ws_reader_loop(
         return;
     }
     let mut buf = leftover;
-    let mut msg: Vec<u8> = Vec::new();
-    let mut msg_binary = false;
-    let mut fragmenting = false;
+    let mut reassembly = WsReassembly { msg: Vec::new(), binary: false, fragmenting: false };
     let mut chunk = [0u8; 8 * 1024];
 
     loop {
@@ -381,15 +386,7 @@ pub fn run_ws_reader_loop(
                 WsFrameParse::Complete { frame, consumed } => {
                     buf.drain(..consumed);
                     if matches!(
-                        handle_ws_frame(
-                            frame,
-                            conn_id,
-                            sink,
-                            &mut msg,
-                            &mut msg_binary,
-                            &mut fragmenting,
-                            ws_max_message_bytes,
-                        ),
+                        handle_ws_frame(frame, conn_id, sink, &mut reassembly, ws_max_message_bytes),
                         WsLoop::Stop
                     ) {
                         return;

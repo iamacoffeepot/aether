@@ -5,7 +5,7 @@
     "registry()": 16,
     "mailbox_id_from_name(": 47,
     "mailbox_id_from_name_pair(": 9,
-    "mailbox_id_from_path(": 34,
+    "mailbox_id_from_path(": 29,
     "<recipient>.id() at a send": 0,
     "clippy::disallowed_methods": 145
   }

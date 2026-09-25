@@ -7,6 +7,7 @@ use std::sync::Arc;
 use aether_actor::ErasedActorRef;
 
 use super::decode::DecodeError;
+use super::event::TrackStart;
 
 /// Linear fade-out duration (seconds) applied when a track is stopped,
 /// so `stop_track` releases through a short ramp instead of truncating
@@ -44,15 +45,8 @@ pub struct TrackVoice {
 }
 
 impl TrackVoice {
-    pub fn new(
-        sender: Option<ErasedActorRef>,
-        lane: Option<String>,
-        namespace: String,
-        path: String,
-        pcm: Arc<[f32]>,
-        gain: f32,
-        looping: bool,
-    ) -> Self {
+    pub fn new(track: TrackStart) -> Self {
+        let TrackStart { sender, lane, namespace, path, pcm, gain, looping } = track;
         Self { sender, lane, namespace, path, pcm, position: 0, gain, looping, fade: TrackFade::Playing, done: false }
     }
 

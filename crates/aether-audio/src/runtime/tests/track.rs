@@ -1,3 +1,4 @@
+use super::super::event::TrackStart;
 use super::*;
 use aether_actor::ErasedActorRef;
 
@@ -16,7 +17,7 @@ fn ramp_pcm(len: usize) -> Arc<[f32]> {
 }
 
 fn track_start(pcm: Arc<[f32]>, looping: bool) -> AudioEvent {
-    AudioEvent::TrackStart {
+    AudioEvent::TrackStart(TrackStart {
         sender: None,
         lane: None,
         namespace: "assets".to_owned(),
@@ -24,7 +25,7 @@ fn track_start(pcm: Arc<[f32]>, looping: bool) -> AudioEvent {
         pcm,
         gain: 1.0,
         looping,
-    }
+    })
 }
 
 #[test]
@@ -113,7 +114,7 @@ fn replay_same_key_restarts_single_track() {
 /// `(namespace, path)` — the key components the collision fix
 /// folds together.
 fn keyed_track_start(sender: Option<ErasedActorRef>, lane: Option<&str>, pcm: Arc<[f32]>) -> AudioEvent {
-    AudioEvent::TrackStart {
+    AudioEvent::TrackStart(TrackStart {
         sender,
         lane: lane.map(str::to_owned),
         namespace: "assets".to_owned(),
@@ -121,7 +122,7 @@ fn keyed_track_start(sender: Option<ErasedActorRef>, lane: Option<&str>, pcm: Ar
         pcm,
         gain: 1.0,
         looping: true,
-    }
+    })
 }
 
 #[test]
@@ -206,7 +207,7 @@ fn play_track_happy_path_replies_ok_and_starts_a_track() {
     // The decoded track reached the synth queue as a TrackStart.
     let event = queue.pop().expect("a track-start event was queued");
     assert!(
-        matches!(event, AudioEvent::TrackStart { ref path, .. } if path == "track.wav"),
+        matches!(event, AudioEvent::TrackStart(TrackStart { ref path, .. }) if path == "track.wav"),
         "expected TrackStart, got {event:?}",
     );
 }
@@ -247,7 +248,7 @@ fn play_track_echoes_lane_through_result_and_track_start() {
     }
     let event = queue.pop().expect("a track-start event was queued");
     assert!(
-        matches!(event, AudioEvent::TrackStart { ref lane, .. } if lane.as_deref() == Some("bgm")),
+        matches!(event, AudioEvent::TrackStart(TrackStart { ref lane, .. }) if lane.as_deref() == Some("bgm")),
         "TrackStart must carry the lane, got {event:?}",
     );
 }

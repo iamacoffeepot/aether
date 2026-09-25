@@ -101,9 +101,7 @@ impl NativeActor for HttpDispatchShard {
                 InboundEvent::RequestHeadParsed { conn_id, head, handler } => {
                     state.open_requested_stream(ctx, conn_id, head, handler);
                 }
-                InboundEvent::RequestParsed { conn_id, payload, handler, kind, method, keep_alive, ws_key } => {
-                    state.dispatch_prepared(ctx, conn_id, &payload, handler, kind, method, keep_alive, ws_key);
-                }
+                InboundEvent::RequestParsed(request) => state.dispatch_prepared(ctx, request),
                 InboundEvent::RequestBodyChunk { conn_id, body } => {
                     state.forward_request_chunk(ctx, conn_id, body);
                 }

@@ -121,6 +121,23 @@ pub enum ReaderControl {
     Upgrade,
 }
 
+/// A complete, size-bounded buffered request the reader resolved and
+/// encoded (ADR-0135 §2): `payload` is the ready-to-send
+/// `HttpServerRequest` (or routed-kind) wire image; the shard's dispatch
+/// is send + settlement-subscribe + in-flight insert.
+pub struct PreparedRequest {
+    pub conn_id: ConnId,
+    pub payload: Vec<u8>,
+    pub handler: ErasedActorRef,
+    pub kind: KindId,
+    pub method: HttpMethod,
+    pub keep_alive: bool,
+    /// `Some` on a websocket upgrade handshake (ADR-0129) the
+    /// reader validated: the `Sec-WebSocket-Key` the shard stashes
+    /// before dispatching, consumed if the handler accepts.
+    pub ws_key: Option<String>,
+}
+
 /// Internal event the accept / reader sidecar threads push to the cap
 /// dispatcher via an mpsc. The matching wake-mail kind is
 /// [`HttpInboundReady`] (empty payload) — `on_inbound_ready` drains the
@@ -135,21 +152,8 @@ pub enum InboundEvent {
     /// channel. Buffered requests never take this round trip.
     RequestHeadParsed { conn_id: ConnId, head: ParsedHead, handler: ErasedActorRef },
     /// A complete, size-bounded buffered request, resolved and encoded
-    /// at the reader (ADR-0135 §2): `payload` is the ready-to-send
-    /// `HttpServerRequest` (or routed-kind) wire image; the shard's
-    /// dispatch is send + settlement-subscribe + in-flight insert.
-    RequestParsed {
-        conn_id: ConnId,
-        payload: Vec<u8>,
-        handler: ErasedActorRef,
-        kind: KindId,
-        method: HttpMethod,
-        keep_alive: bool,
-        /// `Some` on a websocket upgrade handshake (ADR-0129) the
-        /// reader validated: the `Sec-WebSocket-Key` the shard stashes
-        /// before dispatching, consumed if the handler accepts.
-        ws_key: Option<String>,
-    },
+    /// at the reader (ADR-0135 §2).
+    RequestParsed(PreparedRequest),
     /// A streaming reader delivered one inbound body piece (ADR-0128); the
     /// dispatcher forwards it to the handler as an [`HttpRequestChunk`] on the
     /// connection's active stream.
