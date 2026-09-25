@@ -1,15 +1,16 @@
 //! The tick source — the lifecycle bridge that turns the substrate's own
 //! `Tick` fan-out into the sweep's offered load.
 
-use aether_actor::{ActorRef, OutboundReply};
-use aether_data::{Kind, KindId, MailboxId, ReplyContract, mailbox_id_from_name};
-use aether_kinds::{ComponentCapabilities, HandlerCapability, Tick};
+use aether_actor::{ActorRef, OutboundReply, Publisher};
+use aether_data::{Kind, KindId, ReplyContract};
+use aether_kinds::{ComponentCapabilities, HandlerCapability, LifecycleSubscribeResult, Tick};
+use aether_lifecycle::LifecycleCapability;
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx};
 
 use super::{CountQuery, CountReport, Ping, Relay};
 
-/// Lifecycle bridge for the sweep: subscribed to the `Tick` input
-/// stream, it emits a burst of `burst` `Ping`s into the entry relay per
+/// Lifecycle bridge for the sweep: it subscribes itself to the `Tick`
+/// input stream in its `wire` hook, then emits a burst of `burst` `Ping`s into the entry relay per
 /// frame, each inheriting the tick's trace lineage so the whole
 /// per-frame fan-out is one causal forest. The honest stand-in for a
 /// real tick-reactive component — the substrate's own `Tick` fan-out
@@ -28,6 +29,9 @@ pub struct TickSource {
     /// (iamacoffeepot/aether#1233) — the offered load. `seq` wraps at `u32`
     /// for trace legibility; this is the honest cumulative count.
     sent: u64,
+    /// The lifecycle cap's proof, which `wire` subscribes this source to
+    /// `Tick` through.
+    lifecycle: ActorRef<LifecycleCapability>,
 }
 
 impl aether_actor::Addressable for TickSource {
@@ -37,17 +41,25 @@ impl aether_actor::Addressable for TickSource {
 impl aether_actor::Root for TickSource {}
 impl aether_actor::HandlesKind<Tick> for TickSource {}
 impl aether_actor::Lifecycle<Self> for TickSource {
-    /// `(entry, burst)`: relay 0's proof — the first of those
-    /// [`spawn_relays`](super::spawn_relays) returns — and the number of
-    /// `Ping`s to emit per `Tick` (`1` in `Latency`, `backlog` in `Saturate`).
-    type Config = (ActorRef<Relay>, u32);
+    /// `(entry, burst, lifecycle)`: relay 0's proof — the first of those
+    /// [`spawn_relays`](super::spawn_relays) returns — the number of `Ping`s
+    /// to emit per `Tick` (`1` in `Latency`, `backlog` in `Saturate`), and the
+    /// lifecycle cap's proof.
+    type Config = (ActorRef<Relay>, u32, ActorRef<LifecycleCapability>);
     type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
     type Ctx<'a> = NativeCtx<'a, Self>;
     fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        let (entry, burst) = config;
-        Ok(Self { entry, burst, seq: 0, sent: 0 })
+        let (entry, burst, lifecycle) = config;
+        Ok(Self { entry, burst, seq: 0, sent: 0, lifecycle })
+    }
+
+    /// Subscribe this source to the `Tick` stage as itself (ADR-0082 §7): the
+    /// cap reads the subscriber off the host-stamped sender, so no position
+    /// crosses the wire.
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_, Self>) {
+        ctx.send_to(state.lifecycle, &LifecycleCapability::subscribe_request::<Tick>());
     }
 }
 impl NativeActor for TickSource {
@@ -72,6 +84,12 @@ impl Dispatch<Self> for TickSource {
                     doc: None,
                     reply: ReplyContract::One(CountReport::ID),
                 },
+                HandlerCapability {
+                    id: LifecycleSubscribeResult::ID,
+                    name: <LifecycleSubscribeResult as Kind>::NAME.to_owned(),
+                    doc: None,
+                    reply: ReplyContract::None,
+                },
             ],
             ..ComponentCapabilities::default()
         }
@@ -81,12 +99,23 @@ impl Dispatch<Self> for TickSource {
         state: &mut Self,
         ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>,
         kind: KindId,
-        _payload: &[u8],
+        payload: &[u8],
     ) -> Option<()> {
         // Run-end keep-up harvest (iamacoffeepot/aether#1233): the source
         // never receives a `Ping`, so its `received` is 0.
         if kind.0 == CountQuery::ID.0 {
             ctx.reply(&CountReport { sent: state.sent, received: 0 });
+            return Some(());
+        }
+        // The lifecycle cap's answer to `wire`'s self-subscription. A refusal
+        // means the harness's lifecycle graph lacks `Tick`, so the cell runs
+        // with no offered load; say so rather than report a silent zero.
+        if kind.0 == LifecycleSubscribeResult::ID.0 {
+            if let Some(LifecycleSubscribeResult::Err { stage, error }) =
+                LifecycleSubscribeResult::decode_from_bytes(payload)
+            {
+                tracing::warn!(target: "aether_perf", stage, %error, "tick source's Tick subscribe was refused");
+            }
             return Some(());
         }
         if kind.0 != Tick::ID.0 {
@@ -102,12 +131,3 @@ impl Dispatch<Self> for TickSource {
 }
 
 pub(super) const TICKSRC_NS: &str = "mlat.ticksrc";
-
-/// Deterministic id for the single tick source (subname `"src"`).
-// Harness derives the single tick-source id from its name to wire the topology
-// — id derivation, not sibling-cap addressing.
-#[must_use]
-#[allow(clippy::disallowed_methods)]
-pub fn ticksrc_id() -> MailboxId {
-    MailboxId(mailbox_id_from_name(&format!("{TICKSRC_NS}:src")).0)
-}

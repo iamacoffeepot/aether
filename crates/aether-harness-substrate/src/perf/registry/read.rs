@@ -30,10 +30,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::ActorRef;
+use aether_actor::{ActorRef, ErasedActorRef};
 use aether_data::Kind;
+use aether_substrate::Registry;
 use aether_substrate::mail::registry::RouteResolution;
-use aether_substrate::{MailboxId, Registry};
 use serde::{Deserialize, Serialize};
 
 use super::fixture::{CloseBurst, CommitParent, StageBurst};
@@ -108,7 +108,7 @@ pub struct ReadScalingCell {
 /// needing to hand any part of it around.
 pub fn read_cell(
     harness: &mut SubstrateHarness,
-    targets: &[MailboxId],
+    targets: &[ErasedActorRef],
     threads: usize,
     churn: Option<ActorRef<CommitParent>>,
     mix: KindMix,
@@ -139,7 +139,7 @@ pub fn read_cell(
                 while !stop.load(Ordering::Relaxed) {
                     for &target in &targets {
                         // Consume the result so the read cannot be elided.
-                        if registry.resolve_route_state(kind, target) == RouteResolution::Live {
+                        if registry.resolve_route_state(kind, target.id()) == RouteResolution::Live {
                             count += 1;
                         }
                     }
@@ -196,7 +196,7 @@ pub fn read_cell(
 /// A `PerReader` cell whose kind slots were cold would pay a first-touch cost
 /// the `Shared` arm had already amortized, which is a difference between the
 /// arms that has nothing to do with the refcount they exist to compare.
-pub fn warm_read_path(registry: &Registry, targets: &[MailboxId]) {
+pub fn warm_read_path(registry: &Registry, targets: &[ErasedActorRef]) {
     let kinds: Vec<_> = [KindMix::Shared, KindMix::PerReader]
         .into_iter()
         .flat_map(|mix| (0..*READER_THREADS.iter().max().unwrap_or(&1)).map(move |w| mix.kind_for(w)))
@@ -207,7 +207,7 @@ pub fn warm_read_path(registry: &Registry, targets: &[MailboxId]) {
     for _ in 0..WARMUP_PASSES {
         for &kind in &kinds {
             for &target in targets {
-                let _ = registry.resolve_route_state(kind, target);
+                let _ = registry.resolve_route_state(kind, target.id());
             }
         }
     }
