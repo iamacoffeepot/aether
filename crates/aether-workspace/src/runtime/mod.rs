@@ -27,7 +27,7 @@ use aether_bloomery_tar::{Limits, LimitsError, Rules};
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 pub use aether_substrate::chassis::error::BootError;
 
-use crate::{DEFAULT_ENDPOINT, Import, ImportResult, Run, RunResult, WorkspaceCapability, WorkspaceConfig};
+use crate::{Import, ImportResult, Run, RunResult, WorkspaceCapability, WorkspaceConfig};
 use engine::{Endpoint, Engine};
 use import::Importer;
 use run::{Allotment, Runner};
@@ -61,8 +61,8 @@ impl NativeActor for WorkspaceCapability {
     const NAMESPACE: &'static str = "aether.workspace";
 
     /// Check the endpoint, the import bounds, and the run allotment, and take
-    /// the journal's store. Nothing dials the daemon here, so an engine boots
-    /// without one.
+    /// the journal's store. A `tcp://` endpoint's TLS files are read here,
+    /// once. Nothing dials the daemon here, so an engine boots without one.
     fn init(
         config: WorkspaceConfig,
         params: WorkspaceParams,
@@ -71,8 +71,7 @@ impl NativeActor for WorkspaceCapability {
         let artifacts = params.artifacts.ok_or_else(|| {
             boot_error("the aether.workspace actor needs the artifact store of the journal the chassis opened")
         })?;
-        let endpoint = Endpoint::parse(config.endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT))
-            .map_err(|error| BootError::Other(Box::new(error)))?;
+        let endpoint = Endpoint::from_config(&config).map_err(|error| BootError::Other(Box::new(error)))?;
         let import_limits = limits(config.import_max_entries, config.import_max_bytes, "IMPORT")?;
         let allotment = Allotment {
             deadline: Duration::from_millis(at_least_one(config.run_deadline_millis, "RUN_DEADLINE_MILLIS")?),
@@ -84,6 +83,10 @@ impl NativeActor for WorkspaceCapability {
         tracing::info!(
             target: "aether_workspace",
             %endpoint,
+            tls = matches!(endpoint, Endpoint::Tcp(_)),
+            tls_ca_file = config.tls_ca_file.as_deref(),
+            tls_cert_file = config.tls_cert_file.as_deref(),
+            tls_key_file = config.tls_key_file.as_deref(),
             max_in_flight = config.max_in_flight,
             import_max_entries = config.import_max_entries,
             import_max_bytes = config.import_max_bytes,

@@ -44,7 +44,7 @@ impl Root {
     ) -> Result<(ImportResult, Vec<StubRequest>), Box<dyn Error>> {
         let stub = StubDaemon::bind()?;
         let importer = Importer {
-            engine: Engine::new(Endpoint::parse(&stub.endpoint())?),
+            engine: Engine::new(Endpoint::from_config(&stub.config())?),
             artifacts: self.store.clone(),
             rules: Rules::userland(Limits::new(max_entries, 1 << 30)?),
         };

@@ -1,6 +1,7 @@
-//! Test support: a scripted Engine API server on a Unix socket, and a tar
-//! writer that can spell what an image export holds (absolute symlinks and
-//! device nodes) but the canonical encoder never writes.
+//! Test support: a scripted Engine API server on a Unix socket or, in this
+//! crate's unit tests, on TCP behind mutual TLS, and a tar writer that can
+//! spell what an image export holds (absolute symlinks and device nodes) but
+//! the canonical encoder never writes.
 //!
 //! [`StubDaemon`] answers each connection with the next scripted reply, in
 //! order, whatever the request, and hands back every request it read, a
@@ -13,18 +14,42 @@
 //! instead of hanging it; once [`StubDaemon::serve`] has spent its script it
 //! drops its listener, so a request the script did not expect fails fast
 //! too.
+//!
+//! A TLS stub generates its CA, server, and client certificates with `rcgen`
+//! when it binds and writes the client's files into its temp directory, so
+//! no key material is checked in; [`StubDaemon::config`] names them.
 
+#[cfg(test)]
+use std::fs;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+#[cfg(test)]
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+};
+#[cfg(test)]
 use rusqlite::{Connection, OpenFlags};
+#[cfg(test)]
+use rustls::crypto::ring;
+#[cfg(test)]
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+#[cfg(test)]
+use rustls::server::WebPkiClientVerifier;
+#[cfg(test)]
+use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 use tempfile::TempDir;
+
+use crate::WorkspaceConfig;
 
 /// How long the stub waits for each scripted connection before it stops.
 pub const ACCEPT_WAIT: Duration = Duration::from_secs(10);
@@ -32,12 +57,48 @@ pub const ACCEPT_WAIT: Duration = Duration::from_secs(10);
 /// How often a waiting stub looks for a connection.
 const ACCEPT_POLL: Duration = Duration::from_millis(5);
 
-/// A Unix-socket Engine API stand-in, bound and ready to serve.
+/// The file a TLS stub writes the CA a client must trust into.
+#[cfg(test)]
+const CA_FILE: &str = "ca.pem";
+
+/// The file a TLS stub writes the client certificate into.
+#[cfg(test)]
+const CERT_FILE: &str = "client.pem";
+
+/// The file a TLS stub writes the client certificate's key into.
+#[cfg(test)]
+const KEY_FILE: &str = "client-key.pem";
+
+/// An Engine API stand-in, bound and ready to serve.
 pub struct StubDaemon {
-    /// Holds the socket; removed when the daemon is done.
+    /// Holds the socket or the client's TLS files; removed when the daemon
+    /// is done.
     _dir: TempDir,
-    socket: PathBuf,
-    listener: UnixListener,
+    listener: StubListener,
+}
+
+enum StubListener {
+    Unix {
+        socket: PathBuf,
+        listener: UnixListener,
+    },
+    /// A TCP listener whose connections must present a client certificate
+    /// the stub's CA issued.
+    #[cfg(test)]
+    Tls {
+        address: SocketAddr,
+        listener: TcpListener,
+        server: Arc<ServerConfig>,
+        /// The client's CA, certificate, and key files, in that order.
+        files: [PathBuf; 3],
+    },
+}
+
+/// One accepted connection.
+enum StubStream {
+    Unix(UnixStream),
+    #[cfg(test)]
+    Tls(Box<StreamOwned<ServerConnection, TcpStream>>),
 }
 
 /// One request the stub read.
@@ -138,13 +199,100 @@ impl StubDaemon {
         let dir = tempfile::Builder::new().prefix("ws").tempdir()?;
         let socket = dir.path().join("d.sock");
         let listener = UnixListener::bind(&socket)?;
-        Ok(Self { _dir: dir, socket, listener })
+        Ok(Self { _dir: dir, listener: StubListener::Unix { socket, listener } })
     }
 
-    /// The `unix://` endpoint a client dials.
+    /// Bind `127.0.0.1:0` behind mutual TLS: a fresh CA issues the server's
+    /// certificate for `127.0.0.1` and the client's, and the stub refuses a
+    /// client that presents none.
+    ///
+    /// # Errors
+    ///
+    /// When the directory, the certificates, their files, or the listener
+    /// cannot be created.
+    #[cfg(test)]
+    pub fn bind_tls() -> io::Result<Self> {
+        let ca = test_ca("stub CA")?;
+        Self::bind_tls_serving(&ca, &ca)
+    }
+
+    /// [`StubDaemon::bind_tls`], but a second CA issues the server's
+    /// certificate, while the CA file the client is handed stays the first.
+    ///
+    /// # Errors
+    ///
+    /// As [`StubDaemon::bind_tls`].
+    #[cfg(test)]
+    pub fn bind_tls_untrusted() -> io::Result<Self> {
+        Self::bind_tls_serving(&test_ca("stub CA")?, &test_ca("another CA")?)
+    }
+
+    /// A TLS stub whose client files trust and are issued by `ca`, and whose
+    /// server certificate `server_ca` issues.
+    #[cfg(test)]
+    fn bind_tls_serving(
+        ca: &CertifiedIssuer<'_, KeyPair>,
+        server_ca: &CertifiedIssuer<'_, KeyPair>,
+    ) -> io::Result<Self> {
+        let dir = tempfile::Builder::new().prefix("ws").tempdir()?;
+        let files = [CA_FILE, CERT_FILE, KEY_FILE].map(|name| dir.path().join(name));
+        let (client, client_key) = test_leaf(ca, ExtendedKeyUsagePurpose::ClientAuth)?;
+        fs::write(&files[0], ca.pem())?;
+        fs::write(&files[1], client.pem())?;
+        fs::write(&files[2], client_key.serialize_pem())?;
+
+        let provider = Arc::new(ring::default_provider());
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.der().clone()).map_err(io::Error::other)?;
+        let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+            .build()
+            .map_err(io::Error::other)?;
+        let (server_cert, server_key) = test_leaf(server_ca, ExtendedKeyUsagePurpose::ServerAuth)?;
+        let server = ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(io::Error::other)?
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(
+                vec![server_cert.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key.serialize_der())),
+            )
+            .map_err(io::Error::other)?;
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        Ok(Self { _dir: dir, listener: StubListener::Tls { address, listener, server: Arc::new(server), files } })
+    }
+
+    /// The endpoint a client dials: `unix://<socket>`, or
+    /// `tcp://127.0.0.1:<port>` for a TLS stub.
     #[must_use]
     pub fn endpoint(&self) -> String {
-        format!("unix://{}", self.socket.display())
+        match self.listener {
+            StubListener::Unix { ref socket, .. } => format!("unix://{}", socket.display()),
+            #[cfg(test)]
+            StubListener::Tls { address, .. } => format!("tcp://{address}"),
+        }
+    }
+
+    /// The configuration a client of this stub boots with: its endpoint, and
+    /// for a TLS stub the paths of the CA, client certificate, and key files.
+    #[must_use]
+    pub fn config(&self) -> WorkspaceConfig {
+        let endpoint = Some(self.endpoint());
+        match self.listener {
+            StubListener::Unix { .. } => WorkspaceConfig { endpoint, ..WorkspaceConfig::default() },
+            #[cfg(test)]
+            StubListener::Tls { files: [ref ca, ref cert, ref key], .. } => {
+                let file = |path: &Path| Some(path.display().to_string());
+                WorkspaceConfig {
+                    endpoint,
+                    tls_ca_file: file(ca),
+                    tls_cert_file: file(cert),
+                    tls_key_file: file(key),
+                    ..WorkspaceConfig::default()
+                }
+            }
+        }
     }
 
     /// Answer one connection per reply, in order, and return the requests
@@ -190,6 +338,7 @@ impl StubDaemon {
                     StubBody::Length(_) | StubBody::Chunked(_) => {
                         // Ignored: a client that has what it needs closes early.
                         let _ = write_reply(&mut stream, &reply);
+                        stream.close();
                     }
                 }
             }
@@ -201,15 +350,12 @@ impl StubDaemon {
     }
 
     /// The next connection, or `None` once `wait` passes without one.
-    fn accept_within(&self, wait: Duration) -> io::Result<Option<UnixStream>> {
+    fn accept_within(&self, wait: Duration) -> io::Result<Option<StubStream>> {
         let deadline = Instant::now() + wait;
         self.listener.set_nonblocking(true)?;
         loop {
             match self.listener.accept() {
-                Ok((stream, _)) => {
-                    stream.set_nonblocking(false)?;
-                    return Ok(Some(stream));
-                }
+                Ok(stream) => return Ok(Some(stream)),
                 Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
                     thread::sleep(ACCEPT_POLL);
                 }
@@ -276,8 +422,100 @@ fn read_chunked(reader: &mut impl BufRead) -> io::Result<Vec<u8>> {
     }
 }
 
+impl StubListener {
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        match *self {
+            Self::Unix { ref listener, .. } => listener.set_nonblocking(nonblocking),
+            #[cfg(test)]
+            Self::Tls { ref listener, .. } => listener.set_nonblocking(nonblocking),
+        }
+    }
+
+    /// The next connection, blocking; a TLS one's handshake runs on its
+    /// first read.
+    fn accept(&self) -> io::Result<StubStream> {
+        match *self {
+            Self::Unix { ref listener, .. } => {
+                let (stream, _) = listener.accept()?;
+                stream.set_nonblocking(false)?;
+                Ok(StubStream::Unix(stream))
+            }
+            #[cfg(test)]
+            Self::Tls { ref listener, ref server, .. } => {
+                let (stream, _) = listener.accept()?;
+                stream.set_nonblocking(false)?;
+                let conn = ServerConnection::new(Arc::clone(server)).map_err(io::Error::other)?;
+                Ok(StubStream::Tls(Box::new(StreamOwned::new(conn, stream))))
+            }
+        }
+    }
+}
+
+impl StubStream {
+    /// Finish a reply: a TLS stream sends its `close_notify` first, as a
+    /// well-behaved server does.
+    fn close(self) {
+        match self {
+            Self::Unix(_) => {}
+            #[cfg(test)]
+            Self::Tls(mut stream) => {
+                stream.conn.send_close_notify();
+                // Ignored: a client that has what it needs closes early.
+                let _ = stream.flush();
+            }
+        }
+    }
+}
+
+impl Read for StubStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match *self {
+            Self::Unix(ref mut stream) => stream.read(buf),
+            #[cfg(test)]
+            Self::Tls(ref mut stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for StubStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match *self {
+            Self::Unix(ref mut stream) => stream.write(buf),
+            #[cfg(test)]
+            Self::Tls(ref mut stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match *self {
+            Self::Unix(ref mut stream) => stream.flush(),
+            #[cfg(test)]
+            Self::Tls(ref mut stream) => stream.flush(),
+        }
+    }
+}
+
+/// A fresh self-signed CA.
+#[cfg(test)]
+fn test_ca(name: &str) -> io::Result<CertifiedIssuer<'static, KeyPair>> {
+    let mut params = CertificateParams::new(Vec::new()).map_err(io::Error::other)?;
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.distinguished_name.push(DnType::CommonName, name);
+    CertifiedIssuer::self_signed(params, KeyPair::generate().map_err(io::Error::other)?).map_err(io::Error::other)
+}
+
+/// A certificate for `127.0.0.1` that `ca` issues for `purpose`, and its key.
+#[cfg(test)]
+fn test_leaf(ca: &Issuer<'_, KeyPair>, purpose: ExtendedKeyUsagePurpose) -> io::Result<(rcgen::Certificate, KeyPair)> {
+    let key = KeyPair::generate().map_err(io::Error::other)?;
+    let mut params = CertificateParams::new(vec!["127.0.0.1".to_owned()]).map_err(io::Error::other)?;
+    params.extended_key_usages = vec![purpose];
+    let certificate = params.signed_by(&key, ca).map_err(io::Error::other)?;
+    Ok((certificate, key))
+}
+
 /// Everything a hijacked client streams until it closes its writing half.
-fn read_to_close(mut stream: UnixStream) -> io::Result<Vec<u8>> {
+fn read_to_close(mut stream: StubStream) -> io::Result<Vec<u8>> {
     let mut streamed = Vec::new();
     stream.read_to_end(&mut streamed)?;
     Ok(streamed)

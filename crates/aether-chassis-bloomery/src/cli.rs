@@ -51,9 +51,11 @@ pub struct BloomeryCli {
     pub http: HttpOverlay,
 
     /// Workspace actor knobs (ADR-0237 decision 8): `--workspace-endpoint`
-    /// shadows `AETHER_WORKSPACE_ENDPOINT`, the Docker Engine API socket
+    /// shadows `AETHER_WORKSPACE_ENDPOINT`, the Docker Engine API endpoint
     /// (`unix:///var/run/docker.sock` when absent; `DOCKER_HOST` is never
-    /// read), beside the import bounds and the in-flight bound.
+    /// read), and `--workspace-tls-{ca,cert,key}-file` name the PEM files a
+    /// `tcp://` endpoint's mutual TLS needs, beside the import bounds, the run
+    /// allotment, and the in-flight bound.
     #[command(flatten)]
     pub workspace: WorkspaceOverlay,
 

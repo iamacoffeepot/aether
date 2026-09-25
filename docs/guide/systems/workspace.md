@@ -174,6 +174,9 @@ environment variable of its own.
 | Knob | Flag | Default |
 |---|---|---|
 | `AETHER_WORKSPACE_ENDPOINT` | `--workspace-endpoint` | `unix:///var/run/docker.sock` |
+| `AETHER_WORKSPACE_TLS_CA_FILE` | `--workspace-tls-ca-file` | none |
+| `AETHER_WORKSPACE_TLS_CERT_FILE` | `--workspace-tls-cert-file` | none |
+| `AETHER_WORKSPACE_TLS_KEY_FILE` | `--workspace-tls-key-file` | none |
 | `AETHER_WORKSPACE_MAX_IN_FLIGHT` | `--workspace-max-in-flight` | 1 |
 | `AETHER_WORKSPACE_IMPORT_MAX_ENTRIES` | `--workspace-import-max-entries` | 1,000,000 |
 | `AETHER_WORKSPACE_IMPORT_MAX_BYTES` | `--workspace-import-max-bytes` | 8 GiB |
@@ -183,9 +186,20 @@ environment variable of its own.
 | `AETHER_WORKSPACE_OUTPUT_MAX_ENTRIES` | `--workspace-output-max-entries` | 1,000,000 |
 | `AETHER_WORKSPACE_OUTPUT_MAX_BYTES` | `--workspace-output-max-bytes` | 8 GiB |
 
-- Only `unix://` with an absolute socket path is accepted, and only on Unix. Any
-  other scheme refuses boot naming `AETHER_WORKSPACE_ENDPOINT`. TCP with TLS and
-  the Windows named pipe follow in #6721.
+- `unix://<absolute path>` dials the daemon's socket, on Unix only.
+- `tcp://<host>:<port>` dials a daemon anywhere, always over mutual TLS. The
+  port is required, and the host is a DNS name or an IP literal (IPv6 in
+  brackets) that the daemon's certificate must name. All three TLS files are
+  required: the CA file is the only trust root, with no platform store and no
+  bundled roots, and the certificate and key files are the client certificate
+  the daemon checks. There is no plaintext TCP, since the daemon socket is
+  root-equivalent. `init` reads the three files once; one that cannot be read,
+  holds no certificate or key, or that rustls refuses fails boot naming its
+  key.
+- Any other scheme refuses boot naming `AETHER_WORKSPACE_ENDPOINT`, and so does
+  a `tcp://` address without a port. A missing TLS file beside `tcp://`, or a
+  TLS file set beside any other scheme, refuses boot naming that file's key.
+  The Windows named pipe is not supported yet (#6775).
 - `init` does not dial the daemon, so an engine boots without one; the first
   import that cannot connect answers `Failed`.
 - Imports and runs share `max_in_flight`: past it they queue and are never

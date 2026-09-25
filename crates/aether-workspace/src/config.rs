@@ -1,8 +1,8 @@
 //! Resolved configuration for the `aether.workspace` actor (ADR-0237 decision
-//! 8, ADR-0090). The Engine API endpoint, the import bounds, and the fixed run
-//! allotment are configuration resolved at chassis boot (argv > env > file >
-//! default) and handed to `init`; the actor reads no environment variable of
-//! its own, and never `DOCKER_HOST`.
+//! 8, ADR-0090). The Engine API endpoint and its TLS files, the import bounds,
+//! and the fixed run allotment are configuration resolved at chassis boot
+//! (argv > env > file > default) and handed to `init`; the actor reads no
+//! environment variable of its own, and never `DOCKER_HOST`.
 //!
 //! The run allotment is one fixed set of amounts every run gets until
 //! executor provisioning (#6710) replaces it with a host budget, per-program
@@ -24,10 +24,25 @@ pub const DEFAULT_ENDPOINT: &str = "unix:///var/run/docker.sock";
 pub struct WorkspaceConfig {
     /// The Docker Engine API endpoint (`AETHER_WORKSPACE_ENDPOINT`).
     ///
-    /// Unset means `unix:///var/run/docker.sock`. Only `unix://` followed by
-    /// an absolute socket path is accepted, and only on Unix; any other scheme
-    /// refuses boot naming this key. `DOCKER_HOST` is never read.
+    /// Unset means `unix:///var/run/docker.sock`. `unix://<absolute path>`
+    /// dials a socket, on Unix only. `tcp://<host>:<port>` dials a daemon
+    /// anywhere, always over mutual TLS, and needs all three TLS files below;
+    /// the port is required and there is no plaintext TCP. The host is a DNS
+    /// name or an IP literal, an IPv6 one in brackets. Any other value refuses
+    /// boot naming this key. `DOCKER_HOST` is never read.
     pub endpoint: Option<String>,
+    /// The PEM file of the CA a `tcp://` daemon's certificate must chain to
+    /// (`AETHER_WORKSPACE_TLS_CA_FILE`), the only trust root. Required for a
+    /// `tcp://` endpoint and refused beside any other.
+    pub tls_ca_file: Option<String>,
+    /// The PEM file of the client certificate chain presented to a `tcp://`
+    /// daemon (`AETHER_WORKSPACE_TLS_CERT_FILE`). Required for a `tcp://`
+    /// endpoint and refused beside any other.
+    pub tls_cert_file: Option<String>,
+    /// The PEM file of the client certificate's private key
+    /// (`AETHER_WORKSPACE_TLS_KEY_FILE`). Required for a `tcp://` endpoint
+    /// and refused beside any other.
+    pub tls_key_file: Option<String>,
     /// The most imports that talk to the daemon at once; the rest queue, and
     /// none is dropped. A resolved `0` coerces back to the default.
     #[cfg_attr(feature = "runtime", config(default = 1, nonzero))]
@@ -72,6 +87,9 @@ impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
             endpoint: None,
+            tls_ca_file: None,
+            tls_cert_file: None,
+            tls_key_file: None,
             max_in_flight: 1,
             import_max_entries: 1_000_000,
             import_max_bytes: 8 << 30,

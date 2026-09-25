@@ -24,6 +24,7 @@ runtime = [
   "dep:clap",
   "dep:confique",
   "dep:tracing",
+  "dep:rustls",
 ]
 # Exposes `testing::StubDaemon`, the scripted Engine API server the runtime's
 # unit tests and this crate's own actor scenario dial. Off by default, so it
@@ -47,6 +48,10 @@ clap = { workspace = true, optional = true }
 confique = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
 tempfile = { version = "3", optional = true }
+# Mutual TLS for a `tcp://` Engine API endpoint, on the ring provider the
+# workspace already locks: no default features, so no ambient root store and
+# no process-default provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 
 # The `#[actor]` and `Kind` derives emit a `cfg(not(target_family = "wasm"))`
 # inventory row, so native builds need `inventory` reachable; wasm guests don't.
@@ -61,6 +66,9 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 # connection of their own.
 rusqlite = { workspace = true }
 tempfile = "3"
+# The TLS stub daemon's CA, server, and client certificates, generated fresh
+# on every run so no key material is checked in.
+rcgen = "0.14"
 
 # cargo-machete (the CI unused-deps gate) scans source without resolving
 # features, so it cannot see that `clap` and `confique` are used only through
