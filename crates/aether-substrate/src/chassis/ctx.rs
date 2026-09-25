@@ -640,33 +640,22 @@ impl<'a> ChassisCtx<'a> {
         self.claimed_actor_mailboxes.retain(|i| *i != id);
     }
 
-    /// Clone-able mail-send handle. Capabilities stash this into
-    /// their dispatcher state to send mail to other mailboxes
-    /// (including other capabilities). Same `Arc<Mailer>` every
-    /// capability sees, so an envelope sent here goes through the
-    /// substrate's routing table the same way component-originated mail
-    /// does.
+    /// Clone the chassis's `Arc<Mailer>`, the one every actor's binding
+    /// routes through. Crate-private: its consumers are the binding
+    /// `NativeBinding::from_ctx` builds, `DriverCtx::root_pusher`, and the
+    /// passive boot's `init` / `spawn` passes. No capability reaches the
+    /// mailer through this ctx.
     #[must_use]
-    pub fn mail_send_handle(&self) -> Arc<Mailer> {
+    pub(crate) fn mail_send_handle(&self) -> Arc<Mailer> {
         Arc::clone(self.mailer)
     }
 
-    /// Borrow the chassis's registry. Capabilities that resolve
-    /// names or descriptors at boot (today: the hub client capability
-    /// cloning the registry into its TCP reader thread) reach for
-    /// this; most capabilities don't need it.
+    /// Borrow the chassis's registry. Crate-private: its consumers are the
+    /// passive boot's `init` pass (the declared-dependency check) and
+    /// `spawn` pass (the seize-handle install).
     #[must_use]
-    pub fn registry(&self) -> &Arc<Registry> {
+    pub(crate) fn registry(&self) -> &Arc<Registry> {
         self.registry
-    }
-
-    /// Borrow the chassis's mailer. Same shape as
-    /// [`Self::mail_send_handle`] but returns a borrow instead of a
-    /// clone — preferred when the capability is going to clone with
-    /// `Arc::clone` itself.
-    #[must_use]
-    pub fn mailer(&self) -> &Arc<Mailer> {
-        self.mailer
     }
 
     /// Clone the chassis's [`FatalAborter`]. Read by the crate-private

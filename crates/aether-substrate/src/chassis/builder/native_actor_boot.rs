@@ -198,8 +198,7 @@ where
         // `ActorLogRing`. The pre-ADR `with_actor_dispatch` +
         // `drain_buffer` flush hop retired alongside `LogBatch`.
         let init_result = check_declared::<A>(ctx.registry(), None).and_then(|()| {
-            let mailer_clone = ctx.mail_send_handle();
-            let mut init_ctx = NativeInitCtx::new(&resources.transport, handles, mailer_clone);
+            let mut init_ctx = NativeInitCtx::new(&resources.transport, handles);
             local::with_stamped(&resources.slots, || A::init(config, params, &mut init_ctx))
         });
         let actor = match init_result {

@@ -183,7 +183,7 @@ impl Spawner {
             // ExportedHandles to keep the init-ctx shape uniform with
             // the singleton path.
             let mut throwaway_handles = ExportedHandles::new();
-            let mut init_ctx = NativeInitCtx::new(&transport, &mut throwaway_handles, Arc::clone(&self.mailer));
+            let mut init_ctx = NativeInitCtx::new(&transport, &mut throwaway_handles);
             // ADR-0081: wrap `init` in `with_stamped` so any
             // `tracing::*` event the actor fires lands in its
             // per-actor `ActorLogRing`. The pre-ADR
