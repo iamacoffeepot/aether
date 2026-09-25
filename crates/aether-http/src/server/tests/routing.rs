@@ -6,8 +6,6 @@
 
 use aether_actor::Addressable;
 use aether_data::Kind as KindTrait;
-use aether_data::KindId;
-use aether_substrate::Mail;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::io::Write;
@@ -228,7 +226,6 @@ fn route_registered_mid_connection_serves_next_request() {
 
     // Register /late at the wired handler while the connection is
     // parked between keep-alive requests.
-    let supervisor = registry.lookup(<HttpServerCapability as Addressable>::NAMESPACE).expect("http server registered");
     let target = registry.lookup(<WiredRouteHandler as Addressable>::NAMESPACE).expect("wired handler registered");
     let payload = RegisterRoute {
         prefix: "/late".to_string(),
@@ -238,7 +235,14 @@ fn route_registered_mid_connection_serves_next_request() {
         shared: false,
     }
     .encode_into_bytes();
-    mailer.push(Mail::new(supervisor, KindId(<RegisterRoute as KindTrait>::ID.0), payload, 1));
+    let registered = chassis.send_tracked(
+        chassis.actor_ref::<HttpServerCapability>().erase(),
+        <RegisterRoute as KindTrait>::ID,
+        payload,
+        0x6521,
+        None,
+    );
+    registered.recv_timeout(Duration::from_secs(10)).expect("the route registration settles");
 
     // The registration lands asynchronously; poll on the SAME socket.
     let deadline = Instant::now() + Duration::from_secs(10);

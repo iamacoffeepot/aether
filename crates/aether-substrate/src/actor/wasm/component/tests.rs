@@ -958,7 +958,10 @@ fn deliver_with_real_token_allocates_session_handle() {
     component.deliver(&mail).expect("deliver");
     let observed = component.read_u32(500);
     assert_ne!(observed, NO_REPLY_HANDLE);
-    assert_eq!(component.store.data().reply_table.resolve(observed), Some(ReplyEntry::session(token)),);
+    assert_eq!(
+        component.store.data().reply_table.resolve(observed),
+        Some(ReplyEntry::new(SourceAddr::Session(token), 0)),
+    );
 }
 
 #[test]
@@ -975,7 +978,10 @@ fn deliver_with_component_reply_target_allocates_component_handle() {
     component.deliver(&mail).expect("deliver");
     let observed = component.read_u32(500);
     assert_ne!(observed, NO_REPLY_HANDLE);
-    assert_eq!(component.store.data().reply_table.resolve(observed), Some(ReplyEntry::component(M(7))),);
+    assert_eq!(
+        component.store.data().reply_table.resolve(observed),
+        Some(ReplyEntry::new(SourceAddr::Component(M(7)), 0)),
+    );
 }
 
 /// #6412: a single-class arm returns `DISPATCH_HANDLED_RELEASE`, so the host

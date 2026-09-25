@@ -73,7 +73,7 @@ pub struct ComponentCtx {
     /// dispatch return (#6412). One table per mailbox slot, not
     /// per instance: the component trampoline carries it to the slot's
     /// next occupant as [`PendingReplies`] (#6409).
-    pub reply_table: ReplyTable,
+    pub(crate) reply_table: ReplyTable,
     /// Set by the `save_state` host fn during `on_dehydrate`. The
     /// substrate extracts it after hooks return via
     /// `Component::take_saved_state`. Never read by the guest —
