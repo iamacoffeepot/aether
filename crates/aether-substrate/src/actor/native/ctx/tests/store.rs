@@ -10,9 +10,9 @@ use crate::mail::Source;
 use crate::testing::bare_substrate;
 
 /// Catches the verb reaching some store other than the engine's: the bytes
-/// must count against the binding mailer's store while the `BlobRef` lives.
+/// must count against the binding mailer's store while the `Blob` lives.
 #[test]
-fn check_in_holds_bytes_in_the_mailers_store_until_the_ref_drops() {
+fn check_in_holds_bytes_in_the_mailers_store_until_the_blob_drops() {
     let (_registry, mailer) = bare_substrate();
     let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00B1_0B00)));
     let ctx: NativeCtx<'_> = NativeCtx::new(&binding, Source::NONE, None, None);

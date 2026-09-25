@@ -1,6 +1,8 @@
 use std::ptr;
 use std::sync::{Arc, Weak};
 
+use aether_data::BlobReader;
+
 use super::entry::remove_if_current;
 use super::gauge::next_mark;
 use super::{BlobStore, Index};
@@ -83,18 +85,21 @@ fn the_gauge_advances_only_when_a_mark_is_crossed() {
     assert_eq!(next_mark(200, 900), Some(1600));
 }
 
-/// Catches a mint that holds a `Weak`, copies the bytes, or leaks the entry:
-/// a `BlobRef` must keep its entry resident through a clone's drop and free
-/// it when the last reference goes.
+/// Catches a `BlobEntry::read_at` offset bug, a mint that holds a `Weak`, or
+/// a leaked entry: a checked-in value reads its bytes from an offset, keeps
+/// its entry resident through a clone's drop, and frees it when the last
+/// clone goes.
 #[test]
-fn a_blob_ref_keeps_its_entry_resident_until_the_last_reference_drops() {
+fn a_shared_blob_reads_from_an_offset_and_stays_resident_until_the_last_clone_drops() {
     let store = store();
 
-    let blob = store.check_in(boxed(b"checked in")).into_ref();
+    let blob = store.check_in(boxed(b"checked in")).into_blob();
     let clone = blob.clone();
     drop(clone);
 
-    assert_eq!(blob.bytes(), b"checked in");
+    let mut buf = [0; 8];
+    assert_eq!(BlobReader::open(&blob).read_range(3, &mut buf), 7);
+    assert_eq!(buf[..7], *b"cked in");
     assert_eq!(store.resident_bytes(), b"checked in".len());
 
     drop(blob);

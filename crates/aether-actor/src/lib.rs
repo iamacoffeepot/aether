@@ -10,6 +10,8 @@
 //!   family each implement the relevant subset.
 //! - [`Slot`]: the single-instance backing store [`export!`] emits as a
 //!   `static`.
+//! - [`Blob`], [`BlobReader`], [`MAX_READ_BYTES`]: immutable bytes as a value
+//!   and their streaming reader, re-exported from `aether-data` (ADR-0238).
 //! - [`wasm`]: the guest binding layer. [`wasm::bridge`] holds the dispatch
 //!   functions, [`WasmActor`] is the trait a component implements (including
 //!   the `on_dehydrate` / `on_rehydrate` hot-swap hooks, ADR-0101),
@@ -151,6 +153,7 @@ pub use aether_actor_derive::__export_emit_classified;
 /// capability authors need only `aether-actor` in their dep list; the
 /// full macro surface is available from here.
 pub use aether_actor_derive::{actor, capability, export_asset, fallback, handler, handler_set, local, runtime};
+pub use aether_data::{Blob, BlobReader, MAX_READ_BYTES};
 pub use aether_data::{Kind, KindId as DataKindId, MailboxId, RequestId, Schema};
 // ADR-0119: the `#[derive(Singleton)]` / `#[derive(Instanced)]` /
 // `#[derive(Embeddable)]` proc-macros are retired. Cardinality is the

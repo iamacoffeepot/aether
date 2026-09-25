@@ -5,7 +5,7 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use aether_data::{BlobBacking, BlobHash, BlobRef};
+use aether_data::{Blob, BlobBacking, BlobHash};
 
 use super::{Index, Shared, reclaim};
 
@@ -50,17 +50,26 @@ impl BlobEntry {
         self.hash
     }
 
-    /// Hold this entry as a [`BlobRef`]: the store's one mint site. The
-    /// reference keeps the entry, and so its bytes, resident until it and
-    /// every clone of it drop.
-    pub(crate) fn into_ref(self: Arc<Self>) -> BlobRef {
-        aether_data::__mint_blob_ref(self.hash, self)
+    /// Hold this entry as a `Shared` [`Blob`]: the store's one mint site. The
+    /// value keeps the entry, and so its bytes, resident until it and every
+    /// clone of it drop.
+    pub(crate) fn into_blob(self: Arc<Self>) -> Blob {
+        aether_data::__mint_shared_blob(self)
     }
 }
 
 impl BlobBacking for BlobEntry {
-    fn bytes(&self) -> &[u8] {
-        &self.bytes
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> usize {
+        let Some(rest) = usize::try_from(offset).ok().and_then(|start| self.bytes.get(start..)) else {
+            return 0;
+        };
+        let copied = rest.len().min(buf.len());
+        buf[..copied].copy_from_slice(&rest[..copied]);
+        copied
     }
 }
 

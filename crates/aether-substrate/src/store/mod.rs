@@ -16,10 +16,11 @@
 //!
 //! The engine's one store is owned by its `Mailer`. A native handler checks
 //! bytes in through `NativeCtx::check_in`, which holds the resulting entry as
-//! an [`aether_data::BlobRef`]: the entry's `Arc` behind the
-//! [`aether_data::BlobBacking`] this module implements. `BlobEntry::into_ref`
-//! is the only place that mints one, so a `BlobRef` always comes from this
-//! store. Cloning a `BlobRef` adds a strong reference and dropping it lets one
+//! a `Shared` [`aether_data::Blob`]: the entry's `Arc` behind the
+//! [`aether_data::BlobBacking`] this module implements. `BlobEntry::into_blob`
+//! is the only place that mints one, so a `Shared` value always comes from
+//! this store. Reads stream through `BlobBacking::read_at` and never take a
+//! lock. Cloning the value adds a strong reference and dropping it lets one
 //! go; native actors keep no table of their own.
 //!
 //! # How entries are freed
