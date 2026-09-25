@@ -1,5 +1,6 @@
 //! A resident entry and its dedup key.
 
+use std::fmt;
 use std::mem;
 use std::ptr;
 use std::sync::Arc;
@@ -40,9 +41,8 @@ impl BlobEntry {
         self.bytes.len()
     }
 
-    /// The entry's hash. The test seam for the wasm blob table's grant; the
-    /// envelope encoder that writes tag-1 fields un-gates it.
-    #[cfg(test)]
+    /// The entry's hash: the key a tag-1 `Blob` field names it by, which the
+    /// egress rewrite matches against an envelope's attachments.
     #[must_use]
     pub fn hash(&self) -> BlobHash {
         self.hash
@@ -53,6 +53,13 @@ impl BlobEntry {
     /// clone of it drop.
     pub(crate) fn into_blob(self: Arc<Self>) -> Blob {
         aether_data::__mint_shared_blob(self)
+    }
+}
+
+impl fmt::Debug for BlobEntry {
+    /// The identity and size, never the bytes: an entry can be very large.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BlobEntry").field("hash", &self.hash).field("len", &self.bytes.len()).finish_non_exhaustive()
     }
 }
 

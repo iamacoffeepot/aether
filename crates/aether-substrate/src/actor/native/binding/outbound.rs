@@ -189,7 +189,19 @@ impl NativeBinding {
                 Err(RingFull) => PendingPayload::Owned(bytes.to_vec()),
             }
         };
-        buf.mails.push(PendingMail { recipient, kind, payload, count, reply_to, mail_id, root, parent_mail });
+        // No native send attaches blob entries yet; the envelope encoder
+        // that interns `Blob` fields fills this.
+        buf.mails.push(PendingMail {
+            recipient,
+            kind,
+            payload,
+            count,
+            reply_to,
+            mail_id,
+            root,
+            parent_mail,
+            attachments: None,
+        });
         mail_id
     }
 

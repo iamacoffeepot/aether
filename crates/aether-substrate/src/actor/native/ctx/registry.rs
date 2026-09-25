@@ -1,14 +1,21 @@
-//! Registry reads and owner batches from a handler turn.
+//! Registry reads and owner batches from a handler turn, and the wire form
+//! of an envelope's payload, which reads its kind's schema from the registry.
 //!
 //! A staged batch uses reserved owner admission and completes on a later
 //! actor turn, so it rides the same ADR-0093 ledger every other deferred
 //! producer does rather than taking the registry's locks mid-turn (ADR-0165).
 
+use std::borrow::Cow;
+
 use aether_actor::{ErasedActorRef, ReplyMode};
+use aether_codec::InlineError;
+use aether_codec::frame::max_frame_size;
 use aether_data::{ActorPath, KindDescriptor, KindId};
 use aether_kinds::ComponentCapabilities;
 
+use crate::actor::native::envelope::Envelope;
 use crate::actor::native::offload::blocking::DispatchId;
+use crate::mail::attachments::plain_payload;
 use crate::mail::registry::AddressResolutionError;
 use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
 
@@ -106,6 +113,32 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn receive_surface(&self, actor: ErasedActorRef) -> Option<ComponentCapabilities> {
         self.binding.receive_surface(actor)
+    }
+
+    /// This envelope's payload as wire bytes: tag-1 `Blob` fields rewritten
+    /// to tag 0, bounded by the installed frame limit (ADR-0238 decisions 3
+    /// and 5). An envelope with no attachments has no tag-1 field, so its
+    /// bytes come back as they are, unwalked.
+    ///
+    /// # Errors
+    ///
+    /// [`InlineError::TooLarge`] when the rewritten payload would not fit one
+    /// frame (`aether_codec::frame::max_frame_size`),
+    /// [`InlineError::MissingAttachment`] for a tag-1 hash the envelope does
+    /// not attach, and [`InlineError::Malformed`] for a payload that does not
+    /// follow its kind's schema or a kind the registry does not hold.
+    ///
+    /// Consumer: the rpc server's reply-out, which writes the bytes into a
+    /// `ReplyEvent` frame.
+    pub fn wire_payload(&self, envelope: &Envelope) -> Result<Vec<u8>, InlineError> {
+        plain_payload(
+            self.binding.mailer().registry(),
+            envelope.kind,
+            envelope.payload.bytes(),
+            envelope.attachments(),
+            max_frame_size(),
+        )
+        .map(Cow::into_owned)
     }
 
     /// Stage a typed registry-owner batch from the current handler. The batch

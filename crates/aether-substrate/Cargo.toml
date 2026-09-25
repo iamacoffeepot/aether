@@ -45,6 +45,10 @@ test-support = []
 # through `WasmTransport`. The trait takes `&self` so per-actor
 # state lives in struct fields, not a thread-local.
 aether-actor = { path = "../aether-actor" }
+# ADR-0238 decisions 3 and 5: every path that takes an envelope's payload out
+# of the process rewrites its tag-1 `Blob` fields to inline bytes through
+# `aether_codec::inline_blobs`, bounded by `aether_codec::frame::max_frame_size`.
+aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
 # ADR-0090 unit g (iamacoffeepot/aether#1264): `#[derive(Config)]` lives
 # in `aether-derive` and is re-exported here as `aether_substrate::Config`,

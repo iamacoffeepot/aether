@@ -1,11 +1,14 @@
 use std::fmt;
+use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::{cell::Cell, thread};
 
 use aether_actor::ErasedActorRef;
 use aether_kinds::trace::Nanos;
 
+use crate::mail::attachments::{self, Attachments};
 use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
+use crate::store::BlobEntry;
 
 /// Test-only helper that builds a [`MailDispatch`] with empty
 /// `origin` / `Source::NONE` / no-lineage defaults from the
@@ -292,6 +295,11 @@ pub struct OwnedDispatch {
     /// already pass; survives release builds (where the debug-only
     /// `ObligationGuard` that previously held it is compiled out).
     pub(crate) recipient: MailboxId,
+    /// ADR-0238 decision 3: the store entries the payload's tag-1 `Blob`
+    /// fields name, carried from the routed [`Mail`](crate::mail::Mail).
+    /// Private so it stays off [`DispatchParts`], which other crates build
+    /// by struct update, and set only through [`Self::with_attachments`].
+    attachments: Attachments,
     /// ADR-0094 debug-only settlement-obligation guard. Present only
     /// under `#[cfg(debug_assertions)]`; release builds carry no field
     /// (byte-identical to the pre-ADR-0094 layout). Disarmed via
@@ -385,9 +393,30 @@ impl OwnedDispatch {
             t_enqueue,
             enqueue_depth,
             recipient,
+            attachments: None,
             #[cfg(debug_assertions)]
             obligation,
         }
+    }
+
+    /// Carry `attachments`, the entries the payload's tag-1 `Blob` fields
+    /// name (ADR-0238 decision 3). An empty set is stored as `None`.
+    #[must_use]
+    pub(crate) fn with_attachments(mut self, attachments: Attachments) -> Self {
+        self.attachments = attachments::normalized(attachments);
+        self
+    }
+
+    /// The entries the payload's tag-1 `Blob` fields name; empty for a
+    /// payload with none.
+    pub(crate) fn attachments(&self) -> &[Arc<BlobEntry>] {
+        self.attachments.as_deref().unwrap_or_default()
+    }
+
+    /// Move the attachments out, for a hand-off that rebuilds this dispatch
+    /// as a [`Mail`](crate::mail::Mail).
+    pub(crate) fn take_attachments(&mut self) -> Attachments {
+        self.attachments.take()
     }
 
     /// ADR-0094: "the obligation ends here." Records intent that the
@@ -430,6 +459,7 @@ impl Clone for OwnedDispatch {
             t_enqueue: self.t_enqueue,
             enqueue_depth: self.enqueue_depth,
             recipient: self.recipient,
+            attachments: self.attachments.clone(),
             // ADR-0094: a clone is for inspection, never a second live
             // obligation — `ObligationGuard::clone` is disarmed.
             #[cfg(debug_assertions)]
@@ -454,6 +484,7 @@ impl fmt::Debug for OwnedDispatch {
             .field("t_enqueue", &self.t_enqueue)
             .field("enqueue_depth", &self.enqueue_depth)
             .field("recipient", &self.recipient)
+            .field("attachments", &self.attachments)
             // ADR-0094: the debug-only `obligation` guard is deliberately
             // omitted so `Debug` output is identical across debug/release.
             .finish_non_exhaustive()

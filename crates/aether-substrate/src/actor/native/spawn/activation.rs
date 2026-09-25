@@ -562,7 +562,8 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
                 OwnedDispatch::disarmed_at(parts, id)
             } else {
                 OwnedDispatch::armed(parts, id)
-            };
+            }
+            .with_attachments(mail.attachments);
             let _ = sender.send(envelope);
         }
 

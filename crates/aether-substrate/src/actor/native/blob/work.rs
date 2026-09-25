@@ -685,7 +685,8 @@ impl BlobWork {
                         enqueue_depth: 0,
                     },
                     recipient,
-                );
+                )
+                .with_attachments(mail.attachments);
                 match slot.seize_and_run(seed, budget) {
                     CycleResult::Requeue => self.sink.schedule(slot),
                     CycleResult::Idle | CycleResult::Closed => {}

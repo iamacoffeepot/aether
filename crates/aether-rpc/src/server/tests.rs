@@ -6,8 +6,10 @@ use crate::{Hello, HelloAck, PeerKind, Recipient, WIRE_VERSION, WireFrame};
 use aether_actor::Addressable;
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::ActorPath;
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::builder::PassiveChassis;
+use aether_substrate::chassis::error::BootError;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
 use aether_trace::TraceDispatchCapability;
 use std::net::TcpStream;
@@ -862,4 +864,147 @@ fn call_echo_round_trips_over_the_socket() {
         }
         other => panic!("expected ReplyEnd, got {other:?}"),
     }
+}
+
+/// Asks [`BlobSharer`] for a reply whose blob is `blob_len` patterned
+/// bytes and whose `padding` is `padding_len` bytes of text.
+#[aether_data::kind(name = "aether.rpc.test.blob", copy, default, eq)]
+struct BlobRequest {
+    blob_len: u64,
+    padding_len: u64,
+}
+
+/// [`BlobSharer`]'s reply: one blob plus padding that sizes the payload.
+#[aether_data::kind(name = "aether.rpc.test.blob_result")]
+struct BlobResult {
+    blob: aether_data::Blob,
+    padding: String,
+}
+
+/// Replies to each [`BlobRequest`] with its blob checked into the engine
+/// store and shared as an attached in-process reply carries it: tag 1 with
+/// the hash, the entry attached. The rpc server must write it out as bytes.
+struct BlobSharer {
+    /// The character each reply's padding repeats.
+    padding_fill: char,
+}
+
+#[aether_actor::actor(singleton, root)]
+impl NativeActor for BlobSharer {
+    type Config = ();
+    const NAMESPACE: &'static str = "aether.rpc.test.blob_sharer";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { padding_fill: 'p' })
+    }
+
+    /// Reply with a shared blob.
+    #[handler::manual]
+    fn on_blob_request(&mut self, ctx: &mut NativeCtx<'_, Self, aether_actor::Manual>, mail: BlobRequest) {
+        let blob = ctx.check_in(patterned(mail.blob_len).into_boxed_slice());
+        let padding =
+            self.padding_fill.to_string().repeat(usize::try_from(mail.padding_len).expect("test padding fits memory"));
+        ctx.reply_sharing_blobs(&BlobResult { blob, padding });
+    }
+}
+
+fn patterned(len: u64) -> Vec<u8> {
+    (0..len).map(|i| u8::try_from(i % 251).expect("below 251")).collect()
+}
+
+fn boot_with_blob_replier() -> (PassiveChassis<TestChassis>, TcpStream) {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor::<BlobSharer>(())
+        .with_actor_configured::<RpcServerCapability>(
+            RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
+            RpcServerConfig { port: Some(0), port_file: None },
+        )
+        .build_passive()
+        .expect("caps boot");
+    let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(10));
+    complete_handshake(&mut stream);
+    (chassis, stream)
+}
+
+fn call_blob_replier(stream: &mut TcpStream, cid: u64, request: BlobRequest) {
+    use crate::MailEnvelope;
+    use aether_data::Kind;
+
+    write_frame(
+        stream,
+        &WireFrame::Call {
+            cid: Some(cid),
+            envelope: MailEnvelope {
+                to: recipient_of::<BlobSharer>(),
+                kind: <BlobRequest as Kind>::ID,
+                payload: request.encode_into_bytes(),
+            },
+        },
+    )
+    .expect("write Call");
+}
+
+/// Read one call's `ReplyEvent` and `ReplyEnd { Ok }`, returning the reply's
+/// blob bytes. The plain decode refuses a tag-1 field, so a payload that left
+/// the process unrewritten fails here.
+fn read_blob_reply(stream: &mut TcpStream, cid: u64) -> Vec<u8> {
+    use aether_data::{BlobReader, Kind};
+
+    let envelope = match read_frame(stream).expect("read ReplyEvent") {
+        WireFrame::ReplyEvent { cid: event_cid, envelope } if event_cid == cid => envelope,
+        other => panic!("expected ReplyEvent for cid {cid}, got {other:?}"),
+    };
+    assert_eq!(envelope.kind, <BlobResult as Kind>::ID);
+    let reply = BlobResult::decode_from_bytes(&envelope.payload).expect("the reply decodes with inline blob bytes");
+    let reader = BlobReader::open(&reply.blob);
+    let mut bytes = vec![0; usize::try_from(reader.len()).expect("test blob fits memory")];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        filled += reader.read_range(filled as u64, &mut bytes[filled..]);
+    }
+
+    match read_frame(stream).expect("read ReplyEnd") {
+        WireFrame::ReplyEnd { cid: end_cid, result } if end_cid == cid => result.expect("ReplyEnd Ok"),
+        other => panic!("expected ReplyEnd for cid {cid}, got {other:?}"),
+    }
+    bytes
+}
+
+/// A reply carrying an attached blob reaches the wire client as tag-0 bytes
+/// holding the blob's contents. Catches a tag-1 hash written into a
+/// `ReplyEvent`, which no client can resolve.
+#[test]
+fn attached_reply_reaches_the_client_as_inline_bytes() {
+    let (_chassis, mut stream) = boot_with_blob_replier();
+
+    call_blob_replier(&mut stream, 0x0b10, BlobRequest { blob_len: 300, padding_len: 0 });
+
+    assert_eq!(read_blob_reply(&mut stream, 0x0b10), patterned(300));
+}
+
+/// A reply whose inline form cannot fit one frame closes its own call with
+/// `FrameTooLarge` naming the size and the limit, and the connection carries
+/// the next call. Catches the reply-out writing the oversized frame, which
+/// closes the whole connection, or leaving the call open.
+#[test]
+fn oversized_attached_reply_closes_the_call_and_keeps_the_connection() {
+    use crate::RpcError;
+    use aether_codec::frame::max_frame_size;
+
+    let (_chassis, mut stream) = boot_with_blob_replier();
+    let max = max_frame_size();
+
+    call_blob_replier(&mut stream, 0x0b11, BlobRequest { blob_len: 16, padding_len: max as u64 });
+    match read_frame(&mut stream).expect("read ReplyEnd") {
+        WireFrame::ReplyEnd { cid: 0x0b11, result: Err(RpcError::FrameTooLarge { size, max: limit }) } => {
+            assert!(size > max as u64, "the reported size {size} must exceed the limit {max}");
+            assert_eq!(limit, max as u64);
+        }
+        other => panic!("expected ReplyEnd FrameTooLarge for cid 0x0b11, got {other:?}"),
+    }
+
+    call_blob_replier(&mut stream, 0x0b12, BlobRequest { blob_len: 16, padding_len: 0 });
+    assert_eq!(read_blob_reply(&mut stream, 0x0b12), patterned(16));
 }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::blob_table::BlobTable;
 use crate::actor::wasm::reply_table::ReplyTable;
+use crate::mail::attachments::plain_payload;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{
@@ -618,40 +619,54 @@ impl ComponentCtx {
                 // ADR-0094: the second of two production mint sites
                 // (ComponentCtx's inline send bypasses `route_mail`). Armed
                 // here; the recipient actor's dispatcher discharges it.
-                handler.enqueue(OwnedDispatch::armed(
-                    DispatchParts {
-                        kind: mail.kind,
-                        origin,
-                        sender: mail.reply_to,
-                        payload: mail.payload,
-                        count: mail.count,
-                        mail_id: mail.mail_id,
-                        root: mail.root,
-                        parent_mail: mail.parent_mail,
-                        // iamacoffeepot/aether#1134: the second production
-                        // deposit chokepoint (ComponentCtx's inline send
-                        // bypasses `route_mail`), so stamp the deposit instant
-                        // + scheduler backlog here too — else the recipient's
-                        // `Received` would read a zeroed `t_enqueue`.
-                        t_enqueue: queue.now_nanos(),
-                        enqueue_depth: pending_depth(),
-                    },
-                    mail.recipient,
-                ));
+                handler.enqueue(
+                    OwnedDispatch::armed(
+                        DispatchParts {
+                            kind: mail.kind,
+                            origin,
+                            sender: mail.reply_to,
+                            payload: mail.payload,
+                            count: mail.count,
+                            mail_id: mail.mail_id,
+                            root: mail.root,
+                            parent_mail: mail.parent_mail,
+                            // iamacoffeepot/aether#1134: the second production
+                            // deposit chokepoint (ComponentCtx's inline send
+                            // bypasses `route_mail`), so stamp the deposit instant
+                            // + scheduler backlog here too — else the recipient's
+                            // `Received` would read a zeroed `t_enqueue`.
+                            t_enqueue: queue.now_nanos(),
+                            enqueue_depth: pending_depth(),
+                        },
+                        mail.recipient,
+                    )
+                    .with_attachments(mail.attachments),
+                );
                 return;
             }
             Some(MailboxEntry::Inline(handler)) => {
                 let origin = registry.mailbox_name(identity);
-                handler.dispatch(crate::mail::registry::MailDispatch {
-                    kind: mail.kind,
-                    origin: origin.as_deref(),
-                    sender: mail.reply_to,
-                    payload: mail.payload.bytes(),
-                    count: mail.count,
-                    mail_id: mail.mail_id,
-                    root: mail.root,
-                    parent_mail: mail.parent_mail,
-                });
+                // ADR-0238: an inline handler reads plain bytes, so an
+                // attached payload is lent rewritten, with no frame limit.
+                let attachments = mail.attachments.as_deref().unwrap_or_default();
+                match plain_payload(registry, mail.kind, mail.payload.bytes(), attachments, usize::MAX) {
+                    Ok(payload) => handler.dispatch(crate::mail::registry::MailDispatch {
+                        kind: mail.kind,
+                        origin: origin.as_deref(),
+                        sender: mail.reply_to,
+                        payload: &payload,
+                        count: mail.count,
+                        mail_id: mail.mail_id,
+                        root: mail.root,
+                        parent_mail: mail.parent_mail,
+                    }),
+                    Err(error) => tracing::error!(
+                        target: "aether_substrate::mail",
+                        kind = %registry.kind_label(mail.kind),
+                        %error,
+                        "attached mail to an inline mailbox refused",
+                    ),
+                }
                 // ADR-0080 §2 settlement hook. Inline mailboxes have no
                 // per-actor trace ring, so post-ADR-0086 Phase 3c their
                 // Received/Finished trace events aren't recorded — only

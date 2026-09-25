@@ -39,7 +39,7 @@ impl NativeBinding {
         if buffer.construct_start.is_none() {
             buffer.construct_start = Some(self.mailer.now_nanos());
         }
-        let Mail { recipient, kind, payload, count, reply_to, parent_mail, .. } = mail;
+        let Mail { recipient, kind, payload, count, reply_to, parent_mail, attachments, .. } = mail;
         buffer.component_origins.push(ComponentOrigin { mail_id, sender });
         buffer.mails.push(PendingMail {
             recipient: recipient.0,
@@ -50,6 +50,7 @@ impl NativeBinding {
             mail_id,
             root,
             parent_mail,
+            attachments,
         });
         None
     }
