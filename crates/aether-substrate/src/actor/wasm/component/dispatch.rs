@@ -1,8 +1,9 @@
 use aether_actor::DISPATCH_HANDLED_RELEASE;
 use aether_actor::wasm::NO_INBOUND_SOURCE;
 
+use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
-use crate::mail::{Mail, SourceAddr};
+use crate::mail::SourceAddr;
 
 use super::instantiate::Placement;
 use super::{Component, MAX_DELIVERABLE_MAIL_BYTES, SMALL_REGION_BYTES};
@@ -58,16 +59,18 @@ impl Component {
         }
     }
 
-    /// Deliver a mail into the component's linear memory and invoke
-    /// `receive`. Returns the guest's return value (contract is
+    /// Deliver a routed envelope into the component's linear memory and
+    /// invoke `receive`. Returns the guest's return value (contract is
     /// currently informational; host-visible errors propagate as
-    /// `wasmtime::Error`).
+    /// `wasmtime::Error`). `deliver` borrows the envelope and never
+    /// discharges it: its ADR-0094 settlement stays with the caller's
+    /// dispatcher.
     ///
     /// ADR-0013 + ADR-0017: once the payload has a place in guest memory,
     /// a fresh sender handle is allocated from the per-instance
     /// `ReplyTable` for every inbound that has a meaningful reply target —
     /// a Claude session (non-NIL `SessionToken`), a remote engine mailbox,
-    /// or a peer component (`reply_to.addr = SourceAddr::Component(_)`
+    /// or a peer component (`sender.addr = SourceAddr::Component(_)`
     /// populated by `ComponentCtx::send` / `NativeBinding::send_mail`).
     /// Broadcast-origin and system-generated mail pass `NO_REPLY_HANDLE`
     /// so the guest's `mail.reply_handle()` accessor returns `None`. A
@@ -81,7 +84,7 @@ impl Component {
     /// handle stays held until answered. A table holding every
     /// addressable handle fails the delivery, which the trampoline turns
     /// into an ADR-0063 fail-fast.
-    pub fn deliver(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
+    pub fn deliver(&mut self, env: &Envelope) -> wasmtime::Result<u32> {
         // ADR-0095: choose where in guest memory the payload lands via the
         // guest allocator — a fitting payload into the cached small region, a
         // larger one into the grown large region, anything past the ceiling or
@@ -89,7 +92,7 @@ impl Component {
         // invoking `receive`, so the trampoline's `forward_to_wasm` returns
         // normally and the native dispatcher discharges the inbound's
         // settlement bracket — no corruption, no trap, no hung caller.
-        let payload_len = mail.payload.len();
+        let payload_len = env.payload.len();
         // Wasm32 ABI carries `u32` byte lengths; only used in branches where
         // `payload_len <= MAX_DELIVERABLE_MAIL_BYTES`, so the cast can't lose data.
         #[allow(clippy::cast_possible_truncation)]
@@ -104,17 +107,17 @@ impl Component {
         )? {
             Placement::At(ptr) => ptr,
             Placement::Oversize => {
-                self.log_dropped_oversize(mail, payload_len, "exceeds the absolute mail-size bound");
+                self.log_dropped_oversize(env, payload_len, "exceeds the absolute mail-size bound");
                 return Ok(DISPATCH_DROPPED_OVERSIZE);
             }
             Placement::NoAllocator => {
-                self.log_dropped_oversize(mail, payload_len, "guest exports no realloc_p32 allocator (raw-FFI guest)");
+                self.log_dropped_oversize(env, payload_len, "guest exports no realloc_p32 allocator (raw-FFI guest)");
                 return Ok(DISPATCH_DROPPED_OVERSIZE);
             }
         };
-        let handle = self.allocate_reply_handle(mail)?;
+        let handle = self.allocate_reply_handle(env)?;
 
-        self.memory.write(&mut self.store, mail_ptr as usize, mail.payload.bytes())?;
+        self.memory.write(&mut self.store, mail_ptr as usize, env.payload.bytes())?;
         // ADR-0080 §5 (issue iamacoffeepot/aether#722): publish the
         // inbound's lineage on `ComponentCtx` so any guest-triggered
         // `send_mail_p32` / `reply_mail_p32` host fn — both routed
@@ -123,8 +126,8 @@ impl Component {
         // chain `root`. Cleared after the call so a future cap-side
         // call site that bypasses `deliver` (today: only test
         // fixtures) doesn't accidentally pick up stale lineage.
-        self.store.data().set_in_flight(mail.mail_id, mail.root);
-        self.store.data().set_reply_correlation(mail.reply_to);
+        self.store.data().set_in_flight(env.mail_id, env.root);
+        self.store.data().set_reply_correlation(env.sender);
         // ADR-0114 decision #1: thread the routed recipient through to
         // the guest as a `receive_p32` frame slot so a guest handler (and
         // the inline-child membrane) can read which address the mail was
@@ -137,10 +140,10 @@ impl Component {
         // `source_of_p32` host round-trip can be retired. Resolved exactly
         // as `source_of_p32` did — a peer-component origin yields its
         // `MailboxId`, every other origin yields `NO_INBOUND_SOURCE` (0).
-        let source = Self::resolve_inbound_source(&mail.reply_to.addr);
+        let source = Self::resolve_inbound_source(&env.sender.addr);
         let result = self
             .receive
-            .call(&mut self.store, (mail.kind.0, mail_ptr, byte_len, mail.count, handle, mail.recipient.0, source));
+            .call(&mut self.store, (env.kind.0, mail_ptr, byte_len, env.count, handle, env.recipient.0, source));
         self.store.data().clear_in_flight();
         if let Ok(rc) = result
             && (rc == DISPATCH_HANDLED_RELEASE || rc == DISPATCH_UNKNOWN_KIND)
@@ -154,13 +157,13 @@ impl Component {
     /// `NO_REPLY_HANDLE` when it has no reply target. Warns, naming the
     /// actor, each time the table's live count passes a new high-water mark,
     /// and errors when every addressable handle is held.
-    fn allocate_reply_handle(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
+    fn allocate_reply_handle(&mut self, env: &Envelope) -> wasmtime::Result<u32> {
         // ADR-0042: carry the incoming correlation through to the
         // ReplyEntry so a subsequent `reply_mail` echoes it on the
         // outgoing reply. Session / engine mail that didn't originate
         // a correlation carries 0 — fine, echo of 0 is a no-op.
-        let correlation = mail.reply_to.correlation_id;
-        let entry = match &mail.reply_to.addr {
+        let correlation = env.sender.correlation_id;
+        let entry = match &env.sender.addr {
             SourceAddr::Session(token) => ReplyEntry::new(SourceAddr::Session(*token), correlation),
             SourceAddr::EngineMailbox { engine_id, mailbox_id } => ReplyEntry::new(
                 SourceAddr::EngineMailbox { engine_id: *engine_id, mailbox_id: *mailbox_id },
@@ -191,12 +194,12 @@ impl Component {
     /// Loudly log an inbound mail dropped by `deliver` because its payload
     /// could not be delivered safely (iamacoffeepot/aether#1337). The mail is
     /// dropped, not written; the caller settles via the native dispatcher.
-    fn log_dropped_oversize(&self, mail: &Mail, payload_len: usize, reason: &str) {
-        let kind_name = self.store.data().registry.kind_name(mail.kind).unwrap_or_default();
+    fn log_dropped_oversize(&self, env: &Envelope, payload_len: usize, reason: &str) {
+        let kind_name = self.store.data().registry.kind_name(env.kind).unwrap_or_default();
         tracing::error!(
             target: "aether_substrate::component",
             kind = %kind_name,
-            kind_id = mail.kind.0,
+            kind_id = env.kind.0,
             payload_bytes = payload_len,
             small_region_bytes = SMALL_REGION_BYTES,
             deliverable_cap_bytes = MAX_DELIVERABLE_MAIL_BYTES,
