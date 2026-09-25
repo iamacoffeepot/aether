@@ -54,7 +54,7 @@ use std::sync::OnceLock;
 /// `aether.trace.tail` / `aether.cost.tail` dispatch arms reach the
 /// expected ring (iamacoffeepot/aether#1272).
 pub struct MailboxClaim {
-    pub id: MailboxId,
+    pub(crate) id: MailboxId,
     /// ADR-0106: the sealed inbound surface. Replaces the raw
     /// `mpsc::Receiver<Envelope>` the claim used to expose — a capability
     /// reaches inbound envelopes only through the [`SettlingInbox`]'s drain
@@ -145,7 +145,7 @@ impl SharedActorSlots {
 /// polling until their own migration PRs land.
 #[derive(Debug)]
 pub struct DropOnShutdownClaim {
-    pub id: MailboxId,
+    pub(crate) id: MailboxId,
     /// ADR-0106: the standard-dispatcher feed. Narrowed to `pub(crate)` —
     /// the raw-receiver shape survives only inside `aether-substrate` (the
     /// builder hands it straight to the pooled dispatcher), so no
@@ -635,7 +635,7 @@ impl<'a> ChassisCtx<'a> {
     /// `Dropped` rather than leaving the table: its name stays free for
     /// a later claim of the same namespace, and a reference minted while
     /// it was `Live` still names its path (ADR-0230).
-    pub fn unclaim_mailbox(&mut self, id: MailboxId) {
+    pub(crate) fn unclaim_mailbox(&mut self, id: MailboxId) {
         let _ = self.registry.drop_mailbox(&self.authority, id);
         self.claimed_actor_mailboxes.retain(|i| *i != id);
     }
