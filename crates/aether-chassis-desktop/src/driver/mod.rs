@@ -25,12 +25,12 @@ use aether_render::{Frame, Occluded, RenderCapability, RenderCapabilityState, Re
 use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RootPusher, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::settlement::{PumpWake, TerminalDisposition, WaitOutcome, await_settlement_pumped};
+use aether_substrate::chassis::settlement::{
+    PumpWake, SettlementRegistry, TerminalDisposition, WaitOutcome, await_settlement_pumped,
+};
 use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
 use aether_substrate::runtime::lifecycle as runtime_lifecycle;
-use aether_substrate::{
-    ChassisCtx, HubOutbound, Mailer, SettlingInbox, SubstrateBoot, chassis::frame_loop, mail::MailId,
-};
+use aether_substrate::{ChassisCtx, HubOutbound, SettlingInbox, SubstrateBoot, chassis::frame_loop, mail::MailId};
 use aether_window::{
     DesktopWindowApplication, DesktopWindowCapability, DesktopWindowIntegration, DesktopWindowParams,
     INITIAL_WINDOW_NAME, WindowSizeRequest, WindowSpec,
@@ -55,9 +55,9 @@ const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 /// Chassis-owned semantic integration for the window application's render,
 /// lifecycle-settlement, and graceful-shutdown operations.
 pub struct DesktopRenderIntegration {
-    /// Read only for its settlement registry, which `pump_while_settling`
+    /// The chassis's settlement registry, which `pump_while_settling`
     /// subscribes each advance root on.
-    queue: Arc<Mailer>,
+    settlement: Arc<SettlementRegistry>,
     /// The chassis-root door to `aether.lifecycle`, minted at boot. Each
     /// redraw fires one `LifecycleAdvance` through it; the cap broadcasts the
     /// `Tick` stage directly to its stage subscribers (components subscribe
@@ -284,11 +284,8 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
     }
 
     fn pump_while_settling(&mut self, settlement: MailId) -> WaitOutcome {
-        let Some(registry) = self.queue.settlement_registry().cloned() else {
-            return WaitOutcome::Settled;
-        };
         let pump_tx = self.render_pump_tx.clone();
-        registry.subscribe_settlement_with(settlement, move || {
+        self.settlement.subscribe_settlement_with(settlement, move || {
             let _ = pump_tx.send(PumpWake::Settled);
         });
         await_settlement_pumped(
@@ -452,7 +449,7 @@ impl DriverCapability for DesktopDriverCapability {
         let lifecycle_reply_inbox = ctx.claim_mailbox("aether.lifecycle.advance_reply")?.inbox;
 
         let integration = DesktopRenderIntegration {
-            queue: Arc::clone(&boot.queue),
+            settlement: Arc::clone(ctx.settlement_registry()),
             lifecycle,
             lifecycle_reply_inbox,
             outbound: Arc::clone(&boot.outbound),

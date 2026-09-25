@@ -61,13 +61,11 @@ pub(super) struct BootedPassives {
     /// its driver or embedder boots later. Read back by type through the
     /// chassis handle's `actor_ref`.
     pub(super) references: ComposedReferences,
-    /// Issue 607 Phase 2 / Phase 3 (ADR-0079): per-chassis actor
-    /// lifecycle registry, plus the spawn machinery that writes into
-    /// it. Both built once at boot; `Spawner` carries `Arc` clones of
-    /// the chassis-level handles (registry, `actor_registry`, mailer,
-    /// aborter) so future per-handler `spawn_child` reaches them
-    /// without separate plumbing.
-    pub(super) actor_registry: Arc<crate::ActorRegistry>,
+    /// Issue 607 Phase 2 / Phase 3 (ADR-0079): the spawn machinery,
+    /// built once at boot. `Spawner` carries `Arc` clones of the
+    /// chassis-level handles (registry, the per-chassis actor lifecycle
+    /// registry, mailer, aborter) so per-handler `spawn_child` reaches
+    /// them without separate plumbing.
     pub(super) spawner: Arc<crate::Spawner>,
     /// ADR-0165 additive owner foundation. Retains the scheduler slot and
     /// keeps effect submission accepting until chassis teardown. Declared
@@ -521,7 +519,6 @@ pub(super) fn boot_passives(
         claimed_actor_mailboxes,
         reserved_driver_mailboxes,
         references,
-        actor_registry,
         spawner,
         registry_owner: Some(registry_owner),
         _route_relay: route_relay,

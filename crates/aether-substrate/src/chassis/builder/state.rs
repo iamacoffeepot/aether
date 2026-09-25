@@ -622,6 +622,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
         // — each actor owns its own `ActorLogRing`.
         let driver_running = {
+            let settlement = Arc::clone(booted.settlement_registry());
             let chassis_ctx = ChassisCtx::new(
                 &registry,
                 &mailer,
@@ -632,7 +633,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
                 &mut booted.reserved_driver_mailboxes,
                 &booted.references,
             );
-            let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.handles);
+            let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.handles, settlement);
             driver_boot(&mut driver_ctx)?
         };
         // ADR-0230 §3: every mailbox reserved at the Claim stage must have

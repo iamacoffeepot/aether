@@ -25,7 +25,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_data::KindId;
 use aether_kinds::LifecycleAdvance;
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::SubstrateBoot;
@@ -42,13 +41,6 @@ use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
 /// observes a labelled `aether.lifecycle` root for every frame chain.
 pub struct HeadlessTimerDriverCapability {
     pub boot: SubstrateBoot,
-    /// Field kept for wire compatibility; the timer body no longer
-    /// touches `Tick` directly post-ADR-0082, but chassis builders
-    /// resolve the kind id from `SubstrateBoot::registry` once and
-    /// hand it through this struct. Removing the field would touch
-    /// every chassis call site; left as a no-op.
-    #[allow(dead_code)]
-    pub kind_tick: KindId,
     pub tick_period: Duration,
 }
 
@@ -83,7 +75,7 @@ impl DriverCapability for HeadlessTimerDriverCapability {
     }
 
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let Self { boot, kind_tick: _, tick_period } = self;
+        let Self { boot, tick_period } = self;
 
         let shutdown = Arc::new(AtomicBool::new(false));
         install_shutdown_handler(&shutdown);

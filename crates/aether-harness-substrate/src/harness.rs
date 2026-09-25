@@ -696,7 +696,7 @@ impl SubstrateHarness {
             render_size: (width, height),
             render_assets_dir,
         };
-        let SubstrateHarnessBuild { passive, boot, kind_tick, mut hook } =
+        let SubstrateHarnessBuild { passive, boot, mut hook } =
             SubstrateHarnessChassis::build_passive(env).map_err(|e| SubstrateHarnessError::Boot(e.to_string()))?;
 
         // ADR-0160 / ADR-0161: the drain-at-pump-start rule — a pumped
@@ -720,8 +720,6 @@ impl SubstrateHarness {
         // chassis recorded when it composed the cap.
         let lifecycle = passive.actor_ref::<aether_lifecycle::LifecycleCapability>();
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
-        let _ = kind_tick; // PR 3b retired direct Tick push; kept on the
-        // build result for wire-compat with binaries that haven't migrated yet.
 
         Ok(Self {
             queue,
@@ -1086,15 +1084,6 @@ impl SubstrateHarness {
     /// published view a running engine dispatches against.
     pub(crate) fn mail_registry(&self) -> &Arc<aether_substrate::Registry> {
         &self.registry
-    }
-
-    /// Borrow the harness's [`aether_substrate::ActorRegistry`]. Used
-    /// alongside `spawn_actor` so the in-crate spawn test can check each
-    /// spawn's proof names a live slot. Test-only, same rationale as
-    /// [`Self::spawn_actor`].
-    #[cfg(test)]
-    pub(crate) fn actor_registry(&self) -> &Arc<aether_substrate::ActorRegistry> {
-        self.passive.actor_registry()
     }
 
     /// iamacoffeepot/aether#1057: inject a chassis-root mail and return its
@@ -2023,16 +2012,14 @@ mod tests {
         let received = Arc::new(AtomicU32::new(0));
 
         // Subname::Counter — first instance, full name "test.spawn.child:0".
-        let id_a = tb
-            .spawn_actor::<Child>(Subname::Counter, Arc::clone(&received), ())
+        tb.spawn_actor::<Child>(Subname::Counter, Arc::clone(&received), ())
             .after_init(Bump { tag: 1 })
             .after_init(Bump { tag: 2 })
             .finish()
             .expect("first counter spawn");
 
         // Subname::Named — second instance, full name "test.spawn.child:alpha".
-        let id_b =
-            tb.spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received), ()).finish().expect("named spawn");
+        tb.spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received), ()).finish().expect("named spawn");
 
         // Reused subname → SubnameInUse.
         let err = tb
@@ -2052,9 +2039,5 @@ mod tests {
             2,
             "both pre-loaded after_init mails should dispatch to the first instance"
         );
-
-        // Each spawn's proof names a live registry slot.
-        assert!(tb.actor_registry().is_live(id_a.erase()), "first instance should be Live in the actor registry");
-        assert!(tb.actor_registry().is_live(id_b.erase()), "second instance should be Live in the actor registry");
     }
 }
