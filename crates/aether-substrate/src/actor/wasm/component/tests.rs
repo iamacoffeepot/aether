@@ -1533,10 +1533,11 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
 }
 
 /// Issue 4490: both scoped spawn imports accept a freshly prepared inline
-/// actor as the executing parent, extend that actor's lineage, and preserve
-/// the validated identity through the detached-spawn staging seam. Keeping
-/// the parent alias owner-unpublished exercises the immediate nested `wire`
-/// window as well as the ordinary handler path.
+/// actor as the executing parent and extend that actor's lineage. With the
+/// parent alias still owner-unpublished, the host function records the
+/// detached request under that alias and returns the predicted id; whether the
+/// birth happens is the trampoline's decision when it proves the parent at
+/// drain, which nothing here drains into (issue 6672).
 #[test]
 fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
     let registry = Arc::new(Registry::new());
@@ -1568,7 +1569,6 @@ fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
     let spawns = component.drain_pending_spawns();
     assert_eq!(spawns.len(), 1);
     assert_eq!(spawns[0].parent, parent);
-    assert_eq!(spawns[0].parent_name, parent_name);
     assert_eq!(spawns[0].subname, "worker");
     assert_eq!(spawns[0].config, b"cfg");
     let returned_inline = u64::from(component.read_u32(200)) | (u64::from(component.read_u32(204)) << 32);

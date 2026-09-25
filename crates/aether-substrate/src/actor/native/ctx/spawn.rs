@@ -8,8 +8,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Instanced, ReplyMode};
-use aether_data::{ActorPath, MailboxId};
+use aether_actor::{ErasedActorRef, Instanced, ReplyMode};
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::identity::ActorRuntimeIdentity;
@@ -83,18 +82,18 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
         HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root, self.reply_target())
     }
 
-    /// Stage a child under an already-validated logical actor identity that
-    /// shares this ctx's physical binding. This is the wasm trampoline seam:
-    /// an inline actor executes inside the root trampoline but its detached
-    /// child must extend the inline actor's lineage. The component host
-    /// validates `parent` against its active cluster and hands in its proven
-    /// canonical `parent_name`; native actor code should use
+    /// Stage a child under an already-`Live` logical parent that shares this
+    /// ctx's physical binding. This is the wasm trampoline seam: an inline
+    /// actor executes inside the root trampoline but its detached child must
+    /// extend the inline actor's lineage. The caller hands in the parent's
+    /// proof (ADR-0230), and the parent's canonical path is read off that
+    /// proof, so the lineage the child extends cannot disagree with the
+    /// position it is born under; native actor code should use
     /// [`Self::spawn_child`] instead.
     #[doc(hidden)]
     pub fn spawn_child_scoped<'b, C>(
         &'b self,
-        parent: MailboxId,
-        parent_name: ActorPath,
+        parent: ErasedActorRef,
         subname: Subname<'b>,
         config: C::Config,
         params: C::Params,
@@ -105,7 +104,7 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
         let spawner = self.binding.spawner().expect("NativeCtx::spawn_child_scoped requires a chassis-built binding");
         let sender =
             Source { addr: SourceAddr::Component(self.binding.self_mailbox()), correlation_id: Source::NO_CORRELATION };
-        let parent = ActorRuntimeIdentity::new(parent, None, parent.0, parent_name);
+        let parent = ActorRuntimeIdentity::new(parent.id(), None, parent.id().0, self.actor_path(parent));
         let builder = SpawnBuilder::new_child(Arc::clone(spawner), subname, config, params, sender, parent);
         HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root, self.reply_target())
     }
