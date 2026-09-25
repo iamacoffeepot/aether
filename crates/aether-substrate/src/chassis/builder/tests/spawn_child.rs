@@ -84,6 +84,7 @@ fn ctx_spawn_child_routes_through_handler() {
         spawn_count: Arc<AtomicU32>,
         failure_count: Arc<AtomicU32>,
         child_received: Arc<Mutex<Vec<u32>>>,
+        registry: Arc<registry::Registry>,
     }
     impl Addressable for ParentCap {
         const NAMESPACE: &'static str = "test.spawn_child.parent";
@@ -93,16 +94,16 @@ fn ctx_spawn_child_routes_through_handler() {
     impl HandlesKind<Hatch> for ParentCap {}
     impl aether_actor::Lifecycle<Self> for ParentCap {
         type Config = ();
-        type Params = (Arc<AtomicU32>, Arc<AtomicU32>, Arc<Mutex<Vec<u32>>>);
+        type Params = (Arc<AtomicU32>, Arc<AtomicU32>, Arc<Mutex<Vec<u32>>>, Arc<registry::Registry>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a, Self>;
         fn init(
             (): (),
-            (spawn_count, failure_count, child_received): Self::Params,
+            (spawn_count, failure_count, child_received, registry): Self::Params,
             _ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
-            Ok(Self { spawn_count, failure_count, child_received })
+            Ok(Self { spawn_count, failure_count, child_received, registry })
         }
     }
     impl NativeActor for ParentCap {
@@ -130,7 +131,7 @@ fn ctx_spawn_child_routes_through_handler() {
                     .stage()
                     .expect("spawn_child local preparation must succeed");
                 assert!(
-                    ctx.mailer().registry().lookup(receipt.canonical_name.as_str()).is_none(),
+                    state.registry.lookup(receipt.canonical_name.as_str()).is_none(),
                     "staging performs no global route write before handler flush"
                 );
                 let duplicate = ctx
@@ -166,7 +167,12 @@ fn ctx_spawn_child_routes_through_handler() {
     let child_received = Arc::new(Mutex::new(Vec::new()));
 
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<ParentCap>((Arc::clone(&spawn_count), Arc::clone(&failure_count), Arc::clone(&child_received)))
+        .with_actor::<ParentCap>((
+            Arc::clone(&spawn_count),
+            Arc::clone(&failure_count),
+            Arc::clone(&child_received),
+            Arc::clone(&registry),
+        ))
         .build_passive()
         .expect("ParentCap boots");
 

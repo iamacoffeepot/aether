@@ -369,17 +369,13 @@ impl WasmTrampolineState {
         capabilities.assets = load_window.catalog();
 
         // Build a fresh `ComponentCtx` for the new instance — same
-        // binding + mailer + registry/outbound references. The binding
+        // binding + registry/outbound references. The binding
         // carries the mailbox id, so it is preserved across replace per
         // ADR-0022 §4. The correlation cursor and reply table it inherits
         // are known only once the old guest's hooks have run, so both are
         // resumed after instantiate, below.
-        let mut substrate_ctx = ComponentCtx::new(
-            ctx.transport_arc(),
-            Arc::clone(&self.registry),
-            Arc::clone(&self.mailer),
-            Arc::clone(&self.outbound),
-        );
+        let mut substrate_ctx =
+            ComponentCtx::new(ctx.transport_arc(), Arc::clone(&self.registry), Arc::clone(&self.outbound));
         // ADR-0163 §3 (#3984): install the load window before instantiate so
         // the replacement's `init` can pull assets; closed after instantiate
         // (replace re-runs `init`, not `wire`).

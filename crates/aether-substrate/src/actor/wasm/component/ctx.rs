@@ -41,19 +41,18 @@ pub struct CorrelationCursor {
 pub struct PendingReplies(ReplyTable);
 
 /// Per-component context stored as wasmtime `Store` data. Holds the
-/// sender's own `MailboxId`, a handle to the shared mail queue, and a
-/// handle to the registry so the `send_mail` host function can route
-/// without consulting the scheduler's internals.
+/// sender's own `MailboxId`, its binding (which reaches the shared mail
+/// queue), and a handle to the registry so the `send_mail` host function
+/// can route without consulting the scheduler's internals.
 ///
 /// Deliberately does NOT hold the scheduler's full shared state — doing
 /// so would create an Arc cycle through `Scheduler owns Actor, Actor
 /// owns Store<ComponentCtx>, ComponentCtx back to Scheduler`. By holding
-/// only `Arc<Registry>` and `Arc<Mailer>` the cycle is broken: neither
-/// of those owns any actor.
+/// only its own binding and an `Arc<Registry>` the cycle is broken:
+/// neither of those owns any actor.
 pub struct ComponentCtx {
     pub(crate) sender: MailboxId,
     pub(crate) registry: Arc<Registry>,
-    pub(crate) queue: Arc<Mailer>,
     /// ADR-0013: direct outbound handle so the `reply_mail` host fn
     /// can address a specific Claude session without routing through
     /// a well-known sink. Broadcast still goes through
@@ -220,18 +219,13 @@ impl ComponentCtx {
     /// empty sender table. Using this over the struct literal keeps
     /// the private fields (`reply_table`, `saved_state`,
     /// `save_state_error`) internal to the wiring — callers should
-    /// never set them directly. The ctx's own position is read from
-    /// `binding`, so the two cannot disagree.
-    pub fn new(
-        binding: Arc<NativeBinding>,
-        registry: Arc<Registry>,
-        queue: Arc<Mailer>,
-        outbound: Arc<HubOutbound>,
-    ) -> Self {
+    /// never set them directly. The ctx's own position, and the mailer
+    /// its sends go through, are read from `binding`, so the two cannot
+    /// disagree.
+    pub fn new(binding: Arc<NativeBinding>, registry: Arc<Registry>, outbound: Arc<HubOutbound>) -> Self {
         Self {
             sender: binding.self_mailbox(),
             registry,
-            queue,
             outbound,
             reply_table: ReplyTable::new(),
             saved_state: None,
@@ -536,8 +530,7 @@ impl ComponentCtx {
         // read the dispatch `identity` the caller resolved from the guest's
         // `from`, so an inline child's mail is attributed to the child's
         // address; a normally-addressed actor's is its own id.
-        self.queue.record_sent(mail_id, root, parent_mail, identity, recipient, kind);
-        Self::dispatch_routed_mail(&self.registry, &self.queue, mail, identity);
+        self.binding.publish_component_mail(mail, mail_id, root, identity);
     }
 
     /// Dispatch one component-originated mail after its `Sent` accounting has

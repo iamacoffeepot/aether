@@ -12,6 +12,8 @@ use crate::mail::{KindId, Mail, MailRef, MailboxId};
 
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
+#[cfg(feature = "wasm")]
+use crate::mail::MailId;
 
 impl NativeBinding {
     /// ADR-0087 / 2c: seal the open ring blob and route the buffered
@@ -192,6 +194,15 @@ impl NativeBinding {
                 }
             }
         }
+    }
+
+    /// Record one component-originated mail's `Sent` event and publish it under
+    /// `identity`: the eager tail of a guest send the activation hold did not
+    /// retain. `ComponentCtx` sends through this, so it keeps no mailer of its own.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn publish_component_mail(&self, mail: Mail, mail_id: MailId, root: MailId, identity: MailboxId) {
+        self.mailer.record_sent(mail_id, root, mail.parent_mail, identity, mail.recipient, mail.kind);
+        self.dispatch_component_mail(mail, identity);
     }
 
     /// Publish one released component mail under the canonical origin the

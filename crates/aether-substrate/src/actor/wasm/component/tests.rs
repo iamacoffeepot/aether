@@ -70,8 +70,8 @@ fn ctx_at(
     sender: MailboxId,
     parent: Option<MailboxId>,
 ) -> ComponentCtx {
-    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), sender, parent));
-    ComponentCtx::new(binding, registry, mailer, outbound)
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(mailer, sender, parent));
+    ComponentCtx::new(binding, registry, outbound)
 }
 
 fn ctx() -> ComponentCtx {
@@ -119,9 +119,7 @@ fn replacement_ctx_pair(sender: MailboxId, parent: MailboxId) -> (ComponentCtx, 
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), sender, Some(parent)));
-    let build = || {
-        ComponentCtx::new(Arc::clone(&binding), Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected())
-    };
+    let build = || ComponentCtx::new(Arc::clone(&binding), Arc::clone(&registry), HubOutbound::disconnected());
     (build(), build())
 }
 
