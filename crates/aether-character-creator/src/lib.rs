@@ -208,6 +208,7 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let head = head_mesh(64, 64);
     let eye = sphere_mesh(18, 24);
     let disc = disc_mesh(48);
+    let neck = neck_mesh(12, 36);
     let brow_ridges = brow_ridges_mesh(24);
     let brows = brows_mesh(24);
     let upper_lids = upper_lids_mesh(24);
@@ -234,6 +235,11 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let disc_normal = buffer.push_vec3(&disc.normals, false);
     let disc_uv = buffer.push_vec2(&disc.texture_coordinates);
     let disc_indices = buffer.push_indices(&disc.indices);
+
+    let neck_position = buffer.push_vec3(&neck.positions, true);
+    let neck_normal = buffer.push_vec3(&neck.normals, false);
+    let neck_uv = buffer.push_vec2(&neck.texture_coordinates);
+    let neck_indices = buffer.push_indices(&neck.indices);
 
     let brow_ridge_position = buffer.push_vec3(&brow_ridges.positions, true);
     let brow_ridge_normal = buffer.push_vec3(&brow_ridges.normals, false);
@@ -308,19 +314,19 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             { "name": "Iris.Right.Inner", "mesh": 3, "translation": [0.255, 0.225, 0.550], "scale": [0.023, 0.023, 0.023] },
             { "name": "Pupil.Left", "mesh": 4, "translation": [-0.255, 0.225, 0.552], "scale": [0.012, 0.012, 0.012] },
             { "name": "Pupil.Right", "mesh": 4, "translation": [0.255, 0.225, 0.552], "scale": [0.012, 0.012, 0.012] },
-            { "name": "Ear.Left", "mesh": 5, "translation": [-0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
-            { "name": "Ear.Right", "mesh": 5, "translation": [0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
-            { "name": "Brows", "mesh": 6 },
-            { "name": "UpperLid.Left", "mesh": 7, "translation": [-0.255, 0.225, 0.492] },
-            { "name": "UpperLid.Right", "mesh": 7, "translation": [0.255, 0.225, 0.492] },
-            { "name": "LowerLid.Left", "mesh": 8, "translation": [-0.255, 0.225, 0.492] },
-            { "name": "LowerLid.Right", "mesh": 8, "translation": [0.255, 0.225, 0.492] },
-            { "name": "Neck", "mesh": 5, "translation": [0.0, -0.86, -0.14], "scale": [0.29, 0.40, 0.27] },
-            { "name": "MouthOpening", "mesh": 9 },
-            { "name": "Lips", "mesh": 10 },
-            { "name": "Canthus.Left", "mesh": 11, "translation": [-0.150, 0.222, 0.520], "scale": [0.012, 0.005, 0.004] },
-            { "name": "Canthus.Right", "mesh": 11, "translation": [0.150, 0.222, 0.520], "scale": [0.012, 0.005, 0.004] },
-            { "name": "BrowRidges", "mesh": 12 }
+            { "name": "Ear.Left", "mesh": 5, "translation": [-0.64, 0.04, 0.0], "scale": [0.045, 0.145, 0.065] },
+            { "name": "Ear.Right", "mesh": 5, "translation": [0.64, 0.04, 0.0], "scale": [0.045, 0.145, 0.065] },
+            { "name": "Brows", "mesh": 7 },
+            { "name": "UpperLid.Left", "mesh": 8, "translation": [-0.255, 0.225, 0.492] },
+            { "name": "UpperLid.Right", "mesh": 8, "translation": [0.255, 0.225, 0.492] },
+            { "name": "LowerLid.Left", "mesh": 9, "translation": [-0.255, 0.225, 0.492] },
+            { "name": "LowerLid.Right", "mesh": 9, "translation": [0.255, 0.225, 0.492] },
+            { "name": "Neck", "mesh": 6 },
+            { "name": "MouthOpening", "mesh": 10 },
+            { "name": "Lips", "mesh": 11 },
+            { "name": "Canthus.Left", "mesh": 12, "translation": [-0.150, 0.222, 0.520], "scale": [0.012, 0.005, 0.004] },
+            { "name": "Canthus.Right", "mesh": 12, "translation": [0.150, 0.222, 0.520], "scale": [0.012, 0.005, 0.004] },
+            { "name": "BrowRidges", "mesh": 13 }
         ],
         "materials": [
             material("Skin", [0.55, 0.28, 0.18, 1.0], 0.82),
@@ -351,6 +357,7 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             mesh_json("IrisInner", disc_position, disc_normal, disc_uv, disc_indices, 3),
             mesh_json("Pupil", disc_position, disc_normal, disc_uv, disc_indices, 4),
             mesh_json("SkinFeature", eye_position, eye_normal, eye_uv, eye_indices, 0),
+            mesh_json("Neck", neck_position, neck_normal, neck_uv, neck_indices, 0),
             {
                 "name": "Brow",
                 "weights": weights,
@@ -485,6 +492,39 @@ fn sphere_mesh(rings: u32, segments: u32) -> Mesh {
     }
     let normals = positions.iter().copied().map(Vec3::normalized).collect();
     Mesh { positions, normals, texture_coordinates, indices: grid_indices(rings, segments) }
+}
+
+fn neck_mesh(rings: u32, segments: u32) -> Mesh {
+    let mut positions = Vec::with_capacity(((rings + 1) * (segments + 1) + 1) as usize);
+    let mut normals = Vec::with_capacity(positions.capacity());
+    let mut texture_coordinates = Vec::with_capacity(positions.capacity());
+    for ring in 0..=rings {
+        let amount = ring as f32 / rings as f32;
+        let y = (-0.82_f32).mul_add(amount, -0.38);
+        let radius_x = 0.065_f32.mul_add(amount, 0.24);
+        let radius_z = 0.055_f32.mul_add(amount, 0.26);
+        let center_z = (-0.10_f32).mul_add(amount, -0.04);
+        for segment in 0..=segments {
+            let around = TAU * segment as f32 / segments as f32;
+            let (sin, cos) = around.sin_cos();
+            positions.push(Vec3::new(radius_x * cos, y, center_z + radius_z * sin));
+            let around_tangent = Vec3::new(-radius_x * sin, 0.0, radius_z * cos);
+            let down_tangent = Vec3::new(0.065 * cos, -0.82, -0.10 + 0.055 * sin);
+            normals.push(around_tangent.cross(down_tangent).normalized());
+            texture_coordinates.push(Vec2 { x: segment as f32 / segments as f32, y: amount });
+        }
+    }
+
+    let mut indices = grid_indices(rings, segments);
+    let bottom_center = positions.len() as u32;
+    positions.push(Vec3::new(0.0, -1.20, -0.14));
+    normals.push(Vec3::new(0.0, -1.0, 0.0));
+    texture_coordinates.push(Vec2 { x: 0.5, y: 0.5 });
+    let bottom_start = rings * (segments + 1);
+    for segment in 0..segments {
+        indices.extend_from_slice(&[bottom_center, bottom_start + segment, bottom_start + segment + 1]);
+    }
+    Mesh { positions, normals, texture_coordinates, indices }
 }
 
 fn disc_mesh(segments: u32) -> Mesh {
