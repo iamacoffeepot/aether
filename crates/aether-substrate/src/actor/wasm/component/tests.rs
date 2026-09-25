@@ -5,10 +5,6 @@
     clippy::unwrap_used,
     reason = "test-setup unwraps: fixture construction and decode panic on failure is the assertion"
 )]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "these tests exercise the rendered-path resolution machinery itself — mailbox_id_from_path is the surface under test"
-)]
 use std::sync::Arc;
 
 use wasmtime::{Engine, Linker, Module};
@@ -29,6 +25,7 @@ use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
 use crate::mail::registry::RegistryOwnerLease;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
+use crate::mail::registry::lineage_mailbox_id;
 use crate::mail::{Mail, MailId, MailRef, MailboxId, Source};
 use crate::scheduler::WakeSink;
 use crate::testing::{boot_authority, token_root};
@@ -1556,7 +1553,7 @@ fn send_detached_mints_fresh_chain_despite_in_flight() {
 /// ADR-0114 step 1: the inline-child alias id the `spawn_inline_child`
 /// host fn folds — `with_tag(Mailbox, fold_lineage(parent_carry,
 /// instanced(aether.embedded, subname)))` — equals the parse → fold of
-/// the rendered lineage name (`mailbox_id_from_path`), so a wire `Call`
+/// the rendered lineage name (the registry's `lineage_mailbox_id`), so a wire `Call`
 /// addressing the child by name resolves to the same id the guest
 /// keys its membrane on (the post-#1920 convention). The parent carry
 /// mirrors a depth-2 loaded component (`aether.component/aether.embedded:NAME`).
@@ -1570,8 +1567,7 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
         Tag::Mailbox,
         aether_data::fold_lineage(parent_carry, aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, "widget")),
     ));
-    let from_path =
-        aether_data::mailbox_id_from_path("aether.component/aether.embedded:testparent/aether.embedded:widget");
+    let from_path = lineage_mailbox_id("aether.component/aether.embedded:testparent/aether.embedded:widget");
     assert_eq!(folded, from_path, "the host-fn alias fold matches the rendered-name parse → fold");
 }
 
@@ -1586,14 +1582,14 @@ fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let root_name = "aether.component/aether.embedded:nested-root";
-    let root = aether_data::mailbox_id_from_path(root_name);
+    let root = lineage_mailbox_id(root_name);
     let (_captured, root_handler) = lineage_capture_handler();
     registry
         .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
         .expect("register component root");
 
     let parent_name = format!("{root_name}/{TRAMPOLINE_NAMESPACE}:branch");
-    let parent = aether_data::mailbox_id_from_path(&parent_name);
+    let parent = lineage_mailbox_id(&parent_name);
     let mut ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), root, None);
     ctx.stage_alias(PreparedAliasRoute::new(parent, parent_name.clone(), root));
     let mut component = instantiate_with_ctx(&wat_scoped_spawns(parent), ctx);
@@ -1603,14 +1599,14 @@ fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
         .expect("deliver nested spawn turn");
 
     let expected_inline_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:leaf");
-    let expected_inline = aether_data::mailbox_id_from_path(&expected_inline_name);
+    let expected_inline = lineage_mailbox_id(&expected_inline_name);
     let aliases = component.drain_pending_aliases();
     let inline = aliases.iter().find(|alias| alias.alias == expected_inline).expect("nested inline alias staged");
     assert_eq!(&*inline.rendered_name, expected_inline_name);
     assert_eq!(inline.target_parent, root, "nested aliases still route to the physical trampoline root");
 
     let expected_detached_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:worker");
-    let expected_detached = aether_data::mailbox_id_from_path(&expected_detached_name);
+    let expected_detached = lineage_mailbox_id(&expected_detached_name);
     let spawns = component.drain_pending_spawns();
     assert_eq!(spawns.len(), 1);
     assert_eq!(spawns[0].parent, parent);
@@ -1630,12 +1626,12 @@ fn scoped_wasm_spawns_reject_a_foreign_parent() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let root_name = "aether.component/aether.embedded:scoped-root";
-    let root = aether_data::mailbox_id_from_path(root_name);
+    let root = lineage_mailbox_id(root_name);
     let (_captured, root_handler) = lineage_capture_handler();
     registry
         .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
         .expect("register component root");
-    let foreign = aether_data::mailbox_id_from_path("aether.component/aether.embedded:foreign");
+    let foreign = lineage_mailbox_id("aether.component/aether.embedded:foreign");
     let ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), root, None);
     let mut component = instantiate_with_ctx(&wat_scoped_spawns(foreign), ctx);
 
@@ -1660,7 +1656,7 @@ fn inline_alias_routes_into_parent_slot_inbox() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let (captured, capture_handler) = lineage_capture_handler();
     let parent_name = "aether.component/aether.embedded:testparent".to_owned();
-    let parent_id = aether_data::mailbox_id_from_path(&parent_name);
+    let parent_id = lineage_mailbox_id(&parent_name);
     registry
         .try_register_inbox_with_id(&boot_authority(), parent_id, parent_name.clone(), capture_handler)
         .expect("parent registers under its lineage id");
@@ -1675,7 +1671,7 @@ fn inline_alias_routes_into_parent_slot_inbox() {
     // Mirror the host/trampoline split: fold the alias id, then let the owner
     // publish only the logical alias-to-parent relation.
     let alias_name = format!("{parent_name}/aether.embedded:widget");
-    let alias_id = aether_data::mailbox_id_from_path(&alias_name);
+    let alias_id = lineage_mailbox_id(&alias_name);
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
             alias_id,

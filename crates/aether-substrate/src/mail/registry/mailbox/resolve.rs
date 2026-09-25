@@ -2,11 +2,9 @@
 //! lookup shares, and the point-in-time answers it hands back.
 
 use aether_actor::ErasedActorRef;
-use aether_data::{
-    ActorPath, ActorPathError, ActorPathForm, ScopePathError, mailbox_id_from_path, validate_scope_path,
-};
+use aether_data::{ActorPath, ActorPathError, ActorPathForm, ScopePathError, validate_scope_path};
 
-use crate::mail::registry::{AddressResolutionError, ResolvedAddress};
+use crate::mail::registry::{AddressResolutionError, ResolvedAddress, lineage_mailbox_id};
 use crate::mail::{KindId, MailboxId};
 use crate::scheduler::SeizeHandle;
 
@@ -110,11 +108,11 @@ impl RouteLookup {
 impl Registry {
     /// Does a live (non-`Dropped`) mailbox exist under `name`? Returns
     /// its id if so. The id itself is deterministic (ADR-0029/ADR-0099
-    /// §4) — callers that just want the id without a liveness check can
-    /// fold the written name themselves with `mailbox_id_from_path`,
-    /// which is what this lookup does. The registry's own
-    /// `canonical_mailbox_id` is the single-segment derivation and misses a
-    /// `/`-rendered lineage address.
+    /// §4): the registry folds the written name node by node, and a caller
+    /// resolves a written name through this lookup or
+    /// [`Self::resolve_address`] rather than folding it itself. The
+    /// registry's own `canonical_mailbox_id` is the single-segment
+    /// derivation and misses a `/`-rendered lineage address.
     ///
     /// # Panics
     /// Panics if the inner routing lock is poisoned — fail-fast per
@@ -175,9 +173,7 @@ impl Registry {
         // nested actor's id is the lineage fold, so the whole-string hash
         // would miss it. The depth-1 case (every root cap) folds to the
         // same id `hash(name)` gives.
-        #[allow(clippy::disallowed_methods)]
-        // the runtime-name resolution path itself — the registry is the one owner of the parse → fold
-        let id = mailbox_id_from_path(name);
+        let id = lineage_mailbox_id(name);
         let routes = self.routes.load();
         Ok(match routes.entry_for(&id) {
             Some(route)

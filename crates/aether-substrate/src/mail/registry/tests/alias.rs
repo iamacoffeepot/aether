@@ -10,7 +10,7 @@ use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::owner::RegistryOwnerLease;
-use crate::mail::registry::{MailboxEntry, Registry, canonical_mailbox_id, noop_handler};
+use crate::mail::registry::{MailboxEntry, Registry, canonical_mailbox_id, lineage_mailbox_id, noop_handler};
 use crate::mail::{KindId, Mail};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority as auth;
@@ -23,10 +23,6 @@ use super::support::{activation_barrier, prepared_test_spawn, starting_token};
 /// Scheduler recruitment is covered separately by the component integration
 /// suite.
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the registry alias test intentionally folds the canonical path whose prepared id it validates"
-)]
 fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
@@ -49,7 +45,7 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
     let starting_inventory_generation = registry.inventory().mailbox_generation;
 
     let alias_name = format!("{parent_name}/aether.embedded:widget");
-    let alias_id = aether_data::mailbox_id_from_path(&alias_name);
+    let alias_id = lineage_mailbox_id(&alias_name);
     let alias_completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
             alias_id,
@@ -87,10 +83,6 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
 }
 
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the registry alias conflict test intentionally folds the canonical path whose prepared id it validates"
-)]
 fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
@@ -105,7 +97,7 @@ fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
         RegistryQueueCapacities::default(),
     );
     let alias_name = "alias-parent-first/aether.embedded:widget";
-    let alias_id = aether_data::mailbox_id_from_path(alias_name);
+    let alias_id = lineage_mailbox_id(alias_name);
     let submit = |target_parent| {
         registry
             .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(

@@ -1220,10 +1220,7 @@ macro_rules! __export_internal {
                 if captured != 0 {
                     captured
                 } else {
-                    $crate::__macro_internals::mailbox_id_from_name(
-                        <$component as $crate::Addressable>::NAMESPACE,
-                    )
-                    .0
+                    $crate::__macro_internals::ActorTypeTag::of::<$component>().0
                 }
             };
             let mail =
@@ -1330,10 +1327,7 @@ macro_rules! __export_internal {
                 if captured != 0 {
                     captured
                 } else {
-                    $crate::__macro_internals::mailbox_id_from_name(
-                        <$component as $crate::Addressable>::NAMESPACE,
-                    )
-                    .0
+                    $crate::__macro_internals::ActorTypeTag::of::<$component>().0
                 }
             };
             // ADR-0114 §5: run the parent's `on_dehydrate` and every
@@ -1375,10 +1369,7 @@ macro_rules! __export_internal {
                 if captured != 0 {
                     captured
                 } else {
-                    $crate::__macro_internals::mailbox_id_from_name(
-                        <$component as $crate::Addressable>::NAMESPACE,
-                    )
-                    .0
+                    $crate::__macro_internals::ActorTypeTag::of::<$component>().0
                 }
             };
             // ADR-0114 §5: decompose the migration bundle, restore the
@@ -1627,7 +1618,7 @@ macro_rules! __export_internal {
 /// - `init_typed_with_parent_p32` carries both logical parent and actor-type
 ///   tag. `init_typed_p32` remains as its parent-`0` compatibility wrapper.
 ///   Both match the tag against each exported type's
-///   `mailbox_id_from_name(NAMESPACE)` and construct the selected one.
+///   `ActorTypeTag::of::<A>()` and construct the selected one.
 ///
 /// `receive` / `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` all
 /// route through the boxed `ErasedWasmActor`, so a multi-actor instance
@@ -1875,7 +1866,7 @@ macro_rules! __export_multi_internal {
 
         /// # Safety
         /// ADR-0096 typed init: `type_tag` selects which exported type
-        /// to construct (its `mailbox_id_from_name(NAMESPACE)`).
+        /// to construct (its `ActorTypeTag::of::<A>()`).
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "init_typed_with_parent_p32")]
         pub unsafe extern "C" fn init_typed_with_parent(
@@ -1906,12 +1897,7 @@ macro_rules! __export_multi_internal {
                 $crate::__export_internal!(@spawn_inline_child_by_tag $($component),+),
             );
             $(
-                if type_tag
-                    == $crate::__macro_internals::mailbox_id_from_name(
-                        <$component as $crate::Addressable>::NAMESPACE,
-                    )
-                    .0
-                {
+                if type_tag == $crate::__macro_internals::ActorTypeTag::of::<$component>().0 {
                     return $crate::__export_multi_internal!(@construct $component, config_bytes);
                 }
             )+
@@ -1992,10 +1978,7 @@ macro_rules! __export_multi_internal {
                     let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                         return 1;
                     };
-                    $crate::__macro_internals::mailbox_id_from_name(
-                        instance.erased_namespace(),
-                    )
-                    .0
+                    $crate::__macro_internals::ActorId::singleton(instance.erased_namespace()).0
                 }
             };
             let mail =
@@ -2086,10 +2069,7 @@ macro_rules! __export_multi_internal {
                 if captured != 0 {
                     captured
                 } else {
-                    $crate::__macro_internals::mailbox_id_from_name(
-                        instance.erased_namespace(),
-                    )
-                    .0
+                    $crate::__macro_internals::ActorId::singleton(instance.erased_namespace()).0
                 }
             };
             // ADR-0114 §5: compose the parent + every inline child into one
@@ -2130,10 +2110,7 @@ macro_rules! __export_multi_internal {
                 if captured != 0 {
                     captured
                 } else {
-                    $crate::__macro_internals::mailbox_id_from_name(
-                        instance.erased_namespace(),
-                    )
-                    .0
+                    $crate::__macro_internals::ActorId::singleton(instance.erased_namespace()).0
                 }
             };
             // ADR-0114 §5: decompose, restore the boxed parent, then

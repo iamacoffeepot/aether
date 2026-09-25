@@ -64,7 +64,7 @@ pub trait Resolve {
 /// Root-pinned keyless resolution (ADR-0119): the depth-1 fixed point
 /// (ADR-0099 §3), this actor's own [`ActorId`] tagged as a mailbox,
 /// **ignoring the caller's carry** because a root cap sits at the root. It
-/// equals `mailbox_id_from_name(NAMESPACE)` because [`with_tag`] is
+/// equals `ActorId::singleton(NAMESPACE)` because [`with_tag`] is
 /// idempotent on an already-`Mailbox`-tagged value, so every chassis cap
 /// keeps the exact id it has today. Makes its actor a [`Singleton`].
 pub struct One;
@@ -717,12 +717,8 @@ impl<S, T: Addressable + Lifecycle<S>> Actor<S> for T {}
 
 #[cfg(test)]
 mod tests {
-    // These tests assert the resolve/lineage machinery against the depth-1
-    // name hash — the primitive is the reference value under test, not a
-    // sibling-cap address.
-    #![allow(clippy::disallowed_methods)]
     use super::*;
-    use aether_data::{fold_lineage, mailbox_id_from_name};
+    use aether_data::fold_lineage;
 
     #[test]
     fn namespace_segments_reject_structural_separators() {
@@ -863,9 +859,9 @@ mod tests {
     }
 
     /// ADR-0099 §5 / ADR-0119: the [`One`] resolver ignores the caller's
-    /// carry and returns the depth-1 fixed point — the id
-    /// `mailbox_id_from_name(NAMESPACE)` yields today, so the chassis-cap
-    /// vocabulary stays frozen (§3).
+    /// carry and returns the depth-1 fixed point — the actor's own
+    /// `ActorId::singleton(NAMESPACE)`, so the chassis-cap vocabulary stays
+    /// frozen (§3).
     #[test]
     fn one_resolver_is_frozen_depth_one() {
         struct RootCap;
@@ -874,9 +870,9 @@ mod tests {
             type Resolver = One;
         }
 
-        let frozen = mailbox_id_from_name("test.resolve.rootcap");
-        assert_eq!(<RootCap as Addressable>::resolve(0, ()), frozen, "One is the depth-1 id");
-        assert_eq!(<RootCap as Addressable>::resolve(0xDEAD_BEEF, ()), frozen, "One ignores the caller's carry");
+        let frozen = ActorId::singleton("test.resolve.rootcap").0;
+        assert_eq!(<RootCap as Addressable>::resolve(0, ()).0, frozen, "One is the depth-1 id");
+        assert_eq!(<RootCap as Addressable>::resolve(0xDEAD_BEEF, ()).0, frozen, "One ignores the caller's carry");
     }
 
     /// ADR-0099 §5 / ADR-0119: the [`Many`] resolver folds

@@ -3,7 +3,7 @@
 //! (ADR-0114) and tear one down, and the subname resolution plus
 //! `init`-and-insert core both spawn paths share.
 
-use aether_data::{Kind, MailboxId, mailbox_id_from_name};
+use aether_data::{ActorId, Kind, MailboxId};
 
 use super::{InlineChild, NO_INBOUND_SOURCE, WasmCtx, WasmInitCtx};
 use crate::model::ctx::Erased;
@@ -22,29 +22,21 @@ use alloc::vec::Vec;
 /// resolves against the module's exported set (issue 2692), and the same
 /// tag the ADR-0114 §5 reconstruct arm matches a persisted inline child on.
 ///
-/// A newtype rather than a bare `u64` on purpose: it centralizes the single
-/// allowed [`mailbox_id_from_name`] call (every other call site is
-/// clippy-disallowed) in [`Self::of`], so a consumer selects a type with
-/// `ActorTypeTag::of::<SomeActor>()` and never hand-hashes a namespace. It
-/// also reads as an actor-type selector, distinct from a [`MailboxId`] even
-/// though the underlying hash coincides with the type's depth-1 folded id.
+/// A newtype rather than a bare `u64` on purpose: a consumer selects a type
+/// with `ActorTypeTag::of::<SomeActor>()` and never names a namespace hash.
+/// The tag is `ActorId::singleton(NAMESPACE)`, the actor type's identity, and
+/// it reads as an actor-type selector, distinct from a [`MailboxId`] even
+/// though the underlying value coincides with the type's depth-1 folded id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActorTypeTag(pub u64);
 
 impl ActorTypeTag {
-    /// The actor-type tag for `A` — `hash(A::NAMESPACE)`, folded at compile
-    /// time (`Addressable::NAMESPACE` is a `const`). The one sanctioned
-    /// [`mailbox_id_from_name`] call outside the id/routing core: it is the
-    /// id definition for an actor *type*, so the disallowed-method allow
-    /// mirrors [`WasmCtx::spawn_child`] / [`WasmCtx::spawn_inline_child`].
+    /// The actor-type tag for `A` — `ActorId::singleton(A::NAMESPACE)`, the
+    /// actor type's identity, folded at compile time
+    /// (`Addressable::NAMESPACE` is a `const`).
     #[must_use]
-    // This is the id definition for an actor type — the single centralized
-    // `mailbox_id_from_name` call the by-tag spawn API is built to funnel, so
-    // consumers never hand-hash a namespace (all other call sites are
-    // clippy-disallowed).
-    #[allow(clippy::disallowed_methods)]
     pub const fn of<A: Addressable>() -> Self {
-        Self(mailbox_id_from_name(A::NAMESPACE).0)
+        Self(ActorId::singleton(A::NAMESPACE).0)
     }
 }
 

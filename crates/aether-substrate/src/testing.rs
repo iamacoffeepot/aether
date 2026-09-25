@@ -34,7 +34,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_actor::{ErasedActorRef, Manual, Root};
-use aether_data::{Kind, KindId, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid, mailbox_id_from_path};
+use aether_data::{Kind, KindId, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
 use aether_kinds::descriptors;
 
 use crate::actor::native::binding::NativeBinding;
@@ -47,7 +47,7 @@ use crate::config::ConfigMember;
 use crate::mail::MailRef;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
-use crate::mail::registry::{BootAuthority, InboxHandler, Registry};
+use crate::mail::registry::{BootAuthority, InboxHandler, Registry, lineage_mailbox_id};
 use crate::mail::registry::{DispatchParts, OwnedDispatch};
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
@@ -166,7 +166,7 @@ pub fn registered_binding(
 /// `name` is a root name (`test.render.observer`) or a `/`-rendered ADR-0166
 /// lineage path (`aether.http.server/aether.http.server.shard:shard-0`). The
 /// route stands where the registry's own name lookup looks for that name,
-/// the ADR-0099 parse → fold, so `Registry::lookup`,
+/// the registry's ADR-0099 lineage fold, so `Registry::lookup`,
 /// `Registry::resolve_address`, and a spawn claiming the same path all meet
 /// it. A root name folds to its name hash, the position it always had.
 ///
@@ -180,7 +180,7 @@ pub fn registered_ref(registry: &Registry, name: &str, handler: Arc<dyn InboxHan
     registry
         .resolve_live(
             registry
-                .try_register_inbox_with_id(&boot_authority(), mailbox_id_from_path(name), name, handler)
+                .try_register_inbox_with_id(&boot_authority(), lineage_mailbox_id(name), name, handler)
                 .expect("the fixture name is free"),
         )
         .expect("a freshly registered inbox proves")

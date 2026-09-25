@@ -219,8 +219,9 @@ building a repository to test against. Build the same inventory by hand with
 
 ## The namespace pass
 
-`clippy.toml` refuses a hand-*hashed* address (`mailbox_id_from_name`), but not
-a hand-*written* one: an actor's `NAMESPACE` spelled out again as a `&str`
+A hand-*hashed* address is closed: the name hashes are private to
+`aether-data`, and `clippy.toml` refuses `MailboxId::from_name`. A
+hand-*written* one is not: an actor's `NAMESPACE` spelled out again as a `&str`
 somewhere else compiles, resolves, and warn-drops the day the two diverge,
 because the parameter receiving it is a `&str`.
 

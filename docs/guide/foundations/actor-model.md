@@ -535,8 +535,8 @@ under the embedding-host class (`aether.embedded`), rendered with one `/` per
 node as `aether.component/aether.embedded:<name>` — the canonical rendered
 address `LoadResult.path` hands back. A nested host contributes its own lineage
 instead. The string is a display rendering of the lineage; the `MailboxId` is
-the fold over the nodes (`mailbox_id_from_path` on the string side), never a
-hash of the joined string.
+the fold over the nodes (the host registry parses a written path and folds it
+node by node), never a hash of the joined string.
 
 There is **one addressing verb**: you address a type, and the type declares
 where it lives. `ctx.send::<Camera>(..)` routes through

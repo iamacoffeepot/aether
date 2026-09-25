@@ -8,7 +8,7 @@ use crate::model::ctx::{Erased, Manual, Single};
 use crate::model::{Addressable, Embedded, HandlesKind, Resolve};
 use crate::wasm::inline::RouteDecision;
 use crate::wasm::{ActorInitError, WasmInitCtx};
-use aether_data::{MailboxId, Source, mailbox_id_from_path};
+use aether_data::{ActorId, MailboxId, Source};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem::{align_of, size_of};
@@ -60,17 +60,16 @@ fn ffi_ctx_layout_identical_across_modes() {
     assert_eq!(align_of::<WasmCtx<'static, EmbeddedPeer, Manual>>(), align_of::<WasmCtx<'static, Erased, Manual>>(),);
 }
 
-#[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise parent-relative routing
 #[test]
 fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents() {
     let registry = Registry::new();
-    let entry_parent = mailbox_id_from_path("test.wasm.host");
-    let entry = mailbox_id_from_path("test.wasm.host/test.wasm.entry");
-    let child = mailbox_id_from_path("test.wasm.host/test.wasm.entry/test.wasm.child");
-    let default_entry_peer = Embedded::resolve(entry_parent.0, EmbeddedPeer::NAMESPACE, ());
+    let entry_parent = ActorId::singleton("test.wasm.host").0;
+    let entry = Embedded::resolve(entry_parent, "test.wasm.entry", ());
+    let child = Embedded::resolve(entry.0, "test.wasm.child", ());
+    let default_entry_peer = Embedded::resolve(entry_parent, EmbeddedPeer::NAMESPACE, ());
     let nested_peer = Embedded::resolve(entry.0, EmbeddedPeer::NAMESPACE, ());
     registry.set_self_id(entry.0);
-    registry.set_parent_id(entry_parent.0);
+    registry.set_parent_id(entry_parent);
     install_inline_child::<SucceedingChild>(&registry, child, 0, String::from("child"), false, entry.0, Vec::new(), ())
         .expect("install inline child");
     install_inline_child::<SucceedingChild>(

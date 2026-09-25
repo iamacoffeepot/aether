@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use aether_actor::Addressable;
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
@@ -44,15 +44,15 @@ impl Addressable for OneDep {
 /// and a flat send to that declared dependency reaches the mailbox registered
 /// beneath that parent. The parent is already a tagged routable `MailboxId`;
 /// no raw carry is retained beside it.
-#[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise parent-relative routing
 #[test]
 fn embedded_actor_resolves_and_delivers_beneath_binding_parent() {
+    use crate::mail::registry::lineage_mailbox_id;
     use crate::testing::{bare_substrate, boot_authority};
     use std::sync::mpsc;
 
     let (registry, mailer) = bare_substrate();
-    let parent = mailbox_id_from_path("test.native.parent");
-    let current = mailbox_id_from_path("test.native.parent/test.native.caller");
+    let parent = lineage_mailbox_id("test.native.parent");
+    let current = lineage_mailbox_id("test.native.parent/test.native.caller");
     let recipient = EmbeddedPeer::resolve(parent.0, ());
     let (tx, rx) = mpsc::channel::<Envelope>();
     registry
