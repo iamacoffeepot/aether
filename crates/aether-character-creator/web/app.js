@@ -22,10 +22,11 @@ in vec3 aTarget6;
 in vec3 aTarget7;
 in vec3 aTarget8;
 in vec3 aTarget9;
+in vec3 aTarget10;
 uniform mat4 uViewProjection;
 uniform mat4 uModel;
 uniform mat3 uNormal;
-uniform float uWeights[10];
+uniform float uWeights[11];
 out vec3 vNormal;
 out vec3 vWorldPosition;
 void main() {
@@ -39,7 +40,8 @@ void main() {
     + aTarget6 * uWeights[6]
     + aTarget7 * uWeights[7]
     + aTarget8 * uWeights[8]
-    + aTarget9 * uWeights[9];
+    + aTarget9 * uWeights[9]
+    + aTarget10 * uWeights[10];
   vec4 world = uModel * vec4(position, 1.0);
   vWorldPosition = world.xyz;
   vNormal = normalize(uNormal * aNormal);
@@ -74,7 +76,7 @@ const program = createProgram(vertexSource, fragmentSource);
 const locations = {
   position: gl.getAttribLocation(program, "aPosition"),
   normal: gl.getAttribLocation(program, "aNormal"),
-  targets: Array.from({ length: 10 }, (_, index) => gl.getAttribLocation(program, `aTarget${index}`)),
+  targets: Array.from({ length: 11 }, (_, index) => gl.getAttribLocation(program, `aTarget${index}`)),
   viewProjection: gl.getUniformLocation(program, "uViewProjection"),
   model: gl.getUniformLocation(program, "uModel"),
   normalMatrix: gl.getUniformLocation(program, "uNormal"),
@@ -86,7 +88,7 @@ const locations = {
 
 let scene;
 let morphNames = [];
-let weights = new Float32Array(10);
+let weights = new Float32Array(11);
 let yaw = 0;
 let pitch = 0.02;
 let distance = 3.45;
@@ -132,7 +134,7 @@ function createScene(arrayBuffer) {
     }));
   return {
     nodes,
-    morphNames: meshes.flatMap((mesh) => mesh.targetNames).slice(0, 10),
+    morphNames: meshes.flatMap((mesh) => mesh.targetNames).slice(0, 11),
     triangleCount: meshes.reduce(
       (total, mesh) => total + mesh.primitives.reduce((sum, primitive) => sum + primitive.count / 3, 0),
       0,
@@ -200,6 +202,7 @@ function createControls() {
     NoseLength: "Nose length",
     EyeSize: "Eye size",
     BrowHeight: "Brow height",
+    BrowOuterSize: "Outer brow size",
     LipFullness: "Lip fullness",
     MouthSmile: "Mouth smile",
     ChinShape: "Chin shape",
@@ -248,7 +251,7 @@ function bindInterface() {
       document.querySelectorAll("[data-view]").forEach((candidate) => candidate.classList.toggle("active", candidate === button));
     });
   });
-  document.querySelector("#reset").addEventListener("click", () => setWeights(new Array(10).fill(0)));
+  document.querySelector("#reset").addEventListener("click", () => setWeights(new Array(11).fill(0)));
   document.querySelector("#randomize").addEventListener("click", () => {
     setWeights(morphNames.map(() => (Math.random() * 1.3) - 0.65));
   });
@@ -258,7 +261,7 @@ function bindInterface() {
 
 function setWeights(values) {
   const inputs = controls.querySelectorAll("input");
-  values.slice(0, 10).forEach((value, index) => {
+  values.slice(0, 11).forEach((value, index) => {
     weights[index] = clamp(Number(value) || 0, -1, 1);
     inputs[index].value = weights[index];
     updateControl(inputs[index].closest(".morph-control"), weights[index]);
@@ -323,7 +326,6 @@ function render() {
     const translation = [...node.translation];
     const scale = [...node.scale];
     const eyeSize = weights[morphNames.indexOf("EyeSize")] ?? 0;
-    const browHeight = weights[morphNames.indexOf("BrowHeight")] ?? 0;
     if (node.name.startsWith("Eye.") || node.name.startsWith("Iris.") || node.name.startsWith("Pupil.")) {
       scale[0] *= 1 + eyeSize * 0.10;
       scale[1] *= 1 + eyeSize * 0.08;
@@ -341,11 +343,6 @@ function render() {
       scale[1] *= 1 + eyeSize * 0.08;
       translation[2] -= Math.max(eyeSize, 0) * 0.040;
     }
-    if (node.name === "Brows") {
-      translation[1] += browHeight * 0.10;
-      translation[2] += browHeight * 0.025;
-    }
-
     const model = modelMatrix(translation, scale);
     gl.uniformMatrix4fv(locations.model, false, model);
     gl.uniformMatrix3fv(locations.normalMatrix, false, normalMatrix(scale));

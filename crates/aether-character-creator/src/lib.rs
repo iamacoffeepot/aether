@@ -27,7 +27,7 @@ const JSON_CHUNK: u32 = 0x4e4f_534a;
 const BIN_CHUNK: u32 = 0x004e_4942;
 
 /// Stable facial controls authored into `mesh.extras.targetNames`.
-pub const MORPH_TARGETS: [&str; 10] = [
+pub const MORPH_TARGETS: [&str; 11] = [
     "JawWidth",
     "JawLength",
     "CheekVolume",
@@ -35,6 +35,7 @@ pub const MORPH_TARGETS: [&str; 10] = [
     "NoseLength",
     "EyeSize",
     "BrowHeight",
+    "BrowOuterSize",
     "LipFullness",
     "MouthSmile",
     "ChinShape",
@@ -241,6 +242,10 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let brow_normal = buffer.push_vec3(&brows.normals, false);
     let brow_uv = buffer.push_vec2(&brows.texture_coordinates);
     let brow_indices = buffer.push_indices(&brows.indices);
+    let brow_morph_accessors = MORPH_TARGETS
+        .iter()
+        .map(|name| buffer.push_vec3(&brow_morph_deltas(name, &brows.positions), false))
+        .collect::<Vec<_>>();
 
     let lid_position = buffer.push_vec3(&upper_lids.positions, true);
     let lid_normal = buffer.push_vec3(&upper_lids.normals, false);
@@ -271,6 +276,7 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
         .collect::<Vec<_>>();
 
     let targets = morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
+    let brow_targets = brow_morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
     let mouth_targets =
         mouth_morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
     let lip_targets = lip_morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
@@ -337,7 +343,17 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             mesh_json("IrisInner", disc_position, disc_normal, disc_uv, disc_indices, 3),
             mesh_json("Pupil", disc_position, disc_normal, disc_uv, disc_indices, 4),
             mesh_json("SkinFeature", eye_position, eye_normal, eye_uv, eye_indices, 0),
-            mesh_json("Brow", brow_position, brow_normal, brow_uv, brow_indices, 5),
+            {
+                "name": "Brow",
+                "weights": weights,
+                "primitives": [{
+                    "attributes": { "POSITION": brow_position, "NORMAL": brow_normal, "TEXCOORD_0": brow_uv },
+                    "indices": brow_indices,
+                    "material": 5,
+                    "mode": 4,
+                    "targets": brow_targets
+                }]
+            },
             mesh_json("UpperLid", lid_position, lid_normal, lid_uv, lid_indices, 0),
             mesh_json(
                 "LowerLid",
@@ -539,6 +555,32 @@ fn brows_mesh(segments: u32) -> Mesh {
         });
     }
     mesh
+}
+
+fn brow_morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
+    positions
+        .iter()
+        .enumerate()
+        .map(|(index, position)| match name {
+            "BrowHeight" => {
+                let target_y = position.y + 0.055;
+                let target = front_surface_point(position.x, target_y);
+                Vec3::new(0.0, target_y - position.y, target.z + 0.018 - position.z)
+            }
+            "BrowOuterSize" => {
+                let outer = ((position.x.abs() - 0.255) / 0.19).clamp(0.0, 1.0).powf(1.2);
+                let target_x = position.x + position.x.signum() * 0.035 * outer;
+                let edge_direction = if index.is_multiple_of(2) {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let target_y = position.y + edge_direction * 0.012 * outer;
+                Vec3::new(target_x - position.x, target_y - position.y, 0.0)
+            }
+            _ => Vec3::default(),
+        })
+        .collect()
 }
 
 fn upper_lids_mesh(segments: u32) -> Mesh {
@@ -900,12 +942,6 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                     let left = gaussian(position.x, position.y, -0.275, 0.275, 0.22, 0.14);
                     let right = gaussian(position.x, position.y, 0.275, 0.275, 0.22, 0.14);
                     Vec3::new(0.0, 0.025 * front * (left + right), -0.045 * front * (left + right))
-                }
-                "BrowHeight" => {
-                    let weight = front
-                        * (gaussian(position.x, position.y, -0.27, 0.42, 0.24, 0.10)
-                            + gaussian(position.x, position.y, 0.27, 0.42, 0.24, 0.10));
-                    Vec3::new(0.0, 0.10 * weight, 0.025 * weight)
                 }
                 "LipFullness" => {
                     let weight = front
