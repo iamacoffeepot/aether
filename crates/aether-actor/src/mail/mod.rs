@@ -268,8 +268,8 @@ impl Mail<'_> {
         // substrate's receive ABI; the substrate guarantees
         // `self.byte_len` bytes valid at `self.ptr` for this `Mail`'s
         // lifetime. Bounding the slice by `byte_len` keeps the decode
-        // (cast or structured) from running past
-        // the substrate-written region into adjacent linear memory.
+        // (cast or structured) from running past the substrate-written
+        // region into adjacent linear memory.
         let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) };
         decode_payload(bytes)
     }

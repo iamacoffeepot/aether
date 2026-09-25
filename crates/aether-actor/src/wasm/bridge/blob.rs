@@ -42,7 +42,7 @@ pub fn read(hash: &BlobHash, offset: u64, dst: &mut [u8]) -> i64 {
 }
 
 /// Give back one of this instance's holds on the blob `hash` names. The host
-/// warns and does nothing for a hash the table holds no hold on.
+/// warns and does nothing for a hash this instance has no hold on.
 pub fn drop_hold(hash: &BlobHash) {
     // SAFETY: `hash_ptr` points at the 32 bytes of `hash`, which the borrow
     // keeps alive for the call; the host copies them out before returning.

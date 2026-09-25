@@ -180,8 +180,8 @@ unsafe extern "C" {
     /// ADR-0238 decision 9: copy at most `dst_len` bytes (and at most
     /// `MAX_READ_BYTES`) of the blob whose hash sits at `hash_ptr`, from
     /// `offset`, into `(dst_ptr, dst_len)`, and return how many; `0` at or
-    /// past the end. Negative, with nothing written, when the table does not
-    /// hold the hash or either range is out of bounds.
+    /// past the end. Negative, with nothing written, when the table neither
+    /// pins nor holds the hash or either range is out of bounds.
     #[link_name = "blob_read_p32"]
     pub fn blob_read(hash_ptr: u32, offset: u64, dst_ptr: u32, dst_len: u32) -> i64;
     /// ADR-0238 decision 2: give back one hold on the blob whose hash sits
