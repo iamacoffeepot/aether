@@ -104,8 +104,7 @@ pub enum HttpError {
 /// `FetchResult` arms (ADR-0158 §6). The cap dispatches fetches
 /// concurrently under a per-sender bound, so a caller firing two
 /// requests to the same `url` matches each reply by its own
-/// `request_id` rather than by the ambiguous echoed `url`. Mirrors
-/// `MessagesSend.request_id` in `aether-anthropic`.
+/// `request_id` rather than by the ambiguous echoed `url`.
 ///
 /// `timeout_ms` overrides the chassis default
 /// (`AETHER_HTTP_TIMEOUT_MS`, default 30000) when set; `None`

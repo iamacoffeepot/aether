@@ -70,23 +70,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-anthropic"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-component",
- "aether-data",
- "aether-harness-substrate",
- "aether-harness-substrate-capture",
- "aether-http",
- "aether-kinds",
- "aether-process",
- "inventory",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "aether-audio"
 version = "0.3.0-alpha"
 dependencies = [

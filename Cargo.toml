@@ -58,7 +58,6 @@ members = [
     "crates/aether-trace",
     "crates/aether-render",
     "crates/aether-text",
-    "crates/aether-anthropic",
     "crates/aether-process",
     "crates/aether-mcp",
     # Test fixtures — single-output crates sitting alongside every other
@@ -145,7 +144,6 @@ default-members = [
     "crates/aether-trace",
     "crates/aether-render",
     "crates/aether-text",
-    "crates/aether-anthropic",
     "crates/aether-process",
     "crates/aether-mcp",
     "crates/aether-bloomery-view",
