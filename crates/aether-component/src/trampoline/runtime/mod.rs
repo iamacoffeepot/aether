@@ -79,13 +79,8 @@ impl NativeActor for WasmTrampoline {
     const NAMESPACE: &'static str = EMBEDDED_SCOPE;
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
-        let mailer = ctx.mailer();
-        let mut substrate_ctx = ComponentCtx::new(
-            Arc::clone(ctx.binding()),
-            Arc::clone(&config.registry),
-            Arc::clone(&mailer),
-            Arc::clone(&config.outbound),
-        );
+        let mut substrate_ctx =
+            ComponentCtx::new(Arc::clone(ctx.binding()), Arc::clone(&config.registry), Arc::clone(&config.outbound));
         // ADR-0163 §3 (#3984): index an asset load window over the module's
         // `aether.asset.*` sections and install it before instantiate, so
         // the guest's `init` (run inside `instantiate`) and its later `wire`
@@ -139,7 +134,6 @@ impl NativeActor for WasmTrampoline {
             engine: config.engine,
             linker: config.linker,
             registry: config.registry,
-            mailer,
             outbound: config.outbound,
             capabilities: config.capabilities,
             type_tag: config.type_tag,

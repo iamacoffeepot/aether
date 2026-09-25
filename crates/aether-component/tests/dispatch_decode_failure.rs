@@ -41,7 +41,7 @@ fn known_kind_bad_payload_reports_unknown_kind_not_handled() {
 
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let ctx = ComponentCtx::new(unrouted_binding(&mailer), registry, Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ComponentCtx::new(unrouted_binding(&mailer), registry, HubOutbound::disconnected());
 
     // `type_tag = None` instantiates the module's entry actor — `Probe`, the
     // strict (no-`#[fallback]`) receiver (`export!(default = Probe, …)` makes
