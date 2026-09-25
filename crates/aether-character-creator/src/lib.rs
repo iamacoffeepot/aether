@@ -728,7 +728,7 @@ fn implicit_head_mesh(resolution: u32) -> Mesh {
         [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]];
 
     let minimum = Vec3::new(-0.82, -0.82, -0.70);
-    let maximum = Vec3::new(0.82, 0.96, 0.98);
+    let maximum = Vec3::new(0.82, 1.05, 0.98);
     let step = Vec3::new(
         (maximum.x - minimum.x) / resolution as f32,
         (maximum.y - minimum.y) / resolution as f32,
@@ -860,16 +860,20 @@ fn head_sdf(point: Vec3) -> f32 {
 }
 
 fn head_mass_sdf(point: Vec3) -> f32 {
-    let mut shape = superellipsoid_sdf(point, Vec3::new(0.0, 0.29, -0.10), Vec3::new(0.63, 0.66, 0.58), 2.20);
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.42, 0.12), Vec3::new(0.52, 0.43, 0.43)), 0.11);
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.20, 0.18), Vec3::new(0.52, 0.55, 0.46)), 0.13);
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.52, 0.31), Vec3::new(0.35, 0.27, 0.27)), 0.10);
-    for x in [-0.285, 0.285] {
-        shape =
-            smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.36, 0.17), Vec3::new(0.155, 0.28, 0.20)), 0.12);
+    let mut shape = superellipsoid_sdf(point, Vec3::new(0.0, 0.34, -0.12), Vec3::new(0.68, 0.63, 0.60), 2.10);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.40, 0.12), Vec3::new(0.52, 0.42, 0.42)), 0.10);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.18, 0.18), Vec3::new(0.49, 0.54, 0.45)), 0.11);
+    shape = smooth_union(
+        shape,
+        superellipsoid_sdf(point, Vec3::new(0.0, -0.52, 0.27), Vec3::new(0.36, 0.24, 0.28), 2.40),
+        0.08,
+    );
+    for x in [-0.28, 0.28] {
+        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.35, 0.15), Vec3::new(0.15, 0.26, 0.19)), 0.09);
     }
-    for x in [-0.31, 0.31] {
-        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.02, 0.43), Vec3::new(0.20, 0.15, 0.12)), 0.10);
+    for x in [-0.33, 0.33] {
+        shape =
+            smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.01, 0.38), Vec3::new(0.21, 0.15, 0.115)), 0.10);
     }
     for x in [-0.255, 0.255] {
         shape =
@@ -882,9 +886,9 @@ fn head_mass_sdf(point: Vec3) -> f32 {
         shape =
             smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.08, 0.69), Vec3::new(0.065, 0.055, 0.075)), 0.028);
     }
-    for x in [-0.66, 0.66] {
-        let temporal_fossa = ellipsoid_sdf(point, Vec3::new(x, 0.14, 0.10), Vec3::new(0.10, 0.24, 0.30));
-        shape = smooth_maximum(shape, -temporal_fossa, 0.035);
+    for x in [-0.68, 0.68] {
+        let temporal_fossa = ellipsoid_sdf(point, Vec3::new(x, 0.16, 0.06), Vec3::new(0.11, 0.25, 0.34));
+        shape = smooth_maximum(shape, -temporal_fossa, 0.06);
     }
     shape
 }
