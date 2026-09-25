@@ -34,12 +34,12 @@ use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::effect::ACTIVATION_BARRIER_KIND;
 use crate::mail::registry::{
-    AddressResolutionError, CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry,
+    AddressResolutionError, CapturedDisposition, DispatchParts, MailDispatch, OwnedDispatch, ParkAdmission, Registry,
     RegistryQueueMetrics, RegistrySubscription, ResolvedAddress, RouteContinuation, RouteEndpoint, RouteRelayHandle,
 };
 use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::thread_name;
-use crate::runtime::trace::{SettlementHold, TraceHandle};
+use crate::runtime::trace::{SentRecord, SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
 use aether_actor::ErasedActorRef;
 use aether_data::tagged_id::{self, Tag};
@@ -238,28 +238,8 @@ impl Mailer {
     /// iamacoffeepot/aether#1158: `t_construct_start` is the instant the
     /// blob opened (the first buffered send of the flush window); `t −
     /// t_construct_start` is the **construct** span.
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_sent_event_at(
-        &self,
-        mail_id: aether_data::MailId,
-        root: aether_data::MailId,
-        parent_mail: Option<aether_data::MailId>,
-        sender: aether_data::MailboxId,
-        recipient: aether_data::MailboxId,
-        kind: KindId,
-        t_construct_start: Nanos,
-        t: Nanos,
-    ) {
-        self.trace_handle.record_sent_event_at(
-            mail_id,
-            root,
-            parent_mail,
-            sender,
-            recipient,
-            kind,
-            t_construct_start,
-            t,
-        );
+    pub(crate) fn record_sent_event_at(&self, sent: SentRecord) {
+        self.trace_handle.record_sent_event_at(sent);
     }
 
     /// iamacoffeepot/aether#1150: eager settlement-counter increment for
@@ -855,22 +835,24 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
             // the actor's mpsc (`spawn.rs` / `chassis/ctx.rs`) is a
             // transfer — the obligation rides the moved value.
             handler.enqueue(OwnedDispatch::armed(
-                mail.kind,
-                None,
-                mail.reply_to,
-                mail.payload,
-                mail.count,
-                mail.mail_id,
-                mail.root,
-                mail.parent_mail,
-                // iamacoffeepot/aether#1134: stamp the deposit instant +
-                // scheduler backlog here — the single Inbox chokepoint
-                // every mail-to-an-actor funnels through. Read back at the
-                // recipient's `Received` hook to split the hop into
-                // send→enqueue vs queue residence. One clock read on the
-                // already-traced path; depth is `0` off a pool worker.
-                mailer.trace_handle.now_nanos(),
-                pending_depth(),
+                DispatchParts {
+                    kind: mail.kind,
+                    origin: None,
+                    sender: mail.reply_to,
+                    payload: mail.payload,
+                    count: mail.count,
+                    mail_id: mail.mail_id,
+                    root: mail.root,
+                    parent_mail: mail.parent_mail,
+                    // iamacoffeepot/aether#1134: stamp the deposit instant +
+                    // scheduler backlog here — the single Inbox chokepoint
+                    // every mail-to-an-actor funnels through. Read back at the
+                    // recipient's `Received` hook to split the hop into
+                    // send→enqueue vs queue residence. One clock read on the
+                    // already-traced path; depth is `0` off a pool worker.
+                    t_enqueue: mailer.trace_handle.now_nanos(),
+                    enqueue_depth: pending_depth(),
+                },
                 recipient,
             ));
         }

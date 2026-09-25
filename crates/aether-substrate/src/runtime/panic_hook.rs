@@ -185,15 +185,15 @@ fn write_crash_dump(
     let backtrace_text = backtrace
         .map(|bt| matches!(bt.status(), BacktraceStatus::Captured).then(|| format!("{bt}")))
         .and_then(|opt| opt);
-    if let Err(e) = write_jsonl(
-        &path,
-        timestamp_unix_ms,
+    let record = PanicRecord {
+        timestamp_unix_millis: timestamp_unix_ms,
         thread_name,
         location,
         payload,
-        backtrace_text.as_deref(),
-        ring.as_deref(),
-    ) {
+        backtrace: backtrace_text.as_deref(),
+        ring: ring.as_deref(),
+    };
+    if let Err(e) = write_jsonl(&path, record) {
         let _ = writeln!(io::stderr(), "aether-substrate: failed to write crash dump {}: {e}", path.display());
     }
 }
@@ -245,22 +245,26 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_jsonl(
-    path: &Path,
-    timestamp_unix_ms: u64,
-    thread_name: &str,
-    location: &str,
-    payload: &str,
-    backtrace: Option<&str>,
-    ring: Option<&[LogEntry]>,
-) -> io::Result<()> {
+/// One crash dump's contents: the panic context for the header line and
+/// the panicking actor's log ring, when one was stamped.
+#[derive(Clone, Copy)]
+struct PanicRecord<'a> {
+    timestamp_unix_millis: u64,
+    thread_name: &'a str,
+    location: &'a str,
+    payload: &'a str,
+    backtrace: Option<&'a str>,
+    ring: Option<&'a [LogEntry]>,
+}
+
+fn write_jsonl(path: &Path, record: PanicRecord<'_>) -> io::Result<()> {
+    let PanicRecord { timestamp_unix_millis, thread_name, location, payload, backtrace, ring } = record;
     let mut file = fs::OpenOptions::new().create(true).truncate(true).write(true).open(path)?;
 
     // Header line — one JSON object capturing the panic context.
     let header = serde_json::json!({
         "kind": "panic",
-        "timestamp_unix_ms": timestamp_unix_ms,
+        "timestamp_unix_ms": timestamp_unix_millis,
         "thread": thread_name,
         "location": location,
         "payload": payload,
@@ -549,12 +553,14 @@ mod tests {
         let ring = vec![entry(2, 1, "before crash a"), entry(3, 2, "before crash b")];
         write_jsonl(
             &path,
-            1_700_000_001_234,
-            "aether.audio",
-            "src/audio.rs:42:8",
-            "panic payload",
-            Some("backtrace text"),
-            Some(&ring),
+            PanicRecord {
+                timestamp_unix_millis: 1_700_000_001_234,
+                thread_name: "aether.audio",
+                location: "src/audio.rs:42:8",
+                payload: "panic payload",
+                backtrace: Some("backtrace text"),
+                ring: Some(&ring),
+            },
         )
         .expect("write succeeds");
 
@@ -595,12 +601,14 @@ mod tests {
             let path = dir.join("scheduler-thread.jsonl");
             write_jsonl(
                 &path,
-                1_700_000_002_000,
-                "scheduler-thread",
-                "src/scheduler.rs:1:1",
-                "host-thread panic",
-                None,
-                ring,
+                PanicRecord {
+                    timestamp_unix_millis: 1_700_000_002_000,
+                    thread_name: "scheduler-thread",
+                    location: "src/scheduler.rs:1:1",
+                    payload: "host-thread panic",
+                    backtrace: None,
+                    ring,
+                },
             )
             .expect("write succeeds");
             let contents = fs::read_to_string(&path).expect("readback");

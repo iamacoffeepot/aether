@@ -4,10 +4,8 @@
 use std::panic;
 use std::sync::{Arc, mpsc};
 
-use aether_kinds::trace::Nanos;
-
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
+use crate::mail::registry::{DispatchParts, InboxHandler, OwnedDispatch, Registry};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source, SourceAddr};
 use crate::testing::boot_authority as auth;
 
@@ -20,16 +18,11 @@ use crate::testing::boot_authority as auth;
 #[should_panic(expected = "settlement-obligation leak")]
 fn armed_dispatch_panics_if_dropped_without_discharge() {
     let env = OwnedDispatch::armed(
-        KindId(7),
-        None,
-        Source::NONE,
-        MailRef::from(vec![1u8, 2, 3]),
-        1,
-        Some(MailId::new(MailboxId(42), 9)),
-        Some(MailId::new(MailboxId(42), 9)),
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            mail_id: Some(MailId::new(MailboxId(42), 9)),
+            root: Some(MailId::new(MailboxId(42), 9)),
+            ..DispatchParts::new(KindId(7), MailRef::from(vec![1u8, 2, 3]))
+        },
         MailboxId(42),
     );
     // Drop without discharge/transfer — the InboxHandler contract
@@ -51,16 +44,11 @@ fn armed_dispatch_panic_names_the_kind() {
     let leaked = KindId(7);
     let payload = panic::catch_unwind(|| {
         let env = OwnedDispatch::armed(
-            leaked,
-            None,
-            Source::NONE,
-            MailRef::from(Vec::new()),
-            1,
-            Some(MailId::new(MailboxId(1), 1)),
-            Some(MailId::new(MailboxId(1), 1)),
-            None,
-            Nanos(0),
-            0,
+            DispatchParts {
+                mail_id: Some(MailId::new(MailboxId(1), 1)),
+                root: Some(MailId::new(MailboxId(1), 1)),
+                ..DispatchParts::new(leaked, MailRef::from(Vec::new()))
+            },
             MailboxId(1),
         );
         drop(env);
@@ -80,16 +68,11 @@ fn armed_dispatch_panic_names_the_kind() {
 #[test]
 fn discharged_dispatch_does_not_panic() {
     let env = OwnedDispatch::armed(
-        KindId(7),
-        None,
-        Source::NONE,
-        MailRef::from(Vec::new()),
-        1,
-        Some(MailId::new(MailboxId(2), 2)),
-        Some(MailId::new(MailboxId(2), 2)),
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            mail_id: Some(MailId::new(MailboxId(2), 2)),
+            root: Some(MailId::new(MailboxId(2), 2)),
+            ..DispatchParts::new(KindId(7), MailRef::from(Vec::new()))
+        },
         MailboxId(2),
     );
     env.discharge();
@@ -105,16 +88,11 @@ fn discharged_dispatch_does_not_panic() {
 fn dispatch_carries_routed_recipient() {
     let recipient = MailboxId(0xABCD);
     let env = OwnedDispatch::disarmed_at(
-        KindId(7),
-        None,
-        Source::NONE,
-        MailRef::from(Vec::new()),
-        1,
-        Some(MailId::new(MailboxId(3), 3)),
-        Some(MailId::new(MailboxId(3), 3)),
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            mail_id: Some(MailId::new(MailboxId(3), 3)),
+            root: Some(MailId::new(MailboxId(3), 3)),
+            ..DispatchParts::new(KindId(7), MailRef::from(Vec::new()))
+        },
         recipient,
     );
     assert_eq!(env.recipient, recipient);
@@ -130,16 +108,11 @@ fn dispatch_carries_routed_recipient() {
 #[test]
 fn transferred_dispatch_does_not_panic() {
     let env = OwnedDispatch::armed(
-        KindId(7),
-        None,
-        Source::NONE,
-        MailRef::from(Vec::new()),
-        1,
-        Some(MailId::new(MailboxId(3), 3)),
-        Some(MailId::new(MailboxId(3), 3)),
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            mail_id: Some(MailId::new(MailboxId(3), 3)),
+            root: Some(MailId::new(MailboxId(3), 3)),
+            ..DispatchParts::new(KindId(7), MailRef::from(Vec::new()))
+        },
         MailboxId(3),
     );
     env.mark_transferred();
@@ -150,19 +123,7 @@ fn transferred_dispatch_does_not_panic() {
 /// drop even without discharge.
 #[test]
 fn disarmed_dispatch_does_not_panic() {
-    let env = OwnedDispatch::disarmed_at(
-        KindId(7),
-        None,
-        Source::NONE,
-        MailRef::from(Vec::new()),
-        1,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
-        MailboxId(0),
-    );
+    let env = OwnedDispatch::disarmed_at(DispatchParts::new(KindId(7), MailRef::from(Vec::new())), MailboxId(0));
     drop(env);
 }
 
@@ -174,16 +135,11 @@ fn disarmed_dispatch_does_not_panic() {
 #[test]
 fn clone_of_armed_dispatch_is_disarmed() {
     let env = OwnedDispatch::armed(
-        KindId(7),
-        None,
-        Source::NONE,
-        MailRef::from(vec![9u8]),
-        1,
-        Some(MailId::new(MailboxId(4), 4)),
-        Some(MailId::new(MailboxId(4), 4)),
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            mail_id: Some(MailId::new(MailboxId(4), 4)),
+            root: Some(MailId::new(MailboxId(4), 4)),
+            ..DispatchParts::new(KindId(7), MailRef::from(vec![9u8]))
+        },
         MailboxId(4),
     );
     let clone = env.clone();
@@ -204,19 +160,7 @@ fn clone_of_armed_dispatch_is_disarmed() {
 #[cfg(debug_assertions)]
 #[test]
 fn armed_none_mail_id_dispatch_does_not_panic() {
-    let env = OwnedDispatch::armed(
-        KindId(7),
-        None,
-        Source::NONE,
-        MailRef::from(Vec::new()),
-        1,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
-        MailboxId(63),
-    );
+    let env = OwnedDispatch::armed(DispatchParts::new(KindId(7), MailRef::from(Vec::new())), MailboxId(63));
     // No discharge / transfer — a dispatch with no id carries no obligation,
     // so the guard must be disarmed and the drop must be silent.
     drop(env);
@@ -242,16 +186,11 @@ fn standard_inbox_handler_relay_does_not_panic() {
     });
     // Mint armed exactly as `route_mail`'s Inbox arm does.
     handler.enqueue(OwnedDispatch::armed(
-        KindId(11),
-        None,
-        Source::NONE,
-        MailRef::from(vec![0u8]),
-        1,
-        Some(MailId::new(MailboxId(5), 5)),
-        Some(MailId::new(MailboxId(5), 5)),
-        None,
-        Nanos(0),
-        0,
+        DispatchParts {
+            mail_id: Some(MailId::new(MailboxId(5), 5)),
+            root: Some(MailId::new(MailboxId(5), 5)),
+            ..DispatchParts::new(KindId(11), MailRef::from(vec![0u8]))
+        },
         MailboxId(5),
     ));
     let env = rx.recv().expect("relay forwarded the dispatch");

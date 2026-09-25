@@ -9,7 +9,7 @@ use aether_data::ActorPath;
 
 use super::reservation::ParentReservation;
 use super::{SpawnError, SpawnOutcome};
-use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::binding::{NativeBinding, OutboundSend};
 use crate::actor::native::offload::blocking::DeferredCompletion;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::{Envelope, NativeActor};
@@ -19,7 +19,7 @@ use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, InstalledActivation, LiveActivation, PreparedMail,
     PreparedSpawnActivation, PreparedSpawnFailure,
 };
-use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry, SeizeCell};
+use crate::mail::registry::{DispatchParts, MailboxEntry, OwnedDispatch, Registry, SeizeCell};
 use crate::mail::{MailId, MailboxId};
 use crate::runtime::effect_chain::EffectChain;
 use crate::scheduler::pending_depth;
@@ -435,12 +435,14 @@ impl<A: NativeActor> Drainable for ActivationJob<A> {
             // intentionally eager; buffered wire work stays behind the
             // binding's activation hold until the owner's post-Live suffix.
             binding.push_envelope_returning_root_before_push(
-                id.0,
-                ACTIVATION_BARRIER_KIND.0,
-                &self.token.value().to_le_bytes(),
-                1,
-                None,
-                None,
+                OutboundSend {
+                    recipient: id.0,
+                    kind: ACTIVATION_BARRIER_KIND.0,
+                    bytes: &self.token.value().to_le_bytes(),
+                    count: 1,
+                    parent_mail: None,
+                    inherited_root: None,
+                },
                 |barrier_mail_id| {
                     self.barrier_mail_id
                         .lock()
@@ -544,34 +546,22 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
             } else {
                 pending_depth()
             };
+            let parts = DispatchParts {
+                kind: mail.kind,
+                origin: None,
+                sender: mail.reply_to,
+                payload: mail.payload,
+                count: mail.count,
+                mail_id: mail.mail_id,
+                root: mail.root,
+                parent_mail: mail.parent_mail,
+                t_enqueue,
+                enqueue_depth: depth,
+            };
             let envelope = if bootstrap {
-                OwnedDispatch::disarmed_at(
-                    mail.kind,
-                    None,
-                    mail.reply_to,
-                    mail.payload,
-                    mail.count,
-                    mail.mail_id,
-                    mail.root,
-                    mail.parent_mail,
-                    t_enqueue,
-                    depth,
-                    id,
-                )
+                OwnedDispatch::disarmed_at(parts, id)
             } else {
-                OwnedDispatch::armed(
-                    mail.kind,
-                    None,
-                    mail.reply_to,
-                    mail.payload,
-                    mail.count,
-                    mail.mail_id,
-                    mail.root,
-                    mail.parent_mail,
-                    t_enqueue,
-                    depth,
-                    id,
-                )
+                OwnedDispatch::armed(parts, id)
             };
             let _ = sender.send(envelope);
         }

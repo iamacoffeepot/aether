@@ -3,7 +3,7 @@
 
 use std::sync::atomic::Ordering;
 
-use super::NativeBinding;
+use super::{NativeBinding, OutboundSend};
 use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 
 /// Inherent send / `prev_correlation` entry points the
@@ -18,20 +18,12 @@ impl NativeBinding {
     /// Mint an eager envelope's identity, expose it to `before_push`, then
     /// publish the mail. The activation barrier uses this narrow hook to make
     /// its exact identity visible before another owner worker can consume it.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the hook preserves the established eager-envelope dimensions and adds one ordering callback"
-    )]
     pub(in crate::actor::native) fn push_envelope_returning_root_before_push(
         &self,
-        recipient: u64,
-        kind: u64,
-        bytes: &[u8],
-        count: u32,
-        parent_mail: Option<MailId>,
-        inherited_root: Option<MailId>,
+        send: OutboundSend<'_>,
         before_push: impl FnOnce(MailId),
     ) -> MailId {
+        let OutboundSend { recipient, kind, bytes, count, parent_mail, inherited_root } = send;
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let recipient_id = MailboxId(recipient);
         let reply_to = Source::with_correlation(SourceAddr::Component(self.self_mailbox()), correlation);
@@ -97,9 +89,29 @@ mod tests {
         assert_eq!(transport.parent_mailbox(), None, "legacy untyped bindings have no logical parent");
 
         assert_eq!(transport.prev_correlation(), 0);
-        transport.push_envelope_returning_root_before_push(recipient.0, 1, &[], 1, None, None, |_| {});
+        transport.push_envelope_returning_root_before_push(
+            OutboundSend {
+                recipient: recipient.0,
+                kind: 1,
+                bytes: &[],
+                count: 1,
+                parent_mail: None,
+                inherited_root: None,
+            },
+            |_| {},
+        );
         assert_eq!(transport.prev_correlation(), 1);
-        transport.push_envelope_returning_root_before_push(recipient.0, 1, &[], 1, None, None, |_| {});
+        transport.push_envelope_returning_root_before_push(
+            OutboundSend {
+                recipient: recipient.0,
+                kind: 1,
+                bytes: &[],
+                count: 1,
+                parent_mail: None,
+                inherited_root: None,
+            },
+            |_| {},
+        );
         assert_eq!(transport.prev_correlation(), 2);
     }
 
@@ -120,10 +132,19 @@ mod tests {
         );
         let binding = NativeBinding::new_for_test(mailer, MailboxId(0xB4_221E));
 
-        let mail_id =
-            binding.push_envelope_returning_root_before_push(recipient.0, KindId(1).0, &[], 1, None, None, |mail_id| {
+        let mail_id = binding.push_envelope_returning_root_before_push(
+            OutboundSend {
+                recipient: recipient.0,
+                kind: KindId(1).0,
+                bytes: &[],
+                count: 1,
+                parent_mail: None,
+                inherited_root: None,
+            },
+            |mail_id| {
                 published.lock().unwrap().replace(mail_id);
-            });
+            },
+        );
 
         assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Some(mail_id));
     }

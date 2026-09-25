@@ -36,7 +36,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use aether_actor::{ErasedActorRef, Manual, Root};
 use aether_data::{Kind, KindId, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid, mailbox_id_from_path};
 use aether_kinds::descriptors;
-use aether_kinds::trace::Nanos;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
@@ -48,8 +47,8 @@ use crate::config::ConfigMember;
 use crate::mail::MailRef;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
-use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{BootAuthority, InboxHandler, Registry};
+use crate::mail::registry::{DispatchParts, OwnedDispatch};
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
 /// drives the chassis through `Builder::<TestChassis>::new(...)` directly
@@ -373,16 +372,7 @@ pub fn manual_dispatch_ctx<A>(binding: &Arc<NativeBinding>, sender: Source) -> N
         None,
         None,
         OwnedDispatch::disarmed_at(
-            KindId(0),
-            None,
-            sender,
-            MailRef::from(Vec::new()),
-            1,
-            None,
-            None,
-            None,
-            Nanos(0),
-            0,
+            DispatchParts { sender, ..DispatchParts::new(KindId(0), MailRef::from(Vec::new())) },
             binding.self_mailbox(),
         ),
     )

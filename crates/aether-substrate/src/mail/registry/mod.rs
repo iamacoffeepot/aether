@@ -39,7 +39,7 @@ pub use address::{
     ActorAddressInventoryError, AddressResolutionError, AmbiguousHole, ResolvedAddress, ambiguous_holes,
 };
 pub use authority::BootAuthority;
-pub use dispatch::{MailDispatch, OwnedDispatch};
+pub use dispatch::{DispatchParts, MailDispatch, OwnedDispatch};
 #[cfg(test)]
 pub(crate) use dispatch::{test_dispatch, test_owned_dispatch};
 #[doc(hidden)]

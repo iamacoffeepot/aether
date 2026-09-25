@@ -38,16 +38,7 @@ pub fn test_dispatch(kind: KindId, payload: &[u8], count: u32) -> MailDispatch<'
 #[cfg(test)]
 pub fn test_owned_dispatch(kind: KindId, payload: &[u8], count: u32) -> OwnedDispatch {
     OwnedDispatch::disarmed_at(
-        kind,
-        None,
-        Source::NONE,
-        MailRef::from(payload.to_vec()),
-        count,
-        None,
-        None,
-        None,
-        Nanos(0),
-        0,
+        DispatchParts { count, ..DispatchParts::new(kind, MailRef::from(payload.to_vec())) },
         MailboxId(0),
     )
 }
@@ -186,6 +177,41 @@ impl Drop for ObligationGuard {
     }
 }
 
+/// The fields of an [`OwnedDispatch`] other than its recipient, which each
+/// constructor takes in the form its caller holds.
+pub struct DispatchParts {
+    pub kind: KindId,
+    pub origin: Option<String>,
+    pub sender: Source,
+    pub payload: MailRef,
+    pub count: u32,
+    pub mail_id: Option<MailId>,
+    pub root: Option<MailId>,
+    pub parent_mail: Option<MailId>,
+    pub t_enqueue: Nanos,
+    pub enqueue_depth: u32,
+}
+
+impl DispatchParts {
+    /// One `kind` mail carrying `payload`: no origin, no reply target
+    /// (`Source::NONE`), a count of 1, no lineage, and no deposit stamp.
+    #[must_use]
+    pub fn new(kind: KindId, payload: MailRef) -> Self {
+        Self {
+            kind,
+            origin: None,
+            sender: Source::NONE,
+            payload,
+            count: 1,
+            mail_id: None,
+            root: None,
+            parent_mail: None,
+            t_enqueue: Nanos(0),
+            enqueue_depth: 0,
+        }
+    }
+}
+
 /// Owned mirror of [`MailDispatch`] handed to
 /// [`InboxHandler::enqueue`](crate::mail::registry::InboxHandler::enqueue).
 /// Built by the mailer at the `Inbox` arm by moving `mail.payload`
@@ -283,37 +309,15 @@ impl OwnedDispatch {
     /// `Inbox` arm — plus the #1135 in-place demux seed use this. The
     /// guard field is compiled out in release, so this is identical to
     /// a struct literal there.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn armed(
-        kind: KindId,
-        origin: Option<String>,
-        sender: Source,
-        payload: MailRef,
-        count: u32,
-        mail_id: Option<MailId>,
-        root: Option<MailId>,
-        parent_mail: Option<MailId>,
-        t_enqueue: Nanos,
-        enqueue_depth: u32,
-        recipient: MailboxId,
-    ) -> Self {
+    pub(crate) fn armed(parts: DispatchParts, recipient: MailboxId) -> Self {
         #[cfg(debug_assertions)]
-        let obligation = ObligationGuard::armed(mail_id, kind, recipient);
-        Self {
-            kind,
-            origin,
-            sender,
-            payload,
-            count,
-            mail_id,
-            root,
-            parent_mail,
-            t_enqueue,
-            enqueue_depth,
+        let obligation = ObligationGuard::armed(parts.mail_id, parts.kind, recipient);
+        Self::assemble(
+            parts,
             recipient,
             #[cfg(debug_assertions)]
             obligation,
-        }
+        )
     }
 
     /// Construct an `OwnedDispatch` whose ADR-0094 obligation is
@@ -329,21 +333,35 @@ impl OwnedDispatch {
     /// they take the disarmed path. The armed constructor stays
     /// crate-internal — only the substrate's own mint sites arm.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn disarmed(
-        kind: KindId,
-        origin: Option<String>,
-        sender: Source,
-        payload: MailRef,
-        count: u32,
-        mail_id: Option<MailId>,
-        root: Option<MailId>,
-        parent_mail: Option<MailId>,
-        t_enqueue: Nanos,
-        enqueue_depth: u32,
-        recipient: ErasedActorRef,
+    pub fn disarmed(parts: DispatchParts, recipient: ErasedActorRef) -> Self {
+        Self::disarmed_at(parts, recipient.id())
+    }
+
+    /// The raw-`MailboxId` form of [`Self::disarmed`], for substrate-internal
+    /// mints that hold no proof of their recipient: a bootstrap seed
+    /// before its actor is live, the `after_init` seed, and the crate's
+    /// own tests. Same ADR-0094 disarmed obligation.
+    #[must_use]
+    pub(crate) fn disarmed_at(parts: DispatchParts, recipient: MailboxId) -> Self {
+        #[cfg(debug_assertions)]
+        let obligation = ObligationGuard::disarmed(parts.mail_id, parts.kind, recipient);
+        Self::assemble(
+            parts,
+            recipient,
+            #[cfg(debug_assertions)]
+            obligation,
+        )
+    }
+
+    /// The one struct literal both obligation modes share: `parts` plus
+    /// the routed `recipient`, carrying the guard the caller armed or
+    /// disarmed in debug builds.
+    fn assemble(
+        parts: DispatchParts,
+        recipient: MailboxId,
+        #[cfg(debug_assertions)] obligation: ObligationGuard,
     ) -> Self {
-        Self::disarmed_at(
+        let DispatchParts {
             kind,
             origin,
             sender,
@@ -354,31 +372,7 @@ impl OwnedDispatch {
             parent_mail,
             t_enqueue,
             enqueue_depth,
-            recipient.id(),
-        )
-    }
-
-    /// The positional form of [`Self::disarmed`], for substrate-internal
-    /// mints that hold no proof of their recipient: a bootstrap seed
-    /// before its actor is live, the `after_init` seed, and the crate's
-    /// own tests. Same ADR-0094 disarmed obligation.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)] // aether-suppression-request: the positional form of `disarmed`, which carries the same eleven envelope fields
-    pub(crate) fn disarmed_at(
-        kind: KindId,
-        origin: Option<String>,
-        sender: Source,
-        payload: MailRef,
-        count: u32,
-        mail_id: Option<MailId>,
-        root: Option<MailId>,
-        parent_mail: Option<MailId>,
-        t_enqueue: Nanos,
-        enqueue_depth: u32,
-        recipient: MailboxId,
-    ) -> Self {
-        #[cfg(debug_assertions)]
-        let obligation = ObligationGuard::disarmed(mail_id, kind, recipient);
+        } = parts;
         Self {
             kind,
             origin,
