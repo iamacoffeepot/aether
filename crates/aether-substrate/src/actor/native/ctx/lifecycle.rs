@@ -9,11 +9,11 @@
 use std::sync::Arc;
 
 use aether_actor::{ErasedActorRef, HandlesKind, RegistryChanged, ReplyMode};
-use aether_data::{Kind, MailId, MailboxId};
+use aether_data::{Kind, MailId};
 
 use crate::actor::monitor::{MonitorHandle, notify_alias_departures, notify_departure};
 use crate::actor::registry::MonitorError;
-use crate::mail::registry::RegistrySubscription;
+use crate::mail::registry::{PreparedAliasRetirement, RegistrySubscription};
 
 use super::NativeCtx;
 
@@ -22,7 +22,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// flag the actor's dispatcher polls after each handler returns;
     /// when set, the trampoline drains any remaining inbox mail
     /// synchronously, runs `NativeActor::unwire`, and exits the
-    /// dispatch loop. After exit the actor's [`MailboxId`]
+    /// dispatch loop. After exit the actor's [`MailboxId`](aether_data::MailboxId)
     /// transitions from `Live` to `Dead` in the chassis's
     /// [`ActorRegistry`](crate::ActorRegistry) and is added to `tombstones` —
     /// `spawn_child` rejects reuse of the retired full name with
@@ -187,16 +187,17 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// Retiring the route itself is a separate, owner-staged step: the notice
     /// goes out from the despawning actor's own turn, while the route change
-    /// lands through the registry owner.
-    pub fn vacate_alias(&self, alias: MailboxId) -> bool {
+    /// lands through the registry owner. The token comes from the drained
+    /// retirements (`Component::drain_pending_alias_retirements`).
+    pub fn vacate_alias(&self, alias: &PreparedAliasRetirement) -> bool {
         let Some(spawner) = self.binding.spawner() else {
             return false;
         };
-        if !self.binding.mailer().registry().is_alias_to(alias, self.binding.self_mailbox()) {
+        if !self.binding.mailer().registry().is_alias_to(alias.alias, self.binding.self_mailbox()) {
             return false;
         }
         let registry = spawner.actor_registry();
-        notify_departure(self.binding, alias, registry.vacate_actor(alias));
+        notify_departure(self.binding, alias.alias, registry.vacate_actor(alias.alias));
         true
     }
 }

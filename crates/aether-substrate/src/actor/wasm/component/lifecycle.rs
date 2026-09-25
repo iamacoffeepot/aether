@@ -7,8 +7,7 @@ use super::{
     Component, ComponentCtx, CorrelationCursor, MAX_DELIVERABLE_MAIL_BYTES, PendingReplies, PendingSpawn,
     SMALL_REGION_BYTES, StateBundle,
 };
-use crate::mail::MailboxId;
-use crate::mail::registry::PreparedAliasRoute;
+use crate::mail::registry::{PreparedAliasRetirement, PreparedAliasRoute};
 
 impl Component {
     /// Loudly log an init config rejected by [`Component::instantiate`] (ADR-0095)
@@ -128,7 +127,7 @@ impl Component {
     /// (#4228). The trampoline retires each route through the registry owner
     /// and notifies its watchers, the teardown mirror of
     /// [`Self::drain_pending_aliases`].
-    pub fn drain_pending_alias_retirements(&mut self) -> Vec<MailboxId> {
+    pub fn drain_pending_alias_retirements(&mut self) -> Vec<PreparedAliasRetirement> {
         self.store.data_mut().take_pending_alias_retirements()
     }
 

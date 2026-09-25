@@ -43,7 +43,7 @@ pub use dispatch::{DispatchParts, MailDispatch, OwnedDispatch};
 #[cfg(test)]
 pub(crate) use dispatch::{test_dispatch, test_owned_dispatch};
 #[doc(hidden)]
-pub use effect::{PreparedAliasRoute, RegistryInventory, RegistrySubscription};
+pub use effect::{PreparedAliasRetirement, PreparedAliasRoute, RegistryInventory, RegistrySubscription};
 pub use errors::{DropError, KindConflict, NameConflict};
 pub use handlers::{InboxHandler, InlineHandler, noop_handler};
 pub use mailbox::{AdoptRefused, ChildRefused, MailboxEntry, Registry, ResolveLiveError, RouteResolution};
