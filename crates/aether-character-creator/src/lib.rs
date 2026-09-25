@@ -286,14 +286,14 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
         "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] }],
         "nodes": [
             { "name": "Head", "mesh": 0 },
-            { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.492], "scale": [0.115, 0.055, 0.060] },
-            { "name": "Eye.Right", "mesh": 1, "translation": [0.255, 0.225, 0.492], "scale": [0.115, 0.055, 0.060] },
-            { "name": "Iris.Left", "mesh": 2, "translation": [-0.255, 0.225, 0.554], "scale": [0.032, 0.032, 0.032] },
-            { "name": "Iris.Right", "mesh": 2, "translation": [0.255, 0.225, 0.554], "scale": [0.032, 0.032, 0.032] },
-            { "name": "Iris.Left.Inner", "mesh": 3, "translation": [-0.255, 0.225, 0.556], "scale": [0.023, 0.023, 0.023] },
-            { "name": "Iris.Right.Inner", "mesh": 3, "translation": [0.255, 0.225, 0.556], "scale": [0.023, 0.023, 0.023] },
-            { "name": "Pupil.Left", "mesh": 4, "translation": [-0.255, 0.225, 0.558], "scale": [0.012, 0.012, 0.012] },
-            { "name": "Pupil.Right", "mesh": 4, "translation": [0.255, 0.225, 0.558], "scale": [0.012, 0.012, 0.012] },
+            { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.486], "scale": [0.115, 0.055, 0.060] },
+            { "name": "Eye.Right", "mesh": 1, "translation": [0.255, 0.225, 0.486], "scale": [0.115, 0.055, 0.060] },
+            { "name": "Iris.Left", "mesh": 2, "translation": [-0.255, 0.225, 0.548], "scale": [0.032, 0.032, 0.032] },
+            { "name": "Iris.Right", "mesh": 2, "translation": [0.255, 0.225, 0.548], "scale": [0.032, 0.032, 0.032] },
+            { "name": "Iris.Left.Inner", "mesh": 3, "translation": [-0.255, 0.225, 0.550], "scale": [0.023, 0.023, 0.023] },
+            { "name": "Iris.Right.Inner", "mesh": 3, "translation": [0.255, 0.225, 0.550], "scale": [0.023, 0.023, 0.023] },
+            { "name": "Pupil.Left", "mesh": 4, "translation": [-0.255, 0.225, 0.552], "scale": [0.012, 0.012, 0.012] },
+            { "name": "Pupil.Right", "mesh": 4, "translation": [0.255, 0.225, 0.552], "scale": [0.012, 0.012, 0.012] },
             { "name": "Ear.Left", "mesh": 5, "translation": [-0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
             { "name": "Ear.Right", "mesh": 5, "translation": [0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
             { "name": "Brows", "mesh": 6 },
@@ -525,10 +525,7 @@ fn lips_mesh(segments: u32) -> Mesh {
 fn brow_ridges_mesh(segments: u32) -> Mesh {
     let mut mesh = empty_mesh((segments + 1) * 4, segments * 12);
     for center_x in [-0.255, 0.255] {
-        append_ribbon(&mut mesh, segments, center_x, 0.335, Vec2 { x: 0.20, y: 0.20 }, 0.12, |x, y, _| {
-            let point = front_surface_point(x, y);
-            (point.z + 0.015, head_normal(point))
-        });
+        append_ribbon(&mut mesh, segments, center_x, 0.310, Vec2 { x: 0.150, y: 0.50 }, 0.10, orbital_hood_surface);
     }
     mesh
 }
@@ -546,13 +543,13 @@ fn brows_mesh(segments: u32) -> Mesh {
 
 fn upper_lids_mesh(segments: u32) -> Mesh {
     let mut mesh = empty_mesh((segments + 1) * 2, segments * 6);
-    append_ribbon(&mut mesh, segments, 0.0, 0.010, Vec2 { x: 0.112, y: 0.20 }, 0.20, upper_lid_surface);
+    append_ribbon(&mut mesh, segments, 0.0, 0.004, Vec2 { x: 0.108, y: 0.22 }, 0.18, upper_lid_surface);
     mesh
 }
 
 fn lower_lids_mesh(segments: u32) -> Mesh {
     let mut mesh = empty_mesh((segments + 1) * 2, segments * 6);
-    append_ribbon(&mut mesh, segments, 0.0, -0.020, Vec2 { x: 0.108, y: 0.048 }, -0.16, eye_surface);
+    append_ribbon(&mut mesh, segments, 0.0, -0.016, Vec2 { x: 0.106, y: 0.052 }, -0.14, eye_surface);
     mesh
 }
 
@@ -561,7 +558,13 @@ fn eye_surface(x: f32, y: f32, center_x: f32) -> (f32, Vec3) {
 }
 
 fn upper_lid_surface(x: f32, y: f32, center_x: f32) -> (f32, Vec3) {
-    ellipsoid_surface(x, y, center_x, Vec3::new(0.115, 0.090, 0.060))
+    ellipsoid_surface(x, y, center_x, Vec3::new(0.112, 0.095, 0.064))
+}
+
+fn orbital_hood_surface(x: f32, y: f32, center_x: f32) -> (f32, Vec3) {
+    let face = front_mass_surface_point(x, y);
+    let center_fade = (1.0 - ((x - center_x) / 0.15).abs()).max(0.0);
+    (face.z + 0.004 + center_fade * 0.004, head_mass_normal(face))
 }
 
 fn ellipsoid_surface(x: f32, y: f32, center_x: f32, radii: Vec3) -> (f32, Vec3) {
@@ -615,11 +618,19 @@ fn append_ribbon(
 }
 
 fn front_surface_point(x: f32, y: f32) -> Vec3 {
+    front_surface_point_for(x, y, head_sdf)
+}
+
+fn front_mass_surface_point(x: f32, y: f32) -> Vec3 {
+    front_surface_point_for(x, y, head_mass_sdf)
+}
+
+fn front_surface_point_for(x: f32, y: f32, sdf: fn(Vec3) -> f32) -> Vec3 {
     let mut outside = 1.05;
     let mut inside = 1.05;
     for step in 1..=180 {
         let z = 1.05 - step as f32 * 0.01;
-        if head_sdf(Vec3::new(x, y, z)) <= 0.0 {
+        if sdf(Vec3::new(x, y, z)) <= 0.0 {
             inside = z;
             break;
         }
@@ -627,7 +638,7 @@ fn front_surface_point(x: f32, y: f32) -> Vec3 {
     }
     for _ in 0..12 {
         let middle = (outside + inside) * 0.5;
-        if head_sdf(Vec3::new(x, y, middle)) > 0.0 {
+        if sdf(Vec3::new(x, y, middle)) > 0.0 {
             outside = middle;
         } else {
             inside = middle;
@@ -779,11 +790,31 @@ fn push_triangle(mesh: &mut Mesh, a: Vec3, mut b: Vec3, mut c: Vec3) {
 }
 
 fn head_sdf(point: Vec3) -> f32 {
+    let mut shape = head_mass_sdf(point);
+
+    for x in [-0.070, 0.070] {
+        let nostril = ellipsoid_sdf(point, Vec3::new(x, -0.125, 0.770), Vec3::new(0.025, 0.016, 0.035));
+        shape = smooth_maximum(shape, -nostril, 0.006);
+    }
+
+    for x in [-0.255, 0.255] {
+        let socket = ellipsoid_sdf(point, Vec3::new(x, 0.22, 0.600), Vec3::new(0.132, 0.066, 0.078));
+        shape = smooth_maximum(shape, -socket, 0.014);
+    }
+    let mouth = ellipsoid_sdf(point, Vec3::new(0.0, -0.27, 0.62), Vec3::new(0.19, 0.022, 0.06));
+    smooth_maximum(shape, -mouth, 0.014)
+}
+
+fn head_mass_sdf(point: Vec3) -> f32 {
     let mut shape = ellipsoid_sdf(point, Vec3::new(0.0, 0.14, -0.03), Vec3::new(0.65, 0.79, 0.60));
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.18, 0.19), Vec3::new(0.57, 0.57, 0.47)), 0.14);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.49, 0.32), Vec3::new(0.36, 0.30, 0.27)), 0.12);
     for x in [-0.30, 0.30] {
         shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.03, 0.48), Vec3::new(0.24, 0.20, 0.13)), 0.08);
+    }
+    for x in [-0.255, 0.255] {
+        shape =
+            smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, 0.34, 0.445), Vec3::new(0.21, 0.14, 0.115)), 0.07);
     }
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.10, 0.61), Vec3::new(0.085, 0.23, 0.16)), 0.05);
     shape =
@@ -792,26 +823,23 @@ fn head_sdf(point: Vec3) -> f32 {
         shape =
             smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.08, 0.69), Vec3::new(0.065, 0.055, 0.075)), 0.028);
     }
-    for x in [-0.070, 0.070] {
-        let nostril = ellipsoid_sdf(point, Vec3::new(x, -0.125, 0.770), Vec3::new(0.025, 0.016, 0.035));
-        shape = smooth_maximum(shape, -nostril, 0.006);
-    }
-
-    for x in [-0.255, 0.255] {
-        let socket = ellipsoid_sdf(point, Vec3::new(x, 0.22, 0.57), Vec3::new(0.147, 0.092, 0.115));
-        shape = smooth_maximum(shape, -socket, 0.025);
-    }
-    let mouth = ellipsoid_sdf(point, Vec3::new(0.0, -0.27, 0.62), Vec3::new(0.19, 0.022, 0.06));
-    shape = smooth_maximum(shape, -mouth, 0.014);
     shape
 }
 
 fn head_normal(point: Vec3) -> Vec3 {
+    sdf_normal(point, head_sdf)
+}
+
+fn head_mass_normal(point: Vec3) -> Vec3 {
+    sdf_normal(point, head_mass_sdf)
+}
+
+fn sdf_normal(point: Vec3, sdf: fn(Vec3) -> f32) -> Vec3 {
     let epsilon = 0.002;
     Vec3::new(
-        head_sdf(point + Vec3::new(epsilon, 0.0, 0.0)) - head_sdf(point - Vec3::new(epsilon, 0.0, 0.0)),
-        head_sdf(point + Vec3::new(0.0, epsilon, 0.0)) - head_sdf(point - Vec3::new(0.0, epsilon, 0.0)),
-        head_sdf(point + Vec3::new(0.0, 0.0, epsilon)) - head_sdf(point - Vec3::new(0.0, 0.0, epsilon)),
+        sdf(point + Vec3::new(epsilon, 0.0, 0.0)) - sdf(point - Vec3::new(epsilon, 0.0, 0.0)),
+        sdf(point + Vec3::new(0.0, epsilon, 0.0)) - sdf(point - Vec3::new(0.0, epsilon, 0.0)),
+        sdf(point + Vec3::new(0.0, 0.0, epsilon)) - sdf(point - Vec3::new(0.0, 0.0, epsilon)),
     )
     .normalized()
 }

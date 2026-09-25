@@ -151,14 +151,14 @@ pub fn render_head_preview_png(width: u32, height: u32) -> Result<Vec<u8>, png::
 
     let eye = sphere_mesh(18, 24);
     for x in [-0.255, 0.255] {
-        canvas.draw_mesh(&eye, Vec3::new(x, 0.225, 0.492), Vec3::new(0.115, 0.055, 0.060), SCLERA, yaw);
+        canvas.draw_mesh(&eye, Vec3::new(x, 0.225, 0.486), Vec3::new(0.115, 0.055, 0.060), SCLERA, yaw);
     }
 
     let disc = disc_mesh(48);
     for x in [-0.255, 0.255] {
-        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.554), Vec3::new(0.032, 0.032, 0.032), IRIS, yaw);
-        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.556), Vec3::new(0.023, 0.023, 0.023), IRIS_INNER, yaw);
-        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.558), Vec3::new(0.012, 0.012, 0.012), PUPIL, yaw);
+        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.548), Vec3::new(0.032, 0.032, 0.032), IRIS, yaw);
+        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.550), Vec3::new(0.023, 0.023, 0.023), IRIS_INNER, yaw);
+        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.552), Vec3::new(0.012, 0.012, 0.012), PUPIL, yaw);
     }
 
     let skin_feature = sphere_mesh(18, 24);
