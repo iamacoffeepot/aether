@@ -4,6 +4,7 @@
 - **Date:** 2026-09-24
 - **Amended:** 2026-09-24 — trees cross into and out of a container as canonical tar streams through the Engine API's archive endpoints; no tree is written to a host directory, so a remote daemon needs nothing on its host but the stream. While the blob split stays deferred, the actor's blob writes go through the journal.
 - **Amended:** 2026-09-25 — the blob split is no longer deferred: the journal is a root directory holding the SQLite database and a `blobs` directory of digest-named files for every blob, at every size (ADR-0220). Open question 1 is resolved: the journal stays the only writer, of the database and of the blob files. This replaces the previous amendment's deferred-split sentence.
+- **Amended:** 2026-09-25 — RunResult gains Failed { detail } for executor failures during a run; like Exhausted it never reaches the program.
 
 Amends [ADR-0229](0229-program-cap-apis-are-extra-run-arguments.md) (the
 closed, sealed set of program APIs, `Http` / `Process`, mapped through
@@ -91,6 +92,7 @@ the sandbox, or they make the program `Sampled`.
        Ok(Outcome),
        Refused(Refusal),
        Exhausted(Resource),                 // the executor's allotment ran out; never reaches the program
+       Failed { detail: Detail },           // the executor failed during the run; never reaches the program
    }
 
    pub enum Resource { Memory, Time }
@@ -132,6 +134,18 @@ the sandbox, or they make the program `Sampled`.
    invocation, and the driver records `Fault { TimedOut }` for time or a
    new `FaultReason::ResourceExhausted` for memory. The program never
    observes it, and whether to retry is reactor policy.
+
+   `Failed` is the same kind of fault for an attempt that broke for reasons
+   outside the request: the daemon or transport failed after the run
+   started, the output exceeded the decode limits, or `/work` held
+   something no tree can represent (a FIFO, a device, a name the tree rules
+   refuse), with `detail` (the bounded fault text `Detail` from
+   `aether-bloomery-kinds`) naming the cause or the path. Nothing about the
+   step is recorded as a result or reused, so it is safe to retry; the
+   `Workspace` binding turns it into a fault exactly as it does `Exhausted`,
+   and the program never sees it. `Refused(EnvironmentUnavailable)` stays
+   reserved for an environment that cannot be provided, never a mid-run
+   failure.
 
 3. **An environment is a stored tree plus what it declares.**
 
