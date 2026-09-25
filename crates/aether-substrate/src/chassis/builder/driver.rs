@@ -22,9 +22,10 @@ use crate::chassis::inbox::SettlingInbox;
 use crate::config::ConfigMemberRecord;
 use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
-use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
+
+use super::root_pusher::RootPusher;
 
 #[derive(Debug)]
 pub enum RunError {
@@ -188,13 +189,25 @@ impl<'a> DriverCtx<'a> {
         self.inner.take_claimed_mailbox(name)
     }
 
-    #[must_use]
-    pub fn mail_send_handle(&self) -> Arc<Mailer> {
-        self.inner.mail_send_handle()
-    }
-
     pub fn claim_fallback_router(&mut self, handler: FallbackRouter) -> Result<(), BootError> {
         self.inner.claim_fallback_router(handler)
+    }
+
+    /// The chassis-root door to the composed root actor `R` (ADR-0080 §6).
+    /// The driver mints it once in [`DriverCapability::boot`] and pushes
+    /// host-originated mail to `R` from its run loop; every push mints its
+    /// root from the engine's one chassis-root counter.
+    ///
+    /// # Panics
+    ///
+    /// Panics naming `R::NAMESPACE` when this chassis composed no `R`, like
+    /// [`PassiveChassis::actor_ref`](super::PassiveChassis::actor_ref).
+    #[must_use]
+    pub fn root_pusher<R: Root + 'static>(&self) -> RootPusher<R> {
+        let to = self.inner.reference::<R>().unwrap_or_else(|| {
+            panic!("this chassis composed no {:?} actor; compose it before asking for its reference", R::NAMESPACE)
+        });
+        RootPusher::new(to, self.inner.mail_send_handle())
     }
 
     /// Issue 629 / Phase A: retrieve a clone of a cap-published handle
@@ -266,8 +279,7 @@ impl<'a> DriverCtx<'a> {
         // init/wire + slot assembly is shared with the passive pumped boot
         // ([`crate::chassis::builder::PassiveChassis::boot_pumped_actor`]).
         // The `Spawner` carries the chassis mailer / aborter / actor-registry
-        // / ring capacities the assembly needs — the same handles
-        // `mail_send_handle` / `fatal_aborter` would source.
+        // / ring capacities the assembly needs.
         let slot = match assemble_pumped_slot::<A>(
             mailbox_id,
             inbox,

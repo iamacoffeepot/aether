@@ -20,6 +20,7 @@
 // thread.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::actor::native::ActorProbe;
 use crate::chassis::settlement::SettlementRegistry;
@@ -114,6 +115,33 @@ pub struct Mailer {
     /// fold (that runs lock-free through the per-actor cache). Allocated
     /// empty by [`Self::new`] (like `trace_handle`).
     cost_table: Arc<CostTable>,
+    /// ADR-0080 §6: the engine's one chassis-root correlation counter. Every
+    /// chassis-root push mints `MailId(CHASSIS_MAILBOX_ID, n)` from here, so no
+    /// two senders can mint the same root. Starts at 1; 0 is the sentinel.
+    chassis_roots: AtomicU64,
+}
+
+/// A chassis root minted from the [`Mailer`]'s counter, its `Sent` recorded,
+/// not yet pushed. Only [`Mailer::mint_chassis_root`] builds one and
+/// [`Mailer::push_minted_root`] consumes it, so a root is pushed at most once
+/// and never from a caller-chosen correlation.
+#[must_use]
+pub(crate) struct MintedRoot {
+    root: aether_data::MailId,
+    recipient: aether_data::MailboxId,
+    kind: KindId,
+}
+
+impl MintedRoot {
+    /// The minted root.
+    pub(crate) const fn id(&self) -> aether_data::MailId {
+        self.root
+    }
+
+    /// Consume the minted root into what its push needs.
+    const fn into_parts(self) -> (aether_data::MailId, aether_data::MailboxId, KindId) {
+        (self.root, self.recipient, self.kind)
+    }
 }
 
 impl Mailer {
@@ -131,6 +159,7 @@ impl Mailer {
             route_relay: OnceLock::new(),
             capability_registry: Arc::new(CapabilityRegistry::new()),
             cost_table: Arc::new(CostTable::new()),
+            chassis_roots: AtomicU64::new(1),
         }
     }
 
@@ -262,33 +291,44 @@ impl Mailer {
         self.trace_handle.now_nanos()
     }
 
-    /// ADR-0080 chassis-root push helper. Combines `MailId` minting,
-    /// the `Sent` trace event emission, and the [`Mailer::push`]
-    /// into one call so chassis-side mail (Tick fanout from the
-    /// frame loop, hub-bridged inbound, MCP-bridged) gets observable
-    /// lineage without duplicating the producer-side hook in
-    /// `NativeBinding::push_envelope_returning_root_before_push`.
-    ///
-    /// Returns the freshly minted `MailId` so the caller can
-    /// subscribe to its settlement via the chassis
-    /// [`SettlementRegistry`] before
-    /// waiting on the chain.
-    ///
-    /// `correlation_id` is allocated by the caller (the chassis
-    /// owns its own `AtomicU64` counter, symmetric with each
-    /// per-actor `NativeBinding`'s counter).
-    pub fn push_chassis_root_mail(
+    /// Mint the next chassis root for `kind` to `recipient` and record its
+    /// `Sent` (ADR-0080 §6). The root is `MailId(CHASSIS_MAILBOX_ID, n)` with
+    /// `n` drawn from this engine's one chassis-root counter, so no two
+    /// senders can mint the same root. The caller pushes the returned root
+    /// with [`Self::push_minted_root`]; `Spawner::push_tracked` subscribes
+    /// its settlement between the two, so the receiver cannot miss an
+    /// immediate settle.
+    pub(crate) fn mint_chassis_root(&self, recipient: aether_data::MailboxId, kind: KindId) -> MintedRoot {
+        let root =
+            aether_data::MailId::new(aether_data::MailboxId::CHASSIS_MAILBOX_ID, self.next_chassis_correlation());
+        self.record_sent(root, root, None, aether_data::MailboxId::CHASSIS_MAILBOX_ID, recipient, kind);
+        MintedRoot { root, recipient, kind }
+    }
+
+    /// Push the minted root's mail with `reply_to` (`Source::NONE` for no
+    /// reply target) and return the root.
+    pub(crate) fn push_minted_root(
         &self,
-        correlation_id: u64,
-        recipient: aether_data::MailboxId,
-        kind: KindId,
+        minted: MintedRoot,
         payload: Vec<u8>,
-        count: u32,
+        reply_to: Source,
     ) -> aether_data::MailId {
-        let mail_id = aether_data::MailId::new(aether_data::MailboxId::CHASSIS_MAILBOX_ID, correlation_id);
-        self.record_sent(mail_id, mail_id, None, aether_data::MailboxId::CHASSIS_MAILBOX_ID, recipient, kind);
-        self.push(Mail::new(recipient, kind, payload, count).with_lineage(Some(mail_id), Some(mail_id), None));
-        mail_id
+        let (root, recipient, kind) = minted.into_parts();
+        self.push(
+            Mail::new(recipient, kind, payload, 1).with_lineage(Some(root), Some(root), None).with_reply_to(reply_to),
+        );
+        root
+    }
+
+    /// Draw the next chassis-root correlation, skipping zero, which is the
+    /// "no correlation" sentinel.
+    fn next_chassis_correlation(&self) -> u64 {
+        let id = self.chassis_roots.fetch_add(1, Ordering::Relaxed);
+        if id == 0 {
+            self.chassis_roots.fetch_add(1, Ordering::Relaxed)
+        } else {
+            id
+        }
     }
 
     /// Attach a `HubOutbound` so mail to unknown mailbox ids bubbles
@@ -1104,7 +1144,8 @@ mod tests {
         // An off-actor chassis-root mail records its `Sent` in the
         // chassis-host ring (the recipient is unregistered and the mail
         // itself warn-drops, but the off-actor `Sent` still lands).
-        let root = mailer.push_chassis_root_mail(0x55, MailboxId(0x1234), KindId(0xFEED), vec![], 1);
+        let root =
+            mailer.push_minted_root(mailer.mint_chassis_root(MailboxId(0x1234), KindId(0xFEED)), vec![], Source::NONE);
 
         // Query the chassis-host ring for that root, replying to a
         // `Component` target (the MCP RPC-server reply hop).

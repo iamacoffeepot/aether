@@ -11,10 +11,8 @@
 //! params.
 
 use std::any::Any;
-use std::sync::Arc;
 
 use aether_actor::ErasedActorRef;
-use aether_data::Kind;
 use aether_harness_substrate::{
     ExecutionError, FrameHook, HarnessOp, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder,
 };
@@ -22,10 +20,8 @@ use aether_render::{
     DrawShapes, DrawTexturedQuads, Frame, ProgramTimings, ProgramTimingsResult, RenderCapability, RenderParams,
     RenderTuningConfig,
 };
-use aether_substrate::PumpedSlot;
-use aether_substrate::mail::mailer::Mailer;
-use aether_substrate::mail::{Mail, MailboxId};
 use aether_substrate::render::VERTEX_BUFFER_BYTES;
+use aether_substrate::{PumpedSlot, RootPusher};
 
 /// [`FrameHook`] owning the [`PumpedSlot`] for the pumped `aether.render`
 /// actor (ADR-0161). The harness drains the slot at its step / capture pump
@@ -35,10 +31,9 @@ use aether_substrate::render::VERTEX_BUFFER_BYTES;
 /// from the `offscreen_size` params.
 pub struct GpuFrameHook {
     slot: PumpedSlot<RenderCapability>,
-    /// The chassis mailer, so the hook can mail `frame` to the pumped slot.
-    mailer: Arc<Mailer>,
-    /// The pumped render actor's mailbox — where `frame` mail routes.
-    render_mailbox: MailboxId,
+    /// The chassis-root door to the pumped render actor — where `frame`
+    /// mail goes.
+    render_root: RootPusher<RenderCapability>,
     /// The pumped render actor's proven reference, recorded by its boot —
     /// where the harness routes `capture_frame`.
     render: ErasedActorRef,
@@ -85,11 +80,10 @@ impl GpuFrameHook {
 
 impl FrameHook for GpuFrameHook {
     fn send_frame(&mut self, replay_cache_when_idle: bool) {
-        // Fire-and-forget internal frame request (disarmed lineage — no
-        // settlement obligation): the harness awaits the capture reply / the
-        // advance's `LifecycleAdvanceComplete`, not the frame itself.
-        let payload = Frame { replay_cache_when_idle, windows: Vec::new() }.encode_into_bytes();
-        self.mailer.push(Mail::new(self.render_mailbox, <Frame as Kind>::ID, payload, 1));
+        // A traced chassis root that settles inside the drain below: the
+        // harness awaits the capture reply / the advance's
+        // `LifecycleAdvanceComplete`, not the frame itself.
+        self.render_root.push_root(&Frame { replay_cache_when_idle, windows: Vec::new() }, None);
         self.slot.drain_available();
     }
 
@@ -167,7 +161,7 @@ impl RenderHarnessBuilderExt for SubstrateHarnessBuilder {
 fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color: &str) -> SubstrateHarnessBuilder {
     let clear_color = clear_color.to_owned();
     builder.render_hook::<RenderCapability>(Box::new(move |passive, wiring, width, height| {
-        let RenderHookWiring { mailer, observed_kinds, assets_dir } = wiring;
+        let RenderHookWiring { observed_kinds, assets_dir } = wiring;
         // The `FrameCheck` / similarity scorer lives in
         // `aether_substrate::render::visual` (below aether-render), so the
         // pumped runtime scores capture verdicts + similarity directly in
@@ -188,12 +182,9 @@ fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color
                 params,
             )
             .map_err(|e| anyhow::anyhow!("boot pumped render slot: {e}"))?;
-        // The pumped slot registered its inbox at the cap's root-pinned id —
-        // the same id `send_and_await_reply("aether.render", CaptureFrame)`
-        // resolves.
-        let render_mailbox = aether_actor::root_mailbox::<RenderCapability>();
+        let render_root = passive.root_pusher::<RenderCapability>();
         let render = passive.actor_ref::<RenderCapability>().erase();
-        Ok(Box::new(GpuFrameHook { slot, mailer, render_mailbox, render }) as Box<dyn FrameHook>)
+        Ok(Box::new(GpuFrameHook { slot, render_root, render }) as Box<dyn FrameHook>)
     }))
 }
 

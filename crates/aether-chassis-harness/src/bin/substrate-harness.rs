@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use aether_chassis::run_describe_prelude;
 use aether_chassis_harness::{HarnessChassis, HarnessCli, HarnessDriver, HarnessEnv};
+use aether_lifecycle::LifecycleCapability;
 use aether_render::{RenderCapability, RenderParams};
 use aether_substrate::Chassis;
 use aether_substrate::SubstrateBoot;
@@ -77,7 +78,13 @@ fn main() -> anyhow::Result<()> {
         )
     })?;
 
-    let mut driver = HarnessDriver::new(&boot, Arc::clone(passive.settlement_registry()), render_slot);
+    let mut driver = HarnessDriver::new(
+        &boot,
+        Arc::clone(passive.settlement_registry()),
+        render_slot,
+        passive.root_pusher::<LifecycleCapability>(),
+        passive.root_pusher::<RenderCapability>(),
+    );
     // ADR-0161 §Decision 2: the unified `PumpWake` channel. The render slot's
     // mailbox wake sends `PumpWake::Mail` so the advance-loop settlement wait
     // drains on mail arrival, and *also* pokes `ChassisEvent::RenderMail` so a

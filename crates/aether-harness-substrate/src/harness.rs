@@ -253,6 +253,8 @@ pub struct SubstrateHarness {
     kind_lifecycle_advance: KindId,
 
     frame: u64,
+    /// Counter behind [`Self::fresh_correlation_id`]: session-reply
+    /// correlations only, never chassis roots.
     next_correlation_id: AtomicU64,
 
     /// Cumulative settlement-patience backstop the settlement gates
@@ -997,8 +999,7 @@ impl SubstrateHarness {
     ) -> Result<(), SubstrateHarnessError> {
         use crossbeam_channel::RecvTimeoutError;
 
-        let cid = self.fresh_correlation_id();
-        let rx = self.passive.send_tracked(to, kind, payload, cid, None);
+        let (_, rx) = self.passive.send_tracked(to, kind, payload, None);
 
         // A short drain cadence so a render chain gated on the pumped slot
         // (a render mail that emits another render mail) advances every round;
@@ -1111,11 +1112,7 @@ impl SubstrateHarness {
         kind: KindId,
         payload: Vec<u8>,
     ) -> (MailId, Receiver<()>) {
-        let cid = self.fresh_correlation_id();
-        let settled = self.passive.send_tracked(recipient, kind, payload, cid, None);
-        // `send_tracked` roots the push at the chassis pseudo-mailbox under
-        // `cid`, the root `Mailer::push_chassis_root_mail` mints for the same push.
-        (MailId::new(MailboxId::CHASSIS_MAILBOX_ID, cid), settled)
+        self.passive.send_tracked(recipient, kind, payload, None)
     }
 
     /// ADR-0086 Phase 3: read the chassis-host trace ring — where the
@@ -1311,6 +1308,10 @@ impl SubstrateHarness {
         ReplyTarget::Session { session: self.session, correlation: cid }
     }
 
+    /// The next session-reply correlation: the `ReplyTarget::Session`
+    /// correlation a recipient echoes back, which `pump_until_event` matches
+    /// the loopback reply by. It names no root — `send_tracked` mints those
+    /// from the engine's one chassis-root counter.
     fn fresh_correlation_id(&self) -> u64 {
         // 0 is the "no correlation" sentinel so skip it.
         let id = self.next_correlation_id.fetch_add(1, Ordering::SeqCst);
@@ -1607,11 +1608,10 @@ impl SubstrateHarness {
             // carries this harness's session as the reply target — the driver
             // routes `LifecycleAdvanceComplete` there via `on_settled`'s
             // `ctx.reply_to`.
-            let settlement = self.passive.send_tracked(
+            let (_, settlement) = self.passive.send_tracked(
                 self.lifecycle.erase(),
                 self.kind_lifecycle_advance,
                 aether_kinds::LifecycleAdvance { delta_micros }.encode_into_bytes(),
-                cid,
                 Some(self.session_reply(cid)),
             );
             // Block until the driver replies `LifecycleAdvanceComplete`
@@ -1780,7 +1780,7 @@ mod tests {
     }
 
     /// Issue iamacoffeepot/aether#723: chassis-source ticks are minted
-    /// via `push_chassis_root_mail`, and the lifecycle cap fanout
+    /// as chassis roots, and the lifecycle cap fanout
     /// propagates `(root, parent_mail)` from the inbound through
     /// `NativeCtx::fanout` so each subscriber-bound copy lands in the
     /// same causal chain. Verified by registering a closure-bound

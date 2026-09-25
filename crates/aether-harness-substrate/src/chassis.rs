@@ -24,7 +24,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, Pas
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigSources;
 use aether_substrate::mail::MailboxId;
-use aether_substrate::{Chassis, Mailer, RingCapacities, SchedulerTuning, SubstrateBoot};
+use aether_substrate::{Chassis, RingCapacities, SchedulerTuning, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 use aether_window::SyntheticWindowCapability;
 
@@ -138,9 +138,11 @@ pub type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Op
 pub trait FrameHook {
     /// Mail one `aether.render.frame { replay_cache_when_idle }` to the
     /// pumped render actor and drain its slot so the frame records this
-    /// call. `replay_cache_when_idle` is the issue 847 semantic: the advance
-    /// path commits current (`false`); a capture-driving frame replays the
-    /// last committed accumulators (`true`).
+    /// call. The frame is a traced chassis root the hook pushes through its
+    /// door to the render actor, and it settles inside that drain.
+    /// `replay_cache_when_idle` is the issue 847 semantic: the advance path
+    /// commits current (`false`); a capture-driving frame replays the last
+    /// committed accumulators (`true`).
     fn send_frame(&mut self, replay_cache_when_idle: bool);
     /// Drain the pumped render slot without recording a frame — dispatches
     /// any queued render mail (advance draws, capture pre-mails, the
@@ -179,8 +181,6 @@ pub trait FrameHook {
 /// — so the non-knob render wiring is handed straight to the hook factory,
 /// which threads it into the pumped actor's `RenderParams`.
 pub struct RenderHookWiring {
-    /// The chassis mailer, so the hook can mail `frame` to the pumped slot.
-    pub mailer: Arc<Mailer>,
     /// `SubstrateHarness` observer inbox, threaded into the render actor's
     /// `RenderParams` so the pumped dispatch witnesses every kind it
     /// delivers by mail (issue 5965) — no shared state crosses into the
@@ -472,7 +472,6 @@ impl SubstrateHarnessChassis {
             render_hook
                 .map(|factory| {
                     let wiring = RenderHookWiring {
-                        mailer: Arc::clone(&boot.queue),
                         observed_kinds: Some(substrate_harness_observer_mailbox()),
                         assets_dir: render_assets_dir,
                     };

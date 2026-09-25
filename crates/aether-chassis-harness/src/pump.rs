@@ -10,22 +10,19 @@
 //! the loop is otherwise idle.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use aether_actor::root_mailbox;
-use aether_chassis::next_chassis_correlation;
-use aether_data::{Kind, KindId};
 use aether_kinds::{AdvanceResult, LifecycleAdvance};
 use aether_lifecycle::LifecycleCapability;
 use aether_render::{Frame, RenderCapability, RenderCapabilityState};
 use aether_substrate::actor::native::PumpedSlot;
+use aether_substrate::chassis::builder::RootPusher;
 use aether_substrate::chassis::settlement::{
     PumpWake, SettlementRegistry, TerminalDisposition, WaitOutcome, await_settlement_pumped,
 };
 use aether_substrate::runtime::lifecycle;
-use aether_substrate::{HubOutbound, Mailer, SubstrateBoot, chassis::frame_loop, mail::MailboxId};
+use aether_substrate::{HubOutbound, SubstrateBoot, chassis::frame_loop};
 use aether_substrate_harness_cap::events::{ChassisEvent, EventReceiver};
 use crossbeam_channel::{Receiver, Sender};
 
@@ -39,11 +36,13 @@ const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 /// the pumped `aether.render` slot and drives the advance / capture frame loop,
 /// mirroring the desktop driver's pump shape off winit.
 pub struct HarnessDriver {
-    queue: Arc<Mailer>,
     outbound: Arc<HubOutbound>,
-    lifecycle_mailbox: MailboxId,
-    kind_lifecycle_advance: KindId,
-    render_mailbox: MailboxId,
+    /// The chassis-root door each advance frame's `LifecycleAdvance` goes
+    /// through.
+    lifecycle: RootPusher<LifecycleCapability>,
+    /// The chassis-root door each recorded frame's `aether.render.frame`
+    /// goes through.
+    render: RootPusher<RenderCapability>,
     settlement_registry: Arc<SettlementRegistry>,
     render_slot: PumpedSlot<RenderCapability>,
     /// `PumpWake::Settled` sender cloned into each advance's settlement
@@ -51,37 +50,29 @@ pub struct HarnessDriver {
     /// `PumpWake::Mail`.
     pump_tx: Sender<PumpWake>,
     pump_rx: Receiver<PumpWake>,
-    /// ADR-0080 §6 chassis-root correlation counter (issue 723).
-    chassis_correlation: AtomicU64,
 }
 
 impl HarnessDriver {
-    /// Wire the loop to the booted substrate and the pumped render slot the
-    /// binary claimed post-build.
+    /// Wire the loop to the booted substrate, the pumped render slot the
+    /// binary claimed post-build, and the chassis-root doors to the lifecycle
+    /// cap and the render actor the binary took from the passive chassis.
     #[must_use]
     pub fn new(
         boot: &SubstrateBoot,
         settlement_registry: Arc<SettlementRegistry>,
         render_slot: PumpedSlot<RenderCapability>,
+        lifecycle: RootPusher<LifecycleCapability>,
+        render: RootPusher<RenderCapability>,
     ) -> Self {
-        // The loop wires itself to the pumped render actor and the lifecycle
-        // cap; ctx-less driver setup, so the root-pinned resolver answers
-        // directly.
-        let render_mailbox = root_mailbox::<RenderCapability>();
-        let lifecycle_mailbox = root_mailbox::<LifecycleCapability>();
-
         let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<PumpWake>();
         Self {
-            queue: Arc::clone(&boot.queue),
             outbound: Arc::clone(&boot.outbound),
-            lifecycle_mailbox,
-            kind_lifecycle_advance: <LifecycleAdvance as Kind>::ID,
-            render_mailbox,
+            lifecycle,
+            render,
             settlement_registry,
             render_slot,
             pump_tx,
             pump_rx,
-            chassis_correlation: AtomicU64::new(1),
         }
     }
 
@@ -160,13 +151,7 @@ impl HarnessDriver {
     /// the chain is gated on lands on this slot, so a non-pumping wait would
     /// deadlock — the ADR-0161 §Decision 2 rule), then record the frame.
     fn advance_frame(&mut self, delta_micros: u32) {
-        let advance_root = self.queue.push_chassis_root_mail(
-            next_chassis_correlation(&self.chassis_correlation),
-            self.lifecycle_mailbox,
-            self.kind_lifecycle_advance,
-            LifecycleAdvance { delta_micros }.encode_into_bytes(),
-            1,
-        );
+        let advance_root = self.lifecycle.push_root(&LifecycleAdvance { delta_micros }, None);
         let pump_tx = self.pump_tx.clone();
         self.settlement_registry.subscribe_settlement_with(advance_root, move || {
             let _ = pump_tx.send(PumpWake::Settled);
@@ -193,13 +178,7 @@ impl HarnessDriver {
     /// Record a frame: mail one chassis-root `aether.render.frame` and drain
     /// the slot so its `on_frame` handler runs inline on this thread.
     fn record_frame(&mut self, replay_cache_when_idle: bool) {
-        self.queue.push_chassis_root_mail(
-            next_chassis_correlation(&self.chassis_correlation),
-            self.render_mailbox,
-            <Frame as Kind>::ID,
-            Frame { replay_cache_when_idle, windows: Vec::new() }.encode_into_bytes(),
-            1,
-        );
+        self.render.push_root(&Frame { replay_cache_when_idle, windows: Vec::new() }, None);
         self.render_slot.drain_available();
     }
 

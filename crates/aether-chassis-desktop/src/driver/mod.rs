@@ -15,24 +15,21 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use aether_actor::{Addressable, root_mailbox};
+use aether_actor::Addressable;
 use aether_data::Kind;
-use aether_data::encode_empty;
-use aether_kinds::{Quit, Tick, WindowId as EngineWindowId};
+use aether_kinds::{LifecycleAdvance, Quit, Tick, WindowId as EngineWindowId};
+use aether_lifecycle::LifecycleCapability;
 use aether_render::{Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
 use aether_substrate::actor::native::PumpedSlot;
-use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
+use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RootPusher, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::settlement::{PumpWake, TerminalDisposition, WaitOutcome, await_settlement_pumped};
 use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
 use aether_substrate::runtime::lifecycle as runtime_lifecycle;
 use aether_substrate::{
-    ChassisCtx, HubOutbound, Mailer, SettlingInbox, Source, SourceAddr, SubstrateBoot,
-    chassis::frame_loop,
-    mail::{Mail, MailId, MailboxId},
+    ChassisCtx, HubOutbound, Mailer, SettlingInbox, SubstrateBoot, chassis::frame_loop, mail::MailId,
 };
 use aether_window::{
     DesktopWindowApplication, DesktopWindowCapability, DesktopWindowIntegration, DesktopWindowParams,
@@ -58,14 +55,15 @@ const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 /// Chassis-owned semantic integration for the window application's render,
 /// lifecycle-settlement, and graceful-shutdown operations.
 pub struct DesktopRenderIntegration {
+    /// Read only for its settlement registry, which `pump_while_settling`
+    /// subscribes each advance root on.
     queue: Arc<Mailer>,
-    /// `aether.lifecycle` mailbox id, cached at boot. Each redraw
-    /// fires one `LifecycleAdvance` here; the cap broadcasts the `Tick`
-    /// stage directly to its stage subscribers (components subscribe
-    /// `Tick` on `aether.lifecycle`), then the driver waits for
-    /// settlement before submitting the frame.
-    lifecycle_mailbox: MailboxId,
-    kind_lifecycle_advance: aether_data::KindId,
+    /// The chassis-root door to `aether.lifecycle`, minted at boot. Each
+    /// redraw fires one `LifecycleAdvance` through it; the cap broadcasts the
+    /// `Tick` stage directly to its stage subscribers (components subscribe
+    /// `Tick` on `aether.lifecycle`), then the driver waits for settlement
+    /// before submitting the frame.
+    lifecycle: RootPusher<LifecycleCapability>,
     /// `aether.lifecycle.advance_reply` inbox claimed at boot (issue
     /// 1378). The per-frame `Tick → Render` cycle pushes each
     /// `LifecycleAdvance` with this mailbox as its `Component` reply
@@ -77,13 +75,10 @@ pub struct DesktopRenderIntegration {
     /// guard (the same reply-gate the substrate-harness frame loop uses,
     /// iamacoffeepot/aether#999).
     lifecycle_reply_inbox: SettlingInbox,
-    /// Mailbox id of [`Self::lifecycle_reply_inbox`], used as the
-    /// `Component` reply target stamped onto each `LifecycleAdvance`.
-    lifecycle_reply_mailbox: MailboxId,
     /// Hub outbound — held for log egress to the hub and
     /// `lifecycle::fatal_abort`. NOT used for chassis replies:
     /// `HubOutbound::send_reply` only routes `Session` / `EngineMailbox`
-    /// targets and silently drops `SourceAddr::Component`, but mail
+    /// targets and silently drops a `Component` target, but mail
     /// dispatched by this engine's own `RpcServerCapability` (every
     /// hub/MCP call lands via the proxy → local RPC server) carries a
     /// `Component(rpc_server)` reply target. Replies go through the
@@ -100,9 +95,9 @@ pub struct DesktopRenderIntegration {
     /// [`Frame`] / [`Occluded`] mail and drains. Booted from the driver's
     /// Claim-stage `aether.render` reservation via [`DriverCtx::boot_pumped_actor`].
     render_slot: PumpedSlot<RenderCapability>,
-    /// `aether.render` mailbox id, cached at boot — the recipient for the
+    /// The chassis-root door to `aether.render`, minted at boot — carries the
     /// per-frame [`Frame`] request and the [`Occluded`] forward.
-    render_mailbox: MailboxId,
+    render: RootPusher<RenderCapability>,
     /// Unified [`PumpWake`] channel (ADR-0161 §Decision 2). The render slot's
     /// mailbox wake sends [`PumpWake::Mail`] here and each per-advance
     /// settlement subscription sends [`PumpWake::Settled`];
@@ -117,12 +112,6 @@ pub struct DesktopRenderIntegration {
     /// frame-driven, so this is the source of Tick's elapsed-time payload.
     last_tick: Option<Instant>,
     frame: u64,
-    /// ADR-0080 §6 chassis-root correlation counter (issue
-    /// iamacoffeepot/aether#723). Bumped per chassis-source push so
-    /// every chassis-owned render/lifecycle emission carries a fresh
-    /// `MailId` for the trace observer to root a tree on. Symmetric
-    /// with the per-actor counter on `NativeBinding`.
-    chassis_correlation: AtomicU64,
     /// True once graceful lifecycle shutdown has been requested.
     quit_requested: bool,
     /// Set after the lifecycle reaches its `Shutdown` terminal.
@@ -130,26 +119,6 @@ pub struct DesktopRenderIntegration {
 }
 
 impl DesktopRenderIntegration {
-    /// ADR-0080 §6 chassis-source push helper (issue
-    /// iamacoffeepot/aether#723). Mints a fresh correlation, calls
-    /// `push_chassis_root_mail` so the trace observer sees a `Sent`
-    /// event for every chassis-owned render/lifecycle emission. Returns the
-    /// minted chain-root [`MailId`] so frame-gating callers can
-    /// subscribe its settlement (ADR-0082 §6).
-    fn push_chassis_root(
-        &self,
-        recipient: MailboxId,
-        kind: aether_data::KindId,
-        payload: Vec<u8>,
-        count: u32,
-    ) -> MailId {
-        let mut correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
-        if correlation == 0 {
-            correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
-        }
-        self.queue.push_chassis_root_mail(correlation, recipient, kind, payload, count)
-    }
-
     /// Begin graceful shutdown exactly once. The window application drives a
     /// frame immediately after this request and exits only after the lifecycle
     /// reports its terminal.
@@ -158,42 +127,15 @@ impl DesktopRenderIntegration {
             return;
         }
         self.quit_requested = true;
-        self.push_chassis_root(self.lifecycle_mailbox, <Quit as Kind>::ID, encode_empty::<Quit>(), 1);
+        self.lifecycle.push_root(&Quit, None);
     }
 
-    /// Mint a chassis-root `LifecycleAdvance` and push it to the
-    /// `aether.lifecycle` cap with [`Self::lifecycle_reply_mailbox`] as
-    /// its `Component` reply target (issue 1378). Open-codes the
-    /// chassis-root push (`push_chassis_root_mail` doesn't carry a reply
-    /// target): mint id → record `Sent` for the trace subtree → push with
-    /// both the chassis-root lineage and the reply-to. Returns the minted
-    /// chain root so the caller can subscribe its settlement.
+    /// Push a chassis-root `LifecycleAdvance` to the `aether.lifecycle` cap
+    /// with [`Self::lifecycle_reply_inbox`] as its reply target (issue 1378).
+    /// Returns the minted chain root so the caller can subscribe its
+    /// settlement.
     fn push_lifecycle_advance(&self, delta_micros: u32) -> MailId {
-        let mut correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
-        if correlation == 0 {
-            correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
-        }
-        let advance_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, correlation);
-        self.queue.record_sent(
-            advance_root,
-            advance_root,
-            None,
-            MailboxId::CHASSIS_MAILBOX_ID,
-            self.lifecycle_mailbox,
-            self.kind_lifecycle_advance,
-        );
-        let reply_to = Source::with_correlation(SourceAddr::Component(self.lifecycle_reply_mailbox), correlation);
-        self.queue.push(
-            Mail::new(
-                self.lifecycle_mailbox,
-                self.kind_lifecycle_advance,
-                aether_kinds::LifecycleAdvance { delta_micros }.encode_into_bytes(),
-                1,
-            )
-            .with_lineage(Some(advance_root), Some(advance_root), None)
-            .with_reply_to(reply_to),
-        );
-        advance_root
+        self.lifecycle.push_root(&LifecycleAdvance { delta_micros }, Some(&self.lifecycle_reply_inbox))
     }
 
     /// Block (bounded) for the `LifecycleAdvanceComplete` reply to the
@@ -230,7 +172,7 @@ impl DesktopRenderIntegration {
     /// hides, and lets a [`Frame`] request record + present within the
     /// redraw that issued it.
     fn send_render_and_drain<K: Kind>(&mut self, mail: &K) {
-        self.push_chassis_root(self.render_mailbox, K::ID, mail.encode_into_bytes(), 1);
+        self.render.push_root(mail, None);
         self.render_slot.drain_available();
     }
 
@@ -493,12 +435,10 @@ impl DriverCapability for DesktopDriverCapability {
             let _ = render_mail_proxy.send_event(UserEvent::WindowMail);
         }));
 
-        // The recipient for the per-frame `Frame` request and the `Occluded`
-        // forward. ctx-less driver setup, so the root-pinned resolver answers
-        // directly — the lifecycle route below is the same shape.
-        let render_mailbox = root_mailbox::<RenderCapability>();
-        let lifecycle_mailbox = root_mailbox::<aether_lifecycle::LifecycleCapability>();
-        let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
+        // The chassis-root doors for the per-frame `Frame` request and the
+        // `Occluded` forward, and for each `LifecycleAdvance` and the `Quit`.
+        let render = ctx.root_pusher::<RenderCapability>();
+        let lifecycle = ctx.root_pusher::<LifecycleCapability>();
 
         // The watcher sends the window-owned `Quit` event directly; the
         // application converts it to semantic graceful shutdown.
@@ -509,25 +449,20 @@ impl DriverCapability for DesktopDriverCapability {
         // Render` cycle stamps this as the `Component` reply target on
         // each `LifecycleAdvance` and drains the receiver synchronously
         // to gate the next advance (see `recv_lifecycle_advance_next`).
-        let lifecycle_reply_claim = ctx.claim_mailbox("aether.lifecycle.advance_reply")?;
+        let lifecycle_reply_inbox = ctx.claim_mailbox("aether.lifecycle.advance_reply")?.inbox;
 
         let integration = DesktopRenderIntegration {
             queue: Arc::clone(&boot.queue),
-            lifecycle_mailbox,
-            kind_lifecycle_advance,
-            lifecycle_reply_inbox: lifecycle_reply_claim.inbox,
-            lifecycle_reply_mailbox: lifecycle_reply_claim.id,
+            lifecycle,
+            lifecycle_reply_inbox,
             outbound: Arc::clone(&boot.outbound),
             render_slot,
-            render_mailbox,
+            render,
             render_pump_tx,
             render_pump_rx,
             started: None,
             last_tick: None,
             frame: 0,
-            // 0 is the "no correlation" sentinel; mirror NativeBinding's
-            // start-at-1 convention.
-            chassis_correlation: AtomicU64::new(1),
             quit_requested: false,
             terminal_reached: false,
         };
