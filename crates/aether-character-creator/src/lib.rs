@@ -207,6 +207,7 @@ impl BufferBuilder {
 pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let head = head_mesh(64, 64);
     let eye = sphere_mesh(18, 24);
+    let ear = ear_mesh(20, 28);
     let disc = disc_mesh(48);
     let neck = neck_mesh(12, 36);
     let brow_ridges = brow_ridges_mesh(24);
@@ -230,6 +231,11 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let eye_normal = buffer.push_vec3(&eye.normals, false);
     let eye_uv = buffer.push_vec2(&eye.texture_coordinates);
     let eye_indices = buffer.push_indices(&eye.indices);
+
+    let ear_position = buffer.push_vec3(&ear.positions, true);
+    let ear_normal = buffer.push_vec3(&ear.normals, false);
+    let ear_uv = buffer.push_vec2(&ear.texture_coordinates);
+    let ear_indices = buffer.push_indices(&ear.indices);
 
     let disc_position = buffer.push_vec3(&disc.positions, true);
     let disc_normal = buffer.push_vec3(&disc.normals, false);
@@ -314,8 +320,8 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             { "name": "Iris.Right.Inner", "mesh": 3, "translation": [0.255, 0.225, 0.550], "scale": [0.023, 0.023, 0.023] },
             { "name": "Pupil.Left", "mesh": 4, "translation": [-0.255, 0.225, 0.552], "scale": [0.012, 0.012, 0.012] },
             { "name": "Pupil.Right", "mesh": 4, "translation": [0.255, 0.225, 0.552], "scale": [0.012, 0.012, 0.012] },
-            { "name": "Ear.Left", "mesh": 5, "translation": [-0.64, 0.04, 0.0], "scale": [0.045, 0.145, 0.065] },
-            { "name": "Ear.Right", "mesh": 5, "translation": [0.64, 0.04, 0.0], "scale": [0.045, 0.145, 0.065] },
+            { "name": "Ear.Left", "mesh": 5, "translation": [-0.65, 0.035, -0.005], "scale": [0.060, 0.155, 0.080] },
+            { "name": "Ear.Right", "mesh": 5, "translation": [0.65, 0.035, -0.005], "scale": [0.060, 0.155, 0.080] },
             { "name": "Brows", "mesh": 7 },
             { "name": "UpperLid.Left", "mesh": 8, "translation": [-0.255, 0.225, 0.492] },
             { "name": "UpperLid.Right", "mesh": 8, "translation": [0.255, 0.225, 0.492] },
@@ -356,7 +362,7 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             mesh_json("IrisOuter", disc_position, disc_normal, disc_uv, disc_indices, 2),
             mesh_json("IrisInner", disc_position, disc_normal, disc_uv, disc_indices, 3),
             mesh_json("Pupil", disc_position, disc_normal, disc_uv, disc_indices, 4),
-            mesh_json("SkinFeature", eye_position, eye_normal, eye_uv, eye_indices, 0),
+            mesh_json("Ear", ear_position, ear_normal, ear_uv, ear_indices, 0),
             mesh_json("Neck", neck_position, neck_normal, neck_uv, neck_indices, 0),
             {
                 "name": "Brow",
@@ -494,22 +500,34 @@ fn sphere_mesh(rings: u32, segments: u32) -> Mesh {
     Mesh { positions, normals, texture_coordinates, indices: grid_indices(rings, segments) }
 }
 
+fn ear_mesh(rings: u32, segments: u32) -> Mesh {
+    let mut mesh = sphere_mesh(rings, segments);
+    for position in &mut mesh.positions {
+        let upper_amount = (position.y + 1.0) * 0.5;
+        let outline = 0.72 + 0.28 * upper_amount;
+        position.x *= 0.65 * outline;
+        position.z = position.z.mul_add(outline, -0.10 * position.y);
+    }
+    mesh
+}
+
 fn neck_mesh(rings: u32, segments: u32) -> Mesh {
     let mut positions = Vec::with_capacity(((rings + 1) * (segments + 1) + 1) as usize);
     let mut normals = Vec::with_capacity(positions.capacity());
     let mut texture_coordinates = Vec::with_capacity(positions.capacity());
     for ring in 0..=rings {
         let amount = ring as f32 / rings as f32;
-        let y = (-0.82_f32).mul_add(amount, -0.38);
         let radius_x = 0.065_f32.mul_add(amount, 0.24);
-        let radius_z = 0.055_f32.mul_add(amount, 0.26);
-        let center_z = (-0.10_f32).mul_add(amount, -0.04);
+        let radius_z = (-0.04_f32).mul_add(amount, 0.26);
+        let center_z = (-0.06_f32).mul_add(amount, -0.04);
         for segment in 0..=segments {
             let around = TAU * segment as f32 / segments as f32;
             let (sin, cos) = around.sin_cos();
+            let top_y = (-0.075_f32).mul_add(sin, -0.345);
+            let y = (-1.18 - top_y).mul_add(amount, top_y);
             positions.push(Vec3::new(radius_x * cos, y, center_z + radius_z * sin));
-            let around_tangent = Vec3::new(-radius_x * sin, 0.0, radius_z * cos);
-            let down_tangent = Vec3::new(0.065 * cos, -0.82, -0.10 + 0.055 * sin);
+            let around_tangent = Vec3::new(-radius_x * sin, -0.075 * (1.0 - amount) * cos, radius_z * cos);
+            let down_tangent = Vec3::new(0.065 * cos, -1.18 - top_y, -0.06 - 0.04 * sin);
             normals.push(around_tangent.cross(down_tangent).normalized());
             texture_coordinates.push(Vec2 { x: segment as f32 / segments as f32, y: amount });
         }
@@ -517,7 +535,7 @@ fn neck_mesh(rings: u32, segments: u32) -> Mesh {
 
     let mut indices = grid_indices(rings, segments);
     let bottom_center = positions.len() as u32;
-    positions.push(Vec3::new(0.0, -1.20, -0.14));
+    positions.push(Vec3::new(0.0, -1.18, -0.10));
     normals.push(Vec3::new(0.0, -1.0, 0.0));
     texture_coordinates.push(Vec2 { x: 0.5, y: 0.5 });
     let bottom_start = rings * (segments + 1);
