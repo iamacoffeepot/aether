@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-25
+- **Amended:** 2026-09-25 — decision 6: persisting a handle is a documented misuse, not enforced; later directions recorded.
 
 Builds on [ADR-0038](0038-actor-per-component-dispatch.md) and
 [ADR-0087](0087-blob-unit-of-dispatch.md) (one handler at a time per actor,
@@ -192,25 +193,70 @@ derived from the schema, not declared: RPC `Call` accept
 (`encode_schema` / `decode_schema`). Crossing a process means sending bytes and
 checking them in on the other side.
 
-### 6. Persisting a handle: deferred
+### 6. Persisting a handle: a documented misuse, not enforced
 
-A handle is encoded into a payload inside the engine; that is how mail
-carries it (section 3). A persisted handle names nothing after a restart,
-because the store is memory only. Whether and how the engine refuses to
-persist one is deferred until the `Kind` / `Schema` traits are reconsidered.
-Until then nothing refuses it. The candidates recorded so far:
+A handle names an entry in one engine's memory, so a persisted handle names
+nothing after a restart. Writing a handle out is a misuse: code that needs a
+blob's contents outside the engine writes the bytes. The engine documents
+this and does not enforce it. Enforcement costs more than the correctness it
+buys, and an enforced rule would get in the way of legitimate uses such as
+logging a value that holds a handle. Passing a handle over the wire is
+already refused (decision 5), and a program that wants to do it is doing
+something odd.
 
-- a schema-derived `const HAS_BLOB: bool` on each kind, with a
-  `const { assert!(!K::HAS_BLOB) }` in every typed persistence path (journal
-  staging, `save_state_kind`, the wire and codec paths), making a typed
-  persist a compile error;
-- a random per-table incarnation in the handle's encoded form (widening it to
-  64 bits), so a handle written through an untyped path and read back after a
-  restart resolves to nothing instead of aliasing a live slot.
+An index resolves only against its holder's own table, so a replayed or
+forged handle reaches only blobs the holder was already granted. A misuse can
+cost correctness, never access.
 
-What holds regardless: an index resolves only against its holder's own
-table, so a replayed or forged handle can reach only blobs the holder was
-already granted.
+Directions recorded for a later trait rework, none chosen. The leading one:
+
+- **Liveness classes and encoder accept sets.** Every kind keeps one schema
+  and carries a liveness class, derived as the most restrictive class among
+  its fields: `Universal` for plain data, `Process` for anything holding a
+  reference into this engine's memory, such as a `Blob`. Each encoder declares
+  the classes it accepts: the mail envelope accepts both; wire, file and
+  journal encoders accept only `Universal`; a log formatter accepts everything
+  for display and never reads it back. A typed path refuses a mismatch at
+  compile time (`const { assert!(K::LIVENESS <= E::ACCEPTS) }`). Decision 5's
+  wire refusal and the persistence question become one rule, logging is just
+  another destination, and further classes (for example `Session`) can be
+  added later. Fuchsia FIDL's split of `resource` types from value types is
+  the prior art.
+
+  Refinements noted with it:
+
+  - The classes form a partial order, not a ladder: `Process` and `Session`
+    are incomparable. A kind requires the union of its fields' scopes and an
+    encoder provides a set, so the check is `K::REQUIRES ⊆ E::PROVIDES`.
+    Candidate scopes by reach: Actor (one table), Incarnation (survives
+    `replace`, not a restart), Process (`Blob`, proven refs), Session (one
+    connection), Fleet (one hub's lifetime), Store (journal `Ref`),
+    Universal. Start with only the scopes a real type needs: Process, Store
+    and Universal.
+  - Confidentiality is a second, independent axis checked the same way: a
+    secret (ADR-0235) is accepted by no encoder but the secrets store, and the
+    log formatter redacts it.
+  - Explicit cast maps bridge classes. A reference type declares a cast pair
+    (`Blob` to `Bytes` and back by check-in; `Ref<K>` to an inline `K` and back
+    by storing it; `ActorRef<R>` to an address description and back by
+    re-proving). A kind that must cross declares an authored mirror, such as
+    `#[cast(from = Texture)] struct TextureFile { .., pixels: Bytes }`; the
+    derive verifies that every field has a cast and emits both conversions.
+    Each type keeps one schema, a costly conversion is a visible `cast` call,
+    and a kind with no declared mirror stays where its class allows. Prior
+    art: Cap'n Proto `save` / `restore`, serde's `remote` derive, `From` /
+    `TryFrom`.
+
+Also recorded:
+
+- a reference type that materializes its bytes when it leaves the engine and
+  checks them back in when it returns;
+- a derive-generated mirror type, with each `Blob` replaced by bytes;
+- an encoder and decoder parameterized by destination, after serde's
+  `Serializer` and `DeserializeSeed`;
+- a schema-derived `HAS_BLOB` flag with compile-time asserts in typed
+  persistence paths, and a random per-table incarnation in the encoded handle
+  so a restored handle fails closed.
 
 ### 7. Freeing by refcount, with a reclaim thread
 
