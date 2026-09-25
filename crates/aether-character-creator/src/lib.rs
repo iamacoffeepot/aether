@@ -912,8 +912,8 @@ fn head_mass_sdf(point: Vec3) -> f32 {
             capsule_sdf(point, Vec3::new(side * 0.38, 0.02, 0.36), Vec3::new(side * 0.48, 0.06, 0.08), 0.075);
         shape = smooth_union(shape, zygomatic_arch, 0.13);
         let masseter =
-            capsule_sdf(point, Vec3::new(side * 0.37, -0.05, 0.32), Vec3::new(side * 0.22, -0.46, 0.43), 0.055);
-        shape = smooth_union(shape, masseter, 0.12);
+            capsule_sdf(point, Vec3::new(side * 0.38, -0.03, 0.26), Vec3::new(side * 0.34, -0.33, 0.12), 0.10);
+        shape = smooth_union(shape, masseter, 0.14);
     }
     for side in [-1.0, 1.0] {
         let brow_ridge =
