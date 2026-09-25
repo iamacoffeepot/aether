@@ -56,8 +56,7 @@ host. The knob is `--http-secrets` (`AETHER_HTTP_SECRETS`, `[http] secrets` in a
 config file): a comma list of `<host>/<header-name>=<secret-name>`, or
 `<host>/bearer=<secret-name>` for `Authorization: Bearer <value>`.
 
-For the Anthropic Messages API (the `aether.anthropic` component sends no key
-of its own):
+For the Anthropic Messages API (the calling component sends no key of its own):
 
 ```sh
 aether-headless \

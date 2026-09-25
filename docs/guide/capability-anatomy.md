@@ -30,10 +30,9 @@ foundation crate the provider depends on rather than a grab-bag crate — a plai
 dependency, not a facade: nothing re-exports the provider through the
 foundation, so the provider stays a leaf and only its own reverse-dependency
 closure reruns on a change to it. Reach for the foundation crate only once the
-logic is genuinely shared; a content-gen provider keeps its own wasm-safe
-DTO and string helpers rather than sharing a one-consumer crate, so
-`aether-anthropic` is a self-contained leaf. (It is a wasm guest component
-loaded on demand, not a native chassis capability — ADR-0159.)
+logic is genuinely shared; a provider with no sibling keeps its own wasm-safe
+DTO and string helpers rather than sharing a one-consumer crate, so it stays
+a self-contained leaf.
 
 ## Typical directory
 
@@ -348,7 +347,6 @@ Do not copy old paths such as a crate-root `test_echo.rs` or `test_chassis.rs`.
 - Heavy runtime directory: `audio/`, `render/`, `component/`, `lifecycle/`
 - Neutral identity with desktop/headless/synthetic runtimes: `window/`
 - Multi-actor cluster: `fleet/`, `http/`, `tcp/`
-- Self-contained guest provider components: `anthropic/`
 - Split test support: `rpc/server/test_echo.rs`
 
 See [Guest/native boundaries](architecture/guest-native-boundary.md),
