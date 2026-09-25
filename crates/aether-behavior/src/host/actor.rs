@@ -586,7 +586,7 @@ mod tests {
     }
 
     fn host(script: ScriptSource) -> BehaviorHost {
-        let mut init_ctx = WasmInitCtx::__new(0x10);
+        let mut init_ctx = WasmInitCtx::__new();
         BehaviorHost::init(config(script), (), &mut init_ctx).expect("test setup: host inits")
     }
 

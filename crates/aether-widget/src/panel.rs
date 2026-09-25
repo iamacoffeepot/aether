@@ -1484,14 +1484,14 @@ impl WasmActor for WidgetPanel {
     }
 
     /// Observe one descendant scroll container's exact typed outcome. The
-    /// `container` field remains authoritative after intermediate scroll
-    /// actors relay the event unchanged.
+    /// owner is the direct child `widget` names, `relays` scroll hops inward:
+    /// each intermediate scroll that relays the event adds one.
     #[handler::manual]
     fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, outcome: ScrollOutcome) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
-            container = outcome.container.0,
+            relays = outcome.relays,
             offset_x_pixels = outcome.offset.x_pixels,
             offset_y_pixels = outcome.offset.y_pixels,
             consumed_x_pixels = outcome.consumed.x_pixels,

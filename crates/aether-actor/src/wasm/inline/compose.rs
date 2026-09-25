@@ -262,7 +262,7 @@ where
     let Some(config) = <A::Config as Kind>::decode_from_bytes(to_reconstruct.config_bytes) else {
         return false;
     };
-    let mut init_ctx = WasmInitCtx::__new(to_reconstruct.alias.0);
+    let mut init_ctx = WasmInitCtx::__new();
     // ADR-0156 §2: empty params for now — resolve `Params` to the compiled
     // default, mirroring the real-config decode above.
     let params = <A::Params as Default>::default();

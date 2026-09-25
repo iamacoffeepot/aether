@@ -1911,12 +1911,14 @@ using `Focus::hit_test` — a scroll viewport, or a virtual list, which owns the
 row window it realizes — and it never follows pointer capture. The consuming actor
 converts chassis deltas once (`x_pixels = -delta_x`, `y_pixels = -delta_y`),
 then clamps each axis independently. It emits
-`ScrollOutcome { container, offset, consumed, residual }`. If an axis
-overshoots a bound, only the exact `ScrollResidual` remainder moves to the
+`ScrollOutcome { relays, offset, consumed, residual }` with `relays: 0`. If an
+axis overshoots a bound, only the exact `ScrollResidual` remainder moves to the
 parent, already in content-space; parents apply it directly without negating
-again. Intermediate scroll actors relay descendant outcomes unchanged, so a
-panel log preserves inner-before-outer ownership. A remainder that reaches the
-panel is logged as a terminal residual and dropped.
+again. An intermediate scroll relays only its own scroll content root's
+outcomes and adds one to `relays` on the way, so the chain below a panel child
+is linear: the panel log attributes each outcome to (direct child, `relays`)
+and preserves inner-before-outer ownership. A remainder that reaches the panel
+is logged as a terminal residual and dropped.
 
 `SetTheme` follows the same actor tree to the retained content root. This keeps
 live restyles and the panel's resolved session font id intact through nested

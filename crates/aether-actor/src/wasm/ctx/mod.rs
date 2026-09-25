@@ -8,8 +8,8 @@
 //! [`crate::model::ctx`]; these structs are concrete impls that route
 //! outbound calls through the per-concern bridge functions in
 //! `crate::wasm::bridge::mail` and `crate::wasm::bridge::persist`.
-//! Ctxs hold per-mail state only (mailbox id at init; reply target at
-//! receive), and dispatch goes through the bridge functions directly.
+//! Ctxs hold per-stage state only (the asset catalog at init; reply target
+//! at receive), and dispatch goes through the bridge functions directly.
 //!
 //! The submodules follow the lifecycle a component author meets in order —
 //! `init`, `wire`, `receive`, `drop` — plus the cross-cutting surfaces the
