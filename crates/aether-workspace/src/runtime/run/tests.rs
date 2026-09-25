@@ -93,7 +93,7 @@ impl Fixture {
     ) -> Result<(RunResult, Vec<StubRequest>), Box<dyn Error>> {
         let stub = StubDaemon::bind()?;
         let runner = Runner {
-            engine: Engine::new(Endpoint::parse(&stub.endpoint())?),
+            engine: Engine::new(Endpoint::from_config(&stub.config())?),
             artifacts: self.store.clone(),
             allotment: Allotment { deadline, memory_bytes: 1 << 30, pids: 64, output: Limits::new(1_000, 1 << 30)? },
         };

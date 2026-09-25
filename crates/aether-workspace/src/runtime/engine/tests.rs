@@ -2,13 +2,14 @@
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::thread;
+use std::time::Duration;
 
-use super::api::ContainerId;
+use super::api::{ContainerId, Waited};
 use super::http::Response;
 use super::logs::{self, Demux, Lengths, Output};
-use super::{Endpoint, Engine, EngineError};
-use crate::ImageRef;
+use super::{ENDPOINT_KEY, Endpoint, Engine, EngineError, TLS_CA_FILE_KEY, TLS_CERT_FILE_KEY, TLS_KEY_FILE_KEY};
 use crate::runtime::testing::{StubDaemon, StubReply, log_stream};
+use crate::{ImageRef, WorkspaceConfig};
 
 const IMAGE: &str = "debian@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -19,7 +20,7 @@ fn body_of(raw: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 fn stub_engine(stub: &StubDaemon) -> Engine {
-    Engine::new(Endpoint::parse(&stub.endpoint()).expect("the stub's endpoint parses"))
+    Engine::new(Endpoint::from_config(&stub.config()).expect("the stub's config is a usable endpoint"))
 }
 
 #[test]
@@ -93,15 +94,109 @@ fn a_non_2xx_status_carries_the_daemons_message() {
 }
 
 #[test]
-fn endpoint_parsing_accepts_only_an_absolute_unix_socket() {
-    // Catches a remote or named-pipe endpoint accepted before its transport
-    // exists (every request would then fail at dial time instead of at boot),
-    // and a refusal that does not name the key an operator must fix.
-    for refused in ["tcp://127.0.0.1:2375", "npipe:////./pipe/docker_engine", "unix://relative.sock"] {
-        let message = Endpoint::parse(refused).expect_err(refused).to_string();
-        assert!(message.contains("AETHER_WORKSPACE_ENDPOINT"), "the refusal names the key: {message}");
+fn endpoint_config_accepts_unix_and_mutual_tls_and_names_the_refused_key() {
+    // Catches a remote endpoint accepted without client auth (a root-equivalent
+    // daemon reachable with no certificate), a TLS file beside a Unix socket
+    // silently ignored, a named-pipe endpoint accepted before its transport
+    // exists, and a refusal that names a key other than the one an operator
+    // must fix.
+    let stub = StubDaemon::bind_tls().expect("bind the TLS stub");
+    let tls = stub.config();
+    let unix = |endpoint: &str| WorkspaceConfig { endpoint: Some(endpoint.to_owned()), ..WorkspaceConfig::default() };
+
+    assert!(Endpoint::from_config(&tls).is_ok(), "tcp:// with a port and all three files");
+    assert!(Endpoint::from_config(&unix("unix:///var/run/docker.sock")).is_ok());
+    assert!(Endpoint::from_config(&WorkspaceConfig::default()).is_ok(), "the unset default");
+
+    let refusals = [
+        (WorkspaceConfig { endpoint: Some("tcp://127.0.0.1".to_owned()), ..tls.clone() }, ENDPOINT_KEY),
+        (WorkspaceConfig { endpoint: Some("tcp://127.0.0.1:0".to_owned()), ..tls.clone() }, ENDPOINT_KEY),
+        (WorkspaceConfig { tls_ca_file: None, ..tls.clone() }, TLS_CA_FILE_KEY),
+        (WorkspaceConfig { tls_cert_file: None, ..tls.clone() }, TLS_CERT_FILE_KEY),
+        (WorkspaceConfig { tls_key_file: None, ..tls.clone() }, TLS_KEY_FILE_KEY),
+        (WorkspaceConfig { tls_key_file: tls.tls_ca_file.clone(), ..tls.clone() }, TLS_KEY_FILE_KEY),
+        (WorkspaceConfig { tls_cert_file: tls.tls_cert_file, ..unix("unix:///run/d.sock") }, TLS_CERT_FILE_KEY),
+        (unix("npipe:////./pipe/docker_engine"), ENDPOINT_KEY),
+        (unix("unix://relative.sock"), ENDPOINT_KEY),
+    ];
+    for (config, key) in refusals {
+        let Err(error) = Endpoint::from_config(&config) else {
+            panic!("accepted {config:?}");
+        };
+        assert_eq!(error.key, key, "{error}");
+        assert!(error.to_string().starts_with(key), "the refusal leads with the key: {error}");
     }
-    assert!(Endpoint::parse("unix:///var/run/docker.sock").is_ok());
+}
+
+#[test]
+fn a_tls_request_round_trips_with_a_client_certificate() {
+    // Catches the TLS variant not wired into `connect`, the TLS files not read
+    // from config, or no client certificate presented: the stub refuses a
+    // client without one, so the call would fail instead of answering.
+    let stub = StubDaemon::bind_tls().expect("bind the TLS stub");
+    let engine = stub_engine(&stub);
+    let image = ImageRef::new(IMAGE).expect("a valid ref");
+
+    let (result, requests) = thread::scope(|scope| {
+        let reply = StubReply::with_length(200, format!(r#"{{"Id":"sha256:1","RepoDigests":["{IMAGE}"]}}"#));
+        let served = scope.spawn(|| stub.serve(vec![reply]));
+        let result = engine.repo_digests(&image);
+        (result, served.join().expect("the stub thread").expect("the stub serves"))
+    });
+
+    assert_eq!(result.expect("the inspect answers"), vec![IMAGE.to_owned()]);
+    assert_eq!(requests[0].line(), format!("GET /v1.44/images/{IMAGE}/json"));
+}
+
+#[test]
+fn a_server_certificate_from_another_ca_fails_the_connect() {
+    // Catches server verification disabled, or a root store that picks up
+    // roots beyond the configured CA: either would let the call through to a
+    // daemon the configured CA never vouched for.
+    let stub = StubDaemon::bind_tls_untrusted().expect("bind the untrusted TLS stub");
+    let engine = stub_engine(&stub);
+    let dialed = stub.endpoint();
+    let image = ImageRef::new(IMAGE).expect("a valid ref");
+
+    let result = thread::scope(|scope| {
+        let served = scope.spawn(|| stub.serve(vec![StubReply::with_length(200, r#"{"RepoDigests":[]}"#)]));
+        let result = engine.repo_digests(&image);
+        // Ignored: the stub's handshake fails too once the client aborts it.
+        let _ = served.join();
+        result
+    });
+
+    match result {
+        Err(EngineError::Connect { endpoint, .. }) => assert_eq!(endpoint, dialed),
+        other => panic!("expected a connect failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_hijacked_attach_over_tls_delivers_the_stdin_bytes_and_their_end() {
+    // Catches a TLS half-close that skips the close_notify or its flush: the
+    // stub would then read a truncated stream, an error rather than the end,
+    // instead of every stdin byte followed by a clean end.
+    assert_an_attach_delivers_the_stdin_bytes_and_their_end(StubDaemon::bind_tls().expect("bind the TLS stub"));
+}
+
+#[test]
+fn a_wait_over_tls_times_out_on_the_socket_timeout() {
+    // Catches the socket's timeout arriving remapped through the TLS stream,
+    // which would turn a run's deadline into a failed wait rather than a kill
+    // answering `Exhausted(Time)`.
+    let stub = StubDaemon::bind_tls().expect("bind the TLS stub");
+    let engine = stub_engine(&stub);
+    let container = ContainerId::new("c0ffee").expect("hex");
+
+    let waited = thread::scope(|scope| {
+        let served = scope.spawn(|| stub.serve(vec![StubReply::hold()]));
+        let waited = engine.wait(&container, Duration::from_millis(200));
+        served.join().expect("the stub thread").expect("the stub serves");
+        waited
+    });
+
+    assert_eq!(waited.expect("the wait ends"), Waited::TimedOut);
 }
 
 #[test]
@@ -160,7 +255,12 @@ fn a_hijacked_attach_delivers_the_stdin_bytes_and_their_end() {
     // body the daemon discards), buffered bytes never sent, or a stream never
     // closed, which would leave the process reading stdin forever: the stub
     // records the stream only once the client closes its writing half.
-    let stub = StubDaemon::bind().expect("bind the stub");
+    assert_an_attach_delivers_the_stdin_bytes_and_their_end(StubDaemon::bind().expect("bind the stub"));
+}
+
+/// Attach to `stub`, stream 300 KiB of stdin, close it, and require the stub
+/// to have read exactly those bytes and then a clean end.
+fn assert_an_attach_delivers_the_stdin_bytes_and_their_end(stub: StubDaemon) {
     let engine = stub_engine(&stub);
     let container = ContainerId::new("c0ffee").expect("hex");
     let stdin: Vec<u8> = (0..=255u8).cycle().take(300 * 1024).collect();
