@@ -4,7 +4,7 @@
 - **Date:** 2026-09-25
 - **Amended:** 2026-09-25 — decision 6: persisting a handle is a documented misuse, not enforced; later directions recorded.
 - **Amended:** 2026-09-25 — decision 10: `ReadArtifact` replies carry handles too; `aether.fs` recorded as a blob consumer.
-- **Amended:** 2026-09-25 — decisions 9, 11: `blob_len_p32` gives the reader its length; `read_range` takes `&self`; the guest SDK's `std` feature is new; a `replace` keeps the old instance's counts.
+- **Amended:** 2026-09-25 — decisions 2, 3, 9, 11: `BlobRef` is opaque (identity plus an engine-supplied keep-alive, no methods); reading goes through `ctx.read_blob`; guest imports are `blob_len_p32`, `blob_read_p32` and `blob_drop_p32`; the guest SDK's `std` feature is new; a general resource-type pattern is recorded.
 - **Amended:** 2026-09-25 — decisions 2, 3, 4, 9: a handle is the blob's hash (`BlobRef`, cloned and dropped like an `Arc`), not a per-actor index; `BlobRef` lives in `aether-data`; there is no release verb.
 
 Builds on [ADR-0038](0038-actor-per-component-dispatch.md) and
@@ -142,27 +142,36 @@ the last weak reference drops, so a weak index over bare `Arc<[u8]>` would free
 nothing. `Weak<BlobEntry>` pins only the small `BlobEntry` header, and the
 boxed bytes are freed when the last strong reference drops.
 
-### 2. A handle is the blob's hash
+### 2. A handle is an opaque reference named by the blob's hash
 
 ```rust
-// crates/aether-data (every kind crate depends only on aether-data, and kinds carry blob fields)
-pub struct BlobRef { hash: BlobHash, /* native builds: the entry's strong reference */ }
-// not Copy. Clone adds a reference and Drop lets it go, like an Arc.
+// crates/aether-data: one definition for every target; no cfg, no FFI
+pub struct BlobRef { hash: BlobHash, keep: Arc<dyn Keep> }   // no methods beyond Clone and Debug
+pub trait Keep: Send + Sync {}   // no methods: the engine's type decides what the last drop does
 ```
 
-| Side | What a `BlobRef` holds | Holdings |
-|---|---|---|
-| Native actor | the hash and its entry's `Arc`, type-erased behind a trait `aether-data` declares and the store implements | nothing beyond its `BlobRef`s: the `Arc`'s count is the accounting |
-| Wasm guest | the hash alone, 32 bytes in linear memory | a table on `ComponentCtx`, beside `reply_table`: hash to (entry `Arc`, count of the guest's live `BlobRef`s), moved across `replace` like `PendingReplies` |
+A `BlobRef` is a symbol. Held on its own it can be kept, cloned, sent and
+dropped, and nothing else: it has no read, length or inspection methods.
+Everything a caller can do with the bytes goes through engine APIs that take
+`&BlobRef` (section 9). Its identity is the hash, the same in every actor.
 
-- A `BlobRef` names the same blob in every actor. Its identity is the hash.
-- Cloning adds a reference and dropping lets it go. A guest's `Clone` and
-  `Drop` call host imports that raise and lower its table count, and the
-  entry leaves the table at zero. No actor code releases a blob: going out of
-  scope does it, and other holders are unaffected.
+`keep` is the engine patching in drop behavior. `aether-data` declares only
+"something that runs when the last copy goes"; the engine supplies the type:
+
+| Side | `keep` is | What the last drop does | Holdings |
+|---|---|---|---|
+| Native actor | the store's `BlobEntry` | frees or reclaims the bytes (section 7) | nothing beyond its `BlobRef`s: the `Arc`'s count is the accounting |
+| Wasm guest | `aether-actor`'s `GuestHold` | calls `blob_drop_p32` once, lowering the host table's count | a table on `ComponentCtx`, beside `reply_table`: hash to (entry `Arc`, count of live `GuestHold`s), moved across `replace` like `PendingReplies` |
+
+- Cloning is a local `Arc` increment on both sides. No actor code releases a
+  blob: going out of scope does it, and other holders are unaffected.
 - A native table would be state that `Drop` could reach only through an
-  ambient door, so a native `BlobRef` holds its entry directly and native
+  ambient door, so a native `BlobRef` keeps its entry directly and native
   actors keep no table. Nothing is stored on `NativeBinding` (see Context).
+- The alternative patch point, a process-global drop hook installed at boot,
+  would drop the pointer from the ref but needs a global count keyed by hash:
+  a lookup under one contended lock on every clone and drop, and one hook
+  shared by every engine in the process.
 - The guest table is keyed by hash, so it needs no generation bits and has no
   stale-reuse case: a hash always names the same bytes, and the only failure
   is "not held by this actor".
@@ -173,9 +182,9 @@ pub struct BlobRef { hash: BlobHash, /* native builds: the entry's strong refere
 
 | Step | What happens |
 |---|---|
-| Send | The payload carries hashes. The send path clones each blob field's `Arc` into the envelope: a native `BlobRef` holds it, and a guest's is looked up in its table, where a hash the guest does not hold refuses the send. A send borrows its payload, so the sender keeps its references. |
-| Carry | The envelope carries the `Arc`s beside the payload: `attachments: Option<Box<[Arc<BlobEntry>]>>` on `Mail`, one null word when empty. |
-| Deliver | A native recipient's decoded `BlobRef`s take their `Arc`s from the attachments. A guest recipient's table gains one count per `BlobRef` in the payload before the handler runs. A hash is the same in every actor, so the payload is never rewritten. Fan-out delivers per recipient. |
+| Send | The payload carries hashes. The send path attaches a native `BlobRef` per blob field: a native sender's is cloned, and a guest's hash is looked up in its table, where a hash the guest does not hold refuses the send. A send borrows its payload, so the sender keeps its references. |
+| Carry | The envelope carries the `Arc`s beside the payload: `attachments: Option<Box<[BlobRef]>>` on `Mail`, one null word when empty. |
+| Deliver | A native recipient's decoded `BlobRef`s are the attachments. A guest recipient's table gains one count per `BlobRef` in the payload before the handler runs, and each decoded guest `BlobRef` owns one `GuestHold`. A hash is the same in every actor, so the payload is never rewritten. Fan-out delivers per recipient. |
 
 A grant is a side effect of delivering mail. An actor cannot see a new blob
 until mail carrying it is delivered. Prior art: Unix `SCM_RIGHTS`, Fuchsia
@@ -197,9 +206,10 @@ reaches nothing the caller does not already hold.
 
 `BlobRef` lives in `aether-data`, not in `aether-actor`'s reference module:
 kind crates depend only on `aether-data`, and a type in `aether-actor` could
-never appear in their kinds. Its constructor is hidden, only the substrate
-mints it (check-in and delivery), and the existing mint scanner
-(`scripts/check-reference-mint.py`) confines the constructor to the store.
+never appear in their kinds. Its constructor and the accessor engine APIs
+use to reach the hash and `keep` are hidden. Only the engine calls them (the
+store's check-in, delivery, and the read APIs), and the existing mint scanner
+(`scripts/check-reference-mint.py`) confines them.
 
 ### 5. Handles never cross the wire
 
@@ -229,7 +239,20 @@ A hash resolves only against its holder's own table, so a replayed or
 forged hash reaches only blobs the holder already holds. A misuse can
 cost correctness, never access.
 
-Directions recorded for a later trait rework, none chosen. The leading one:
+Directions recorded for a later trait rework, none chosen.
+
+- **A general resource-type pattern.** `BlobRef` is the first instance of a
+  category: an opaque identity plus an engine-supplied keep-alive whose type
+  decides what the last drop does, process-local by construction, and operated
+  only through APIs that take it. `ActorRef` arguably fits already, and GPU
+  textures or sockets would too. Prior art: Erlang NIF resource objects (a
+  per-type destructor registered by the native library, operations only
+  through NIF functions), wasm component-model resources (`own<T>` /
+  `borrow<T>`, a host-side drop through an import, no methods on the handle),
+  FIDL `resource` types, Lua userdata with `__gc`, Rust `bytes::Bytes`'s
+  per-instance vtable, and C++ `shared_ptr` with a custom deleter.
+
+The leading one for kinds:
 
 - **Liveness classes and encoder accept sets.** Every kind keeps one schema
   and carries a liveness class, derived as the most restrictive class among
@@ -311,45 +334,41 @@ cost of freeing large blocks.
   `Arc::new_uninit_slice`-style buffer in place, so building an entry does not
   copy the bytes twice.
 
-### 9. Reads: native borrows, wasm streams
+### 9. Reads: through ctx APIs, streamed on both sides
 
-Native code borrows zero-copy from the `BlobRef` itself:
-`blob.bytes() -> &[u8]`. A native `BlobRef` always holds its entry, so the
-borrow cannot fail and needs no ctx.
-
-A wasm guest reads only through a streaming API. No host import and no guest
-SDK call returns a blob's whole bytes.
+A `BlobRef` has no read methods. Reading is an engine API on both ctxs, and
+it streams everywhere:
 
 ```rust
-// guest SDK (aether-actor, no_std)
-pub struct BlobReader<'a> { blob: &'a BlobRef, cursor: u64, len: u64 }
+// NativeCtx and WasmCtx alike
+ctx.read_blob(&blob) -> BlobReader
 
-impl<'a> BlobReader<'a> {
-    pub fn open(blob: &'a BlobRef) -> BlobReader<'a>;
+impl BlobReader<'_> {
     pub fn len(&self) -> u64;
-    pub fn read(&mut self, buf: &mut [u8]) -> usize;   // at most MAX_READ_BYTES per call
+    pub fn read(&mut self, buf: &mut [u8]) -> usize;                  // at most MAX_READ_BYTES per call
     pub fn seek(&mut self, to: u64);
     pub fn read_range(&self, offset: u64, buf: &mut [u8]) -> usize;   // does not move the cursor
 }
 
 // host imports (crates/aether-substrate/src/actor/wasm/host_fns.rs); hash_ptr points at the 32-byte hash
-// "aether"."blob_len_p32"(hash_ptr: u32) -> i64       // BlobReader::open
+// "aether"."blob_len_p32"(hash_ptr: u32) -> i64            // ctx.read_blob
 // "aether"."blob_read_p32"(hash_ptr: u32, offset: u64, dst_ptr: u32, dst_len: u32) -> i64
-// "aether"."blob_clone_p32"(hash_ptr: u32) -> i32     // BlobRef::clone
-// "aether"."blob_drop_p32"(hash_ptr: u32)            // BlobRef::drop
+// "aether"."blob_drop_p32"(hash_ptr: u32)                 // GuestHold::drop
 ```
 
-- The guest supplies the buffer. The host copies at most `MAX_READ_BYTES` per
-  call into it and returns the length (negative for a hash the guest does not
-  hold).
-- Streaming decoders run over the reader.
-- This is a forced paradigm. A component author has to ask why they would load
-  something large into memory.
-- A guest can still loop the reader into a `Vec`. The API cannot prevent it.
-  Nothing makes it the easy path, and the loop is visible in review.
-- `blob_clone_p32` and `blob_drop_p32` are consumed by the guest `BlobRef`'s
-  own `Clone` and `Drop`. `blob_read_p32` lands with a named production
-  consumer, per the rule that every FFI import needs one: Bloomery's `Env::open` over an `OpaqueBytes`
+- Native reads resolve `keep` to the store entry and copy from it. Guest reads
+  go through the imports, which resolve a hash only against the caller's own
+  table.
+- The caller supplies the buffer. The host copies at most `MAX_READ_BYTES` per
+  call and returns the length (negative for a hash the guest does not hold).
+- Streaming is the paradigm on both sides: a caller has to ask why it would
+  load something large into memory. A caller can still loop the reader into a
+  `Vec`; nothing makes it the easy path, and the loop is visible in review.
+- There is no zero-copy view yet. One arrives as its own API when a consumer
+  needs contiguous bytes (the render cap uploading textures, for example).
+- `blob_drop_p32` is consumed by `GuestHold`'s own `Drop`. `blob_len_p32` and
+  `blob_read_p32` land with a named production consumer, per the rule that
+  every FFI import needs one: Bloomery's `Env::open` over an `OpaqueBytes`
   input (section 11).
 
 ### 10. Closures carry handles, and the closure ceiling rises
@@ -386,7 +405,7 @@ meaning.
 | Native send | `crates/aether-substrate/src/actor/native/binding/{outbound,pending,flush,send}.rs` (ring entries are plain bytes, so attachments ride on `PendingMail` beside the ring entry) |
 | Native deliver | `actor/native/slot/dispatcher.rs` (decoded `BlobRef`s take the attachments' `Arc`s), `actor/native/ctx/{mod,send}.rs` |
 | Armed hand-offs | `actor/native/blob/work.rs:670`, `actor/native/spawn/activation.rs:564`, `mail/mailer.rs` (`route_tail`) |
-| Wasm | `actor/wasm/host_fns.rs` (`send_mail_p32` lookup, `blob_read_p32`, `blob_clone_p32`, `blob_drop_p32`), `actor/wasm/component/{ctx,dispatch}.rs`, `crates/aether-component/src/trampoline/runtime/mod.rs` (table across `replace`) |
+| Wasm | `actor/wasm/host_fns.rs` (`send_mail_p32` lookup, `blob_len_p32`, `blob_read_p32`, `blob_drop_p32`, `read_blob`), `actor/wasm/component/{ctx,dispatch}.rs`, `crates/aether-component/src/trampoline/runtime/mod.rs` (table across `replace`) |
 | Guest SDK | `crates/aether-actor/src/wasm/{raw.rs,bridge/mail.rs}` |
 | `BlobRef` and schema | `crates/aether-data/src/{blob.rs,schema.rs}` (`BlobRef`, `SchemaType::BlobRef`), `crates/aether-codec/src/{encode,decode}.rs` (refuse) |
 | Boundary | `crates/aether-substrate/src/mail/boundary.rs`, `crates/aether-rpc/src/server/runtime.rs` |
@@ -410,12 +429,12 @@ meaning.
   in-engine consumer.
 - **Other consumers.** Process stdout, fs reads, and future mostly-static
   graphics data (meshes, textures) held as blobs and uploaded by the render
-  cap from a borrowed slice.
+  cap, which is the likely first consumer of a zero-copy view.
 - **Naming.** `actor/native/blob/` already means ADR-0087's unit of dispatch.
   The store's module is `store/`, with the types `BlobStore` / `BlobEntry` /
   `BlobHash`, and a handle is a `BlobRef`. ADR-0087's unit of dispatch is to be renamed separately.
 - **Negative.** Blob-bearing kinds pay a schema walk on send and on delivery.
-  A guest's `BlobRef` clone and drop each cost a host call, and a guest that
+  A guest's last drop of a `GuestHold` costs one host call, and a guest that
   leaks a `BlobRef` (for example with `mem::forget`) keeps its entry until the
   actor dies. A `replace` carries the guest table across, and references that
   lived in the old instance's memory die without running `Drop`, so their
