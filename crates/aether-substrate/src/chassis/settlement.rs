@@ -7,7 +7,8 @@
 //! - [`SettlementRegistry::subscribe_settlement`] returns a
 //!   `crossbeam_channel::Receiver<()>` for in-thread waiters
 //!   (chassis-internal code, tests) that can block on `recv` directly.
-//! - [`SettlementRegistry::subscribe_settlement_mail`] pushes a
+//! - `SettlementRegistry::subscribe_settlement_mail` (crate-private,
+//!   the path behind `NativeCtx::subscribe_settlement`) pushes a
 //!   notification mail to a target mailbox when the root settles —
 //!   for actors whose thread is committed to its mpsc inbox and
 //!   can't block on a separate channel without per-cid helper threads.
@@ -233,7 +234,7 @@ impl SettlementRegistry {
     /// # Panics
     /// Panics if the inner `Mutex` is poisoned — fail-fast per ADR-0063:
     /// a poisoned mutex means a prior holder panicked under the guard.
-    pub fn subscribe_settlement_mail(&self, root: MailId, target: MailboxId, kind: KindId, mailer: Arc<Mailer>) {
+    pub(crate) fn subscribe_settlement_mail(&self, root: MailId, target: MailboxId, kind: KindId, mailer: Arc<Mailer>) {
         let mut cell = self.cell_for(root).lock().expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
         if cell.settled.contains(&root) {
             // Drop the mutex before pushing — `push` may run hot

@@ -70,9 +70,10 @@ pub type MailKind = KindId;
 /// also rode here, set by `with_origin` to the same id
 /// `reply_to.addr = Component(_)` already carried.
 #[derive(Debug)]
-pub struct Mail {
-    pub recipient: MailboxId,
-    pub kind: MailKind,
+#[allow(clippy::struct_field_names)] // aether-suppression-request: `mail_id` / `parent_mail` are the ADR-0080 lineage names every trace event and producer uses; the lint only fires now that the struct is crate-private
+pub(crate) struct Mail {
+    pub(crate) recipient: MailboxId,
+    pub(crate) kind: MailKind,
     /// The payload bytes, carried as a [`MailRef`] so a producer that
     /// buffered this mail into its per-actor ring (ADR-0087 / 2b) routes
     /// a zero-copy `InRing` reference, while cross-boundary and
@@ -80,30 +81,30 @@ pub struct Mail {
     /// routing path (`route_mail`) is variant-agnostic — it reads
     /// `payload.bytes()` and only materializes to `Owned` at the few
     /// sites that move bytes off-engine.
-    pub payload: MailRef,
-    pub count: u32,
-    pub reply_to: Source,
+    pub(crate) payload: MailRef,
+    pub(crate) count: u32,
+    pub(crate) reply_to: Source,
     /// ADR-0080 §1: this mail's identity. The producer mints it from
     /// `MailId::new(producer_mailbox, producer_per_actor_correlation)`
     /// before pushing through `Mailer`. PR 2 stamps it inert (no
     /// trace-event consumer reads it yet); PR 2's `TraceObserver` hooks
     /// emit `TraceEvent::Sent { mail_id, .. }` against this value.
     /// `None` for mail no producer stamped.
-    pub mail_id: Option<MailId>,
+    pub(crate) mail_id: Option<MailId>,
     /// ADR-0080 §5: the root of this mail's causal chain — the
     /// originating mail's `mail_id` for the chain. Inherited from the
     /// sender's in-flight handler context; for chassis-root sends
     /// (`Tick`, lifecycle, externally-bridged), `root == mail_id`.
     /// `None` for mail that carries no chain.
-    pub root: Option<MailId>,
+    pub(crate) root: Option<MailId>,
     /// ADR-0080 §5: the in-flight mail at the sender, or `None` for
     /// chassis-root sends. The receiver's parent in the causal graph.
-    pub parent_mail: Option<MailId>,
+    pub(crate) parent_mail: Option<MailId>,
 }
 
 impl Mail {
     #[must_use]
-    pub fn new(recipient: MailboxId, kind: MailKind, payload: impl Into<MailRef>, count: u32) -> Self {
+    pub(crate) fn new(recipient: MailboxId, kind: MailKind, payload: impl Into<MailRef>, count: u32) -> Self {
         Self {
             recipient,
             kind,
@@ -123,7 +124,7 @@ impl Mail {
     /// peer-to-peer component sends (target = `Component(sender)`).
     /// Other mail paths leave the default `Source::None`.
     #[must_use]
-    pub fn with_reply_to(mut self, reply_to: Source) -> Self {
+    pub(crate) fn with_reply_to(mut self, reply_to: Source) -> Self {
         self.reply_to = reply_to;
         self
     }
@@ -137,7 +138,12 @@ impl Mail {
     /// passes a carrier's lineage through unchanged; mail with no lineage
     /// stamped keeps `None` in all three.
     #[must_use]
-    pub fn with_lineage(mut self, mail_id: Option<MailId>, root: Option<MailId>, parent_mail: Option<MailId>) -> Self {
+    pub(crate) fn with_lineage(
+        mut self,
+        mail_id: Option<MailId>,
+        root: Option<MailId>,
+        parent_mail: Option<MailId>,
+    ) -> Self {
         self.mail_id = mail_id;
         self.root = root;
         self.parent_mail = parent_mail;

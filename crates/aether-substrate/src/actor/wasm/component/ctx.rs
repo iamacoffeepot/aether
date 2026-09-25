@@ -402,7 +402,7 @@ impl ComponentCtx {
     /// routes to the component's inbox, warn-drops dropped/unknown
     /// mailboxes, or bubbles unknown ids up to the hub-substrate when
     /// a `HubOutbound` is wired (ADR-0037).
-    pub fn send(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
+    pub(crate) fn send(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
         // ADR-0042: mint a fresh correlation_id for this send and
         // stash it on `last_correlation` so `prev_correlation_p32`
         // can return it to the guest. The minted id rides on the
@@ -432,7 +432,14 @@ impl ComponentCtx {
     /// `send_detached` verb or `MailSender::send_detached_to`). Correlation / reply-routing are identical to
     /// `send` — only the trace lineage differs. `from` (issue 1987) is the
     /// dispatch identity the host fn already resolved, used as in `send`.
-    pub fn send_detached(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
+    pub(crate) fn send_detached(
+        &self,
+        recipient: MailboxId,
+        kind: MailKind,
+        payload: Vec<u8>,
+        count: u32,
+        from: MailboxId,
+    ) {
         let correlation = self.mint_correlation();
         let reply_to = Source::with_correlation(SourceAddr::Component(from), correlation);
         let mail_id = MailId::new(from, correlation);
