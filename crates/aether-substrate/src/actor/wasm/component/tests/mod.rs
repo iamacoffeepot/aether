@@ -33,6 +33,8 @@ use aether_data::tagged_id::Tag;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
+mod blob;
+
 /// A disarmed, unstamped inbound for `Component::deliver`: `payload` of `kind`
 /// routed to `recipient`, replying to `sender`.
 fn inbound(recipient: MailboxId, kind: aether_data::KindId, payload: Vec<u8>, sender: Source) -> Envelope {
