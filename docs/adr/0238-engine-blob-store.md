@@ -329,9 +329,8 @@ impl<'a> BlobReader<'a> {
 
 This amends ADR-0226 decision 10. `ReadArtifact` and `ReadClosure` answer
 with handles, not inline bytes, and `Invoke` hands the program its closure
-as handles. A
-program reads an `OpaqueBytes` member through `BlobReader`, so no member is
-copied into the program's memory unless it reads it.
+as handles. A program reads an `OpaqueBytes` member through `BlobReader`,
+so no member is copied into the program's memory unless it reads it.
 
 The ceiling now bounds resident bytes checked in for one closure, not a mail
 frame. `ClosureLimit::MAX_BYTES` rises from 16 MiB to 4 GiB, which admits a
