@@ -52,10 +52,13 @@ impl BlobDir {
     /// Store `bytes` under `digest` unless its file already exists: temp file
     /// in `blobs/tmp/`, fsync, rename to the digest name, fsync the shard
     /// directory. The caller commits the artifact row only after this returns.
+    ///
+    /// An existing file may be one an interrupted earlier store renamed but
+    /// never made durable, so its shard directory is fsynced before reuse.
     pub fn store(&self, digest: &Digest, bytes: &[u8]) -> Result<(), JournalError> {
         let (shard, path) = self.locate(digest);
         if path.try_exists().map_err(|error| JournalError::io(&path, error))? {
-            return Ok(());
+            return sync_dir(&shard);
         }
 
         let tmp = self.tmp();
@@ -118,11 +121,12 @@ fn read_error(digest: &Digest, path: &Path, error: io::Error) -> JournalError {
 }
 
 /// Create the directory `path` when it is missing, then fsync its parent so
-/// the new entry survives a crash. An existing directory is left alone.
+/// the entry survives a crash. The parent is fsynced for an existing
+/// directory too, since an interrupted earlier create may not be durable yet.
 pub fn create_synced(path: &Path) -> Result<(), JournalError> {
     match fs::create_dir(path) {
         Ok(()) => sync_dir(parent_of(path)),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists && path.is_dir() => sync_dir(parent_of(path)),
         Err(error) => Err(JournalError::io(path, error)),
     }
 }
