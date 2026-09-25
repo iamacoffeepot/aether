@@ -130,7 +130,9 @@ impl BlobStore {
         entry
     }
 
-    /// The total length of every live entry's bytes, each counted once.
+    /// The total length of every live entry's bytes, each counted once. Read
+    /// only by tests until the gauge has a reader outside the store.
+    #[cfg(test)]
     #[must_use]
     pub fn resident_bytes(&self) -> usize {
         self.shared.resident_bytes.load(Ordering::Relaxed)

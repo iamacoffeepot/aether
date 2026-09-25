@@ -53,7 +53,7 @@ pub mod transform;
 pub mod wire;
 pub mod wire_id;
 #[doc(hidden)]
-pub use blob::__mint_shared_blob;
+pub use blob::{__mint_shared_blob, __shared_backing};
 pub use blob::{Blob, BlobBacking, BlobHash, BlobReader, MAX_READ_BYTES};
 pub use contract::first_contract_break;
 pub use hash::{
@@ -169,6 +169,33 @@ pub trait Kind {
              on `#[repr(C)]`) or hand-roll an override before sending.",
             Self::NAME,
         );
+    }
+
+    /// Encode `self` through `enc`, handing each `Blob` field to
+    /// [`wire::Encoder::blob`] once wherever it nests (ADR-0238 decision 3).
+    /// The `Kind` derive overrides it for structured kinds. The default, which
+    /// cast kinds keep because a `#[repr(C)]` type cannot hold a `Blob`,
+    /// appends [`Kind::encode_into_bytes`] to [`wire::Encoder::out`].
+    ///
+    /// # Errors
+    ///
+    /// Fails only when a length exceeds the `u32` ceiling.
+    fn encode_with<E: wire::Encoder>(&self, enc: &mut E) -> Result<(), wire::Error> {
+        enc.out().extend_from_slice(&self.encode_into_bytes());
+        Ok(())
+    }
+
+    /// Decode one instance from `bytes`, resolving each tag-1 `Blob` field's
+    /// hash through `resolver` (ADR-0238 decision 3). The `Kind` derive
+    /// overrides it for structured kinds; the default ignores `resolver` and
+    /// is [`Kind::decode_from_bytes`].
+    #[must_use]
+    fn decode_with(bytes: &[u8], resolver: &mut dyn wire::BlobResolver) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        let _ = resolver;
+        Self::decode_from_bytes(bytes)
     }
 }
 
@@ -561,7 +588,7 @@ pub mod __derive_runtime {
         fold_path_segment, terminate_field_hash, variant_hash,
     };
     use crate::wire;
-    pub use crate::wire::{WireDecode, WireEncode, decode_bytes, encode_bytes};
+    pub use crate::wire::{BlobResolver, Decoder, Encoder, WireDecode, WireEncode, decode_bytes, encode_bytes};
     pub use alloc::borrow::Cow;
     pub use alloc::string::String;
     pub use alloc::vec::Vec;
@@ -619,6 +646,28 @@ pub mod __derive_runtime {
     /// body (ADR-0118); encoding fails only past the `u32` length ceiling.
     pub fn encode_wire<T: WireEncode>(value: &T) -> Vec<u8> {
         wire::encode_to_vec(value).expect("wire encode to Vec fails only past the u32 length ceiling")
+    }
+
+    /// Wire-shape encode through an [`Encoder`]: the body the `Kind` derive
+    /// emits for `Kind::encode_with` on a structured kind. Sibling of
+    /// `encode_wire`.
+    ///
+    /// # Errors
+    ///
+    /// Fails only when a length exceeds the `u32` ceiling.
+    pub fn encode_wire_with<T: WireEncode, E: Encoder + ?Sized>(value: &T, enc: &mut E) -> Result<(), wire::Error> {
+        value.encode_to(enc)
+    }
+
+    /// Wire-shape decode that resolves tag-1 `Blob` hashes through
+    /// `resolver`, requiring every byte consumed: the body the `Kind` derive
+    /// emits for `Kind::decode_with` on a structured kind. Sibling of
+    /// `decode_wire`.
+    #[must_use]
+    pub fn decode_wire_with<T: for<'de> WireDecode<'de>>(bytes: &[u8], resolver: &mut dyn BlobResolver) -> Option<T> {
+        let mut dec = wire::Resolving::new(bytes, resolver);
+        let value = T::decode_from(&mut dec).ok()?;
+        dec.is_empty().then_some(value)
     }
 }
 

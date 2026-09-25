@@ -40,11 +40,9 @@ impl BlobEntry {
         self.bytes.len()
     }
 
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
+    /// The entry's hash. The test seam for the wasm blob table's grant; the
+    /// envelope encoder that writes tag-1 fields un-gates it.
+    #[cfg(test)]
     #[must_use]
     pub fn hash(&self) -> BlobHash {
         self.hash

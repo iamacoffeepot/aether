@@ -12,12 +12,15 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
 use core::fmt;
 
+mod codec;
 mod reader;
 #[cfg(test)]
 mod tests;
 
+pub use codec::encode_inline;
 pub use reader::{BlobReader, MAX_READ_BYTES};
 
 /// Immutable bytes. `Clone` is cheap: it clones one `Arc`, and the bytes stay
@@ -59,7 +62,11 @@ impl fmt::Debug for Blob {
 /// The bytes behind a `Shared` [`Blob`]. `aether-data` declares it; the
 /// engine blob store and the guest backing implement it. Implementing it
 /// builds nothing: only `__mint_shared_blob` turns a backing into a `Blob`.
-pub trait BlobBacking: Send + Sync + 'static {
+///
+/// `Any` lets the engine recover its own store entry from a `Shared` value
+/// it is sending on (ADR-0238 decision 4). The entry type is private to the
+/// engine, so no other crate can name the downcast target.
+pub trait BlobBacking: Any + Send + Sync + 'static {
     /// The number of bytes.
     fn len(&self) -> u64;
 
@@ -99,4 +106,17 @@ impl BlobHash {
 #[must_use]
 pub fn __mint_shared_blob(backing: Arc<dyn BlobBacking>) -> Blob {
     Blob(Repr::Shared(backing))
+}
+
+/// The backing behind a `Shared` value, or `None` for `Owned` bytes. The
+/// engine's envelope encoder downcasts it to its store entry to attach that
+/// entry without copying the bytes (ADR-0238 decision 4). It grants no read
+/// a [`BlobReader`] does not.
+#[doc(hidden)]
+#[must_use]
+pub fn __shared_backing(blob: &Blob) -> Option<&Arc<dyn BlobBacking>> {
+    match &blob.0 {
+        Repr::Owned(_) => None,
+        Repr::Shared(backing) => Some(backing),
+    }
 }

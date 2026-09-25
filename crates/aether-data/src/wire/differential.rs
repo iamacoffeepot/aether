@@ -154,6 +154,7 @@ fn schema_type_unit_and_bool_match_serde_and_golden() {
     assert_golden(&SchemaType::Bool, &[1, 0, 0, 0]);
     assert_golden(&SchemaType::String, &[3, 0, 0, 0]);
     assert_golden(&SchemaType::Bytes, &[4, 0, 0, 0]);
+    assert_golden(&SchemaType::Blob, &[12, 0, 0, 0]);
 }
 
 #[test]

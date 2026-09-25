@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use super::Error;
+use super::{Decoder, Encoder, Error};
 
 /// Append this value's ADR-0118 bytes to `out`.
 pub trait WireEncode {
@@ -17,6 +17,18 @@ pub trait WireEncode {
     ///
     /// Fails only when a length exceeds the `u32` ceiling.
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error>;
+
+    /// Encode `self` through `enc`, handing each `Blob` field to
+    /// [`Encoder::blob`]. The derive and the container impls override it to
+    /// pass `enc` to their fields; a leaf that holds no `Blob` keeps the
+    /// default, which writes [`WireEncode::encode`] into [`Encoder::out`].
+    ///
+    /// # Errors
+    ///
+    /// Fails only when a length exceeds the `u32` ceiling.
+    fn encode_to<E: Encoder + ?Sized>(&self, enc: &mut E) -> Result<(), Error> {
+        self.encode(enc.out())
+    }
 }
 
 /// Reconstruct `Self` from the front of a borrowed-slice cursor.
@@ -28,6 +40,19 @@ pub trait WireDecode<'de>: Sized {
     /// Unexpected EOF, an invalid bool/presence/enum byte, a length past the
     /// remaining input, invalid UTF-8, or an out-of-range `char`.
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error>;
+
+    /// Pull one `Self` off `dec`, resolving each tag-1 `Blob` field through
+    /// [`Decoder::resolve`]. The derive and the container impls override it
+    /// to pass `dec` to their fields; a leaf that holds no `Blob` keeps the
+    /// default, which reads [`WireDecode::decode`] from [`Decoder::cursor`].
+    ///
+    /// # Errors
+    ///
+    /// The [`WireDecode::decode`] faults, or [`Error::DetachedBlob`] when
+    /// `dec` does not resolve a tag-1 hash.
+    fn decode_from<D: Decoder<'de> + ?Sized>(dec: &mut D) -> Result<Self, Error> {
+        Self::decode(dec.cursor())
+    }
 }
 
 /// Encode a value to owned wire bytes through [`WireEncode`].
@@ -139,29 +164,32 @@ pub fn read_presence(cursor: &mut &[u8]) -> Result<bool, Error> {
     }
 }
 
-/// Encode a sequence: `u32` count then elements in iteration order.
+/// Encode a sequence through `enc`: `u32` count then elements in iteration
+/// order, each through [`WireEncode::encode_to`].
 ///
 /// # Errors
 ///
 /// [`Error::Length`] past the `u32` ceiling, or an element encode fault.
-pub fn encode_seq<T: WireEncode>(out: &mut Vec<u8>, items: &[T]) -> Result<(), Error> {
-    write_count(out, items.len())?;
+pub fn encode_seq_to<T: WireEncode, E: Encoder + ?Sized>(enc: &mut E, items: &[T]) -> Result<(), Error> {
+    write_count(enc.out(), items.len())?;
     for item in items {
-        item.encode(out)?;
+        item.encode_to(enc)?;
     }
     Ok(())
 }
 
-/// Decode a sequence into an owned `Vec`.
+/// Decode a sequence from `dec` into an owned `Vec`, each element through
+/// [`WireDecode::decode_from`].
 ///
 /// # Errors
 ///
 /// Count overrun or an element decode fault.
-pub fn decode_seq<'de, T: WireDecode<'de>>(cursor: &mut &'de [u8]) -> Result<Vec<T>, Error> {
+pub fn decode_seq_from<'de, T: WireDecode<'de>, D: Decoder<'de> + ?Sized>(dec: &mut D) -> Result<Vec<T>, Error> {
+    let cursor = dec.cursor();
     let count = u32::from_le_bytes(take_array(cursor)?) as usize;
     let mut items = Vec::with_capacity(count.min(cursor.len()));
     for _ in 0..count {
-        items.push(T::decode(cursor)?);
+        items.push(T::decode_from(dec)?);
     }
     Ok(items)
 }

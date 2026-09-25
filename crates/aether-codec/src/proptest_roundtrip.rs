@@ -46,7 +46,7 @@ const MAX_WIDTH: usize = 4;
 /// is a leaf yes; `Array` is eligible iff its element is; a nested
 /// `Struct` is eligible iff it is itself `repr_c: true` (which, by
 /// construction, already implies its own fields are eligible). Everything
-/// else — `Bool`, `String`, `Bytes`, `Option`, `Vec`, `Enum`, `Map`,
+/// else — `Bool`, `String`, `Bytes`, `Blob`, `Option`, `Vec`, `Enum`, `Map`,
 /// `Unit` — disqualifies the parent. `TypeId` is never generated.
 fn cast_eligible(ty: &SchemaType) -> bool {
     match ty {
@@ -166,6 +166,7 @@ fn arb_schema() -> impl Strategy<Value = SchemaType> {
         arb_primitive().prop_map(SchemaType::Scalar),
         Just(SchemaType::String),
         Just(SchemaType::Bytes),
+        Just(SchemaType::Blob),
     ];
     // depth ≤ 4, ~64 total nodes, ~MAX_WIDTH children per recursive node.
     leaf.prop_recursive(4, 64, 4, |inner| {
@@ -358,7 +359,7 @@ fn value_for_schema(schema: &SchemaType) -> BoxedStrategy<Value> {
         SchemaType::String => {
             prop::collection::vec(any::<char>(), 0..=12).prop_map(|cs| Value::String(cs.into_iter().collect())).boxed()
         }
-        SchemaType::Bytes => prop::collection::vec(any::<u8>(), 0..=12)
+        SchemaType::Bytes | SchemaType::Blob => prop::collection::vec(any::<u8>(), 0..=12)
             .prop_map(|bytes| Value::Array(bytes.into_iter().map(Value::from).collect()))
             .boxed(),
         SchemaType::Option(inner) => {

@@ -38,6 +38,7 @@ const SCHEMA_STRUCT: u8 = 8;
 const SCHEMA_ENUM: u8 = 9;
 const SCHEMA_MAP: u8 = 10;
 const SCHEMA_TYPE_ID: u8 = 11;
+const SCHEMA_BLOB: u8 = 12;
 
 const VARIANT_UNIT: u8 = 0;
 const VARIANT_TUPLE: u8 = 1;
@@ -61,7 +62,7 @@ const PRIM_F64: u8 = 9;
 #[must_use]
 pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
     match schema {
-        SchemaType::Unit | SchemaType::Bool | SchemaType::String | SchemaType::Bytes => U32_WIDTH,
+        SchemaType::Unit | SchemaType::Bool | SchemaType::String | SchemaType::Bytes | SchemaType::Blob => U32_WIDTH,
         // Selector + the inner `Primitive` as its own `u32` unit-variant index.
         SchemaType::Scalar(_) => U32_WIDTH + U32_WIDTH,
         SchemaType::Option(cell) | SchemaType::Vec(cell) => U32_WIDTH + canonical_len_cell(cell),
@@ -217,6 +218,7 @@ fn schema_to_shape(s: &SchemaType) -> SchemaShape {
             SchemaShape::Map { key: Box::new(schema_to_shape(key)), value: Box::new(schema_to_shape(value)) }
         }
         SchemaType::TypeId(id) => SchemaShape::TypeId(*id),
+        SchemaType::Blob => SchemaShape::Blob,
     }
 }
 
@@ -334,6 +336,9 @@ const fn write_schema(schema: &SchemaType, out: &mut [u8], cursor: usize) -> usi
         SchemaType::TypeId(id) => {
             pos = write_u32_le(SCHEMA_TYPE_ID as u32, out, pos);
             pos = write_u64_le(*id, out, pos);
+        }
+        SchemaType::Blob => {
+            pos = write_u32_le(SCHEMA_BLOB as u32, out, pos);
         }
     }
     pos

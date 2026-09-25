@@ -18,7 +18,10 @@
 //!   the elements (maps in ascending encoded-key byte order — canonical);
 //! - struct / tuple / array fields are positional, no names, no count;
 //! - sum-type selectors (`Enum`, `Ref`) are a fixed `u32` (serde's
-//!   `variant_index`), then the selected variant's body.
+//!   `variant_index`), then the selected variant's body;
+//! - a `Blob` is a one-byte tag (ADR-0238): tag 0 is a `u32` count then the
+//!   bytes, tag 1 the blob's 32-byte hash, written only by the in-process
+//!   envelope encoder through the [`Encoder`] hook.
 //!
 //! This module is the workspace's structured wire format (ADR-0118,
 //! shipped). Kind encode/decode funnels through [`WireEncode`] /
@@ -35,6 +38,9 @@ use serde::de::Error as DeError;
 use serde::ser::Error as SerError;
 use serde::{Deserialize, Serialize};
 
+use crate::blob::BlobHash;
+
+mod attach;
 mod de;
 mod leaf;
 pub(crate) mod owned;
@@ -46,6 +52,8 @@ mod differential;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use attach::Resolving;
+pub use attach::{BlobResolver, Decoder, Encoder};
 pub use owned::{
     WireDecode, WireEncode, decode_bytes, decode_from_slice, encode_bytes, encode_to_vec, take_from_slice,
 };
@@ -79,6 +87,10 @@ pub enum Error {
     InvalidAddressForm(u32),
     /// A decoded actor path that breaks the ADR-0166 address grammar.
     InvalidActorPath,
+    /// A `Blob` field's tag was neither `0` (inline bytes) nor `1` (a hash).
+    InvalidBlobTag(u8),
+    /// A tag-1 `Blob` field whose hash the decode's resolver does not supply.
+    DetachedBlob(BlobHash),
 }
 
 impl fmt::Display for Error {
@@ -96,6 +108,8 @@ impl fmt::Display for Error {
             Self::InvalidLoadName => f.write_str("aether wire: invalid load name"),
             Self::InvalidAddressForm(form) => write!(f, "aether wire: invalid address form {form}"),
             Self::InvalidActorPath => f.write_str("aether wire: invalid actor path"),
+            Self::InvalidBlobTag(tag) => write!(f, "aether wire: invalid blob tag {tag}"),
+            Self::DetachedBlob(_) => f.write_str("aether wire: blob hash not supplied by the decode's resolver"),
         }
     }
 }

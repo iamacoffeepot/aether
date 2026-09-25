@@ -43,6 +43,7 @@ pub fn non_cast_variant_error(ty: &SchemaType) -> Option<&'static str> {
         SchemaType::Bool
         | SchemaType::String
         | SchemaType::Bytes
+        | SchemaType::Blob
         | SchemaType::Option(_)
         | SchemaType::Vec(_)
         | SchemaType::Enum { .. }

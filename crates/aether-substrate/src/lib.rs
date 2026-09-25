@@ -54,7 +54,9 @@ pub mod scheduler;
 // share, so they agree on what happens at the ceiling.
 pub mod session_ids;
 // ADR-0238: the native, in-memory store of immutable checked-in blob bytes.
-pub mod store;
+// Crate-private, so no other crate can name the `BlobEntry` a shared blob's
+// backing downcasts to (decision 4).
+pub(crate) mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod transform;

@@ -133,6 +133,12 @@ pub enum SchemaType {
     /// `u64`, so a typed-id field embedded in a `repr_c: true`
     /// struct keeps the parent's cast-eligibility.
     TypeId(u64),
+    /// ADR-0238: immutable bytes held as a [`crate::Blob`]. The binary
+    /// form is a one-byte tag: tag 0 is a `u32` little-endian length and
+    /// the bytes, written by every codec; tag 1 is the blob's 32-byte
+    /// hash, written only in in-process mail. Every outside codec (JSON,
+    /// MCP) reads and writes plain bytes. Never cast-eligible.
+    Blob,
 }
 
 /// Recursion-breaking indirection for nested `SchemaType` fields
@@ -309,6 +315,8 @@ pub enum SchemaShape {
     /// ADR-0065 first-class typed reference. Wire-identical to
     /// `SchemaType::TypeId(u64)`.
     TypeId(u64),
+    /// ADR-0238 blob leaf. Wire-identical to `SchemaType::Blob`.
+    Blob,
 }
 
 /// Positional enum variant — `VariantShape::Tuple { discriminant, fields }`
