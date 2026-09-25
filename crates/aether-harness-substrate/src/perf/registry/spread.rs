@@ -35,8 +35,6 @@
 //! it is why reader 0's window is the same under both spreads: the single-reader
 //! cell the two columns are each scaled against is one measurement, not two.
 
-use aether_substrate::MailboxId;
-
 /// Routes each reader walks per pass, under every spread and reader count.
 ///
 /// Held constant so the two spreads differ only in *whose* routes they are. See
@@ -71,7 +69,7 @@ impl TargetSpread {
     /// Reader 0 gets the same window under both spreads, which is what makes the
     /// two columns' single-reader baselines the same measurement.
     #[must_use]
-    pub fn walk(self, all: &[MailboxId], worker: usize) -> Vec<MailboxId> {
+    pub fn walk<T: Copy>(self, all: &[T], worker: usize) -> Vec<T> {
         match self {
             Self::Overlapping => {
                 all.iter().copied().take(WALK_TARGETS).cycle().skip(worker).take(WALK_TARGETS).collect()
@@ -97,8 +95,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    fn table(n: usize) -> Vec<MailboxId> {
-        (0..n).map(|i| MailboxId(i as u64 + 1)).collect()
+    fn table(n: usize) -> Vec<usize> {
+        (1..=n).collect()
     }
 
     /// Tripwire (iamacoffeepot/aether#4276): every reader walks the same number

@@ -1104,15 +1104,21 @@ impl SubstrateHarness {
     /// causal tree drains. Unlike [`Self::settle_bytes`] this does NOT
     /// block — the mail-latency harness injects many roots back-to-back
     /// (to build inbox queueing) and waits on the collected receivers
-    /// afterward. Subscription is race-safe: `subscribe_settlement`
-    /// pre-fires if the tree settled between the push and the subscribe.
+    /// afterward. It pushes through the proof-taking
+    /// [`PassiveChassis::send_tracked`], which subscribes settlement before
+    /// the push, so a tree that drains at once still fires the receiver.
     #[cfg(test)]
-    pub(crate) fn inject_root(&self, recipient: MailboxId, kind: KindId, payload: Vec<u8>) -> (MailId, Receiver<()>) {
+    pub(crate) fn inject_root(
+        &self,
+        recipient: ErasedActorRef,
+        kind: KindId,
+        payload: Vec<u8>,
+    ) -> (MailId, Receiver<()>) {
         let cid = self.fresh_correlation_id();
-        let registry = self.passive.settlement_registry();
-        let root = self.queue.push_chassis_root_mail(cid, recipient, kind, payload, 1);
-        let rx = registry.subscribe_settlement(root);
-        (root, rx)
+        let settled = self.passive.send_tracked(recipient, kind, payload, cid, None);
+        // `send_tracked` roots the push at the chassis pseudo-mailbox under
+        // `cid`, the root `Mailer::push_chassis_root_mail` mints for the same push.
+        (MailId::new(MailboxId::CHASSIS_MAILBOX_ID, cid), settled)
     }
 
     /// ADR-0086 Phase 3: read the chassis-host trace ring — where the

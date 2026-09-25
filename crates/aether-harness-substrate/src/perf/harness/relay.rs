@@ -1,13 +1,12 @@
 //! The relay — the sweep's synthetic forwarding actor — with the bounded CPU
 //! spin a heavy relay burns per inbound `Ping`, the reverse-order spawn that
-//! hands each relay its downstreams' proofs, and the deterministic id a
-//! harness injects a root at.
+//! hands each relay its downstreams' proofs.
 
 use std::hint::black_box;
 use std::sync::Arc;
 
 use aether_actor::{ActorRef, OutboundReply};
-use aether_data::{Kind, KindId, MailboxId, ReplyContract, mailbox_id_from_name};
+use aether_data::{Kind, KindId, ReplyContract};
 use aether_kinds::{ComponentCapabilities, HandlerCapability};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, SpawnError, Subname};
 
@@ -190,20 +189,6 @@ pub fn spawn_relays(tb: &SubstrateHarness, topo: &Topology) -> Result<Vec<ActorR
     Ok(spawned.into_iter().map(|relay| relay.expect("every relay index spawned above")).collect())
 }
 
-/// Deterministic `MailboxId` for relay instance `i`. Mirrors the
-/// substrate's `mailbox_id_from_name("{NAMESPACE}:{subname}")`, so a harness
-/// can inject a root at a spawned relay by position
-/// (`SubstrateHarness::inject_root` takes a `MailboxId`) and the registry
-/// probe can name its read targets. Downstream wiring does not read it —
-/// [`spawn_relays`] hands each relay proofs.
-// Harness derives a spawned relay's name-hashed id to inject roots at it —
-// id derivation, not sibling-cap addressing.
-#[must_use]
-#[allow(clippy::disallowed_methods)]
-pub fn relay_id(i: usize) -> MailboxId {
-    MailboxId(mailbox_id_from_name(&format!("{RELAY_NS}:{i}")).0)
-}
-
 /// Tripwire for iamacoffeepot/aether#4236: the sweep's relays must own live
 /// cost cells after a real run.
 ///
@@ -221,10 +206,10 @@ pub fn relay_id(i: usize) -> MailboxId {
 /// from the declaration, so it moves when the wiring moves.
 #[cfg(test)]
 mod cost_cell_liveness {
-    use aether_kinds::{CostTail, CostTailResult, LifecycleSubscribe, LifecycleSubscribeResult, Tick};
+    use aether_kinds::{CostTail, CostTailResult};
 
     use super::*;
-    use crate::perf::harness::{TickSource, fanout, ticksrc_id};
+    use crate::perf::harness::{TickSource, fanout};
     use crate::{DEFAULT_TICK_DELTA_MICROS, SubstrateHarness};
     use aether_lifecycle::LifecycleCapability;
 
@@ -238,12 +223,10 @@ mod cost_cell_liveness {
         };
 
         let relays = spawn_relays(&tb, &topo).expect("relays spawn");
-        tb.spawn_actor::<TickSource>(Subname::Named("src"), (relays[0], 1), ()).finish().expect("source spawns");
-
-        let sub_req = LifecycleSubscribe { stage: Tick::ID.0, mailbox: ticksrc_id().0 }.encode_into_bytes();
-        let lifecycle = tb.actor_ref::<LifecycleCapability>().erase();
-        let reply = tb.request_bytes(lifecycle, LifecycleSubscribe::ID, sub_req).expect("subscribe sends");
-        assert!(matches!(LifecycleSubscribeResult::decode_from_bytes(&reply), Some(LifecycleSubscribeResult::Ok)));
+        let lifecycle = tb.actor_ref::<LifecycleCapability>();
+        tb.spawn_actor::<TickSource>(Subname::Named("src"), (relays[0], 1, lifecycle), ())
+            .finish()
+            .expect("source spawns");
 
         let _ = tb.advance(200, DEFAULT_TICK_DELTA_MICROS);
 

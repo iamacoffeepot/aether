@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 use aether_actor::ErasedActorRef;
 use aether_data::Kind;
 use aether_kinds::trace::{TraceRingEntry, TraceTail, TraceTailResult};
-use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::Subname;
 use aether_substrate::scheduler::{handoff_cost_nanos, reset_handoff_to_boot_seed};
@@ -21,7 +20,7 @@ use super::throughput::throughput_from_nodes;
 use super::tick::TICKSRC_NS;
 use super::{
     Drive, KeepUp, Ping, Stats, TickSource, Tier, Topology, drive_for_tier, max_out_degree, scheduler_tuning_from_env,
-    spawn_relays, summarize, ticksrc_id,
+    spawn_relays, summarize,
 };
 use crate::{DEFAULT_TICK_DELTA_MICROS, SubstrateHarness};
 
@@ -230,7 +229,8 @@ pub fn run_cell(
             backlog.min(ring_cap / fanout_divisor)
         }
     };
-    let source = match tb.spawn_actor::<TickSource>(Subname::Named("src"), (relays[0], burst), ()).finish() {
+    let lifecycle = tb.actor_ref::<LifecycleCapability>();
+    let source = match tb.spawn_actor::<TickSource>(Subname::Named("src"), (relays[0], burst, lifecycle), ()).finish() {
         Ok(source) => source,
         Err(e) => {
             tracing::warn!(target: "aether_perf", topo = %topo.name, error = ?e, "tick source spawn failed");
@@ -238,23 +238,7 @@ pub fn run_cell(
         }
     };
 
-    // Subscribe the source to the `Tick` lifecycle stage so
-    // `advance` broadcasts a tick to it each frame (ADR-0082).
-    let sub_req = LifecycleSubscribe { stage: Tick::ID.0, mailbox: ticksrc_id().0 }.encode_into_bytes();
-    let lifecycle = tb.actor_ref::<LifecycleCapability>().erase();
-    match tb.request_bytes(lifecycle, LifecycleSubscribe::ID, sub_req) {
-        Ok(reply) => match LifecycleSubscribeResult::decode_from_bytes(&reply) {
-            Some(LifecycleSubscribeResult::Ok) => {}
-            other => {
-                tracing::warn!(target: "aether_perf", topo = %topo.name, ?other, "Tick subscribe failed");
-                return None;
-            }
-        },
-        Err(e) => {
-            tracing::warn!(target: "aether_perf", topo = %topo.name, error = ?e, "Tick subscribe send failed");
-            return None;
-        }
-    }
+    // The source subscribes itself to `Tick` in its `wire` hook.
 
     // Per-actor rings (ADR-0086 Phase 3) self-bound at their
     // capacity, so there's no central node cap to clamp against —
