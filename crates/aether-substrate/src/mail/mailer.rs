@@ -82,8 +82,8 @@ pub struct Mailer {
     /// caps) can subscribe to settlement of mail they dispatch from
     /// their handlers. Threaded through the Mailer rather than down
     /// every `NativeBinding` because settlement is a chassis-wide
-    /// service used at runtime — the cap reaches it via
-    /// `ctx.mailer().settlement_registry()`.
+    /// service used at runtime — a cap reaches it through
+    /// [`NativeCtx::subscribe_settlement`](crate::actor::native::ctx::NativeCtx::subscribe_settlement).
     ///
     /// `OnceLock` so the chassis builder installs exactly once at
     /// boot alongside [`Self::chassis_router`]. `None` on test fixtures
@@ -179,9 +179,9 @@ impl Mailer {
 
     /// ADR-0080 §6 settlement-registry installation. Called once by the
     /// chassis builder at boot alongside [`Self::install_chassis_router`]
-    /// so capability handlers can reach the registry via
-    /// `ctx.mailer().settlement_registry()`. Single-claim; subsequent
-    /// calls are no-ops.
+    /// so capability handlers can reach the registry through
+    /// [`NativeCtx::subscribe_settlement`](crate::actor::native::ctx::NativeCtx::subscribe_settlement).
+    /// Single-claim; subsequent calls are no-ops.
     pub fn install_settlement_registry(&self, registry: Arc<SettlementRegistry>) {
         let _ = self.settlement_registry.set(registry);
     }
@@ -359,12 +359,10 @@ impl Mailer {
         self.outbound.as_ref()
     }
 
-    /// Borrow the wired [`Registry`]. Issue 603: surfaced so
-    /// `ComponentHostCapability::init` can pull the registry for its
-    /// internal state without requiring it on `ComponentHostConfig` —
-    /// per Resolved Decision §2 registry arrives via init ctx, not
-    /// via the cap's config struct.
-    pub fn registry(&self) -> &Arc<Registry> {
+    /// Borrow the wired [`Registry`]. Crate-private: the binding's
+    /// registry reads, the spawn path's declared-dependency check, and the
+    /// chassis boot's pumped-slot assembly read it. No ctx door reaches it.
+    pub(crate) fn registry(&self) -> &Arc<Registry> {
         &self.registry
     }
 
@@ -485,14 +483,13 @@ impl Mailer {
     /// (iamacoffeepot/aether#1037). The component-load / native-cap-boot
     /// path registers mailbox caps through this handle; the DAG
     /// validator (iamacoffeepot/aether#975) reads `accepts` /
-    /// `has_fallback` on the submit path. Shared via the `Mailer` so any
-    /// actor with `ctx.mailer()` reaches the same registry — mirroring
-    /// how [`Self::registry`] surfaces the routing table.
+    /// `has_fallback` on the submit path.
     pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
         &self.capability_registry
     }
 
-    /// The crate-private builder behind [`NativeInitCtx::actor_probe`](crate::actor::native::NativeInitCtx::actor_probe).
+    /// The crate-private builder behind `NativeBinding::actor_probe`, which
+    /// backs [`NativeInitCtx::actor_probe`](crate::actor::native::NativeInitCtx::actor_probe).
     pub(crate) fn actor_probe(&self) -> ActorProbe {
         ActorProbe::new(Arc::clone(&self.registry), Arc::clone(&self.capability_registry))
     }
@@ -501,10 +498,7 @@ impl Mailer {
     /// component-load / native-cap-boot path seeds it (alongside the
     /// capability registry's accept-set); the `cost.tail` dispatch arm
     /// dumps it, and a future iamacoffeepot/aether#1178 recruiter sums
-    /// recipient-group cells from it at flush. Shared via the `Mailer`
-    /// so any actor with `ctx.mailer()` reaches the same table —
-    /// mirroring how [`Self::capability_registry`] surfaces its sibling
-    /// index.
+    /// recipient-group cells from it at flush.
     pub fn cost_table(&self) -> &Arc<CostTable> {
         &self.cost_table
     }

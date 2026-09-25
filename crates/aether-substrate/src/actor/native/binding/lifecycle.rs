@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 use super::identity::BindingIdentity;
 use super::outbound::OutboundBuffer;
 use super::{ChildReservationTable, NativeBinding};
+use crate::actor::native::ActorProbe;
 use crate::actor::native::ctx::ResolvePathError;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
@@ -309,6 +310,12 @@ impl NativeBinding {
     /// [`NativeCtx::receive_surface`](crate::actor::native::ctx::NativeCtx::receive_surface).
     pub(crate) fn receive_surface(&self, actor: ErasedActorRef) -> Option<ComponentCapabilities> {
         self.mailer.receive_surface(actor)
+    }
+
+    /// The builder behind
+    /// [`NativeInitCtx::actor_probe`](crate::actor::native::NativeInitCtx::actor_probe).
+    pub(crate) fn actor_probe(&self) -> ActorProbe {
+        self.mailer.actor_probe()
     }
 
     /// The first declared dependency with no `Live` route for a child placed

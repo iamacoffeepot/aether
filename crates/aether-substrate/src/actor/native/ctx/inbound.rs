@@ -174,7 +174,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// rather than a guard that gates nothing.
     #[must_use]
     pub fn acquire_settlement_hold(&self) -> Option<SettlementHold> {
-        self.held_chain().map(|root| self.mailer().acquire_settlement_hold(root))
+        self.held_chain().map(|root| self.binding.mailer().acquire_settlement_hold(root))
     }
 
     /// The chain a hold taken from this context gates: the in-flight root
