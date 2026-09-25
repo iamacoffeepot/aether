@@ -873,11 +873,16 @@ fn head_mass_sdf(point: Vec3) -> f32 {
     }
     for x in [-0.33, 0.33] {
         shape =
-            smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.01, 0.38), Vec3::new(0.21, 0.15, 0.115)), 0.10);
+            smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.01, 0.38), Vec3::new(0.21, 0.15, 0.115)), 0.14);
     }
     for x in [-0.255, 0.255] {
         shape =
             smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, 0.34, 0.445), Vec3::new(0.21, 0.14, 0.115)), 0.07);
+    }
+    for side in [-1.0, 1.0] {
+        let lateral_orbital_rim =
+            capsule_sdf(point, Vec3::new(side * 0.29, 0.35, 0.45), Vec3::new(side * 0.42, 0.045, 0.38), 0.095);
+        shape = smooth_union(shape, lateral_orbital_rim, 0.08);
     }
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.10, 0.61), Vec3::new(0.085, 0.23, 0.16)), 0.05);
     shape =
@@ -887,8 +892,8 @@ fn head_mass_sdf(point: Vec3) -> f32 {
             smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.08, 0.69), Vec3::new(0.065, 0.055, 0.075)), 0.028);
     }
     for x in [-0.68, 0.68] {
-        let temporal_fossa = ellipsoid_sdf(point, Vec3::new(x, 0.16, 0.06), Vec3::new(0.11, 0.25, 0.34));
-        shape = smooth_maximum(shape, -temporal_fossa, 0.06);
+        let temporal_fossa = ellipsoid_sdf(point, Vec3::new(x, 0.16, 0.06), Vec3::new(0.075, 0.25, 0.34));
+        shape = smooth_maximum(shape, -temporal_fossa, 0.08);
     }
     shape
 }
@@ -915,6 +920,13 @@ fn ellipsoid_sdf(point: Vec3, center: Vec3, radii: Vec3) -> f32 {
     let local = point - center;
     let scaled = Vec3::new(local.x / radii.x, local.y / radii.y, local.z / radii.z);
     (scaled.length() - 1.0) * radii.x.min(radii.y).min(radii.z)
+}
+
+fn capsule_sdf(point: Vec3, start: Vec3, end: Vec3, radius: f32) -> f32 {
+    let segment = end - start;
+    let offset = point - start;
+    let projection = (offset.dot(segment) / segment.dot(segment)).clamp(0.0, 1.0);
+    (offset - segment * projection).length() - radius
 }
 
 fn superellipsoid_sdf(point: Vec3, center: Vec3, radii: Vec3, exponent: f32) -> f32 {
