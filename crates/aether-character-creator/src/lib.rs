@@ -869,12 +869,12 @@ fn head_mass_sdf(point: Vec3) -> f32 {
         smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.245, 0.525), Vec3::new(0.25, 0.115, 0.155)), 0.08);
     shape = smooth_union(
         shape,
-        superellipsoid_sdf(point, Vec3::new(0.0, -0.46, 0.34), Vec3::new(0.36, 0.20, 0.29), 2.40),
+        superellipsoid_sdf(point, Vec3::new(0.0, -0.46, 0.34), Vec3::new(0.34, 0.20, 0.29), 2.40),
         0.08,
     );
-    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.50, 0.43), Vec3::new(0.26, 0.135, 0.20)), 0.08);
-    for x in [-0.28, 0.28] {
-        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.32, 0.22), Vec3::new(0.15, 0.22, 0.20)), 0.09);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.50, 0.43), Vec3::new(0.24, 0.135, 0.20)), 0.08);
+    for x in [-0.27, 0.27] {
+        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.32, 0.22), Vec3::new(0.14, 0.22, 0.20)), 0.09);
     }
     for x in [-0.31, 0.31] {
         shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.01, 0.46), Vec3::new(0.20, 0.15, 0.13)), 0.14);
