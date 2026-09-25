@@ -124,7 +124,7 @@ mod tests {
             (too_long.as_str(), PathError::TooLong, max_len.as_str()),
             ("/bin/run", PathError::Absolute, "../bin/run"),
             ("foo/", PathError::EmptySegment, "foo"),
-            ("nul.txt", PathError::Segment(NameError::Device), "null.txt"),
+            ("a/.git/config", PathError::Segment(NameError::Git), "a/.github/config"),
         ];
         for (reject, error, accept) in cases {
             assert_eq!(Path::new(reject), Err(error), "reject {reject:?}");

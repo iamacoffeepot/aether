@@ -15,7 +15,7 @@ pub enum NameError {
     Empty,
     /// The string was longer than 255 bytes.
     TooLong,
-    /// The string contained `/` or `\`.
+    /// The string contained `/`.
     Separator,
     /// The string contained NUL (U+0000).
     Nul,
@@ -23,12 +23,6 @@ pub enum NameError {
     Control,
     /// The string was `.` or `..`.
     Dot,
-    /// The string had a trailing `.`, or leading or trailing Unicode whitespace.
-    TrailingDotOrSpace,
-    /// The string contained `<`, `>`, `:`, `"`, `|`, `?`, or `*`.
-    Reserved,
-    /// The stem is a Windows device name, with or without an extension.
-    Device,
     /// The whole name is `.git` case-insensitively.
     Git,
     /// The string contained an invisible or bidi format character.
@@ -46,9 +40,6 @@ impl NameError {
             Self::Nul => "nul",
             Self::Control => "control",
             Self::Dot => "dot",
-            Self::TrailingDotOrSpace => "trailing-dot-or-space",
-            Self::Reserved => "reserved",
-            Self::Device => "device",
             Self::Git => "git",
             Self::Format => "format",
             Self::NotNfc => "not-nfc",
@@ -70,9 +61,12 @@ impl fmt::Display for NameError {
 
 impl StdError for NameError {}
 
-/// One directory entry name. These are our rules, not Unix's: a tree is
-/// something models and humans read, so a name that is not text is refused
-/// at the boundary.
+/// One directory entry name. The rules depend on no host filesystem: no tree
+/// is written to a host directory (ADR-0237), so names Windows or a
+/// case-insensitive filesystem cannot hold, such as `File::Spec.3perl.gz` or
+/// `con.h`, are valid. A tree is something models and humans read, so a name
+/// that is not text (controls, invisible format characters) is refused at the
+/// boundary.
 ///
 /// NFC gives each run of canonically equivalent text one spelling, so a
 /// tree's byte-exact uniqueness also refuses `é` precomposed beside `e` plus
@@ -82,7 +76,8 @@ impl StdError for NameError {}
 pub struct Name(String);
 
 impl Name {
-    /// Accept a name that is a lossless directory entry on every host we run on.
+    /// Accept a name that is one Linux directory entry Git will store, written
+    /// as NFC text.
     ///
     /// # Errors
     ///
@@ -109,14 +104,8 @@ impl Name {
         if value == "." || value == ".." {
             return Err(NameError::Dot);
         }
-        if has_trailing_dot_or_edge_whitespace(value) {
-            return Err(NameError::TrailingDotOrSpace);
-        }
         if let Some(error) = value.chars().find_map(char_error) {
             return Err(error);
-        }
-        if is_device_name(value) {
-            return Err(NameError::Device);
         }
         if value.eq_ignore_ascii_case(".git") {
             return Err(NameError::Git);
@@ -128,18 +117,11 @@ impl Name {
     }
 }
 
-fn has_trailing_dot_or_edge_whitespace(value: &str) -> bool {
-    value.ends_with('.')
-        || value.chars().next().is_some_and(char::is_whitespace)
-        || value.chars().next_back().is_some_and(char::is_whitespace)
-}
-
 fn char_error(ch: char) -> Option<NameError> {
     match ch {
-        '/' | '\\' => Some(NameError::Separator),
+        '/' => Some(NameError::Separator),
         '\0' => Some(NameError::Nul),
         '\u{01}'..='\u{1F}' | '\u{7F}' | '\u{80}'..='\u{9F}' | '\u{2028}' | '\u{2029}' => Some(NameError::Control),
-        '<' | '>' | ':' | '"' | '|' | '?' | '*' => Some(NameError::Reserved),
         '\u{200B}'..='\u{200F}'
         | '\u{202A}'..='\u{202E}'
         | '\u{2060}'..='\u{2064}'
@@ -150,35 +132,6 @@ fn char_error(ch: char) -> Option<NameError> {
         | '\u{180E}' => Some(NameError::Format),
         _ => None,
     }
-}
-
-fn is_device_name(value: &str) -> bool {
-    let stem = value.split_once('.').map_or(value, |(stem, _)| stem);
-    matches!(
-        stem.to_ascii_uppercase().as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    )
 }
 
 #[cfg(test)]
@@ -192,13 +145,10 @@ mod tests {
         let cases = [
             ("", NameError::Empty, "a"),
             (too_long.as_str(), NameError::TooLong, max_len.as_str()),
-            ("a/b", NameError::Separator, "a-b"),
+            ("a/b", NameError::Separator, "a\\b"),
             ("a\0b", NameError::Nul, "ab"),
             ("a\nb", NameError::Control, "ab"),
             (".", NameError::Dot, ".a"),
-            ("foo.", NameError::TrailingDotOrSpace, "foo.rs"),
-            ("a<b", NameError::Reserved, "ab"),
-            ("nul.txt", NameError::Device, "null.txt"),
             (".git", NameError::Git, ".gitignore"),
             ("a\u{200B}b", NameError::Format, "ab"),
             ("e\u{0301}", NameError::NotNfc, "\u{00E9}"),
@@ -207,9 +157,15 @@ mod tests {
             assert_eq!(Name::new(reject), Err(error), "reject {reject:?}");
             assert_eq!(Name::new(accept).expect("accepted neighbour").as_str(), accept, "accept {accept:?}");
         }
-        assert_eq!(Name::new("a\\b"), Err(NameError::Separator));
         assert_eq!(Name::new(".."), Err(NameError::Dot));
-        assert_eq!(Name::new(" foo"), Err(NameError::TrailingDotOrSpace));
-        assert_eq!(Name::new("foo "), Err(NameError::TrailingDotOrSpace));
+    }
+
+    #[test]
+    fn names_only_windows_refuses_are_accepted() {
+        // Catches a Windows portability rule left in place, which refuses a
+        // Debian userland (Perl man pages are named `File::Spec.3perl.gz`).
+        for accept in ["File::Spec.3perl.gz", "con.h", "foo.", " foo", "a\\b", "what?"] {
+            assert_eq!(Name::new(accept).expect("accepted").as_str(), accept, "accept {accept:?}");
+        }
     }
 }
