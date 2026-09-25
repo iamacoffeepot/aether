@@ -53,9 +53,9 @@ impl TreeSink for MemoryStore {
     type Error = String;
     type Blob<'a> = MemoryBlob<'a>;
 
-    fn begin_blob(&mut self, len: u64) -> Result<MemoryBlob<'_>, String> {
-        let capacity = usize::try_from(len).map_err(|_| format!("a {len}-byte blob does not fit in memory"))?;
-        Ok(MemoryBlob { store: self, bytes: Vec::with_capacity(capacity) })
+    /// Grows as chunks arrive: `len` is the archive's unverified claim.
+    fn begin_blob(&mut self, _len: u64) -> Result<MemoryBlob<'_>, String> {
+        Ok(MemoryBlob { store: self, bytes: Vec::new() })
     }
 
     fn put_tree(&mut self, tree: &Tree) -> Result<Ref<Tree>, String> {

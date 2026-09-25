@@ -46,8 +46,10 @@ pub enum Refusal {
     RootNotDirectory,
     /// The entry path has more than [`MAX_DEPTH`] segments.
     TooDeep,
-    /// A directory entry carries content.
-    DirectorySize,
+    /// A directory, symlink, or hardlink entry carries content. Other readers
+    /// treat these headers as header-only (Go's `archive/tar` ignores their
+    /// size), so skipping the content would decode a different tree.
+    HeaderOnlyContent,
     /// A symlink target fails a [`aether_bloomery_kinds::Path`] rule.
     LinkTarget(PathError),
     /// A hardlink whose target is not an earlier File or Executable entry.
@@ -80,7 +82,7 @@ impl fmt::Display for Refusal {
             Self::Name(error) => write!(f, "invalid name: {error}"),
             Self::RootNotDirectory => f.write_str("the root is not a directory"),
             Self::TooDeep => write!(f, "more than {MAX_DEPTH} path segments"),
-            Self::DirectorySize => f.write_str("directory with content"),
+            Self::HeaderOnlyContent => f.write_str("directory or link with content"),
             Self::LinkTarget(error) => write!(f, "invalid symlink target: {error}"),
             Self::HardlinkTarget => f.write_str("hardlink target is not an earlier file"),
             Self::Duplicate => f.write_str("duplicate path"),

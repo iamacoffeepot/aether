@@ -1,7 +1,9 @@
-//! The canonical encoding: pinned bytes, the round trip in both directions,
-//! the depth cap, and a source that misstates a blob's length.
+//! The canonical encoding: pinned bytes, the round trip, the depth cap, and
+//! the encoder's handling of its blob readers and its output.
 
 mod common;
+
+use std::io::{self, ErrorKind, Read, Write};
 
 use aether_bloomery_kinds::{Node, OpaqueBytes, Path, Ref, Tree, hash_bytes};
 use aether_bloomery_tar::{EncodeError, MAX_DEPTH, SourceBlob, TreeSource, encode};
@@ -52,10 +54,12 @@ fn the_canonical_bytes_of_one_fixed_tree_are_pinned() {
 const TRIPWIRE_DIGEST: &str = "d1ee62ddefb0daf74b9794d391e1f178db7014cac2e98359bc0f4cb50538452d";
 
 #[test]
-fn decode_inverts_encode_and_encode_reproduces_canonical_bytes() {
+fn decode_inverts_encode() {
     // Catches an asymmetry between the writer and the reader: a PAX record
     // one side drops, a padding miscount, a blob cut at a copy-buffer
-    // boundary, or a sibling order that differs from the tree's.
+    // boundary, or a sibling order that differs from the tree's. Equal
+    // references already make re-encoding the decoded tree reproduce the
+    // canonical bytes, so that is not asserted separately.
     let mut store = MemoryStore::default();
     let fixture = fixture(&mut store);
     let big = Node::File(store.add_blob(&(0..150_000u32).map(|index| index.to_le_bytes()[0]).collect::<Vec<_>>()));
@@ -66,7 +70,6 @@ fn decode_inverts_encode_and_encode_reproduces_canonical_bytes() {
     let decoded = store.decode(&canonical);
 
     assert_eq!(decoded, root);
-    assert_eq!(canonical_bytes(&mut store, &decoded), canonical);
 }
 
 #[test]
@@ -89,24 +92,64 @@ fn depth_is_capped_at_max_depth_segments() {
     assert!(matches!(result, Err(EncodeError::TooDeep)), "got {result:?}");
 }
 
-/// Serves one tree for every lookup and one blob whose stated length is off.
-struct MisstatedSource {
+/// Serves one tree for every lookup and one blob with a stated length that
+/// may be off, through a reader that reports `Interrupted` before every read.
+struct OneBlobSource {
     tree: Tree,
     bytes: Vec<u8>,
     stated: u64,
 }
 
-impl TreeSource for MisstatedSource {
+impl TreeSource for OneBlobSource {
     type Error = String;
-    type Blob<'a> = &'a [u8];
+    type Blob<'a> = Interrupting<'a>;
 
     fn tree(&mut self, _tree: &Ref<Tree>) -> Result<Tree, String> {
         Ok(self.tree.clone())
     }
 
-    fn blob(&mut self, _blob: &Ref<OpaqueBytes>) -> Result<SourceBlob<&[u8]>, String> {
-        Ok(SourceBlob { len: self.stated, reader: self.bytes.as_slice() })
+    fn blob(&mut self, _blob: &Ref<OpaqueBytes>) -> Result<SourceBlob<Interrupting<'_>>, String> {
+        Ok(SourceBlob { len: self.stated, reader: Interrupting { bytes: self.bytes.as_slice(), interrupt: true } })
     }
+}
+
+/// A reader over `bytes` whose every other call fails with `Interrupted`.
+struct Interrupting<'a> {
+    bytes: &'a [u8],
+    interrupt: bool,
+}
+
+impl Read for Interrupting<'_> {
+    fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+        self.interrupt = !self.interrupt;
+        if !self.interrupt {
+            return Err(ErrorKind::Interrupted.into());
+        }
+        self.bytes.read(into)
+    }
+}
+
+/// A one-file tree in `store` and a [`OneBlobSource`] over the same file
+/// that states `stated` bytes.
+fn one_file(store: &mut MemoryStore, bytes: &[u8], stated: u64) -> (Ref<Tree>, Ref<OpaqueBytes>, OneBlobSource) {
+    let blob = store.add_blob(bytes);
+    let root = store.add_dir(vec![("f", Node::File(blob))]);
+    let tree = TreeSource::tree(store, &root).expect("stored");
+    (root, blob, OneBlobSource { tree, bytes: bytes.to_vec(), stated })
+}
+
+#[test]
+fn an_interrupted_blob_read_is_retried() {
+    // Catches an encoder that treats a spurious `Interrupted` from a blob
+    // reader, in the copy or in the long-reader probe, as a failed read.
+    let mut store = MemoryStore::default();
+    let bytes = b"hello\n";
+    let (root, _, mut source) = one_file(&mut store, bytes, bytes.len() as u64);
+
+    let mut interrupted = Vec::new();
+    encode(&root, &mut source, &mut interrupted).expect("interrupted reads are retried");
+
+    assert_eq!(interrupted, canonical_bytes(&mut store, &root));
 }
 
 #[test]
@@ -114,17 +157,41 @@ fn a_reader_shorter_or_longer_than_its_stated_length_is_refused() {
     // Catches an encoder that trusts the stated length and writes a header
     // whose size disagrees with the bytes after it: a corrupt archive.
     let mut store = MemoryStore::default();
-    let bytes = b"hello\n".to_vec();
-    let file = Node::File(store.add_blob(&bytes));
-    let root = store.add_dir(vec![("f", file)]);
-    let tree = TreeSource::tree(&mut store, &root).expect("stored");
+    let bytes = b"hello\n";
     let len = bytes.len() as u64;
 
     for (stated, actual) in [(len + 1, len), (len - 1, len)] {
-        let mut source = MisstatedSource { tree: tree.clone(), bytes: bytes.clone(), stated };
+        let (root, file, mut source) = one_file(&mut store, bytes, stated);
         match encode(&root, &mut source, Vec::new()) {
-            Err(EncodeError::BlobLength { expected, actual: got }) => assert_eq!((expected, got), (stated, actual)),
+            Err(EncodeError::BlobLength { blob, expected, actual: got }) => {
+                assert_eq!((blob, expected, got), (file, stated, actual));
+            }
             other => panic!("stated {stated}: expected BlobLength, got {other:?}"),
         }
     }
+}
+
+/// Takes every write and fails every flush.
+struct FailingFlush(Vec<u8>);
+
+impl Write for FailingFlush {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::other("flush failed"))
+    }
+}
+
+#[test]
+fn a_failed_flush_of_the_output_is_an_error() {
+    // Catches an encoder that returns Ok while the end blocks may still sit
+    // in a buffered writer, the way a dropped `BufWriter` loses them.
+    let mut store = MemoryStore::default();
+    let root = fixture(&mut store);
+
+    let result = encode(&root, &mut store, FailingFlush(Vec::new()));
+
+    assert!(matches!(&result, Err(EncodeError::Write(error)) if error.to_string() == "flush failed"), "got {result:?}");
 }

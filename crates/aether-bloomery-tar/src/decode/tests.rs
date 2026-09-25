@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
-use aether_bloomery_kinds::{Name, NameError, Node, OpaqueBytes, PathError, Ref, Tree};
+use aether_bloomery_kinds::{Name, NameError, Node, OpaqueBytes, Path, PathError, Ref, Tree};
 
 use super::{DecodeError, Refusal, decode};
 use crate::MAX_DEPTH;
@@ -197,7 +197,19 @@ fn entry_refusals_are_driven_by_crafted_archives() {
             "directory with content",
             archive(&[record(&header(b"d/", typeflag::DIRECTORY, 1, ""), b"x")]),
             "d/",
-            Refusal::DirectorySize,
+            Refusal::HeaderOnlyContent,
+        ),
+        (
+            "symlink with content",
+            archive(&[record(&header(b"l", typeflag::SYMLINK, 1, "f"), b"x")]),
+            "l",
+            Refusal::HeaderOnlyContent,
+        ),
+        (
+            "hardlink with content",
+            archive(&[file("f", b""), record(&header(b"h", typeflag::HARDLINK, 1, "f"), b"x")]),
+            "h",
+            Refusal::HeaderOnlyContent,
         ),
         (
             "absolute symlink target",
@@ -228,8 +240,10 @@ fn entry_refusals_are_driven_by_crafted_archives() {
 #[test]
 fn lenient_inputs_decode_to_their_canonical_tree() {
     // Catches a dropped decode branch: GNU base-256 size, the signed
-    // checksum, PAX over GNU `L` over the header name, the merge of an
-    // explicit directory into an implicit one, and the root entry.
+    // checksum, PAX over GNU `L` over the header name, GNU `K` over the
+    // linkname, the POSIX prefix joined to the name, the GNU prefix bytes
+    // ignored, the merge of an explicit directory into an implicit one, and
+    // the root entry.
     let hello = Ref::of_bytes(b"hello!");
 
     let mut base256 = header(b"f", typeflag::REGULAR, 0, "");
@@ -250,6 +264,16 @@ fn lenient_inputs_decode_to_their_canonical_tree() {
         .sum();
     signed[148..156].copy_from_slice(format!("{signed_sum:06o}\0 ").as_bytes());
 
+    let mut posix_prefix = header(b"f", typeflag::REGULAR, 6, "");
+    posix_prefix[345..349].copy_from_slice(b"p/q\0");
+    seal(&mut posix_prefix);
+
+    // GNU keeps atime and ctime where POSIX keeps the prefix.
+    let mut gnu_prefix = header(b"f", typeflag::REGULAR, 6, "");
+    gnu_prefix[257..265].copy_from_slice(b"ustar  \0");
+    gnu_prefix[345..369].copy_from_slice(b"14000000000\014000000000\0");
+    seal(&mut gnu_prefix);
+
     let cases: Vec<(&str, Vec<u8>, Ref<Tree>)> = vec![
         ("base-256 size", archive(&[record(&base256, b"hello!")]), tree(vec![("f", Node::File(hello))])),
         ("signed checksum", archive(&[record(&signed, b"hello!")]), tree(vec![("é", Node::File(hello))])),
@@ -258,6 +282,20 @@ fn lenient_inputs_decode_to_their_canonical_tree() {
             archive(&[extended(b'L', b"long\0"), pax_header(&[("path", "pax")]), file("plain", b"hello!")]),
             tree(vec![("pax", Node::File(hello))]),
         ),
+        (
+            "gnu long link over header linkname",
+            archive(&[extended(b'K', b"long\0"), link("l", typeflag::SYMLINK, "short")]),
+            tree(vec![("l", Node::Symlink(Path::new("long").expect("valid target")))]),
+        ),
+        (
+            "posix prefix joined to the name",
+            archive(&[record(&posix_prefix, b"hello!")]),
+            tree(vec![(
+                "p",
+                Node::Directory(tree(vec![("q", Node::Directory(tree(vec![("f", Node::File(hello))])))])),
+            )]),
+        ),
+        ("gnu prefix bytes ignored", archive(&[record(&gnu_prefix, b"hello!")]), tree(vec![("f", Node::File(hello))])),
         (
             "explicit directory after an implicit one",
             archive(&[file("./d/f", b"hello!"), directory("./d/"), directory("./")]),

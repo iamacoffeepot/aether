@@ -38,9 +38,10 @@
 //! | Input | Result |
 //! |---|---|
 //! | `0` or NUL | File, or Executable when `mode & 0o100`. |
-//! | `5` | Directory; its size must be 0. |
+//! | `5` | Directory. |
 //! | `2` | Symlink, the target checked by [`Path::new`](aether_bloomery_kinds::Path::new). |
 //! | `1` | A copy of an earlier File or Executable entry's node. |
+//! | `5`, `2`, or `1` with a non-zero size | [`Refusal::HeaderOnlyContent`] |
 //! | Any other typeflag | [`Refusal::UnsupportedType`] |
 //! | PAX `GNU.sparse.*` | [`Refusal::Sparse`] |
 //! | Other PAX keys | Ignored. |

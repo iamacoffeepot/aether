@@ -156,7 +156,9 @@ fn place<K: TreeSink, R: Read>(
     let kind = entry::classify(header.typeflag, header.mode).map_err(refuse)?;
     match (entry::normalize(&path).map_err(refuse)?, kind) {
         (Target::Root, EntryKind::Directory) if size == 0 => Ok(()),
-        (_, EntryKind::Directory) if size != 0 => Err(refuse(Refusal::DirectorySize)),
+        (_, EntryKind::Directory | EntryKind::Symlink | EntryKind::Hardlink) if size != 0 => {
+            Err(refuse(Refusal::HeaderOnlyContent))
+        }
         (Target::Root, _) => Err(refuse(Refusal::RootNotDirectory)),
         (Target::Entry(path), EntryKind::Directory) => skeleton.directory(&path).map_err(refuse),
         (Target::Entry(path), EntryKind::Regular { executable }) => {
@@ -175,7 +177,6 @@ fn place<K: TreeSink, R: Read>(
         (Target::Entry(path), EntryKind::Symlink) => {
             let target = entry::link_target(&link).map_err(refuse)?;
             let vacancy = skeleton.vacancy(&path).map_err(refuse)?;
-            reader.skip(size, &name)?;
             skeleton.fill(vacancy, Node::Symlink(target));
             Ok(())
         }
@@ -185,7 +186,6 @@ fn place<K: TreeSink, R: Read>(
             };
             let node = skeleton.hardlink(&target).map_err(refuse)?;
             let vacancy = skeleton.vacancy(&path).map_err(refuse)?;
-            reader.skip(size, &name)?;
             skeleton.fill(vacancy, node);
             Ok(())
         }
@@ -225,17 +225,6 @@ impl<R: Read> Reader<R> {
         let blob = writer.finish().map_err(DecodeError::Sink)?;
         self.padding(size, entry)?;
         Ok(blob)
-    }
-
-    /// Discard `size` content bytes and their padding.
-    fn skip<E>(&mut self, size: u64, entry: &str) -> Result<(), DecodeError<E>> {
-        let mut left = size;
-        while left > 0 {
-            let chunk = &mut self.buffer[..chunk_len(left, COPY_BUFFER_BYTES)];
-            read_exact(&mut self.input, chunk, entry)?;
-            left -= chunk.len() as u64;
-        }
-        self.padding(size, entry)
     }
 
     fn padding<E>(&mut self, size: u64, entry: &str) -> Result<(), DecodeError<E>> {

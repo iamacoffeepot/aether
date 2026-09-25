@@ -54,6 +54,11 @@ pub trait TreeSink {
 
     /// Start a blob of exactly `len` bytes.
     ///
+    /// `len` is the archive's claim, unverified until the codec has copied
+    /// that many bytes: a hostile header can state any 64-bit size and end
+    /// long before it. A sink must not allocate from `len` up front without
+    /// a bound of its own; growing as chunks arrive is always safe.
+    ///
     /// # Errors
     ///
     /// Whatever the store reports.

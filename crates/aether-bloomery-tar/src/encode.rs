@@ -31,11 +31,11 @@ pub enum EncodeError<E> {
     Write(io::Error),
     /// Reading a blob's bytes failed.
     BlobRead(io::Error),
-    /// A blob's reader disagreed with the length its source stated.
+    /// The reader of `blob` disagreed with the length its source stated.
     /// `actual` is how many bytes it yielded before the encoder stopped
     /// reading: fewer than `expected` when it ended early, or `expected + 1`
     /// when it had more.
-    BlobLength { expected: u64, actual: u64 },
+    BlobLength { blob: Ref<OpaqueBytes>, expected: u64, actual: u64 },
     /// An entry would have more than [`MAX_DEPTH`] path segments.
     TooDeep,
 }
@@ -46,8 +46,8 @@ impl<E: fmt::Display> fmt::Display for EncodeError<E> {
             Self::Source(error) => write!(f, "tree source: {error}"),
             Self::Write(error) => write!(f, "writing the archive: {error}"),
             Self::BlobRead(error) => write!(f, "reading a blob: {error}"),
-            Self::BlobLength { expected, actual } => {
-                write!(f, "a blob stated {expected} bytes and its reader yielded {actual}")
+            Self::BlobLength { blob, expected, actual } => {
+                write!(f, "blob {} stated {expected} bytes and its reader yielded {actual}", blob.digest())
             }
             Self::TooDeep => write!(f, "an entry has more than {MAX_DEPTH} path segments"),
         }
@@ -116,7 +116,8 @@ pub fn encode<S: TreeSource, W: Write>(root: &Ref<Tree>, source: &mut S, out: W)
         }
     }
 
-    writer.out.write_all(&[0; 2 * BLOCK_BYTES]).map_err(EncodeError::Write)
+    writer.write(&[0; 2 * BLOCK_BYTES])?;
+    writer.out.flush().map_err(EncodeError::Write)
 }
 
 /// One open directory: where its children's paths start in the shared path
@@ -161,25 +162,26 @@ impl<W: Write> Writer<W> {
     ) -> Result<(), EncodeError<S::Error>> {
         let SourceBlob { len, mut reader } = source.blob(blob).map_err(EncodeError::Source)?;
         self.entry(Entry { path, typeflag: typeflag::REGULAR, mode, size: len, link: "" })?;
-        self.copy(&mut reader, len)?;
+        self.copy(&mut reader, blob, len)?;
         self.pad(len)
     }
 
-    /// Copy exactly `len` bytes, then probe for one more so a long reader is
-    /// caught rather than silently cut.
-    fn copy<E>(&mut self, reader: &mut impl Read, len: u64) -> Result<(), EncodeError<E>> {
+    /// Copy exactly `len` bytes of `blob`, then probe for one more so a long
+    /// reader is caught rather than silently cut.
+    fn copy<E>(&mut self, reader: &mut impl Read, blob: &Ref<OpaqueBytes>, len: u64) -> Result<(), EncodeError<E>> {
+        let mismatch = |actual| EncodeError::BlobLength { blob: *blob, expected: len, actual };
         let mut copied = 0;
         while copied < len {
             let want = chunk_len(len - copied, self.buffer.len());
-            let read = reader.read(&mut self.buffer[..want]).map_err(EncodeError::BlobRead)?;
+            let read = read_retrying(reader, &mut self.buffer[..want])?;
             if read == 0 {
-                return Err(EncodeError::BlobLength { expected: len, actual: copied });
+                return Err(mismatch(copied));
             }
             self.out.write_all(&self.buffer[..read]).map_err(EncodeError::Write)?;
             copied += read as u64;
         }
-        if reader.read(&mut [0; 1]).map_err(EncodeError::BlobRead)? != 0 {
-            return Err(EncodeError::BlobLength { expected: len, actual: len + 1 });
+        if read_retrying(reader, &mut [0; 1])? != 0 {
+            return Err(mismatch(len + 1));
         }
         Ok(())
     }
@@ -231,6 +233,17 @@ impl<W: Write> Writer<W> {
     }
 }
 
+/// One `read`, retried while it reports [`io::ErrorKind::Interrupted`], the
+/// way [`Read::read_exact`] retries.
+fn read_retrying<E>(reader: &mut impl Read, into: &mut [u8]) -> Result<usize, EncodeError<E>> {
+    loop {
+        match reader.read(into) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            result => return result.map_err(EncodeError::BlobRead),
+        }
+    }
+}
+
 fn needs_pax(text: &str) -> bool {
     !text.is_ascii() || text.len() > NAME_FIELD_BYTES
 }
@@ -243,4 +256,41 @@ fn field_prefix(text: &str) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Entry, FILE_MODE, PAX_SIZE_BYTES, Writer};
+    use crate::block::{self, BLOCK_BYTES, typeflag};
+    use crate::pax;
+
+    /// The header records `Writer::entry` writes for a file of `size` bytes.
+    fn headers(size: u64) -> Vec<u8> {
+        let mut writer = Writer { out: Vec::new(), buffer: Vec::new() };
+        let entry = Entry { path: "f", typeflag: typeflag::REGULAR, mode: FILE_MODE, size, link: "" };
+        writer.entry::<()>(entry).expect("a Vec takes every write");
+        writer.out
+    }
+
+    fn header_size(block: &[u8]) -> u64 {
+        block::parse(block.try_into().expect("one block")).map(|header| header.size).expect("a valid header")
+    }
+
+    #[test]
+    fn sizes_from_8_gibibytes_move_to_a_pax_size_record() {
+        // Catches an off-by-one at the PAX size boundary: one byte below it
+        // must fit the 11-digit octal field, and the boundary itself must not
+        // reach that field, which cannot hold it. An 8 GiB stream is too
+        // large to run, so only the headers are written.
+        let below = headers(PAX_SIZE_BYTES - 1);
+        assert_eq!(below.len(), BLOCK_BYTES);
+        assert_eq!(header_size(&below), PAX_SIZE_BYTES - 1);
+
+        let at = headers(PAX_SIZE_BYTES);
+        assert_eq!(at.len(), 3 * BLOCK_BYTES);
+        let body_len = usize::try_from(header_size(&at[..BLOCK_BYTES])).expect("a small body");
+        let records = pax::parse(&at[BLOCK_BYTES..BLOCK_BYTES + body_len]).expect("valid records");
+        assert_eq!((records.size, records.path), (Some(PAX_SIZE_BYTES), None));
+        assert_eq!(header_size(&at[2 * BLOCK_BYTES..]), 0);
+    }
 }
