@@ -2,6 +2,7 @@
 //! turns it back into routed mail, plus the owner batch a handler can stage
 //! alongside it.
 
+use crate::mail::attachments::Attachments;
 use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
 use crate::mail::ring::MailLoc;
 use crate::mail::{MailId, MailRef, MailboxId, Source};
@@ -37,6 +38,10 @@ pub(super) struct PendingMail {
     pub(super) mail_id: MailId,
     pub(super) root: MailId,
     pub(super) parent_mail: Option<MailId>,
+    /// ADR-0238 decision 3: the store entries the payload's tag-1 `Blob`
+    /// fields name. The ring holds plain bytes, so they ride here, beside
+    /// the ring entry, until the flush stamps them onto the routed mail.
+    pub(super) attachments: Attachments,
 }
 
 /// One guest-authored mail the staged activation hold admitted, paired with

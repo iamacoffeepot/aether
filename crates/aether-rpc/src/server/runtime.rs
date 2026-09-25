@@ -32,6 +32,7 @@ use super::{
     RpcServerParams, Settled,
 };
 use aether_actor::{HandlesKind, runtime};
+use aether_codec::InlineError;
 use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::mail::boundary::is_engine_only;
 use aether_substrate::net::teardown_connect_addr;
@@ -931,7 +932,22 @@ impl NativeActor for RpcServerCapability {
             return;
         }
 
-        let envelope = ReplyEnvelope { kind: env.kind, payload: env.payload.bytes().to_vec() };
-        state.write_frame_to(entry.conn_id, &WireFrame::ReplyEvent { cid: entry.wire_cid, envelope });
+        // ADR-0238 decisions 3 and 5: the reply leaves the process, so its
+        // tag-1 `Blob` fields go out as inline bytes. One that cannot fit a
+        // frame closes this call with an error instead of writing a frame the
+        // peer would refuse, which would close the whole connection.
+        let result = match ctx.wire_payload(env) {
+            Ok(payload) => {
+                let envelope = ReplyEnvelope { kind: env.kind, payload };
+                state.write_frame_to(entry.conn_id, &WireFrame::ReplyEvent { cid: entry.wire_cid, envelope });
+                return;
+            }
+            Err(InlineError::TooLarge { size, limit }) => {
+                RpcError::FrameTooLarge { size: size as u64, max: limit as u64 }
+            }
+            Err(error) => RpcError::Other { reason: format!("reply {} not sent: {error}", ctx.kind_label(env.kind)) },
+        };
+        state.take_in_flight(correlation);
+        state.write_frame_to(entry.conn_id, &WireFrame::ReplyEnd { cid: entry.wire_cid, result: Err(result) });
     }
 }

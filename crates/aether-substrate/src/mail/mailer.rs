@@ -29,6 +29,7 @@ use crate::actor::native::ctx::ResolvePathError;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
 use crate::chassis::settlement::SettlementRegistry;
+use crate::mail::attachments::{inline_payload, plain_payload};
 use crate::mail::capability::CapabilityRegistry;
 use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
@@ -43,6 +44,7 @@ use crate::runtime::trace::{SentRecord, SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
 use crate::store::BlobStore;
 use aether_actor::ErasedActorRef;
+use aether_codec::frame::max_frame_size;
 use aether_data::tagged_id::{self, Tag};
 use aether_data::{ActorPath, Kind, KindDescriptor, KindId};
 use aether_kinds::ComponentCapabilities;
@@ -676,8 +678,27 @@ impl Mailer {
         root: Option<aether_data::MailId>,
         parent: Option<aether_data::MailId>,
     ) -> bool {
-        let SourceAddr::Component(mailbox) = sender.addr else {
+        let Some(mail) = self.component_reply_mail(sender, kind, payload, reply_id, root, parent) else {
             return false;
+        };
+        self.push(mail);
+        true
+    }
+
+    /// The reply mail [`Self::send_component_reply`] pushes, with its `Sent`
+    /// already recorded, or `None` when `sender` is not a component. Split out
+    /// so a test-support reply can attach blob entries before the push.
+    pub(crate) fn component_reply_mail(
+        &self,
+        sender: Source,
+        kind: KindId,
+        payload: Vec<u8>,
+        reply_id: Option<aether_data::MailId>,
+        root: Option<aether_data::MailId>,
+        parent: Option<aether_data::MailId>,
+    ) -> Option<Mail> {
+        let SourceAddr::Component(mailbox) = sender.addr else {
+            return None;
         };
         // ADR-0042: echo the caller's correlation_id onto the reply envelope
         // so the originating handler can pick the right reply out of the
@@ -692,8 +713,7 @@ impl Mailer {
         if let (Some(reply_id), Some(root)) = (reply_id, root) {
             self.record_sent(reply_id, root, parent, reply_id.sender, mailbox, kind);
         }
-        self.push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to).with_lineage(reply_id, root, parent));
-        true
+        Some(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to).with_lineage(reply_id, root, parent))
     }
 }
 
@@ -851,39 +871,54 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
             // `record_finished`. The relay closure that forwards it onto
             // the actor's mpsc (`spawn.rs` / `chassis/ctx.rs`) is a
             // transfer — the obligation rides the moved value.
-            handler.enqueue(OwnedDispatch::armed(
-                DispatchParts {
+            handler.enqueue(
+                OwnedDispatch::armed(
+                    DispatchParts {
+                        kind: mail.kind,
+                        origin: None,
+                        sender: mail.reply_to,
+                        payload: mail.payload,
+                        count: mail.count,
+                        mail_id: mail.mail_id,
+                        root: mail.root,
+                        parent_mail: mail.parent_mail,
+                        // iamacoffeepot/aether#1134: stamp the deposit instant +
+                        // scheduler backlog here — the single Inbox chokepoint
+                        // every mail-to-an-actor funnels through. Read back at the
+                        // recipient's `Received` hook to split the hop into
+                        // send→enqueue vs queue residence. One clock read on the
+                        // already-traced path; depth is `0` off a pool worker.
+                        t_enqueue: mailer.trace_handle.now_nanos(),
+                        enqueue_depth: pending_depth(),
+                    },
+                    recipient,
+                )
+                .with_attachments(mail.attachments),
+            );
+        }
+        CapturedDisposition::Live { endpoint: RouteEndpoint::Inline(handler) } => {
+            // ADR-0238: an inline handler reads plain bytes, so an attached
+            // payload is lent rewritten. The bytes stay in memory, so no
+            // frame limit applies.
+            let attachments = mail.attachments.as_deref().unwrap_or_default();
+            match plain_payload(&mailer.registry, mail.kind, mail.payload.bytes(), attachments, usize::MAX) {
+                Ok(payload) => handler.dispatch(MailDispatch {
                     kind: mail.kind,
                     origin: None,
                     sender: mail.reply_to,
-                    payload: mail.payload,
+                    payload: &payload,
                     count: mail.count,
                     mail_id: mail.mail_id,
                     root: mail.root,
                     parent_mail: mail.parent_mail,
-                    // iamacoffeepot/aether#1134: stamp the deposit instant +
-                    // scheduler backlog here — the single Inbox chokepoint
-                    // every mail-to-an-actor funnels through. Read back at the
-                    // recipient's `Received` hook to split the hop into
-                    // send→enqueue vs queue residence. One clock read on the
-                    // already-traced path; depth is `0` off a pool worker.
-                    t_enqueue: mailer.trace_handle.now_nanos(),
-                    enqueue_depth: pending_depth(),
-                },
-                recipient,
-            ));
-        }
-        CapturedDisposition::Live { endpoint: RouteEndpoint::Inline(handler) } => {
-            handler.dispatch(MailDispatch {
-                kind: mail.kind,
-                origin: None,
-                sender: mail.reply_to,
-                payload: mail.payload.bytes(),
-                count: mail.count,
-                mail_id: mail.mail_id,
-                root: mail.root,
-                parent_mail: mail.parent_mail,
-            });
+                }),
+                Err(error) => tracing::error!(
+                    target: "aether_substrate::mail",
+                    kind = %mailer.registry.kind_label(mail.kind),
+                    %error,
+                    "attached mail to an inline mailbox refused",
+                ),
+            }
             // ADR-0080 §2: synchronous handler. Records `Finished`
             // (settlement) after the inline call so the chain's
             // `in_flight` balances and settlement subscribers wake
@@ -934,10 +969,36 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
                 // up frame so a reply coming back via Phase-2 reply
                 // routing carries the id the originating handler matches on.
                 let correlation_id = mail.reply_to.correlation_id;
+                // ADR-0238 decisions 3 and 5: the bytes leave the process, so
+                // an attached payload goes out rewritten to inline bytes,
+                // within one frame, or not at all.
+                let payload = match mail.attachments.as_deref() {
+                    None => mail.payload.into_vec(),
+                    Some(attachments) => match inline_payload(
+                        &mailer.registry,
+                        mail.kind,
+                        mail.payload.bytes(),
+                        attachments,
+                        max_frame_size(),
+                    ) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            tracing::error!(
+                                target: "aether_substrate::queue",
+                                mailbox = %recipient,
+                                kind = %mailer.registry.kind_label(mail.kind),
+                                %error,
+                                "attached mail to an unresolved mailbox refused at egress",
+                            );
+                            mailer.trace_handle.record_finished(inbound_mail_id, inbound_root);
+                            return;
+                        }
+                    },
+                };
                 outbound.egress_unresolved_mail(
                     recipient,
                     mail.kind,
-                    mail.payload.into_vec(),
+                    payload,
                     mail.count,
                     source_mailbox_id,
                     correlation_id,

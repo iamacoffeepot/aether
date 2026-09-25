@@ -258,11 +258,13 @@ impl Spawner {
         }
         let after_init = after_init
             .into_iter()
-            .map(|envelope| {
+            .map(|mut envelope| {
+                let attachments = envelope.take_attachments();
                 PreparedMail::bootstrap(
                     Mail::new(id, envelope.kind, envelope.payload, envelope.count)
                         .with_reply_to(envelope.sender)
-                        .with_lineage(envelope.mail_id, envelope.root, envelope.parent_mail),
+                        .with_lineage(envelope.mail_id, envelope.root, envelope.parent_mail)
+                        .with_attachments(attachments),
                 )
             })
             .collect();

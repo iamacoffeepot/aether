@@ -25,6 +25,8 @@ use aether_actor::{
 use aether_data::{ActorMail, Kind, KindId, MailId, RequestId};
 
 use crate::actor::native::binding::OutboundSend;
+#[cfg(any(test, feature = "test-support"))]
+use crate::mail::attachments::SharingEncoder;
 use crate::mail::boundary::is_engine_only;
 use crate::mail::{BoundaryMail, Source};
 
@@ -514,5 +516,28 @@ impl<A> OutboundReply for NativeCtx<'_, A, Manual> {
 
     fn reply_to<K: ActorMail>(&mut self, sender: Source, payload: &K) {
         self.binding.send_reply_for_handler(sender, payload, self.in_flight_root, self.outbound_parent());
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<A> NativeCtx<'_, A, Manual> {
+    /// Test support: reply to this handler's sender with `payload`, sharing
+    /// each `Blob` field backed by this engine's store the way an attached
+    /// in-process reply carries it: tag 1 with the blob's hash, and the store
+    /// entry attached to the envelope (ADR-0238 decision 3). No production
+    /// sender attaches entries yet, so a test of a consumer that must rewrite
+    /// attached mail (the rpc server's reply-out) drives one through here.
+    /// Only a component reply target is served; any other sends nothing.
+    #[doc(hidden)]
+    pub fn reply_sharing_blobs<K: ActorMail>(&mut self, payload: &K) {
+        let (bytes, attachments) = SharingEncoder::encode(payload);
+        self.binding.send_attached_reply_for_handler(
+            self.source,
+            K::ID,
+            bytes,
+            attachments,
+            self.in_flight_root,
+            self.outbound_parent(),
+        );
     }
 }

@@ -119,6 +119,7 @@ impl NativeBinding {
                     Mail::new(MailboxId(p.recipient), KindId(p.kind), payload, p.count)
                         .with_reply_to(p.reply_to)
                         .with_lineage(Some(p.mail_id), Some(p.root), p.parent_mail)
+                        .with_attachments(p.attachments)
                 })
                 .collect();
             (
@@ -229,8 +230,10 @@ mod tests {
     use super::super::OutboundSend;
     use super::super::fixture::forward_to_envelope_sender;
     use super::super::outbound::ACTOR_RING_BYTES;
+    use super::super::pending::PendingMail;
     use super::*;
     use crate::actor::native::envelope::Envelope;
+    use crate::mail::{MailId, Source};
     use crate::testing::{bare_substrate, boot_authority};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -276,6 +279,35 @@ mod tests {
         // Buffer drained — a second flush is a no-op.
         transport.flush_outbound();
         assert!(rx.try_recv().is_err());
+    }
+
+    /// ADR-0238: the flush turns a buffered send back into routed mail, and
+    /// the entries the send attached ride onto it and on into the recipient's
+    /// inbox. Catches the flush rebuilding the mail without the field.
+    #[test]
+    fn flush_carries_a_pending_sends_attachments() {
+        let (registry, mailer) = bare_substrate();
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        let recipient = registry.register_inbox(&boot_authority(), "test.sink", forward_to_envelope_sender(tx));
+        let entry = mailer.blob_store().check_in(Box::from(b"attached".as_slice()));
+        let transport = NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x6363));
+
+        transport.outbound.lock().unwrap().mails.push(PendingMail {
+            recipient: recipient.0,
+            kind: 3,
+            payload: PendingPayload::Owned(vec![1]),
+            count: 1,
+            reply_to: Source::NONE,
+            mail_id: MailId::new(MailboxId(0x6363), 1),
+            root: MailId::new(MailboxId(0x6363), 1),
+            parent_mail: None,
+            attachments: Some(Box::new([Arc::clone(&entry)])),
+        });
+        transport.flush_outbound();
+
+        let env = rx.try_recv().expect("the flushed mail reaches the inbox");
+        assert_eq!(env.attachments().len(), 1);
+        assert!(Arc::ptr_eq(&env.attachments()[0], &entry), "the routed mail carries the buffered entry");
     }
 
     /// 2b: a payload larger than the per-actor ring degrades to the

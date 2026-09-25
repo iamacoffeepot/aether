@@ -7,6 +7,7 @@
 //! interaction lives in the actor SDK's flat ctx send verbs and proven
 //! references (`aether_actor::ActorRef`) and per-cap dispatchers.
 
+pub(crate) mod attachments;
 pub mod boundary;
 pub mod capability;
 pub mod cost;
@@ -23,6 +24,8 @@ pub use cost::{CostCell, CostCells, CostTable};
 pub use mail_ref::MailRef;
 pub use mailer::Mailer;
 pub use outbound::{EgressEvent, HubOutbound};
+
+use self::attachments::Attachments;
 pub use registry::{
     ActorAddressInventoryError, AddressResolutionError, InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch,
     Registry, ResolveLiveError, ResolvedAddress,
@@ -100,6 +103,11 @@ pub(crate) struct Mail {
     /// ADR-0080 §5: the in-flight mail at the sender, or `None` for
     /// chassis-root sends. The receiver's parent in the causal graph.
     pub(crate) parent_mail: Option<MailId>,
+    /// ADR-0238 decision 3: the store entries this payload's tag-1 `Blob`
+    /// fields name by hash, held until the last hand-off of the envelope
+    /// drops. `None` for a payload with none, which is every mail no
+    /// blob-sharing producer built.
+    pub(crate) attachments: Attachments,
 }
 
 impl Mail {
@@ -114,7 +122,16 @@ impl Mail {
             mail_id: None,
             root: None,
             parent_mail: None,
+            attachments: None,
         }
+    }
+
+    /// Carry `attachments`: the entries the payload's tag-1 `Blob` fields
+    /// name (ADR-0238 decision 3). An empty set is stored as `None`.
+    #[must_use]
+    pub(crate) fn with_attachments(mut self, attachments: Attachments) -> Self {
+        self.attachments = attachments::normalized(attachments);
+        self
     }
 
     /// Attach a reply-to destination. Used by the hub client when
