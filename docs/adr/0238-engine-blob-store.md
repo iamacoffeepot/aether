@@ -4,6 +4,7 @@
 - **Date:** 2026-09-25
 - **Amended:** 2026-09-25 — decision 6: persisting a handle is a documented misuse, not enforced; later directions recorded.
 - **Amended:** 2026-09-25 — decision 10: `ReadArtifact` replies carry handles too; `aether.fs` recorded as a blob consumer.
+- **Amended:** 2026-09-25 — decisions 9, 11: `blob_len_p32` gives the reader its length; `read_range` takes `&self`; the guest SDK's `std` feature is new; a `replace` keeps the old instance's counts.
 - **Amended:** 2026-09-25 — decisions 2, 3, 4, 9: a handle is the blob's hash (`BlobRef`, cloned and dropped like an `Arc`), not a per-actor index; `BlobRef` lives in `aether-data`; there is no release verb.
 
 Builds on [ADR-0038](0038-actor-per-component-dispatch.md) and
@@ -328,10 +329,11 @@ impl<'a> BlobReader<'a> {
     pub fn len(&self) -> u64;
     pub fn read(&mut self, buf: &mut [u8]) -> usize;   // at most MAX_READ_BYTES per call
     pub fn seek(&mut self, to: u64);
-    pub fn read_range(&mut self, offset: u64, buf: &mut [u8]) -> usize;
+    pub fn read_range(&self, offset: u64, buf: &mut [u8]) -> usize;   // does not move the cursor
 }
 
 // host imports (crates/aether-substrate/src/actor/wasm/host_fns.rs); hash_ptr points at the 32-byte hash
+// "aether"."blob_len_p32"(hash_ptr: u32) -> i64       // BlobReader::open
 // "aether"."blob_read_p32"(hash_ptr: u32, offset: u64, dst_ptr: u32, dst_len: u32) -> i64
 // "aether"."blob_clone_p32"(hash_ptr: u32) -> i32     // BlobRef::clone
 // "aether"."blob_drop_p32"(hash_ptr: u32)            // BlobRef::drop
@@ -371,8 +373,8 @@ meaning.
   named production consumer of `blob_read_p32`.
 - `BlobReader` does not implement `std::io::Read`, whose provided
   `read_to_end` is exactly the whole-load shortcut. A separately named adapter
-  (`BlobReadAdapter`, behind the guest SDK's `std` feature, since the SDK is
-  `no_std`) provides `Read` for decoders that need it, so the whole-load path
+  (`BlobReadAdapter`, behind a new `std` feature of the guest SDK, since the
+  SDK is `no_std`) provides `Read` for decoders that need it, so the whole-load path
   is always a named choice.
 
 ### 12. Files that change (implementation, not this ADR)
@@ -415,7 +417,9 @@ meaning.
 - **Negative.** Blob-bearing kinds pay a schema walk on send and on delivery.
   A guest's `BlobRef` clone and drop each cost a host call, and a guest that
   leaks a `BlobRef` (for example with `mem::forget`) keeps its entry until the
-  actor dies.
+  actor dies. A `replace` carries the guest table across, and references that
+  lived in the old instance's memory die without running `Drop`, so their
+  counts stay and those blobs remain resident until the actor dies.
 - **Follow-on.** Guest-side check-in (a chunked writer that finishes into a
   `BlobRef`) needs its own named consumer and is not decided here.
 
