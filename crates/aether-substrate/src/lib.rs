@@ -95,7 +95,7 @@ pub use config::{
     validate_env,
 };
 pub use mail::mailer::Mailer;
-pub use mail::outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};
+pub use mail::outbound::{EgressEvent, HubOutbound};
 pub use mail::registry::{
     ActorAddressInventoryError, AddressResolutionError, AdoptRefused, BootAuthority, ChildRefused, InboxHandler,
     InlineHandler, MailboxEntry, OwnedDispatch, Registry, ResolvedAddress,
