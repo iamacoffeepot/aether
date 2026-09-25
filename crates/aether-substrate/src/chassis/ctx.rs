@@ -462,6 +462,12 @@ impl<'a> ChassisCtx<'a> {
         self.references.record(reference);
     }
 
+    /// The reference recorded for the composed root actor `A`, or `None` when
+    /// this chassis has composed no `A` so far.
+    pub(crate) fn reference<A: 'static>(&self) -> Option<ActorRef<A>> {
+        self.references.get::<A>()
+    }
+
     /// Borrow this boot's [`BootAuthority`] — the proof a cap needs to name
     /// the registry's direct mutators (`try_register_inbox_with_id`,
     /// `register_kind_with_descriptor`) while it is still booting. A

@@ -265,12 +265,11 @@ fn staged_bind_reply_preserves_the_original_root_and_follows_monitor_commit() {
     let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let session = SessionToken(Uuid::from_u128(0x4066_B1AD));
     let correlation_id = 0x4066;
-    let settled = chassis.send_tracked(
+    let (_, settled) = chassis.send_tracked(
         tcp,
         BindListener::ID,
         BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None }
             .encode_into_bytes(),
-        correlation_id,
         Some(ReplyTarget::Session { session, correlation: correlation_id }),
     );
 
@@ -477,11 +476,10 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
 
     let session = SessionToken(Uuid::from_u128(0x3051));
     let correlation_id = 0x3051;
-    let settled = chassis.send_tracked(
+    let (_, settled) = chassis.send_tracked(
         tcp,
         UnbindListener::ID,
         UnbindListener { listener_name: listener_name.clone() }.encode_into_bytes(),
-        correlation_id,
         Some(ReplyTarget::Session { session, correlation: correlation_id }),
     );
 
@@ -663,18 +661,16 @@ fn concurrent_connects_reply_to_their_own_origins() {
     let session_beta = SessionToken(Uuid::from_u128(0xB37A));
     let correlation_alpha = 0xA11A;
     let correlation_beta = 0xB37A;
-    let settled_alpha = chassis.send_tracked(
+    let (_, settled_alpha) = chassis.send_tracked(
         tcp,
         Connect::ID,
         Connect { addr: addr_alpha.to_string(), name: Some("alpha".into()), consumer: None }.encode_into_bytes(),
-        correlation_alpha,
         Some(ReplyTarget::Session { session: session_alpha, correlation: correlation_alpha }),
     );
-    let settled_beta = chassis.send_tracked(
+    let (_, settled_beta) = chassis.send_tracked(
         tcp,
         Connect::ID,
         Connect { addr: addr_beta.to_string(), name: Some("beta".into()), consumer: None }.encode_into_bytes(),
-        correlation_beta,
         Some(ReplyTarget::Session { session: session_beta, correlation: correlation_beta }),
     );
 

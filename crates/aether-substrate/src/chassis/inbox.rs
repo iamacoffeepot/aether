@@ -39,7 +39,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use aether_actor::ErasedActorRef;
-use aether_data::{Kind, KindId, MailId, MailboxId, Source};
+use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr};
 
 use crate::actor::native::envelope::Envelope;
 use crate::mail::mailer::Mailer;
@@ -165,6 +165,14 @@ impl SettlingInbox {
     pub(crate) fn relineage(mut self, reply_lineage: ReplyLineage) -> Self {
         self.reply_counter = reply_lineage;
         self
+    }
+
+    /// The reply target that routes a recipient's reply into this inbox,
+    /// correlated by `correlation`. [`RootPusher::push_root`](crate::RootPusher::push_root)
+    /// stamps it on a root whose reply the claimer drains here, so the
+    /// claim's position never leaves the crate.
+    pub(crate) fn reply_source(&self, correlation: u64) -> Source {
+        Source::with_correlation(SourceAddr::Component(self.id), correlation)
     }
 
     fn wrap(&self, env: Envelope) -> InboundMail {

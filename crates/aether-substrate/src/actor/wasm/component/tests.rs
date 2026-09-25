@@ -30,7 +30,7 @@ use crate::mail::registry::RegistryOwnerLease;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
 use crate::mail::{Mail, MailId, MailRef, MailboxId, Source};
 use crate::scheduler::WakeSink;
-use crate::testing::boot_authority;
+use crate::testing::{boot_authority, token_root};
 use aether_data::tagged_id::Tag;
 use aether_kinds::trace::Nanos;
 use std::sync::mpsc::Receiver;
@@ -1477,7 +1477,7 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
 
     // Inbound lineage: the chassis-driven tick chain we're "in"
     // when the wasm guest's on_tick handler fires its outbound.
-    let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 7);
+    let inbound_root = token_root(7);
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x99)), 42);
     ctx.set_in_flight(Some(inbound_mail), Some(inbound_root));
 
@@ -1537,7 +1537,7 @@ fn send_detached_mints_fresh_chain_despite_in_flight() {
     let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected(), sender, None);
 
     // Set an in-flight chain the default `send` would inherit.
-    let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 9);
+    let inbound_root = token_root(9);
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x77)), 13);
     ctx.set_in_flight(Some(inbound_mail), Some(inbound_root));
 

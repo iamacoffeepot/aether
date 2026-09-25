@@ -38,8 +38,6 @@
 //! `aether-substrate` for their runtime halves, so shared composition
 //! cannot live in the substrate without a cycle.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 /// Re-exported for `chassis_main!`, whose emitted `fn main` names this crate's
 /// `anyhow` rather than requiring every chassis bin to carry a dependency it
 /// would otherwise never spell.
@@ -68,17 +66,3 @@ pub use window::{
     WindowConfig, WindowConfigLayer, WindowOverlay, WindowSettings, apply_manifest_window_settings,
     parse_window_mode_env,
 };
-
-/// Atomically advance `counter` and return the next non-zero id for
-/// synthetic chassis-root mail (ADR-0080 §6). Both the headless driver
-/// and the substrate-harness bin own an `AtomicU64` of these;
-/// symmetric with the per-actor counter on `NativeBinding`, with zero
-/// reserved as "no correlation".
-pub fn next_chassis_correlation(counter: &AtomicU64) -> u64 {
-    let id = counter.fetch_add(1, Ordering::Relaxed);
-    if id == 0 {
-        counter.fetch_add(1, Ordering::Relaxed)
-    } else {
-        id
-    }
-}

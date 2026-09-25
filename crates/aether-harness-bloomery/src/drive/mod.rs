@@ -98,11 +98,10 @@ impl BloomeryHarness {
     /// call's chain has not settled within thirty seconds of its outcome.
     pub fn call(&mut self, call: &Call) -> CallOutcome {
         let correlation = self.next_correlation();
-        let settled = self.chassis.send_tracked(
+        let (_, settled) = self.chassis.send_tracked(
             self.mounted.driver.erase(),
             Call::ID,
             call.encode_into_bytes(),
-            correlation,
             Some(ReplyTarget::Actor { to: self.sink.erase(), correlation }),
         );
         let outcome =

@@ -235,11 +235,10 @@ fn route_registered_mid_connection_serves_next_request() {
         shared: false,
     }
     .encode_into_bytes();
-    let registered = chassis.send_tracked(
+    let (_, registered) = chassis.send_tracked(
         chassis.actor_ref::<HttpServerCapability>().erase(),
         <RegisterRoute as KindTrait>::ID,
         payload,
-        0x6521,
         None,
     );
     registered.recv_timeout(Duration::from_secs(10)).expect("the route registration settles");
