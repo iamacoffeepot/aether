@@ -361,11 +361,9 @@ dependencies = [
 name = "aether-chassis-harness"
 version = "0.3.0-alpha"
 dependencies = [
- "aether-actor",
  "aether-chassis",
  "aether-clipboard",
  "aether-component",
- "aether-data",
  "aether-fs",
  "aether-harness-substrate",
  "aether-kinds",
@@ -387,7 +385,6 @@ dependencies = [
 name = "aether-chassis-headless"
 version = "0.3.0-alpha"
 dependencies = [
- "aether-actor",
  "aether-audio",
  "aether-chassis",
  "aether-clipboard",

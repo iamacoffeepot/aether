@@ -409,11 +409,10 @@ mod tests {
         // proves the manual handler retains the original correlation and
         // settlement through owner apply and the later task turn.
         let correlation_id = 0x4068;
-        let settled = chassis.send_tracked(
+        let (_, settled) = chassis.send_tracked(
             chassis.actor_ref::<FleetServer>().erase(),
             SpawnEngine::ID,
             SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None }.encode_into_bytes(),
-            correlation_id,
             Some(ReplyTarget::Actor { to: chassis.actor_ref::<ReplySink>().erase(), correlation: correlation_id }),
         );
         let spawn = wait_for(Duration::from_secs(30), || {
@@ -486,11 +485,10 @@ mod tests {
         let expected_engine = Uuid::from_u128(1);
         let collision = register_proxy_collision(&registry, expected_engine);
         let correlation_id = 0x4068_C011;
-        let settled = chassis.send_tracked(
+        let (_, settled) = chassis.send_tracked(
             chassis.actor_ref::<FleetServer>().erase(),
             SpawnEngine::ID,
             SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None }.encode_into_bytes(),
-            correlation_id,
             Some(ReplyTarget::Actor { to: chassis.actor_ref::<ReplySink>().erase(), correlation: correlation_id }),
         );
 

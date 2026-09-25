@@ -18,7 +18,7 @@ use aether_data::{ActorPath, Address};
 use crossbeam_channel::Receiver;
 
 use crate::actor::registry::ActorRegistry;
-use crate::chassis::builder::ReplyTarget;
+use crate::chassis::builder::{ReplyTarget, RootPusher};
 use crate::config::RingCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::{
@@ -233,14 +233,13 @@ impl Spawner {
 
     /// Body of the chassis handle's `send_tracked`: push `payload` to the
     /// actor `to` proves as a chassis-root mail, optionally carrying a reply
-    /// target, and return the receiver that fires once its causal chain
-    /// settles (ADR-0080 §6).
+    /// target, and return the minted root beside the receiver that fires once
+    /// its causal chain settles (ADR-0080 §6).
     ///
-    /// The three chassis-root steps — mint the root id, record its `Sent`,
-    /// push with lineage — are `Mailer::push_chassis_root_mail`'s, open-coded
-    /// here so the push can also carry a reply target. The subscription lands
-    /// between the record and the push, so the settlement cannot fire before
-    /// the caller holds the receiver.
+    /// The root is minted from the mailer's one chassis-root counter. The
+    /// subscription lands between the mint, which records the `Sent`, and the
+    /// push, so the settlement cannot fire before the caller holds the
+    /// receiver.
     ///
     /// # Panics
     /// Panics if the chassis boot did not install its settlement registry on
@@ -250,24 +249,23 @@ impl Spawner {
         to: ErasedActorRef,
         kind: KindId,
         payload: Vec<u8>,
-        correlation: u64,
         reply: Option<ReplyTarget>,
-    ) -> Receiver<()> {
-        let recipient = to.id();
-        let root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, correlation);
-        self.mailer.record_sent(root, root, None, MailboxId::CHASSIS_MAILBOX_ID, recipient, kind);
+    ) -> (MailId, Receiver<()>) {
+        let minted = self.mailer.mint_chassis_root(to.id(), kind);
         let settlement = self
             .mailer
             .settlement_registry()
             .expect("the chassis boot installs its settlement registry on the mailer")
-            .subscribe_settlement(root);
+            .subscribe_settlement(minted.id());
 
-        let mail = Mail::new(recipient, kind, payload, 1).with_lineage(Some(root), Some(root), None);
-        self.mailer.push(match reply {
-            Some(reply) => mail.with_reply_to(reply_source(reply)),
-            None => mail,
-        });
-        settlement
+        let root = self.mailer.push_minted_root(minted, payload, reply.map_or(Source::NONE, reply_source));
+        (root, settlement)
+    }
+
+    /// Body of the chassis handle's `root_pusher`: the chassis-root door to
+    /// the actor `to` proves, minting from this chassis's mailer.
+    pub(crate) fn root_pusher<R>(&self, to: ActorRef<R>) -> RootPusher<R> {
+        RootPusher::new(to, Arc::clone(&self.mailer))
     }
 
     /// Body of the chassis handle's `send_for_reply`: push `payload` to the

@@ -21,20 +21,17 @@
 //! analogue of desktop returning from winit's `event_loop.run_app`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::root_mailbox;
-use aether_data::{Kind, KindId};
+use aether_data::KindId;
 use aether_kinds::LifecycleAdvance;
 use aether_lifecycle::LifecycleCapability;
-use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
+use aether_substrate::SubstrateBoot;
+use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RootPusher, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
-use aether_substrate::{Mailer, SubstrateBoot, mail::MailboxId};
-
-use aether_chassis::next_chassis_correlation;
 
 /// ADR-0071 driver capability for the headless chassis. Owns the
 /// pieces the timer loop needs at construction time, then `boot()`
@@ -56,15 +53,11 @@ pub struct HeadlessTimerDriverCapability {
 }
 
 pub struct HeadlessTimerRunning {
-    queue: Arc<Mailer>,
-    /// `aether.lifecycle` mailbox id, cached at boot. Each tick fires
-    /// one `LifecycleAdvance` here; the lifecycle driver broadcasts the
-    /// current stage (Tick) directly to its stage subscriber set
-    /// (components subscribe `Tick` on `aether.lifecycle`).
-    lifecycle_mailbox: MailboxId,
-    /// Kind id of [`LifecycleAdvance`], pre-resolved so the timer
-    /// loop body stays alloc-free per tick.
-    kind_lifecycle_advance: KindId,
+    /// The chassis-root door to `aether.lifecycle`, minted at boot. Each
+    /// tick fires one `LifecycleAdvance` through it; the lifecycle driver
+    /// broadcasts the current stage (Tick) directly to its stage subscriber
+    /// set (components subscribe `Tick` on `aether.lifecycle`).
+    lifecycle: RootPusher<LifecycleCapability>,
     tick_period: Duration,
     /// SIGINT/SIGTERM shutdown flag, flipped from the signal handler
     /// installed in [`HeadlessTimerDriverCapability::boot`]. The run loop
@@ -89,16 +82,14 @@ impl DriverCapability for HeadlessTimerDriverCapability {
         <aether_chassis::TickConfig as ConfigMember>::members()
     }
 
-    fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+    fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
         let Self { boot, kind_tick: _, tick_period } = self;
 
         let shutdown = Arc::new(AtomicBool::new(false));
         install_shutdown_handler(&shutdown);
 
         Ok(HeadlessTimerRunning {
-            queue: Arc::clone(&boot.queue),
-            lifecycle_mailbox: root_mailbox::<LifecycleCapability>(),
-            kind_lifecycle_advance: <LifecycleAdvance as Kind>::ID,
+            lifecycle: ctx.root_pusher::<LifecycleCapability>(),
             tick_period,
             shutdown,
             _boot: boot,
@@ -154,9 +145,7 @@ fn install_shutdown_handler(shutdown: &Arc<AtomicBool>) {
 impl DriverRunning for HeadlessTimerRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
         let Self {
-            queue,
-            lifecycle_mailbox,
-            kind_lifecycle_advance,
+            lifecycle,
             tick_period,
             shutdown,
             // Held to the end of `run()` so the scheduler joins workers on
@@ -164,11 +153,6 @@ impl DriverRunning for HeadlessTimerRunning {
             _boot,
         } = *self;
 
-        // ADR-0080 §6 chassis-root correlation counter (issue
-        // iamacoffeepot/aether#723). One per driver, symmetric with the
-        // per-actor counter on `NativeBinding`. Skipping 0 keeps the
-        // sentinel slot reserved.
-        let chassis_correlation = AtomicU64::new(1);
         let delta_micros = u32::try_from(tick_period.as_micros()).unwrap_or(u32::MAX);
 
         let mut next_deadline = Instant::now() + tick_period;
@@ -191,13 +175,7 @@ impl DriverRunning for HeadlessTimerRunning {
             // gating tracks one pending advance at a time — frames that
             // overlap (settlement still pending when the next deadline
             // hits) warn-drop at the driver per ADR-0082 §6.
-            queue.push_chassis_root_mail(
-                next_chassis_correlation(&chassis_correlation),
-                lifecycle_mailbox,
-                kind_lifecycle_advance,
-                LifecycleAdvance { delta_micros }.encode_into_bytes(),
-                1,
-            );
+            lifecycle.push_root(&LifecycleAdvance { delta_micros }, None);
         }
 
         // SIGINT/SIGTERM flipped `shutdown` (or a test pre-set it): the

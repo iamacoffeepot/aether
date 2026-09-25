@@ -40,8 +40,6 @@ aether-text = { path = "../aether-text", features = ["runtime"] }
 aether-fs = { path = "../aether-fs" }
 # The deterministic synthetic window the harness answers window mail on.
 aether-window = { path = "../aether-window", features = ["synthetic"] }
-aether-actor = { path = "../aether-actor" }
-aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 anyhow = { workspace = true }
 # `RenderSizeConfig` derives `aether_substrate::Config`, which emits a

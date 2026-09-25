@@ -571,11 +571,10 @@ mod tests {
         let (chassis, proxy, log) = spawn_scripted_proxy(3, "scripted", port);
         let sink = chassis.actor_ref::<ProxyReplySink>().erase();
 
-        let settled = chassis.send_tracked(
+        let (_, settled) = chassis.send_tracked(
             proxy.erase(),
             <ForwardEnvelope as Kind>::ID,
             echo_forward().encode_into_bytes(),
-            1,
             Some(ReplyTarget::Actor { to: sink, correlation: 11 }),
         );
         calls_rx.recv_timeout(Duration::from_secs(5)).expect("the fake engine receives the first call");
@@ -593,11 +592,10 @@ mod tests {
         );
         settled.recv_timeout(Duration::from_secs(5)).expect("the forward's chain settles after its terminal");
 
-        let second = chassis.send_tracked(
+        let (_, second) = chassis.send_tracked(
             proxy.erase(),
             <ForwardEnvelope as Kind>::ID,
             echo_forward().encode_into_bytes(),
-            2,
             Some(ReplyTarget::Actor { to: sink, correlation: 12 }),
         );
         calls_rx.recv_timeout(Duration::from_secs(5)).expect("the fake engine receives the second call");
@@ -629,11 +627,10 @@ mod tests {
         // `Call` before any byte reaches the socket, so the connection
         // stays healthy for the follow-up forward.
         let oversized = ForwardEnvelope { payload: vec![0; max_frame_size() + 1], ..echo_forward() };
-        let settled = chassis.send_tracked(
+        let (_, settled) = chassis.send_tracked(
             proxy.erase(),
             <ForwardEnvelope as Kind>::ID,
             oversized.encode_into_bytes(),
-            1,
             Some(ReplyTarget::Actor { to: sink, correlation: 21 }),
         );
         let replies = await_len(&log, 1, "the unwritable forward's terminal did not arrive");
@@ -643,11 +640,10 @@ mod tests {
         assert!(reason.contains("encoded frame too large"), "the error names the write failure: {reason}");
         settled.recv_timeout(Duration::from_secs(5)).expect("the unwritable forward's chain settles");
 
-        let second = chassis.send_tracked(
+        let (_, second) = chassis.send_tracked(
             proxy.erase(),
             <ForwardEnvelope as Kind>::ID,
             echo_forward().encode_into_bytes(),
-            2,
             Some(ReplyTarget::Actor { to: sink, correlation: 22 }),
         );
         calls_rx.recv_timeout(Duration::from_secs(5)).expect("the fake engine receives the follow-up call");
@@ -720,11 +716,10 @@ mod tests {
         };
         calls_rx.recv_timeout(Duration::from_secs(5)).expect("the fake engine receives the forwarded call");
 
-        let _terminated = chassis.send_tracked(
+        let (_, _terminated) = chassis.send_tracked(
             proxy.erase(),
             <TerminateEngine as Kind>::ID,
             TerminateEngine { engine_id: engine_id.0.to_string() }.encode_into_bytes(),
-            13,
             None,
         );
         let end = conn.inbound.recv_timeout(Duration::from_secs(5)).expect("the hub closes the wire call");

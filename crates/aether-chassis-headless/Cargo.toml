@@ -39,7 +39,6 @@ aether-http = { path = "../aether-http" }
 # so the cpal/synth stack is linked but never constructed here — no audio
 # device is opened on a headless boot.
 aether-audio = { path = "../aether-audio", features = ["runtime"] }
-aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 clap = { workspace = true }

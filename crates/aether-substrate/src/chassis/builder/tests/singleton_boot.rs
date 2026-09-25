@@ -297,11 +297,10 @@ fn actor_ref_reaches_each_composed_cap_and_only_it() {
 
     let ping = ComposedPing { tag: 7 }.encode_into_bytes();
     let _left_settled =
-        chassis.send_tracked(chassis.actor_ref::<ComposedLeft>().erase(), ComposedPing::ID, ping.clone(), 1, None);
+        chassis.send_tracked(chassis.actor_ref::<ComposedLeft>().erase(), ComposedPing::ID, ping.clone(), None);
     let _right_settled =
-        chassis.send_tracked(chassis.actor_ref::<ComposedRight>().erase(), ComposedPing::ID, ping.clone(), 2, None);
-    let _right_again =
-        chassis.send_tracked(chassis.actor_ref::<ComposedRight>().erase(), ComposedPing::ID, ping, 3, None);
+        chassis.send_tracked(chassis.actor_ref::<ComposedRight>().erase(), ComposedPing::ID, ping.clone(), None);
+    let _right_again = chassis.send_tracked(chassis.actor_ref::<ComposedRight>().erase(), ComposedPing::ID, ping, None);
 
     let deadline = Instant::now() + Duration::from_millis(500);
     while (left.load(AtomicOrdering::SeqCst), right.load(AtomicOrdering::SeqCst)) != (1, 2) && Instant::now() < deadline
