@@ -256,7 +256,7 @@ See [Writing a component](docs/guide/recipes/writing-a-component.md) and
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm hosts, settlement |
 | Native services | `aether-render`, `aether-audio`, `aether-fs` and the rest of `aether-<cap>` | one crate per capability mailbox: render, text, audio, clipboard, window, FS, HTTP, TCP, process, RPC, component, lifecycle, fleet, inventory, trace |
 | Chassis and harnesses | `aether-chassis` + `aether-chassis-*` | per-chassis crates over a shared composition layer; harnesses in `aether-harness-*` |
-| Guest actors | `aether-kit`, `aether-widget`, `aether-mesh`, `aether-demo`, `aether-anthropic` | camera and mesh viewer; the widget tree; the geometry DSL library; the release demo's bring-up component; the model-provider component |
+| Guest actors | `aether-kit`, `aether-widget`, `aether-mesh`, `aether-demo` | camera and mesh viewer; the widget tree; the geometry DSL library; the release demo's bring-up component |
 | Operator bridge | `aether-mcp` | MCP tools, live schemas, RPC and bounded evidence projection |
 | Tooling | `xtask`, fixture crates, excluded `fuzz/` | dist/bundle discovery, compatibility artifacts, nightly fuzz targets |
 

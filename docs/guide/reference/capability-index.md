@@ -39,14 +39,12 @@ requested binary.
 
 ## Loadable provider components
 
-The content-generation providers are wasm guest components a substrate loads on
+Content-generation providers are wasm guest components a substrate loads on
 demand rather than native chassis capabilities (ADR-0159). The default
-composition carries neither; a workload uploads and loads the one it needs, and
+composition carries none; a workload uploads and loads the one it needs, and
 the loaded component answers at `aether.component/aether.embedded:<namespace>`.
-
-| Namespace | Responsibility | Public source | Guide |
-|---|---|---|---|
-| `aether.anthropic` | Messages API and CLI text generation | `aether-anthropic/src` | [Content generation](../systems/content-generation.md) |
+No provider component currently ships in the workspace; see
+[Content generation](../systems/content-generation.md) for the pattern.
 
 ## Shared/substrate kind families
 
