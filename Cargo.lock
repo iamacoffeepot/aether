@@ -333,6 +333,7 @@ dependencies = [
  "aether-http",
  "aether-rpc",
  "aether-substrate",
+ "aether-workspace",
  "clap",
  "confique",
  "serde_json",
@@ -1224,8 +1225,21 @@ dependencies = [
 name = "aether-workspace"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-actor",
+ "aether-bloomery-journal",
  "aether-bloomery-kinds",
+ "aether-bloomery-tar",
  "aether-data",
+ "aether-harness-substrate",
+ "aether-substrate",
+ "aether-workspace",
+ "clap",
+ "confique",
+ "inventory",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

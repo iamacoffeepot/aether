@@ -4,19 +4,67 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The workspace contract (ADR-0237): run, environment, and import kinds, valid by construction."
+description = "The workspace contract (ADR-0237): run, environment, and import kinds, valid by construction, and the aether.workspace actor that answers them."
 
 # The ADR-0122 identity/runtime split rides the `runtime` feature. The identity
-# half (the kinds and their validators) is `no_std` and compiles always-on, so a
-# wasm program SDK depends on this crate with `default-features = false`. The
-# `runtime` feature is empty until the `aether.workspace` actor lands with it.
+# half (the kinds, their validators, the `WorkspaceCapability` marker, and the
+# `WorkspaceConfig` domain struct) is `no_std` and compiles always-on, so a wasm
+# program SDK depends on this crate with `default-features = false`. The
+# `runtime` feature adds the `aether.workspace` actor: the substrate-typed
+# state, the private Docker Engine API client, and the journal sink it decodes
+# an image's export into.
 [features]
 default = ["runtime"]
-runtime = []
+runtime = [
+  "dep:aether-substrate",
+  "dep:aether-bloomery-journal",
+  "dep:aether-bloomery-tar",
+  "dep:serde_json",
+  "dep:clap",
+  "dep:confique",
+  "dep:tracing",
+]
+# Exposes `testing::StubDaemon`, the scripted Engine API server the runtime's
+# unit tests and this crate's own actor scenario dial. Off by default, so it
+# never reaches the shipped surface.
+test-support = ["runtime", "dep:tempfile"]
 
 [dependencies]
+aether-actor = { path = "../aether-actor" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+# Native-only runtime half: the actor runtime, the journal's streaming artifact
+# store, the tar codec the export decodes through, the Engine API's JSON
+# bodies, the `Config` derive's clap/confique codegen, and logging.
+aether-substrate = { path = "../aether-substrate", optional = true }
+aether-bloomery-journal = { path = "../aether-bloomery-journal", optional = true }
+aether-bloomery-tar = { path = "../aether-bloomery-tar", optional = true }
+serde_json = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+confique = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
+tempfile = { version = "3", optional = true }
+
+# The `#[actor]` and `Kind` derives emit a `cfg(not(target_family = "wasm"))`
+# inventory row, so native builds need `inventory` reachable; wasm guests don't.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+# The crate's own actor scenario dials the stub daemon `test-support` exposes.
+aether-workspace = { path = ".", features = ["test-support"] }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+# The journal and import tests count the committed artifact rows on a
+# connection of their own.
+rusqlite = { workspace = true }
+tempfile = "3"
+
+# cargo-machete (the CI unused-deps gate) scans source without resolving
+# features, so it cannot see that `clap` and `confique` are used only through
+# the `Config` derive's codegen under the optional `runtime` feature. Both are
+# false positives: the deps are real and runtime-gated.
+[package.metadata.cargo-machete]
+ignored = ["clap", "confique"] # aether-suppression-request: both are reached only through the `#[derive(aether_substrate::Config)]` expansion on `WorkspaceConfig`, which a source-only scan cannot see
 
 [lints]
 workspace = true

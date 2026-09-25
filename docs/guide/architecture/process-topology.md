@@ -32,7 +32,7 @@ table as intent rather than a hardcoded manifest.
 | Headless | `aether-headless` | timer-driven engine without a desktop event loop |
 | Hub | `aether-hub` | supervise child engines, store artifacts, and route RPC |
 | Substrate harness | `aether-substrate-harness` | deterministic in-process operations and test evidence |
-| Bloomery | `aether-bloomery` | journal-driven engine: the bundle driver over one journal root, with deny-by-default HTTP egress |
+| Bloomery | `aether-bloomery` | journal-driven engine: the bundle driver over one journal root, with deny-by-default HTTP egress and the `aether.workspace` actor, which imports digest-pinned images into the journal through the Docker Engine API |
 
 Their builders live under
 `crates/aether-chassis-{desktop,headless,hub,harness,bloomery}`. Shared runtime mechanism

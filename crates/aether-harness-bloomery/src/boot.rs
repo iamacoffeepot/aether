@@ -148,11 +148,11 @@ fn env(journal: &Path, mut sources: ConfigSources) -> BloomeryEnv {
     let settlement = resolve::<SettlementConfig>(&mut sources);
     let runtime = resolve::<RuntimeConfig>(&mut sources);
     let bloomery = resolve::<BloomeryConfig>(&mut sources);
-    BloomeryEnv {
-        base: ChassisBase { sources, actor_ring, scheduler_tuning, registry_queues, settlement },
+    BloomeryEnv::new(
+        ChassisBase { sources, actor_ring, scheduler_tuning, registry_queues, settlement },
         runtime,
-        bloomery: BloomeryConfig { journal: Some(journal.display().to_string()), ..bloomery },
-    }
+        BloomeryConfig { journal: Some(journal.display().to_string()), ..bloomery },
+    )
 }
 
 /// Resolve member `C` off `sources`, panicking with the refusal: a flag the

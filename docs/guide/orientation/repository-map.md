@@ -104,7 +104,7 @@ the bundle driver on the `aether-bloomery` binary.
 | `aether-bloomery-bundle`, `aether-bloomery-bundle-derive` | the `bundle` export generator: one root for a module's programs and reactors |
 | `aether-bloomery-driver` | the sans-io driver core: journal folds in, driver commands out, for both programs and reactors (ADR-0226) |
 | `aether-bloomery-muse` | the `muse.turn` Sampled program: one stateless responses-API turn per run (ADR-0234) |
-| `aether-workspace` | ADR-0237's run, environment, and import kinds, valid by construction; the `aether.workspace` actor that answers them follows in #6754 |
+| `aether-workspace` | ADR-0237's run, environment, and import kinds, valid by construction, and the `aether.workspace` actor that answers them: a private Docker Engine API client that imports a digest-pinned image into the journal as a tree (`Run` follows in #6755) |
 
 ## Derive, fixture, and tooling crates
 
