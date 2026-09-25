@@ -319,8 +319,16 @@ function render() {
     if (node.name.startsWith("Eye.") || node.name.startsWith("Iris.") || node.name.startsWith("Pupil.")) {
       scale[0] *= 1 + eyeSize * 0.16;
       scale[1] *= 1 + eyeSize * 0.12;
+      translation[2] -= Math.max(eyeSize, 0) * 0.040;
     }
-    if (node.name.startsWith("Brow.")) translation[1] += browHeight * 0.10;
+    if (node.name === "UpperLids") {
+      translation[1] += eyeSize * 0.006;
+      translation[2] -= Math.max(eyeSize, 0) * 0.040;
+    }
+    if (node.name === "Brows") {
+      translation[1] += browHeight * 0.10;
+      translation[2] += browHeight * 0.025;
+    }
 
     const model = modelMatrix(translation, scale);
     gl.uniformMatrix4fv(locations.model, false, model);

@@ -205,7 +205,9 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let head = head_mesh(64, 64);
     let eye = sphere_mesh(18, 24);
     let disc = disc_mesh(48);
-    let brow = brow_mesh(24);
+    let brows = brows_mesh(24);
+    let upper_lids = upper_lids_mesh(24);
+    let mouth = mouth_mesh(48);
     let mut buffer = BufferBuilder::default();
 
     let head_position = buffer.push_vec3(&head.positions, true);
@@ -227,12 +229,28 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let disc_uv = buffer.push_vec2(&disc.texture_coordinates);
     let disc_indices = buffer.push_indices(&disc.indices);
 
-    let brow_position = buffer.push_vec3(&brow.positions, true);
-    let brow_normal = buffer.push_vec3(&brow.normals, false);
-    let brow_uv = buffer.push_vec2(&brow.texture_coordinates);
-    let brow_indices = buffer.push_indices(&brow.indices);
+    let brow_position = buffer.push_vec3(&brows.positions, true);
+    let brow_normal = buffer.push_vec3(&brows.normals, false);
+    let brow_uv = buffer.push_vec2(&brows.texture_coordinates);
+    let brow_indices = buffer.push_indices(&brows.indices);
+
+    let lid_position = buffer.push_vec3(&upper_lids.positions, true);
+    let lid_normal = buffer.push_vec3(&upper_lids.normals, false);
+    let lid_uv = buffer.push_vec2(&upper_lids.texture_coordinates);
+    let lid_indices = buffer.push_indices(&upper_lids.indices);
+
+    let mouth_position = buffer.push_vec3(&mouth.positions, true);
+    let mouth_normal = buffer.push_vec3(&mouth.normals, false);
+    let mouth_uv = buffer.push_vec2(&mouth.texture_coordinates);
+    let mouth_indices = buffer.push_indices(&mouth.indices);
+    let mouth_morph_accessors = MORPH_TARGETS
+        .iter()
+        .map(|name| buffer.push_vec3(&mouth_morph_deltas(name, &mouth.positions), false))
+        .collect::<Vec<_>>();
 
     let targets = morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
+    let mouth_targets =
+        mouth_morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
     let target_names = MORPH_TARGETS.iter().map(|name| json!(name)).collect::<Vec<_>>();
     let weights = MORPH_TARGETS.iter().map(|_| json!(0.0)).collect::<Vec<_>>();
 
@@ -242,23 +260,21 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             "generator": "Aether AI parametric character generator 0.1"
         },
         "scene": 0,
-        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] }],
+        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] }],
         "nodes": [
             { "name": "Head", "mesh": 0 },
-            { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.590], "scale": [0.115, 0.055, 0.085] },
-            { "name": "Eye.Right", "mesh": 1, "translation": [0.255, 0.225, 0.590], "scale": [0.115, 0.055, 0.085] },
-            { "name": "Iris.Left", "mesh": 2, "translation": [-0.255, 0.225, 0.677], "scale": [0.032, 0.032, 0.032] },
-            { "name": "Iris.Right", "mesh": 2, "translation": [0.255, 0.225, 0.677], "scale": [0.032, 0.032, 0.032] },
-            { "name": "Pupil.Left", "mesh": 3, "translation": [-0.255, 0.225, 0.679], "scale": [0.014, 0.014, 0.014] },
-            { "name": "Pupil.Right", "mesh": 3, "translation": [0.255, 0.225, 0.679], "scale": [0.014, 0.014, 0.014] },
+            { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.490], "scale": [0.115, 0.055, 0.060] },
+            { "name": "Eye.Right", "mesh": 1, "translation": [0.255, 0.225, 0.490], "scale": [0.115, 0.055, 0.060] },
+            { "name": "Iris.Left", "mesh": 2, "translation": [-0.255, 0.225, 0.552], "scale": [0.032, 0.032, 0.032] },
+            { "name": "Iris.Right", "mesh": 2, "translation": [0.255, 0.225, 0.552], "scale": [0.032, 0.032, 0.032] },
+            { "name": "Pupil.Left", "mesh": 3, "translation": [-0.255, 0.225, 0.554], "scale": [0.014, 0.014, 0.014] },
+            { "name": "Pupil.Right", "mesh": 3, "translation": [0.255, 0.225, 0.554], "scale": [0.014, 0.014, 0.014] },
             { "name": "Ear.Left", "mesh": 4, "translation": [-0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
             { "name": "Ear.Right", "mesh": 4, "translation": [0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
-            { "name": "Brow.Left", "mesh": 5, "translation": [-0.255, 0.375, 0.682], "scale": [0.195, 0.11, 0.02] },
-            { "name": "Brow.Right", "mesh": 5, "translation": [0.255, 0.375, 0.682], "scale": [0.195, 0.11, 0.02] },
-            { "name": "UpperLid.Left", "mesh": 6, "translation": [-0.255, 0.247, 0.681], "scale": [0.122, 0.105, 0.02] },
-            { "name": "UpperLid.Right", "mesh": 6, "translation": [0.255, 0.247, 0.681], "scale": [0.122, 0.105, 0.02] },
+            { "name": "Brows", "mesh": 5 },
+            { "name": "UpperLids", "mesh": 6 },
             { "name": "Neck", "mesh": 4, "translation": [0.0, -0.86, -0.14], "scale": [0.29, 0.40, 0.27] },
-            { "name": "MouthOpening", "mesh": 7, "translation": [0.0, -0.252, 0.665], "scale": [0.165, 0.018, 0.02] }
+            { "name": "MouthOpening", "mesh": 7 }
         ],
         "materials": [
             material("Skin", [0.55, 0.28, 0.18, 1.0], 0.82),
@@ -286,8 +302,18 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             mesh_json("Pupil", disc_position, disc_normal, disc_uv, disc_indices, 3),
             mesh_json("SkinFeature", eye_position, eye_normal, eye_uv, eye_indices, 0),
             mesh_json("Brow", brow_position, brow_normal, brow_uv, brow_indices, 4),
-            mesh_json("Lid", brow_position, brow_normal, brow_uv, brow_indices, 0),
-            mesh_json("Mouth", disc_position, disc_normal, disc_uv, disc_indices, 5)
+            mesh_json("Lid", lid_position, lid_normal, lid_uv, lid_indices, 0),
+            {
+                "name": "Mouth",
+                "weights": weights,
+                "primitives": [{
+                    "attributes": { "POSITION": mouth_position, "NORMAL": mouth_normal, "TEXCOORD_0": mouth_uv },
+                    "indices": mouth_indices,
+                    "material": 5,
+                    "mode": 4,
+                    "targets": mouth_targets
+                }]
+            }
         ],
         "bufferViews": buffer.views,
         "accessors": buffer.accessors,
@@ -380,27 +406,120 @@ fn disc_mesh(segments: u32) -> Mesh {
     Mesh { positions, normals, texture_coordinates, indices }
 }
 
-fn brow_mesh(segments: u32) -> Mesh {
-    let mut positions = Vec::with_capacity(((segments + 1) * 2) as usize);
-    let mut normals = Vec::with_capacity(positions.capacity());
-    let mut texture_coordinates = Vec::with_capacity(positions.capacity());
+fn mouth_mesh(segments: u32) -> Mesh {
+    let mut mesh = disc_mesh(segments);
+    for position in &mut mesh.positions {
+        *position = Vec3::new(position.x * 0.165, position.y.mul_add(0.018, -0.252), 0.610);
+    }
+    mesh
+}
+
+fn mouth_morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
+    positions
+        .iter()
+        .map(|position| match name {
+            "LipFullness" => Vec3::new(0.0, 0.0, 0.10),
+            "MouthSmile" => {
+                let corner = (position.x.abs() / 0.165).clamp(0.0, 1.0).powf(1.5);
+                Vec3::new(0.0, 0.13 * corner, 0.025 * corner)
+            }
+            _ => Vec3::default(),
+        })
+        .collect()
+}
+
+fn brows_mesh(segments: u32) -> Mesh {
+    let mut mesh = empty_mesh((segments + 1) * 4, segments * 12);
+    for center_x in [-0.255, 0.255] {
+        append_ribbon(&mut mesh, segments, center_x, 0.365, 0.19, 0.10, |x, y, _| {
+            let point = front_surface_point(x, y);
+            (point.z + 0.004, head_normal(point))
+        });
+    }
+    mesh
+}
+
+fn upper_lids_mesh(segments: u32) -> Mesh {
+    let mut mesh = empty_mesh((segments + 1) * 4, segments * 12);
+    for center_x in [-0.255, 0.255] {
+        append_ribbon(&mut mesh, segments, center_x, 0.245, 0.112, 0.075, |x, y, center_x| {
+            let center = Vec3::new(center_x, 0.225, 0.490);
+            let radii = Vec3::new(0.115, 0.055, 0.060);
+            let normalized_x = (x - center.x) / radii.x;
+            let normalized_y = (y - center.y) / radii.y;
+            let z =
+                center.z + radii.z * (1.0 - normalized_x * normalized_x - normalized_y * normalized_y).max(0.0).sqrt();
+            let normal = Vec3::new(
+                (x - center.x) / radii.x.powi(2),
+                (y - center.y) / radii.y.powi(2),
+                (z - center.z) / radii.z.powi(2),
+            )
+            .normalized();
+            (z + 0.003, normal)
+        });
+    }
+    mesh
+}
+
+fn empty_mesh(vertex_capacity: u32, index_capacity: u32) -> Mesh {
+    Mesh {
+        positions: Vec::with_capacity(vertex_capacity as usize),
+        normals: Vec::with_capacity(vertex_capacity as usize),
+        texture_coordinates: Vec::with_capacity(vertex_capacity as usize),
+        indices: Vec::with_capacity(index_capacity as usize),
+    }
+}
+
+fn append_ribbon(
+    mesh: &mut Mesh,
+    segments: u32,
+    center_x: f32,
+    base_y: f32,
+    x_scale: f32,
+    y_scale: f32,
+    surface: impl Fn(f32, f32, f32) -> (f32, Vec3),
+) {
+    let base = mesh.positions.len() as u32;
     for segment in 0..=segments {
         let t = segment as f32 / segments as f32;
-        let x = t.mul_add(2.0, -1.0);
-        let center_y = 0.22 * (1.0 - x * x);
+        let local_x = t.mul_add(2.0, -1.0);
+        let center_y = 0.22 * (1.0 - local_x * local_x);
         let half_width = 0.16 * (0.35 + 0.65 * (PI * t).sin());
-        for (side, y) in [(0.0, center_y - half_width), (1.0, center_y + half_width)] {
-            positions.push(Vec3::new(x, y, 0.0));
-            normals.push(Vec3::new(0.0, 0.0, 1.0));
-            texture_coordinates.push(Vec2 { x: t, y: side });
+        for (side, local_y) in [(0.0, center_y - half_width), (1.0, center_y + half_width)] {
+            let x = local_x.mul_add(x_scale, center_x);
+            let y = local_y.mul_add(y_scale, base_y);
+            let (z, normal) = surface(x, y, center_x);
+            mesh.positions.push(Vec3::new(x, y, z));
+            mesh.normals.push(normal);
+            mesh.texture_coordinates.push(Vec2 { x: t, y: side });
         }
     }
-    let mut indices = Vec::with_capacity((segments * 6) as usize);
     for segment in 0..segments {
-        let left = segment * 2;
-        indices.extend_from_slice(&[left, left + 2, left + 1, left + 1, left + 2, left + 3]);
+        let left = base + segment * 2;
+        mesh.indices.extend_from_slice(&[left, left + 2, left + 1, left + 1, left + 2, left + 3]);
     }
-    Mesh { positions, normals, texture_coordinates, indices }
+}
+
+fn front_surface_point(x: f32, y: f32) -> Vec3 {
+    let mut outside = 1.05;
+    let mut inside = 1.05;
+    for step in 1..=180 {
+        let z = 1.05 - step as f32 * 0.01;
+        if head_sdf(Vec3::new(x, y, z)) <= 0.0 {
+            inside = z;
+            break;
+        }
+        outside = z;
+    }
+    for _ in 0..12 {
+        let middle = (outside + inside) * 0.5;
+        if head_sdf(Vec3::new(x, y, middle)) > 0.0 {
+            outside = middle;
+        } else {
+            inside = middle;
+        }
+    }
+    Vec3::new(x, y, (outside + inside) * 0.5)
 }
 
 fn grid_indices(rings: u32, segments: u32) -> Vec<u32> {
@@ -606,22 +725,26 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
             let front = ((position.z + 0.05) / 0.78).clamp(0.0, 1.0);
             match name {
                 "JawWidth" => {
-                    let weight = front * gaussian(position.x, position.y, 0.0, -0.42, 0.68, 0.35);
-                    Vec3::new(position.x.signum() * 0.12 * weight, 0.0, 0.0)
+                    let lower_face = ((0.12 - position.y) / 0.52).clamp(0.0, 1.0);
+                    let lateral = ((position.x.abs() - 0.10) / 0.26).clamp(0.0, 1.0);
+                    let weight =
+                        front * lower_face * lateral * gaussian(position.x, position.y, 0.0, -0.42, 0.68, 0.35);
+                    Vec3::new(position.x * 0.30 * weight, 0.0, 0.0)
                 }
                 "JawLength" => {
-                    let weight = front * gaussian(position.x, position.y, 0.0, -0.55, 0.50, 0.30);
+                    let lower_face = ((-0.10 - position.y) / 0.42).clamp(0.0, 1.0);
+                    let weight = front * lower_face * gaussian(position.x, position.y, 0.0, -0.55, 0.50, 0.30);
                     Vec3::new(0.0, -0.16 * weight, 0.025 * weight)
                 }
                 "CheekVolume" => {
                     let weight = front
                         * (gaussian(position.x, position.y, -0.37, -0.01, 0.25, 0.22)
                             + gaussian(position.x, position.y, 0.37, -0.01, 0.25, 0.22));
-                    Vec3::new(position.x.signum() * 0.025 * weight, 0.0, 0.11 * weight)
+                    Vec3::new(position.x * 0.075 * weight, 0.0, 0.11 * weight)
                 }
                 "NoseWidth" => {
                     let weight = front * gaussian(position.x, position.y, 0.0, 0.02, 0.19, 0.19);
-                    Vec3::new(position.x.signum() * 0.07 * weight, 0.0, 0.015 * weight)
+                    Vec3::new(position.x * 0.45 * weight, 0.0, 0.015 * weight)
                 }
                 "NoseLength" => {
                     let weight = front * gaussian(position.x, position.y, 0.0, 0.10, 0.13, 0.30);
@@ -683,5 +806,31 @@ fn vec3_bounds(values: &[Vec3]) -> (Vec3, Vec3) {
 fn pad(bytes: &mut Vec<u8>, value: u8) {
     while !bytes.len().is_multiple_of(4) {
         bytes.push(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MORPH_TARGETS, head_mesh, morph_deltas};
+
+    #[test]
+    fn morph_extremes_remain_finite_and_preserve_the_face_centerline() {
+        let mesh = head_mesh(32, 32);
+        for name in MORPH_TARGETS {
+            let deltas = morph_deltas(name, &mesh.positions);
+            for amount in [-1.0, 1.0] {
+                for (position, delta) in mesh.positions.iter().zip(&deltas) {
+                    let deformed = *position + *delta * amount;
+                    assert!(deformed.x.is_finite() && deformed.y.is_finite() && deformed.z.is_finite(), "{name}");
+                    if matches!(name, "JawWidth" | "CheekVolume" | "NoseWidth") && position.x.abs() > 0.000_1 {
+                        assert_eq!(
+                            position.x.is_sign_positive(),
+                            deformed.x.is_sign_positive(),
+                            "{name} crossed centerline"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

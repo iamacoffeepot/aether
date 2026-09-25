@@ -16,7 +16,7 @@ fn generated_head_is_a_self_contained_glb_with_named_morphs() {
     assert_eq!(document["asset"]["version"], "2.0");
     assert_eq!(document["buffers"][0]["uri"], Value::Null);
     assert_eq!(document["scenes"].as_array().expect("scenes array").len(), 1);
-    assert_eq!(document["nodes"].as_array().expect("nodes array").len(), 15);
+    assert_eq!(document["nodes"].as_array().expect("nodes array").len(), 13);
     assert_eq!(document["meshes"].as_array().expect("meshes array").len(), 8);
     assert_eq!(document["images"], Value::Null);
 
@@ -29,4 +29,9 @@ fn generated_head_is_a_self_contained_glb_with_named_morphs() {
         document["meshes"][0]["primitives"][0]["targets"].as_array().expect("targets array").len(),
         MORPH_TARGETS.len()
     );
+    assert_eq!(
+        document["meshes"][7]["primitives"][0]["targets"].as_array().expect("mouth targets array").len(),
+        MORPH_TARGETS.len()
+    );
+    assert_eq!(document["meshes"][7]["extras"], Value::Null);
 }
