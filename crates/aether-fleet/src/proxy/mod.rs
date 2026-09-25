@@ -133,8 +133,8 @@ mod tests {
         DeathReason, FleetCapCells, FleetCapSink, FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyReplySink,
         ProxyTarget, RecordedReply, ReplyLog,
     };
-    use aether_actor::Addressable;
-    use aether_codec::frame::{read_frame, write_frame};
+    use aether_actor::{ActorRef, Addressable};
+    use aether_codec::frame::{max_frame_size, read_frame, write_frame};
     use aether_data::{ActorPath, EngineId, Kind, Uuid};
     use aether_kinds::TerminateEngine;
     use aether_rpc::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
@@ -411,6 +411,44 @@ mod tests {
         (chassis, cells, engine_id.0.to_string())
     }
 
+    /// Boot a chassis hosting trace dispatch, the engine-cap sink, a reply
+    /// sink, and the unbound RPC server, then point an [`FleetProxy`] named
+    /// `subname` at the fake engine on `port` with no heartbeat. Returns the
+    /// chassis (kept alive for its dispatcher threads), the proxy, and the
+    /// sink's reply log. `engine_id` is `Uuid::from_u128(seed)`.
+    fn spawn_scripted_proxy(
+        seed: u128,
+        subname: &'static str,
+        port: u16,
+    ) -> (PassiveChassis<TestChassis>, ActorRef<FleetProxy>, ReplyLog) {
+        let (registry, mailer) = fresh_substrate();
+        let log = ReplyLog::default();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<FleetCapSink>(FleetCapCells::default())
+            .with_actor::<ProxyReplySink>(Arc::clone(&log))
+            .with_actor_configured::<RpcServerCapability>(
+                unbound_rpc_params(),
+                RpcServerConfig { port: None, port_file: None },
+            )
+            .build_passive()
+            .expect("caps boot");
+        let proxy = chassis
+            .spawn_actor_for_test::<FleetProxy>(
+                Subname::Named(subname),
+                FleetProxyConfig {
+                    engine_id: EngineId(Uuid::from_u128(seed)),
+                    target: ProxyTarget::Adopted { rpc_addr: format!("127.0.0.1:{port}") },
+                    heartbeat: None,
+                    connect_budget: None,
+                },
+                (),
+            )
+            .finish()
+            .expect("proxy spawns + connects");
+        (chassis, proxy, log)
+    }
+
     /// Block until `cell` holds at least one entry (returning a clone of
     /// the first), or the deadline passes (panicking with `what`).
     fn await_first<T: Clone>(cell: &Arc<Mutex<Vec<T>>>, what: &str) -> T {
@@ -530,32 +568,7 @@ mod tests {
             CallScript { frames: vec![ScriptFrame::End], release: None },
         ]);
         let (port, _server) = fake_server(Behavior::Scripted { calls: calls_tx, scripts });
-
-        let (registry, mailer) = fresh_substrate();
-        let log = ReplyLog::default();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<TraceDispatchCapability>(())
-            .with_actor::<FleetCapSink>(FleetCapCells::default())
-            .with_actor::<ProxyReplySink>(Arc::clone(&log))
-            .with_actor_configured::<RpcServerCapability>(
-                unbound_rpc_params(),
-                RpcServerConfig { port: None, port_file: None },
-            )
-            .build_passive()
-            .expect("caps boot");
-        let proxy = chassis
-            .spawn_actor_for_test::<FleetProxy>(
-                Subname::Named("scripted"),
-                FleetProxyConfig {
-                    engine_id: EngineId(Uuid::from_u128(3)),
-                    target: ProxyTarget::Adopted { rpc_addr: format!("127.0.0.1:{port}") },
-                    heartbeat: None,
-                    connect_budget: None,
-                },
-                (),
-            )
-            .finish()
-            .expect("proxy spawns + connects");
+        let (chassis, proxy, log) = spawn_scripted_proxy(3, "scripted", port);
         let sink = chassis.actor_ref::<ProxyReplySink>().erase();
 
         let settled = chassis.send_tracked(
@@ -598,6 +611,51 @@ mod tests {
                 RecordedReply::Settled(Ok(())),
             ],
             "an event after its call's terminal is not relayed",
+        );
+    }
+
+    /// A forward whose `Call` cannot be written to the engine answers its
+    /// sender at once with a `CallSettled::Err` naming the write failure,
+    /// and the proxy keeps serving: a later forward still round-trips.
+    #[test]
+    fn a_forward_whose_call_write_fails_answers_its_caller_with_the_error() {
+        let (calls_tx, calls_rx) = mpsc::channel();
+        let scripts = VecDeque::from([CallScript { frames: vec![ScriptFrame::End], release: None }]);
+        let (port, _server) = fake_server(Behavior::Scripted { calls: calls_tx, scripts });
+        let (chassis, proxy, log) = spawn_scripted_proxy(5, "unwritable", port);
+        let sink = chassis.actor_ref::<ProxyReplySink>().erase();
+
+        // One byte past the frame cap: the client refuses to encode the
+        // `Call` before any byte reaches the socket, so the connection
+        // stays healthy for the follow-up forward.
+        let oversized = ForwardEnvelope { payload: vec![0; max_frame_size() + 1], ..echo_forward() };
+        let settled = chassis.send_tracked(
+            proxy.erase(),
+            <ForwardEnvelope as Kind>::ID,
+            oversized.encode_into_bytes(),
+            1,
+            Some(ReplyTarget::Actor { to: sink, correlation: 21 }),
+        );
+        let replies = await_len(&log, 1, "the unwritable forward's terminal did not arrive");
+        let [RecordedReply::Settled(Err(RpcError::Other { reason }))] = replies.as_slice() else {
+            panic!("the unwritable forward is answered with one CallSettled::Err, got {replies:?}");
+        };
+        assert!(reason.contains("encoded frame too large"), "the error names the write failure: {reason}");
+        settled.recv_timeout(Duration::from_secs(5)).expect("the unwritable forward's chain settles");
+
+        let second = chassis.send_tracked(
+            proxy.erase(),
+            <ForwardEnvelope as Kind>::ID,
+            echo_forward().encode_into_bytes(),
+            2,
+            Some(ReplyTarget::Actor { to: sink, correlation: 22 }),
+        );
+        calls_rx.recv_timeout(Duration::from_secs(5)).expect("the fake engine receives the follow-up call");
+        second.recv_timeout(Duration::from_secs(5)).expect("the follow-up forward's chain settles");
+        assert_eq!(
+            await_len(&log, 2, "the follow-up forward's terminal did not arrive")[1],
+            RecordedReply::Settled(Ok(())),
+            "the proxy still serves after a failed write",
         );
     }
 
