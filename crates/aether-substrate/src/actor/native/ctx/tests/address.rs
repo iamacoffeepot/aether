@@ -127,6 +127,57 @@ fn sender_mints_only_a_routed_component_source() {
     assert!(sourceless.sender().is_none(), "a sourceless dispatch has no sender reference");
 }
 
+/// `resolve_path` proves a path whose route is `Live` to the very reference
+/// registered there, answers `NotLive` naming the canonical path for a route
+/// whose birth is still `Starting`, and hands back the registry's own refusal
+/// as `Unresolved` for a path that resolves to no route. Owned logic: the
+/// verb's pairing of address resolution with the liveness proof, and the
+/// split between its two refusals, which the component host's reply text
+/// reads.
+#[test]
+fn resolve_path_proves_live_routes_and_names_the_rest() {
+    use aether_data::ActorPath;
+
+    use crate::actor::native::ResolvePathError;
+    use crate::config::RegistryQueueCapacities;
+    use crate::mail::registry::RegistryOwnerLease;
+    use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
+    use crate::scheduler::{Pool, PoolConfig};
+    use crate::testing::{bare_substrate, boot_authority, registered_binding, registered_ref};
+
+    let (registry, mailer) = bare_substrate();
+    let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
+    let pool = Pool::start(PoolConfig { workers: 1, ..PoolConfig::default() }, aborter);
+    let owner = RegistryOwnerLease::attach(
+        boot_authority(),
+        &registry,
+        &mailer,
+        pool.wake_sink(),
+        RegistryQueueCapacities::default(),
+    );
+    let (binding, _host) = registered_binding(&registry, &mailer, "test.native.resolve_path_host", discharging());
+    let live = registered_ref(&registry, "test.native.resolve_path_live", discharging());
+    let starting = "test.native.resolve_path_starting";
+    registry.reserve_starting_through_owner(starting).expect("owner accepts the Starting reservation");
+    let ctx = NativeCtx::new(&binding, Source::NONE, None, None);
+    let path = |text: &str| ActorPath::new(text).expect("a valid actor path");
+
+    assert_eq!(ctx.resolve_path(&path("test.native.resolve_path_live")), Ok(live));
+    assert_eq!(
+        ctx.resolve_path(&path(starting)),
+        Err(ResolvePathError::NotLive { canonical_path: starting.to_owned() }),
+        "a Starting route resolves as an address but does not prove",
+    );
+    assert!(
+        matches!(ctx.resolve_path(&path("test.native.resolve_path_unknown")), Err(ResolvePathError::Unresolved(_))),
+        "a path with no route is the registry's own refusal",
+    );
+
+    drop(ctx);
+    drop(owner);
+    assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+}
+
 fn discharging() -> Arc<dyn InboxHandler> {
     Arc::new(|dispatch: OwnedDispatch| dispatch.discharge())
 }

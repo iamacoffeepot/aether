@@ -21,7 +21,7 @@ impl Registry {
     /// host an embedded peer, so an [`Embedded`] entry refuses there. A
     /// missing dependency is a refusal and nothing else: no ordering, no
     /// retry, no wait.
-    pub fn missing_dependency<'a>(
+    pub(crate) fn missing_dependency<'a>(
         &self,
         parent: Option<MailboxId>,
         dependencies: impl IntoIterator<Item = (u8, &'a str)>,

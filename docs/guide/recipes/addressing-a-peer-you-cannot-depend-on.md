@@ -164,7 +164,9 @@ shell has nothing to resolve.
 A position that arrives in a payload is proven once, at receipt. A native
 actor does that with the ctx verb `resolve_live`
 (`crates/aether-substrate/src/actor/native/ctx/address.rs`) and keeps the
-proof, not the position. A guest has no such verb, so a guest keeps the
+proof, not the position. An address that arrives as an `ActorPath`, such as
+the component path in a drop or replace request, is proven the same way
+through `resolve_path`, whose refusal names the path, never a position. A guest has no such verb, so a guest keeps the
 envelope sender instead of a payload-borne id.
 
 No door turns a foreign `Address<R>` (one that arrived in mail, config, or

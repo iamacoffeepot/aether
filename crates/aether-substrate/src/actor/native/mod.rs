@@ -82,7 +82,7 @@ pub mod spawn;
 
 pub use crate::mail::registry::effect::{RegistryBatch, RegistryBatchError, RegistryBatchResult};
 pub use binding::NativeBinding;
-pub use ctx::{Erased, ExportedHandles, NativeCtx, NativeInitCtx};
+pub use ctx::{Erased, ExportedHandles, NativeCtx, NativeInitCtx, ResolvePathError};
 pub use envelope::Envelope;
 pub use offload::blocking::{DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskCompletionWake, TaskDone};
 pub use offload::self_wake::SelfWake;

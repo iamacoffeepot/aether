@@ -8,13 +8,18 @@ use std::sync::{Arc, OnceLock};
 use super::identity::BindingIdentity;
 use super::outbound::OutboundBuffer;
 use super::{ChildReservationTable, NativeBinding};
+use crate::actor::native::ctx::ResolvePathError;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::component::ComponentCtx;
 use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
 #[cfg(feature = "wasm")]
 use crate::mail::CostCells;
 use crate::mail::mailer::Mailer;
+#[cfg(feature = "wasm")]
+use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{AddressResolutionError, RegistrySubscription};
 use crate::mail::{KindId, MailId, MailboxId};
 use crate::runtime::lifecycle::FatalAborter;
@@ -22,7 +27,6 @@ use crate::runtime::lifecycle::FatalAborter;
 use crate::runtime::lifecycle::PanicAborter;
 use aether_actor::{CallerScope, ErasedActorRef, RequestContextTable};
 use aether_data::{ActorPath, KindDescriptor};
-#[cfg(feature = "wasm")]
 use aether_kinds::ComponentCapabilities;
 
 impl NativeBinding {
@@ -294,6 +298,19 @@ impl NativeBinding {
         self.mailer.stamped_sender(position)
     }
 
+    /// Prove an address that arrived in a payload. The path behind
+    /// [`NativeCtx::resolve_path`](crate::actor::native::ctx::NativeCtx::resolve_path).
+    pub(crate) fn resolve_path(&self, address: &ActorPath) -> Result<ErasedActorRef, ResolvePathError> {
+        self.mailer.resolve_path(address)
+    }
+
+    /// The receive surface retained for the actor a reference proves. The
+    /// path behind
+    /// [`NativeCtx::receive_surface`](crate::actor::native::ctx::NativeCtx::receive_surface).
+    pub(crate) fn receive_surface(&self, actor: ErasedActorRef) -> Option<ComponentCapabilities> {
+        self.mailer.receive_surface(actor)
+    }
+
     /// The first declared dependency with no `Live` route for a child placed
     /// under this binding's actor. The path behind
     /// [`NativeCtx::missing_child_dependency`](crate::actor::native::ctx::NativeCtx::missing_child_dependency).
@@ -302,7 +319,27 @@ impl NativeBinding {
         &self,
         dependencies: impl IntoIterator<Item = (u8, &'a str)>,
     ) -> Option<&'a str> {
-        self.mailer.missing_dependency_under(self.self_mailbox(), dependencies)
+        self.mailer.missing_dependency(Some(self.self_mailbox()), dependencies)
+    }
+
+    /// The first declared dependency with no `Live` route for an actor placed
+    /// under an explicit `parent`, or at the root for `None`. The path behind
+    /// [`NativeCtx::missing_dependency`](crate::actor::native::ctx::NativeCtx::missing_dependency).
+    #[cfg(feature = "wasm")]
+    pub(crate) fn missing_dependency<'a>(
+        &self,
+        parent: Option<ErasedActorRef>,
+        dependencies: impl IntoIterator<Item = (u8, &'a str)>,
+    ) -> Option<&'a str> {
+        self.mailer.missing_dependency(parent.map(ErasedActorRef::id), dependencies)
+    }
+
+    /// Build a guest ctx over this binding. The path behind
+    /// [`NativeInitCtx::guest_ctx`](crate::actor::native::NativeInitCtx::guest_ctx) and
+    /// [`NativeCtx::guest_ctx`](crate::actor::native::ctx::NativeCtx::guest_ctx).
+    #[cfg(feature = "wasm")]
+    pub(crate) fn guest_ctx(self: &Arc<Self>, outbound: Arc<HubOutbound>) -> ComponentCtx {
+        self.mailer.guest_ctx(Arc::clone(self), outbound)
     }
 
     /// Make this actor's accept set exactly `guest`, and seed a cost cell for

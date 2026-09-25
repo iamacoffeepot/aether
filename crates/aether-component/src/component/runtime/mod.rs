@@ -58,13 +58,12 @@ use aether_substrate::actor::native::{
 };
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
-use aether_substrate::mail::registry::{Registry, RegistrySubscription};
+use aether_substrate::mail::registry::RegistrySubscription;
 
 /// `aether.component` runtime state (ADR-0122 split). Holds the wasmtime
-/// `engine` + `linker` every load instantiates against, the mail `registry`,
-/// the `mailer` / `outbound` egress handles, and the monotonic
+/// `engine` + `linker` every load instantiates against, the registry-inventory
+/// subscription, the `outbound` egress handle, and the monotonic
 /// `default_name_counter` for `component_N` default names. Plain fields (no
 /// `Arc<Inner>` wrapper) per ADR-0078 — the cap is single-threaded, every
 /// handler runs on the cap's dispatcher thread. The host addresses no
@@ -81,8 +80,6 @@ use aether_substrate::mail::registry::{Registry, RegistrySubscription};
 pub struct ComponentHostCapabilityState {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
-    pub registry: Arc<Registry>,
-    pub mailer: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
     /// Retained registry-inventory subscription. `wire` installs the weak sink
     /// before the registry issues its initial wake, then this handle keeps that
@@ -181,8 +178,8 @@ pub struct BootEntry {
 #[runtime]
 impl NativeActor for ComponentHostCapability {
     /// The runtime state this identity boots into (ADR-0122 split): the
-    /// wasmtime instances, mail registry, egress handles, and default-name
-    /// counter every load instantiates against.
+    /// wasmtime instances, registry-inventory subscription, egress handle, and
+    /// default-name counter every load instantiates against.
     type State = ComponentHostCapabilityState;
 
     type Config = ();
@@ -192,15 +189,11 @@ impl NativeActor for ComponentHostCapability {
     fn init(
         _config: (),
         params: ComponentHostParams,
-        ctx: &mut NativeInitCtx<'_>,
+        _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<ComponentHostCapabilityState, BootError> {
-        let mailer = ctx.mailer();
-        let registry = Arc::clone(mailer.registry());
         Ok(ComponentHostCapabilityState {
             engine: params.engine,
             linker: params.linker,
-            registry,
-            mailer,
             outbound: params.hub_outbound,
             registry_subscription: None,
             last_egressed_inventory: None,
@@ -299,16 +292,10 @@ impl NativeActor for ComponentHostCapability {
     /// path, canonical (`LoadResult.path`) or short (`aether.component/:NAME`).
     #[handler::manual]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: DropComponent) {
-        // ADR-0230: parse the address with the host's boundary parser and
-        // prove the answer at once. An address with no live route has no
-        // trampoline to drop, so it answers `Err` now rather than forwarding
-        // into nothing; the position is never kept.
-        let proven = state
-            .registry
-            .resolve_address(&payload.target)
-            .map_err(|error| error.to_string())
-            .and_then(|resolved| ctx.resolve_live(resolved.mailbox_id).map_err(|error| error.to_string()));
-        let actor = match proven {
+        // ADR-0230: prove the address at receipt. An address with no live
+        // route has no trampoline to drop, so it answers `Err` now rather
+        // than forwarding into nothing; no position leaves the verb.
+        let actor = match ctx.resolve_path(&payload.target) {
             Ok(proven) => proven,
             Err(error) => {
                 ctx.reply(&DropResult::Err { error: format!("no component to drop at {}: {error}", payload.target) });
@@ -413,8 +400,9 @@ impl NativeActor for ComponentHostCapability {
         _payload: ListComponents,
     ) -> ListComponentsResult {
         let names = state
-            .registry
-            .list_mailbox_descriptors()
+            .subscription()
+            .inventory()
+            .mailboxes
             .into_iter()
             .filter(|d| d.category == Some(MailboxCategory::Trampoline))
             .map(|d| d.name)
@@ -424,10 +412,8 @@ impl NativeActor for ComponentHostCapability {
 
     /// Introspect one loaded component's ADR-0033 receive-side
     /// `ComponentCapabilities` by lineage `name` (iamacoffeepot/aether#2421).
-    /// Resolves `name` to its mailbox id through the routing registry, then
-    /// reads the full caps the [`aether_substrate::mail::CapabilityRegistry`]
-    /// retains for that
-    /// mailbox.
+    /// Proves `name` through the host's address resolution, then reads the
+    /// full receive surface the substrate retains for the proven actor.
     ///
     /// # Agent
     /// `DescribeComponent { name }` to the `aether.component` mailbox, where
@@ -439,25 +425,26 @@ impl NativeActor for ComponentHostCapability {
     /// spawner never receives a mailbox id, stays introspectable.
     #[handler::single]
     fn on_describe_component(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
         payload: DescribeComponent,
     ) -> DescribeComponentResult {
-        // `resolve_address`, not `lookup`: a short path that is
-        // ambiguous rather than absent reports its candidate spellings instead
-        // of collapsing to "nothing registered" (ADR-0166 §5, issue 4125).
-        let resolved = ActorPath::new(&payload.name)
+        // The host's address resolution, not an exact-name lookup: a short
+        // path that is ambiguous rather than absent reports its candidate
+        // spellings instead of collapsing to "nothing registered" (ADR-0166
+        // §5, issue 4125).
+        let proven = ActorPath::new(&payload.name)
             .map_err(|error| error.to_string())
-            .and_then(|name| state.registry.resolve_address(&name).map_err(|error| error.to_string()));
-        let mailbox = match resolved {
-            Ok(resolved) => resolved.mailbox_id,
+            .and_then(|name| ctx.resolve_path(&name).map_err(|error| error.to_string()));
+        let actor = match proven {
+            Ok(actor) => actor,
             Err(error) => {
                 return DescribeComponentResult::Err {
                     error: format!("no component registered at name {}: {error}", payload.name),
                 };
             }
         };
-        match state.mailer.capability_registry().describe(mailbox) {
+        match ctx.receive_surface(actor) {
             Some(capabilities) => DescribeComponentResult::Ok { capabilities },
             None => {
                 DescribeComponentResult::Err { error: format!("no capabilities retained for name {}", payload.name) }
@@ -467,8 +454,14 @@ impl NativeActor for ComponentHostCapability {
 }
 
 impl ComponentHostCapabilityState {
+    /// The registry-inventory subscription `wire` installs, which every
+    /// handler runs after.
+    fn subscription(&self) -> &RegistrySubscription {
+        self.registry_subscription.as_ref().expect("component host registry subscription installed during wire")
+    }
+
     fn refresh_registry_inventory(&mut self) {
-        let inventory = self.registry.inventory();
+        let inventory = self.subscription().inventory();
         let generations = (inventory.mailbox_generation, inventory.kind_generation);
 
         if self.last_egressed_inventory != Some(generations) {
@@ -477,10 +470,7 @@ impl ComponentHostCapabilityState {
             self.last_egressed_inventory = Some(generations);
         }
 
-        self.registry_subscription
-            .as_ref()
-            .expect("component host registry subscription installed during wire")
-            .acknowledge(generations.0, generations.1);
+        self.subscription().acknowledge(generations.0, generations.1);
     }
 }
 
@@ -488,8 +478,9 @@ impl ComponentHostCapabilityState {
 mod tests {
     use std::sync::Arc;
 
+    use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::EgressEvent;
-    use aether_substrate::mail::registry::noop_handler;
+    use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::testing::{boot_authority, registered_binding};
 
     use super::*;
@@ -505,8 +496,6 @@ mod tests {
         let mut state = ComponentHostCapabilityState {
             linker: Arc::new(Linker::new(&engine)),
             engine,
-            registry: Arc::clone(&registry),
-            mailer: Arc::clone(&mailer),
             outbound,
             registry_subscription: Some(
                 NativeCtx::<ComponentHostCapability>::new_for_actor(&binding, Source::NONE, None, None)
