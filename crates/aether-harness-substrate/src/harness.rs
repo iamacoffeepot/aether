@@ -37,7 +37,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::{ActorPath, Kind, KindId, LoadName, SessionToken, Uuid};
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
-use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
+use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, CostTail, CostTailResult};
 use aether_kinds::{LoadComponent, LoadResult, LogTail, LogTailResult, Tick};
 #[cfg(test)]
 use aether_trace::walk::TreeWalk;
@@ -52,8 +52,7 @@ use aether_substrate::config::{ConfigMember, SettlementConfig};
 use aether_substrate::mail::MailboxId;
 use aether_substrate::{
     Builder, ChildRefused, EgressEvent, Mailer, NativeActor, PassiveChassis, ReplyTarget, RingCapacities,
-    SchedulerTuning, SubstrateBoot,
-    mail::{CapabilityRegistry, CostTable, MailId},
+    SchedulerTuning, SubstrateBoot, mail::MailId,
 };
 
 use crate::SendTarget;
@@ -878,28 +877,19 @@ impl SubstrateHarness {
         self.passive.child::<P, C>(*parent, key).map_err(SubstrateHarnessError::ChildRefused)
     }
 
-    /// Borrow the substrate's queryable [`CapabilityRegistry`]
-    /// (iamacoffeepot/aether#1037). The harness shares the same `Mailer`
-    /// every cap registers against, so `accepts_actor(reference, KindId)`
-    /// here reflects the post-load / post-replace / post-drop
-    /// dispatchability surface, for the reference [`Self::load_any`]
-    /// returns. Surfaced for integration tests that exercise the registry
-    /// through a real component-load lifecycle.
+    /// Whether `actor` would dispatch `kind`: a declared handler or a `#[fallback]` (ADR-0033),
+    /// as the capability registry reflects after load / replace / drop.
+    /// Consumers: `aether-substrate/tests/cap_registry.rs`.
     #[must_use]
-    pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
-        self.queue.capability_registry()
+    pub fn accepts(&self, actor: ErasedActorRef, kind: KindId) -> bool {
+        self.queue.capability_registry().accepts_actor(actor, kind)
     }
 
-    /// Borrow the substrate's per-handler [`CostTable`]
-    /// (iamacoffeepot/aether#1128). Shares the same `Mailer` the dispatch
-    /// fold writes through, so `tail(reference, …)` here reflects the
-    /// cells seeded at component construction (and any folded samples),
-    /// for the reference [`Self::load_any`] returns.
-    /// Surfaced for integration tests that exercise the cost table
-    /// through a real component-load lifecycle.
+    /// `actor`'s per-handler cost rows (ADR-0036), what the `actor_cost` MCP tool reports.
+    /// Consumers: `aether-substrate/tests/cost_table.rs`, `aether-widget/tests/widget_actor_cost.rs`.
     #[must_use]
-    pub fn cost_table(&self) -> &Arc<CostTable> {
-        self.queue.cost_table()
+    pub fn actor_cost(&self, actor: ErasedActorRef) -> CostTailResult {
+        self.queue.cost_table().tail(actor, &CostTail { kind: None })
     }
 
     /// Load the component export `R` and return its proven reference and

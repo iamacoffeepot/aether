@@ -2,8 +2,8 @@
 //! exercised through a real component-load lifecycle on a `SubstrateHarness`.
 //!
 //! Each test boots a `SubstrateHarness`, loads (and where relevant replaces /
-//! drops) a component, and asks the substrate's `CapabilityRegistry`
-//! whether the loaded actor `accepts_actor(kind)`. The registry
+//! drops) a component, and asks the harness whether the loaded actor
+//! `accepts` a kind, as the substrate's capability registry answers. The registry
 //! is the prerequisite for the DAG validator's dispatchability check
 //! (iamacoffeepot/aether#975 Phase 2). The surface is input-side only —
 //! handler kinds + fallback presence; there is deliberately no
@@ -48,11 +48,10 @@ fn cap_registry_reports_accepted_kinds() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let (probe, _) = load_named(&mut harness, &wasm_path, "probe");
-    let caps = harness.capability_registry();
 
-    assert!(caps.accepts_actor(probe, Tick::ID), "probe should accept its declared Tick handler");
-    assert!(caps.accepts_actor(probe, UnsubscribeKeys::ID), "probe should accept its declared UnsubscribeKeys handler");
-    assert!(!caps.accepts_actor(probe, Ping::ID), "probe has no Ping handler and no fallback — must reject Ping");
+    assert!(harness.accepts(probe, Tick::ID), "probe should accept its declared Tick handler");
+    assert!(harness.accepts(probe, UnsubscribeKeys::ID), "probe should accept its declared UnsubscribeKeys handler");
+    assert!(!harness.accepts(probe, Ping::ID), "probe has no Ping handler and no fallback — must reject Ping");
 }
 
 /// The probe is a strict receiver — no `#[fallback]` — so a kind it doesn't
@@ -65,9 +64,8 @@ fn cap_registry_reports_fallback() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let (strict, _) = load_named(&mut harness, &wasm_path, "strict");
-    let caps = harness.capability_registry();
 
-    assert!(!caps.accepts_actor(strict, Ping::ID), "a strict receiver rejects an undeclared kind");
+    assert!(!harness.accepts(strict, Ping::ID), "a strict receiver rejects an undeclared kind");
 }
 
 /// `aether.component.replace` swaps the bundle's `test.contract.base` export
@@ -96,11 +94,8 @@ fn cap_registry_updates_on_replace() {
         harness.load_any(&base).unwrap_or_else(|error| panic!("load_component(swappable): {error}"));
 
     // Pre-replace: the base accepts Bump, rejects InlineProbe.
-    {
-        let caps = harness.capability_registry();
-        assert!(caps.accepts_actor(swappable, Bump::ID));
-        assert!(!caps.accepts_actor(swappable, InlineProbe::ID));
-    }
+    assert!(harness.accepts(swappable, Bump::ID));
+    assert!(!harness.accepts(swappable, InlineProbe::ID));
 
     let host = harness.actor_ref::<ComponentHostCapability>();
     let swapped = harness
@@ -127,13 +122,12 @@ fn cap_registry_updates_on_replace() {
     }
 
     // Post-replace: the extended accept-set wins.
-    let caps = harness.capability_registry();
     assert!(
-        caps.accepts_actor(swappable, InlineProbe::ID),
+        harness.accepts(swappable, InlineProbe::ID),
         "the extended export should accept its declared InlineProbe handler after replace",
     );
     // Both exports declare a Bump handler, so it survives the swap.
-    assert!(caps.accepts_actor(swappable, Bump::ID));
+    assert!(harness.accepts(swappable, Bump::ID));
 }
 
 /// `aether.component.drop` clears the dropped mailbox's caps — once
@@ -145,10 +139,7 @@ fn cap_registry_clears_on_drop() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let (victim, path) = load_named(&mut harness, &wasm_path, "victim");
-    assert!(
-        harness.capability_registry().accepts_actor(victim, Tick::ID),
-        "sanity: loaded probe accepts Tick before drop"
-    );
+    assert!(harness.accepts(victim, Tick::ID), "sanity: loaded probe accepts Tick before drop");
 
     let host = harness.actor_ref::<ComponentHostCapability>();
     let dropped = harness
@@ -159,8 +150,7 @@ fn cap_registry_clears_on_drop() {
         DropResult::Err { error } => panic!("drop_component: {error}"),
     }
 
-    let caps = harness.capability_registry();
-    assert!(!caps.accepts_actor(victim, Tick::ID), "dropped component's mailbox must accept nothing");
+    assert!(!harness.accepts(victim, Tick::ID), "dropped component's mailbox must accept nothing");
 }
 
 /// The native+wasm unification guard: a native cap (`aether.fs`)
@@ -174,12 +164,11 @@ fn cap_registry_covers_native_cap() {
         SubstrateHarness::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     let fs = harness.actor_ref::<FsCapability>().erase();
-    let caps = harness.capability_registry();
-    assert!(caps.accepts_actor(fs, Write::ID), "the native aether.fs cap should accept its declared Write handler");
+    assert!(harness.accepts(fs, Write::ID), "the native aether.fs cap should accept its declared Write handler");
     // A native cap with no `#[fallback]` rejects undeclared kinds — a
     // fallback would accept this one, so the refusal also proves there is none.
     assert!(
-        !caps.accepts_actor(fs, KindId(0xDEAD_BEEF)),
+        !harness.accepts(fs, KindId(0xDEAD_BEEF)),
         "aether.fs is a strict receiver — undeclared kinds are rejected",
     );
 }

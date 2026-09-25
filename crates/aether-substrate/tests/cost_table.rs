@@ -23,9 +23,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{
-    CostTail, CostTailResult, DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult, Tick,
-};
+use aether_kinds::{CostTailResult, DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult, Tick};
 use aether_test_fixtures_kinds::{Bump, InlineProbe, UnsubscribeKeys};
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
@@ -59,7 +57,7 @@ fn init_seeds_cells_and_dispatch_folds() {
     // (`samples = 0`) — the known-but-unrun state. If `init`'s seed had not run, the
     // table would hold no rows for this mailbox.
     {
-        let CostTailResult::Ok { rows } = harness.cost_table().tail(probe, &CostTail { kind: None }) else {
+        let CostTailResult::Ok { rows } = harness.actor_cost(probe) else {
             panic!("expected Ok");
         };
         let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell seeded at init");
@@ -74,7 +72,7 @@ fn init_seeds_cells_and_dispatch_folds() {
     // neutral seed.
     harness.execute(vec![("advance", HarnessOp::advance(3))]).expect("advance 3");
 
-    let CostTailResult::Ok { rows } = harness.cost_table().tail(probe, &CostTail { kind: None }) else {
+    let CostTailResult::Ok { rows } = harness.actor_cost(probe) else {
         panic!("expected Ok");
     };
     let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell present");
@@ -85,7 +83,7 @@ fn init_seeds_cells_and_dispatch_folds() {
 }
 
 fn cost_kinds(harness: &SubstrateHarness, actor: ErasedActorRef) -> Vec<KindId> {
-    let CostTailResult::Ok { rows } = harness.cost_table().tail(actor, &CostTail { kind: None }) else {
+    let CostTailResult::Ok { rows } = harness.actor_cost(actor) else {
         panic!("expected Ok");
     };
     rows.iter().map(|row| row.kind_id).collect()
