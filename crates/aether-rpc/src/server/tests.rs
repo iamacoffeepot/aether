@@ -866,17 +866,17 @@ fn call_echo_round_trips_over_the_socket() {
     }
 }
 
-/// Asks [`BlobReplyActor`] for a reply whose blob is `blob_len` patterned
+/// Asks [`BlobSharer`] for a reply whose blob is `blob_len` patterned
 /// bytes and whose `padding` is `padding_len` bytes of text.
-#[aether_data::kind(name = "aether.rpc.test.blob_request", copy, default, eq)]
+#[aether_data::kind(name = "aether.rpc.test.blob", copy, default, eq)]
 struct BlobRequest {
     blob_len: u64,
     padding_len: u64,
 }
 
-/// [`BlobReplyActor`]'s reply: one blob plus padding that sizes the payload.
-#[aether_data::kind(name = "aether.rpc.test.blob_reply")]
-struct BlobReply {
+/// [`BlobSharer`]'s reply: one blob plus padding that sizes the payload.
+#[aether_data::kind(name = "aether.rpc.test.blob_result")]
+struct BlobResult {
     blob: aether_data::Blob,
     padding: String,
 }
@@ -884,24 +884,27 @@ struct BlobReply {
 /// Replies to each [`BlobRequest`] with its blob checked into the engine
 /// store and shared as an attached in-process reply carries it: tag 1 with
 /// the hash, the entry attached. The rpc server must write it out as bytes.
-struct BlobReplyActor;
+struct BlobSharer {
+    /// The character each reply's padding repeats.
+    padding_fill: char,
+}
 
 #[aether_actor::actor(singleton, root)]
-impl NativeActor for BlobReplyActor {
+impl NativeActor for BlobSharer {
     type Config = ();
-    const NAMESPACE: &'static str = "aether.rpc.test.blob_reply";
+    const NAMESPACE: &'static str = "aether.rpc.test.blob_sharer";
 
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self)
+        Ok(Self { padding_fill: 'p' })
     }
 
     /// Reply with a shared blob.
-    #[allow(clippy::unused_self)] // actor handler ABI always receives state
     #[handler::manual]
     fn on_blob_request(&mut self, ctx: &mut NativeCtx<'_, Self, aether_actor::Manual>, mail: BlobRequest) {
         let blob = ctx.check_in(patterned(mail.blob_len).into_boxed_slice());
-        let padding = "p".repeat(usize::try_from(mail.padding_len).expect("test padding fits memory"));
-        ctx.reply_sharing_blobs(&BlobReply { blob, padding });
+        let padding =
+            self.padding_fill.to_string().repeat(usize::try_from(mail.padding_len).expect("test padding fits memory"));
+        ctx.reply_sharing_blobs(&BlobResult { blob, padding });
     }
 }
 
@@ -913,7 +916,7 @@ fn boot_with_blob_replier() -> (PassiveChassis<TestChassis>, TcpStream) {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<BlobReplyActor>(())
+        .with_actor::<BlobSharer>(())
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
             RpcServerConfig { port: Some(0), port_file: None },
@@ -934,7 +937,7 @@ fn call_blob_replier(stream: &mut TcpStream, cid: u64, request: BlobRequest) {
         &WireFrame::Call {
             cid: Some(cid),
             envelope: MailEnvelope {
-                to: recipient_of::<BlobReplyActor>(),
+                to: recipient_of::<BlobSharer>(),
                 kind: <BlobRequest as Kind>::ID,
                 payload: request.encode_into_bytes(),
             },
@@ -953,8 +956,8 @@ fn read_blob_reply(stream: &mut TcpStream, cid: u64) -> Vec<u8> {
         WireFrame::ReplyEvent { cid: event_cid, envelope } if event_cid == cid => envelope,
         other => panic!("expected ReplyEvent for cid {cid}, got {other:?}"),
     };
-    assert_eq!(envelope.kind, <BlobReply as Kind>::ID);
-    let reply = BlobReply::decode_from_bytes(&envelope.payload).expect("the reply decodes with inline blob bytes");
+    assert_eq!(envelope.kind, <BlobResult as Kind>::ID);
+    let reply = BlobResult::decode_from_bytes(&envelope.payload).expect("the reply decodes with inline blob bytes");
     let reader = BlobReader::open(&reply.blob);
     let mut bytes = vec![0; usize::try_from(reader.len()).expect("test blob fits memory")];
     let mut filled = 0;
