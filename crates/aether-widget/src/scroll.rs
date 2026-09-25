@@ -14,7 +14,6 @@
 //! ancestor offsets.
 
 use aether_actor::{ActorInitError, Erased, ErasedActorRef, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_data::MailboxId;
 use aether_kinds::MouseWheel;
 use aether_math::Vec2;
 
@@ -126,7 +125,6 @@ fn apply_axis(old_pixels: f32, requested_pixels: f32, max_pixels: f32) -> AxisOu
 
 #[must_use]
 fn apply_scroll(
-    container: MailboxId,
     viewport_extent: ScrollExtent,
     content_extent: ScrollExtent,
     old_offset: ScrollOffset,
@@ -143,7 +141,7 @@ fn apply_scroll(
         max_offset(viewport_extent.height_pixels, content_extent.height_pixels),
     );
     ScrollOutcome {
-        container,
+        relays: 0,
         offset: ScrollOffset { x_pixels: x.offset_pixels, y_pixels: y.offset_pixels },
         consumed: ScrollDelta { x_pixels: x.consumed_pixels, y_pixels: y.consumed_pixels },
         residual: ScrollResidual { x_pixels: x.residual_pixels, y_pixels: y.residual_pixels },
@@ -302,7 +300,7 @@ impl ScrollWidget {
     }
 
     fn apply_delta<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>, delta: ScrollDelta) {
-        let outcome = apply_scroll(ctx.mailbox_id(), self.viewport_extent, self.content_extent, self.offset, delta);
+        let outcome = apply_scroll(self.viewport_extent, self.content_extent, self.offset, delta);
         self.offset = outcome.offset;
         self.sync_layout(ctx);
         if let Some(parent) = ctx.parent() {
@@ -427,7 +425,7 @@ impl WasmActor for ScrollWidget {
             return;
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&outcome);
+            parent.send(&ScrollOutcome { relays: outcome.relays.saturating_add(1), ..outcome });
         }
     }
 
@@ -507,7 +505,6 @@ mod tests {
     #[test]
     fn scroll_math_covers_middle_bounds_and_partial_overshoot_per_axis() {
         let middle = apply_scroll(
-            MailboxId(7),
             VIEWPORT,
             CONTENT,
             ScrollOffset { x_pixels: 10.0, y_pixels: 20.0 },
@@ -519,7 +516,6 @@ mod tests {
         assert_eq!(middle.residual, ScrollResidual::default());
 
         let positive = apply_scroll(
-            MailboxId(7),
             VIEWPORT,
             CONTENT,
             ScrollOffset { x_pixels: 25.0, y_pixels: 45.0 },
@@ -535,7 +531,6 @@ mod tests {
         assert_axis_invariant(20.0, positive.consumed.y_pixels, positive.residual.y_pixels);
 
         let negative = apply_scroll(
-            MailboxId(7),
             VIEWPORT,
             CONTENT,
             ScrollOffset { x_pixels: 4.0, y_pixels: 9.0 },
@@ -556,7 +551,6 @@ mod tests {
             "initial offsets clamp independently into the configured extent",
         );
         let no_overflow = apply_scroll(
-            MailboxId(1),
             ScrollExtent { width_pixels: 50.0, height_pixels: 50.0 },
             ScrollExtent { width_pixels: 20.0, height_pixels: 0.0 },
             ScrollOffset::default(),
@@ -567,7 +561,6 @@ mod tests {
         assert_eq!(no_overflow.residual, ScrollResidual { x_pixels: 9.0, y_pixels: -3.0 });
 
         let reversed = apply_scroll(
-            MailboxId(1),
             VIEWPORT,
             CONTENT,
             ScrollOffset { x_pixels: 30.0, y_pixels: 50.0 },
@@ -582,13 +575,8 @@ mod tests {
     fn non_finite_offsets_and_requests_never_enter_retained_state() {
         let clamped = clamp_offset(VIEWPORT, CONTENT, ScrollOffset { x_pixels: f32::NAN, y_pixels: f32::INFINITY });
         assert_eq!(clamped, ScrollOffset::default());
-        let outcome = apply_scroll(
-            MailboxId(1),
-            VIEWPORT,
-            CONTENT,
-            clamped,
-            ScrollDelta { x_pixels: f32::NEG_INFINITY, y_pixels: f32::NAN },
-        );
+        let outcome =
+            apply_scroll(VIEWPORT, CONTENT, clamped, ScrollDelta { x_pixels: f32::NEG_INFINITY, y_pixels: f32::NAN });
         assert_eq!(outcome.offset, ScrollOffset::default());
         assert_eq!(outcome.consumed, ScrollDelta::default());
         assert_eq!(outcome.residual, ScrollResidual::default());
@@ -603,7 +591,6 @@ mod tests {
             ScrollDelta { x_pixels: -5.0, y_pixels: 7.0 }
         );
         let outcome = apply_scroll(
-            MailboxId(1),
             VIEWPORT,
             CONTENT,
             ScrollOffset { x_pixels: 0.0, y_pixels: 49.0 },

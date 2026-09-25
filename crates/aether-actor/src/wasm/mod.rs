@@ -1107,7 +1107,7 @@ macro_rules! __export_internal {
             // real params bytes over the FFI.
             let params =
                 <<$component as $crate::Lifecycle<$component>>::Params as ::core::default::Default>::default();
-            let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new(mailbox_id);
+            let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new();
             match <$component as $crate::Lifecycle<$component>>::init(config, params, &mut ctx) {
                 Ok(instance) => {
                     __AETHER_INLINE.set_entry_actor_tag($crate::ActorTypeTag::of::<$component>());
@@ -1740,7 +1740,7 @@ macro_rules! __export_multi_internal {
             __AETHER_INLINE.set_spawn_resolver(
                 $crate::__export_internal!(@spawn_inline_child_by_tag $($component),+),
             );
-            $crate::__export_multi_internal!(@construct $default, mailbox_id, config_bytes)
+            $crate::__export_multi_internal!(@construct $default, config_bytes)
         }
 
         /// # Safety
@@ -1912,7 +1912,7 @@ macro_rules! __export_multi_internal {
                     )
                     .0
                 {
-                    return $crate::__export_multi_internal!(@construct $component, mailbox_id, config_bytes);
+                    return $crate::__export_multi_internal!(@construct $component, config_bytes);
                 }
             )+
             $crate::wasm::stage_init_failure(
@@ -2179,7 +2179,7 @@ macro_rules! __export_multi_internal {
     // Resolve `$ty`'s Config from `$config_bytes`, run its `init`, and box
     // the result into `__AETHER_MULTI`. Empty bytes use `Config::default()`;
     // a non-empty decode/init failure stages the message and `return 1`.
-    (@construct $ty:ty, $mailbox_id:ident, $config_bytes:ident) => {{
+    (@construct $ty:ty, $config_bytes:ident) => {{
         let config = if $config_bytes.is_empty() {
             <<$ty as $crate::Lifecycle<$ty>>::Config as ::core::default::Default>::default()
         } else {
@@ -2198,7 +2198,7 @@ macro_rules! __export_multi_internal {
         // ADR-0156 §2: empty params for now — resolve `Params` to its
         // compiled default, mirroring the empty-config path above.
         let params = <<$ty as $crate::Lifecycle<$ty>>::Params as ::core::default::Default>::default();
-        let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new($mailbox_id);
+        let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new();
         match <$ty as $crate::Lifecycle<$ty>>::init(config, params, &mut ctx) {
             ::core::result::Result::Ok(instance) => {
                 __AETHER_INLINE.set_entry_actor_tag($crate::ActorTypeTag::of::<$ty>());

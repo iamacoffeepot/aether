@@ -145,10 +145,10 @@ fn ctx_relative_verbs_resolve_and_route_in_place() {
 
     // child(name) resolves the resident widget; a missing name is None.
     let child = ctx.child("widget").expect("the widget resolves by subname");
-    assert_eq!(child.mailbox_id(), widget, "child resolves to the alias id");
+    assert_eq!(child.id, widget, "child resolves to the alias id");
     assert!(ctx.child("missing").is_none(), "a missing subname resolves to None");
     let grandchild = child.child("label").expect("the grandchild resolves relative to the child handle");
-    assert_eq!(grandchild.mailbox_id(), label, "handle-relative child walk reaches the grandchild");
+    assert_eq!(grandchild.id, label, "handle-relative child walk reaches the grandchild");
     assert!(child.child("missing").is_none(), "a missing grandchild segment resolves to None");
 
     // The resolved relative is a cluster member, so a send routes in
@@ -157,7 +157,7 @@ fn ctx_relative_verbs_resolve_and_route_in_place() {
     // panic proves the send took the local branch). A `()` payload
     // encodes to empty bytes.
     assert_eq!(
-        registry.route_decision(child.mailbox_id().0),
+        registry.route_decision(child.id.0),
         RouteDecision::Local,
         "the resolved relative is classified as an in-cluster recipient",
     );

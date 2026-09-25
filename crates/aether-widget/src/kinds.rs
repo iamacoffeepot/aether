@@ -32,7 +32,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::MailboxId;
 use aether_math::{Rgba, Vec2};
 use aether_render::{ScreenVertex, ShapeShadow, ShapeStroke, ShapeTexture};
 use serde::{Deserialize, Serialize};
@@ -558,12 +557,14 @@ pub struct ScrollResidual {
 }
 
 /// `aether.widget.scroll.outcome` — one container's exact retained offset,
-/// consumed movement, and unconsumed residual after a request. `container`
-/// identifies the state-owning actor even when an ancestor transparently
-/// relays this event to the root.
+/// consumed movement, and unconsumed residual after a request. `relays`
+/// counts the scroll actors that relayed it toward the root: the owning
+/// container emits `0` and each relaying scroll ancestor adds one. A scroll
+/// relays only its own scroll content root, so the chain below a root's
+/// direct child is linear and that child plus `relays` names the owner.
 #[aether_data::kind(name = "aether.widget.scroll.outcome", copy, partial_eq)]
 pub struct ScrollOutcome {
-    pub container: MailboxId,
+    pub relays: u32,
     pub offset: ScrollOffset,
     pub consumed: ScrollDelta,
     pub residual: ScrollResidual,

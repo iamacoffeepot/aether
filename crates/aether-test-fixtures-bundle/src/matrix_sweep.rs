@@ -19,6 +19,10 @@
 //!   reads child\[a\]'s id: the member's ctx-mediated send threads its own id
 //!   as the send's `from`, so the host stamps the member as origin (validated
 //!   host-side to the cluster), not the cluster's inbound parent.
+//! - cross-cluster (the parent → the same observer, before the fan-out): the
+//!   witness for the parent's id. No actor reads its own position (ADR-0230),
+//!   so the test anchors the parent → child\[a\] source against the id the
+//!   host stamped on the parent's own send.
 //!
 //! The observation log is a cluster-shared `static` with the same
 //! single-run-token `UnsafeCell` + blanket `Sync` discipline the inline
@@ -54,15 +58,14 @@ struct Cell {
 }
 
 /// The cluster-shared observation log. Indexed by the `MATRIX_CELL_*`
-/// markers (1-based; index 0 is unused), plus the resolved parent / child\[a\]
-/// ids the parent records so the test can assert the sources against the
-/// actual folded addresses, plus the cross-cluster observer reference the
+/// markers (1-based; index 0 is unused), plus the child\[a\] id the parent
+/// reads off its spawn-registry handle so the test can assert the child-origin
+/// sources against the actual folded address, plus the cross-cluster observer reference the
 /// parent minted from its declared dependency. The reference is shared through
 /// the log rather than threaded on `MatrixPing` because a proven reference has
 /// no codec (ADR-0230); it never leaves this module instance.
 struct MatrixLog {
     cells: [Cell; 5],
-    parent_id: u64,
     child_a_id: u64,
     observer: Option<ActorRef<SourceObserver>>,
 }
@@ -82,12 +85,7 @@ struct LogSlot {
 unsafe impl Sync for LogSlot {}
 
 static MATRIX_LOG: LogSlot = LogSlot {
-    inner: UnsafeCell::new(MatrixLog {
-        cells: [Cell { arrived: false, source: 0 }; 5],
-        parent_id: 0,
-        child_a_id: 0,
-        observer: None,
-    }),
+    inner: UnsafeCell::new(MatrixLog { cells: [Cell { arrived: false, source: 0 }; 5], child_a_id: 0, observer: None }),
 };
 
 /// Record `(arrived, source)` for `cell` (a `MATRIX_CELL_*` marker) into the
@@ -102,12 +100,12 @@ fn record_cell(cell: u32, source: u64) {
     }
 }
 
-/// Record the resolved parent / child\[a\] ids the parent learned at sweep
-/// start, so the test can assert each source against the real folded address.
-fn record_ids(parent_id: u64, child_a_id: u64) {
+/// Record the child\[a\] id the parent read off its spawn-registry handle at
+/// sweep start, so the test can assert each child-origin source against the
+/// real folded address.
+fn record_child_a(child_a_id: u64) {
     // SAFETY: see `LogSlot`'s `Sync` impl.
     let log = unsafe { &mut *MATRIX_LOG.inner.get() };
-    log.parent_id = parent_id;
     log.child_a_id = child_a_id;
 }
 
@@ -147,7 +145,6 @@ fn snapshot_report() -> MatrixReport {
         child_to_self_arrived: u32::from(c2self.arrived),
         child_to_self_source: c2self.source,
         child_a_id: log.child_a_id,
-        parent_id: log.parent_id,
     }
 }
 
@@ -176,19 +173,21 @@ impl WasmActor for MatrixParent {
         let _ = ctx.spawn_inline_child::<MatrixParent, MatrixChild>(Subname::Named("b"), &());
     }
 
-    /// Drive the sweep: record the parent / child\[a\] ids and the proven
-    /// observer reference, then send the fan-out ping to child\[a\] in place.
-    /// Child\[a\]'s handler drives the child-origin cells (child → parent /
-    /// sibling / self) and the cross-cluster send. Everything settles in this
-    /// one receive's drain. The handler spells its actor type because
-    /// `actor_ref` is bounded `A: DependsOn<R>`.
+    /// Drive the sweep: record the proven observer reference and child\[a\]'s
+    /// id, query the observer once so it logs the host-stamped parent id (the
+    /// witness the test anchors the parent-origin source against), then send
+    /// the fan-out ping to child\[a\] in place. Child\[a\]'s handler drives the
+    /// child-origin cells (child → parent / sibling / self) and the
+    /// cross-cluster send. Everything settles in this one receive's drain. The
+    /// handler spells its actor type because `actor_ref` and the flat `send`
+    /// are bounded `A: DependsOn<R>`.
     #[handler::single]
     fn on_run_matrix(&mut self, ctx: &mut WasmCtx<'_, MatrixParent>, _msg: RunMatrix) {
         record_observer(ctx.actor_ref::<SourceObserver>());
+        record_child_a(ctx.child_as::<MatrixChild>("a").expect("inline child a is resident").id().0);
+        ctx.send::<SourceObserver>(&SourceQuery);
 
-        let parent_id = ctx.mailbox_id();
         let child_a = ctx.child("a").expect("inline child a is resident");
-        record_ids(parent_id.0, child_a.mailbox_id().0);
         child_a.send(&MatrixPing { cell: MATRIX_CELL_PARENT_TO_CHILD, fan_out: 1 });
     }
 
