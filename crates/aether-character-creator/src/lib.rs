@@ -32,7 +32,7 @@ pub const MORPH_TARGETS: [&str; 13] = [
     "JawLength",
     "CheekVolume",
     "CheekboneWidth",
-    "UpperCraniumWidth",
+    "ParietalWidth",
     "NoseWidth",
     "NoseLength",
     "EyeSize",
@@ -862,8 +862,8 @@ fn head_sdf(point: Vec3) -> f32 {
 }
 
 fn head_mass_sdf(point: Vec3) -> f32 {
-    let crown_weight = upper_cranium_weight(point.y);
-    let cranial_point = Vec3::new(point.x * (1.0 + 0.10 * crown_weight), point.y, point.z);
+    let parietal_weight = parietal_width_weight(point.y);
+    let cranial_point = Vec3::new(point.x * (1.0 + 0.06 * parietal_weight), point.y, point.z);
     let mut shape = superellipsoid_sdf(cranial_point, Vec3::new(0.0, 0.29, -0.12), Vec3::new(0.68, 0.56, 0.60), 2.10);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.37, 0.12), Vec3::new(0.52, 0.36, 0.42)), 0.10);
     shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.14, 0.18), Vec3::new(0.49, 0.47, 0.45)), 0.11);
@@ -961,9 +961,12 @@ fn brow_outer_delta(position: Vec3) -> Vec3 {
     Vec3::new(position.x.signum() * 0.015, -0.012, 0.035) * weight
 }
 
-fn upper_cranium_weight(y: f32) -> f32 {
-    let amount = ((y - 0.35) / 0.50).clamp(0.0, 1.0);
-    amount * amount * (3.0 - 2.0 * amount)
+fn parietal_width_weight(y: f32) -> f32 {
+    let lower_fade = ((y - 0.12) / 0.16).clamp(0.0, 1.0);
+    let lower_fade = lower_fade * lower_fade * (3.0 - 2.0 * lower_fade);
+    let upper_fade = ((0.75 - y) / 0.16).clamp(0.0, 1.0);
+    let upper_fade = upper_fade * upper_fade * (3.0 - 2.0 * upper_fade);
+    lower_fade * upper_fade * gaussian(0.0, y, 0.0, 0.38, 1.0, 0.22)
 }
 
 fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
@@ -1002,7 +1005,7 @@ fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {
                         + gaussian(position.x, position.y, 0.35, 0.02, 0.20, 0.23);
                     Vec3::new(position.x.signum() * 0.075 * front * lateral * cheekbones, 0.0, 0.0)
                 }
-                "UpperCraniumWidth" => Vec3::new(position.x * 0.10 * upper_cranium_weight(position.y), 0.0, 0.0),
+                "ParietalWidth" => Vec3::new(position.x * 0.07 * parietal_width_weight(position.y), 0.0, 0.0),
                 "NoseWidth" => {
                     let weight = front * gaussian(position.x, position.y, 0.0, 0.02, 0.19, 0.19);
                     Vec3::new(position.x * 0.45 * weight, 0.0, 0.015 * weight)
@@ -1073,7 +1076,7 @@ mod tests {
                 for (position, delta) in mesh.positions.iter().zip(&deltas) {
                     let deformed = *position + *delta * amount;
                     assert!(deformed.x.is_finite() && deformed.y.is_finite() && deformed.z.is_finite(), "{name}");
-                    if matches!(name, "JawWidth" | "CheekVolume" | "CheekboneWidth" | "UpperCraniumWidth" | "NoseWidth")
+                    if matches!(name, "JawWidth" | "CheekVolume" | "CheekboneWidth" | "ParietalWidth" | "NoseWidth")
                         && position.x.abs() > 0.000_1
                     {
                         assert_eq!(
@@ -1088,8 +1091,8 @@ mod tests {
                     if name == "CheekVolume" && position.x.abs() <= 0.16 {
                         assert!(delta.length() < 0.000_1, "cheek morph leaked into the nose");
                     }
-                    if name == "UpperCraniumWidth" && position.y <= 0.35 {
-                        assert!(delta.length() < 0.000_1, "upper cranium morph leaked into the face");
+                    if name == "ParietalWidth" && (position.y <= 0.12 || position.y >= 0.75) {
+                        assert!(delta.length() < 0.000_1, "parietal morph leaked outside the side band");
                     }
                 }
             }

@@ -203,7 +203,7 @@ function createControls() {
     JawLength: "Jaw length",
     CheekVolume: "Cheek volume",
     CheekboneWidth: "Cheekbone width",
-    UpperCraniumWidth: "Upper cranium width",
+    ParietalWidth: "Parietal width",
     NoseWidth: "Nose width",
     NoseLength: "Nose length",
     EyeSize: "Eye size",
