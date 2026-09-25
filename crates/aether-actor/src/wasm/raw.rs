@@ -82,7 +82,7 @@ unsafe extern "C" {
     pub fn log_event(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
     /// ADR-0097: spawn a sibling actor type from the same resident
     /// module. `tag` is the sibling's actor-type tag
-    /// (`mailbox_id_from_name(NAMESPACE)`), used to pick the export at
+    /// (`ActorTypeTag::of::<A>()`), used to pick the export at
     /// `init_typed_p32`. `is_counter` is `1` for `Subname::Counter`
     /// (the host appends a monotonic discriminator) or `0` for a
     /// caller-supplied name. `subname_ptr/len` is the full subname for

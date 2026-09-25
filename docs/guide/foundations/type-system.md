@@ -191,8 +191,8 @@ parent's, so the same code under two different parents is two different
 mailboxes. The `/`-rendered addresses you see
 (`aether.component/aether.embedded:camera`) are a display rendering of the
 lineage, one segment per ActorId; a written path resolves by parsing it into
-segments and re-folding (`mailbox_id_from_path`), never by hashing the joined
-string.
+segments and re-folding, which happens in the host registry, never by hashing
+the joined string.
 
 Both ids are computed from compile-time constants with no registry lookup, so
 every process that holds the same names and the same lineage computes the same

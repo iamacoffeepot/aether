@@ -81,7 +81,7 @@ pub struct ChildEntry {
     /// the rehydrate path re-registers the reconstructed child under in
     /// the guest inline-child registry.
     pub alias_id: u64,
-    /// The actor-type tag (`mailbox_id_from_name(NAMESPACE)`) the
+    /// The actor-type tag (`ActorTypeTag::of::<A>()`) the
     /// rehydrate reconstruct matches against the module's exported types.
     pub type_tag: u64,
     /// Whether the original spawn used a counter discriminator.

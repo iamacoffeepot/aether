@@ -1,12 +1,9 @@
 {
   "note": "ADR-0230 contract-phase ratchet (issue #6314). These counts are owned by the head: a pull request may lower any row, and scripts/check-raw-mailbox-ratchet.py's --base one-way rule then forbids raising it back. The regexes that produce these numbers live in scripts/check-raw-mailbox-ratchet.py, read from the pull request's base commit at CI time, never from this file. A row leaves this file only in the same pull request that deletes its door (its call sites reach zero and the scanner's PATTERNS table drops the row too); until then an absent row is read as baseline 0, so a deleted row with any live call site fails loudly. A door narrowed to take a proof, or closed to its crate so the compiler enforces it, keeps its call sites, so the change that narrows it drops its pattern from PATTERNS and leaves its row at its exact count for the base scanner, and the next change to this file deletes the row.",
   "patterns": {
-    "mailer()": 20,
-    "registry()": 16,
-    "mailbox_id_from_name(": 47,
+    "mailbox_id_from_name(": 21,
     "mailbox_id_from_name_pair(": 9,
-    "mailbox_id_from_path(": 29,
     "<recipient>.id() at a send": 0,
-    "clippy::disallowed_methods": 145
+    "clippy::disallowed_methods": 123
   }
 }
