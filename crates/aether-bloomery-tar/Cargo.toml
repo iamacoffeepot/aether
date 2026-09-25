@@ -1,0 +1,13 @@
+[package]
+name = "aether-bloomery-tar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The canonical tar codec for bloomery trees: encode a tree as a canonical tar stream and decode a tar stream into a tree."
+
+[dependencies]
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+
+[lints]
+workspace = true
