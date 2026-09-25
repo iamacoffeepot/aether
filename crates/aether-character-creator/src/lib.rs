@@ -872,11 +872,8 @@ fn head_mass_sdf(point: Vec3) -> f32 {
         smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.245, 0.525), Vec3::new(0.25, 0.115, 0.155)), 0.08);
     for side in [-1.0, 1.0] {
         let perioral_support =
-            capsule_sdf(point, Vec3::new(side * 0.10, -0.10, 0.535), Vec3::new(side * 0.16, -0.33, 0.505), 0.095);
-        shape = smooth_union(shape, perioral_support, 0.075);
-        let perioral_column =
-            capsule_sdf(point, Vec3::new(side * 0.16, -0.12, 0.61), Vec3::new(side * 0.19, -0.34, 0.57), 0.045);
-        shape = smooth_union(shape, perioral_column, 0.05);
+            capsule_sdf(point, Vec3::new(side * 0.085, -0.10, 0.55), Vec3::new(side * 0.125, -0.33, 0.52), 0.08);
+        shape = smooth_union(shape, perioral_support, 0.065);
     }
     shape = smooth_union(
         shape,
