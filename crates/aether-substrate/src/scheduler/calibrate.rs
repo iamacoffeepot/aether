@@ -53,6 +53,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::mail::cost::ewma_step;
+use crate::runtime::infra_thread;
 
 /// Round trips measured (after warmup). Even, so the median averages the
 /// two central samples; large enough to median out scheduler jitter,
@@ -310,9 +311,7 @@ pub fn log_handoff_calibration() {
 /// the lockstep can't desync into a deadlock, and the sticky unpark token
 /// means an `unpark` that races ahead of its `park` is not lost.
 // Boot-time scheduler calibration probe — measures handoff cost before any actor
-// runs; no mail, no ctx, no settlement chain. (Spawn is a block-tail expression, so
-// the allow sits on the fn rather than the statement.)
-#[allow(clippy::disallowed_methods)]
+// runs; no mail, no ctx, no settlement chain, so it spawns through the infra door.
 fn measure_handoff_cost_nanos() -> u64 {
     let rounds = WARMUP + TRIALS;
     // request: waker → worker hand-off signal; reply: worker → waker.
@@ -323,18 +322,16 @@ fn measure_handoff_cost_nanos() -> u64 {
     let worker = {
         let request = Arc::clone(&request);
         let reply = Arc::clone(&reply);
-        thread::Builder::new()
-            .name("aether-handoff-probe".to_string())
-            .spawn(move || {
-                for _ in 0..rounds {
-                    while !request.swap(false, Ordering::Acquire) {
-                        thread::park();
-                    }
-                    reply.store(true, Ordering::Release);
-                    waker.unpark();
+        infra_thread::spawn("aether-handoff-probe", move || {
+            for _ in 0..rounds {
+                while !request.swap(false, Ordering::Acquire) {
+                    thread::park();
                 }
-            })
-            .expect("spawn handoff calibration probe thread")
+                reply.store(true, Ordering::Release);
+                waker.unpark();
+            }
+        })
+        .expect("spawn handoff calibration probe thread")
     };
 
     let mut samples: Vec<u64> = Vec::with_capacity(TRIALS);

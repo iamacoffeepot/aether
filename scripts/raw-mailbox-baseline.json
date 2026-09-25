@@ -4,6 +4,6 @@
     "mailbox_id_from_name(": 21,
     "mailbox_id_from_name_pair(": 9,
     "<recipient>.id() at a send": 0,
-    "clippy::disallowed_methods": 123
+    "clippy::disallowed_methods": 122
   }
 }

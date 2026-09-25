@@ -85,6 +85,9 @@ serde_json = { workspace = true }
 # ADR-0115 / ADR-0149: sha256 content addressing for the `content_store`
 # core (the hub `ArtifactStore` builds on it).
 sha2 = { workspace = true, features = ["std"] }
+# ADR-0238 decision 1: BLAKE3 keys the `store` dedup index (a dedup key,
+# never a capability).
+blake3 = { workspace = true, features = ["std"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wasmtime = { workspace = true, optional = true }
