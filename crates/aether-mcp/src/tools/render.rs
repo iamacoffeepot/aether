@@ -79,6 +79,7 @@ pub(super) fn render_shape(ty: &SchemaType) -> String {
             .to_owned(),
             SchemaType::String => "String".to_owned(),
             SchemaType::Bytes => "Bytes".to_owned(),
+            SchemaType::Blob => "Blob".to_owned(),
             SchemaType::Option(inner) => format!("Option<{}>", render(inner, depth + 1)),
             SchemaType::Vec(inner) => format!("Vec<{}>", render(inner, depth + 1)),
             SchemaType::Array { element, len } => {

@@ -58,6 +58,12 @@ pub enum DecodeError {
         path: String,
         discriminant: u32,
     },
+    /// A `Blob` field whose tag is not `0` (inline bytes). A tag-1 hash
+    /// never leaves the process, so an outside decode refuses it.
+    InvalidBlobTag {
+        path: String,
+        tag: u8,
+    },
     /// The decode produced more `Value` nodes than the input length
     /// justifies (`VALUE_BUDGET_BASE + input_len * VALUES_PER_INPUT_BYTE`).
     /// Guards the zero-wire-byte-element collection class (`Vec<Unit>`,
@@ -110,6 +116,9 @@ impl fmt::Display for DecodeError {
             Self::DuplicateMapKey { path } => write!(f, "duplicate map key at {path}"),
             Self::UnknownEnumDiscriminant { path, discriminant } => {
                 write!(f, "enum at {path} has no variant for discriminant {discriminant}")
+            }
+            Self::InvalidBlobTag { path, tag } => {
+                write!(f, "invalid blob tag at {path}: {tag} is not 0 (inline bytes)")
             }
             Self::UnsupportedSchema(shape) => {
                 write!(f, "schema arm not supported by hub decoder: {shape}")
@@ -348,6 +357,20 @@ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, DecodeError> {
     }
 }
 
+/// A `u32` count then that many bytes, projected as a JSON byte array: the
+/// `Bytes` body, and the tag-0 `Blob` body after its tag.
+fn decode_byte_array(cur: &mut Cursor<'_>, path: &str) -> Result<Value, DecodeError> {
+    let len = cur.read_count(path)? as usize;
+    let bytes = cur.take_slice(len, path)?;
+    // One `Value` per byte, so the leaf is the densest node in the format —
+    // charged before the collect, since a ceiling below `len` must reject
+    // rather than allocate.
+    cur.charge_projected(len, path)?;
+    // Mirror encoder input shape: array of byte values.
+    let arr = bytes.iter().map(|b| Value::from(*b)).collect();
+    Ok(Value::Array(arr))
+}
+
 // Schema-driven wire decoder: one match arm per `SchemaType`
 // variant. Each arm is short but the arm count adds up — extracting
 // per-type helpers obscures the schema → wire mapping that's the
@@ -377,17 +400,14 @@ fn decode_wire_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> R
             let s = str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8 { path: path.into() })?;
             Ok(Value::String(s.into()))
         }
-        SchemaType::Bytes => {
-            let len = cur.read_count(path)? as usize;
-            let bytes = cur.take_slice(len, path)?;
-            // One `Value` per byte, so the leaf is the densest node in
-            // the format — charged before the collect, since a ceiling
-            // below `len` must reject rather than allocate.
-            cur.charge_projected(len, path)?;
-            // Mirror encoder input shape: array of byte values.
-            let arr = bytes.iter().map(|b| Value::from(*b)).collect();
-            Ok(Value::Array(arr))
-        }
+        SchemaType::Bytes => decode_byte_array(cur, path),
+        // ADR-0238: JSON speaks a blob as plain bytes. Only tag 0 reaches
+        // this codec; a tag-1 field is rewritten to tag 0 before mail
+        // leaves the process.
+        SchemaType::Blob => match cur.take::<1>(path)? {
+            [0] => decode_byte_array(cur, path),
+            [tag] => Err(DecodeError::InvalidBlobTag { path: path.into(), tag }),
+        },
         SchemaType::Option(inner) => {
             let [tag] = cur.take::<1>(path)?;
             match tag {
@@ -818,6 +838,20 @@ mod tests {
         // u32 length 2, then two invalid utf-8 bytes.
         let err = decode_schema(&[2, 0, 0, 0, 0xff, 0xfe], &schema).expect_err("invalid utf-8 string body must error");
         assert!(matches!(err, DecodeError::InvalidUtf8 { .. }));
+    }
+
+    /// Catches a codec that shows the tag in JSON or accepts a tag-1 hash: a
+    /// tag-0 `Blob` field reads back as a plain byte array, and a tag-1 field
+    /// is refused by its tag.
+    #[test]
+    fn structured_blob_field_reads_tag_zero_as_bytes_and_refuses_tag_one() {
+        let schema = pc_struct(vec![NamedField { name: "blob".into(), ty: SchemaType::Blob }]);
+        roundtrip(json!({"blob": [1u8, 2, 3]}), &schema);
+
+        let mut hashed = vec![1];
+        hashed.extend_from_slice(&[7; 32]);
+        let err = decode_schema(&hashed, &schema).expect_err("a tag-1 hash never reaches an outside codec");
+        assert!(matches!(err, DecodeError::InvalidBlobTag { tag: 1, .. }), "{err}");
     }
 
     #[test]

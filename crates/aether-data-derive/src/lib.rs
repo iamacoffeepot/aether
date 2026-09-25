@@ -209,6 +209,28 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     } else {
         quote! { ::aether_data::__derive_runtime::encode_wire::<Self>(self) }
     };
+    // ADR-0238: a structured kind passes the encoder and the resolver down
+    // to its `Blob` fields. A `#[repr(C)]` kind cannot hold a `Blob`, so it
+    // keeps `Kind`'s defaults.
+    let blob_hooks = if has_repr_c {
+        TokenStream2::new()
+    } else {
+        quote! {
+            fn encode_with<E: ::aether_data::__derive_runtime::Encoder>(
+                &self,
+                enc: &mut E,
+            ) -> ::core::result::Result<(), ::aether_data::wire::Error> {
+                ::aether_data::__derive_runtime::encode_wire_with::<Self, E>(self, enc)
+            }
+
+            fn decode_with(
+                bytes: &[u8],
+                resolver: &mut dyn ::aether_data::__derive_runtime::BlobResolver,
+            ) -> ::core::option::Option<Self> {
+                ::aether_data::__derive_runtime::decode_wire_with::<Self>(bytes, resolver)
+            }
+        }
+    };
 
     // ADR-0032 section emission goes through trait dispatch, not a
     // syntactic walker. `<Self as Schema>::SCHEMA` / `::LABEL_NODE`
@@ -261,6 +283,8 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
             fn encode_into_bytes(&self) -> ::aether_data::__derive_runtime::Vec<u8> {
                 #encode_body
             }
+
+            #blob_hooks
         }
 
         #mail_class
@@ -687,42 +711,66 @@ fn expand_wire_codec(name: &syn::Ident, data: &Data) -> TokenStream2 {
     }
 }
 
+// Each field goes through the hook: `encode_to(enc)` / `decode_from(dec)`,
+// so a `Blob` field wherever it nests reaches `Encoder::blob` once and a
+// tag-1 hash reaches `Decoder::resolve` (ADR-0238 decision 3). `Vec<u8>`
+// keeps its memcpy arm on the hook's buffer.
 fn encode_ref_expr(ref_expr: &TokenStream2, ty: &Type) -> TokenStream2 {
     if is_vec_u8(ty) {
-        quote! { ::aether_data::__derive_runtime::encode_bytes(out, #ref_expr)?; }
+        quote! { ::aether_data::__derive_runtime::encode_bytes(::aether_data::__derive_runtime::Encoder::out(enc), #ref_expr)?; }
     } else {
-        quote! { ::aether_data::__derive_runtime::WireEncode::encode(#ref_expr, out)?; }
+        quote! { ::aether_data::__derive_runtime::WireEncode::encode_to(#ref_expr, enc)?; }
     }
 }
 
 fn decode_expr(ty: &Type) -> TokenStream2 {
     if is_vec_u8(ty) {
-        quote! { ::aether_data::__derive_runtime::decode_bytes(cursor)? }
+        quote! { ::aether_data::__derive_runtime::decode_bytes(::aether_data::__derive_runtime::Decoder::cursor(dec))? }
     } else {
-        quote! { ::aether_data::__derive_runtime::WireDecode::decode(cursor)? }
+        quote! { ::aether_data::__derive_runtime::WireDecode::decode_from(dec)? }
+    }
+}
+
+/// The `WireEncode` / `WireDecode` pair around a field walk. The walk is
+/// emitted once, in `encode_to` / `decode_from`; `encode` / `decode`
+/// forward to it with the plain `Vec<u8>` / `&[u8]` hooks, so the plain path
+/// monomorphizes to a direct walk.
+fn wire_impls(name: &syn::Ident, encode_body: &TokenStream2, decode_body: &TokenStream2) -> TokenStream2 {
+    quote! {
+        impl ::aether_data::wire::WireEncode for #name {
+            fn encode(
+                &self,
+                out: &mut ::aether_data::__derive_runtime::Vec<u8>,
+            ) -> ::core::result::Result<(), ::aether_data::wire::Error> {
+                ::aether_data::__derive_runtime::WireEncode::encode_to(self, out)
+            }
+
+            fn encode_to<E: ::aether_data::__derive_runtime::Encoder + ?::core::marker::Sized>(
+                &self,
+                enc: &mut E,
+            ) -> ::core::result::Result<(), ::aether_data::wire::Error> {
+                #encode_body
+            }
+        }
+        impl<'de> ::aether_data::wire::WireDecode<'de> for #name {
+            fn decode(
+                cursor: &mut &'de [u8],
+            ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {
+                <Self as ::aether_data::__derive_runtime::WireDecode<'de>>::decode_from(cursor)
+            }
+
+            fn decode_from<D: ::aether_data::__derive_runtime::Decoder<'de> + ?::core::marker::Sized>(
+                dec: &mut D,
+            ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {
+                #decode_body
+            }
+        }
     }
 }
 
 fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
     match fields {
-        Fields::Unit => quote! {
-            impl ::aether_data::wire::WireEncode for #name {
-                fn encode(
-                    &self,
-                    _out: &mut ::aether_data::__derive_runtime::Vec<u8>,
-                ) -> ::core::result::Result<(), ::aether_data::wire::Error> {
-                    ::core::result::Result::Ok(())
-                }
-            }
-            impl<'de> ::aether_data::wire::WireDecode<'de> for #name {
-                fn decode(
-                    _cursor: &mut &'de [u8],
-                ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {
-                    ::core::result::Result::Ok(Self)
-                }
-            }
-        },
-        Fields::Named(named) => {
+        Fields::Named(named) if !named.named.is_empty() => {
             let encodes = named.named.iter().map(|field| {
                 let ident = field.ident.as_ref();
                 encode_ref_expr(&quote!(&self.#ident), &field.ty)
@@ -732,49 +780,48 @@ fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
                 let value = decode_expr(&field.ty);
                 quote! { #ident: #value }
             });
-            quote! {
-                impl ::aether_data::wire::WireEncode for #name {
-                    fn encode(
-                        &self,
-                        out: &mut ::aether_data::__derive_runtime::Vec<u8>,
-                    ) -> ::core::result::Result<(), ::aether_data::wire::Error> {
-                        #(#encodes)*
-                        ::core::result::Result::Ok(())
-                    }
-                }
-                impl<'de> ::aether_data::wire::WireDecode<'de> for #name {
-                    fn decode(
-                        cursor: &mut &'de [u8],
-                    ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {
-                        ::core::result::Result::Ok(Self { #(#decodes),* })
-                    }
-                }
-            }
+            wire_impls(
+                name,
+                &quote! {
+                    #(#encodes)*
+                    ::core::result::Result::Ok(())
+                },
+                &quote! { ::core::result::Result::Ok(Self { #(#decodes),* }) },
+            )
         }
-        Fields::Unnamed(unnamed) => {
+        Fields::Unnamed(unnamed) if !unnamed.unnamed.is_empty() => {
             let encodes = unnamed.unnamed.iter().enumerate().map(|(idx, field)| {
                 let index = syn::Index::from(idx);
                 encode_ref_expr(&quote!(&self.#index), &field.ty)
             });
             let decodes = unnamed.unnamed.iter().map(|field| decode_expr(&field.ty));
-            quote! {
-                impl ::aether_data::wire::WireEncode for #name {
-                    fn encode(
-                        &self,
-                        out: &mut ::aether_data::__derive_runtime::Vec<u8>,
-                    ) -> ::core::result::Result<(), ::aether_data::wire::Error> {
-                        #(#encodes)*
-                        ::core::result::Result::Ok(())
-                    }
-                }
-                impl<'de> ::aether_data::wire::WireDecode<'de> for #name {
-                    fn decode(
-                        cursor: &mut &'de [u8],
-                    ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {
-                        ::core::result::Result::Ok(Self(#(#decodes),*))
-                    }
-                }
-            }
+            wire_impls(
+                name,
+                &quote! {
+                    #(#encodes)*
+                    ::core::result::Result::Ok(())
+                },
+                &quote! { ::core::result::Result::Ok(Self(#(#decodes),*)) },
+            )
+        }
+        // A field-less struct walks nothing, so it names the hook once to use it.
+        fieldless => {
+            let value = match fieldless {
+                Fields::Named(_) => quote! { Self {} },
+                Fields::Unnamed(_) => quote! { Self() },
+                Fields::Unit => quote! { Self },
+            };
+            wire_impls(
+                name,
+                &quote! {
+                    let _ = enc;
+                    ::core::result::Result::Ok(())
+                },
+                &quote! {
+                    let _ = dec;
+                    ::core::result::Result::Ok(#value)
+                },
+            )
         }
     }
 }
@@ -783,10 +830,16 @@ fn expand_wire_enum(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
     let encode_arms = data.variants.iter().enumerate().map(|(idx, variant)| {
         let selector = u32::try_from(idx).unwrap_or(u32::MAX);
         let ident = &variant.ident;
+        let write_selector = quote! {
+            ::aether_data::__derive_runtime::WireEncode::encode(
+                &#selector,
+                ::aether_data::__derive_runtime::Encoder::out(enc),
+            )?;
+        };
         match &variant.fields {
             Fields::Unit => quote! {
                 Self::#ident => {
-                    ::aether_data::__derive_runtime::WireEncode::encode(&#selector, out)?;
+                    #write_selector
                 }
             },
             Fields::Unnamed(unnamed) => {
@@ -798,7 +851,7 @@ fn expand_wire_enum(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
                     .map(|(field, binding)| encode_ref_expr(&quote!(#binding), &field.ty));
                 quote! {
                     Self::#ident(#(#bindings),*) => {
-                        ::aether_data::__derive_runtime::WireEncode::encode(&#selector, out)?;
+                        #write_selector
                         #(#encodes)*
                     }
                 }
@@ -809,7 +862,7 @@ fn expand_wire_enum(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
                     named.named.iter().zip(&idents).map(|(field, ident)| encode_ref_expr(&quote!(#ident), &field.ty));
                 quote! {
                     Self::#ident { #(#idents),* } => {
-                        ::aether_data::__derive_runtime::WireEncode::encode(&#selector, out)?;
+                        #write_selector
                         #(#encodes)*
                     }
                 }
@@ -841,30 +894,24 @@ fn expand_wire_enum(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
             }
         }
     });
-    quote! {
-        impl ::aether_data::wire::WireEncode for #name {
-            fn encode(
-                &self,
-                out: &mut ::aether_data::__derive_runtime::Vec<u8>,
-            ) -> ::core::result::Result<(), ::aether_data::wire::Error> {
-                match self {
-                    #(#encode_arms)*
-                }
-                ::core::result::Result::Ok(())
+    wire_impls(
+        name,
+        &quote! {
+            match self {
+                #(#encode_arms)*
             }
-        }
-        impl<'de> ::aether_data::wire::WireDecode<'de> for #name {
-            fn decode(
-                cursor: &mut &'de [u8],
-            ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {
-                let selector: u32 = ::aether_data::__derive_runtime::WireDecode::decode(cursor)?;
-                match selector {
-                    #(#decode_arms)*
-                    other => ::core::result::Result::Err(::aether_data::wire::Error::InvalidEnum(other)),
-                }
+            ::core::result::Result::Ok(())
+        },
+        &quote! {
+            let selector: u32 = ::aether_data::__derive_runtime::WireDecode::decode(
+                ::aether_data::__derive_runtime::Decoder::cursor(dec),
+            )?;
+            match selector {
+                #(#decode_arms)*
+                other => ::core::result::Result::Err(::aether_data::wire::Error::InvalidEnum(other)),
             }
-        }
-    }
+        },
+    )
 }
 
 /// Reject `skip_serializing_if` on every struct and enum-variant field.

@@ -98,9 +98,9 @@ kind](../recipes/adding-a-substrate-kind.md) recipe.
 ## The schema vocabulary — `SchemaType`
 
 A kind's shape is a tree of `SchemaType`. The leaves and containers are what
-you'd expect — `Bool`, `Scalar` (the primitives), `String`, `Bytes`, `Option`,
-`Vec`, `Array` (fixed-length `[T; N]`; `Vec` is the variable-length form),
-`Struct`, `Enum`, and `Map` (a keyed lookup table). The arms that carry rules
+you'd expect — `Bool`, `Scalar` (the primitives), `String`, `Bytes`, `Blob`,
+`Option`, `Vec`, `Array` (fixed-length `[T; N]`; `Vec` is the variable-length
+form), `Struct`, `Enum`, and `Map` (a keyed lookup table). The arms that carry rules
 worth knowing beyond "it's a type tree":
 
 - **Two wire shapes, and what picks them.** A struct encodes as a raw
@@ -134,6 +134,15 @@ worth knowing beyond "it's a type tree":
   `MailboxId` or `KindId` as a first-class typed reference, not just a bare
   `u64` ([ADR-0065](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md)). These encode as a tagged string on JSON and a varint
   on the wire.
+- **`Blob` is immutable bytes held as an `aether_data::Blob`**
+  ([ADR-0238](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0238-engine-blob-store.md)).
+  Its binary form starts with a one-byte tag. Tag 0 is a `u32` length and the
+  bytes, and every codec that writes bytes writes it: files, the journal, the
+  wire, JSON. Tag 1 is the blob's 32-byte hash, written only in in-process
+  mail and never outside the process. The JSON codec and MCP read and write a
+  `Blob` field as a plain byte array and never show the tag. A `Blob` is not
+  cast-eligible, and a `Blob` field is a different kind from a `Vec<u8>`
+  field.
 
 ### What counts as the same kind
 

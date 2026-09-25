@@ -166,6 +166,7 @@ impl WireEncode for SchemaType {
                 11u32.encode(out)?;
                 id.encode(out)
             }
+            Self::Blob => 12u32.encode(out),
         }
     }
 }
@@ -185,6 +186,7 @@ impl<'de> WireDecode<'de> for SchemaType {
             9 => Ok(Self::Enum { variants: Cow::decode(cursor)? }),
             10 => Ok(Self::Map { key: SchemaCell::decode(cursor)?, value: SchemaCell::decode(cursor)? }),
             11 => Ok(Self::TypeId(u64::decode(cursor)?)),
+            12 => Ok(Self::Blob),
             other => Err(Error::InvalidEnum(other)),
         }
     }
@@ -232,6 +234,7 @@ impl WireEncode for SchemaShape {
                 11u32.encode(out)?;
                 id.encode(out)
             }
+            Self::Blob => 12u32.encode(out),
         }
     }
 }
@@ -251,6 +254,7 @@ impl<'de> WireDecode<'de> for SchemaShape {
             9 => Ok(Self::Enum { variants: Vec::decode(cursor)? }),
             10 => Ok(Self::Map { key: Box::decode(cursor)?, value: Box::decode(cursor)? }),
             11 => Ok(Self::TypeId(u64::decode(cursor)?)),
+            12 => Ok(Self::Blob),
             other => Err(Error::InvalidEnum(other)),
         }
     }

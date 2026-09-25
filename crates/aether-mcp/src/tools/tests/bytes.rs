@@ -343,3 +343,32 @@ async fn resolve_bytes_nested_in_enum_struct_variant() {
             .expect("$text embed nested in enum struct variant resolves");
     assert_eq!(out, serde_json::json!({"Ok": {"bytes": [104, 105]}}));
 }
+
+/// Catches a `Blob` leaf falling into the wildcard arm on the way in: a
+/// `$text` embed under a `Blob` field resolves to the byte array the codec
+/// encodes, exactly as under `Bytes`.
+#[tokio::test]
+async fn resolve_bytes_text_embed_under_a_blob_field() {
+    use aether_data::NamedField;
+    let schema = SchemaType::Struct {
+        fields: vec![NamedField { name: "blob".into(), ty: SchemaType::Blob }].into(),
+        repr_c: false,
+    };
+    let out = resolve_bytes_params(serde_json::json!({"blob": {"$text": "hi"}}), &schema, NO_CAP)
+        .await
+        .expect("$text resolves under a blob field");
+    assert_eq!(out, serde_json::json!({"blob": [104, 105]}));
+}
+
+/// Catches a `Blob` leaf falling into the wildcard arm on the way out: a
+/// large `Blob` reply leaf spills to a file, exactly as a `Bytes` one does.
+#[test]
+fn render_bytes_reply_spills_a_large_blob_leaf() {
+    let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+    let json: Vec<serde_json::Value> = payload.iter().map(|b| serde_json::json!(b)).collect();
+    let out = render_bytes_reply(serde_json::Value::Array(json), &SchemaType::Blob, 1024);
+    let file = out.get("file").and_then(|v| v.as_str()).expect("a large blob leaf spills to a file reference");
+    let on_disk = std_fs::read(file).expect("spilled file is present on disk");
+    assert_eq!(on_disk, payload);
+    std_fs::remove_file(file).ok();
+}

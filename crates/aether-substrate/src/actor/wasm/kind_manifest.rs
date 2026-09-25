@@ -574,6 +574,7 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>, depth: usize) ->
         SchemaShape::Scalar(p) => SchemaType::Scalar(*p),
         SchemaShape::String => SchemaType::String,
         SchemaShape::Bytes => SchemaType::Bytes,
+        SchemaShape::Blob => SchemaType::Blob,
         SchemaShape::Option(inner) => {
             let inner_label = match label {
                 Some(LabelNode::Option(cell)) => Some(&**cell),

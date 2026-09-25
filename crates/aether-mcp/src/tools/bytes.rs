@@ -42,7 +42,7 @@ fn render_named_fields(
 /// canonical — a `SchemaType::Bytes` param encodes only from a JSON byte
 /// array — so the consumer-facing ergonomics live here, in the MCP front
 /// that already owns the JSON params before schema-encoding them. Walk
-/// `value` alongside `schema` and, at every `Bytes` node, resolve a
+/// `value` alongside `schema` and, at every `Bytes` or `Blob` node, resolve a
 /// `$`-sigil embed object into the canonical byte array `encode_schema`
 /// accepts. A literal `[…]` array passes straight through (back-compat);
 /// a one-key embed object expands — `{"$file": path}` reads the file on
@@ -64,7 +64,7 @@ pub(super) fn resolve_bytes_params<'a>(
     use serde_json::Value;
     Box::pin(async move {
         match schema {
-            SchemaType::Bytes => resolve_bytes_embed(value, max_file_bytes).await,
+            SchemaType::Bytes | SchemaType::Blob => resolve_bytes_embed(value, max_file_bytes).await,
             SchemaType::Option(inner) => {
                 if value.is_null() {
                     Ok(value)
@@ -202,7 +202,7 @@ pub(super) async fn resolve_bytes_embed(
 /// decoder emits a `Bytes` field as a JSON byte array; render it back to
 /// a bare string when the bytes are valid UTF-8 (the read-back-as-text
 /// ergonomic), else to `{"base64": …}`. Walks `schema` to reach a `Bytes`
-/// leaf nested in a composite, every other value untouched.
+/// or `Blob` leaf nested in a composite, every other value untouched.
 pub(super) fn render_bytes_reply(
     value: serde_json::Value,
     schema: &SchemaType,
@@ -210,7 +210,7 @@ pub(super) fn render_bytes_reply(
 ) -> serde_json::Value {
     use serde_json::Value;
     match schema {
-        SchemaType::Bytes => render_bytes_leaf(value, inline_max),
+        SchemaType::Bytes | SchemaType::Blob => render_bytes_leaf(value, inline_max),
         SchemaType::Option(inner) => {
             if value.is_null() {
                 value

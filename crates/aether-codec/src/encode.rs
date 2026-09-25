@@ -144,6 +144,20 @@ pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, Enc
     }
 }
 
+/// A JSON byte array written as a `u32` count then the bytes: the `Bytes`
+/// body, and the tag-0 `Blob` body after its tag.
+fn encode_byte_array(value: &Value, path: &str, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+    let arr =
+        value.as_array().ok_or_else(|| EncodeError::TypeMismatch { field: path.to_owned(), expected: "byte array" })?;
+    write_count(out, arr.len(), path)?;
+    for (i, v) in arr.iter().enumerate() {
+        let n = as_unsigned(v, path, "u8")?;
+        let b: u8 = n.try_into().map_err(|_| oor(&format!("{path}[{i}]"), "u8"))?;
+        out.push(b);
+    }
+    Ok(())
+}
+
 /// Recursively encode `value` into the `aether_data::wire` format under
 /// `schema`. The encoding is unversioned (ADR-0118 §Envelope).
 /// `path` is a dotted breadcrumb (`$.field.subfield[2]`) used to make
@@ -171,17 +185,12 @@ fn encode_wire_value(value: &Value, schema: &SchemaType, path: &str, out: &mut V
             out.extend_from_slice(s.as_bytes());
             Ok(())
         }
-        SchemaType::Bytes => {
-            let arr = value
-                .as_array()
-                .ok_or_else(|| EncodeError::TypeMismatch { field: path.to_owned(), expected: "byte array" })?;
-            write_count(out, arr.len(), path)?;
-            for (i, v) in arr.iter().enumerate() {
-                let n = as_unsigned(v, path, "u8")?;
-                let b: u8 = n.try_into().map_err(|_| oor(&format!("{path}[{i}]"), "u8"))?;
-                out.push(b);
-            }
-            Ok(())
+        SchemaType::Bytes => encode_byte_array(value, path, out),
+        // ADR-0238: JSON speaks a blob as plain bytes; the binary form is
+        // tag 0 (inline) and then exactly the `Bytes` body.
+        SchemaType::Blob => {
+            out.push(0);
+            encode_byte_array(value, path, out)
         }
         SchemaType::Option(inner) => {
             if value.is_null() {
@@ -998,6 +1007,25 @@ mod tests {
         let schema = structured_struct(vec![NamedField { name: "blob".into(), ty: SchemaType::Bytes }]);
         let bytes = encode_schema(&json!({"blob": [1, 2, 3, 4, 5]}), &schema).expect("test setup: encode bytes field");
         assert_eq!(bytes, expected);
+    }
+
+    #[derive(Serialize)]
+    struct WireBlob {
+        blob: aether_data::Blob,
+    }
+
+    /// Catches a codec that writes a `Blob` field without its tag, or
+    /// otherwise unlike the typed codec: a JSON byte array encodes to the
+    /// tag-0 form the typed codec writes.
+    #[test]
+    fn wire_blob_field_encodes_tag_zero_like_the_typed_codec() {
+        let expected = wire::to_vec(&WireBlob { blob: aether_data::Blob::from(vec![1, 2, 3]) })
+            .expect("test setup: wire reference bytes");
+        let schema = structured_struct(vec![NamedField { name: "blob".into(), ty: SchemaType::Blob }]);
+
+        let bytes = encode_schema(&json!({"blob": [1, 2, 3]}), &schema).expect("encode a blob field");
+        assert_eq!(bytes, expected);
+        assert_eq!(bytes, [0, 3, 0, 0, 0, 1, 2, 3]);
     }
 
     #[test]

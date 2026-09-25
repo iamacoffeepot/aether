@@ -43,6 +43,7 @@ const SCHEMA_STRUCT: u32 = 8;
 const SCHEMA_ENUM: u32 = 9;
 const SCHEMA_MAP: u32 = 10;
 const SCHEMA_TYPE_ID: u32 = 11;
+const SCHEMA_BLOB: u32 = 12;
 
 const VARIANT_UNIT: u32 = 0;
 const VARIANT_TUPLE: u32 = 1;
@@ -190,6 +191,7 @@ const fn fold_canonical_schema(hash: u64, schema: &SchemaType, depth: u32) -> u6
             fold_canonical_schema(hash, schema_of_cell(value), depth + 1)
         }
         SchemaType::TypeId(id) => fold_u64(fold_u32(hash, SCHEMA_TYPE_ID), *id),
+        SchemaType::Blob => fold_u32(hash, SCHEMA_BLOB),
     }
 }
 
@@ -322,6 +324,7 @@ pub const fn count_leaves(schema: &SchemaType, carry: u64, depth: u32) -> usize 
         | SchemaType::Scalar(_)
         | SchemaType::String
         | SchemaType::Bytes
+        | SchemaType::Blob
         | SchemaType::Vec(_)
         | SchemaType::Array { .. }
         | SchemaType::Map { .. }
@@ -450,6 +453,7 @@ const fn find_nth_leaf(schema: &SchemaType, carry: u64, depth: u32, index: usize
         | SchemaType::Scalar(_)
         | SchemaType::String
         | SchemaType::Bytes
+        | SchemaType::Blob
         | SchemaType::Vec(_)
         | SchemaType::Array { .. }
         | SchemaType::Map { .. }
