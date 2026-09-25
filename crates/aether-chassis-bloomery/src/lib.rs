@@ -1,14 +1,18 @@
 //! aether-chassis-bloomery: the bloomery chassis (issue #6244), the
 //! journal-driven engine. Boots the shared base stratum plus the component
-//! host, HTTP egress, and the RPC server, mounts the journal owner and the
+//! host, HTTP egress, the workspace actor, and the RPC server, mounts the journal owner and the
 //! bundle driver over one journal root, and only then binds the RPC listener
 //! (issue #6399). Produces the `aether-bloomery` binary over the shared
 //! `aether-chassis` composition layer.
 //!
-//! HTTP egress is the engine's one sanctioned integration (ADR-0234 decision
-//! 7): Sampled programs fetch through it, and it keeps the capability's own
+//! HTTP egress is one of the engine's two integrations (ADR-0234 decision 7):
+//! Sampled programs fetch through it, and it keeps the capability's own
 //! deny-by-default allowlist, so a fetch reaches only the hosts an operator
 //! names with `--http-allowlist` and any other fetch is recorded as a refusal.
+//! The other is the `aether.workspace` actor (ADR-0237 decision 8), which
+//! imports digest-pinned images into the journal through the Docker Engine
+//! API at `--workspace-endpoint`, writing only through the store of the
+//! journal this engine opened.
 //!
 //! The composition answers ADR-0226's deferred "chassis mounting": the driver
 //! and the journal become RPC-addressable mailboxes on this engine, so journal

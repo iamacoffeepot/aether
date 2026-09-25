@@ -5,23 +5,25 @@
 //! (issue #6399), so an engine a caller can reach can already take driver
 //! calls.
 //!
-//! The composition is deliberately narrow. Its one integration is HTTP
-//! egress for Sampled programs (ADR-0234 decision 7), composed with the
-//! capability's own deny-by-default allowlist, so a fetch reaches only the
-//! hosts an operator names with `--http-allowlist` / `AETHER_HTTP_ALLOWLIST`
-//! and every other fetch is answered with a refusal. A credential rides the
-//! same capability: `--http-secrets` binds a secret from the `--secrets-dir`
-//! directory to an allowlisted host (ADR-0235), so no program carries one.
-//! No exec, TCP,
-//! HTTP-serving, or fs capability rides this engine (the
-//! zero-external-integration rule), while the RPC server keeps it drivable
-//! over MCP (ADR-0155 §3).
+//! The composition is deliberately narrow. Its integrations are HTTP egress
+//! for Sampled programs (ADR-0234 decision 7), composed with the capability's
+//! own deny-by-default allowlist, so a fetch reaches only the hosts an
+//! operator names with `--http-allowlist` / `AETHER_HTTP_ALLOWLIST` and every
+//! other fetch is answered with a refusal, and the `aether.workspace` actor
+//! (ADR-0237 decision 8), which imports digest-pinned images into the journal
+//! through the Docker Engine API at `--workspace-endpoint` /
+//! `AETHER_WORKSPACE_ENDPOINT`. A credential rides the HTTP capability:
+//! `--http-secrets` binds a secret from the `--secrets-dir` directory to an
+//! allowlisted host (ADR-0235), so no program carries one. The workspace
+//! actor is the engine's only route to a container; `aether.process` is not
+//! composed, and no TCP, HTTP-serving, or fs capability rides this engine,
+//! while the RPC server keeps it drivable over MCP (ADR-0155 §3).
 
 use std::io;
 use std::mem;
 use std::sync::Arc;
 
-use aether_bloomery_journal::Journal;
+use aether_bloomery_journal::{ArtifactStore, Journal};
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
     chassis_residual_knobs, install_frame_size, with_rpc_server,
@@ -39,6 +41,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
 use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
+use aether_workspace::{WorkspaceCapability, WorkspaceParams};
 
 use crate::cli::BloomeryCli;
 use crate::config::BloomeryConfig;
@@ -65,9 +68,11 @@ impl Chassis for BloomeryChassis {
 
 impl BloomeryChassis {
     /// Build the bloomery chassis: the hub's prologue with headless's lift —
-    /// lower the bloomery knobs, open the journal root, stand up the substrate, re-apply the resolved
+    /// lower the bloomery knobs, open the journal root and hand its artifact
+    /// store to the env, stand up the substrate, re-apply the resolved
     /// log filter, lift the base out of the env, compose the shared stratum
-    /// plus the component host, HTTP egress, and the held RPC server, sweep for unknown env
+    /// plus the component host, HTTP egress, the workspace actor, and the held
+    /// RPC server, sweep for unknown env
     /// keys, install the signal-blocking driver, mount the journal owner and
     /// the bundle driver, and only then open the RPC server's bind gate. The
     /// order is build, mount, bind: until the gate opens a dial is refused, so
@@ -99,6 +104,10 @@ impl BloomeryChassis {
                 root.display()
             ))))
         })?;
+        // The workspace actor writes its imports through this store, which
+        // shares the root's lock; only this seam sets it, so no embedder can
+        // compose the workspace over a root the chassis did not open.
+        env.artifacts = Some(journal.artifact_store());
         let mut boot = SubstrateBoot::build()?;
         apply_filter(&env.runtime.log_filter);
         let base = mem::take(&mut env.base);
@@ -137,6 +146,22 @@ pub struct BloomeryEnv {
     /// closure limit at the top of [`BloomeryChassis::build_mounted`], then applied off
     /// the builder at the mount seam.
     pub bloomery: BloomeryConfig,
+    /// The artifact store of the journal [`BloomeryChassis::build_mounted`]
+    /// opened, which it sets right after opening the root. `None` everywhere
+    /// else — `from_cli`, `resolve_env`, and [`BloomeryEnv::new`] — so the
+    /// describe / print-config composition lists the workspace actor without
+    /// a store and never boots it.
+    artifacts: Option<ArtifactStore>,
+}
+
+impl BloomeryEnv {
+    /// An env over `base`, `runtime`, and `bloomery`, with no artifact store:
+    /// [`BloomeryChassis::build_mounted`] supplies it from the journal root it
+    /// opens.
+    #[must_use]
+    pub fn new(base: ChassisBase, runtime: RuntimeConfig, bloomery: BloomeryConfig) -> Self {
+        Self { base, runtime, bloomery, artifacts: None }
+    }
 }
 
 impl ChassisEnv for BloomeryEnv {
@@ -152,11 +177,11 @@ impl ChassisEnv for BloomeryEnv {
         let runtime = sources.resolve::<RuntimeConfig>()?;
         let bloomery = sources.resolve::<BloomeryConfig>()?;
         install_frame_size(&mut sources)?;
-        Ok(Self {
-            base: ChassisBase { sources, actor_ring, scheduler_tuning, registry_queues, settlement },
+        Ok(Self::new(
+            ChassisBase { sources, actor_ring, scheduler_tuning, registry_queues, settlement },
             runtime,
             bloomery,
-        })
+        ))
     }
 }
 
@@ -180,25 +205,30 @@ impl BootableChassis for BloomeryChassis {
     /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
     /// so the manifest roster can never drift from what boots. Adds only the
     /// component host (which the driver's `Command::Load` targets), HTTP
-    /// egress for Sampled programs (ADR-0234 decision 7), the RPC server
+    /// egress for Sampled programs (ADR-0234 decision 7), the workspace actor
+    /// over the env's artifact store (ADR-0237 decision 8), the RPC server
     /// (ADR-0155 §3) composed held so [`BloomeryChassis::build_mounted`] binds
-    /// it after the mount, and the bloomery config declaration; the env
-    /// carries values the delta resolves nothing from, so it takes no part.
+    /// it after the mount, and the bloomery config declaration. The env's
+    /// store is `None` on the describe / print-config path, which composes the
+    /// workspace to list it and never boots it.
     ///
     /// HTTP resolves `HttpConfig` off the source stack with no chassis-side
     /// override, so its compiled defaults hold: an empty allowlist answers
     /// every fetch `AllowlistDenied` before any connection. Composing it
     /// unconditionally is what makes a program's fetch always answered on the
-    /// one engine that runs programs; no exec, TCP, HTTP-serving, or fs
-    /// capability is composed.
-    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, _env: Self::Env) -> Result<Builder<Self>, BootError> {
+    /// one engine that runs programs. `aether.process`, TCP, HTTP-serving,
+    /// and fs capabilities are not composed.
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: Self::Env) -> Result<Builder<Self>, BootError> {
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
         Ok(with_rpc_server(
-            builder.with_actor::<ComponentHostCapability>(component_host_params).with_actor::<HttpCapability>(()),
+            builder
+                .with_actor::<ComponentHostCapability>(component_host_params)
+                .with_actor::<HttpCapability>(())
+                .with_actor::<WorkspaceCapability>(WorkspaceParams { artifacts: env.artifacts }),
         )
         .declare_config_member::<BloomeryConfig>())
     }
@@ -211,15 +241,17 @@ mod config_manifest_tests {
     use aether_substrate::chassis::config_manifest;
 
     #[test]
-    fn bloomery_known_keys_claim_its_knobs_and_only_http_egress() {
+    fn bloomery_known_keys_claim_its_knobs_http_egress_and_the_workspace() {
         // The aggregate is derived from what the bloomery actually composes: it
-        // must claim its own two knobs, the RPC port, and the HTTP egress knobs,
-        // and must not claim any exec/serving/fs knob. Catches a dropped HTTP
-        // compose, which would bring back the unanswered-fetch hang and make an
-        // operator's allowlist key an unknown-env boot error; a later edit that
-        // composes `with_full_stack_caps`, which would add exec and fs; and a
-        // dropped `declare_config_member` that would make the journal knob warn
-        // as unknown.
+        // must claim its own two knobs, the RPC port, the HTTP egress knobs, and
+        // the workspace endpoint, and must not claim any process/serving/fs
+        // knob. Catches a dropped HTTP compose, which would bring back the
+        // unanswered-fetch hang and make an operator's allowlist key an
+        // unknown-env boot error; a dropped workspace compose, which would make
+        // the endpoint key an unknown-env boot error and leave imports
+        // unanswered; a later edit that composes `with_full_stack_caps`, which
+        // would add process exec and fs; and a dropped `declare_config_member`
+        // that would make the journal knob warn as unknown.
         let manifest = config_manifest::<BloomeryChassis>().expect("bloomery config manifest");
         let known = manifest.known_keys(&chassis_residual_knobs());
         assert!(known.contains("AETHER_BLOOMERY_JOURNAL"), "bloomery must claim its journal knob");
@@ -227,9 +259,10 @@ mod config_manifest_tests {
         assert!(known.contains("AETHER_RPC_PORT"), "bloomery must claim the RPC port via the composed RpcServerConfig");
         assert!(known.contains("AETHER_HTTP_ALLOWLIST"), "bloomery must claim the http egress allowlist knob");
         assert!(known.contains("AETHER_HTTP_DISABLE"), "bloomery must claim the http egress disable knob");
+        assert!(known.contains("AETHER_WORKSPACE_ENDPOINT"), "bloomery must claim the workspace endpoint knob");
         assert!(
             !known.contains("AETHER_PROCESS_ALLOWLIST"),
-            "bloomery composes no subprocess exec, so it must not claim the process knob"
+            "bloomery composes the workspace, never aether.process, so it must not claim the process knob"
         );
         assert!(
             !known.contains("AETHER_HTTP_SERVER_ENABLED"),

@@ -1,6 +1,6 @@
 //! The bloomery chassis CLI root (ADR-0090 unit d, issue 1258). [`BloomeryCli`]
 //! is journal-driven — no full-stack caps — so it flattens the bloomery,
-//! RPC-server, and HTTP-egress overlays plus the four tuning overlays the
+//! RPC-server, HTTP-egress, and workspace overlays plus the four tuning overlays the
 //! chassis resolves off its own source stack, alongside the source-selecting
 //! [`ChassisMeta`] flags. The
 //! shared staging / flag-naming / help-forwarding machinery lives in
@@ -12,6 +12,7 @@ use aether_chassis::cli::ChassisMeta;
 use aether_http::HttpOverlay;
 use aether_rpc::RpcServerOverlay;
 use aether_substrate::config::SettlementOverlay;
+use aether_workspace::WorkspaceOverlay;
 use clap::Parser;
 
 use crate::config::BloomeryOverlay;
@@ -49,6 +50,13 @@ pub struct BloomeryCli {
     #[command(flatten)]
     pub http: HttpOverlay,
 
+    /// Workspace actor knobs (ADR-0237 decision 8): `--workspace-endpoint`
+    /// shadows `AETHER_WORKSPACE_ENDPOINT`, the Docker Engine API socket
+    /// (`unix:///var/run/docker.sock` when absent; `DOCKER_HOST` is never
+    /// read), beside the import bounds and the in-flight bound.
+    #[command(flatten)]
+    pub workspace: WorkspaceOverlay,
+
     /// Per-actor ring-capacity knobs (issue 1990): `--actor-*`. The chassis
     /// resolves `ActorRingConfig` off its own source stack for the actors its
     /// registry hosts.
@@ -75,15 +83,18 @@ pub struct BloomeryCli {
     pub meta: ChassisMeta,
 }
 
-// The bloomery composes the component host, HTTP egress, and the RPC server;
-// `--rpc-port` rides the derive-emitted `RpcServerOverlay` (#3849) and
-// `--http-allowlist` the derive-emitted `HttpOverlay`, like every other flag.
+// The bloomery composes the component host, HTTP egress, the workspace actor,
+// and the RPC server; `--rpc-port` rides the derive-emitted `RpcServerOverlay`
+// (#3849), `--http-allowlist` the derive-emitted `HttpOverlay`, and
+// `--workspace-endpoint` the derive-emitted `WorkspaceOverlay`, like every
+// other flag.
 // The four tuning overlays the chassis resolves off its own source stack ride
 // beside the bloomery's own overlay.
 chassis_cli!(BloomeryCli {
     BloomeryOverlay,
     RpcServerOverlay,
     HttpOverlay,
+    WorkspaceOverlay,
     ActorRingOverlay,
     SchedulerTuningOverlay,
     RegistryQueueOverlay,

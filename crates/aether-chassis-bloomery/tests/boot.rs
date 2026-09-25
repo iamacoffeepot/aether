@@ -55,11 +55,11 @@ fn populated_journal_is_recovered_through_its_head() {
 fn unset_journal_refuses_boot() {
     // Catches a silent default, for example `PathBuf::new()`: rusqlite opens
     // `""` as a throwaway temporary database, which silently loses every write.
-    let env = BloomeryEnv {
-        base: ChassisBase { sources: ConfigSources::new(None), ..Default::default() },
-        runtime: RuntimeConfig::default(),
-        bloomery: BloomeryConfig { journal: None, closure_limit_bytes: ClosureLimit::MAX_BYTES },
-    };
+    let env = BloomeryEnv::new(
+        ChassisBase { sources: ConfigSources::new(None), ..Default::default() },
+        RuntimeConfig::default(),
+        BloomeryConfig { journal: None, closure_limit_bytes: ClosureLimit::MAX_BYTES },
+    );
     let error = BloomeryChassis::build(env).expect_err("boot without a journal root must fail");
     let message = error.to_string();
     assert!(message.contains("AETHER_BLOOMERY_JOURNAL"), "the refusal names the env key: {message}");
@@ -73,14 +73,11 @@ fn a_root_another_engine_holds_refuses_boot_naming_the_root() {
     // spawn failure's debug dump rather than the lock refusal.
     let first = SeededJournal::new([]).boot();
     let root = first.journal_path().to_path_buf();
-    let env = BloomeryEnv {
-        base: ChassisBase { sources: ConfigSources::new(None), ..Default::default() },
-        runtime: RuntimeConfig::default(),
-        bloomery: BloomeryConfig {
-            journal: Some(root.display().to_string()),
-            closure_limit_bytes: ClosureLimit::MAX_BYTES,
-        },
-    };
+    let env = BloomeryEnv::new(
+        ChassisBase { sources: ConfigSources::new(None), ..Default::default() },
+        RuntimeConfig::default(),
+        BloomeryConfig { journal: Some(root.display().to_string()), closure_limit_bytes: ClosureLimit::MAX_BYTES },
+    );
 
     let error = BloomeryChassis::build(env).expect_err("a held journal root must refuse a second boot");
     let message = error.to_string();

@@ -6,11 +6,13 @@ license.workspace = true
 publish = false
 
 # The bloomery chassis (issue #6244): the journal-driven engine. Boots the
-# shared base stratum plus the component host, HTTP egress, and the RPC server,
-# then spawns the journal owner and the bundle driver over one journal root.
-# Produces the `aether-bloomery` binary over the shared `aether-chassis`
-# composition layer. HTTP egress is its one sanctioned integration (ADR-0234
-# decision 7), deny-by-default until an operator names hosts on the allowlist.
+# shared base stratum plus the component host, HTTP egress, the workspace
+# actor, and the RPC server, then spawns the journal owner and the bundle
+# driver over one journal root. Produces the `aether-bloomery` binary over the
+# shared `aether-chassis` composition layer. HTTP egress (ADR-0234 decision 7)
+# is deny-by-default until an operator names hosts on the allowlist; the
+# workspace actor (ADR-0237 decision 8) imports digest-pinned images into the
+# journal through the Docker Engine API.
 
 [[bin]]
 name = "aether-bloomery"
@@ -36,6 +38,9 @@ aether-rpc = { path = "../aether-rpc" }
 aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-driver = { path = "../aether-bloomery-driver" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+# The `aether.workspace` actor, composed over the opened journal's artifact
+# store.
+aether-workspace = { path = "../aether-workspace" }
 clap = { workspace = true }
 # `BloomeryConfig` derives `aether_substrate::Config`; the macro emits a
 # `#[derive(confique::Config)]` layer struct reached only through
