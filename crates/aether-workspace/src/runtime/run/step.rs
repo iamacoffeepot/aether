@@ -1,5 +1,6 @@
-//! One step: its container under the sandbox pins (ADR-0237 decision 4), its
-//! stdin, its bounded wait, its exit, and its logs as blobs.
+//! One step: its container under the sandbox pins (ADR-0237 decision 4) and
+//! the run's allotment (decision 9), its stdin, its bounded wait, its peak
+//! memory, its exit, and its logs as blobs.
 //!
 //! | Pin | Container setting |
 //! |---|---|
@@ -8,7 +9,8 @@
 //! | Identity | `WorkingDir /work`, `User 0:0`, `Hostname workspace` |
 //! | Filesystem | read-only root; `/work` on the run's volume; a tmpfs at each `/work/<scratch>`; each mount read-only |
 //! | Network | `NetworkMode none` unless `Network::On` |
-//! | Allotment | `Memory` = `MemorySwap`, `PidsLimit` |
+//! | CPU | `CpusetCpus` = the allotment's cores, `NanoCpus` = their count × 10^9 |
+//! | Memory, processes | `Memory` = `MemorySwap` = the allotment's memory; `PidsLimit` = the fixed pids limit |
 //! | Privilege | `CapDrop ALL`, `no-new-privileges` |
 //! | Logs | the `local` driver with rotation set explicitly, so a daemon default cannot truncate output |
 //!
@@ -18,6 +20,13 @@
 //! code is its outcome. Docker reports a signal death as 128 + the signal,
 //! which cannot be told apart from `exit(128 + n)`, so this backend always
 //! answers `Some(code)`.
+//!
+//! While the step runs, a scoped thread reads the container's stats stream
+//! and keeps the peak memory it reports. The stream is opened after `start`,
+//! its response head read on the worker so connections stay in a fixed
+//! order, and shut down once the wait (or the kill) is over. Sampling is an
+//! observation for the estimate only: a failure is logged and leaves the
+//! peak `None`, and never changes the answer.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -33,7 +42,7 @@ use super::cleanup::Cleanup;
 use super::volumes::{RUN_LABEL, Volumes, volume_mount};
 use super::{Allotment, RunError, Stop, engine_failed};
 use crate::runtime::engine::logs::{self, Demux, Output};
-use crate::runtime::engine::{ContainerId, Engine, Transport, Waited};
+use crate::runtime::engine::{ContainerId, Engine, Transport, Waited, stats};
 use crate::{EnvVar, Network, Refusal, Resource, Scratch, Step, StepOutcome, ToolRecord};
 
 /// The fixed `SOURCE_DATE_EPOCH`: 1980-01-01T00:00:00Z, the tar codec's mtime.
@@ -53,6 +62,9 @@ const LOG_MAX_SIZE: &str = "1024g";
 /// The copy buffer logs and stdin stream through.
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
+/// `NanoCpus` per pinned core.
+const NANO_CPUS_PER_CORE: u64 = 1_000_000_000;
+
 /// What every step's container shares.
 pub struct Sandbox<'a> {
     /// The environment image.
@@ -61,6 +73,8 @@ pub struct Sandbox<'a> {
     pub scratch: &'a Scratch,
     pub network: Network,
     pub allotment: &'a Allotment,
+    /// Each container's process and thread count.
+    pub pids: u32,
     /// `Environment::env`.
     pub base_env: &'a [EnvVar],
 }
@@ -116,9 +130,11 @@ fn spec(sandbox: &Sandbox<'_>, tool: &ToolRecord, step: &Step) -> Value {
             "Mounts": mounts,
             "Tmpfs": tmpfs,
             "NetworkMode": network_mode,
+            "CpusetCpus": sandbox.allotment.cpus.docker_list(),
+            "NanoCpus": u64::from(sandbox.allotment.cpus.count().get()) * NANO_CPUS_PER_CORE,
             "Memory": sandbox.allotment.memory_bytes,
             "MemorySwap": sandbox.allotment.memory_bytes,
-            "PidsLimit": sandbox.allotment.pids,
+            "PidsLimit": sandbox.pids,
             "CapDrop": ["ALL"],
             "SecurityOpt": ["no-new-privileges"],
             "LogConfig": {
@@ -137,6 +153,14 @@ fn environment(base: &[EnvVar], step: &[EnvVar]) -> Vec<String> {
     merged.into_iter().map(|(key, value)| format!("{key}={value}")).collect()
 }
 
+/// A step that ran to its end: its outcome, the peak memory sampled while it
+/// ran, and when its wait ended.
+pub struct StepRan {
+    pub outcome: StepOutcome,
+    pub peak_memory_bytes: Option<u64>,
+    pub exited: Instant,
+}
+
 /// Run the created container to its end and store its outputs in `batch`.
 pub fn run(
     engine: &Engine,
@@ -145,9 +169,10 @@ pub fn run(
     step: &Step,
     tool: &ToolRecord,
     deadline: Instant,
-) -> Result<StepOutcome, Stop> {
+) -> Result<StepRan, Stop> {
     let stdin = step.stdin.as_ref().map(|blob| attach(engine, batch, container, blob)).transpose()?;
-    execute(engine, container, stdin, deadline)?;
+    let peak_memory_bytes = execute(engine, container, stdin, deadline)?;
+    let exited = Instant::now();
 
     let exit = engine.inspect_exit(container).map_err(engine_failed(format!("inspecting container {container}")))?;
     if exit.oom_killed {
@@ -165,7 +190,8 @@ pub fn run(
         })?;
     let stdout = store_output(engine, batch, container, Output::Stdout, lengths.of(Output::Stdout))?;
     let stderr = store_output(engine, batch, container, Output::Stderr, lengths.of(Output::Stderr))?;
-    Ok(StepOutcome { exit_code: Some(code), stdout, stderr, tool: tool.clone() })
+    let outcome = StepOutcome { exit_code: Some(code), stdout, stderr, tool: tool.clone() };
+    Ok(StepRan { outcome, peak_memory_bytes, exited })
 }
 
 /// The hijacked stdin connection and the blob to write into it.
@@ -191,13 +217,28 @@ fn attach(
     Ok(Stdin { connection, blob: reader })
 }
 
-/// Start the container, feed its stdin on a scoped thread, and wait for it
-/// until `deadline`. A container still running then, or whose wait failed, is
-/// killed before the feeder is joined, so the feeder's writes always end.
-fn execute(engine: &Engine, container: &ContainerId, stdin: Option<Stdin>, deadline: Instant) -> Result<(), Stop> {
+/// Start the container, feed its stdin and sample its stats on scoped
+/// threads, and wait for it until `deadline`. A container still running then,
+/// or whose wait failed, is killed before the feeder is joined, so the
+/// feeder's writes always end; the stats stream is shut down before its
+/// sampler is joined, so its reads always end. Answers the sampled peak.
+fn execute(
+    engine: &Engine,
+    container: &ContainerId,
+    stdin: Option<Stdin>,
+    deadline: Instant,
+) -> Result<Option<u64>, Stop> {
     engine.start(container).map_err(engine_failed(format!("starting container {container}")))?;
+    let stats_stream = engine
+        .stats(container)
+        .inspect_err(|error| {
+            tracing::warn!(target: "aether_workspace", %container, %error, "opening the stats stream failed");
+        })
+        .ok()
+        .map(stats::StatsStream::split);
     thread::scope(|scope| {
         let feeder = stdin.map(|stdin| scope.spawn(move || feed(stdin)));
+        let sampler = stats_stream.map(|(samples, stop)| (scope.spawn(move || stats::peak_bytes(samples)), stop));
         let waited = engine.wait(container, deadline.saturating_duration_since(Instant::now()));
         let ended = match waited {
             Ok(Waited::Stopped) => Ok(()),
@@ -212,11 +253,21 @@ fn execute(engine: &Engine, container: &ContainerId, stdin: Option<Stdin>, deadl
                 Err(RunError::Engine { call: format!("waiting for container {container}"), error }.into())
             }
         };
+        let peak = sampler.and_then(|(sampler, stop)| {
+            stop.stop();
+            let peak = sampler.join().unwrap_or_else(|_| Err(io::Error::other("the stats sampler panicked")));
+            peak.inspect_err(|error| {
+                tracing::warn!(target: "aether_workspace", %container, %error, "reading the stats stream failed");
+            })
+            .ok()
+            .flatten()
+        });
         let fed = feeder.map_or(Ok(()), |feeder| {
             feeder.join().unwrap_or_else(|_| Err(io::Error::other("the stdin feeder panicked")))
         });
         ended?;
-        fed.map_err(|error| RunError::Read { during: "reading a stdin blob".to_owned(), error }.into())
+        fed.map_err(|error| RunError::Read { during: "reading a stdin blob".to_owned(), error })?;
+        Ok(peak)
     })
 }
 

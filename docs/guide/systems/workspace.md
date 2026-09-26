@@ -1,7 +1,7 @@
 # Workspace imports and runs
 
 > **Governing ADR:** [ADR-0237](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0237-workspaces-run-steps-over-trees.md)
-> (workspaces run steps over trees), decisions 2, 3, 4, and 8. The actor
+> (workspaces run steps over trees), decisions 2, 3, 4, 8, and 9. The actor
 > answers `Import` and `Run`.
 
 The `aether.workspace` actor is the Bloomery engine's only route to a container.
@@ -67,9 +67,10 @@ A `Run` names everything by digest: the tree written at `/work`, the
 trees, 1 to 64 steps (a tool name from the environment's table, argv, extra
 variables, and optional stdin), the scratch paths under `/work` left out of the
 output, and whether the network is on. It names no cores, memory, or deadline;
-those are the executor's.
+those are the executor's (see [Provisioning](#provisioning)).
 
-The whole sequence runs on the worker thread, held like an import:
+Once the run is admitted, the whole sequence runs on the worker thread, held
+like an import:
 
 1. **Resolve.** Open one journal batch and load the environment, the tree,
    every mount tree, and every stdin blob. Then check the tree's
@@ -94,7 +95,10 @@ The whole sequence runs on the worker thread, held like an import:
    container at `/work` before it starts.
 4. **Steps.** Each step gets its own container under the sandbox pins below.
    Stdin, when set, streams through a hijacked `attach`. The container starts,
-   and the wait's read timeout is the run's remaining deadline. `inspect`
+   and `GET …/stats?stream=true` opens beside it: a second thread keeps the
+   peak memory the samples report until the wait ends, for the estimate
+   only, so a failed or dropped stats stream never changes the answer. The
+   wait's read timeout is the run's remaining deadline. `inspect`
    gives the exit code; each output is one counting read of the demultiplexed
    log stream, which fixes the blob's length, then one writing read into the
    journal, so no log is held whole. The steps stop after the first non-zero
@@ -121,7 +125,8 @@ every blob and tree is content-addressed.
 | Working directory, user, hostname | `/work`, `0:0`, `workspace` |
 | Filesystem | read-only root from the environment image; `/work` on the run's volume; a tmpfs (`rw,exec`) at each `/work/<scratch>`; mounts read-only; volumes never seeded from the image (`NoCopy`) |
 | Network | `NetworkMode none` unless `Network::On` |
-| Memory, processes | `Memory` = `MemorySwap` = the allotment; `PidsLimit` |
+| CPU | `CpusetCpus` = the allotment's pinned cores; `NanoCpus` = their count × 10^9 |
+| Memory, processes | `Memory` = `MemorySwap` = the allotment's memory; `PidsLimit` = the fixed pids limit |
 | Privilege | `CapDrop ALL`, `no-new-privileges` |
 | Logs | the `local` driver, one file, rotation size set explicitly, so a daemon default cannot truncate or rewrite output |
 
@@ -149,6 +154,61 @@ directory and its destination on the same side.
 `Workspace` program binding (#6711) ends the invocation on either, and the
 program never sees them. Nothing from a failed or exhausted run is committed,
 so retrying it is safe.
+
+## Provisioning
+
+The actor alone chooses each run's cores, memory, and deadline, and admits it
+against its host (ADR-0237 decision 9). No program can ask for resources.
+
+**Budget.** `AETHER_WORKSPACE_CPUSET` lists the cores the actor may pin runs
+to, and `AETHER_WORKSPACE_BUDGET_MEMORY_BYTES` the memory it may reserve at
+once. What the host keeps for itself is the cores left out of the list and the
+memory left out of the budget.
+
+**Allotment.** Each run gets `run_cores` pinned cores (at most the list's
+count), a memory limit for each step's container, and one deadline its steps
+share, from the first step's container create to the last step's exit.
+
+- A run key the actor has not seen gets `default_memory_bytes` and
+  `default_deadline_millis`.
+- A seen key gets its estimate times `headroom_percent`, floored at 256 MiB
+  and 60 seconds.
+- Every allotment, defaults included, is clamped: memory to the budget, and
+  the deadline to `max_deadline_millis`. So an allotment larger than the whole
+  budget still fits an idle host, and a hung step holds its cores for at most
+  that long per attempt.
+
+**Run key.** The estimate is kept per run key: sha256 over a fixed domain tag,
+then the environment digest, the step count, and for each step in order its
+tool name, its args, and its env entries (keys and values, in the order
+given), every count and string length-prefixed. The tree, the mounts, the
+scratch paths, the network, and every step's stdin are not in it, so two runs
+doing the same work over different inputs share an estimate.
+
+**Estimate.** An `Ok` run, whatever its exit codes, records its peak memory
+(the highest stats sample of any step, less the reclaimable file cache) and
+its wall time. The first observation seeds the key's estimate; later ones
+blend in at weight 1/4. `Refused` and `Failed` change nothing.
+
+**After exhaustion.** `Exhausted(Memory)` makes the key's next allotment twice
+the memory that ran out, and `Exhausted(Time)` twice the deadline that passed,
+so a reactor's retry receives more without asking. Both stay clamped: memory
+to the budget, and the deadline to `max_deadline_millis`, so repeated timeouts
+stop growing at 4 hours by default. Whether to keep retrying at the ceiling is
+reactor policy.
+
+**Admission.** Strict FIFO. A run starts only when no run waits ahead of it
+and its allotment fits the free cores and free memory; it is pinned to the
+lowest-numbered free cores. Otherwise it waits, its caller's settlement chain
+held, and is never dropped or refused for load. Each completion releases the
+finished run's cores and memory and starts runs from the front while the
+front fits, computing the front's allotment from the estimate as it is then.
+A small run behind a large waiting one waits too, so the large one is never
+starved.
+
+**Executor-local.** The budget, the queue, and the estimates live only in the
+actor's memory. Nothing is written to the journal or placed in a result, and
+a restart empties the estimates.
 
 ## Userland rules and bounds
 
@@ -180,8 +240,13 @@ environment variable of its own.
 | `AETHER_WORKSPACE_MAX_IN_FLIGHT` | `--workspace-max-in-flight` | 1 |
 | `AETHER_WORKSPACE_IMPORT_MAX_ENTRIES` | `--workspace-import-max-entries` | 1,000,000 |
 | `AETHER_WORKSPACE_IMPORT_MAX_BYTES` | `--workspace-import-max-bytes` | 8 GiB |
-| `AETHER_WORKSPACE_RUN_DEADLINE_MILLIS` | `--workspace-run-deadline-millis` | 1,800,000 (30 minutes) |
-| `AETHER_WORKSPACE_MEMORY_LIMIT_BYTES` | `--workspace-memory-limit-bytes` | 8 GiB |
+| `AETHER_WORKSPACE_CPUSET` | `--workspace-cpuset` | `0` |
+| `AETHER_WORKSPACE_BUDGET_MEMORY_BYTES` | `--workspace-budget-memory-bytes` | 8 GiB |
+| `AETHER_WORKSPACE_RUN_CORES` | `--workspace-run-cores` | 4 |
+| `AETHER_WORKSPACE_DEFAULT_MEMORY_BYTES` | `--workspace-default-memory-bytes` | 8 GiB |
+| `AETHER_WORKSPACE_DEFAULT_DEADLINE_MILLIS` | `--workspace-default-deadline-millis` | 1,800,000 (30 minutes) |
+| `AETHER_WORKSPACE_MAX_DEADLINE_MILLIS` | `--workspace-max-deadline-millis` | 14,400,000 (4 hours) |
+| `AETHER_WORKSPACE_HEADROOM_PERCENT` | `--workspace-headroom-percent` | 150 |
 | `AETHER_WORKSPACE_PIDS_LIMIT` | `--workspace-pids-limit` | 4,096 |
 | `AETHER_WORKSPACE_OUTPUT_MAX_ENTRIES` | `--workspace-output-max-entries` | 1,000,000 |
 | `AETHER_WORKSPACE_OUTPUT_MAX_BYTES` | `--workspace-output-max-bytes` | 8 GiB |
@@ -202,16 +267,21 @@ environment variable of its own.
   The Windows named pipe is not supported yet (#6775).
 - `init` does not dial the daemon, so an engine boots without one; the first
   import that cannot connect answers `Failed`.
-- Imports and runs share `max_in_flight`: past it they queue and are never
-  dropped. The default of 1 also keeps two runs from building the same
-  environment image at once.
-- A zero import bound, output bound, deadline, memory limit, or pids limit
-  refuses boot naming its key.
-- The five run knobs are one fixed allotment every run gets. The deadline
-  covers a run's steps together, from the first step's container create to
-  the last step's exit; memory and pids apply to each step's container.
-  Executor provisioning (#6710) replaces them with a host budget, per-program
-  estimates, and FIFO admission.
+- `max_in_flight` bounds imports only: past it they queue and are never
+  dropped. Runs are admitted against the budget instead (see
+  [Provisioning](#provisioning)).
+- Runs can overlap, so two first runs of one environment may both import its
+  image. That is idempotent: both import the same content under the same tag
+  and label, and each run inspects the label before use.
+- A `cpuset` that does not parse (an empty list, a reversed range, a value
+  that is not a number, an index above 1023) refuses boot naming
+  `AETHER_WORKSPACE_CPUSET`, and a headroom below 100 names
+  `AETHER_WORKSPACE_HEADROOM_PERCENT`.
+- A zero import bound, output bound, budget memory, run cores, default
+  memory, default deadline, maximum deadline, or pids limit refuses boot
+  naming its key.
+- The pids limit and the output bounds are the same for every run; memory and
+  pids apply to each step's container.
 
 ## Composition
 

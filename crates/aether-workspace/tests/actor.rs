@@ -7,13 +7,13 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::thread;
 
-use aether_bloomery_journal::{ArtifactBatch, Journal};
+use aether_bloomery_journal::{ArtifactBatch, ArtifactStore, Journal};
 use aether_bloomery_kinds::{Name, Node, Ref, Tree};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_workspace::testing::{RunScript, StubDaemon, StubReply, TarWriter};
+use aether_workspace::testing::{RunScript, StubDaemon, StubReply, StubRequest, TarWriter};
 use aether_workspace::{
-    Environment, ImageRef, Import, ImportResult, Mounts, Network, Platform, Provides, Run, RunResult, Scratch, Step,
-    Steps, Tool, ToolName, Tools, TreePath, WorkspaceCapability, WorkspaceConfig, WorkspaceParams,
+    Environment, ImageRef, Import, ImportResult, Mounts, Network, Platform, Provides, Resource, Run, RunResult,
+    Scratch, Step, Steps, Tool, ToolName, Tools, TreePath, WorkspaceCapability, WorkspaceConfig, WorkspaceParams,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -77,6 +77,23 @@ fn no_artifact_store_refuses_boot_naming_it() {
 }
 
 #[test]
+fn a_zero_max_deadline_refuses_boot_naming_it() {
+    // Catches the ceiling left unvalidated: a zero ceiling would clamp every
+    // run's deadline to nothing, so every run would answer Exhausted(Time).
+    let temp = tempfile::tempdir().expect("a temp dir");
+    let store = Journal::open(&temp.path().join("journal")).expect("a journal").artifact_store();
+    let config = WorkspaceConfig { max_deadline_millis: 0, ..WorkspaceConfig::default() };
+    let error = SubstrateHarness::builder()
+        .with_actor_configured::<WorkspaceCapability>(WorkspaceParams { artifacts: Some(store) }, config)
+        .build()
+        .err()
+        .expect("boot with a zero max deadline must fail");
+
+    let message = error.to_string();
+    assert!(message.contains("AETHER_WORKSPACE_MAX_DEADLINE_MILLIS"), "the refusal names the knob: {message}");
+}
+
+#[test]
 fn a_run_answers_its_result_and_holds_settlement_until_it_is_done() -> TestResult {
     // Catches `on_run` answering on the dispatcher or detached from the
     // caller's chain (settlement would come back while the worker still talks
@@ -122,6 +139,124 @@ fn a_run_answers_its_result_and_holds_settlement_until_it_is_done() -> TestResul
     })?;
     assert!(matches!(answer, RunResult::Ok(_)), "{answer:?}");
     Ok(())
+}
+
+#[test]
+fn on_one_core_a_second_run_waits_for_the_first_holding_its_settlement_and_both_answer() -> TestResult {
+    // Catches a queued run dropped or starved (its reply never comes), a
+    // queued run started beside the first on a budget with room for one
+    // (the stub would see the two runs' requests interleave), and a queued
+    // run whose settlement hold was not taken at accept: its chain would
+    // settle while the first run still held the core.
+    let temp = tempfile::tempdir()?;
+    let store = Journal::open(&temp.path().join("journal"))?.artifact_store();
+    let (run, hex) = one_step_run(&store)?;
+    let stub = StubDaemon::bind()?;
+    let config =
+        WorkspaceConfig { endpoint: Some(stub.endpoint()), cpuset: "0".to_owned(), ..WorkspaceConfig::default() };
+    let mut harness = SubstrateHarness::builder()
+        .with_actor_configured::<WorkspaceCapability>(WorkspaceParams { artifacts: Some(store) }, config)
+        .build()?;
+    let workspace = harness.actor_ref::<WorkspaceCapability>();
+    let output = TarWriter::new().directory("work/").file("work/out", b"o\n").finish();
+    let script = RunScript { environment: &hex, logs: &[(1, b"ok\n")], exit_code: 0, output: &output };
+    let back_to_back = || script.replies().into_iter().chain(script.replies()).collect::<Vec<_>>();
+
+    let served_before_settling = thread::scope(|scope| -> Result<bool, Box<dyn Error>> {
+        let served = scope.spawn(|| stub.answer(back_to_back()));
+        let _first = harness.send_deferred(&workspace, &run);
+        harness.execute(vec![("second", HarnessOp::send_and_settle(&workspace, &run))])?;
+        let finished = served.is_finished();
+        served.join().map_err(|_| "the stub thread panicked")??;
+        Ok(finished)
+    })?;
+    assert!(served_before_settling, "the queued run's chain settled before its requests were served");
+
+    let (first, second, requests) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
+        let served = scope.spawn(|| stub.serve(back_to_back()));
+        let first = harness.send_deferred(&workspace, &run);
+        let second = harness.execute(vec![("second", HarnessOp::send_and_await_reply(&workspace, &run))])?;
+        let first = harness.await_deferred::<RunResult>(first)?;
+        let requests = served.join().map_err(|_| "the stub thread panicked")??;
+        Ok((first, second.reply::<RunResult>("second")?, requests))
+    })?;
+    assert!(matches!(first, RunResult::Ok(_)), "{first:?}");
+    assert!(matches!(second, RunResult::Ok(_)), "{second:?}");
+    let lines: Vec<String> = requests.iter().map(StubRequest::line).collect();
+    let per_run = script.replies().len();
+    assert_eq!(lines.len(), 2 * per_run, "{lines:?}");
+    assert_eq!(lines[..per_run], lines[per_run..], "the second run started only after the first ended: {lines:?}");
+    Ok(())
+}
+
+#[test]
+fn a_retry_after_an_out_of_memory_kill_gets_twice_the_memory() -> TestResult {
+    // Catches the estimate not wired to the run's completion: the retry
+    // would get the same memory that already ran out, and be killed again.
+    let temp = tempfile::tempdir()?;
+    let store = Journal::open(&temp.path().join("journal"))?.artifact_store();
+    let (run, hex) = one_step_run(&store)?;
+    let stub = StubDaemon::bind()?;
+    let config = WorkspaceConfig {
+        endpoint: Some(stub.endpoint()),
+        budget_memory_bytes: 64 << 30,
+        default_memory_bytes: 1 << 30,
+        ..WorkspaceConfig::default()
+    };
+    let mut harness = SubstrateHarness::builder()
+        .with_actor_configured::<WorkspaceCapability>(WorkspaceParams { artifacts: Some(store) }, config)
+        .build()?;
+    let workspace = harness.actor_ref::<WorkspaceCapability>();
+    let script = RunScript { environment: &hex, logs: &[], exit_code: 137, output: &[] };
+    let mut killed = script.replies();
+    killed.truncate(8);
+    killed.extend([
+        StubReply::with_length(200, r#"{"State":{"ExitCode":137,"OOMKilled":true}}"#),
+        StubReply::with_length(204, ""),
+        StubReply::with_length(204, ""),
+    ]);
+    let both = killed.iter().cloned().chain(killed.iter().cloned()).collect::<Vec<_>>();
+
+    let (answers, requests) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
+        let served = scope.spawn(|| stub.serve(both));
+        let result = harness.execute(vec![
+            ("first", HarnessOp::send_and_await_reply(&workspace, &run)),
+            ("retry", HarnessOp::send_and_await_reply(&workspace, &run)),
+        ])?;
+        let requests = served.join().map_err(|_| "the stub thread panicked")??;
+        Ok(([result.reply::<RunResult>("first")?, result.reply::<RunResult>("retry")?], requests))
+    })?;
+    assert!(answers.iter().all(|answer| *answer == RunResult::Exhausted(Resource::Memory)), "{answers:?}");
+    let memory = |request: &StubRequest| -> Result<serde_json::Value, Box<dyn Error>> {
+        let spec: serde_json::Value = serde_json::from_slice(&request.body)?;
+        Ok(spec["HostConfig"]["Memory"].clone())
+    };
+    let creates: Vec<&StubRequest> =
+        requests.iter().filter(|request| request.line() == "POST /v1.44/containers/create").collect();
+    let [first, retry] = creates.as_slice() else {
+        return Err(format!("two step containers were created: {creates:?}").into());
+    };
+    assert_eq!(memory(first)?, serde_json::json!(1u64 << 30));
+    assert_eq!(memory(retry)?, serde_json::json!(2u64 << 30));
+    Ok(())
+}
+
+/// Commit the inputs of a one-step run of `tool`, and answer the run and its
+/// environment's digest in hex.
+fn one_step_run(store: &ArtifactStore) -> Result<(Run, String), Box<dyn Error>> {
+    let mut batch = store.batch()?;
+    let (environment, tree) = stage_inputs(&mut batch)?;
+    batch.commit()?;
+    let step = Step { tool: ToolName::new("tool")?, args: Vec::new(), env: Vec::new(), stdin: None };
+    let run = Run {
+        tree,
+        environment,
+        mounts: Mounts::new(Vec::new())?,
+        steps: Steps::new(vec![step])?,
+        scratch: Scratch::new(Vec::new())?,
+        network: Network::Off,
+    };
+    Ok((run, environment.digest().to_string()))
 }
 
 /// Commit an environment whose root holds the executable `usr/bin/tool`,

@@ -22,6 +22,7 @@
 #[cfg(test)]
 use std::fs;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::iter;
 #[cfg(test)]
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -556,6 +557,28 @@ pub fn log_stream(frames: &[(u8, &[u8])]) -> Vec<u8> {
     stream
 }
 
+/// A stats stream as `GET /containers/{id}/stats?stream=true` answers one
+/// under cgroup v2: one JSON sample per line, each `(usage, inactive_file)`.
+#[must_use]
+pub fn stats_stream(samples: &[(u64, u64)]) -> Vec<u8> {
+    samples
+        .iter()
+        .flat_map(|(usage, inactive)| {
+            format!(r#"{{"memory_stats":{{"usage":{usage},"stats":{{"inactive_file":{inactive}}}}}}}"#)
+                .into_bytes()
+                .into_iter()
+                .chain(iter::once(b'\n'))
+        })
+        .collect()
+}
+
+/// The two stats samples every scripted run's step reports.
+pub const RUN_SAMPLES: [(u64, u64); 2] = [(300 << 20, 100 << 20), (500 << 20, 50 << 20)];
+
+/// The peak memory [`RUN_SAMPLES`] report: the second sample's usage less
+/// its inactive file cache.
+pub const RUN_PEAK_MEMORY_BYTES: u64 = 450 << 20;
+
 /// What one scripted single-step run's daemon answers.
 pub struct RunScript<'a> {
     /// The environment digest, in hex, the image label carries.
@@ -575,8 +598,9 @@ pub const RUN_CONTAINER: &str = "c0ffee";
 pub const RUN_VOLUME: &str = "v0lume";
 
 impl RunScript<'_> {
-    /// The fourteen replies a single-step run with no mounts and no stdin
-    /// reads, in order, when the environment image is already present.
+    /// The fifteen replies a single-step run with no mounts and no stdin
+    /// reads, in order, when the environment image is already present. The
+    /// seventh, after `start`, is the step's stats stream of [`RUN_SAMPLES`].
     #[must_use]
     pub fn replies(&self) -> Vec<StubReply> {
         let only = |kind: u8| -> Vec<(u8, &[u8])> {
@@ -592,6 +616,7 @@ impl RunScript<'_> {
             StubReply::with_length(201, format!(r#"{{"Id":"{RUN_CONTAINER}","Warnings":[]}}"#)),
             StubReply::with_length(200, Vec::new()),
             StubReply::with_length(204, Vec::new()),
+            StubReply::chunked(200, RUN_SAMPLES.iter().map(|&sample| stats_stream(&[sample])).collect()),
             StubReply::chunked(200, vec![br#"{"StatusCode":0,"Error":null}"#.to_vec()]),
             StubReply::with_length(200, format!(r#"{{"State":{{"ExitCode":{},"OOMKilled":false}}}}"#, self.exit_code)),
             StubReply::chunked(200, vec![log_stream(self.logs)]),
