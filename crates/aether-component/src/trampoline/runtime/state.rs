@@ -46,7 +46,11 @@ pub struct WasmTrampolineState {
     /// ADR-0097: the resident `Module`, retained so a sibling spawn
     /// re-instantiates it (a cheap `Arc` clone — wasmtime shares the
     /// compiled code) without a re-compile, and refreshed on replace.
-    pub(crate) module: Module,
+    /// ADR-0240 D5: this `Arc` is also what keeps the host's
+    /// content-hash-keyed module cache entry alive — the cache holds only a
+    /// `Weak<Module>`, so a trampoline dropping this field is part of what
+    /// lets the cache prune a module no one still hosts.
+    pub(crate) module: Arc<Module>,
     /// ADR-0097: every exported type's capability group (see
     /// [`super::WasmTrampolineConfig::actor_caps`]). A spawned sibling looks
     /// up its own handler set here by actor-type tag.
