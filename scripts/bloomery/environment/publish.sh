@@ -8,10 +8,10 @@
 #                       toolchain=<repository>@sha256:<digest>
 #   publish.sh --stop   remove the registry container; its volume stays
 #
-# The registry and the push live in `../registry.sh`, shared with the source
-# recipe. Rerunning is idempotent: it reuses the running registry, the build
-# is a cache hit when nothing changed, and the same references come back. Only
-# the two reference lines go to stdout; build and push output goes to stderr.
+# The registry and the push live in `../registry.sh`. Rerunning is
+# idempotent: it reuses the running registry, the build is a cache hit when
+# nothing changed, and the same references come back. Only the two reference
+# lines go to stdout; build and push output goes to stderr.
 #
 # AETHER_ENV_REGISTRY_PORT picks the loopback port (default 5000).
 

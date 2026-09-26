@@ -1,7 +1,7 @@
 # The loopback registry the Bloomery recipes publish images to, so the
 # `aether.workspace` actor can import them by digest (ADR-0237 decision 3).
-# Sourced by `environment/publish.sh` and `source/publish.sh`; it defines
-# functions and variables only, and runs nothing.
+# Sourced by `environment/publish.sh`; it defines functions and variables
+# only, and runs nothing.
 #
 # The registry is a digest-pinned `registry:2` container bound to 127.0.0.1,
 # which the daemon trusts without TLS. Its blobs live in a named volume, so a

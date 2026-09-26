@@ -1,14 +1,14 @@
 //! One place that spawns `git` and classifies what came back.
 //!
-//! The symbol inventory and the verify lane's symbol pass both read history
-//! through this module, so load-bearing flags cannot drift per call site and
-//! every failed spawn renders the same way.
+//! The symbol inventory, the verify lane's symbol pass, and `import-commit`
+//! all read history through this module, so load-bearing flags cannot drift
+//! per call site and every failed spawn renders the same way.
 
 use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 
 /// Why a git spawn or its output could not be used.
 #[derive(Debug)]
@@ -79,4 +79,16 @@ pub fn run_ok(repo: &Path, args: &[&str]) -> Result<String, GitCommandError> {
         return Err(GitCommandError::Failed { args: format!("{args:?}"), stderr: trim_bytes(&output.stderr) });
     }
     Ok(trim_bytes(&output.stdout))
+}
+
+/// Start `git -C repo args…` with piped stdin and stdout, for a long-lived
+/// batch reader such as `cat-file --batch`. stderr stays the terminal's, so
+/// git's own diagnostic reaches the operator.
+///
+/// # Errors
+/// The process could not be spawned.
+pub fn spawn_piped(repo: &Path, args: &[&str]) -> Result<Child, GitCommandError> {
+    Command::new("git").arg("-C").arg(repo).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(
+        |source| GitCommandError::Spawn { args: format!("{args:?}"), repo: Some(repo.display().to_string()), source },
+    )
 }

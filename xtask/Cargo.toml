@@ -12,7 +12,16 @@ publish = false
 # depends on the chassis crate that owns `package::{PackageManifest,
 # PackageEntry, Sha256, encode_manifest}`.
 aether-chassis = { path = "../crates/aether-chassis" }
+# `import-commit` builds the journal's own `Tree` / `EncodedArtifact` values and
+# speaks its `read_head` / `publish` mail, so it links the kind vocabulary.
+aether-bloomery-kinds = { path = "../crates/aether-bloomery-kinds" }
+# `import-commit` installs the frame cap the engine and `aether-mcp` share, so
+# its batch budget matches what the engine will read.
+aether-codec = { path = "../crates/aether-codec" }
 aether-data = { path = "../crates/aether-data" }
+# `import-commit` dials the engine's RPC port with the same client
+# `aether-mcp` uses, and resolves the frame cap through `FrameSizeConfig`.
+aether-rpc = { path = "../crates/aether-rpc" }
 anyhow = { workspace = true }
 cargo_metadata = "0.23.1"
 clap = { workspace = true }
@@ -32,6 +41,11 @@ sha2 = { workspace = true, features = ["std"] }
 # the Item/File grammar; no extra toolchain binary.
 syn = { workspace = true, features = ["full"] }
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "sync", "time"] }
+
+[dev-dependencies]
+# `import-commit`'s tests stage its batches into a scratch journal through the
+# same `Batch` + `Journal::append` path the journal actor's publish handler runs.
+aether-bloomery-journal = { path = "../crates/aether-bloomery-journal" }
 
 [lints]
 workspace = true
