@@ -23,7 +23,7 @@ It splits in two:
 > Maturity: the addressing, typing, and identity invariants are **stable** —
 > they've held since the model's early ADRs and the wire format depends on them.
 > Settlement is **stable as a contract** while its transport is still settling
-> ([ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md)). Scheduler internals are **settling** ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) — but the
+> ([ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md)). Scheduler internals are **settling** ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md)) — but the
 > concurrency *contracts* below are stable regardless of how dispatch is tuned.
 
 ## What the engine guarantees you
@@ -97,12 +97,12 @@ never run concurrently with each other, so its state is plain fields — no
 `Mutex`, no `RefCell`, no atomics for actor-local state. This holds even though
 actors do *not* each own a thread: they're multiplexed onto a shared
 work-stealing scheduler, and a run-token guarantees only one worker runs a given
-actor at a time ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)). The property is achieved by scheduling, not by a
+actor at a time ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md)). The property is achieved by scheduling, not by a
 dedicated thread.
 
 **Per-recipient FIFO; cross-recipient unordered.** Mail from the same sender to
 the same recipient arrives in send order. Mail to *different* recipients carries
-no ordering guarantee — each send is an independent async call ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)). This
+no ordering guarantee — each send is an independent async call ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md)). This
 is the single contract most likely to bite under load; the *what you must
 uphold* section restates it as a rule.
 

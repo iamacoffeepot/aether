@@ -105,4 +105,4 @@ v1 wires MCP to reverse mailbox / kind / thread ids to real names everywhere it 
 ## References
 
 - ADR-0029 (name-derived `MailboxId`), ADR-0030 (schema-hashed `KindId`), ADR-0064 (type-tagged opaque ids), ADR-0065 (typed-id newtypes + first-class type ids), ADR-0048 (native transforms + link-time inventory), ADR-0080/0081 (trace + per-actor rings).
-- Issues: #243 (`Kind` link-time inventory), #734 (per-thread trace attribution), #1059 / #1101 (dispatch-latency umbrella + blob redesign — the forcing function).
+- Issues: #243 (`Kind` link-time inventory), #734 (per-thread trace attribution), #1059 / #1101 (dispatch-latency umbrella + burst redesign — the forcing function).

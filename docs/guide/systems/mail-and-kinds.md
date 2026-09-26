@@ -1,10 +1,10 @@
 # Mail, kinds & scheduling
 
 > **Governing ADRs:** [ADR-0002](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0002-mail-first-architecture.md) (mail-first actor model), [ADR-0005](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0005-mail-typing-system.md) (mail
-> typing), [ADR-0019](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0019-unified-mail-encoding.md) (unified encoding), [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) (blob dispatch + the
+> typing), [ADR-0019](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0019-unified-mail-encoding.md) (unified encoding), [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md) (burst dispatch + the
 > ordering spine). The mail/kind model is **stable**; the *scheduler internals*
 > (how work is batched and balanced across threads) are **settling** — this
-> page documents the stable contract and defers the guts to [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md).
+> page documents the stable contract and defers the guts to [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md).
 
 This is the spine the rest of the engine hangs on. Actors don't call each
 other — they send **mail**. A piece of mail is a typed payload (a *kind*)
@@ -60,7 +60,7 @@ buys four things the project treats as non-negotiable:
 can own a whole subsystem — the entire physics world, state as plain data and a
 tight inner loop. A fine one can be a single instance: **instanced** actors are
 a first-class category (cardinality — `Singleton` vs `Instanced` — is its own
-axis, [ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), and the blob dispatcher ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) is built to rip through
+axis, [ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), and the burst dispatcher ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md)) is built to rip through
 large sets of mail, so fan-out across many small actors is cheap, not the
 performance trap an earlier design assumed. [ADR-0002](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0002-mail-first-architecture.md)'s "subsystem-sized, never
 per-entity" rule predates both and is superseded on this point.
@@ -75,7 +75,7 @@ camera component drives many cameras from one actor, no per-camera mailbox
 needed.
 
 Fine granularity is cheap because actors **don't each own a thread** — they're
-multiplexed onto a shared work-stealing scheduler ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)), and the run-token
+multiplexed onto a shared work-stealing scheduler ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md)), and the run-token
 that lets only one worker run a given actor at a time is what gives you the
 single-threaded-per-actor property. So thousands of instanced actors cost mail
 and state, not threads. The rare exception is blocking I/O: an actor that must
@@ -143,7 +143,7 @@ context, but exact duplicate-safe matching belongs to the request context or
 envelope request id. Detached data phases still carry their own domain-level
 correlation in their payloads.
 
-**The ordering spine** ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) — **the single contract to hold in your head
+**The ordering spine** ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md)) — **the single contract to hold in your head
 when writing handlers.** Get it wrong and you write code that passes in dev and
 breaks under load:
 
@@ -178,8 +178,8 @@ to reason about concurrency here — is in [Concurrency and blocking](concurrenc
 carry now: **don't block in a handler.**
 
 *How* mail is batched and balanced across workers (the per-producer rings, the
-work-stealing pool, the blob-as-unit-of-dispatch) is drawn out on
-[The scheduler](scheduler.md), with [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) as the authority while the
+work-stealing pool, the burst-as-unit-of-dispatch) is drawn out on
+[The scheduler](scheduler.md), with [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md) as the authority while the
 internals settle — build on the contracts above, not the internals.
 
 ## How to use it

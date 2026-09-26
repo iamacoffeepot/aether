@@ -17,7 +17,7 @@ Synthetic actor topologies exercise different scheduler shapes:
 
 Per-mail tracing separates construct, queue, drain, and handler spans. This
 matters because “latency got worse” is not actionable if producer encode work,
-worker wakeup, blob drain position, and handler computation are collapsed into
+worker wakeup, burst drain position, and handler computation are collapsed into
 one number.
 
 ## Tiers and drive modes

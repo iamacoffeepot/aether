@@ -174,7 +174,7 @@ need that send moved onto a host path.
 - **Sealing `ActorMail`.** The derive would need an escape hatch into the seal;
   the orphan rule already confines implementations.
 - **Refusing in the mailer's routing chokepoint.** The host's own notices use
-  the same push, and the blob producer and component direct dispatch bypass
+  the same push, and the burst producer and component direct dispatch bypass
   `route_mail`.
 - **A flag on `KindDescriptor` or in the `aether.kinds` section.** Changes the
   hub handshake and the guest section format for a property only native kinds

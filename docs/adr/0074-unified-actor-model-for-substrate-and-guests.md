@@ -177,7 +177,7 @@ The frame-bound→free-running guard from decision 6 lives at the top of this fu
 
 **Amendment (2026-06-04): `wait_reply` retired; orchestration is not a handler concern.**
 
-The host-side `wait_reply` described above shipped (phase 4) but went unused and was retired in #1201. The unified model settled on a stricter stance, decided by attrition rather than fiat: **cap/actor handlers do not block on replies, and do not orchestrate.** A handler runs to completion as a single-threaded unit on the blob scheduler (ADR-0087); a blocking in-handler wait parks a scheduler worker and couples handler latency to peer latency.
+The host-side `wait_reply` described above shipped (phase 4) but went unused and was retired in #1201. The unified model settled on a stricter stance, decided by attrition rather than fiat: **cap/actor handlers do not block on replies, and do not orchestrate.** A handler runs to completion as a single-threaded unit on the burst scheduler (ADR-0087); a blocking in-handler wait parks a scheduler worker and couples handler latency to peer latency.
 
 Request/reply between actors is still mail — the responder `ctx.reply()`s and the originator observes the reply asynchronously. What does *not* belong in a handler is fan-out-and-collect ("wait for N peers' replies"). That is orchestration, and it lives in one of three async homes:
 

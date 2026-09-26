@@ -1,6 +1,6 @@
 # Concurrency & blocking
 
-> **Governing ADRs:** [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) (the blob dispatch model + scheduler), [ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md)
+> **Governing ADRs:** [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md) (the burst dispatch model + scheduler), [ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md)
 > (the hold-until-resolve offload primitive), [ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md) (settlement). The
 > *contracts* on this page — single-threaded actors, per-recipient FIFO, no
 > blocking — are **stable**. The scheduler *internals* that enforce them are
@@ -18,14 +18,14 @@ makes the first two hold is drawn out on [The scheduler](scheduler.md).
 
 Actors don't each own a thread. There are far more actors than worker threads,
 and a small work-stealing pool multiplexes them on demand
-([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)). The unit the pool hands around is a **blob** — one handler
+([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md)). The unit the pool hands around is a **burst** — one handler
 execution's buffered sends, grouped by recipient and published for idle workers
 to race — and a per-actor **run-token** admits one worker to a given actor at a
 time. The token is what makes an actor single-threaded (so actor state is plain
 fields with no locks) and what makes **per-recipient FIFO fall out for free**
 while distinct recipients run concurrently — exactly the ordering spine the
 [invariants](../foundations/invariants.md) and [mail](mail-and-kinds.md) pages
-rely on. The full machinery — the outbound mail ring, blob formation, the
+rely on. The full machinery — the outbound mail ring, burst formation, the
 cursor race, the run-token state machine, wakeup and fairness — is drawn out on
 [The scheduler](scheduler.md).
 

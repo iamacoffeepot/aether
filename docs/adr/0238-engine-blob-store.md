@@ -15,7 +15,7 @@
 - **Amended:** 2026-09-25 — decisions 2, 3, 4, 9: a handle is the blob's hash (`BlobRef`, cloned and dropped like an `Arc`), not a per-actor index; `BlobRef` lives in `aether-data`; there is no release verb.
 
 Builds on [ADR-0038](0038-actor-per-component-dispatch.md) and
-[ADR-0087](0087-blob-unit-of-dispatch.md) (one handler at a time per actor,
+[ADR-0087](0087-burst-unit-of-dispatch.md) (one handler at a time per actor,
 enforced by the actor `Mutex` in `DispatcherSlot`),
 [ADR-0230](0230-proven-actor-references.md) (mints only in the reference
 module; a type that cannot keep its invariant across serialization is not a
@@ -425,7 +425,7 @@ meaning.
 | Envelope | `crates/aether-substrate/src/mail/mod.rs` (`Mail`), `mail/registry/dispatch.rs` (`OwnedDispatch`, `DispatchParts`, `MailDispatch`) |
 | Native send | `crates/aether-substrate/src/actor/native/binding/{outbound,pending,flush,send}.rs` (ring entries are plain bytes, so attachments ride on `PendingMail` beside the ring entry) |
 | Native deliver | `actor/native/slot/dispatcher.rs` (decoded `Blob` fields are the attachments), `actor/native/ctx/{mod,send}.rs` |
-| Armed hand-offs | `actor/native/blob/work.rs:670`, `actor/native/spawn/activation.rs:564`, `mail/mailer.rs` (`route_tail`) |
+| Armed hand-offs | `actor/native/burst/work.rs:670`, `actor/native/spawn/activation.rs:564`, `mail/mailer.rs` (`route_tail`) |
 | Wasm | `actor/wasm/host_fns.rs` (`send_mail_p32` resolve on send, `blob_hold_p32`, `blob_read_p32`, `blob_drop_p32`), `actor/wasm/component/{ctx,dispatch}.rs`, `actor/wasm/blob_table.rs` (the instance's table) |
 | Guest SDK | `crates/aether-actor/src/wasm/{raw.rs,bridge/mail.rs}` |
 | `Blob` and schema | `crates/aether-data/src/{blob/,schema.rs}` (`Blob`, `BlobBacking`, `BlobReader`, `SchemaType::Blob`), `crates/aether-codec/src/{encode,decode}.rs` (read and write plain bytes) |
@@ -451,7 +451,8 @@ meaning.
 - **Other consumers.** Process stdout, captures, HTTP bodies, and future
   mostly-static graphics data (meshes, textures) held as blobs and uploaded by
   the render cap, the likely first consumer of a zero-copy view.
-- **Naming.** `actor/native/blob/` already means ADR-0087's unit of dispatch.
+- **Naming.** `actor/native/blob/` meant ADR-0087's unit of dispatch when this
+  ADR was written; that unit is now the burst (`actor/native/burst/`, #6781).
   The store's module is `store/`, with the internal types `BlobStore` /
   `BlobEntry`, and the value is `Blob`. ADR-0087's unit of dispatch is to be
   renamed separately.
