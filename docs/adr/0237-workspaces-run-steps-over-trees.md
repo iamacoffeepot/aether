@@ -9,7 +9,6 @@
 - **Amended:** 2026-09-25 — decision 9: the allotment estimate is keyed on what the run does, not who asked. The key is the digest of the run's environment and its ordered steps (each step's tool, args and env). A `Run` carries no program identity, and the steps describe the work directly, so identical steps share an estimate and different args get their own.
 - **Amended:** 2026-09-25 — decision 3: an image carries only a bare, reusable layer (the base userland or the toolchain), never a snapshot of content that changes between runs. A source tree enters through the operator command `import-commit <commit>`, which reads the commit's tracked files outside the engine and stages them as a tree through the journal's fenced `publish`. The engine never reads Git or a host path, and no image or allowlist carries source.
 - **Amended:** 2026-09-26 — open question 4 is resolved as proposed: the journal records no commit for a source tree.
-- **Amended:** 2026-09-26 — the workspace is Bloomery's one singleton workspace service per engine (ADR-0240 D7): the crate is `aether-bloomery-workspace` and the actor `aether.bloomery.workspace`; kind names are unchanged. It serves every journal unit's runs through decision 9's one FIFO queue against the one host budget. It no longer reads or commits a journal's store: a run's and an import's inputs are requested from its caller (`aether.bloomery.journal.read_artifact`) and its outputs, step logs included, are staged back to the caller (`aether.bloomery.journal.stage`), through a second `TreeSource` / `TreeSink` implementation; only a caller that covers that storage protocol may send `Run` or `Import`. In Bloomery the caller is the unit's driver, which relays both requests to its journal and relays operator imports. This amends decision 3 (an import's tree goes to its caller, and imports are sent to a unit's driver), decision 8 (the actor holds no journal store and stages outputs as a run goes, so a run that does not end `Ok` leaves inert, uncited artifacts), open question 1 as amended (the journal stays the only writer, reached through the caller rather than a store handed to the actor), and open question 3 as amended (the runtime half no longer depends on `aether-bloomery-journal`). Decision 9 is unchanged.
 
 Amends [ADR-0229](0229-program-cap-apis-are-extra-run-arguments.md) (the
 closed, sealed set of program APIs, `Http` / `Process`, mapped through
@@ -70,9 +69,10 @@ the sandbox, or they make the program `Sampled`.
    nothing held open:
 
    ```rust
-   // kinds: new crate `aether-workspace` (identity/runtime split, ADR-0122)
+   // kinds: new crate `aether-bloomery-workspace` (identity/runtime split, ADR-0122)
    #[aether_data::kind(name = "aether.workspace.run")]
    pub struct Run {
+       pub source: ProtocolAddress<ArtifactStorage>, // where inputs are read and outputs staged (decision 8)
        pub tree: Ref<Tree>,                 // written out at /work
        pub environment: Ref<Environment>,   // the whole visible root filesystem
        pub mounts: Vec<Mount>,              // extra read-only trees (e.g. vendored crates)
@@ -122,11 +122,14 @@ the sandbox, or they make the program `Sampled`.
        ToolchainMismatch { tree_wants: RustToolchain, environment_provides: Option<RustToolchain> },
        UnknownTool(ToolName),
        InputMissing(Digest),
+       SourceUnavailable,                   // `source` does not resolve to a live ArtifactStorage
    }
    ```
 
-   The request carries no mailbox id and no actor reference: the reply goes
-   to the caller (ADR-0227 `Replies<Run, Reply = RunResult>`). A non-zero
+   The request carries no mailbox id and no actor reference. Its one address
+   is `source`, a typed storage address the actor proves on receipt
+   (decision 8). The reply goes to the caller (ADR-0227
+   `Replies<Run, Reply = RunResult>`). A non-zero
    exit is an `Outcome`, not a refusal, exactly as ADR-0157 treats a
    completed run. The result carries no duration, host name, or timestamp,
    so two correct executors can produce the same digest.
@@ -186,14 +189,17 @@ the sandbox, or they make the program `Sampled`.
 
    ```rust
    #[aether_data::kind(name = "aether.workspace.import")]
-   pub struct Import { pub image: ImageRef }   // <repository>@sha256:<hex>; never a tag
+   pub struct Import {
+       pub image: ImageRef,                          // <repository>@sha256:<hex>; never a tag
+       pub source: ProtocolAddress<ArtifactStorage>, // where the tree is staged (decision 8)
+   }
 
    #[aether_data::kind(name = "aether.workspace.import_result")]
    pub enum ImportResult { Ok { tree: Ref<Tree> }, Failed { detail: Detail } }
    ```
 
    *The actor pulls the image, creates a container from it without starting
-   it, decodes `GET /containers/{id}/export` into a tree in the journal, and
+   it, decodes `GET /containers/{id}/export` into a tree staged to `source`, and
    removes the container on every path. The decode rewrites an absolute
    symlink target to the relative target that resolves the same inside the
    tree, drops device nodes under `dev/` (the container runtime supplies
@@ -262,7 +268,10 @@ the sandbox, or they make the program `Sampled`.
    async fn run(input: Self::Input, env: &mut Env<Async>, workspace: Workspace) -> Result<Self::Result, Refusal>
    ```
 
-   `workspace.run(Run { .. }).await` awaits one `RunResult`. `Mode::Sampled`
+   `workspace.run(..)` takes every `Run` field but `source` and awaits one
+   `RunResult`. The unit's driver, which relays the call, sets `source` to
+   its own journal (ADR-0240 D6), so a program never chooses where its run
+   reads and writes. `Mode::Sampled`
    is required beside it until decision 5's class agreement is recorded
    mechanically.
 
@@ -295,6 +304,24 @@ the sandbox, or they make the program `Sampled`.
    order" read as streamed in, with canonical order fixed by the tar
    encoding.)*
 
+   **One per engine; storage is the request's.** Bloomery runs one workspace
+   actor per engine, `aether.bloomery.workspace` in the crate
+   `aether-bloomery-workspace`, a `#[actor(singleton, root)]` serving every
+   journal unit (ADR-0240 D7). Kind names keep the `aether.workspace.*`
+   prefix. The actor holds no artifact store and depends on no journal
+   crate:
+
+   | Step | Mechanism |
+   |---|---|
+   | Receipt | Resolve `source` to a `ProtocolRef<ArtifactStorage>` (ADR-0231) before anything is queued. A source that does not resolve is `Refused(SourceUnavailable)` for a run and `Failed { detail }` for an import. |
+   | Reads | Every tree, blob, and environment the run cites is a `read` (`aether.bloomery.journal.read_artifact`) through that reference, including the checks that refuse before any container exists. |
+   | Writes | Step stdout and stderr, the output tree, and an import's tree are `stage`d (`aether.bloomery.journal.stage`) through it in bounded batches as they are produced. A run that does not end `Ok` leaves what it staged cited by nothing. |
+   | Codec | A `TreeSource` / `TreeSink` implementation over the reference; the container steps above are unchanged. |
+
+   The journal implements `ArtifactStorage` and stays the only writer
+   (open question 1): it receives each artifact from the workspace as mail
+   rather than handing the actor a store. ADR-0240 D7 defines the protocol.
+
    Other backends (unprivileged namespaces, a cluster scheduler) are other
    actors answering the same `Run` / `RunResult` contract. Programs and the
    driver never learn which backend served a run.
@@ -325,7 +352,7 @@ the sandbox, or they make the program `Sampled`.
   store, none of which can change a result.
 - Every result names its tree, environment, and platform by digest, so the
   journal proves exactly which tools produced it.
-- `aether.workspace` is a new privileged surface. The actor holds a
+- `aether.bloomery.workspace` is a new privileged surface. The actor holds a
   root-equivalent socket; the contract's fields are the only way to shape a
   container, and no field passes daemon options through.
 - Container start-up (sub-second) and first-use image import are added to
