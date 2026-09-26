@@ -47,6 +47,7 @@ async fn send_mail_reports_per_item_errors() {
             ],
             fire_and_forget: false,
             replies: ReplyProjection::Terminal,
+            format: None,
         }))
         .await
         .expect("send_mail returns a status array, not a tool error");
@@ -74,7 +75,8 @@ async fn send_mail_traced_bad_spec_is_tool_error() {
             }],
             settlement_timeout_millis: None,
             fire_and_forget: false,
-            format: TraceFormat::Tree,
+            trace: TraceShape::Tree,
+            format: None,
         }))
         .await;
     assert!(result.is_err(), "an unknown kind in the batch should be a tool error");
@@ -105,6 +107,7 @@ async fn send_mail_fire_and_forget_rejects_unknown_engine_during_resolution() {
             }],
             fire_and_forget: true,
             replies: ReplyProjection::All,
+            format: None,
         }))
         .await
         .expect("send_mail returns a status array");
@@ -218,6 +221,7 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
             },
         },
         ReplyProjection::All,
+        None,
     )
     .await;
 
@@ -317,7 +321,7 @@ async fn traced_walk_tails_each_layer_by_the_engine_paths() {
     });
     let mcp = connect_mcp(port);
 
-    let _ = finish_traced_dispatch(&mcp, engine, engine.0.to_string(), root, Vec::new(), TraceFormat::Tree).await;
+    let _ = finish_traced_dispatch(&mcp, engine, engine.0.to_string(), root, Vec::new(), TraceShape::Tree).await;
 
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
     let tails: Vec<ActorPath> =
@@ -446,4 +450,47 @@ fn the_pre_0_4_recipient_name_key_still_deserializes_as_address() {
     let properties = schema["properties"].as_object().expect("schema has properties");
     assert!(properties.contains_key("address"), "the schema advertises the canonical key: {schema}");
     assert!(!properties.contains_key("recipient_name"), "the alias stays out of the advertised schema: {schema}");
+}
+
+/// Catches mask validation that runs after the first dispatch: a `format`
+/// naming a kind the engine does not know refuses the whole call, and the
+/// engine route sees only the one `aether.inventory.kinds` refresh the
+/// unknown name triggers, never the item's address resolution or its mail.
+#[tokio::test]
+async fn send_mail_with_an_unknown_format_kind_refuses_before_any_mail() {
+    let engine = EngineId(Uuid::from_u128(0x6813));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (_chassis, port) =
+        boot_hub_with_route_loopback(engine, ListKindsResult { kinds: Vec::new() }, Arc::clone(&calls));
+    let mcp = connect_mcp(port);
+
+    let result = mcp
+        .send_mail(Parameters(SendMailArgs {
+            mails: vec![MailSpec {
+                engine_id: Some(engine.0.to_string()),
+                mail: EngineMailSpec {
+                    address: "aether.fs".to_owned(),
+                    kind_name: "aether.fs.list".to_owned(),
+                    params: Some(serde_json::json!({ "addr": { "namespace": "save", "path": "" } })),
+                },
+            }],
+            fire_and_forget: false,
+            replies: ReplyProjection::Terminal,
+            format: serde_json::json!({ "test.not_a_kind": "$hex" }).as_object().cloned(),
+        }))
+        .await;
+
+    let error = result.expect_err("an unknown format kind is a tool error");
+    assert!(error.message.contains("unknown kind: test.not_a_kind"), "{}", error.message);
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "only the kind refresh reached the engine");
+}
+
+/// Catches the retired trace-shape spelling being silently accepted or
+/// refused without saying where it went.
+#[test]
+fn a_string_format_on_send_mail_traced_points_at_trace() {
+    let error = serde_json::from_value::<SendMailTracedArgs>(serde_json::json!({ "mails": [], "format": "nodes" }))
+        .expect_err("a string format is refused");
+
+    assert!(error.to_string().contains("trace"), "{error}");
 }

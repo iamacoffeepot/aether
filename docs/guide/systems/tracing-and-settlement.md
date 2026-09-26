@@ -264,7 +264,7 @@ returns the combined trace tree, the correlated replies, and a `status`:
 - `"settled"` — the chain closed. By default `mails` is `null`, `tree` holds one
   indented line per node (`sender → recipient`, kind, and handler duration),
   `node_count` states how many nodes were rendered, and `in_flight` reads `0`.
-  Pass `format: "nodes"` to restore the complete `mails` nodes with `parent` edges
+  Pass `trace: "nodes"` to restore the complete `mails` nodes with `parent` edges
   and all timestamps; that mode omits `tree` and carries the same `node_count`.
 - `"timeout"` — the chain didn't settle within `settlement_timeout_millis`
   (default 300 000, clamped to 600 000). A timeout is the bound on a hung chain, and the usual

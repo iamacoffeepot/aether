@@ -1,4 +1,5 @@
 use super::bytes::{render_bytes_reply, reply_inline_max_bytes};
+use super::reply_format::ReplyFormat;
 use super::{
     Kind, KindDescriptor, KindId, MailId, McpError, ReplyEnvelope, ReplyEventJson, ReplyProjection, descriptors,
     internal_msg, kind_id_from_parts, tagged_id,
@@ -20,10 +21,19 @@ use std::collections::HashMap;
 /// per-reply handler isn't known, then the static substrate vocabulary,
 /// then base64. On a clean decode the raw bytes are omitted (issue 1246).
 /// Order is preserved — arrival order.
+///
+/// A clean decode is projected in a fixed order: `decode_schema`, then the
+/// caller's validated `format` mask for that reply's kind id (or its
+/// wildcard), then the `Bytes` / `Blob` leaf render (and its per-leaf file
+/// spill). The caller's `replies` projection and the whole-response guard
+/// run after this returns. A leaf the mask formatted is a string by the time
+/// the leaf render sees it, so it stays inline; a reply whose kind the mask
+/// does not name renders exactly as with no mask.
 pub(super) fn decode_reply_events(
     envelopes: &[ReplyEnvelope],
     engine_kinds: &HashMap<String, KindDescriptor>,
     declared_reply: Option<KindId>,
+    format: Option<&ReplyFormat>,
 ) -> Vec<ReplyEventJson> {
     let static_descriptors = descriptors::all();
     // Resolve the reply-`Bytes` spill threshold once for the whole batch
@@ -53,11 +63,16 @@ pub(super) fn decode_reply_events(
             let (params, payload_bytes) = descriptor
                 .as_ref()
                 .and_then(|d| {
-                    // Render reply `Bytes` fields back to readable text /
-                    // base64 (issue 1944): the strict decoder emits a byte
-                    // array, the MCP front projects it for the caller.
+                    // Apply the caller's format mask, then render reply
+                    // `Bytes` fields back to readable text / base64 (issue
+                    // 1944): the strict decoder emits a byte array, the MCP
+                    // front projects it for the caller.
                     aether_codec::decode_schema(&env.payload, &d.schema)
                         .ok()
+                        .map(|v| match format {
+                            Some(format) => format.apply(env.kind, v, &d.schema),
+                            None => v,
+                        })
                         .map(|v| render_bytes_reply(v, &d.schema, inline_max))
                 })
                 .map_or_else(

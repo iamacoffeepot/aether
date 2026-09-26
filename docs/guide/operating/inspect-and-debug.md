@@ -98,13 +98,15 @@ Use `send_mail_traced` when any of these are true:
 - handler and queue timing matter;
 - settlement itself is under investigation.
 
-The default traced projection is a compact, indented `tree`. `format: "nodes"`
+The default traced projection is a compact, indented `tree`. `trace: "nodes"`
 returns the complete per-node `mails` vector instead, omitting `tree` and
 carrying the same `node_count`. There is no separate public MCP `trace_tail`
 tool; `send_mail_traced` performs the guided ring walk internally.
 
-`format` and `detail` select a render shape; `full` on the component tools
-means "expand documentation" and never switches a reply shape.
+`trace` and `detail` select a render shape; `full` on the component tools
+means "expand documentation" and never switches a reply shape. `format` on the
+two mail tools is a reply mask that re-spells chosen reply leaves as hex (see
+[Sending mail](../mcp-harness.md#the-tools)).
 
 Do not use `fire_and_forget` as a health check. `dispatched` confirms the call
 was written or its immediate traced ack arrived; it does not prove downstream
@@ -240,7 +242,7 @@ Before terminate, restart, replace, or retry, capture what applies:
 - [ ] narrow `describe_kinds` output for request and reply kinds;
 - [ ] `describe_handlers` or `describe_component` output;
 - [ ] `actor_logs` result with cursor and truncation fields;
-- [ ] `send_mail_traced` result in either `tree` or `nodes` format, if
+- [ ] `send_mail_traced` result in either the `tree` or `nodes` trace shape, if
       reproduction was safe;
 - [ ] `actor_cost` rows for a slow handler;
 - [ ] capture verdict and a full-resolution `save_path`, when visual;

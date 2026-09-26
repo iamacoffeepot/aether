@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::iter;
 use std::time::Duration;
 
@@ -8,18 +10,24 @@ use rmcp::ErrorData as McpError;
 
 use crate::args::{
     MailSpec, MailStatus, ReplyEventJson, ReplyProjection, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
-    TraceFormat,
+    TraceShape,
 };
 
 use super::envelope::{engine_envelope, engine_envelope_to};
 use super::ids::{mail_id_to_json, render_compact_tree};
 use super::render::{internal, internal_msg, json};
 use super::reply::{decode_reply_events, decode_traced_ack, project_replies, strip_ack};
+use super::reply_format::{ReplyFormat, resolve_reply_format};
 use super::{AWAIT_TIMEOUT_CAP_MILLIS, AWAIT_TIMEOUT_DEFAULT_MILLIS, Mcp};
 
-pub(super) async fn send_mail(mcp: &Mcp, args: SendMailArgs) -> Result<String, McpError> {
+pub(super) async fn send_mail(mcp: &Mcp, mut args: SendMailArgs) -> Result<String, McpError> {
     let fire_and_forget = args.fire_and_forget;
     let reply_projection = args.replies;
+    let formats = match args.format.as_ref() {
+        Some(raw) => Some(resolve_item_formats(mcp, &mut args.mails, raw).await?),
+        None => None,
+    };
+
     let mut statuses = Vec::with_capacity(args.mails.len());
     for (index, spec) in args.mails.into_iter().enumerate() {
         let status = if fire_and_forget {
@@ -29,11 +37,54 @@ pub(super) async fn send_mail(mcp: &Mcp, args: SendMailArgs) -> Result<String, M
             };
             MailStatus { index, status, replies: Vec::new(), timed_out: false }
         } else {
-            settle_mail_item(mcp, index, spec, reply_projection).await
+            let format = formats.as_ref().and_then(|formats| formats.for_item(index));
+            settle_mail_item(mcp, index, spec, reply_projection, format).await
         };
         statuses.push(status);
     }
     json(&statuses)
+}
+
+/// A `send_mail` batch's validated `format` masks: one per distinct engine
+/// the batch names, since a kind name resolves per engine, plus each item's
+/// engine.
+struct ItemFormats {
+    item_engines: Vec<EngineId>,
+    by_engine: HashMap<EngineId, ReplyFormat>,
+}
+
+impl ItemFormats {
+    fn for_item(&self, index: usize) -> Option<&ReplyFormat> {
+        self.item_engines.get(index).and_then(|engine| self.by_engine.get(engine))
+    }
+}
+
+/// The `format` pre-pass: resolve every item's engine, pin the item to that
+/// resolved id so dispatch uses exactly the engine its mask was validated on,
+/// and validate the mask once per distinct engine. Any failure refuses the
+/// whole call before the first item is prepared, so no mail moves.
+async fn resolve_item_formats(
+    mcp: &Mcp,
+    mails: &mut [MailSpec],
+    raw: &serde_json::Map<String, serde_json::Value>,
+) -> Result<ItemFormats, McpError> {
+    let mut item_engines = Vec::with_capacity(mails.len());
+    let mut by_engine = HashMap::new();
+    for (index, spec) in mails.iter_mut().enumerate() {
+        let (engine, engine_id) = mcp.resolve_engine(spec.engine_id.as_deref()).await.map_err(|error| {
+            McpError::invalid_params(format!("send_mail format: item {index}: {}", error.message), None)
+        })?;
+        spec.engine_id = Some(engine_id);
+        if let Entry::Vacant(slot) = by_engine.entry(engine) {
+            slot.insert(
+                resolve_reply_format(mcp, engine, raw)
+                    .await
+                    .map_err(|error| McpError::invalid_params(format!("send_mail {error}"), None))?,
+            );
+        }
+        item_engines.push(engine);
+    }
+    Ok(ItemFormats { item_engines, by_engine })
 }
 
 /// Settle one mail item the `send_mail` way: dispatch it, await the
@@ -46,6 +97,7 @@ pub(super) async fn settle_mail_item(
     index: usize,
     spec: MailSpec,
     reply_projection: ReplyProjection,
+    format: Option<&ReplyFormat>,
 ) -> MailStatus {
     let mut replies = Vec::new();
     let mut timed_out = false;
@@ -67,7 +119,7 @@ pub(super) async fn settle_mail_item(
             });
             let engine_kinds = mcp.snapshot_engine_kinds(delivered.engine);
             replies = project_replies(
-                decode_reply_events(&delivered.events, &engine_kinds, declared_reply),
+                decode_reply_events(&delivered.events, &engine_kinds, declared_reply, format),
                 reply_projection,
             );
             timed_out = delivered.timed_out;
@@ -85,6 +137,16 @@ pub(super) async fn settle_mail_item(
 
 pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Result<String, McpError> {
     let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
+    // Validate the reply mask against this engine's kinds before the batch
+    // is encoded, so a bad mask refuses the call before any mail moves.
+    let format = match args.format.as_ref() {
+        Some(raw) => Some(
+            resolve_reply_format(mcp, engine, raw)
+                .await
+                .map_err(|error| McpError::invalid_params(format!("send_mail_traced {error}"), None))?,
+        ),
+        None => None,
+    };
     // Encode the batch before sending — a bad spec produces a
     // clean invalid-params error and never touches the wire.
     // Same shape `CaptureFrame` carries: `Vec<NamedMail>` with
@@ -163,10 +225,10 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
         });
     }
     let engine_kinds = mcp.snapshot_engine_kinds(engine);
-    let replies = decode_reply_events(strip_ack(&events), &engine_kinds, None);
+    let replies = decode_reply_events(strip_ack(&events), &engine_kinds, None, format.as_ref());
     let root = decode_traced_ack(&events)?;
 
-    finish_traced_dispatch(mcp, engine, engine_id, root, replies, args.format).await
+    finish_traced_dispatch(mcp, engine, engine_id, root, replies, args.trace).await
 }
 
 pub(super) async fn finish_traced_dispatch(
@@ -175,7 +237,7 @@ pub(super) async fn finish_traced_dispatch(
     engine_id: String,
     root: MailId,
     replies: Vec<ReplyEventJson>,
-    format: TraceFormat,
+    trace: TraceShape,
 ) -> Result<String, McpError> {
     // Round 2: reconstruct the tree by a guided walk over the
     // per-actor trace rings (ADR-0086 Phase 3b), one frontier layer at a
@@ -224,9 +286,9 @@ pub(super) async fn finish_traced_dispatch(
             // chassis mailbox — a static name).
             let mails = mcp.render_mail_nodes(engine, mails).await;
             let node_count = mails.len();
-            let (mails, tree) = match format {
-                TraceFormat::Nodes => (Some(mails), None),
-                TraceFormat::Tree => (None, Some(render_compact_tree(&mails))),
+            let (mails, tree) = match trace {
+                TraceShape::Nodes => (Some(mails), None),
+                TraceShape::Tree => (None, Some(render_compact_tree(&mails))),
             };
             let root = {
                 let cache = mcp.names.lock().expect("reverse-name cache mutex is never poisoned");

@@ -131,14 +131,60 @@ mutation must precede observation. It returns no replies regardless of the
 requested projection. Items are independent: one bad item does not abort its
 siblings.
 
+A byte field in `params` takes its literal JSON form or one `$`-sigil embed
+object. A `Bytes` or `Blob` field takes a byte array or `{"$file": path}` (a
+file on the harness host), `{"$base64": s}`, `{"$text": s}` (UTF-8), or
+`{"$hex": s}`. `$hex` also writes two leaf types the others do not: a
+`[u8; N]` field, such as a 32-byte digest, takes exactly `2 * N` characters,
+two per byte in index order; an integer field takes two characters per byte of
+its type, most significant digit first, with a signed value spelled as its
+two's-complement bit pattern (`u32` 300 is `"0000012c"`, `i8` -1 is `"ff"`).
+Hex is lowercase `0-9a-f` with no prefix; uppercase, a `0x` prefix, and a wrong
+length are refused, so every value has one spelling. A `u32` and a `[u8; 4]`
+holding the same wire bytes spell differently, because each follows how its
+own type reads. A function on a field type outside its set, such as `$base64`
+at a `[u8; 32]` or `$hex` at a `String`, is refused, naming the function and
+the field type. The same embeds work in `send_mail_traced`, the
+`capture_frame` and `spawn_substrate` mail bundles, and component `config`.
+
+`format` renders chosen reply leaves in that same hex spelling. It is an
+object keyed by exact reply kind name, each value a mask that mirrors the JSON
+the kind decodes to: `"$hex"` at a `[u8; N]`, `Bytes`, `Blob`, or integer leaf;
+an object over struct field names or over the names of enum variants that
+carry a payload (a one-field tuple variant takes its field's mask directly, a
+struct variant an object over its fields); a one-element array `[mask]` for
+every element of a `Vec` or array, or every value of a `Map`; and, for a tuple
+variant with two or more fields, an array of that length where `null` leaves a
+position alone. `Option` layers are transparent. Over a `[u8; N]`, `"$hex"`
+spells the whole array as one string, while `["$hex"]` spells each byte on its
+own.
+
+```json
+{"aether.bloomery.journal.publish_result": {"Committed": {"artifacts": ["$hex"]}}}
+```
+
+The sole key `"*"` with a function, `{"*": "$hex"}`, formats every
+`[u8; N]`, `Bytes`, and `Blob` leaf in every reply, and leaves integers alone.
+The mask is validated against each item's engine before any mail is sent: an
+unknown kind, a key the kind's schema lacks, a unit variant, a function on a
+leaf outside its set, or `"*"` beside another key refuses the whole call,
+naming the kind and the JSON path. A reply of a kind the mask does not name
+renders as it does without one. Formatting runs on each decoded reply before
+the per-leaf `Bytes` spill, so a formatted leaf is already a string and stays
+inline; the 32 KiB whole-response guard still applies to the result. A mask
+only re-spells leaves: it never renames, drops, or adds a field, so the
+`replies` projection recognizes errors the same way.
+
 `send_mail_traced` is the same idea with a shared trace root. Every item in the
 batch lands under one chassis-level trace root. The settled default returns a
 compact one-line-per-node `tree`, a matching `node_count`, and `mails: null`;
 each line names `sender → recipient`, kind, and handler duration, with indentation
-for causal depth. Pass `format: "nodes"` to restore the complete `mails` node values;
+for causal depth. Pass `trace: "nodes"` to restore the complete `mails` node values;
 that form omits `tree` and carries the same `node_count`. Both forms also carry
 the complete flat reply list and rely on the generic response spill rather than
-truncating. Reach for it when you
+truncating. Its `format` is the same reply mask as `send_mail`'s, applied to
+that reply list and validated before the batch is encoded; a string `format`,
+such as the retired `"nodes"`, is refused. Reach for it when you
 need exact whole-chain settlement — proof that everything a mail set off has finished
 — or all-or-nothing dispatch where a single bad item aborts the batch before any mail
 moves. For independent items where you just want each reply, plain `send_mail` is the

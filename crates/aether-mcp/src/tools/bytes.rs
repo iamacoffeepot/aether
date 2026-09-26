@@ -1,3 +1,5 @@
+use super::render::render_shape;
+use super::sigil::{Sigil, applicable_names, integer_width, is_byte_leaf};
 use super::{EnumVariant, SchemaType};
 use aether_data::NamedField;
 use base64::Engine as _;
@@ -8,7 +10,6 @@ use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use tokio::fs;
 
 async fn resolve_named_fields(
     mut map: serde_json::Map<String, serde_json::Value>,
@@ -38,23 +39,29 @@ fn render_named_fields(
     serde_json::Value::Object(map)
 }
 
-/// Blob-embed preprocessor (issue 1944). The wire codec is strict and
+/// Embed preprocessor (issue 1944). The wire codec is strict and
 /// canonical — a `SchemaType::Bytes` param encodes only from a JSON byte
-/// array — so the consumer-facing ergonomics live here, in the MCP front
-/// that already owns the JSON params before schema-encoding them. Walk
-/// `value` alongside `schema` and, at every `Bytes` or `Blob` node, resolve a
-/// `$`-sigil embed object into the canonical byte array `encode_schema`
-/// accepts. A literal `[…]` array passes straight through (back-compat);
-/// a one-key embed object expands — `{"$file": path}` reads the file on
-/// the harness host and inlines its bytes, `{"$base64": s}` decodes,
-/// `{"$text": s}` UTF-8-encodes. Any other shape at a `Bytes` node, or an
-/// unknown `$`-tag, errors. Recursion depth is bounded by the
+/// array, an integer only from a JSON number — so the consumer-facing
+/// ergonomics live here, in the MCP front that already owns the JSON params
+/// before schema-encoding them. Walk `value` alongside `schema` and resolve a
+/// one-key `$`-sigil embed object into the canonical JSON `encode_schema`
+/// accepts, at every leaf some function in the [`Sigil`] table applies to:
+///
+/// - `Bytes` / `Blob`: `{"$file": path}` reads the file on the harness host
+///   and inlines its bytes, `{"$base64": s}` decodes, `{"$text": s}`
+///   UTF-8-encodes, `{"$hex": s}` decodes lowercase hex of any even length.
+/// - `[u8; N]`: `{"$hex": s}` with exactly `2 * N` characters, in index order.
+/// - an integer scalar: `{"$hex": s}` with two characters per byte of the
+///   type, most significant first, signed types as two's complement.
+///
+/// The literal forms (a byte array, a number) pass straight through
+/// (back-compat). A function outside the leaf's set, an unknown `$`-tag, or
+/// any other shape at a `Bytes` node errors. Recursion depth is bounded by the
 /// compile-time kind schema, not by user-controlled runtime data, so it
-/// mirrors `encode_schema`'s own recursive walk; only the arms that can
-/// carry a `Bytes` leaf (`Struct` / `Option` / `Vec` / `Array` / `Map`)
-/// descend, every other value passes through untouched. `max_file_bytes`
-/// is the RPC frame cap a `{"$file"}` read is guarded against; the
-/// production call sites pass `max_frame_size()`.
+/// mirrors `encode_schema`'s own recursive walk; only the arms that can carry
+/// an embeddable leaf descend, every other value passes through untouched.
+/// `max_file_bytes` is the RPC frame cap a `{"$file"}` read is guarded
+/// against; the production call sites pass `max_frame_size()`.
 #[allow(clippy::too_many_lines)] // one arm per SchemaType variant; splitting the enum arm out would obscure the symmetry with render_bytes_reply
 pub(super) fn resolve_bytes_params<'a>(
     value: serde_json::Value,
@@ -63,8 +70,10 @@ pub(super) fn resolve_bytes_params<'a>(
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<serde_json::Value>> + Send + 'a>> {
     use serde_json::Value;
     Box::pin(async move {
+        if routes_to_embed(&value, schema) {
+            return resolve_bytes_embed(value, schema, max_file_bytes).await;
+        }
         match schema {
-            SchemaType::Bytes | SchemaType::Blob => resolve_bytes_embed(value, max_file_bytes).await,
             SchemaType::Option(inner) => {
                 if value.is_null() {
                     Ok(value)
@@ -134,68 +143,68 @@ pub(super) fn resolve_bytes_params<'a>(
                 }
                 other => Ok(other),
             },
-            // Scalars, String, TypeId, Unit, Bool: no `Bytes` leaf is
-            // reachable through the embed grammar, so pass through.
+            // Scalars, String, TypeId, Unit, Bool: a leaf the embed check
+            // above did not claim passes through for `encode_schema` to judge.
             _ => Ok(value),
         }
     })
 }
 
-/// Resolve a single `Bytes`-node value into the canonical JSON byte
-/// array (issue 1944). A literal `[…]` array passes through; a one-key
-/// `$`-sigil object expands into bytes; anything else errors. `{"$file"}`
-/// is guarded above `max_file_bytes` (the RPC frame cap) so a blob too
-/// large to ride in mail errors with a pointer to the staged-path
-/// mechanism rather than being silently inlined.
+/// Whether `value` at `schema` goes to [`resolve_bytes_embed`]. Every value at
+/// a `Bytes` / `Blob` leaf does; an object at a `[u8; N]` or integer leaf
+/// does (the literal array and number forms stay on the ordinary walk); and a
+/// one-key object whose key names a `$` function does at any other node that
+/// cannot hold such a key as data, so a function outside its leaf set is
+/// refused by name rather than failing later as a type mismatch. A `Map` can
+/// carry a `"$hex"` key as data, and an `Option` descends to its inner leaf,
+/// so neither is claimed.
+fn routes_to_embed(value: &serde_json::Value, schema: &SchemaType) -> bool {
+    match schema {
+        SchemaType::Bytes | SchemaType::Blob => true,
+        SchemaType::Option(_) | SchemaType::Map { .. } => false,
+        _ if is_byte_leaf(schema) || integer_width(schema).is_some() => value.is_object(),
+        _ => value.as_object().is_some_and(|map| map.len() == 1 && map.keys().all(|key| Sigil::parse(key).is_some())),
+    }
+}
+
+/// Resolve a single embeddable leaf value into its canonical JSON form
+/// (issue 1944). A literal byte array passes through; a one-key `$`-sigil
+/// object resolves through the [`Sigil`] table when the function applies to
+/// `schema`; anything else errors, naming the functions that do apply.
 pub(super) async fn resolve_bytes_embed(
     value: serde_json::Value,
+    schema: &SchemaType,
     max_file_bytes: usize,
 ) -> anyhow::Result<serde_json::Value> {
     use serde_json::Value;
+    let shape = render_shape(schema);
     let obj = match value {
         // Canonical form — already a byte array. Back-compat passthrough.
         Value::Array(_) => return Ok(value),
         Value::Object(map) => map,
         _ => anyhow::bail!(
-            "a Bytes field accepts a byte array or a single $-sigil embed \
-             ($file / $base64 / $text)"
+            "a {shape} field accepts a byte array or a single $-sigil embed ({})",
+            applicable_names(schema)
         ),
     };
     if obj.len() != 1 {
-        anyhow::bail!(
-            "a Bytes embed object must have exactly one $-sigil key \
-             ($file / $base64 / $text)"
-        );
+        anyhow::bail!("a {shape} embed object must have exactly one $-sigil key ({})", applicable_names(schema));
     }
     let (key, body) = obj.into_iter().next().expect("len == 1");
-    let bytes: Vec<u8> = match key.as_str() {
-        "$file" => {
-            let path = body.as_str().ok_or_else(|| anyhow::anyhow!("$file value must be a string path"))?;
-            let bytes = fs::read(path).await.map_err(|e| anyhow::anyhow!("$file: reading {path:?}: {e}"))?;
-            if bytes.len() > max_file_bytes {
-                anyhow::bail!(
-                    "$file {path:?} is {} bytes, over the {max_file_bytes}-byte RPC frame cap; a \
-                     blob this large must stage as a hub-read path (ADR-0115/0116), not inline \
-                     into mail",
-                    bytes.len()
-                );
-            }
-            bytes
-        }
-        "$base64" => {
-            let s = body.as_str().ok_or_else(|| anyhow::anyhow!("$base64 value must be a string"))?;
-            STANDARD.decode(s).map_err(|e| anyhow::anyhow!("$base64: invalid base64: {e}"))?
-        }
-        "$text" => {
-            let s = body.as_str().ok_or_else(|| anyhow::anyhow!("$text value must be a string"))?;
-            s.as_bytes().to_vec()
-        }
-        other => anyhow::bail!(
-            "a Bytes field accepts a byte array or a single $-sigil embed; got {other:?} \
-             (expected $file / $base64 / $text)"
-        ),
+    let Some(sigil) = Sigil::parse(&key) else {
+        anyhow::bail!(
+            "a {shape} field accepts a single $-sigil embed; got {key:?} (expected {})",
+            applicable_names(schema)
+        );
     };
-    Ok(Value::Array(bytes.into_iter().map(Value::from).collect()))
+    if !sigil.applies_to(schema) {
+        anyhow::bail!(
+            "{} does not apply to a {shape} leaf (functions that apply: {})",
+            sigil.name(),
+            applicable_names(schema)
+        );
+    }
+    sigil.resolve_input(body, schema, max_file_bytes).await
 }
 
 /// Reply-side mirror of [`resolve_bytes_params`] (issue 1944). The strict

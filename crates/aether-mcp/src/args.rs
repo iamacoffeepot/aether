@@ -324,6 +324,48 @@ pub struct SendMailArgs {
     /// errors. Ignored when `fire_and_forget` is true.
     #[serde(default)]
     pub replies: ReplyProjection,
+    /// Optional reply format mask: renders chosen byte-array or integer
+    /// leaves of the named reply kinds as lowercase hex, the spelling the
+    /// `{"$hex": …}` input embed takes. Each key is an exact reply kind name,
+    /// resolved on each item's engine; its value mirrors the JSON that kind
+    /// decodes to. A string is a function (`"$hex"`) for that leaf; an object
+    /// names struct fields or enum variants that carry a payload (a one-field
+    /// tuple variant takes its field's mask directly, a struct variant an
+    /// object over its fields); a one-element array `[mask]` applies to every
+    /// element of a `Vec` / array or every value of a `Map`; an array as long
+    /// as a wider tuple variant is positional, `null` leaving a position
+    /// alone. `Option` layers are transparent. `$hex` applies to `[u8; N]`
+    /// (one string, index order), `Bytes`, `Blob`, and integers (fixed width,
+    /// most significant digit first, signed as two's complement). The sole
+    /// key `"*"` with a function, `{"*": "$hex"}`, formats every `[u8; N]` /
+    /// `Bytes` / `Blob` leaf in every reply (never integers). Example:
+    /// `{"aether.bloomery.journal.publish_result": {"Committed":
+    /// {"artifacts": ["$hex"]}}}`. The mask is validated before any mail is
+    /// sent: an unknown kind, a key the kind's schema lacks, a unit variant,
+    /// or a function on a leaf outside its set refuses the whole call. A
+    /// formatted leaf is a string before the 16 KiB per-leaf file spill, so
+    /// it stays inline; the 32 KiB whole-response guard still applies.
+    #[serde(default, deserialize_with = "reply_mask")]
+    pub format: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Deserialize a `format` reply mask, refusing a string with a pointer to
+/// `send_mail_traced`'s `trace`, which took over the retired
+/// `format: "tree" | "nodes"` render shape.
+fn reply_mask<'de, D>(deserializer: D) -> Result<Option<serde_json::Map<String, serde_json::Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(serde_json::Value::Object(mask)) => Ok(Some(mask)),
+        Some(serde_json::Value::String(text)) => Err(D::Error::custom(format!(
+            "`format` takes a reply mask object such as {{\"*\": \"$hex\"}}, got the string {text:?}; \
+             send_mail_traced's trace render shape is `trace: \"tree\" | \"nodes\"`"
+        ))),
+        Some(other) => Err(D::Error::custom(format!("`format` takes a reply mask object, got {other}"))),
+    }
 }
 
 /// Consumer projection for a decoded `send_mail` reply stream.
@@ -368,7 +410,12 @@ pub struct EngineMailSpec {
     /// `Bytes`-typed field (e.g. `aether.fs.write`'s `bytes`), pass a byte
     /// array (`[…]`, canonical) or one `$`-sigil embed: `{"$file": path}`
     /// reads a file on the harness host, `{"$base64": s}` decodes,
-    /// `{"$text": s}` UTF-8-encodes.
+    /// `{"$text": s}` UTF-8-encodes, `{"$hex": s}` decodes lowercase hex.
+    /// `{"$hex": s}` also writes a `[u8; N]` field (exactly `2 * N`
+    /// characters, bytes in index order, e.g. a 64-character digest) and an
+    /// integer field (two characters per byte of the type, most significant
+    /// first, signed as two's complement: `u32` 300 is `"0000012c"`, `i8` -1
+    /// is `"ff"`). Hex is lowercase only, with no prefix.
     #[serde(default)]
     pub params: Option<serde_json::Value>,
 }
@@ -1038,16 +1085,12 @@ pub struct DescribeHandlersResponse {
     pub caps: Vec<NativeCapHandlers>,
 }
 
-/// `send_mail_traced` arguments — atomic batched dispatch with a shared
-/// trace root (issue iamacoffeepot/aether#749). Every spec lands on the
-/// same engine and inherits the same chassis root, so the response carries one
-/// combined trace tree covering the whole batch.
 /// Which projection of a settled `send_mail_traced` batch to return. A
-/// render-format selector, not the documentation-expansion `full` flag the
-/// component tools carry — the two used to share one name and one bool.
+/// render-shape selector, not the documentation-expansion `full` flag the
+/// component tools carry, and not the reply `format` mask.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum TraceFormat {
+pub enum TraceShape {
     /// Compact one-line-per-node `tree` in root/sibling input order.
     #[default]
     Tree,
@@ -1055,6 +1098,10 @@ pub enum TraceFormat {
     Nodes,
 }
 
+/// `send_mail_traced` arguments — atomic batched dispatch with a shared
+/// trace root (issue iamacoffeepot/aether#749). Every spec lands on the
+/// same engine and inherits the same chassis root, so the response carries one
+/// combined trace tree covering the whole batch.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMailTracedArgs {
     /// Engine UUID the batch targets (from `list_engines`). All specs
@@ -1086,7 +1133,20 @@ pub struct SendMailTracedArgs {
     /// per-node `mails` values. Both include `node_count`; timeout and
     /// fire-and-forget responses include neither.
     #[serde(default)]
-    pub format: TraceFormat,
+    pub trace: TraceShape,
+    /// Optional reply format mask over the batch's `replies`, in the same
+    /// grammar as `send_mail`'s `format` and resolved on the batch's engine:
+    /// each key an exact reply kind name whose value mirrors that kind's
+    /// decoded JSON, with `"$hex"` at a `[u8; N]`, `Bytes`, `Blob`, or
+    /// integer leaf, e.g. `{"aether.bloomery.driver.call_outcome":
+    /// {"Transition": {"transition": {"input": "$hex", "result": "$hex"}}}}`,
+    /// or the sole key `{"*": "$hex"}` for every byte-array leaf of every
+    /// reply. Validated before the batch is encoded, so a mask naming an
+    /// unknown kind, a missing key, or a function on a leaf outside its set
+    /// refuses the call before any mail moves. The trace render shape is
+    /// `trace`, not this field.
+    #[serde(default, deserialize_with = "reply_mask")]
+    pub format: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// `send_mail_traced` response. One combined trace tree for the whole
@@ -1105,12 +1165,12 @@ pub struct SendMailTracedResponse {
     /// Chassis-root `MailId` every spec inherited. Populated on
     /// `settled` and `dispatched`, `null` on `timeout`.
     pub root: Option<MailIdJson>,
-    /// Complete mail nodes in a settled `format: "nodes"` response. Order is
+    /// Complete mail nodes in a settled `trace: "nodes"` response. Order is
     /// unspecified — agents reconstruct chains via `parent` edges. `null`
     /// in the default compact projection, on `dispatched`, and on `timeout`.
     pub mails: Option<Vec<MailNodeJson>>,
     /// Compact one-line-per-node tree in root/sibling input order. Present
-    /// only on a settled default (`format: "tree"`) response.
+    /// only on a settled default (`trace: "tree"`) response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tree: Option<Vec<String>>,
     /// Number of projected mail nodes. Present for both compact and full
