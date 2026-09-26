@@ -667,7 +667,7 @@ The program asks for one run, and every argument is fixed:
 | Part | Value |
 |---|---|
 | Tool | `cargo`, resolved through the environment's `tools` table; cargo finds `cargo-clippy` on the environment's `PATH` |
-| Args | `--config source.crates-io.replace-with="vendored"` `--config source.vendored.directory="/vendor"` `clippy --workspace --all-targets --frozen -- -D warnings` |
+| Args | `clippy --config source.crates-io.replace-with="vendored" --config source.vendored.directory="/vendor" --workspace --all-targets --frozen -- -D warnings` |
 | Env | `CARGO_HOME=/work/tmp/cargo-home`, `CARGO_TARGET_DIR=/work/target`, `TMPDIR=/work/tmp` |
 | Mounts | the vendor tree at `vendor` |
 | Scratch | `target` and `tmp`, so neither the build output nor cargo's home reaches the output tree |
