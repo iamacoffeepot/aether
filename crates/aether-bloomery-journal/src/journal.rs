@@ -20,7 +20,7 @@ use crate::artifact::{ARTIFACTS_DDL, CITATIONS_DDL, split_artifact};
 use crate::batch::Batch;
 use crate::blobs::{BlobDir, create_synced};
 use crate::clock::{Clock, SystemClock};
-use crate::closure::{Closure, ClosureReader, walk_closure};
+use crate::closure::{Closure, ClosureReader, plan_closure, read_each};
 use crate::draft::Draft;
 use crate::{DecodeError, Digest, Entry, Seq};
 
@@ -244,14 +244,17 @@ impl Journal {
     /// One read snapshot. The walk is breadth-first over the stored citation
     /// edges: the root first, then each member's children in ascending digest
     /// byte order, each distinct artifact once. The budget is the sum of each
-    /// member's stored blob length (kind prefix plus payload), checked before
-    /// the member's file is read; a total equal to `limit` fits. Over the limit
-    /// is [`Closure::TooLarge`] and nothing is returned. Artifacts stored
+    /// member's stored blob length (kind prefix plus payload), taken from the
+    /// artifact rows and checked for the whole closure before any member file
+    /// is read; a total equal to `limit` fits. Over the limit is
+    /// [`Closure::TooLarge`] and nothing is read or returned, and a missing
+    /// member is likewise decided before any file is read. Artifacts stored
     /// before the journal recorded citation edges have none, so their closure
     /// is the artifact alone.
     ///
     /// Each member's payload is handed to `check_in` in the buffer it was
-    /// read into; the journal actor checks it into the engine blob store.
+    /// read into. The journal actor itself reads closures on a worker thread,
+    /// which checks the members in as one slab instead.
     ///
     /// # Errors
     ///
@@ -264,7 +267,7 @@ impl Journal {
         limit: ClosureLimit,
         check_in: impl FnMut(Box<[u8]>) -> Blob,
     ) -> Result<Closure, JournalError> {
-        walk_closure(&self.conn, &self.blobs, *root, limit, check_in)
+        plan_closure(&self.conn, *root, limit)?.read_with(|members| read_each(&self.blobs, &members, check_in))
     }
 
     /// A [`ClosureReader`] over this root, for a worker thread to walk

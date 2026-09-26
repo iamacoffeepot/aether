@@ -153,7 +153,8 @@ fn a_blocked_closure_read_does_not_delay_a_read_artifact() -> Result<(), Box<dyn
     // Declared after the chassis so that, unwinding, it releases a blocked walk before teardown.
     let release = ReleaseFifo(&fifo);
 
-    // The walk checks the root in, then blocks opening the leaf's FIFO until a writer opens it.
+    // The walk reads the root into its slab region, then blocks opening the leaf's FIFO until a writer
+    // opens it.
     let generous = ClosureLimit::new(ClosureLimit::MAX_BYTES)?;
     request(&registry, journal, probe.erase(), 1, &ReadClosure { root, limit_bytes: generous });
     request(&registry, journal, probe.erase(), 2, &ReadArtifact { digest: root });

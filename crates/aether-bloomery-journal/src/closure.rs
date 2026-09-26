@@ -1,15 +1,22 @@
 //! Breadth-first transitive closure over the stored citation edges, under a byte budget.
+//!
+//! A read plans the closure from the database rows first, [`plan_closure`],
+//! so the budget and a missing member are decided before any member file is
+//! read. It then reads the planned members: into one slab through a
+//! [`BlobCheckIn`] on the journal actor's worker, or one buffer per member
+//! for [`crate::Journal::read_closure`].
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use aether_bloomery_kinds::{ClosureArtifact, ClosureLimit};
-use aether_data::Blob;
+use aether_data::{Blob, KindId};
+use aether_substrate::actor::native::BlobCheckIn;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::Digest;
-use crate::blobs::BlobDir;
+use crate::blobs::{self, BlobDir};
 use crate::journal::{BUSY_TIMEOUT, JournalError, RootLock};
 
 /// Outcome of [`crate::Journal::read_closure`].
@@ -45,39 +52,62 @@ impl ClosureReader {
     }
 
     /// As [`crate::Journal::read_closure`], over a read-only connection opened
-    /// on the calling thread.
+    /// on the calling thread, with every member checked in through
+    /// `check_in` as one slab: one allocation for the whole closure, each
+    /// member file read straight into its region. The members are read for
+    /// one `Invoke` and dropped together, which is what a slab asks for.
     ///
     /// # Errors
     ///
     /// As [`crate::Journal::read_closure`], plus [`JournalError::Backend`] when
     /// the connection cannot be opened.
-    pub fn read(
-        &self,
-        root: &Digest,
-        limit: ClosureLimit,
-        check_in: impl FnMut(Box<[u8]>) -> Blob,
-    ) -> Result<Closure, JournalError> {
+    pub fn read(&self, root: &Digest, limit: ClosureLimit, check_in: &BlobCheckIn) -> Result<Closure, JournalError> {
         let conn = Connection::open_with_flags(
             &self.database,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        walk_closure(&conn, &self.blobs, *root, limit, check_in)
+        plan_closure(&conn, *root, limit)?.read_with(|members| read_slab(&self.blobs, &members, check_in))
     }
 }
 
-/// Walk `root`'s closure in one read snapshot. Each digest is enqueued at
-/// most once; the running total, taken from each row's recorded size, is
-/// checked before the member's file is read, so the budget bounds the walk.
-/// Each member's payload is handed to `check_in` in the buffer it was read
-/// into, and the member is built over the [`Blob`] that returns.
-pub fn walk_closure(
-    conn: &Connection,
-    blobs: &BlobDir,
-    root: Digest,
-    limit: ClosureLimit,
-    mut check_in: impl FnMut(Box<[u8]>) -> Blob,
-) -> Result<Closure, JournalError> {
+/// One planned member: its digest and its recorded stored length.
+pub struct PlannedMember {
+    digest: Digest,
+    size_bytes: u64,
+}
+
+/// A closure planned from the database rows alone, before any member file
+/// is read.
+pub enum ClosurePlan {
+    /// Every member in walk order, within the budget.
+    Members(Vec<PlannedMember>),
+    /// A member has no artifact row.
+    Missing(Digest),
+    /// The recorded sizes exceed the limit.
+    TooLarge,
+}
+
+impl ClosurePlan {
+    /// Read the planned members with `read`, or answer `Missing` or
+    /// `TooLarge` without reading anything.
+    pub fn read_with(
+        self,
+        read: impl FnOnce(Vec<PlannedMember>) -> Result<Vec<ClosureArtifact>, JournalError>,
+    ) -> Result<Closure, JournalError> {
+        match self {
+            Self::Members(members) => read(members).map(Closure::Found),
+            Self::Missing(digest) => Ok(Closure::Missing(digest)),
+            Self::TooLarge => Ok(Closure::TooLarge),
+        }
+    }
+}
+
+/// Plan `root`'s closure in one read snapshot from the artifact and citation
+/// rows only. Each digest is enqueued at most once, and the running total,
+/// taken from each row's recorded size, is checked as each member is
+/// planned, so the budget bounds the walk and no member file is read.
+pub fn plan_closure(conn: &Connection, root: Digest, limit: ClosureLimit) -> Result<ClosurePlan, JournalError> {
     let tx = conn.unchecked_transaction()?;
     let mut length = tx.prepare("SELECT size_bytes FROM artifacts WHERE digest = ?1")?;
     let mut children = tx.prepare("SELECT to_digest FROM citations WHERE from_digest = ?1 ORDER BY to_digest")?;
@@ -85,25 +115,19 @@ pub fn walk_closure(
     let mut queue = VecDeque::from([root]);
     let mut visited = HashSet::from([root]);
     let mut total: u64 = 0;
-    let mut artifacts = Vec::new();
+    let mut members = Vec::new();
 
     while let Some(digest) = queue.pop_front() {
         let key = digest.as_bytes().as_slice();
         let Some(size) = length.query_row(params![key], |row| row.get::<_, i64>(0)).optional()? else {
-            return Ok(Closure::Missing(digest));
+            return Ok(ClosurePlan::Missing(digest));
         };
-        let size = u64::try_from(size).map_err(|_| JournalError::IntegerRange)?;
-        total = total.saturating_add(size);
+        let size_bytes = u64::try_from(size).map_err(|_| JournalError::IntegerRange)?;
+        total = total.saturating_add(size_bytes);
         if total > limit.get() {
-            return Ok(Closure::TooLarge);
+            return Ok(ClosurePlan::TooLarge);
         }
-
-        let (kind, payload) = blobs.read_payload(&digest, size)?;
-        let artifact = ClosureArtifact::new(kind, check_in(payload));
-        if artifact.claimed().unverified() != digest {
-            return Err(JournalError::ArtifactDigestMismatch(digest));
-        }
-        artifacts.push(artifact);
+        members.push(PlannedMember { digest, size_bytes });
 
         let mut rows = children.query(params![key])?;
         while let Some(row) = rows.next()? {
@@ -114,5 +138,56 @@ pub fn walk_closure(
             }
         }
     }
-    Ok(Closure::Found(artifacts))
+    Ok(ClosurePlan::Members(members))
+}
+
+/// Read each planned member into its own buffer, hand it to `check_in`, and
+/// build the member over the [`Blob`] that returns.
+pub fn read_each(
+    blobs: &BlobDir,
+    members: &[PlannedMember],
+    mut check_in: impl FnMut(Box<[u8]>) -> Blob,
+) -> Result<Vec<ClosureArtifact>, JournalError> {
+    members
+        .iter()
+        .map(|member| {
+            let (kind, payload) = blobs.read_payload(&member.digest, member.size_bytes)?;
+            verified(member.digest, kind, check_in(payload))
+        })
+        .collect()
+}
+
+/// Read every planned member straight into its region of one slab checked
+/// in through `check_in`, then build each member over its [`Blob`]. An error
+/// before the slab is finished drops it, which frees it.
+fn read_slab(
+    blobs: &BlobDir,
+    members: &[PlannedMember],
+    check_in: &BlobCheckIn,
+) -> Result<Vec<ClosureArtifact>, JournalError> {
+    let lens = members.iter().map(|member| blobs::payload_len(member.size_bytes)).collect::<Result<Vec<_>, _>>()?;
+    let mut slab = check_in.slab(&lens);
+    let kinds = members
+        .iter()
+        .zip(slab.regions())
+        .map(|(member, region)| blobs.read_payload_into(&member.digest, member.size_bytes, region))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    members
+        .iter()
+        .zip(kinds)
+        .zip(slab.finish())
+        .map(|((member, kind), blob)| verified(member.digest, kind, blob))
+        .collect()
+}
+
+/// The member of `kind` over `blob`, once its claim is checked against the
+/// `digest` it was stored under.
+fn verified(digest: Digest, kind: KindId, blob: Blob) -> Result<ClosureArtifact, JournalError> {
+    let artifact = ClosureArtifact::new(kind, blob);
+    if artifact.claimed().unverified() == digest {
+        Ok(artifact)
+    } else {
+        Err(JournalError::ArtifactDigestMismatch(digest))
+    }
 }

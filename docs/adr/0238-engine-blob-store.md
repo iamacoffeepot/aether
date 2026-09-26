@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-25
+- **Amended:** 2026-09-25 — decisions 1, 7 and 8: an entry's bytes are its own buffer or a range of a slab, which a producer opts into through `BlobStore::slab` when its members live and die together; an owned check-in takes the dedup slot from a slab-backed entry; the reclaim thread frees a whole slab when its last member drops, and the gauge reports slab bytes beside live member bytes. A store-wide arena stays rejected.
 - **Amended:** 2026-09-25 — decisions 9, 10 and 11: a closure member is read only through `ClosureArtifact::load(expected)`, which verifies the member's claimed digest before returning any byte and is `blob_read_p32`'s production consumer; `Env::open` and its `VerifyingReader` are deferred until a program streams a large opaque input. This supersedes the `Env::open` clause of the amendment below.
 - **Amended:** 2026-09-25 — decisions 3 and 11, wording: an empty attachments field is two words, not one; `Env::open` returns a `VerifyingReader` that streams through a `BlobReader` and checks the member's claimed digest at end of stream.
 - **Amended:** 2026-09-25 — decision 3: a tag-1 field is valid only beside a matching attachment; one carried by a blob-free sender or a wire `Call` is refused at its recipient's decode; intra-cluster guest mail keeps each named value alive until the child's dispatch; a guest's reply to a session or engine mailbox is an egress path.
@@ -123,11 +124,17 @@ pub struct BlobStore { /* hash -> Weak<BlobEntry>, resident byte gauge, reclaim 
 
 pub struct BlobEntry {
     hash: BlobHash,     // the blob's identity and dedup key; knowing it grants nothing
-    bytes: Box<[u8]>,   // immutable from check-in
+    storage: Storage,   // immutable from check-in
+}
+
+enum Storage {
+    Own(Box<[u8]>),                                // every single check-in
+    Slab { slab: Arc<Slab>, range: Range<usize> }, // one region of a producer's slab (section 8)
 }
 
 impl BlobStore {
     pub(crate) fn check_in(&self, bytes: Box<[u8]>) -> Arc<BlobEntry>;
+    pub(crate) fn slab(&self, lens: &[usize]) -> SlabBuilder; // regions(), then finish() -> Vec<Arc<BlobEntry>>
 }
 ```
 
@@ -137,12 +144,18 @@ impl BlobStore {
 - Check-in hashes the bytes with BLAKE3. The hash is the blob's identity and dedup key, and
   it never matches the Bloomery journal's digests, which cover a kind prefix
   plus the payload, so it need not share their sha256. If the hash is already resident, check-in
-  returns the existing entry and drops the new bytes (dedup).
+  returns the existing entry and drops the new bytes (dedup). The slot prefers
+  owned storage: an owned check-in that finds a live slab-backed entry makes a
+  new owned entry and moves the slot to it, so existing holders keep the slab
+  entry and later check-ins get the owned one. Two live entries with one hash
+  are sound, because the hash is the identity. A slab member whose hash is
+  already resident, in either form, reuses the resident entry.
 - An entry is shared as an `Arc`. Reading its bytes takes no lock.
 - The dedup index takes a short lock on check-in only. Reads, sends and
   delivery never touch it.
 
-The entry is `Arc<BlobEntry>` holding a `Box<[u8]>`, not a bare `Arc<[u8]>`.
+The entry is `Arc<BlobEntry>` holding a `Box<[u8]>` (or a range of a slab
+that owns one), not a bare `Arc<[u8]>`.
 The index must hold weak references so that it does not keep bytes alive.
 A `Weak<[u8]>` keeps the whole `Arc<[u8]>` allocation (header and bytes) until
 the last weak reference drops, so a weak index over bare `Arc<[u8]>` would free
@@ -320,10 +333,13 @@ Directions recorded for a later trait rework, none chosen.
   it (a concurrent check-in of the same hash may already have replaced it).
 - Large entries do not free on the dropping thread. `BlobEntry::drop` sends
   a `Box<[u8]>` at or above `RECLAIM_THRESHOLD_BYTES` to one reclaim thread,
-  which frees it. Small entries free inline.
+  which frees it. Small entries free inline. A slab frees as a whole when its
+  last member drops, through the same thread when it is large.
 - The store never drops a referenced entry. Under memory pressure it grows
   and surfaces the pressure: a resident-byte gauge warns at each new
-  high-water mark, like `ReplyTable`. Spilling referenced entries to
+  high-water mark, like `ReplyTable`. The resident total counts a live slab
+  whole, and the gauge reports slab bytes separately from live slab-member
+  bytes, so what slabs retain is visible. Spilling referenced entries to
   persistent storage is not part of this design.
 
 ### 8. Allocation: system allocator plus off-thread reclaim
@@ -331,18 +347,29 @@ Directions recorded for a later trait rework, none chosen.
 The store allocates with the system allocator. The concerns are churn and the
 cost of freeing large blocks.
 
-- No bump arena. Entries have independent lifetimes. An arena frees only as a
-  whole, so one long-lived blob would pin every block around it.
+- No store-wide arena. Entries have independent lifetimes. An arena frees
+  only as a whole, so one long-lived blob would pin every block around it.
+- An opt-in slab instead. The producer that checks the bytes in chooses one
+  allocation for a set of members when it knows they live and die together,
+  such as a closure read for one `Invoke`. `BlobStore::slab` takes every
+  length up front, and the builder hands out exactly those regions, so none
+  can overlap or run out of bounds. Each region is still its own entry with
+  its own hash and dedup slot. The producer accepts that one live member
+  retains the whole slab, including a region dedup made redundant. Single
+  check-ins never use one.
 - The system allocator serves large allocations as their own mappings. Freeing
   one returns it to the OS without fragmenting the small-object heap.
 - The expensive part of freeing a large block (unmapping) moves off hot
   dispatch threads onto the reclaim thread (section 7).
 - A custom allocator over an engine-held block can come later, behind
-  `BlobStore`'s interface, if measurement shows churn. Nothing outside the
-  store sees how bytes are allocated.
+  `BlobStore`'s interface, if measurement shows churn. A producer sees only
+  the choice between single check-ins and a slab, never how either is
+  allocated.
 - Check-in from a producer that knows the length fills an
   `Arc::new_uninit_slice`-style buffer in place, so building an entry does not
-  copy the bytes twice.
+  copy the bytes twice. A slab is one zeroed allocation at its exact total,
+  and the producer fills each region in place, so a slab member is not copied
+  twice either.
 
 ### 9. Reads stream on both sides
 
@@ -440,7 +467,8 @@ meaning.
 - **Memory is the limit.** The store is in memory only, so a `Shared` value's
   bytes are resident while anyone holds it, and a closure's members are
   resident while it runs. The raised ceiling (section 10) bounds that per
-  closure.
+  closure. A slab stays resident whole while any of its members lives
+  (section 8).
 - **One kind for every caller.** A kind with a `Blob` field works in-process
   and over the wire alike, so no reply needs a separate bytes twin for wire
   callers. aether-mcp sends and receives such fields as bytes, and its
@@ -511,8 +539,9 @@ meaning.
   directory (ADR-0220), as ADR-0049 did. Rejected.
 - **Mutable blobs.** Readers would need synchronization. Rejected; a change
   is a new check-in.
-- **A bump arena.** Frees only as a whole, so one long-lived blob pins its
-  block. Rejected (section 8).
+- **A store-wide bump arena.** Frees only as a whole, so one long-lived blob
+  pins its block. Rejected (section 8), which instead offers a producer an
+  opt-in slab for members that live and die together.
 - **A custom allocator now.** No measurement shows need. Deferred behind the
   store interface.
 - **A decode that needs a delivery context.** The typed decode is

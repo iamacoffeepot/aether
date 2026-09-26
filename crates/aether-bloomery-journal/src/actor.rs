@@ -105,19 +105,18 @@ impl NativeActor for JournalActor {
     /// A plain read: writes nothing and wakes no watcher.
     ///
     /// The walk runs on a worker thread through the actor's task queue
-    /// (ADR-0093), on its own read-only connection, and checks each member
-    /// into the engine blob store there. Every other request keeps being
-    /// answered meanwhile, and the reply lands when the walk finishes. The
-    /// connection opens after every write this actor committed before the
-    /// request was handled, so the walk sees them all.
+    /// (ADR-0093), on its own read-only connection, and checks the members
+    /// into the engine blob store there as one slab: one allocation for the
+    /// whole closure, each member file read straight into its region. Every
+    /// other request keeps being answered meanwhile, and the reply lands when
+    /// the walk finishes. The connection opens after every write this actor
+    /// committed before the request was handled, so the walk sees them all.
     #[handler::single]
     fn on_read_closure(&mut self, ctx: &mut NativeCtx<'_>, request: ReadClosure) -> Pending<ReadClosureResult> {
         let ReadClosure { root, limit_bytes } = request;
         let reader = self.journal.closure_reader();
         let check_in = ctx.blob_check_in();
-        self.closures.submit(ctx, move || {
-            closure_reply(root, limit_bytes, reader.read(&root, limit_bytes, |payload| check_in.check_in(payload)))
-        })
+        self.closures.submit(ctx, move || closure_reply(root, limit_bytes, reader.read(&root, limit_bytes, &check_in)))
     }
 
     /// ADR-0093 completion of a closure walk: reply to the request's own

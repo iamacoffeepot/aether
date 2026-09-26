@@ -18,8 +18,9 @@
 //!   its actor, in place of a stored mailbox id plus a mailer (ADR-0230), and
 //!   the sanctioned spawn for that thread (`SelfWake::spawn_sidecar`).
 //! - [`check_in`] — the handle a [`blocking`] worker holds to check bytes
-//!   into the engine blob store off the dispatcher, in place of a ctx it
-//!   never gets (ADR-0238). It sends nothing.
+//!   into the engine blob store off the dispatcher, one buffer at a time or
+//!   as one slab, in place of a ctx it never gets (ADR-0238). It sends
+//!   nothing.
 //! - `fail_fast` — the runner every sanctioned spawn above wraps its body
 //!   in: a panic on any of these threads is fatal (ADR-0063) and escalates
 //!   through the chassis aborter, as the scheduler escalates a handler panic.
