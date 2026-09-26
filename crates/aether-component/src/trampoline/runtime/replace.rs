@@ -110,7 +110,7 @@ impl WasmTrampolineState {
         let config = WasmTrampolineConfig {
             engine: Arc::clone(&self.engine),
             linker: Arc::clone(&self.linker),
-            module: self.module.clone(),
+            module: Arc::clone(&self.module),
             outbound: Arc::clone(&self.outbound),
             capabilities,
             config: pending.config,
@@ -459,8 +459,11 @@ impl WasmTrampolineState {
 
         // ADR-0097: the new module is now resident — retain it (and
         // the refreshed per-type cap map) so sibling spawns after this
-        // replace re-instantiate the new code, not the old.
-        self.module = module;
+        // replace re-instantiate the new code, not the old. This compile
+        // stays outside the host's `ModuleCache` (ADR-0240 D5), which the
+        // component host owns and no trampoline can reach; the fresh `Arc`
+        // makes this trampoline the new module's holder.
+        self.module = Arc::new(module);
         self.actor_caps = actors;
         // ADR-0163 §3 (#3984): future sibling spawns index the new module's
         // assets, not the replaced module's.

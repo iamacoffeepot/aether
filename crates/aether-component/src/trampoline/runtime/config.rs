@@ -15,7 +15,12 @@ use wasmtime::{Engine, Linker, Module};
 pub struct WasmTrampolineConfig {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
-    pub module: Module,
+    /// The compiled module this trampoline instantiates. Shared with the
+    /// host's `ModuleCache` (ADR-0240 D5): holding this `Arc` is what keeps
+    /// the cache's entry for this content hash alive, so it stays cheap to
+    /// re-instantiate for a sibling spawn or a same-hash load until every
+    /// holder drops.
+    pub module: Arc<Module>,
     pub outbound: Arc<HubOutbound>,
     /// Component capabilities parsed from the wasm's
     /// `aether.kinds.inputs` custom section, surfaced through

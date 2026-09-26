@@ -42,7 +42,7 @@ pub(super) struct PreparedLoad {
     /// sha256 hex of `wasm_bytes` — the compiled-module cache key and, for a
     /// module that declares a boot slot, the boot registry's key.
     hash: String,
-    module: Module,
+    module: Arc<Module>,
     wasm_bytes: Arc<[u8]>,
     config: Vec<u8>,
     name: String,
@@ -60,7 +60,7 @@ impl PreparedLoad {
         WasmTrampolineConfig {
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
-            module: self.module.clone(),
+            module: Arc::clone(&self.module),
             outbound: Arc::clone(&state.outbound),
             capabilities: self.capabilities.clone(),
             config: self.config.clone(),
@@ -74,7 +74,7 @@ impl PreparedLoad {
         Some(PreparedBoot::new(
             self.boot_namespace.clone()?,
             self.hash.clone(),
-            self.module.clone(),
+            Arc::clone(&self.module),
             self.actors.clone(),
             Arc::clone(&self.wasm_bytes),
         ))
@@ -87,13 +87,19 @@ pub(super) struct PreparedBoot {
     namespace: String,
     capabilities: ComponentCapabilities,
     dependencies: Vec<Dependency>,
-    module: Module,
+    module: Arc<Module>,
     actors: Vec<ActorInputs>,
     wasm_bytes: Arc<[u8]>,
 }
 
 impl PreparedBoot {
-    fn new(namespace: String, hash: String, module: Module, actors: Vec<ActorInputs>, wasm_bytes: Arc<[u8]>) -> Self {
+    fn new(
+        namespace: String,
+        hash: String,
+        module: Arc<Module>,
+        actors: Vec<ActorInputs>,
+        wasm_bytes: Arc<[u8]>,
+    ) -> Self {
         let group = actors.iter().find(|actor| actor.namespace.as_deref() == Some(namespace.as_str()));
         let capabilities = group.map(|actor| actor.capabilities.clone()).unwrap_or_default();
         let dependencies = group.map(|actor| actor.dependencies.clone()).unwrap_or_default();
@@ -104,7 +110,7 @@ impl PreparedBoot {
         WasmTrampolineConfig {
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
-            module: self.module.clone(),
+            module: Arc::clone(&self.module),
             outbound: Arc::clone(&state.outbound),
             capabilities: self.capabilities.clone(),
             config: Vec::new(),

@@ -92,9 +92,12 @@ pub struct ComponentHostCapabilityState {
     /// Monotonic counter for `component_N` default names when an agent passes
     /// `name: None` and the wasm doesn't declare an `aether.namespace`.
     pub default_name_counter: u64,
-    /// The most recently compiled module, so a burst of loads of one artifact
-    /// (`replicas: N`, a boot manifest naming several of its exports) pays
-    /// cranelift once instead of once per load.
+    /// Every compiled module currently held by a live user, keyed by content
+    /// hash (ADR-0240 D5), so a burst of loads of one artifact (`replicas: N`,
+    /// a boot manifest naming several of its exports) pays cranelift once
+    /// instead of once per load. Nothing is evicted by count or capacity —
+    /// an entry lives only as long as some trampoline, in-flight load, or
+    /// staged boot plan still holds its `Arc<Module>`.
     pub module_cache: ModuleCache,
     /// ADR-0147 module-boot bookkeeping: content hash (sha256 hex of the wasm
     /// bytes) → the module's boot singleton. A module that declares a `boot =`
