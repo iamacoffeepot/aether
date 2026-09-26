@@ -1,5 +1,4 @@
-#[allow(clippy::wildcard_imports)]
-use super::super::*;
+use super::super::{Primitive, SchemaType, Sigil, decode_hex, encode_hex, resolve_bytes_params};
 use aether_data::{NamedField, SchemaCell};
 
 const NO_CAP: usize = usize::MAX;
