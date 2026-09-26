@@ -35,13 +35,15 @@ const TMPDIR: &str = "/work/tmp";
 const ENV: [(&str, &str); 3] = [("CARGO_HOME", CARGO_HOME), ("CARGO_TARGET_DIR", CARGO_TARGET_DIR), ("TMPDIR", TMPDIR)];
 
 /// CI's lint command plus `--frozen` (locked and offline), with crates.io
-/// replaced by the vendor tree at `/vendor`.
+/// replaced by the vendor tree at `/vendor`. The `--config` flags follow the
+/// subcommand: `cargo clippy` is an external subcommand that re-runs cargo,
+/// and only flags after its name reach that inner cargo.
 const ARGS: [&str; 11] = [
+    "clippy",
     "--config",
     "source.crates-io.replace-with=\"vendored\"",
     "--config",
     "source.vendored.directory=\"/vendor\"",
-    "clippy",
     "--workspace",
     "--all-targets",
     "--frozen",
