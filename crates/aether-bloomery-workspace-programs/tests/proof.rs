@@ -2,13 +2,15 @@
 //!
 //! The closure carries only the encoded input over fixed digests: the program reads nothing but its input.
 
+mod support;
+
 use std::error::Error;
 
-use aether_bloomery_kinds::{ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, ProgramName, Ref, Refusal};
-use aether_bloomery_program::{Pending, PollResult, Program, Started, start_async};
+use aether_bloomery_kinds::{Digest, Invoked, Ref, Refusal};
 use aether_bloomery_workspace_programs::proof::{ClippyInput, ClippyProof, ClippyResult};
-use aether_data::Kind;
-use aether_workspace::{Outcome, RunResult, RustToolchain, StepOutcome, ToolName, ToolRecord, TreePath};
+use aether_workspace::{Outcome, RunResult, RustToolchain};
+
+use support::{completed_with, one_step, output_tree};
 
 /// Start the proof over fixed digests, answer its one captured run with `reply`, and poll to the invocation's end.
 fn answer(reply: &RunResult) -> Result<Invoked, Box<dyn Error>> {
@@ -17,44 +19,7 @@ fn answer(reply: &RunResult) -> Result<Invoked, Box<dyn Error>> {
         environment: Ref::from_digest(Digest::from_bytes([2; 32])),
         vendor: Ref::from_digest(Digest::from_bytes([3; 32])),
     };
-    let encoded = EncodedArtifact::new(&input)?;
-    let closure = ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec());
-    let invoke = Invoke::new(7, ProgramName::new(ClippyProof::NAME)?, encoded.digest(), vec![closure]);
-
-    let Started::Live { mut session, waiting: Some(Pending::Send(pending)) } = start_async::<ClippyProof>(invoke)
-    else {
-        return Err("expected the first poll to capture the workspace run".into());
-    };
-    session.fulfill_send(&pending, RunResult::ID, reply.encode_into_bytes());
-    match session.poll() {
-        PollResult::Finished(invoked) => Ok(invoked),
-        other => Err(format!("expected the invocation to finish, got {other:?}").into()),
-    }
-}
-
-/// An outcome of one clippy step that exited `exit_code`, with distinct stdout and stderr.
-fn one_step(exit_code: Option<i32>) -> Result<RunResult, Box<dyn Error>> {
-    let step = StepOutcome {
-        exit_code,
-        stdout: Ref::of_bytes(b"stdout"),
-        stderr: Ref::of_bytes(b"stderr"),
-        tool: ToolRecord {
-            name: ToolName::new("cargo")?,
-            path: TreePath::new("usr/local/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo")?,
-            file: Ref::of_bytes(b"cargo"),
-        },
-    };
-    Ok(RunResult::Ok(Outcome { steps: vec![step], tree: Ref::from_digest(Digest::from_bytes([4; 32])) }))
-}
-
-/// Assert that `invoked` completed with `expected` as its result and its one staged artifact.
-fn completed_with(invoked: Invoked, expected: &ClippyResult) -> Result<(), Box<dyn Error>> {
-    let expected = EncodedArtifact::new(expected)?;
-    let Invoked::Completed { seq: 7, result, staged } = invoked else {
-        return Err(format!("expected Completed, got {invoked:?}").into());
-    };
-    assert_eq!((result, staged), (expected.digest(), vec![expected]), "the result cites stderr without staging it");
-    Ok(())
+    support::answer::<ClippyProof>(&input, reply)
 }
 
 #[test]
@@ -85,8 +50,7 @@ fn a_workspace_refusal_is_the_programs_refusal_not_a_failed_proof() -> Result<()
 #[test]
 fn a_run_that_answers_no_step_is_refused() -> Result<(), Box<dyn Error>> {
     // Catches an executor's malformed outcome recorded as a proof about the tree.
-    let empty = RunResult::Ok(Outcome { steps: Vec::new(), tree: Ref::from_digest(Digest::from_bytes([4; 32])) });
-    let invoked = answer(&empty)?;
+    let invoked = answer(&RunResult::Ok(Outcome { steps: Vec::new(), tree: output_tree() }))?;
     assert!(matches!(invoked, Invoked::Refused { seq: 7, refusal: Refusal::Refused { .. } }), "{invoked:?}");
     Ok(())
 }

@@ -6,6 +6,8 @@
 //! source at `/work`, with the network off. The root is read-only and the
 //! network is off, so crate sources are an input: [`ClippyInput::vendor`] is a
 //! `cargo vendor` tree mounted at `/vendor`, and crates.io is replaced by it.
+//! `vendor.cargo` produces that tree: its `Vendored.tree` is the tree the
+//! field takes.
 //! Without it, clippy on any tree with registry dependencies would fail at
 //! resolution, and the journal would record a failed proof that says nothing
 //! about the code.

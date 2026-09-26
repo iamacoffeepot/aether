@@ -481,7 +481,9 @@ Run the steps on the host whose daemon the actor dials.
    program answers a `Transition` whose result is the `source` entry's tree,
    so the result digest is that subtree's digest and nothing new is built. It
    refuses, naming `source`, when the image holds no `source` directory.
-4. **Cite.** Pass the transition's result as `proof.clippy.input.source`.
+4. **Cite.** Pass the transition's result as `source` in both
+   `vendor.cargo.input` and `proof.clippy.input`, so the vendor tree and the
+   proof share one `Cargo.lock`.
 
 What the source tree holds:
 
@@ -508,6 +510,78 @@ No head is published for a source tree. Each checkout is its own tree, and the
 proof's caller cites the transition's result directly, so a head would have
 no reader.
 
+## Vendoring crate sources
+
+`vendor.cargo` produces the tree [the clippy proof](#the-clippy-proof) mounts
+at `/vendor`. It lives in the same `aether-bloomery-workspace-programs` bundle
+and runs `cargo vendor --locked` once through the `Workspace` binding, with
+the network on (ADR-0237 decision 4). It is Sampled, because the tree depends
+on registry state and the executor, not only on the cited trees. Every cargo
+proof stays network-free, and the vendor tree is a digest the journal can cite.
+
+Its input, `vendor.cargo.input`, cites two things:
+
+| Field | What it is | Where the run sees it |
+|---|---|---|
+| `source: Ref<Tree>` | the cargo workspace whose `Cargo.lock` is vendored, such as the result of `source.select` ([Importing a source tree](#importing-a-source-tree)) | `/source`, read-only |
+| `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` | the root |
+
+The program asks for one run, and every argument is fixed:
+
+| Part | Value |
+|---|---|
+| Tree | the empty tree, so `/work` starts empty |
+| Tool | `cargo`, resolved through the environment's `tools` table |
+| Args | `vendor --locked --manifest-path /source/Cargo.toml /work` |
+| Env | `CARGO_HOME=/work/.tmp/cargo-home`, `TMPDIR=/work/.tmp` |
+| Mounts | the source tree at `source` |
+| Scratch | `.tmp`, so cargo's home never reaches the output tree |
+| Network | `On` |
+
+The run tree is empty because `Outcome::tree` is `/work` after the last step
+minus scratch, and a mount is never read back. `/work` itself must therefore
+be the vendor directory, so the result cites it with no reshaping and no
+second program. The scratch name starts with a dot because, without
+`--no-delete`, cargo vendor clears every entry of its destination whose name is
+not hidden before it writes, and a scratch path is a tmpfs mount point under
+`/work`. Because nothing varies, every vendor run in one environment has the
+same run key and shares one allotment estimate.
+
+The answer maps to the result, `vendor.cargo.result`, or to a refusal:
+
+| Run answer | Program answer |
+|---|---|
+| `Ok`, one step with exit `Some(0)` | `Vendored { tree }`, citing the outcome's tree |
+| `Ok`, one step with any other exit | `Failed { stderr }`, such as a stale lock under `--locked` or a registry fetch error |
+| `Ok` with any other step count | the program's `Refused`, naming the count |
+| `Refused(..)` | the program's `Refused`, naming the workspace refusal |
+| `Exhausted(..)` or `Failed { .. }` | never seen: the binding ends the invocation, and the driver records the fault |
+
+**Pairing.** `Vendored.tree` is the `cargo vendor --locked` directory for the
+`Cargo.lock` at the root of the input's `source`: one directory per registry
+package, each holding its `.cargo-checksum.json`, the layout
+`source.vendored.directory` reads. A `proof.clippy` input is well-formed when
+its `vendor` is the `Vendored.tree` of a `vendor.cargo` transition whose
+`source` has the same `Cargo.lock` as the proof's `source`, and in practice the
+same `source` digest. The proof replaces only `crates-io`, so the pairing
+covers registry sources only: a git dependency would be vendored but not wired
+into the proof. A dependency-free source vendors to the empty tree, which the
+proof already accepts.
+
+Three preconditions hold for every vendor run:
+
+- The empty run tree must be stored. Every journal holding a merged
+  environment holds it, because `environment.merge` stages an empty `dev`
+  directory. When it is missing, the workspace answers
+  `Refused(InputMissing(<digest>))`, and the program refuses naming it.
+- The source is a mount, not the run tree, so the workspace's
+  `rust-toolchain.toml` check does not run. The vendor layout depends on
+  cargo, not rustc, and `proof.clippy` still runs that check over the same
+  source.
+- Cargo reads config from its working directory, `/work`, so a
+  `.cargo/config.toml` in the source does not apply. The proof also runs with
+  `--config` only.
+
 ## The clippy proof
 
 `proof.clippy` is the first program that runs cargo through the `Workspace`
@@ -521,7 +595,7 @@ Its input, `proof.clippy.input`, cites three trees:
 |---|---|---|
 | `source: Ref<Tree>` | the cargo workspace under proof, such as the result of `source.select` ([Importing a source tree](#importing-a-source-tree)) | `/work` |
 | `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (step 5 of [Building an environment](#building-an-environment)) | the root |
-| `vendor: Ref<Tree>` | a `cargo vendor` tree for the source's `Cargo.lock` | `/vendor`, read-only |
+| `vendor: Ref<Tree>` | the `Vendored.tree` of a `vendor.cargo` run over a source with the same `Cargo.lock` (see [Vendoring crate sources](#vendoring-crate-sources)) | `/vendor`, read-only |
 
 The program reads no head and no journal record, so the caller reads the
 environment head and passes the environment as an input. The run has the
