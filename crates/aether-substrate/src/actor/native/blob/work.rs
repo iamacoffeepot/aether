@@ -35,7 +35,7 @@
 //! [`Lifecycle::publish`]; seen recipients → push onto the existing group's
 //! buffer). The blob retires when fully drained; the next flush rolls a
 //! fresh one. Accumulation is what preserves per-recipient FIFO across
-//! flushes under burst: a second flush to a not-yet-drained recipient lands
+//! flushes under load: a second flush to a not-yet-drained recipient lands
 //! in the same group rather than a second group two workers could seize
 //! out of order. A flush that overflows the group array (or hits a retired
 //! blob) rolls the remainder into a fresh blob — the overflow remainder
@@ -786,7 +786,7 @@ pub struct BlobProducer {
     /// open group instead of opening a second live group another worker
     /// could drain first — the cross-blob FIFO inversion
     /// (iamacoffeepot/aether#1533). Producer-private (no new sharing),
-    /// empty except during overflow bursts, and self-bounding: entries
+    /// empty except during overflow spikes, and self-bounding: entries
     /// leave when their blob retires (pruned at each flush).
     detached: Vec<(Arc<BlobWork>, FxHashMap<MailboxId, usize>)>,
 }

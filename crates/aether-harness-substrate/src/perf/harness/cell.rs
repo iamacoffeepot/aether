@@ -152,7 +152,7 @@ pub struct CellResult {
 /// in-process one measure through identical code.
 ///
 /// `trace_ring_cap` is passed in rather than read here so the sweep's rings and
-/// its `Saturate` burst clamp resolve it once and cannot drift (issue 1990).
+/// its `Saturate` backlog clamp resolve it once and cannot drift (issue 1990).
 ///
 /// [`run_sweep_samples`]: crate::perf::harness::run_sweep_samples
 /// [`super::isolate`]: crate::perf::isolate
@@ -205,22 +205,22 @@ pub fn run_cell(
     // The real tier is always driven paced regardless of the sweep's
     // drive (ADR-0085 amendment); light / heavy keep it verbatim.
     let drive = drive_for_tier(drive, topo.tier);
-    // `burst` is the per-tick `Ping` count: 1 in `Latency` (one
+    // `pings_per_tick` is the per-tick `Ping` count: 1 in `Latency` (one
     // root per frame), `backlog` in `Saturate` (a deep ready queue
     // drained in one frame, iamacoffeepot/aether#1202). The
     // `Saturate` arm is reached only by Light / Heavy cells — the
     // real tier is forced paced by `drive_for_tier` above — so the
-    // clamp below governs only flooding bursts. A relay writes
+    // clamp below governs only flooding backlogs. A relay writes
     // `2 + out_degree` trace-ring slots per inbound mail, so a
     // backlog that fans out wide laps the entry relay's per-actor
     // ring once `backlog * (2 + max_out_degree) > ring_cap`; clamp
-    // each cell's burst to the deepest backlog its ring allows so
+    // each cell's backlog to the deepest backlog its ring allows so
     // every cell stays measurable instead of silently truncating
     // (iamacoffeepot/aether#1226). Low-fan-out cells keep full
     // depth; a wide fan-out (e.g. `fanout-8`: `4096 / 10 = 409`)
     // drops to fit, and any future wider fan-out stays measurable
     // automatically.
-    let burst = match drive {
+    let pings_per_tick = match drive {
         Drive::Latency { .. } => 1,
         Drive::Saturate { backlog } => {
             let ring_cap = u32::try_from(trace_ring_cap).unwrap_or(u32::MAX);
@@ -230,7 +230,10 @@ pub fn run_cell(
         }
     };
     let lifecycle = tb.actor_ref::<LifecycleCapability>();
-    let source = match tb.spawn_actor::<TickSource>(Subname::Named("src"), (relays[0], burst, lifecycle), ()).finish() {
+    let source = match tb
+        .spawn_actor::<TickSource>(Subname::Named("src"), (relays[0], pings_per_tick, lifecycle), ())
+        .finish()
+    {
         Ok(source) => source,
         Err(e) => {
             tracing::warn!(target: "aether_perf", topo = %topo.name, error = ?e, "tick source spawn failed");
@@ -264,15 +267,15 @@ pub fn run_cell(
         Drive::Latency { pace_hz: None } => {
             let _ = tb.advance(frames, DEFAULT_TICK_DELTA_MICROS);
         }
-        // Saturate: the tick source bursts `backlog` roots onto
+        // Saturate: the tick source emits `backlog` roots onto
         // relay 0's inbox on a single tick, and one `advance(1)`
-        // drains the whole burst to quiescence in that frame
+        // drains the whole backlog to quiescence in that frame
         // (iamacoffeepot/aether#1202). The pool contends on a deep
         // ready queue — the load the throughput metric captures —
         // instead of the one-root-settles-per-frame latency path.
         //
         // It advances exactly once regardless of `cfg.frames`: the
-        // backlog *is* the offered load, so re-bursting every frame
+        // backlog *is* the offered load, so re-emitting every frame
         // would multiply it by `frames` and lap the 4096-entry trace
         // rings, tripping the truncation gate below and nulling the
         // rate (the bug the `frames > 1` regression test guards).

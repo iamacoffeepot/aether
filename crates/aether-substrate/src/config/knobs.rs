@@ -9,7 +9,7 @@ use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 
 /// Default admission bound for the ADR-0165 registry owner queue, in
-/// commands. Sized so a legitimate burst never touches it — a birth storm
+/// commands. Sized so a legitimate spike never touches it — a birth storm
 /// parks tens of envelopes, and a batch is one per handler flush — while a
 /// sender spraying nonexistent recipients is capped at a few megabytes of
 /// owner-held memory rather than growing without limit.

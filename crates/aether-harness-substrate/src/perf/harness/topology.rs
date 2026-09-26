@@ -88,7 +88,7 @@ pub struct Topology {
 /// `2 + out_degree` trace-ring slots per inbound mail (`Received` +
 /// `Finished` on dispatch, plus one `Sent` per downstream), so this is the
 /// fan-out multiplier in the per-actor ring-budget bound
-/// `backlog * (2 + max_out_degree) <= ring_cap` that the `Saturate` burst
+/// `backlog * (2 + max_out_degree) <= ring_cap` that the `Saturate` backlog
 /// clamp in [`run_sweep_samples`] enforces (iamacoffeepot/aether#1226).
 ///
 /// [`run_sweep_samples`]: crate::perf::harness::run_sweep_samples

@@ -59,7 +59,7 @@
 #   AETHER_PERF_WORKERS  pool sizes (default "max,2")
 #   AETHER_PERF_FRAMES   frames per cell (default 200)
 #   AETHER_PERF_TOPOS    "ci" | "full" (default "ci")
-#   AETHER_PERF_BACKLOG  per-tick Ping burst for the saturate pass
+#   AETHER_PERF_BACKLOG  per-tick Ping count for the saturate pass
 #                        (default 512; iamacoffeepot/aether#1202). Set
 #                        per pass internally — AETHER_PERF_DRIVE and
 #                        AETHER_PERF_TIER are NOT caller knobs here; the script

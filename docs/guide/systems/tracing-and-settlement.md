@@ -243,7 +243,7 @@ not the in-flight work the ring is actively protecting. A tree self-reports wher
 it was truncated, but old or high-volume chains can come back incomplete or not at
 all. The starting size and the growth ceiling are tunable
 (`AETHER_ACTOR_TRACE_RING_SIZE` and `AETHER_ACTOR_TRACE_RING_MAX_SIZE`) if you
-routinely lose chains to bursts; even so, read a trace promptly after the work
+routinely lose chains to traffic spikes; even so, read a trace promptly after the work
 rather than counting on reconstructing something from minutes ago.
 
 ## How an agent uses it

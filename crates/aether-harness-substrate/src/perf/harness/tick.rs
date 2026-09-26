@@ -10,20 +10,20 @@ use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCt
 use super::{CountQuery, CountReport, Ping, Relay};
 
 /// Lifecycle bridge for the sweep: it subscribes itself to the `Tick`
-/// input stream in its `wire` hook, then emits a burst of `burst` `Ping`s into the entry relay per
+/// input stream in its `wire` hook, then emits `pings_per_tick` `Ping`s into the entry relay per
 /// frame, each inheriting the tick's trace lineage so the whole
 /// per-frame fan-out is one causal forest. The honest stand-in for a
 /// real tick-reactive component — the substrate's own `Tick` fan-out
 /// drives the work, no synthetic injector, no per-root settlement block.
 ///
-/// `burst == 1` is the latency regime (one root per tick, settles within
-/// its frame). A larger `burst` is the saturation regime
-/// (iamacoffeepot/aether#1202): the whole burst lands on relay 0's inbox
+/// `pings_per_tick == 1` is the latency regime (one root per tick, settles within
+/// its frame). A larger `pings_per_tick` is the saturation regime
+/// (iamacoffeepot/aether#1202): the whole backlog lands on relay 0's inbox
 /// in one tick, so a single `advance(1)` drains a deep ready queue — the
 /// contention the per-frame `advance` quiescence otherwise prevents.
 pub struct TickSource {
     entry: ActorRef<Relay>,
-    burst: u32,
+    pings_per_tick: u32,
     seq: u32,
     /// `Ping` mails emitted into the entry, for the run-end keep-up harvest
     /// (iamacoffeepot/aether#1233) — the offered load. `seq` wraps at `u32`
@@ -41,7 +41,7 @@ impl aether_actor::Addressable for TickSource {
 impl aether_actor::Root for TickSource {}
 impl aether_actor::HandlesKind<Tick> for TickSource {}
 impl aether_actor::Lifecycle<Self> for TickSource {
-    /// `(entry, burst, lifecycle)`: relay 0's proof — the first of those
+    /// `(entry, pings_per_tick, lifecycle)`: relay 0's proof — the first of those
     /// [`spawn_relays`](super::spawn_relays) returns — the number of `Ping`s
     /// to emit per `Tick` (`1` in `Latency`, `backlog` in `Saturate`), and the
     /// lifecycle cap's proof.
@@ -51,8 +51,8 @@ impl aether_actor::Lifecycle<Self> for TickSource {
     type InitCtx<'a> = NativeInitCtx<'a>;
     type Ctx<'a> = NativeCtx<'a, Self>;
     fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        let (entry, burst, lifecycle) = config;
-        Ok(Self { entry, burst, seq: 0, sent: 0, lifecycle })
+        let (entry, pings_per_tick, lifecycle) = config;
+        Ok(Self { entry, pings_per_tick, seq: 0, sent: 0, lifecycle })
     }
 
     /// Subscribe this source to the `Tick` stage as itself (ADR-0082 §7): the
@@ -121,7 +121,7 @@ impl Dispatch<Self> for TickSource {
         if kind.0 != Tick::ID.0 {
             return None;
         }
-        for _ in 0..state.burst {
+        for _ in 0..state.pings_per_tick {
             ctx.send_to(state.entry, &Ping { seq: state.seq });
             state.seq = state.seq.wrapping_add(1);
             state.sent += 1;
