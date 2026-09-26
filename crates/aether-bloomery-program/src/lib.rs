@@ -11,6 +11,11 @@
 //! declaration digest. [`Root`] is the bundle root's state: the program table
 //! plus the live-seq table.
 //!
+//! An async program may take trailing API bindings after `env`, from the
+//! closed set [`Http`], [`Process`], and [`Workspace`]; each is Sampled. A
+//! [`Workspace`] run that exhausts its allotment or fails in the executor
+//! ends the invocation as [`Invoked::Faulted`] without the program seeing it.
+//!
 //! `#![no_std]` + `alloc`. Guests cannot link the journal.
 
 #![no_std]
@@ -30,7 +35,7 @@ pub use aether_bloomery_program_derive::program;
 pub use declare::Program;
 #[doc(hidden)]
 pub use declare::{AsyncProgram, SyncProgram};
-pub use env::{Async, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Process, Sync};
+pub use env::{Async, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Process, Sync, Workspace};
 pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
 pub use section::{DeclarationsError, declarations};
@@ -57,6 +62,8 @@ pub mod __macro_internals {
         pub type Http = aether_http::HttpCapability;
         /// Target of [`crate::Process`].
         pub type Process = aether_process::ProcessCapability;
+        /// Target of [`crate::Workspace`].
+        pub type Workspace = aether_workspace::WorkspaceCapability;
     }
 
     /// Compiles only when `Api`'s [`InjectedApi::Target`] is `T`. `#[program]`

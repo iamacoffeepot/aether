@@ -22,7 +22,10 @@
 //!
 //! [`answer`] is the one place a sequence's end becomes a [`RunResult`]: an
 //! executor failure after the request was accepted is `Failed { detail }`,
-//! never a refusal. Beside the result, [`Runner::answer`] hands back what it
+//! never a refusal. The detail is [`RunError::cause`]: the failed call or the
+//! in-tree path and the class of failure, never a host path, a socket, or the
+//! daemon's words, because the driver records it; the log keeps the full
+//! text. Beside the result, [`Runner::answer`] hands back what it
 //! observed of the run — its peak memory and wall time — for the estimate,
 //! which never reaches the result.
 
@@ -178,7 +181,8 @@ impl Runner {
 }
 
 /// Map a sequence's end onto the reply. The only place a [`RunError`] becomes
-/// `Failed`; its full text is logged.
+/// `Failed`: the reply carries its host-free [`RunError::cause`], and its full
+/// text is logged.
 fn answer(ended: Result<Outcome, Stop>) -> RunResult {
     match ended {
         Ok(outcome) => {
@@ -195,7 +199,7 @@ fn answer(ended: Result<Outcome, Stop>) -> RunResult {
         }
         Err(Stop::Failed(error)) => {
             tracing::warn!(target: "aether_workspace", %error, "run failed");
-            RunResult::Failed { detail: Detail::new(error.to_string()) }
+            RunResult::Failed { detail: RunError::cause(&error) }
         }
     }
 }
@@ -207,7 +211,7 @@ fn settle<T>(ran: Result<T, Stop>, removed: Result<(), CleanupError>) -> Result<
     match (ran, removed) {
         (ran, Ok(())) => ran,
         (Ok(_), Err(error)) => Err(Stop::failed(RunError::Cleanup { error, after: None })),
-        (Err(stop), Err(error)) => Err(Stop::failed(RunError::Cleanup { error, after: Some(stop.to_string()) })),
+        (Err(stop), Err(error)) => Err(Stop::failed(RunError::Cleanup { error, after: Some(Box::new(stop)) })),
     }
 }
 
@@ -226,7 +230,7 @@ fn write_tree(
 
 /// Why a run ended without an [`Outcome`]. Both boxed arms are cold paths.
 #[derive(Debug)]
-enum Stop {
+pub enum Stop {
     Refused(Box<Refusal>),
     Exhausted(Resource),
     Failed(Box<RunError>),
@@ -239,6 +243,15 @@ impl Stop {
 
     fn failed(error: RunError) -> Self {
         Self::Failed(Box::new(error))
+    }
+
+    /// How the run ended, with an executor failure rendered as its
+    /// [`RunError::cause`] rather than its full text.
+    fn cause(&self) -> String {
+        match self {
+            Self::Refused(_) | Self::Exhausted(_) => self.to_string(),
+            Self::Failed(error) => error.cause_text(),
+        }
     }
 }
 
@@ -286,7 +299,67 @@ pub enum RunError {
     Commit(AppendError),
     /// A container or volume could not be removed; `after` is how the run
     /// ended before that, if it had already ended.
-    Cleanup { error: CleanupError, after: Option<String> },
+    Cleanup { error: CleanupError, after: Option<Box<Stop>> },
+}
+
+impl RunError {
+    /// The reply's detail: the failed call or step and the in-tree path, with
+    /// each wrapped error replaced by its class. It never carries a host
+    /// path, a socket, a host name, or the daemon's words, because the driver
+    /// records it; [`fmt::Display`] keeps the full text for the log.
+    pub fn cause(&self) -> Detail {
+        Detail::new(self.cause_text())
+    }
+
+    fn cause_text(&self) -> String {
+        match self {
+            Self::Engine { call, error } => format!("{call}: {}", error.cause()),
+            Self::Upload { call, error } => format!("{call}: {}", upload_cause(error)),
+            Self::Journal { during, .. } => format!("{during}: the journal failed"),
+            Self::Load { during, error } => format!("{during}: {}", load_cause(error)),
+            Self::Read { during, error } => format!("{during}: the stored blob did not read back ({})", error.kind()),
+            Self::Logs { call, error } => format!("{call}: the log stream failed ({})", error.kind()),
+            Self::Output(error) => format!("decoding the output /work: {}", output_cause(error)),
+            Self::Shape(detail) => detail.clone(),
+            Self::Commit(_) => "committing the run's artifacts: the journal failed".to_owned(),
+            Self::Cleanup { error, after: None } => format!("cleaning up: {}", error.cause()),
+            Self::Cleanup { error, after: Some(after) } => {
+                format!("{}; cleaning up also failed: {}", after.cause(), error.cause())
+            }
+        }
+    }
+}
+
+/// A failed tree upload's class: which side broke, never the journal's or the
+/// transport's words.
+fn upload_cause(error: &EncodeError<SourceError>) -> String {
+    match error {
+        EncodeError::Source(SourceError::Missing(digest)) => format!("the journal stores no artifact {digest}"),
+        EncodeError::Source(SourceError::Get(_)) => "loading a tree: the journal failed".to_owned(),
+        EncodeError::Source(SourceError::Journal(_)) => "opening a blob: the journal failed".to_owned(),
+        EncodeError::Write(error) => format!("writing the archive failed ({})", error.kind()),
+        EncodeError::BlobRead(error) => format!("reading a blob failed ({})", error.kind()),
+        EncodeError::BlobLength { .. } | EncodeError::TooDeep => error.to_string(),
+    }
+}
+
+/// A failed artifact load's class.
+fn load_cause(error: &GetError) -> &'static str {
+    match error {
+        GetError::Journal(_) => "the journal failed",
+        GetError::Decode(_) => "the stored artifact did not decode",
+        GetError::PrefixMismatch { .. } => "the stored artifact is another kind",
+    }
+}
+
+/// A failed output decode's class. A refused entry keeps its in-tree path and
+/// the tree rule it broke.
+fn output_cause(error: &DecodeError<JournalError>) -> String {
+    match error {
+        DecodeError::Sink(_) => "storing it in the journal failed".to_owned(),
+        DecodeError::Read(error) => format!("reading the archive failed ({})", error.kind()),
+        DecodeError::Refused { .. } => error.to_string(),
+    }
 }
 
 impl fmt::Display for RunError {

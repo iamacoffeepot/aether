@@ -64,6 +64,8 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-fleet = { path = "../aether-fleet" }
 # `derive` for the crash scenario's local mirrors of the fixture's program inputs.
 aether-data = { path = "../aether-data", features = ["derive"] }
+# The workspace scenario's scripted Engine API daemon and the kinds its seed stages.
+aether-workspace = { path = "../aether-workspace", features = ["test-support"] }
 
 # `confique` is reached only through the
 # `#[derive(aether_substrate::Config)]`-emitted paths on `BloomeryConfig`,

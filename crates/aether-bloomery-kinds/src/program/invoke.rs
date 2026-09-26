@@ -7,6 +7,7 @@ use core::fmt;
 
 use aether_data::{Blob, BlobReader, KindId, MAX_READ_BYTES};
 
+use crate::program::executor::ExecutorFault;
 use crate::program::fault::Detail;
 use crate::program::name::ProgramName;
 use crate::program::refusal::Refusal;
@@ -217,6 +218,21 @@ pub enum Invoked {
     Refused { seq: u64, refusal: Refusal },
     /// The bundle refused the request as protocol, not as a program outcome.
     Rejected { seq: u64, reason: Detail },
+    /// An executor the program called ended the invocation; nothing it staged is recorded.
+    Faulted { seq: u64, fault: ExecutorFault },
+}
+
+impl Invoked {
+    /// The driver's `Requested` sequence this reply answers.
+    #[must_use]
+    pub const fn seq(&self) -> u64 {
+        match self {
+            Self::Completed { seq, .. }
+            | Self::Refused { seq, .. }
+            | Self::Rejected { seq, .. }
+            | Self::Faulted { seq, .. } => *seq,
+        }
+    }
 }
 
 #[cfg(test)]

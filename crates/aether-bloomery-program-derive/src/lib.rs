@@ -20,8 +20,9 @@ mod parse;
 /// Takes no arguments. The impl must declare `NAME`, `INTENT`, `MODE` (`Pure`
 /// or `Sampled`), `Input`, and `Result`. `run` is an associated function: no
 /// receiver. `fn run` pairs with `Env<Sync>`; `async fn run` pairs with
-/// `Env<Async>`. Optional cap bindings follow `env`, each an `Http` or a
-/// `Process` in whatever path the author writes it; the export descriptor
+/// `Env<Async>`. Optional cap bindings follow `env`, each an `Http`, a
+/// `Process`, or a `Workspace` in whatever path the author writes it; each is
+/// Sampled, so it requires `Mode::Sampled`. The export descriptor
 /// carries the canonical name, and a check at the parameter confirms the type
 /// is the API that name selects.
 #[proc_macro_attribute]

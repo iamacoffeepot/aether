@@ -1,7 +1,7 @@
 # Workspace imports and runs
 
 > **Governing ADR:** [ADR-0237](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0237-workspaces-run-steps-over-trees.md)
-> (workspaces run steps over trees), decisions 2, 3, 4, 8, and 9. The actor
+> (workspaces run steps over trees), decisions 2, 3, 4, 7, 8, and 9. The actor
 > answers `Import` and `Run`.
 
 The `aether.workspace` actor is the Bloomery engine's only route to a container.
@@ -148,12 +148,51 @@ directory and its destination on the same side.
 | `Refused(EnvironmentUnavailable)` | The daemon answered but could not produce the environment image, or the image's label names another environment. Never a mid-run failure. |
 | `Exhausted(Time)` | A step was still running at the deadline; it is killed. |
 | `Exhausted(Memory)` | The kernel killed a step for memory (`OOMKilled`). |
-| `Failed { detail }` | The executor failed after accepting the run: a daemon or transport error, an output over the decode bounds, a `/work` no tree can represent (a FIFO, a device, an absolute symlink, a name the kinds refuse), an unreadable `rust-toolchain.toml`, a journal I/O failure, or a failed removal. `detail` names the call or the path. |
+| `Failed { detail }` | The executor failed after accepting the run: a daemon or transport error, an output over the decode bounds, a `/work` no tree can represent (a FIFO, a device, an absolute symlink, a name the kinds refuse), an unreadable `rust-toolchain.toml`, a journal I/O failure, or a failed removal. `detail` names the failed call or the in-tree path and the class of failure (for example `reading the daemon's platform: connecting to the Docker daemon failed (entity not found)`), never a host path, a socket, a host name, or the daemon's own message, because the driver records it. The actor's log keeps the full text. |
 
 `Exhausted` and `Failed` are faults about the attempt, never results: the
-`Workspace` program binding (#6711) ends the invocation on either, and the
-program never sees them. Nothing from a failed or exhausted run is committed,
-so retrying it is safe.
+`Workspace` program binding ends the invocation on either, and the program
+never sees them (see [From a program](#from-a-program)). Nothing from a failed
+or exhausted run is committed, so retrying it is safe.
+
+## From a program
+
+A Bloomery program reaches the actor through the trailing `Workspace` binding
+(ADR-0237 decision 7), one of the closed set of program APIs beside `Http` and
+`Process`. It is Sampled, so the program must declare `Mode::Sampled`; a
+`Mode::Pure` program that takes it does not compile.
+
+```rust
+async fn run(input: Self::Input, env: &mut Env<Async>, mut workspace: Workspace) -> Result<Self::Result, Refusal> {
+    let outcome = workspace.run(run).await?; // Result<Outcome, aether_workspace::Refusal>
+    // ...
+}
+```
+
+`workspace.run(run).await` gives `Ok(Ok(outcome))` for an outcome, a non-zero
+exit included, and `Ok(Err(refusal))` for the workspace's `Refused` answer. The
+outer `Err` is the program's own `Refusal` for a call that broke: a reply that
+is not a `RunResult`, or a send the invocation could not make.
+
+The bundle's invocation declares `WorkspaceCapability` as a dependency, so the
+bundle loads only where `aether.workspace` is composed: the Bloomery chassis.
+Elsewhere the load is refused and the driver records a `BundleUnavailable`
+fault.
+
+The binding never resolves on a fault. It ends the invocation instead, no
+program code after the await runs, nothing the program staged is recorded, and
+the driver records the fault, caused by the request's `Requested`:
+
+| Run answer | Recorded fault |
+|---|---|
+| `Exhausted(Time)` | `Fault { TimedOut }` |
+| `Exhausted(Memory)` | `Fault { ResourceExhausted }` |
+| `Failed { detail }` | `Fault { ExecutorFailed { reason } }`, with `reason` the same detail |
+
+Step stdout and stderr are `Ref<OpaqueBytes>` values the actor stored, and the
+output tree is a stored `Ref<Tree>`. A program cites them in its result without
+reading them, or reads one through `Env<Async>::read`, which fetches it from
+the journal on a miss.
 
 ## Provisioning
 

@@ -23,7 +23,7 @@ fn the_driver_mail_kind_ids_are_pinned() {
 const TRIPWIRE_CALL_PROGRAM: KindId = KindId(0x298e_86d0_91bf_d585);
 const TRIPWIRE_SET_HEAD: KindId = KindId(0x2842_0dd2_d83a_65e8);
 const TRIPWIRE_CALL: KindId = KindId(0x2dcc_bc68_65cc_027a);
-const TRIPWIRE_CALL_OUTCOME: KindId = KindId(0x223d_e29c_298a_b3d7);
+const TRIPWIRE_CALL_OUTCOME: KindId = KindId(0x2001_04b9_b5ad_b9c4);
 const TRIPWIRE_AWAIT_PROCESSED: KindId = KindId(0x28c8_2171_74e2_f5b0);
 const TRIPWIRE_PROCESSED: KindId = KindId(0x2389_3dd7_e7c2_f075);
 

@@ -9,8 +9,8 @@ mod support;
 
 use aether_bloomery_driver::{Command, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
-    CallOutcome, CallRefusal, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact, FaultReason, Invoked,
-    OpaqueBytes, ReadEventsResult, Ref, Utf8Text, artifact_digest,
+    CallOutcome, CallRefusal, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact, ExecutorFault,
+    FaultReason, Invoked, OpaqueBytes, ReadEventsResult, Ref, Utf8Text, artifact_digest,
 };
 use aether_data::Kind;
 use program_world::{call, fault, requested, transition};
@@ -593,6 +593,44 @@ fn invoked_seq_mismatch_and_rejection_are_protocol_violations() {
         panic!("expected a protocol violation, got {:?}", second.reason);
     };
     assert_eq!(reason.as_str(), "nope", "a rejection keeps its reason");
+}
+
+#[test]
+fn an_executor_fault_records_its_fault_reason_caused_by_the_request_and_no_transition() {
+    // Catches a driver that treats `Faulted` as a protocol violation, drops
+    // it, maps it to the wrong reason, or loses the failure's reason text.
+    let reason =
+        Detail::new("reading the daemon's platform: connecting to the Docker daemon failed (entity not found)");
+    let cases = [
+        (ExecutorFault::TimedOut, FaultReason::TimedOut),
+        (ExecutorFault::ResourceExhausted, FaultReason::ResourceExhausted),
+        (ExecutorFault::Failed { reason: reason.clone() }, FaultReason::ExecutorFailed { reason }),
+    ];
+    for (executor, expected) in cases {
+        let (mut world, initial) = World::open();
+        let fixed = fixtures(&mut world);
+        assert!(world.drive(initial).is_empty());
+        world.script_invoke(2, Invoked::Faulted { seq: 2, fault: executor });
+        let (_, commands) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
+        assert!(world.drive(commands).is_empty());
+        assert!(world.abort.is_none());
+        let record = fault(fixed.bundle, PROGRAM, fixed.input, expected);
+        assert_eq!(world.appends.len(), 2, "requested, then the fault alone");
+        assert!(world.appends[1].artifacts().is_empty());
+        assert_eq!(world.appends[1].records(), [DriverRecord::Fault { cause: 2, record: record.clone() }]);
+        assert!(matches!(&world.answers[..], [(_, CallOutcome::Fault { seq: 3, fault, .. })] if *fault == record));
+    }
+
+    let (mut world, initial) = World::open();
+    let fixed = fixtures(&mut world);
+    assert!(world.drive(initial).is_empty());
+    world.script_invoke(2, Invoked::Faulted { seq: 999, fault: ExecutorFault::TimedOut });
+    let (_, commands) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
+    assert!(world.drive(commands).is_empty());
+    assert!(matches!(
+        &world.answers[..],
+        [(_, CallOutcome::Fault { fault, .. })] if matches!(fault.reason, FaultReason::ProtocolViolation { .. })
+    ));
 }
 
 #[test]

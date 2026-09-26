@@ -1,14 +1,15 @@
 //! Guest `invoke` owns decoding, staging, and the orphan rule.
 
+use std::cell::Cell;
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, Mode, OpaqueBytes, ProgramName, ReadArtifactResult, Ref,
-    Refusal, Utf8Text, artifact_digest,
+    ClosureArtifact, Detail, Digest, EncodedArtifact, ExecutorFault, Invoke, Invoked, Mode, OpaqueBytes, ProgramName,
+    ReadArtifactResult, Ref, Refusal, Tree, Utf8Text, artifact_digest,
 };
 use aether_bloomery_program::{
-    Async, AsyncProgram, Env, Http, InjectedApi, Pending, PollResult, Process, Program, Started, Sync, SyncProgram,
-    invoke, start_async,
+    Async, AsyncProgram, AsyncSession, Env, Http, InjectedApi, Pending, PendingCall, PollResult, Process, Program,
+    Started, Sync, SyncProgram, Workspace, invoke, start_async,
 };
 use aether_data::wire::{decode_from_slice, encode_to_vec};
 use aether_data::{Cites, Kind, MAX_READ_BYTES, Storage};
@@ -540,4 +541,151 @@ fn invocation_child_has_no_run_kind_arm() {
     let child = include_str!("../../aether-bloomery-bundle-derive/src/expand/programs.rs");
     assert!(!child.contains("PendingSend::Process"), "invocation child must not grow a Process arm");
     assert!(!child.contains("Run =>"), "invocation child must not match on Run");
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.sampled_workspace.input")]
+struct WorkspaceInput {
+    tree: Ref<Tree>,
+    environment: Ref<aether_workspace::Environment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.sampled_workspace.result")]
+struct WorkspaceOut {
+    stdout: Ref<OpaqueBytes>,
+}
+
+thread_local! {
+    /// Set when [`SampledWorkspace`]'s code after the run's await executes.
+    static AFTER_AWAIT: Cell<bool> = const { Cell::new(false) };
+}
+
+struct SampledWorkspace;
+
+impl Program for SampledWorkspace {
+    const NAME: &'static str = "sampled.workspace";
+    const MODE: Mode = Mode::Sampled;
+    const INTENT: &'static str = "Run one step and cite its stdout.";
+    type Input = WorkspaceInput;
+    type Result = WorkspaceOut;
+}
+
+impl AsyncProgram for SampledWorkspace {
+    async fn run(input: Self::Input, mut env: Env<Async>) -> Result<Self::Result, Refusal> {
+        let mut workspace = Workspace::from_env(&mut env);
+        let step = aether_workspace::Step {
+            tool: aether_workspace::ToolName::new("tool").map_err(|_| Refusal::InputDecode)?,
+            args: vec!["target".to_owned()],
+            env: Vec::new(),
+            stdin: None,
+        };
+        let run = aether_workspace::Run {
+            tree: input.tree,
+            environment: input.environment,
+            mounts: aether_workspace::Mounts::new(Vec::new()).map_err(|_| Refusal::InputDecode)?,
+            steps: aether_workspace::Steps::new(vec![step]).map_err(|_| Refusal::InputDecode)?,
+            scratch: aether_workspace::Scratch::new(Vec::new()).map_err(|_| Refusal::InputDecode)?,
+            network: aether_workspace::Network::Off,
+        };
+        let answered = workspace.run(run).await?;
+        AFTER_AWAIT.set(true);
+        match answered {
+            Ok(outcome) => Ok(WorkspaceOut { stdout: outcome.steps[0].stdout }),
+            Err(refusal) => Err(Refusal::Refused { reason: Detail::new(format!("{refusal:?}")) }),
+        }
+    }
+}
+
+/// A started [`SampledWorkspace`] at seq 7 and the one call its first poll captured.
+fn start_workspace() -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
+    AFTER_AWAIT.set(false);
+    let input = WorkspaceInput {
+        tree: Ref::from_digest(Digest::from_bytes([1; 32])),
+        environment: Ref::from_digest(Digest::from_bytes([2; 32])),
+    };
+    let input_artifact = closure_of(&input)?;
+    let started = start_async::<SampledWorkspace>(Invoke::new(
+        7,
+        program_name::<SampledWorkspace>(),
+        input_artifact.claimed().unverified(),
+        vec![input_artifact],
+    ));
+    let Started::Live { session, waiting: Some(Pending::Send(pending)) } = started else {
+        return Err("expected the first poll to capture one cap send".into());
+    };
+    Ok((session, pending))
+}
+
+/// Answer the captured run with `reply`, then poll once: the invocation's end,
+/// and whether the program's code after the await ran.
+fn answer_workspace(reply: &aether_workspace::RunResult) -> Result<(PollResult, bool), Box<dyn Error>> {
+    let (mut session, pending) = start_workspace()?;
+    session.fulfill_send(&pending, aether_workspace::RunResult::ID, reply.encode_into_bytes());
+    Ok((session.poll(), AFTER_AWAIT.get()))
+}
+
+fn step_outcome(stdout: &[u8]) -> Result<aether_workspace::Outcome, Box<dyn Error>> {
+    Ok(aether_workspace::Outcome {
+        steps: vec![aether_workspace::StepOutcome {
+            exit_code: Some(0),
+            stdout: Ref::of_bytes(stdout),
+            stderr: Ref::of_bytes(b""),
+            tool: aether_workspace::ToolRecord {
+                name: aether_workspace::ToolName::new("tool")?,
+                path: aether_workspace::TreePath::new("usr/bin/tool")?,
+                file: Ref::of_bytes(b"#!tool\n"),
+            },
+        }],
+        tree: Ref::from_digest(Digest::from_bytes([3; 32])),
+    })
+}
+
+#[test]
+fn a_workspace_run_targets_the_workspace_and_hands_the_program_its_outcome_or_refusal() -> Result<(), Box<dyn Error>> {
+    // Catches a wrong `api_target` row or reply kind, an outcome that does not
+    // reach the program, and a workspace refusal that ends the invocation
+    // instead of reaching the program as `Ok(Err(..))`.
+    let (_, pending) = start_workspace()?;
+    assert_eq!(pending.mailbox, "aether.workspace");
+    assert_eq!(pending.kind_id, aether_workspace::Run::ID);
+    assert_eq!(pending.expected_reply, aether_workspace::RunResult::ID);
+
+    let (ran, _) = answer_workspace(&aether_workspace::RunResult::Ok(step_outcome(b"checked")?))?;
+    let expected = encoded(&WorkspaceOut { stdout: Ref::of_bytes(b"checked") })?;
+    let PollResult::Finished(Invoked::Completed { seq: 7, result, staged }) = ran else {
+        return Err(format!("expected Completed after Ok, got {ran:?}").into());
+    };
+    assert_eq!((result, staged), (expected.digest(), vec![expected]), "the result cites stdout without staging it");
+
+    let unknown = aether_workspace::Refusal::UnknownTool(aether_workspace::ToolName::new("tool")?);
+    let (refused, after_await) = answer_workspace(&aether_workspace::RunResult::Refused(unknown))?;
+    let PollResult::Finished(Invoked::Refused { seq: 7, refusal: Refusal::Refused { reason } }) = refused else {
+        return Err(format!("expected the program's own refusal, got {refused:?}").into());
+    };
+    assert!(reason.as_str().contains("UnknownTool"), "{reason:?}");
+    assert!(after_await, "the program saw the workspace's refusal");
+    Ok(())
+}
+
+#[test]
+fn an_exhausted_or_failed_run_ends_the_invocation_unseen_by_the_program() -> Result<(), Box<dyn Error>> {
+    // Catches a fault the program can observe (its code after the await runs,
+    // so it could record the fault as a result), a swapped time/memory
+    // mapping, and a failure detail lost on the way to the driver.
+    let detail = Detail::new("starting container c1: the Docker daemon answered 500");
+    let cases = [
+        (aether_workspace::RunResult::Exhausted(aether_workspace::Resource::Time), ExecutorFault::TimedOut),
+        (aether_workspace::RunResult::Exhausted(aether_workspace::Resource::Memory), ExecutorFault::ResourceExhausted),
+        (aether_workspace::RunResult::Failed { detail: detail.clone() }, ExecutorFault::Failed { reason: detail }),
+    ];
+    for (reply, expected) in cases {
+        let (ended, after_await) = answer_workspace(&reply)?;
+        let PollResult::Finished(Invoked::Faulted { seq: 7, fault }) = ended else {
+            return Err(format!("expected Faulted for {reply:?}, got {ended:?}").into());
+        };
+        assert_eq!(fault, expected, "for {reply:?}");
+        assert!(!after_await, "the program ran past the await of {reply:?}");
+    }
+    Ok(())
 }

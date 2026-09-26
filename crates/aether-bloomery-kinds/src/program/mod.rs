@@ -6,6 +6,7 @@
 //! [`ProgramRef`]: the bundle digest plus the program name.
 
 mod events;
+mod executor;
 mod fault;
 mod invoke;
 mod mode;
@@ -19,6 +20,7 @@ use alloc::string::String;
 use aether_data::KindId;
 
 pub use events::{ProgramHeadMoved, Transition};
+pub use executor::ExecutorFault;
 pub use fault::{Detail, DetailError, Fault, FaultReason};
 pub use invoke::{ClaimedDigest, ClosureArtifact, DigestMismatch, Invoke, Invoked};
 pub use mode::Mode;

@@ -219,6 +219,7 @@ dependencies = [
  "aether-http",
  "aether-kinds",
  "aether-process",
+ "aether-workspace",
  "wasmparser 0.246.2",
 ]
 
@@ -1084,6 +1085,18 @@ dependencies = [
  "aether-bloomery-program",
  "aether-data",
  "aether-process",
+]
+
+[[package]]
+name = "aether-test-fixtures-program-workspace"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-bundle",
+ "aether-bloomery-kinds",
+ "aether-bloomery-program",
+ "aether-data",
+ "aether-workspace",
 ]
 
 [[package]]

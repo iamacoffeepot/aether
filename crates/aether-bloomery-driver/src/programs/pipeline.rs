@@ -214,9 +214,7 @@ impl ProgramCore {
             self.abort(format!("invoked reply for request {seq} arrived with no matching active request"), out);
             return;
         }
-        let invoked_seq = match &invoked {
-            Invoked::Completed { seq, .. } | Invoked::Refused { seq, .. } | Invoked::Rejected { seq, .. } => *seq,
-        };
+        let invoked_seq = invoked.seq();
         if invoked_seq != seq {
             self.fail_active(
                 bundle,
@@ -237,6 +235,9 @@ impl ProgramCore {
             }
             Invoked::Rejected { reason, .. } => {
                 self.fail_active(bundle, seq, FaultReason::ProtocolViolation { reason }, out);
+            }
+            Invoked::Faulted { fault, .. } => {
+                self.fail_active(bundle, seq, FaultReason::from(fault), out);
             }
         }
     }

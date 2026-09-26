@@ -36,9 +36,9 @@ pub use journal::{
 };
 pub use lifecycle::{Activated, ActivationRejected, LiveFromError, ReactionFailed};
 pub use program::{
-    ClaimedDigest, ClosureArtifact, Detail, DetailError, DigestMismatch, Fault, FaultReason, Invoke, Invoked, Mode,
-    NativeOrigin, NativeOriginError, Program, ProgramHeadMoved, ProgramName, ProgramNameError, ProgramRef, ReactorName,
-    ReactorNameError, Refusal, RequestSource, Requested, RuleName, RuleNameError, Transition,
+    ClaimedDigest, ClosureArtifact, Detail, DetailError, DigestMismatch, ExecutorFault, Fault, FaultReason, Invoke,
+    Invoked, Mode, NativeOrigin, NativeOriginError, Program, ProgramHeadMoved, ProgramName, ProgramNameError,
+    ProgramRef, ReactorName, ReactorNameError, Refusal, RequestSource, Requested, RuleName, RuleNameError, Transition,
 };
 pub use reactor::{
     Evaluated, Event, REACTORS_SECTION, ReactorDeclaration, ReactorDeclarationError, ReactorDeclarationsError,
