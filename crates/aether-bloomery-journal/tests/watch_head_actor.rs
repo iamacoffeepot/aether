@@ -7,7 +7,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use aether_actor::{ActorRef, ErasedActorRef};
-use aether_bloomery_journal::{Batch, Journal, JournalActor, MAX_HEAD_WATCHERS, Seq};
+use aether_bloomery_journal::{Batch, Journal, JournalActor, MAX_HEAD_WATCHERS, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
     AppendRecords, AppendRecordsResult, Digest, DriverRecord, Head, MoveHead, MoveHeadResult, NativeOrigin,
     ProgramName, ProgramRef, Publish, PublishResult, RecordedHeadMove, Ref, RequestSource, Requested, WatchHead,
@@ -62,7 +62,7 @@ impl Fixture {
         let actor = chassis
             .spawn_actor::<JournalActor>(
                 Subname::Named("watch"),
-                (),
+                ReadCacheBudget::default(),
                 Journal::open(path).expect("open the journal root"),
             )
             .finish()

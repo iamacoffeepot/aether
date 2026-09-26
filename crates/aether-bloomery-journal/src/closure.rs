@@ -2,10 +2,13 @@
 //!
 //! A read plans the closure from the database rows first, [`plan_closure`],
 //! so the budget and a missing member are decided before any member file is
-//! read. It then reads the planned members: into one slab through a
-//! [`BlobCheckIn`] on the journal actor's worker ([`read_slab`], called by
-//! the crate's worker reader), or one buffer per member for
-//! [`crate::Journal::read_closure`].
+//! read. It then reads the planned members: on the journal actor's worker,
+//! members already in the crate's read cache are reused and only the misses
+//! are read, into one slab through a [`BlobCheckIn`] ([`read_slab`], called
+//! by the crate's worker reader); [`crate::Journal::read_closure`] reads
+//! every member into its own buffer. Either way a member is built only as a
+//! [`Verified`], whose claim was checked against the digest it was stored
+//! under.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -34,6 +37,14 @@ pub enum Closure {
 pub struct PlannedMember {
     digest: Digest,
     size_bytes: u64,
+}
+
+impl PlannedMember {
+    /// The digest the member is stored under.
+    #[must_use]
+    pub const fn digest(&self) -> Digest {
+        self.digest
+    }
 }
 
 /// A closure planned from the database rows alone, before any member file
@@ -111,19 +122,21 @@ pub fn read_each(
         .iter()
         .map(|member| {
             let (kind, payload) = blobs.read_payload(&member.digest, member.size_bytes)?;
-            verified(member.digest, kind, check_in(payload))
+            Verified::check(member.digest, kind, check_in(payload)).map(Verified::into_artifact)
         })
         .collect()
 }
 
-/// Read every planned member straight into its region of one slab checked
-/// in through `check_in`, then build each member over its [`Blob`]. An error
-/// before the slab is finished drops it, which frees it.
+/// Read every given member straight into its region of one slab checked in
+/// through `check_in`, then build each member over its [`Blob`]. The slab is
+/// exactly the given members' lengths, so a caller passes only the members
+/// it has to read. An error before the slab is finished drops it, which
+/// frees it.
 pub fn read_slab(
     blobs: &BlobDir,
-    members: &[PlannedMember],
+    members: &[&PlannedMember],
     check_in: &BlobCheckIn,
-) -> Result<Vec<ClosureArtifact>, JournalError> {
+) -> Result<Vec<Verified>, JournalError> {
     let lens = members.iter().map(|member| blobs::payload_len(member.size_bytes)).collect::<Result<Vec<_>, _>>()?;
     let mut slab = check_in.slab(&lens);
     let kinds = members
@@ -136,17 +149,51 @@ pub fn read_slab(
         .iter()
         .zip(kinds)
         .zip(slab.finish())
-        .map(|((member, kind), blob)| verified(member.digest, kind, blob))
+        .map(|((member, kind), blob)| Verified::check(member.digest, kind, blob))
         .collect()
 }
 
-/// The member of `kind` over `blob`, once its claim is checked against the
-/// `digest` it was stored under.
-fn verified(digest: Digest, kind: KindId, blob: Blob) -> Result<ClosureArtifact, JournalError> {
-    let artifact = ClosureArtifact::new(kind, blob);
-    if artifact.claimed().unverified() == digest {
-        Ok(artifact)
-    } else {
-        Err(JournalError::ArtifactDigestMismatch(digest))
+/// A member whose claim has been checked against the digest it was stored
+/// under. [`Self::check`] is the one constructor, so a `Verified` always
+/// carries a claim equal to its digest, which is what lets the read cache
+/// key an entry by that digest.
+pub struct Verified {
+    digest: Digest,
+    artifact: ClosureArtifact,
+}
+
+impl Verified {
+    /// The member of `kind` over `blob`, once its claim is checked against
+    /// the `digest` it was stored under.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::ArtifactDigestMismatch`] when `kind` and `blob` do not
+    /// hash to `digest`.
+    pub(crate) fn check(digest: Digest, kind: KindId, blob: Blob) -> Result<Self, JournalError> {
+        let artifact = ClosureArtifact::new(kind, blob);
+        if artifact.claimed().unverified() == digest {
+            Ok(Self { digest, artifact })
+        } else {
+            Err(JournalError::ArtifactDigestMismatch(digest))
+        }
+    }
+
+    /// The digest the member was stored under, which its claim equals.
+    #[must_use]
+    pub const fn digest(&self) -> Digest {
+        self.digest
+    }
+
+    /// The checked member.
+    #[must_use]
+    pub const fn artifact(&self) -> &ClosureArtifact {
+        &self.artifact
+    }
+
+    /// The checked member, by value.
+    #[must_use]
+    pub fn into_artifact(self) -> ClosureArtifact {
+        self.artifact
     }
 }

@@ -51,7 +51,9 @@
 //! artifact's transitive closure under a validated byte limit.
 //! [`aether_bloomery_kinds::ReadArtifact`] and `ReadClosure` both run off the
 //! actor's thread, each on its own task queue (ADR-0093), so a large artifact
-//! or closure never holds up the actor's other requests.
+//! or closure never holds up the actor's other requests. Both reuse members
+//! the journal still holds, under the [`ReadCacheBudget`], and read only the
+//! misses.
 //!
 //! A blob stored for the first time records its citation edges in the
 //! `citations` table inside the same append transaction, so the edges are
@@ -64,6 +66,7 @@ mod actor;
 mod artifact;
 mod batch;
 mod blobs;
+mod cache;
 mod clock;
 mod closure;
 mod draft;
@@ -80,6 +83,7 @@ pub use aether_bloomery_kinds::{
 };
 pub use artifact::split_artifact;
 pub use batch::{Batch, BatchError};
+pub use cache::ReadCacheBudget;
 pub use clock::{Clock, SystemClock};
 pub use closure::Closure;
 pub use draft::{Draft, DraftError};

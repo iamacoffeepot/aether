@@ -3,14 +3,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aether_bloomery_kinds::ClosureLimit;
-use aether_data::{Blob, KindId};
+use aether_bloomery_kinds::{ClosureArtifact, ClosureLimit};
 use aether_substrate::actor::native::BlobCheckIn;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::Digest;
 use crate::blobs::BlobDir;
-use crate::closure::{Closure, plan_closure, read_slab};
+use crate::cache::ReadCache;
+use crate::closure::{Closure, PlannedMember, Verified, plan_closure, read_slab};
 use crate::journal::{BUSY_TIMEOUT, JournalError, RootLock};
 
 /// Reads closures and single artifacts over one locked journal root on
@@ -21,7 +21,9 @@ use crate::journal::{BUSY_TIMEOUT, JournalError, RootLock};
 /// one into a hold-until-resolve worker (ADR-0093). Each read opens its own
 /// read-only connection on the calling thread; WAL gives that connection every
 /// transaction committed before it opened. The reader shares the root's lock,
-/// so the root stays locked while a read runs.
+/// so the root stays locked while a read runs. Both reads consult the shared
+/// [`ReadCache`] before touching a member file and fill it with the members
+/// they read.
 pub struct WorkerReader {
     database: PathBuf,
     blobs: BlobDir,
@@ -35,10 +37,12 @@ impl WorkerReader {
     }
 
     /// As [`crate::Journal::read_closure`], over a read-only connection opened
-    /// on the calling thread, with every member checked in through
-    /// `check_in` as one slab: one allocation for the whole closure, each
-    /// member file read straight into its region. The members are read for
-    /// one `Invoke` and dropped together, which is what a slab asks for.
+    /// on the calling thread. Members already in `cache` are reused without
+    /// reading their files or hashing them. The misses are checked in through
+    /// `check_in` as one slab of just their lengths, each member file read
+    /// straight into its region, and the slab's members enter `cache` as one
+    /// group, so they live and die together, which is what a slab asks for.
+    /// The reply lists every member in walk order either way.
     ///
     /// # Errors
     ///
@@ -49,25 +53,53 @@ impl WorkerReader {
         root: &Digest,
         limit: ClosureLimit,
         check_in: &BlobCheckIn,
+        cache: &ReadCache,
     ) -> Result<Closure, JournalError> {
-        plan_closure(&self.connect()?, *root, limit)?.read_with(|members| read_slab(&self.blobs, &members, check_in))
+        plan_closure(&self.connect()?, *root, limit)?.read_with(|members| {
+            let cached = cache.lookup(members.iter().map(PlannedMember::digest));
+            let misses = members
+                .iter()
+                .zip(&cached)
+                .filter(|(_, hit)| hit.is_none())
+                .map(|(member, _)| member)
+                .collect::<Vec<_>>();
+            let fresh = if misses.is_empty() {
+                Vec::new()
+            } else {
+                read_slab(&self.blobs, &misses, check_in)?
+            };
+
+            // `read_slab` returns one member per miss, in order, so each miss takes the next one.
+            let mut read = fresh.iter().map(|member| member.artifact().clone()).collect::<Vec<_>>().into_iter();
+            cache.insert(fresh);
+            Ok(cached.into_iter().filter_map(|hit| hit.or_else(|| read.next())).collect())
+        })
     }
 
-    /// The kind and checked-in payload of the artifact stored under `digest`,
-    /// or `None` when it has no row, over a read-only connection opened on
-    /// the calling thread. The payload is read straight into one buffer of
-    /// its exact length and checked in through `check_in` once. There is no
-    /// slab: a single artifact lives and dies alone.
+    /// The verified artifact stored under `digest`, or `None` when it has no
+    /// row. A member already in `cache` is returned without opening a
+    /// connection. Otherwise, over a read-only connection opened on the
+    /// calling thread, the payload is read straight into one buffer of its
+    /// exact length, checked in through `check_in` once, and cached as a
+    /// group of its own. There is no slab: a single artifact lives and dies
+    /// alone.
     ///
     /// # Errors
     ///
     /// [`JournalError::Backend`] when the connection or the row read fails,
-    /// and as [`BlobDir::read_payload`] for the artifact's file.
+    /// as [`BlobDir::read_payload`] for the artifact's file, and
+    /// [`JournalError::ArtifactDigestMismatch`] when its stored kind and
+    /// payload do not hash to `digest`.
     pub fn read_artifact(
         &self,
         digest: &Digest,
         check_in: &BlobCheckIn,
-    ) -> Result<Option<(KindId, Blob)>, JournalError> {
+        cache: &ReadCache,
+    ) -> Result<Option<ClosureArtifact>, JournalError> {
+        if let Some(artifact) = cache.get(*digest) {
+            return Ok(Some(artifact));
+        }
+
         let Some(size) = self
             .connect()?
             .query_row(
@@ -82,7 +114,10 @@ impl WorkerReader {
 
         let size_bytes = u64::try_from(size).map_err(|_| JournalError::IntegerRange)?;
         let (kind, payload) = self.blobs.read_payload(digest, size_bytes)?;
-        Ok(Some((kind, check_in.check_in(payload))))
+        let member = Verified::check(*digest, kind, check_in.check_in(payload))?;
+        let artifact = member.artifact().clone();
+        cache.insert(vec![member]);
+        Ok(Some(artifact))
     }
 
     /// A read-only connection to the root's database, opened on the calling

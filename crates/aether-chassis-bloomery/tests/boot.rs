@@ -6,7 +6,7 @@
 //! tear down on drop. The refusal test builds [`BloomeryEnv`] directly, since
 //! it asserts the boot that never produces a harness.
 
-use aether_bloomery_journal::Batch;
+use aether_bloomery_journal::{Batch, ReadCacheBudget};
 use aether_bloomery_kinds::{ClosureLimit, Head, RecordedHead, RecordedHeadMove, Seq, Utf8Text};
 use aether_chassis::boot::{ChassisBase, RuntimeConfig};
 use aether_chassis_bloomery::BloomeryConfig;
@@ -58,7 +58,11 @@ fn unset_journal_refuses_boot() {
     let env = BloomeryEnv::new(
         ChassisBase { sources: ConfigSources::new(None), ..Default::default() },
         RuntimeConfig::default(),
-        BloomeryConfig { journal: None, closure_limit_bytes: ClosureLimit::MAX_BYTES },
+        BloomeryConfig {
+            journal: None,
+            closure_limit_bytes: ClosureLimit::MAX_BYTES,
+            read_cache_bytes: ReadCacheBudget::DEFAULT_BYTES,
+        },
     );
     let error = BloomeryChassis::build(env).expect_err("boot without a journal root must fail");
     let message = error.to_string();
@@ -76,7 +80,11 @@ fn a_root_another_engine_holds_refuses_boot_naming_the_root() {
     let env = BloomeryEnv::new(
         ChassisBase { sources: ConfigSources::new(None), ..Default::default() },
         RuntimeConfig::default(),
-        BloomeryConfig { journal: Some(root.display().to_string()), closure_limit_bytes: ClosureLimit::MAX_BYTES },
+        BloomeryConfig {
+            journal: Some(root.display().to_string()),
+            closure_limit_bytes: ClosureLimit::MAX_BYTES,
+            read_cache_bytes: ReadCacheBudget::DEFAULT_BYTES,
+        },
     );
 
     let error = BloomeryChassis::build(env).expect_err("a held journal root must refuse a second boot");

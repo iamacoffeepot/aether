@@ -2,6 +2,7 @@
 
 use std::ops::Range;
 
+use crate::cache::{ReadCache, ReadCacheBudget};
 use crate::watch::Watchers;
 use crate::{AppendError, Batch, Closure, Digest, Journal, JournalError};
 use aether_actor::{Manual, actor};
@@ -10,7 +11,6 @@ use aether_bloomery_kinds::{
     MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult,
     ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq, WatchHead, WatchHeadResult,
 };
-use aether_data::{Blob, KindId};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 use aether_substrate::chassis::error::BootError;
 
@@ -40,27 +40,30 @@ const MAX_ARTIFACT_READS_IN_FLIGHT: usize = 4;
 ///
 /// The composer opens the [`Journal`] and hands it over as the actor's params
 /// (ADR-0156 §3), so the root is held, and a held root refused, before the
-/// actor exists.
+/// actor exists. Its config is the [`ReadCacheBudget`] that bounds the one
+/// read cache its workers share, holding the members they checked in.
 pub struct JournalActor {
     journal: Journal,
     watchers: Watchers,
     closures: TaskQueue,
     artifacts: TaskQueue,
+    cache: ReadCache,
 }
 
 #[actor(instanced, root)]
 impl NativeActor for JournalActor {
-    type Config = ();
+    type Config = ReadCacheBudget;
     type Params = Journal;
 
     const NAMESPACE: &'static str = "aether.bloomery.journal";
 
-    fn init((): (), journal: Journal, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(budget: ReadCacheBudget, journal: Journal, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
             journal,
             watchers: Watchers::new(),
             closures: TaskQueue::new(MAX_CLOSURE_READS_IN_FLIGHT),
             artifacts: TaskQueue::new(MAX_ARTIFACT_READS_IN_FLIGHT),
+            cache: ReadCache::with_budget(budget),
         })
     }
 
@@ -103,13 +106,15 @@ impl NativeActor for JournalActor {
     /// Every other request keeps being answered meanwhile, and the reply
     /// lands when the read finishes. The connection opens after every write
     /// this actor committed before the request was handled, so the read sees
-    /// them all.
+    /// them all. A member the read cache still holds is answered from it
+    /// without opening a connection.
     #[handler::single]
     fn on_read_artifact(&mut self, ctx: &mut NativeCtx<'_>, request: ReadArtifact) -> Pending<ReadArtifactResult> {
         let digest = request.digest;
         let reader = self.journal.worker_reader();
         let check_in = ctx.blob_check_in();
-        self.artifacts.submit(ctx, move || artifact_reply(digest, reader.read_artifact(&digest, &check_in)))
+        let cache = self.cache.clone();
+        self.artifacts.submit(ctx, move || artifact_reply(digest, reader.read_artifact(&digest, &check_in, &cache)))
     }
 
     /// ADR-0093 completion of an artifact read: reply to the request's own
@@ -130,13 +135,17 @@ impl NativeActor for JournalActor {
     /// other request keeps being answered meanwhile, and the reply lands when
     /// the walk finishes. The connection opens after every write this actor
     /// committed before the request was handled, so the walk sees them all.
+    /// Members the read cache still holds are reused without reading their
+    /// files, and only the misses go into the slab.
     #[handler::single]
     fn on_read_closure(&mut self, ctx: &mut NativeCtx<'_>, request: ReadClosure) -> Pending<ReadClosureResult> {
         let ReadClosure { root, limit_bytes } = request;
         let reader = self.journal.worker_reader();
         let check_in = ctx.blob_check_in();
-        self.closures
-            .submit(ctx, move || closure_reply(root, limit_bytes, reader.read_closure(&root, limit_bytes, &check_in)))
+        let cache = self.cache.clone();
+        self.closures.submit(ctx, move || {
+            closure_reply(root, limit_bytes, reader.read_closure(&root, limit_bytes, &check_in, &cache))
+        })
     }
 
     /// ADR-0093 completion of a closure walk: reply to the request's own
@@ -279,19 +288,13 @@ impl JournalActor {
 }
 
 /// The reply a finished artifact read answers with.
-fn artifact_reply(digest: Digest, outcome: Result<Option<(KindId, Blob)>, JournalError>) -> ReadArtifactResult {
+fn artifact_reply(digest: Digest, outcome: Result<Option<ClosureArtifact>, JournalError>) -> ReadArtifactResult {
     match outcome {
-        Ok(Some((kind, blob))) => {
-            let artifact = ClosureArtifact::new(kind, blob);
-            if artifact.claimed().unverified() == digest {
-                ReadArtifactResult::Found { artifact }
-            } else {
-                ReadArtifactResult::Err {
-                    digest,
-                    message: "stored artifact bytes do not match the requested digest".into(),
-                }
-            }
-        }
+        Ok(Some(artifact)) => ReadArtifactResult::Found { artifact },
+        Err(JournalError::ArtifactDigestMismatch(_)) => ReadArtifactResult::Err {
+            digest,
+            message: "stored artifact bytes do not match the requested digest".into(),
+        },
         Ok(None) => ReadArtifactResult::Missing { digest },
         Err(error) => ReadArtifactResult::Err { digest, message: error.to_string() },
     }
