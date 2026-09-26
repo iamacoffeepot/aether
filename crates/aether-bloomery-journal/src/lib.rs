@@ -6,6 +6,8 @@
 //! file is written temp file, fsync, rename, directory fsync before the row
 //! that names it commits. [`Journal::open`] takes an exclusive lock on the
 //! root, so a second open fails in any process, and sweeps `blobs/tmp/`.
+//! [`Journal::open`] also stores the empty [`aether_bloomery_kinds::Tree`],
+//! with no event, so a program can cite it without staging it.
 //! [`JournalReader`] observes a root without the lock. See ADR-0220.
 //!
 //! Two layers, and the split is the point:

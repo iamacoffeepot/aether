@@ -4,6 +4,7 @@
 - **Date:** 2026-09-16
 - **Amended:** 2026-09-24 — tree entry names are unique byte for byte, and the Windows-portability name rules are dropped; both served writing a tree to a host directory, which no longer happens (ADR-0237).
 - **Amended:** 2026-09-25 — the journal is a root directory holding the SQLite database and a `blobs` directory; every artifact's bytes, at every size, are one digest-named file there, and the `artifacts` row keeps only the digest, size, and time; opening a root takes an exclusive lock (resolves ADR-0237 open question 1).
+- **Amended:** 2026-09-25 — opening a root also stores the empty `bloomery.tree` artifact when its row is absent: a stored artifact with no entry and no event, and the one artifact the journal writes that no caller staged, so every program can cite the empty tree.
 
 ## Context
 
@@ -60,7 +61,9 @@ unwalked field. The recognized head-move check is not that walk: it decodes
   consoles; a fold never reads it.
 - `open*` creates the `entries` table and `kind` / `cause` indexes if absent,
   sets `journal_mode = WAL` on file-backed databases only, and sets
-  `synchronous = FULL`.
+  `synchronous = FULL`. It then stores the empty `bloomery.tree` artifact when
+  its row is absent, with no entry and no event, so every program can cite the
+  empty tree without staging it.
 - `append` is one `BEGIN IMMEDIATE` transaction that reads the log head,
   returns `AppendError::HeadMoved { actual }` if the fence is stale (nothing
   written), otherwise inserts staged blobs, verifies every citation, decodes

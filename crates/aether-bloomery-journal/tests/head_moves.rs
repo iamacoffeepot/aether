@@ -2,10 +2,11 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::error::Error;
 
 use aether_bloomery_journal::{AppendError, Batch, Digest, Draft, Journal, OpaqueBytes, Seq, Utf8Text};
-use aether_bloomery_kinds::{Head, HeadMoved, RecordedHeadMove, Ref, Tree};
+use aether_bloomery_kinds::{Head, HeadMoved, Name, Node, RecordedHeadMove, Ref, Tree};
 use aether_data::{Kind, KindId, Storage, StorageData};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -71,13 +72,15 @@ fn a_move_to_a_same_batch_target_appends() -> Result<(), Box<dyn Error>> {
     // pre-transaction store, so a new target has to predate the move.
     let (_root, mut journal) = common::temp_journal(0)?;
     let mut batch = Batch::new();
-    let tree = batch.stage_encoded(&Tree::empty())?;
+    let readme = batch.stage_bytes(b"new in this batch");
+    let target = Tree::new(BTreeMap::from([(Name::new("readme")?, Node::File(readme))]));
+    let tree = batch.stage_encoded(&target)?;
     batch.push_event(&move_event(&tree_head("main"), tree), None)?;
     journal.append(Seq(0), &batch)?;
 
     let entry = journal.read(Seq(0), 1)?.into_iter().next().expect("one move");
     assert_eq!(Journal::decode::<HeadMoved<Tree>>(&entry)?.to(), tree);
-    assert_eq!(journal.get::<Tree>(&tree.digest())?, Some(Tree::empty()));
+    assert_eq!(journal.get::<Tree>(&tree.digest())?, Some(target));
     Ok(())
 }
 

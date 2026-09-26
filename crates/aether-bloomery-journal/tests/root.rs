@@ -10,6 +10,7 @@ use aether_bloomery_journal::{
     AppendError, Batch, Digest, Journal, JournalError, JournalReader, OpaqueBytes, Ref, Seq, artifact_blob,
     artifact_digest,
 };
+use aether_bloomery_kinds::Tree;
 use aether_data::Kind;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -41,6 +42,23 @@ fn a_fresh_open_creates_the_root_and_its_layout() -> Result<(), Box<dyn Error>> 
     assert!(root.join("blobs").is_dir());
     assert!(root.join("blobs").join("tmp").is_dir());
     assert!(root.join("lock").is_file());
+    Ok(())
+}
+
+#[test]
+fn a_fresh_root_holds_the_empty_tree_and_no_entry() -> Result<(), Box<dyn Error>> {
+    // Catches the seed recorded as an entry (the head moves), the seed
+    // written only when the root is created, and a reopen that trips the
+    // digest primary key because the absent-row check was skipped.
+    let (root, journal) = common::temp_journal(0)?;
+    let empty = Ref::of_encoded(&Tree::empty())?.digest();
+    assert_eq!(journal.get::<Tree>(&empty)?, Some(Tree::empty()));
+    assert_eq!(journal.head()?, Seq(0));
+
+    drop(journal);
+    let reopened = Journal::open(root.path())?;
+    assert_eq!(reopened.get::<Tree>(&empty)?, Some(Tree::empty()));
+    assert_eq!(reopened.head()?, Seq(0));
     Ok(())
 }
 

@@ -130,14 +130,19 @@ impl Journal {
     /// Creates the root when it is missing (its parent must exist), takes the
     /// exclusive lock, creates `blobs/` and `blobs/tmp/`, deletes whatever
     /// `blobs/tmp/` holds, then opens `journal.sqlite` and applies the DDL.
+    /// Last it stores the empty [`aether_bloomery_kinds::Tree`] when the root
+    /// lacks its row, with no event, so the head stays where it was and any
+    /// program can cite that tree without staging it.
     ///
     /// # Errors
     ///
     /// [`JournalError::NotADirectory`] when `root` exists and is not a
     /// directory, such as a single-file journal. [`JournalError::Locked`] when
     /// another open journal, in this process or another, holds the root.
-    /// [`JournalError::Io`] when the root's layout cannot be created or swept.
-    /// [`JournalError::Backend`] when `SQLite` cannot open the log or apply DDL.
+    /// [`JournalError::Io`] when the root's layout cannot be created or swept,
+    /// or the empty tree's blob cannot be written.
+    /// [`JournalError::Backend`] when `SQLite` cannot open the log, apply DDL,
+    /// or store the empty tree's row.
     pub fn open_with_clock(root: &Path, clock: Box<dyn Clock + Send>) -> Result<Self, JournalError> {
         create_root(root)?;
         let lock = lock_root(root)?;
@@ -146,9 +151,10 @@ impl Journal {
         blobs.create()?;
         blobs.sweep_tmp()?;
 
-        let conn = Connection::open(root.join(DATABASE_FILE))?;
+        let mut conn = Connection::open(root.join(DATABASE_FILE))?;
         configure_writer(&conn)?;
         prepare_schema(&conn)?;
+        seed_empty_tree(&mut conn, &blobs, clock.now_millis())?;
         Ok(Self {
             conn,
             clock,
@@ -440,6 +446,30 @@ fn lock_root(root: &Path) -> Result<File, JournalError> {
         Err(TryLockError::WouldBlock) => Err(JournalError::Locked { root: root.to_path_buf() }),
         Err(TryLockError::Error(error)) => Err(JournalError::io(&path, error)),
     }
+}
+
+/// Store the empty `Tree` when its row is absent, in one transaction and with
+/// no event, so every open root holds it and a program can cite it unstaged.
+/// Its file lands before its row, as in [`insert_staged`].
+fn seed_empty_tree(conn: &mut Connection, blobs: &BlobDir, recorded_at_millis: u64) -> Result<(), JournalError> {
+    use aether_bloomery_kinds::{Tree, artifact_blob, hash_bytes};
+    use aether_data::StorageData;
+
+    let payload = Tree::encode_storage(&StorageData::from_value(Tree::empty())).map_err(JournalError::Encode)?;
+    let bytes = artifact_blob(Tree::ID, &payload);
+    let digest = hash_bytes(&bytes);
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    {
+        let mut rows = ArtifactRows::prepare(&tx, recorded_at_millis)?;
+        if !rows.is_stored(&digest)? {
+            blobs.store(&digest, &bytes)?;
+            let size_bytes = u64::try_from(bytes.len()).map_err(|_| JournalError::IntegerRange)?;
+            rows.insert(&digest, size_bytes, &[])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Store each staged blob whose row is absent: its file lands through
