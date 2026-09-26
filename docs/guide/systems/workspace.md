@@ -12,7 +12,8 @@ Docker actor.
 
 `Import` pulls a digest-pinned image and decodes its filesystem into a stored
 tree. An environment's base and toolchain layers enter the journal this way
-before any run can use them. `Run` runs steps over a stored tree in a stored
+before any run can use them, and so does a source checkout, packed into a
+source image on the build host. `Run` runs steps over a stored tree in a stored
 environment, each in its own container, and stores what they produce.
 
 ## The contract
@@ -438,6 +439,78 @@ Pins are image digests; a tag beside one only names it for the reader.
 - `apt-get` output changes from day to day, so a rebuilt base can have a new
   digest. An environment records the imported tree digest, not the recipe.
 
+## Importing a source tree
+
+A proof runs over a source tree, and a checkout enters the journal the same
+way the environment layers do: as a digest-pinned image the actor imports
+(ADR-0237 decision 3). The checkout is named only on the build host. A host
+path in mail would give an addressable actor a file-read door, so the image
+reference is the only thing that crosses into the engine. The checked-in
+recipe is in `scripts/bloomery/source/`, beside a `registry.sh` it shares with
+the environment recipe.
+
+| File | What it holds |
+|---|---|
+| `source.Dockerfile` | `FROM scratch` and `COPY . /source`: the checkout under `/source` and nothing else |
+| `source.Dockerfile.dockerignore` | the build context as a fail-closed allowlist of the checkout's roots |
+| `publish.sh` | builds the image over a checkout, pushes it to the loopback registry, and prints its reference |
+
+Run the steps on the host whose daemon the actor dials.
+
+1. **Publish.** `scripts/bloomery/source/publish.sh` packs the repository
+   holding the script, or `publish.sh <checkout>` another checkout directory.
+   It starts the registry the environment recipe uses unless it is already
+   running, builds, pushes, and prints:
+
+   ```text
+   source=localhost:5000/aether-source/checkout@sha256:<digest>
+   ```
+
+   Repacking an unchanged checkout is a cache hit and prints the same
+   reference. Another checkout of the same content can print another
+   reference, because the image layer keeps file times, but it imports as the
+   same tree.
+2. **Import.** Mail `aether.workspace.import { image }` to `aether.workspace`
+   on a Bloomery engine. It answers `Ok { tree }`: the image's whole
+   filesystem, with the checkout under `source` beside Docker's placeholders
+   (`.dockerenv`, `dev`, `etc`, `proc`, `sys`). Importing the same checkout
+   content twice answers the same tree.
+3. **Select.** Stage a `source.select.input` (`SelectInput { image }`, the
+   imported tree) and send `aether.bloomery.driver.call` for the program
+   `source.select`, in the same bundle as `environment.merge`. The Pure
+   program answers a `Transition` whose result is the `source` entry's tree,
+   so the result digest is that subtree's digest and nothing new is built. It
+   refuses, naming `source`, when the image holds no `source` directory.
+4. **Cite.** Pass the transition's result as `source` in both
+   `vendor.cargo.input` and `proof.clippy.input`, so the vendor tree and the
+   proof share one `Cargo.lock`.
+
+What the source tree holds:
+
+- The context starts from nothing and re-includes only the roots cargo and
+  the `cargo xtask` lanes read: `Cargo.toml`, `Cargo.lock`,
+  `rust-toolchain.toml`, `rustfmt.toml`, `clippy.toml`,
+  `approval-policy.toml`, `.cargo`, `.config`, `crates`, `docs`, `scripts`,
+  and `xtask`.
+- Inside those roots it drops the paths `.gitignore` ignores there:
+  `docs/book`, every `target`, and every `__pycache__`. It also drops every
+  environment file at any depth: each name that starts with `.env` (`.env`,
+  `.env.<suffix>`, `.envrc`) and each `<name>.env`.
+- Everything else never enters: `.git`, `target`, `dist`, `research`, the
+  agent and CI directories, `fuzz`, and the root prose files. A tree could not
+  hold `.git` anyway, because `Name` refuses it.
+
+The list is an allowlist because a content-addressed tree cannot forget: an
+ignore file that mirrored `.gitignore` would drift as `.gitignore` grew, and
+the first drift would store an ignored or secret file in the journal. A root
+the allowlist misses makes a proof fail loudly instead, for example as a
+missing workspace member. The ignore file is one BuildKit reads, so
+`publish.sh` forces BuildKit; a checkout's own `.dockerignore` cannot widen it.
+
+No head is published for a source tree. Each checkout is its own tree, and the
+proof's caller cites the transition's result directly, so a head would have
+no reader.
+
 ## Vendoring crate sources
 
 `vendor.cargo` produces the tree [the clippy proof](#the-clippy-proof) mounts
@@ -451,7 +524,7 @@ Its input, `vendor.cargo.input`, cites two things:
 
 | Field | What it is | Where the run sees it |
 |---|---|---|
-| `source: Ref<Tree>` | the cargo workspace whose `Cargo.lock` is vendored | `/source`, read-only |
+| `source: Ref<Tree>` | the cargo workspace whose `Cargo.lock` is vendored, such as the result of `source.select` ([Importing a source tree](#importing-a-source-tree)) | `/source`, read-only |
 | `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` | the root |
 
 The program asks for one run, and every argument is fixed:
@@ -521,7 +594,7 @@ Its input, `proof.clippy.input`, cites three trees:
 
 | Field | What it is | Where the run sees it |
 |---|---|---|
-| `source: Ref<Tree>` | the cargo workspace under proof | `/work` |
+| `source: Ref<Tree>` | the cargo workspace under proof, such as the result of `source.select` ([Importing a source tree](#importing-a-source-tree)) | `/work` |
 | `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (step 5 of [Building an environment](#building-an-environment)) | the root |
 | `vendor: Ref<Tree>` | the `Vendored.tree` of a `vendor.cargo` run over a source with the same `Cargo.lock` (see [Vendoring crate sources](#vendoring-crate-sources)) | `/vendor`, read-only |
 
