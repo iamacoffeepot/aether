@@ -2,11 +2,14 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-26
+- **Amended:** 2026-09-26 — D7 is replaced: Bloomery has one workspace per engine, a singleton service. The crate is `aether-bloomery-workspace` and the actor `aether.bloomery.workspace`, still `#[actor(singleton, root)]`. It holds the whole host budget and one FIFO admission queue across every caller, and no artifact store: a run's or an import's inputs are read from its caller and its outputs are handed back to the caller to commit, through a second `TreeSource` / `TreeSink` implementation. Only a caller that covers the workspace's storage protocol may send `Run` or `Import`, checked at the typed send and by one guard cast at receipt. In Bloomery the caller is the unit's driver, which answers from its own journal. The workspace is no longer a unit member, and `HostBudget::split`, `UnitBudget`, and the per-unit workspace knobs are removed.
 
 Amends [ADR-0226](0226-native-bundle-driver.md) decisions 1 and 2,
 [ADR-0229](0229-program-cap-apis-are-extra-run-arguments.md) decision 2 and
 its 2026-09-24 amendment, and [ADR-0237](0237-workspaces-run-steps-over-trees.md)
-decisions 8 and 9. Resolves the "several journals per engine" deferral in
+decisions 3 and 8 and open questions 1 and 3. Extends
+[ADR-0231](0231-protocol-typed-references-and-reply-checks.md) with a caller
+protocol on a handler row (D7). Resolves the "several journals per engine" deferral in
 [ADR-0225](0225-reactor-bundles-load-by-digest.md) and ADR-0226. Gives
 [ADR-0230](0230-proven-actor-references.md) §3's `Address<R>` row its first
 consumer.
@@ -73,23 +76,25 @@ files. Issue #6821 tracks the fix. This ADR does not use the verb.
 | **unit** | One log plus every actor whose state derives from that log. |
 | **unit key** | The `UnitKey` that names a unit, unique per engine: a `LoadName` of at most 191 bytes (D3, D4). |
 | **unit root** | The unit's log owner, the root of the unit's lineage: `JournalActor` at `aether.bloomery.journal:<key>` (D1). |
-| **member** | An actor beneath a unit root: the driver and the workspace. |
+| **member** | An actor beneath a unit root: the driver. |
 | **bundle root** | A trampoline beneath the engine's one `aether.component` that hosts one bundle's generated root for one unit, loaded under the name `<key>-<digest>` (D4). |
 | **belongs to a unit** | A member belongs by lineage, beneath the unit root. A bundle root belongs by name, through the unit key its name is built from. |
 | **engine-shared** | Held once per engine and keyed by content hash, or holding no log state. |
 
 ```text
 aether.bloomery.journal:<key>                          unit root: the journal
-├── aether.workspace:workspace                         member
-└── aether.bloomery.driver:driver                      member
+└── aether.bloomery.driver:driver                      member; the unit's caller of the workspace
 
 aether.component                                       engine-shared host
 ├── aether.embedded:<key>-<digest>                     bundle root of unit <key> (one per digest the unit loads)
 │   └── aether.embedded:<seq>                          inline child per live invocation
 └── aether.embedded:<other-key>-<digest>               the same digest's bundle root for another unit
 
-engine-shared: aether.component (and its compiled-module map), aether.http,
-the engine blob store, the RPC server, the inventory
+aether.bloomery.workspace                              engine-shared; no store: reads and writes through each caller
+
+engine-shared: aether.component (and its compiled-module map),
+aether.bloomery.workspace, aether.http, the engine blob store, the RPC server,
+the inventory
 ```
 
 ### Invariants
@@ -114,8 +119,10 @@ lives in one journal, and a journal is never split across units.**
   door births a unit, and a repeated root refuses boot. Closed by
   semantics as well: I-3 says no order exists across units, so work split
   across two journals loses the order between its parts.
-- *Implication:* a unit runs as one whole, with one journal, one driver,
-  and one workspace. Work that must stay in order grows inside its unit's
+- *Implication:* a unit runs as one whole, with one journal and one driver.
+  Its runs go through the engine's one workspace, which reads and writes
+  them through the unit's driver, so their artifacts stay in the unit's
+  journal (D7). Work that must stay in order grows inside its unit's
   log, never by adding logs.
 
 **I-2. Every actor whose state derives from a log belongs to that log's
@@ -123,8 +130,10 @@ unit: a member by lineage beneath the log's owner, a bundle root by a name
 built from the unit's key.**
 
 - *Upheld by:* lineage for members and naming for bundle roots. The driver
-  and the workspace are `#[actor(instanced, child_of(JournalActor))]` and are
-  born beneath their journal (D2). Every bundle root is loaded under the
+  is `#[actor(instanced, child_of(JournalActor))]` and is born beneath its
+  journal (D2). The workspace holds no unit's data and derives no state
+  from any log (I-7): it reads and writes a run's artifacts only through
+  the run's caller (D7). Every bundle root is loaded under the
   name `UnitBundle::name(key, digest)`, the only constructor of that name,
   from the unit key its driver was born with (D4). Unit keys are unique per
   engine (D3), so two units' roots of one digest are two actors under two
@@ -150,7 +159,9 @@ its own journal's `seq`, and no entry is ordered against another unit's.**
   database and `blobs` directory under its own lock, ADR-0220); `seq` is
   that database's. No kind carries a position in another journal, and no
   actor appends to two journals: each driver holds exactly one
-  `ActorRef<JournalActor>`, handed at birth and never replaced.
+  `ActorRef<JournalActor>`, handed at birth and never replaced. The
+  workspace holds no journal; a run's outputs go to the run's caller, which
+  commits them to its own (D7).
 - *Would be violated by:* a driver retargeted by mail, or a cross-unit
   `cause`. Closed: `ActorRef` has no codec, so no mail can carry a journal
   to write to; `AppendRecords` requires every cause in `1..=expected_seq`
@@ -161,10 +172,9 @@ its own journal's `seq`, and no entry is ordered against another unit's.**
 **I-4. A driver drives exactly one journal, and a bundle root answers
 exactly one driver.**
 
-- *Upheld by:* `DriverParams { unit, journal, workspace }` is filled at
-  birth from the unit's key and the journal's and the workspace's spawn
-  results (D2). A root sends its replies to its `Invoke` / `Warm` / `Event`
-  sender, and only the driver that loaded it holds a proof of it: the load
+- *Upheld by:* `DriverParams { unit, journal }` is filled at birth from the
+  unit's key and the journal's spawn result (D2). A root sends its replies
+  to its `Invoke` / `Warm` / `Event` sender, and only the driver that loaded it holds a proof of it: the load
   reply goes to the requester alone (ADR-0230 §3), and the driver keeps
   that reply's stamped sender. The root's parent is `aether.component`,
   which sends it nothing after the load.
@@ -178,39 +188,46 @@ exactly one driver.**
 
 **I-5. An invocation reaches providers only through its own unit's driver.**
 
-- *Upheld by:* D6. The generated invocation holds one proof, its parent
-  root. A program API call goes invocation → root → the `Invoke`'s sender
-  (the driver) → the provider proof the driver was born with. The
-  workspace is an instanced child, so `#[actor(depends(WorkspaceCapability))]`
-  no longer compiles: `DependsOn<R>` requires `R: Singleton` with a
-  `DependencyResolver` of `One` or `Embedded`.
-- *Would be violated by:* an invocation resolving the workspace through
-  `A::NAMESPACE` as a root singleton (ADR-0229 today). Closed: the type is
-  no longer a root singleton. A shared program root choosing a workspace
-  per call at run time. Closed by I-2: roots are per unit.
+- *Upheld by:* D6 and D7. The generated invocation holds one proof, its
+  parent root, and declares no dependency. A program API call goes
+  invocation → root → the `Invoke`'s sender (the driver) → the provider the
+  driver declares. The workspace accepts `Run` only from a caller that
+  covers its storage protocol, which an invocation does not: the typed send
+  does not compile, and any other send is refused at the guard cast (D7).
+  The workspace reads and writes a run's artifacts through that caller, so
+  a run relayed by a unit's driver touches only that unit's journal.
+- *Would be violated by:* an invocation sending `Run` to the workspace
+  itself (ADR-0229 today, through `A::NAMESPACE`). Closed: it is not a
+  storage caller. A driver's run reading another unit's artifacts. Closed:
+  the workspace names no store; it asks the run's sender. A shared program
+  root relaying one unit's call through another unit's driver. Closed by
+  I-2: roots are per unit.
 - *Implication:* ADR-0229's binding moves from a declared dependency on the
   invocation to a relay through the invoker (D6).
 
-**I-6. An engine-wide budget is handed out once: per-unit actors receive
-shares of it, never copies.**
+**I-6. An engine-wide budget is handed out once: to one actor that serves
+every unit, or as per-unit shares, never as copies.**
 
-- *Upheld by:* `HostBudget::split` is the only constructor of `UnitBudget`,
-  the workspace's `Config` (D7). It refuses overlapping core sets and
-  memory shares that sum past the host's. The journal read-cache budget is
-  divided the same way.
-- *Would be violated by:* each workspace resolving `WorkspaceConfig` off
-  argv and env, which is what composing N copies of today's actor would do.
-  Closed: the workspace's `Config` is `UnitBudget`, which no config source
-  can produce.
-- *Implication:* an idle unit's cores are not lent to a busy one; a shared
-  admission actor is deferred (D9).
+- *Upheld by:* the host's cores and memory go to the one workspace, a
+  `#[actor(singleton, root)]` the chassis composes once, so
+  `WorkspaceConfig` resolves once (D7). The journal read-cache budget is
+  divided: each journal gets an equal share of `read_cache_bytes` (D3).
+- *Would be violated by:* a workspace per unit, each resolving
+  `WorkspaceConfig` off argv and env. Closed: the workspace is a singleton,
+  and no unit spawns one (D2).
+- *Implication:* every unit's runs wait in one FIFO queue against one
+  budget (ADR-0237 decision 9). Cores free anywhere serve the next run
+  from any unit, and a unit with many runs queued can delay another's.
 
 **I-7. What is engine-shared is keyed by content hash or holds no log
 state.**
 
 - *Upheld by:* the compiled-module map is keyed by sha256 (D5); the engine
   blob store dedups by hash (ADR-0238); `aether.component`, `aether.http`,
-  the RPC server, and the inventory keep no fold of any journal. The bundle
+  the RPC server, and the inventory keep no fold of any journal. The
+  workspace keeps no store and no fold: its only state is the budget, the
+  queue, and run-key estimates, which are executor-local and keyed by the
+  digest of what a run does (ADR-0237 decision 9). The bundle
   roots beneath `aether.component` do hold folds, and each belongs to one
   unit by name (I-2); the host keeps only their load bookkeeping.
 - *Would be violated by:* an engine-wide actor that caches a view of one
@@ -254,21 +271,22 @@ boundary.**
 | Journal (log, artifact files, read cache) | per unit | I-3 |
 | Driver (program queue, reactor following, fetch cache) | per unit | I-2, I-4 |
 | Bundle roots (program role and reactor role) | per (digest, unit), beneath `aether.component`, named `<key>-<digest>` | I-2 |
-| Workspace (artifact store handle, run-key estimates, share of the host) | per unit | I-5, I-6 |
+| Workspace (the host budget, one admission queue, run-key estimates; no store) | per engine | I-5, I-6, I-7 |
 | Component host, compiled modules by hash | per engine | I-7 |
 | Engine blob store (in-memory bytes by hash) | per engine | I-7 |
 | HTTP egress, RPC server, inventory | per engine | I-7 |
 | Durable artifact files | per unit (its journal root's `blobs`) | I-3: each root is one lock and one writer (ADR-0237's 2026-09-25 amendment) |
 
-A unit's root is its `JournalActor`; its members are `WorkspaceCapability`
-and `BundleDriver`; its bundle roots belong to it by name. The unit root is
+A unit's root is its `JournalActor`; its member is `BundleDriver`; its
+bundle roots belong to it by name. The unit root is
 the journal because a dedicated unit actor (`aether.bloomery.unit:<key>`)
 would have no handlers once the embedder can spawn children beneath a proof
 (D2).
 
 Bundles are engine-shared code: the bundle format, digest naming, the
 `Warm` / `Event` / `Invoke` protocols, and each compiled module (D5) serve
-every unit alike. Each unit owns its log, its driver, and its workspace.
+every unit alike, and so does the one workspace (D7). Each unit owns its
+log, its driver, and every artifact its runs read or write.
 
 ### D2. The chassis mounts each unit, then binds (serves I-1, I-2, I-4)
 
@@ -289,14 +307,14 @@ impl<C: Chassis> BuiltChassis<C> {
 
 1. `spawn_actor::<JournalActor>(Named(key), cache_share, journal)` →
    `ActorRef<JournalActor>`;
-2. `spawn_child::<JournalActor, WorkspaceCapability>(journal, Named("workspace"),
-   unit_budget, WorkspaceParams { artifacts })`;
-3. `spawn_child::<JournalActor, BundleDriver>(journal, Named("driver"), limit,
-   DriverParams { unit: key, journal, workspace })`.
+2. `spawn_child::<JournalActor, BundleDriver>(journal, Named("driver"), limit,
+   DriverParams { unit: key, journal })`.
 
-Only after every unit is mounted does the RPC bind gate open (issue #6399's
-order, now over every unit). `Mounted` becomes one `MountedUnit { journal,
-workspace, driver }` per key.
+The workspace is not mounted per unit: the chassis composes the one
+`WorkspaceCapability` beside the component host, with no params, before
+any unit is mounted (D7). Only after every unit is mounted does the RPC
+bind gate open (issue #6399's order, now over every unit). `Mounted`
+becomes one `MountedUnit { journal, driver }` per key.
 
 The embedder verb is new. Its consumer is the mount. It reuses
 `SpawnBuilder::new_child`, which the staged handler verb already builds
@@ -312,7 +330,8 @@ readiness wait before bind; it is rejected below.
 | `AETHER_BLOOMERY_UNITS` / `--bloomery-units` | comma-separated `key=root` entries, the precedent `--http-secrets` sets | `Vec<UnitSpec { key: UnitKey, root: PathBuf }>` |
 | `AETHER_BLOOMERY_JOURNAL` | removed | — |
 | `closure_limit_bytes` | unchanged, a per-read ceiling | one `ClosureLimit` for every driver |
-| `read_cache_bytes` | now the engine's total | divided equally among units (D7) |
+| `read_cache_bytes` | now the engine's total | divided equally among units (I-6) |
+| Workspace knobs (`WorkspaceConfig`) | unchanged, the engine's | the one workspace (D7); no per-unit workspace knob exists |
 
 Lowering refuses boot, naming the key, for: an empty list, a key that is
 not a `LoadName`, a key longer than 191 bytes, a repeated key, or two
@@ -440,7 +459,7 @@ fold of one log and one driver's `seq` space, so units do not share one:
 |---|---|---|
 | Invocation → its root | the parent proof | the invocation's `waiting`, by request id, as today |
 | Root → the `Invoke`'s sender | `invokers`, as the fetch-on-miss relay already does | a deferred reply per relayed call, answered once |
-| Driver → provider | the proofs it was born with: `workspace` (its unit's), `HttpCapability` (declared dependency) | the driver's `callers`, as for a fetch |
+| Driver → provider | its declared dependencies, `WorkspaceCapability` and `HttpCapability`; to the workspace it is the run's caller and answers its storage requests (D7) | the driver's `callers`, as for a fetch |
 
 This is the one path for every program API (`Http`, `Process`,
 `Workspace`). The invocation declares no dependency. The closed API set
@@ -454,11 +473,12 @@ driver:
   refusal-before-run, which the invocation's `depends` gave at bundle load.
   On the bloomery engine `Process` has no provider, since `aether.process`
   is not composed.
-- The driver maps `Http` to `HttpCapability` and `Workspace` to its unit's
-  workspace, and refuses anything else with `Refusal::Refused`, as the
-  invocation does today.
-- The driver declares `depends(ComponentHostCapability, HttpCapability)`, so
-  a missing HTTP capability refuses the driver's birth.
+- The driver maps `Http` to `HttpCapability` and `Workspace` to
+  `WorkspaceCapability`, and refuses anything else with `Refusal::Refused`,
+  as the invocation does today.
+- The driver declares `depends(ComponentHostCapability, HttpCapability,
+  WorkspaceCapability)`, so a missing HTTP capability or workspace refuses
+  the driver's birth.
 
 This amends ADR-0229 decision 2 and its 2026-09-24 amendment: bindings no
 longer resolve through `A::NAMESPACE`. The sealed `InjectedApi` set and the
@@ -467,40 +487,131 @@ SDK table stay; the table now names what the driver maps.
 No hop drops or evicts a parked reply; each is answered exactly once or
 abandoned when its actor closes, as the driver's `Drop` does today.
 
-### D7. The workspace is a unit member with a share of the host (serves I-5, I-6)
+### D7. One Bloomery workspace per engine; the caller supplies storage (serves I-3, I-5, I-6, I-7)
+
+The workspace is Bloomery's executor, and Bloomery runs one per engine: a
+singleton service that every unit's runs go through.
+
+| Piece | Decision |
+|---|---|
+| Crate and actor | `aether-workspace` is renamed `aether-bloomery-workspace`. `WorkspaceCapability`'s namespace becomes `aether.bloomery.workspace`, beside `aether.bloomery.journal` and `aether.bloomery.driver`. It stays `#[actor(singleton, root)]`, composed once by the chassis (D2). |
+| Kind names | Unchanged (`aether.workspace.run`, `aether.workspace.environment`, …). An artifact's digest is the digest of its kind-prefixed stored blob (`ReadArtifact`, `crates/aether-bloomery-kinds/src/journal/mod.rs`), so renaming `aether.workspace.environment` would change every stored environment's digest. |
+| Budget | `WorkspaceConfig.cpuset` and `budget_memory_bytes` are the whole host's, resolved once. One FIFO queue admits every caller's runs (ADR-0237 decision 9, unchanged). Run-key estimates are shared by every caller, since the key is what a run does. |
+| Params | None. `WorkspaceParams { artifacts }` is removed, and the runtime half no longer depends on `aether-bloomery-journal`. It keeps `aether-bloomery-kinds` (the tree kinds and the storage kinds below) and `aether-bloomery-tar`. |
+| Storage | The caller's. The workspace holds no artifact store: it reads a run's or an import's inputs from the caller and hands its outputs to the caller to commit. |
+
+**The storage protocol.** A caller of `Run` or `Import` answers two
+requests, named as an ADR-0231 protocol:
 
 ```rust
-pub struct HostBudget { /* cpuset, budget_memory_bytes, from WorkspaceConfig */ }
-pub struct UnitBudget { /* a disjoint core set and a memory share; no public constructor */ }
-
-impl HostBudget {
-    pub fn split(&self, shares: &[(UnitKey, Share)]) -> Result<Vec<(UnitKey, UnitBudget)>, SplitError>;
+#[protocol]
+pub trait ArtifactStorage {
+    /// Existing: `aether.bloomery.journal.read_artifact`, answered with the
+    /// stored artifact as a `ClosureArtifact` (bytes as a `Blob`), `Missing`, or `Err`.
+    fn read(mail: ReadArtifact) -> ReadArtifactResult;
+    /// New, beside it in `aether-bloomery-kinds`.
+    fn stage(mail: Stage) -> StageResult;
 }
+
+/// Store these artifacts: content-addressed, unfenced, no event, no head move.
+/// Each carries its kind, its bytes as a `Blob`, and its citations.
+#[aether_data::kind(name = "aether.bloomery.journal.stage", no_serde)]
+pub struct Stage { artifacts: Vec<EncodedArtifact> }
+
+#[aether_data::kind(name = "aether.bloomery.journal.stage_result", no_serde)]
+pub enum StageResult { Staged, Err { message: String } }
 ```
 
-| Setting | Scope | Source |
-|---|---|---|
-| Endpoint, TLS files, import and output bounds, per-run defaults, headroom, `pids_limit` | engine | `WorkspaceConfig`, resolved once and declared as a config member |
-| Host core set and memory budget | engine | `WorkspaceConfig.cpuset`, `budget_memory_bytes` |
-| A unit's cores and memory | unit | `AETHER_WORKSPACE_UNIT_CPUSETS` (`key=0-3,…`) and `AETHER_WORKSPACE_UNIT_MEMORY_BYTES` (`key=N,…`) |
-| Run-key estimates | unit | the actor's own state, rebuildable, never journaled (ADR-0237 decision 9) |
+Bytes cross as `Blob` values in both directions; in-process mail shares a
+`Blob` through the engine blob store rather than copying it (ADR-0238
+decisions 3 and 10). `ReadArtifactResult` already carries a `Blob`;
+`EncodedArtifact`'s bytes move from `Vec<u8>` to `Blob` as
+`ClosureArtifact`'s did. `Stage` is the write the journal's in-process
+`ArtifactStore` does for the workspace today, as mail: the journal owner
+gains its handler and stays the only writer (ADR-0237 open question 1).
+`Publish` does not fit: it carries a whole-journal fence and head moves,
+which are the journal's to order, not the executor's.
 
-With one unit and neither per-unit knob set, the unit gets the whole host.
-With more than one unit, every unit names both, and `split` refuses boot for
-overlapping core sets, a core outside the host's set, or memory shares that
-sum past the host's budget.
+**The seam.** The tar codec reads and writes trees only through `TreeSource`
+and `TreeSink` (`crates/aether-bloomery-tar/src/store.rs`). The workspace's
+one implementation of them, `JournalSource` / `JournalSink` over one
+`ArtifactBatch` (`crates/aether-workspace/src/runtime/journal/mod.rs`), is
+replaced by a second whose reads are `ReadArtifact` and whose writes are
+`Stage`, both sent to the caller. The container logic keeps talking to the
+traits: the environment image build (`run/environment.rs`), `write_tree` of
+the run tree and each mount, and the output decode (`run/output.rs`). The
+three places that use the batch directly go through the same caller-backed
+store: the stdin attach and the log capture in `run/step.rs` (`attach`,
+`store_output`), and the import decode (`import/mod.rs`).
 
-`WorkspaceCapability` becomes `#[actor(instanced, child_of(JournalActor))]`
-with `Config = UnitBudget` and `Params = WorkspaceParams { artifacts }`, its
-own unit's store. The daemon's image store stays shared by every unit; it is
-a rebuildable derivative labelled by environment digest (ADR-0237 decision
-8), so two units importing one environment converge on one image.
+The sequence runs on the actor's worker thread (ADR-0093) and the codec
+traits are synchronous. Each read or stage the worker makes is a request the
+actor sends to the caller for it, and the actor's reply handler hands the
+answer back to the waiting worker. No dispatcher thread waits on a caller.
 
-The journal's read cache is divided the same way: `read_cache_bytes` is the
-engine total and each journal gets an equal share.
+**Checks before any container.** `run/resolve.rs`'s checks run over the
+caller-backed source, in today's order, before any container exists:
+`InputMissing` (a `Missing` read), `ToolchainMismatch` (the tree's
+`rust-toolchain.toml` against `Environment::provides`), and `UnknownTool`
+(the walk of the environment root), then `PlatformMismatch` against the
+daemon. They stay in the workspace because each compares a request with
+what the executor provides; moving them to the caller would copy executor
+knowledge into every caller.
 
-This amends ADR-0237 decision 8 (one workspace actor per unit) and decision 9 (the host budget is the engine's, handed out as
-per-unit shares; admission stays FIFO within a unit's share).
+**Outputs.** Step stdout and stderr, the output tree, and an import's tree
+are staged to the caller in bounded batches as they are produced, each
+`Stage` answered before the next is sent. The reply follows the last
+`Staged`. A `Stage` answered `Err` ends a run `Failed { detail }` and an
+import `Failed { detail }`. A run or import that ends any way but `Ok`
+leaves the artifacts it staged cited by nothing: content-addressed and inert,
+like an `import-commit` batch with no head move. Staging as it goes bounds
+memory by the batch rather than by the largest import.
+
+**The gate.** Only a caller that covers `ArtifactStorage` may send `Run` or
+`Import`. The check is static where the send is typed and one guard cast
+where it is not:
+
+| Sender | Check |
+|---|---|
+| A typed send (`ctx.send::<WorkspaceCapability>`, a relay, `send_to` through an `ActorRef`) | The workspace's `Run` and `Import` rows name `ArtifactStorage` as their caller protocol, and the send compiles only on a ctx whose actor covers it (`ArtifactStorage: CoveredBy<A>`). The driver covers it; a program invocation and the bootstrap do not. |
+| Any other sender (an erased send, a non-actor such as MCP or an RPC `Call`) | At receipt, before anything is queued, the workspace casts `ctx.sender()` to `ProtocolRef<ArtifactStorage>` (ADR-0231 §4). No sender, or a failed cast, is refused: `Run` answers `Refused(Refusal::NoStorage)`, `Import` answers `Failed { detail }`. |
+
+Every storage request of the run goes through that `ProtocolRef`, the
+stamped sender's proof; the final reply goes to the reply target, as today.
+Nothing is keyed by unit, and no table maps callers to stores.
+
+The gate needs machinery main does not have. ADR-0231 §2–§4
+(`#[protocol]`, `ProtocolRef<P>`, `ErasedActorRef::cast`) is accepted but
+unimplemented: `#[actor]` emits `Contract<K>` rows
+(`crates/aether-actor-derive/src/reply_markers.rs`), and only
+`subscribe`'s silent-row bound reads them
+(`crates/aether-actor/src/wasm/ctx/subscribe.rs`). The caller protocol on a
+handler row is new: ADR-0231 §1 checks that a sender handles the reply, not
+that it covers a protocol. Both the bound and the cast match rows by kind
+and reply, so a caller's `read` and `stage` rows must declare
+`ReadArtifactResult` and `StageResult`. The driver answers them by relaying
+to its journal, and main's relays (`forward_to`,
+`DeferredReply::hand_off`) run from rows that declare no reply. The gate
+therefore also needs a relay from a declared row: ADR-0231 §9's bound, the
+handler's declared reply equal to the target's.
+
+**Bloomery's caller is the unit's driver.** Programs' `Workspace` calls
+relay through their unit's driver (D6), and the driver is the run's caller.
+It covers `ArtifactStorage` by relaying both rows to its journal owner
+(ADR-0231 §9), which answers `ReadArtifact` today and gains `Stage`. An
+operator's `Import` goes to the unit's driver too, which relays it to the
+workspace as its caller. So a unit's runs and imports read and write only
+that unit's journal, and isolation between units needs no table.
+
+The daemon's image store stays shared by every caller; it is a rebuildable
+derivative labelled by environment digest (ADR-0237 decision 8), so two
+units importing one environment converge on one image.
+
+This amends ADR-0237 decisions 3 (an import's tree goes to its caller) and
+8 (one workspace per engine, holding no journal store), and open questions
+1 and 3 as amended (the journal stays the only writer, reached through the
+caller; the runtime half no longer depends on the journal crate). Decision 9
+holds, now across every caller's runs.
 
 ### D8. Addressing: units by key, members by type, bundle roots by key and digest (serves I-8)
 
@@ -508,11 +619,11 @@ per-unit shares; admission stays FIFO within a unit's share).
 |---|---|
 | `AddressForm` | gains `Root { key: Option<LoadName> }`: the root instance of `R` keyed `key`. It carries no position. `Address::<R>::root_at(key)` is bounded `R: Root + Instanced`. |
 | `WasmCtx::resolve::<R>` | `(&Address<R>) -> Result<ActorRef<R>, ResolveError>`, the guest verb only. Folds the address with `R`'s resolver and proves the route with the published-route read `Registry::live_child` already makes; only `Live` mints. An `Exact` address mints only when the route's actor type is `R`. The guest crosses one host import. Takes the name ADR-0230 reserved for this door. |
-| `UnitMember` | a trait in the journal identity half: `ChildOf<JournalActor> + Instanced` with a fixed key (`driver`, `workspace`). `member_address::<C: UnitMember>(unit: ActorRef<JournalActor>) -> Address<C>` is `child_address::<JournalActor, C>(unit, C::key())`. The fixed key stands in for a one-per-parent child placement that the actor model does not have yet (ADR-0166 defers a keyless native-child resolver); #6822 designs that placement, and `UnitMember` is deleted when it lands. |
+| `UnitMember` | a trait in the journal identity half: `ChildOf<JournalActor> + Instanced` with a fixed key (`driver`). `member_address::<C: UnitMember>(unit: ActorRef<JournalActor>) -> Address<C>` is `child_address::<JournalActor, C>(unit, C::key())`. The fixed key stands in for a one-per-parent child placement that the actor model does not have yet (ADR-0166 defers a keyless native-child resolver); #6822 designs that placement, and `UnitMember` is deleted when it lands. |
 | `UnitKey`, `UnitBundle::name` | in `aether-bloomery-kinds` beside `Digest` (D4). The driver's only way to name a bundle root. |
 | `aether-bloomery-journal`, `aether-bloomery-driver` | split per ADR-0122: an always-on, `no_std` identity (the marker, its handled kinds, `UnitMember`) and a `runtime` feature carrying the actor, `aether-substrate`, and `rusqlite`. |
-| Bootstrap config | `journal` and `driver` paths are replaced by `units: Vec<UnitKey>`. At `wire` it resolves each unit, then its driver and workspace by type; every send is `send_to(ActorRef<R>, &K)`, kind-checked. |
-| External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. A unit's bundle root is `aether.component/aether.embedded:<key>-<digest>`, or its short path `aether.component/:<key>-<digest>`. |
+| Bootstrap config | `journal` and `driver` paths are replaced by `units: Vec<UnitKey>`. At `wire` it resolves each unit, then its driver by type; every send is `send_to(ActorRef<R>, &K)`, kind-checked. It sends `Import` to its unit's driver, not to the workspace (D7), and drops `depends(WorkspaceCapability)`. |
+| External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. An operator's `Import` goes to the unit's driver (D7). A unit's bundle root is `aether.component/aether.embedded:<key>-<digest>`, or its short path `aether.component/:<key>-<digest>`. |
 
 Only the guest verb lands. Every new verb needs a named production
 consumer: the guest verb's consumer is the bootstrap, and the chassis mount
@@ -526,7 +637,6 @@ consumers and for guests that are handed text.
 
 ### D9. Deferred
 
-- Lending idle cores between units through a shared admission actor (I-6).
 - Adding or removing a unit while the engine runs; units exist from boot.
   With bundle roots named by key, removing a unit means dropping its
   `<key>-*` roots beneath `aether.component` along with its journal
@@ -553,23 +663,40 @@ the per-unit component host.
 
 | Rule | How this ADR complies |
 |---|---|
-| Addressing by type markers only; no roles, aliases, config slots; no `send_to_named`; ADR-0166 is the only grammar | Units by key, members by type (`UnitMember`), bundle roots by a name built from key and digest; no path fields in config; external text is canonical ADR-0166 paths; no new grammar. `key=root` entries follow `--http-secrets`. |
-| No public `MailboxId` surface increase; stored state holds proofs | The new address form carries a key only; `UnitBundle::name` returns a `LoadName`; the driver stores `ActorRef` / `ErasedActorRef`. `LoadComponent` is unchanged. The program role's existing `Live.child: MailboxId` is untouched. |
+| Addressing by type markers only; no roles, aliases, config slots; no `send_to_named`; ADR-0166 is the only grammar | Units by key, members by type (`UnitMember`), bundle roots by a name built from key and digest; no path fields in config; external text is canonical ADR-0166 paths; no new grammar. `key=root` entries follow `--http-secrets`. The workspace is reached by type and keys nothing by unit: its storage requests go to the run's proven sender (D7). |
+| No public `MailboxId` surface increase; stored state holds proofs | The new address form carries a key only; `UnitBundle::name` returns a `LoadName`; the driver stores `ActorRef` / `ErasedActorRef`, and the workspace holds each run's caller as a `ProtocolRef<ArtifactStorage>`. `LoadComponent` is unchanged. The program role's existing `Live.child: MailboxId` is untouched. |
 | Representations valid by construction | `UnitKey` is fallible on construction and decode and enforces the 191-byte limit that keeps `UnitBundle::name` infallible. |
 | Unexportable invariants stay unexported | Config carries `UnitKey`s; `ActorRef` crosses nothing. |
-| Static contract checks | `child_of(JournalActor)` and `DependsOn` make a root-singleton workspace binding a compile error; identity halves make bootstrap sends kind-checked. No runtime token or injection. |
-| One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `UnitBundle::name`: the driver. `UnitKey::new`: D3's lowering. `WasmCtx::resolve`: the bootstrap; the native twin waits for a native caller (D8). `Root` form: the bootstrap. `HostBudget::split`: the mount. |
-| Pending replies never dropped | D6's hops park and answer once; nothing evicts. |
-| Fewer events, simpler architecture | No new actor, event, or record kind. The dedicated unit root is rejected for having no behaviour, and bundle roots keep the host they have. |
+| Static contract checks | A typed send of `Run` or `Import` compiles only from an actor that covers `ArtifactStorage`; every other sender meets ADR-0231's one guard cast at receipt (D7). `child_of(JournalActor)` places the driver; identity halves make bootstrap sends kind-checked. No runtime token or injection. |
+| One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `UnitBundle::name`: the driver. `UnitKey::new`: D3's lowering. `WasmCtx::resolve`: the bootstrap; the native twin waits for a native caller (D8). `Root` form: the bootstrap. `Stage`: the workspace's caller-backed sink, answered by the journal owner. The caller protocol on a row: the workspace's `Run` and `Import`. |
+| Pending replies never dropped | D6's hops park and answer once; nothing evicts. Each storage request is answered once, and a sender that fails the gate is answered at receipt, never queued. |
+| Fewer events, simpler architecture | No new actor, event, or record kind; one new mail kind pair (`Stage`). The workspace sheds its store, and isolation between units is the caller's, with no table. The dedicated unit root is rejected for having no behaviour, and bundle roots keep the host they have. |
 | No recursion on unbounded data | Mount iterates the unit list; relays are single hops. |
 | No z-index; no drive or storage figures | None appear. |
 | Bring-up is throwaway script components | The bootstrap stays a deletable component; the engine gains no bring-up mechanism. |
 
 ## Consequences
 
-- One engine drives several journals, each with its own driver, workspace,
-  and bundle roots, and no member can fold or write another unit's log
-  through a proof it was given.
+- One engine drives several journals, each with its own driver and bundle
+  roots, and no member can fold or write another unit's log through a proof
+  it was given. Every unit's runs go through the one workspace, which reads
+  and writes them through the unit's driver.
+- Every unit's runs share one host budget and one FIFO queue: free cores
+  serve whichever unit's run is next, and a unit with many runs queued can
+  delay another's (I-6).
+- The workspace's storage seam is rewritten: a caller-backed `TreeSource` /
+  `TreeSink` with the worker-to-actor request path, `run/resolve.rs`'s checks
+  moved onto it, and the stdin, log, and import paths moved off the batch.
+  The container logic (image build, `write_tree`, output decode, step
+  execution) is unchanged.
+- Every artifact a run or import reads or writes is one mail to its caller
+  and one relay to the journal. `Blob`s are shared in process, not copied,
+  but a large tree costs one `ReadArtifact` per node and blob when the
+  daemon lacks its image or a run writes it into a container.
+- A run or import that does not end `Ok` leaves the artifacts it staged in
+  the journal, cited by nothing.
+- The gate depends on ADR-0231 §2–§4, which main does not implement, and
+  one addition to it (D7), so it lands with them.
 - Memory grows per unit: a journal read cache share, a driver fetch cache,
   up to two closure walks in flight per journal, and one instance per
   (digest, unit) including dormant reactor roots. Compilation does not grow
@@ -591,11 +718,25 @@ Follow-on issues, one concept each:
 3. The compiled-module map keyed by hash (D5).
 4. Program API relay through the invoker, the API list in each program's
    section record, and dropping the invocation's `depends` (D6).
-5. `HostBudget::split`, the workspace as a unit member, the read-cache split
-   (D7).
+5. One Bloomery workspace funnels every unit (D7): the caller-backed
+   `TreeSource` / `TreeSink` replacing `JournalSource` / `JournalSink`, the
+   worker-to-actor request path, `run/resolve.rs`'s checks over the new
+   source, step logs and import output staged to the caller, and
+   `WorkspaceParams` and the journal dependency removed. A rewrite of the
+   workspace's storage seam, not of its container logic.
 6. Identity halves for the journal and driver crates (D8).
 7. `AddressForm::Root`, the guest `resolve` verb, `UnitMember`, and the bootstrap
    migration (D8), which also amends ADR-0230 §3's `Address<R>` row.
+8. Rename `aether-workspace` to `aether-bloomery-workspace` and its actor's
+   namespace to `aether.bloomery.workspace`; kind names stay (D7).
+9. The storage protocol's callers (D7): the `Stage` kind pair (with
+   `EncodedArtifact`'s bytes as a `Blob`) and the journal owner's handler, the driver's `read` / `stage` relays to its
+   journal and its `Import` relay, the bootstrap sending `Import` to its
+   driver, and the read-cache split (I-6).
+10. The gate's machinery (D7): ADR-0231 §2–§4 (`#[protocol]`,
+    `ProtocolRef<P>`, the guard cast), the caller protocol on a handler row
+    checked at typed sends, and a relay from a row that declares its
+    reply.
 
 Issue #6821 (`load_under` placement checked against the caller) is separate
 and does not block these.
@@ -642,17 +783,37 @@ and does not block these.
 - **Shared program roots keyed by (invoker, seq).** One root serves both
   roles per digest (ADR-0225 decision 8), so sharing the program role
   splits one root per digest into two, or leaves a root whose reactor role
-  belongs to one unit and program role to all. It also picks a workspace per
-  call at run time (breaks I-5), and saves instance memory only, since D5
-  already compiles once.
+  belongs to one unit and program role to all. It also picks the relaying
+  driver per call at run time (breaks I-5), and saves instance memory only,
+  since D5 already compiles once.
 - **Keep program APIs on declared dependencies and add a resolver that
   finds the nearest enclosing unit.** A new sealed `DependencyResolver`
   whose fold needs an arbitrary ancestor's lineage, where the relay reuses
   the fetch-on-miss path already built.
-- **One engine-wide workspace that picks a unit's store per request.** It
-  would have to read the requester's unit from its lineage at run time.
-- **Replicated budgets.** Each workspace claiming the whole host overbooks
-  cores and memory by the unit count.
+- **One workspace per unit, each with a disjoint share of the host
+  budget** (this ADR's D7 before the 2026-09-26 amendment). It splits one
+  resource manager into N. Each admits only against its own share, so one
+  unit's cores sit idle while another's runs queue; handing each the whole
+  host instead overbooks cores and memory by the unit count. It needs
+  `HostBudget::split`, `UnitBudget`, two per-unit knobs, and the workspace
+  as a unit member, all to divide what one queue admits whole.
+- **Two-table funnel: one workspace holding every unit's store.** The
+  chassis hands it each unit's store at composition, keyed by unit key, and
+  each driver attaches under its key, so a run's store is looked up from
+  its proven sender. Two mechanisms for one relationship (the store table
+  and the attach table), and the workspace stays coupled to journal
+  storage. With the caller supplying storage, the sender is the whole
+  answer.
+- **One workspace that reads the requester's unit per request.** From the
+  requester's lineage, it needs a fold of an arbitrary ancestor at run time;
+  from a unit field on `Run`, any sender picks any unit's store.
+- **The storage checks and staging moved into the caller.** The caller
+  would resolve tools and compare toolchains, which is executor knowledge
+  copied into every caller, and a refusal could no longer come from the one
+  place that knows what the executor provides.
+- **Outputs held until the run ends, then handed back in one reply.**
+  Keeps "nothing stored unless `Ok`", but sizes memory by the largest
+  output or import rather than by a staging batch.
 - **Several engines, one journal each.** Works today and needs no
   change, but pays a process, a substrate, and a compilation per journal,
   and is what an operator keeps for isolation across hosts.
