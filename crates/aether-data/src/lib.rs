@@ -71,7 +71,7 @@ pub use name_inventory::{
     id_for_name, name_entries, root_entries, template_entries,
 };
 pub use reference::{
-    ActorPathForm, Address, AddressForm, ErasedActorPath, ErasedActorPathError, LoadName, LoadNameError, Namespace,
+    ActorPathError, ActorPathForm, Address, AddressForm, ErasedActorPath, LoadName, LoadNameError, Namespace,
     PathSegment, SegmentFault,
 };
 pub use schema::*;

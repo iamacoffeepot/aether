@@ -2,7 +2,7 @@
 //! lookup shares, and the point-in-time answers it hands back.
 
 use aether_actor::ErasedActorRef;
-use aether_data::{ActorPathForm, ErasedActorPath, ErasedActorPathError, ScopePathError, validate_scope_path};
+use aether_data::{ActorPathError, ActorPathForm, ErasedActorPath, ScopePathError, validate_scope_path};
 
 use crate::mail::registry::{AddressResolutionError, ResolvedAddress, RouteContract, lineage_mailbox_id};
 use crate::mail::{KindId, MailboxId};
@@ -130,14 +130,14 @@ impl Registry {
     pub fn lookup(&self, name: &str) -> Option<MailboxId> {
         let address = match ErasedActorPath::new(name) {
             Ok(address) => address,
-            Err(error @ ErasedActorPathError::Scope(_)) => {
+            Err(error @ ActorPathError::Scope(_)) => {
                 tracing::warn!(name, ?error, "scope path over cap; resolution miss");
                 return None;
             }
             Err(
-                ErasedActorPathError::Segment { .. }
-                | ErasedActorPathError::RetiredShortForm
-                | ErasedActorPathError::ShortPathFromInstance,
+                ActorPathError::Segment { .. }
+                | ActorPathError::RetiredShortForm
+                | ActorPathError::ShortPathFromInstance,
             ) => return None,
         };
         match self.resolve_address(&address) {

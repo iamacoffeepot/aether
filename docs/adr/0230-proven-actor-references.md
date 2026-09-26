@@ -175,9 +175,9 @@ pub struct ActorRef<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 pub struct ErasedActorRef { id: MailboxId }
 ```
 
-`ErasedActorPath` is today's `aether_data::ActorPath`, with its error type;
-renaming them is a separate mechanical change, and this ADR uses the new
-names throughout.
+`ErasedActorPath` is today's `aether_data::ActorPath`. Its error keeps the
+name `ActorPathError`, because the typed paths share the grammar and its one
+refusal. This ADR uses the new names throughout.
 
 The paths mirror the references:
 
@@ -218,7 +218,7 @@ impl<A> WasmCtx<'_, A> {           // and NativeCtx, WireCtx
         &self,
         parent: &ActorPath<P>,
         key: &LoadName,
-    ) -> Result<ActorPath<C>, ErasedActorPathError>
+    ) -> Result<ActorPath<C>, ActorPathError>
     where
         A: LinksTo<C>;
 }

@@ -71,10 +71,10 @@ impl ErasedActorPath {
     ///
     /// # Errors
     ///
-    /// Returns [`ErasedActorPathError`] naming the breached cap, the retired `://`
+    /// Returns [`ActorPathError`] naming the breached cap, the retired `://`
     /// form, a short path whose first step is an instance, or the written
     /// step and the rule it broke.
-    pub fn new(text: &str) -> Result<Self, ErasedActorPathError> {
+    pub fn new(text: &str) -> Result<Self, ActorPathError> {
         check_path(text)?;
         Ok(Self(text.into()))
     }
@@ -118,7 +118,7 @@ impl fmt::Display for PathSegment<'_> {
 
 /// [`ErasedActorPath::new`] rejection.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ErasedActorPathError {
+pub enum ActorPathError {
     /// The written step at `index` (0-based; the root is 0) broke `fault`.
     Segment { index: usize, fault: SegmentFault },
     /// The path breaches the depth or byte cap.
@@ -132,7 +132,7 @@ pub enum ErasedActorPathError {
     ShortPathFromInstance,
 }
 
-impl fmt::Display for ErasedActorPathError {
+impl fmt::Display for ActorPathError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Segment { index, fault } => write!(f, "invalid actor path: segment {index}: {}", fault.message()),
@@ -154,23 +154,23 @@ impl fmt::Display for ErasedActorPathError {
     }
 }
 
-impl StdError for ErasedActorPathError {}
+impl StdError for ActorPathError {}
 
-fn check_path(text: &str) -> Result<(), ErasedActorPathError> {
+fn check_path(text: &str) -> Result<(), ActorPathError> {
     if text.len() > MAX_SCOPE_PATH_BYTES {
-        return Err(ErasedActorPathError::Scope(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }));
+        return Err(ActorPathError::Scope(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }));
     }
     if text.contains(RETIRED_SHORT_FORM) {
-        return Err(ErasedActorPathError::RetiredShortForm);
+        return Err(ActorPathError::RetiredShortForm);
     }
     let steps: Vec<_> = text.split('/').map(parse_segment).collect();
     if steps.len() > MAX_SCOPE_PATH_DEPTH {
-        return Err(ErasedActorPathError::Scope(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH }));
+        return Err(ActorPathError::Scope(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH }));
     }
 
     let short = steps.iter().any(|step| matches!(step, PathSegment::Hole { .. }));
     if short && !matches!(steps.first(), Some(PathSegment::Bare(_))) {
-        return Err(ErasedActorPathError::ShortPathFromInstance);
+        return Err(ActorPathError::ShortPathFromInstance);
     }
 
     steps.into_iter().enumerate().try_for_each(|(index, step)| {
@@ -181,7 +181,7 @@ fn check_path(text: &str) -> Result<(), ErasedActorPathError> {
             }
             PathSegment::Hole { discriminator } => check_segment(discriminator.as_bytes()),
         };
-        parts.map_err(|fault| ErasedActorPathError::Segment { index, fault })
+        parts.map_err(|fault| ActorPathError::Segment { index, fault })
     })
 }
 
@@ -242,20 +242,20 @@ mod tests {
 
     #[test]
     fn rejects_malformed_segments_in_either_form() {
-        let segment = |index, fault| Err(ErasedActorPathError::Segment { index, fault });
+        let segment = |index, fault| Err(ActorPathError::Segment { index, fault });
         assert_eq!(ErasedActorPath::new("a//b"), segment(1, SegmentFault::Empty));
         assert_eq!(ErasedActorPath::new("a/"), segment(1, SegmentFault::Empty));
         assert_eq!(ErasedActorPath::new("root/worker:bad:key"), segment(1, SegmentFault::ContainsSeparator));
-        assert_eq!(ErasedActorPath::new("a:b/:c"), Err(ErasedActorPathError::ShortPathFromInstance));
-        assert_eq!(ErasedActorPath::new(":a/b"), Err(ErasedActorPathError::ShortPathFromInstance));
+        assert_eq!(ErasedActorPath::new("a:b/:c"), Err(ActorPathError::ShortPathFromInstance));
+        assert_eq!(ErasedActorPath::new(":a/b"), Err(ActorPathError::ShortPathFromInstance));
         assert_eq!(ErasedActorPath::new("a b"), segment(0, SegmentFault::ContainsControlOrWhitespace));
         assert_eq!(ErasedActorPath::new(""), segment(0, SegmentFault::Empty));
-        assert_eq!(ErasedActorPath::new("aether.component://camera"), Err(ErasedActorPathError::RetiredShortForm));
+        assert_eq!(ErasedActorPath::new("aether.component://camera"), Err(ActorPathError::RetiredShortForm));
     }
 
     #[test]
     fn rejects_paths_over_the_scope_caps() {
-        let too_deep = Err(ErasedActorPathError::Scope(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH }));
+        let too_deep = Err(ActorPathError::Scope(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH }));
         let canonical = |depth| vec!["seg"; depth].join("/");
         assert!(ErasedActorPath::new(&canonical(MAX_SCOPE_PATH_DEPTH)).is_ok());
         assert_eq!(ErasedActorPath::new(&canonical(MAX_SCOPE_PATH_DEPTH + 1)), too_deep);
@@ -266,7 +266,7 @@ mod tests {
 
         assert_eq!(
             ErasedActorPath::new(&"a".repeat(MAX_SCOPE_PATH_BYTES + 1)),
-            Err(ErasedActorPathError::Scope(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }))
+            Err(ActorPathError::Scope(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }))
         );
     }
 

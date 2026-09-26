@@ -10,7 +10,7 @@ mod load_name;
 mod namespace;
 pub(crate) mod segment;
 
-pub use actor_path::{ActorPathForm, ErasedActorPath, ErasedActorPathError, PathSegment};
+pub use actor_path::{ActorPathError, ActorPathForm, ErasedActorPath, PathSegment};
 pub use address::{Address, AddressForm};
 pub use load_name::{LoadName, LoadNameError};
 pub use namespace::Namespace;

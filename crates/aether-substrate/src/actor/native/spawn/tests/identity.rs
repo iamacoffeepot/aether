@@ -3,7 +3,7 @@
 //! actor's binding retains that logical parent (ADR-0099 §3 / ADR-0165), and
 //! a composed name outside the ADR-0166 grammar is refused at staging.
 
-use aether_data::{ErasedActorPath, ErasedActorPathError, MAX_SCOPE_PATH_DEPTH, ScopePathError};
+use aether_data::{ActorPathError, ErasedActorPath, MAX_SCOPE_PATH_DEPTH, ScopePathError};
 
 use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::actor::native::spawn::{SpawnError, Subname};
@@ -48,7 +48,7 @@ fn a_lineage_past_the_depth_cap_is_refused_at_staging() {
     assert!(
         matches!(
             refused,
-            Err(SpawnError::PathInvalid(ErasedActorPathError::Scope(ScopePathError::TooDeep {
+            Err(SpawnError::PathInvalid(ActorPathError::Scope(ScopePathError::TooDeep {
                 limit: MAX_SCOPE_PATH_DEPTH
             })))
         ),
