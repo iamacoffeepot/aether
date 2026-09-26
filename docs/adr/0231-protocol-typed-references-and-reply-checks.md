@@ -286,11 +286,10 @@ rows (§4) compare in one vocabulary.
 A protocol implements no `Contract<K>`. Deriving one from `Rows` needs a
 type-level lookup of `K` in the tuple, and a blanket impl cannot express it:
 positional impls overlap (`E0119`) when two rows could share a kind, and an
-inferred row index is an unconstrained impl parameter (`E0207`). Where a
-protocol's row for `K` is needed, a `ProtocolRef<P>` send and the coverage of
-one protocol by another that narrowing a `ProtocolRef<Q>` needs (§3), it is
-found by a method-level bound on `P::Rows` whose row index is inferred at the
-call site.
+inferred row index is an unconstrained impl parameter (`E0207`). Two places
+need a protocol's row for `K`: a `ProtocolRef<P>` send, and narrowing, which
+needs one protocol covered by another (§3). Both find the row with a
+method-level bound on `P::Rows` whose row index is inferred at the call site.
 
 **Composition.** `#[protocol(includes(Pingable, Describable))]` concatenates the
 included protocols' rows into `Rows`, so the `CONTRACTS` list and coverage

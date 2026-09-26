@@ -243,7 +243,6 @@ fn emit(item: &ItemTrait, rows: &[ProtocolRow]) -> TokenStream2 {
 /// row only in rustdoc.
 fn row_list_docs(rows: &[ProtocolRow]) -> Vec<TokenStream2> {
     let mut lines = vec![String::new(), " # Rows".to_owned(), String::new()];
-    let mut passthrough = Vec::new();
     for row in rows {
         let kind = type_display(&row.kind);
         let entry = match &row.reply {
@@ -252,12 +251,12 @@ fn row_list_docs(rows: &[ProtocolRow]) -> Vec<TokenStream2> {
         };
         lines.push(entry);
 
+        // A row is not a rustdoc item, so only its doc text is kept; any other
+        // doc attribute (`#[doc(hidden)]`, `#[doc(alias = ..)]`) is dropped
+        // rather than applied to the whole protocol.
         let mut text = Vec::new();
-        for attr in &row.docs {
-            match doc_text(attr) {
-                Some(value) => text.extend(value.lines().map(|line| line.strip_prefix(' ').unwrap_or(line).to_owned())),
-                None => passthrough.push(attr.to_token_stream()),
-            }
+        for value in row.docs.iter().filter_map(doc_text) {
+            text.extend(value.lines().map(|line| line.strip_prefix(' ').unwrap_or(line).to_owned()));
         }
         if !text.is_empty() {
             lines.push(String::new());
@@ -265,7 +264,7 @@ fn row_list_docs(rows: &[ProtocolRow]) -> Vec<TokenStream2> {
         }
     }
 
-    lines.into_iter().map(|line| quote! { #[doc = #line] }).chain(passthrough).collect()
+    lines.into_iter().map(|line| quote! { #[doc = #line] }).collect()
 }
 
 fn doc_text(attr: &Attribute) -> Option<String> {
