@@ -139,7 +139,7 @@ pub(super) async fn spawn_substrate(mcp: &Mcp, args: SpawnSubstrateArgs) -> Resu
         let mut statuses = Vec::with_capacity(args.mails.len());
         for (index, mail) in args.mails.into_iter().enumerate() {
             let spec = MailSpec { engine_id: Some(info.engine_id.clone()), mail };
-            statuses.push(settle_mail_item(mcp, index, spec, ReplyProjection::default()).await);
+            statuses.push(settle_mail_item(mcp, index, spec, ReplyProjection::default(), None).await);
         }
         Some(statuses)
     };

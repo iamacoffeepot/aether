@@ -23,7 +23,7 @@ fn decode_reply_events_decodes_known_substrate_kind() {
     let reply = ReplyEnvelope { kind, payload };
 
     // Empty engine-kinds map → falls through to the static vocabulary.
-    let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
+    let decoded = decode_reply_events(&[reply], &HashMap::new(), None, None);
     assert_eq!(decoded.len(), 1, "one reply in, one out");
     let only = &decoded[0];
     assert_eq!(only.kind_name.as_deref(), Some("aether.fs.list"), "the known kind resolves to its name");
@@ -40,7 +40,7 @@ fn decode_reply_events_decodes_known_substrate_kind() {
 fn decode_reply_events_falls_back_on_unknown_kind() {
     let reply = ReplyEnvelope { kind: KindId(0xDEAD_BEEF_DEAD_BEEF), payload: vec![1, 2, 3] };
     // No engine-kinds entry, no declared reply → falls through to base64.
-    let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
+    let decoded = decode_reply_events(&[reply], &HashMap::new(), None, None);
     assert_eq!(decoded.len(), 1);
     let only = &decoded[0];
     assert_eq!(only.kind_name, None, "an unknown kind has no name");
@@ -62,7 +62,7 @@ fn clean_decode_reply_omits_payload_bytes_key_in_json() {
     let reply = ReplyEnvelope { kind, payload };
 
     // Empty engine-kinds map → falls through to the static vocabulary.
-    let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
+    let decoded = decode_reply_events(&[reply], &HashMap::new(), None, None);
     let json = serde_json::to_value(&decoded[0]).expect("reply serializes");
     let obj = json.as_object().expect("reply is a JSON object");
     assert!(!obj.contains_key("payload_bytes"), "a clean decode omits the payload_bytes key entirely: {json}");
@@ -102,7 +102,7 @@ fn decode_reply_events_decodes_component_defined_reply_via_engine_cache() {
     let mut engine_kinds = HashMap::new();
     engine_kinds.insert(reply_kind.name.clone(), reply_kind);
 
-    let decoded = decode_reply_events(&[envelope], &engine_kinds, Some(reply_kind_id));
+    let decoded = decode_reply_events(&[envelope], &engine_kinds, Some(reply_kind_id), None);
     assert_eq!(decoded.len(), 1);
     let only = &decoded[0];
     assert_eq!(only.params.as_ref(), Some(&value), "component-defined reply kind decodes to params via engine cache");
@@ -123,7 +123,7 @@ fn decode_reply_events_base64_fallback_when_kind_absent_from_all_caches() {
     let absent_kind_id = KindId(0xC0FF_EE00_C0FF_EE00);
     let envelope = ReplyEnvelope { kind: absent_kind_id, payload: vec![0xAB, 0xCD] };
     // Declared reply matches the envelope but the engine cache is empty.
-    let decoded = decode_reply_events(&[envelope], &HashMap::new(), Some(absent_kind_id));
+    let decoded = decode_reply_events(&[envelope], &HashMap::new(), Some(absent_kind_id), None);
     assert_eq!(decoded.len(), 1);
     let only = &decoded[0];
     assert_eq!(only.params, None, "absent kind doesn't decode to params");
@@ -220,4 +220,54 @@ fn error_recognition_rejects_err_substring_false_positives() {
             "{kind_name} must not be recognized as an error kind"
         );
     }
+}
+
+/// Pins the order decode → format → leaf render and the exact-kind-id
+/// keying: the masked kind's digest and a `Bytes` leaf over the 16 KiB
+/// per-leaf spill threshold both come back as inline hex, while a second
+/// kind of the same shape renders exactly as it does with no mask.
+#[test]
+fn decode_reply_events_formats_only_the_masked_kind_before_the_leaf_spill() {
+    use aether_data::{NamedField, SchemaCell};
+
+    let schema = SchemaType::Struct {
+        fields: vec![
+            NamedField {
+                name: "digest".into(),
+                ty: SchemaType::Array { element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)), len: 4 },
+            },
+            NamedField { name: "blob".into(), ty: SchemaType::Bytes },
+        ]
+        .into(),
+        repr_c: false,
+    };
+    let masked = KindDescriptor { name: "test.masked_reply".to_owned(), schema: schema.clone() };
+    let unmasked = KindDescriptor { name: "test.unmasked_reply".to_owned(), schema: schema.clone() };
+    let engine_kinds =
+        HashMap::from([(masked.name.clone(), masked.clone()), (unmasked.name.clone(), unmasked.clone())]);
+    let format = ReplyFormat::parse(
+        serde_json::json!({ "test.masked_reply": { "digest": "$hex", "blob": "$hex" } })
+            .as_object()
+            .expect("mask is an object"),
+        &engine_kinds,
+    )
+    .expect("mask is valid");
+
+    let large_blob = vec![0xab_u8; 20 * 1024];
+    let envelope = |descriptor: &KindDescriptor, blob: &[u8]| ReplyEnvelope {
+        kind: KindId(kind_id_from_parts(&descriptor.name, &descriptor.schema)),
+        payload: aether_codec::encode_schema(&serde_json::json!({ "digest": [1, 2, 3, 4], "blob": blob }), &schema)
+            .expect("reply encodes"),
+    };
+    let replies = [envelope(&masked, &large_blob), envelope(&unmasked, b"hi")];
+
+    let formatted = decode_reply_events(&replies, &engine_kinds, None, Some(&format));
+    let plain = decode_reply_events(&replies, &engine_kinds, None, None);
+
+    assert_eq!(
+        formatted[0].params,
+        Some(serde_json::json!({ "digest": "01020304", "blob": "ab".repeat(large_blob.len()) })),
+        "a formatted Bytes leaf is a string before the leaf spill, so it stays inline",
+    );
+    assert_eq!(formatted[1].params, plain[1].params, "an unmasked kind renders exactly as with no mask");
 }

@@ -10,4 +10,6 @@ mod logs_cost;
 mod mail;
 mod render;
 mod reply;
+mod reply_format;
+mod sigil;
 mod state;

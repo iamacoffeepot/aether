@@ -568,6 +568,32 @@ carries, written two hex digits per byte in order. No head is published for a
 source tree: each commit is its own tree, and the proof's caller cites the
 digest directly, so a head would have no reader.
 
+Through the MCP harness, the printed hex goes into the input's params as a
+`$hex` embed, which writes a `[u8; 32]` field from exactly 64 lowercase hex
+characters and encodes the same bytes as the 32-number array:
+
+```json
+"source": {"$hex": "<tree>"}
+```
+
+Digests come back out of a reply the same way when `send_mail` (or
+`send_mail_traced`) carries a `format` mask naming the reply kind and the
+digest leaves, such as the artifacts a publish staged or the input and result
+a driver call recorded:
+
+```json
+{"format": {"aether.bloomery.journal.publish_result": {"Committed": {"artifacts": ["$hex"]}}}}
+```
+
+```json
+{"format": {"aether.bloomery.driver.call_outcome": {"Transition": {"transition": {"input": "$hex", "result": "$hex"}}}}}
+```
+
+Each masked digest then reads as the same 64-character hex `import-commit`
+prints. `{"format": {"*": "$hex"}}` does this for every byte-array leaf of
+every reply. The embed and mask grammar is in
+[The MCP harness](../mcp-harness.md#the-tools).
+
 ## Vendoring crate sources
 
 `vendor.cargo` produces the tree [the clippy proof](#the-clippy-proof) mounts
