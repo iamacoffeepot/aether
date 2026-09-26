@@ -120,8 +120,9 @@ pub struct BlobStore {
     shared: Arc<Shared>,
 }
 
-/// State the store and every entry share. An entry keeps it alive, so the
-/// reclaim thread outlives the last entry as well as the last store.
+/// State the store and every entry share. An entry keeps it alive, and so
+/// does a live slab, so the reclaim thread outlives the last entry and the
+/// last slab as well as the last store.
 struct Shared {
     index: Mutex<Index>,
     /// Every owned entry's bytes plus every live slab.
@@ -199,8 +200,9 @@ impl BlobStore {
         SlabBuilder::new(lens, Arc::clone(&self.shared))
     }
 
-    /// The total length of every live entry's bytes, each counted once. Read
-    /// only by tests until the gauge has a reader outside the store.
+    /// The total length of every owned entry's bytes plus every live slab,
+    /// each counted once. Read only by tests until the gauge has a reader
+    /// outside the store.
     #[cfg(test)]
     #[must_use]
     pub fn resident_bytes(&self) -> usize {
