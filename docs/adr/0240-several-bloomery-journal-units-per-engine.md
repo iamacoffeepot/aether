@@ -64,47 +64,6 @@ files. Issue #6821 tracks the fix. This ADR does not use the verb.
 | Engine-wide budgets | A second workspace or journal owner resolving its own `Config` claims the whole host's cores, memory, or read cache again. |
 | Addressing | Config, the bootstrap script, and `xtask import-commit` name the journal and driver by fixed paths. |
 
-### Constraints from the Ergo specification
-
-Ergo is the language that compiles down to Bloomery reactors and programs.
-Its specification fixes what a world's log must be:
-
-- One log per world with one total order ≺ over every turn. The formalism's
-  header states "heads are a fold over one log"; formalism §11 defines the
-  tick as a fixed list of slots.
-- Parallelism lives inside that one order: core-calculus §6.2 (commit order
-  of conflicting pairs follows ≺, non-conflicting firings commit in any
-  order, speculative work validated first) and §6.3 (the schedule
-  description the platform receives).
-- Instances are World state inside the one log: `Tile.inst: InstanceId =
-  Main | Inst(a)` (systems, collision).
-- The clock and the seed are facts of the log (core-calculus §2.1), and the
-  seed is one per game (systems, rng §3).
-- Grammar gap G-3: a run returns an ordered log append with causal
-  addresses and FIFO order.
-- core-calculus §6.4: "This file designs neither journals nor executors; the
-  owner is rethinking the layer around them."
-
-A journal per instance, region, or player would break teleports, hit
-landing, drops, and dispatch, which all need ≺ across both sides.
-
-### The fork seam
-
-Bundles (reactors, pure programs, and their packaging) are Ergo's compile
-target and Bloomery's build target alike. The log and the executor are where
-the two may diverge:
-
-| | Build unit (Bloomery today) | World unit (Ergo, future) |
-|---|---|---|
-| Log order | `seq` and `cause`, with head fences | one total order by (tick, slot, seq) |
-| Executor | the driver, which serializes calls per root | parallel commit over a tick's turns (core-calculus §6.2) |
-| Clock and seed | none | one Clock and one seed per world |
-| Workspace | yes | no |
-
-Bloomery may fork into its own system focused on building. This ADR does not
-decide that. It fixes the part both sides share: a unit owns a log and
-everything that folds it, and bundles are engine-wide.
-
 ## Decision
 
 ### Terms
@@ -113,12 +72,10 @@ everything that folds it, and bundles are engine-wide.
 |---|---|
 | **unit** | One log plus every actor whose state derives from that log. |
 | **unit key** | The `UnitKey` that names a unit, unique per engine: a `LoadName` of at most 191 bytes (D3, D4). |
-| **unit root** | The unit's log owner, the root of the unit's lineage. For a build unit it is `JournalActor` at `aether.bloomery.journal:<key>`. |
+| **unit root** | The unit's log owner, the root of the unit's lineage: `JournalActor` at `aether.bloomery.journal:<key>` (D1). |
 | **member** | An actor beneath a unit root: the driver and the workspace. |
 | **bundle root** | A trampoline beneath the engine's one `aether.component` that hosts one bundle's generated root for one unit, loaded under the name `<key>-<digest>` (D4). |
 | **belongs to a unit** | A member belongs by lineage, beneath the unit root. A bundle root belongs by name, through the unit key its name is built from. |
-| **build unit** | A unit whose log is a Bloomery journal and whose executor is the bundle driver. The only kind this ADR builds. |
-| **world unit** | A unit whose log is one Ergo world. Its log and executor types are not decided here. |
 | **engine-shared** | Held once per engine and keyed by content hash, or holding no log state. |
 
 ```text
@@ -141,23 +98,25 @@ Each rule is followed by the mechanism that makes breaking it impossible or
 refused, the concrete way it would be broken and why that way is closed, and
 what it forces elsewhere.
 
-**I-1. A world unit holds exactly one Ergo world; nothing smaller than a
-world gets its own journal. A build unit holds no world.**
+**I-1. A unit is indivisible: everything that must share one total order
+lives in one journal, and a journal is never split across units.**
 
-- *Upheld by:* units exist only at boot. `JournalActor` is `#[actor(instanced,
-  root)]`, and a root is spawned only through `BuiltChassis::spawn_actor`,
-  which only the chassis mount holds. No ctx verb births a root:
-  `NativeCtx::spawn_child` requires `C: ChildOf<A>`, and a guest spawns only
-  inline children and siblings. So no
-  bundle, program, or reactor can create a journal for an instance, a
-  region, or a player. Which world a unit holds is its config entry, read
-  once at boot.
-- *Would be violated by:* a journal per instance, region, or player. Closed
-  by construction (no runtime door births a unit) and by semantics:
-  teleports, hit landing, drops, and dispatch need ≺ across both sides, and
-  I-3 says no order exists across units.
-- *Implication:* instances are World state (`Tile.inst`); a world scales
-  inside its log (core-calculus §6.2), never by adding logs.
+- *Upheld by:* units exist only at boot, one per config entry (D2, D3).
+  `JournalActor` is `#[actor(instanced, root)]`, and a root is spawned only
+  through `BuiltChassis::spawn_actor`, which only the chassis mount holds. No
+  ctx verb births a root: `NativeCtx::spawn_child` requires `C: ChildOf<A>`,
+  and a guest spawns only inline children and siblings. So no bundle,
+  program, or reactor can create a journal for part of a unit's work. Each
+  unit opens exactly one journal root, and D3 refuses two entries with the
+  same root, so no journal is shared by two units.
+- *Would be violated by:* splitting one log's work across several journals,
+  or two units opening one journal root. Closed by construction: no runtime
+  door births a unit, and a repeated root refuses boot. Closed by
+  semantics as well: I-3 says no order exists across units, so work split
+  across two journals loses the order between its parts.
+- *Implication:* a unit runs as one whole, with one journal, one driver,
+  and one workspace. Work that must stay in order grows inside its unit's
+  log, never by adding logs.
 
 **I-2. Every actor whose state derives from a log belongs to that log's
 unit: a member by lineage beneath the log's owner, a bundle root by a name
@@ -182,7 +141,7 @@ built from the unit's key.**
   sender, as it does on `main`.
 - *Implication:* one bundle root per (digest, unit); the compiled module is
   shared instead (D5). A unit's bundle roots are not a subtree, so
-  removing a unit means dropping its `<key>-*` roots (D10).
+  removing a unit means dropping its `<key>-*` roots (D9).
 
 **I-3. A unit's log is totally ordered and local: every entry's position is
 its own journal's `seq`, and no entry is ordered against another unit's.**
@@ -196,9 +155,8 @@ its own journal's `seq`, and no entry is ordered against another unit's.**
   `cause`. Closed: `ActorRef` has no codec, so no mail can carry a journal
   to write to; `AppendRecords` requires every cause in `1..=expected_seq`
   of the journal it is sent to.
-- *Implication:* anything that needs ≺ between two things puts both in one
-  unit (I-1). A world unit's Clock and seed are facts in its own log, so
-  each world has its own by construction (core-calculus §2.1).
+- *Implication:* anything that needs an order between two entries puts both
+  in one unit's journal (I-1).
 
 **I-4. A driver drives exactly one journal, and a bundle root answers
 exactly one driver.**
@@ -245,7 +203,7 @@ shares of it, never copies.**
   Closed: the workspace's `Config` is `UnitBudget`, which no config source
   can produce.
 - *Implication:* an idle unit's cores are not lent to a busy one; a shared
-  admission actor is deferred (D10).
+  admission actor is deferred (D9).
 
 **I-7. What is engine-shared is keyed by content hash or holds no log
 state.**
@@ -268,9 +226,10 @@ and a bundle root by its unit's key and its digest; no position crosses a
 boundary.**
 
 - *Upheld by:* D8 and D4. Config carries unit keys (`UnitKey`, validated on
-  decode). Code builds `Address::<JournalActor>::root_at(key)` and proves it
-  through `ctx.resolve::<R>`, which mints `ActorRef<R>`; a member's address
-  is `member_address::<C>(unit)`, derived from the unit's proof and `C`'s
+  decode). The bootstrap builds `Address::<JournalActor>::root_at(key)` and
+  proves it through the guest verb `WasmCtx::resolve::<R>`, which mints
+  `ActorRef<R>`; native code holds its proofs from spawn results. A
+  member's address is `member_address::<C>(unit)`, derived from the unit's proof and `C`'s
   fixed key. A bundle root's name is `UnitBundle::name(key, digest)`, so
   anyone holding the key and the digest derives it, and its canonical path
   `aether.component/aether.embedded:<key>-<digest>` splits back into both
@@ -288,52 +247,7 @@ boundary.**
   kind-checked. A bundle root's path reads as its unit and digest in logs,
   traces, and MCP tools.
 
-### Open questions for the owner
-
-Each has a recommendation. None is decided silently.
-
-1. **Unit content** (changes I-1). Is a unit at most one whole Ergo world,
-   or non-game Bloomery work, with a written ban on sub-world journals?
-   *Recommendation: yes, as I-1 states.*
-2. **Where the Ergo executor lives** (changes I-2, I-4, and the fork seam).
-   The unit's driver, a sibling member beneath the world unit, or
-   undecided. *Recommendation: a member beneath the world unit, of its own
-   type, never the `BundleDriver`: a driver that serializes calls per root
-   is the wrong shape for parallel commit over a tick's turns. Its log
-   order, scheduling, and whether it owns the log are left to the executor
-   ADR. This is the fork seam.*
-3. **Does this ADR settle the core-calculus §6.4 rethink?** (changes I-1,
-   I-3). *Recommendation: it settles ownership and topology only (a unit
-   owns one log and everything that folds it; bundles are engine-wide) and
-   leaves executor semantics, the world log's order, and whether Bloomery
-   forks to that rethink.*
-4. **Unit root: the journal, or a dedicated unit actor?** (changes I-2,
-   I-8). *Recommendation: the journal.* A dedicated
-   `aether.bloomery.unit:<key>` would be an actor with no handlers once the
-   embedder can spawn children beneath a proof (D2), which fails "why do we
-   need this". It becomes worth having only if a unit kind needs behaviour
-   of its own beside its log, such as a world unit coordinating its log and
-   executor; that unit kind can choose it then.
-5. **Program roots: per unit, or shared per engine?** (changes I-2, I-4,
-   I-5). The direction handed to this ADR shared program roots once their
-   live table and child names were keyed by (invoker, seq). *Recommendation:
-   per unit.* One root serves both roles per digest (ADR-0225 decision 8),
-   so sharing the program role means two roots per digest or a root whose
-   reactor role belongs to one unit and program role to all. A shared root
-   would also pick each invocation's workspace at run time (breaks I-5).
-   The saving is instance memory only, since D5 already compiles once. The
-   wider form, one root per digest holding every unit's views, is rejected
-   below.
-6. **The native twin of `resolve`** (changes I-8). Issue #6796 says the
-   `Address<R>` door lands as one verb on each ctx in the same change, and
-   also that no ctx verb lands without a named production consumer. The
-   guest verb's consumer is the bootstrap script. The native verb has none
-   in this ADR: the chassis mount holds its proofs from spawn results.
-   *Recommendation: land the twins together, as #6796 decides; both run the
-   same registry read (`Registry::live_child`), so the native verb adds no
-   new mechanism, and the pair is one door with one consumer.*
-
-### D1. Unit topology (serves I-1, I-2, I-3, I-7)
+### D1. Unit topology (serves I-1, I-2, I-3, I-7, I-8)
 
 | Held | Scope | Why |
 |---|---|---|
@@ -346,10 +260,15 @@ Each has a recommendation. None is decided silently.
 | HTTP egress, RPC server, inventory | per engine | I-7 |
 | Durable artifact files | per unit (its journal root's `blobs`) | I-3: each root is one lock and one writer (ADR-0237's 2026-09-25 amendment) |
 
-A build unit's members are `JournalActor`, `WorkspaceCapability`, and
-`BundleDriver`; its bundle roots belong to it by name. A world unit follows
-the same rule (its log owner is its root, and everything that folds its log
-belongs to it); its types wait for open question 2.
+A unit's root is its `JournalActor`; its members are `WorkspaceCapability`
+and `BundleDriver`; its bundle roots belong to it by name. The unit root is
+the journal because a dedicated unit actor (`aether.bloomery.unit:<key>`)
+would have no handlers once the embedder can spawn children beneath a proof
+(D2).
+
+Bundles are engine-shared code: the bundle format, digest naming, the
+`Warm` / `Event` / `Invoke` protocols, and each compiled module (D5) serve
+every unit alike. Each unit owns its log, its driver, and its workspace.
 
 ### D2. The chassis mounts each unit, then binds (serves I-1, I-2, I-4)
 
@@ -482,14 +401,14 @@ namespace:
   `aether.embedded:` (`crates/aether-substrate/src/mail/registry/names.rs:61`).
   A second trampoline type would have to be threaded through all three.
 
-The dedicated namespace is deferred (D10).
+The dedicated namespace is deferred (D9).
 
-### D5. Shared code, per-unit instances (serves I-2, I-7)
+### D5. Shared code, per-unit instances (serves I-2, I-4, I-7)
 
 Code is shared through the compiled module: one per digest per engine.
 `ModuleCache` holds one slot today
 (`crates/aether-component/src/component/runtime/module_cache.rs:25`), so two
-units loading different bundles in turn would recompile each. It becomes a
+units loading different bundles alternately would recompile each. It becomes a
 map keyed by sha256 content hash that keeps each compiled module while any
 live trampoline of that hash exists. Bundle roots are never dropped (D4),
 so a bundle compiles once per engine however many units load it and in
@@ -497,7 +416,10 @@ whatever order.
 
 Each unit gets its own bundle root instance: its own linear memory, its own
 reactor views, and its own program table. A unit's cost for a bundle it
-shares with another unit is that one instance.
+shares with another unit is that one instance. One generated root serves
+both the program role and the reactor role (ADR-0225 decision 8), and its
+name carries the unit key (D4), so program roots are per unit exactly as
+reactor roots are.
 
 Code reuse and actor sharing are separate decisions. A compiled module is
 immutable code with no log state, so sharing it is I-7. An actor holds a
@@ -585,31 +507,25 @@ per-unit shares; admission stays FIFO within a unit's share).
 | Piece | Change |
 |---|---|
 | `AddressForm` | gains `Root { key: Option<LoadName> }`: the root instance of `R` keyed `key`. It carries no position. `Address::<R>::root_at(key)` is bounded `R: Root + Instanced`. |
-| `NativeCtx::resolve::<R>` / `WasmCtx::resolve::<R>` | `(&Address<R>) -> Result<ActorRef<R>, ResolveError>`, one verb on each ctx in one change. Folds the address with `R`'s resolver and proves the route with the published-route read `Registry::live_child` already makes; only `Live` mints. An `Exact` address mints only when the route's actor type is `R`. The guest crosses one host import. Takes the name ADR-0230 reserved for this door. |
+| `WasmCtx::resolve::<R>` | `(&Address<R>) -> Result<ActorRef<R>, ResolveError>`, the guest verb only. Folds the address with `R`'s resolver and proves the route with the published-route read `Registry::live_child` already makes; only `Live` mints. An `Exact` address mints only when the route's actor type is `R`. The guest crosses one host import. Takes the name ADR-0230 reserved for this door. |
 | `UnitMember` | a trait in the journal identity half: `ChildOf<JournalActor> + Instanced` with a fixed key (`driver`, `workspace`). `member_address::<C: UnitMember>(unit: ActorRef<JournalActor>) -> Address<C>` is `child_address::<JournalActor, C>(unit, C::key())`. |
 | `UnitKey`, `UnitBundle::name` | in `aether-bloomery-kinds` beside `Digest` (D4). The driver's only way to name a bundle root. |
 | `aether-bloomery-journal`, `aether-bloomery-driver` | split per ADR-0122: an always-on, `no_std` identity (the marker, its handled kinds, `UnitMember`) and a `runtime` feature carrying the actor, `aether-substrate`, and `rusqlite`. |
 | Bootstrap config | `journal` and `driver` paths are replaced by `units: Vec<UnitKey>`. At `wire` it resolves each unit, then its driver and workspace by type; every send is `send_to(ActorRef<R>, &K)`, kind-checked. |
 | External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. A unit's bundle root is `aether.component/aether.embedded:<key>-<digest>`, or its short path `aether.component/:<key>-<digest>`. |
 
+Only the guest verb lands. Every new verb needs a named production
+consumer: the guest verb's consumer is the bootstrap, and the chassis mount
+holds its proofs from spawn results, so no native code calls
+`NativeCtx::resolve::<R>`. The native twin lands with its first native
+caller. This departs from issue #6796's wording that the twins arrive
+together, because the consumer rule takes precedence.
+
 The bootstrap's `resolve_path` use goes away; the verb stays for its native
 consumers and for guests that are handed text.
 
-### D9. The fork seam (serves I-1, I-3)
+### D9. Deferred
 
-| Common to every unit kind | Per unit kind |
-|---|---|
-| Bundle format, digest naming, `Warm` / `Event` / `Invoke` protocols, compiled modules (D5) | the log owner's type and order |
-| One log per unit, everything that folds it belonging to the unit (I-2) | the executor's type |
-| Budgets handed out as shares (I-6) | whether it has a workspace, a Clock, a seed |
-
-A world unit reuses bundles unchanged and supplies its own log and executor.
-Whether those live in this repository or a forked one does not change a
-bundle.
-
-### D10. Deferred
-
-- A world unit's log, executor, Clock, and seed (open questions 2 and 3).
 - Lending idle cores between units through a shared admission actor (I-6).
 - Adding or removing a unit while the engine runs; units exist from boot.
   With bundle roots named by key, removing a unit means dropping its
@@ -642,7 +558,7 @@ the per-unit component host.
 | Representations valid by construction | `UnitKey` is fallible on construction and decode and enforces the 191-byte limit that keeps `UnitBundle::name` infallible. |
 | Unexportable invariants stay unexported | Config carries `UnitKey`s; `ActorRef` crosses nothing. |
 | Static contract checks | `child_of(JournalActor)` and `DependsOn` make a root-singleton workspace binding a compile error; identity halves make bootstrap sends kind-checked. No runtime token or injection. |
-| One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `UnitBundle::name`: the driver. `UnitKey::new`: D3's lowering. `resolve` twins: the bootstrap (open question 6). `Root` form: the bootstrap. `HostBudget::split`: the mount. |
+| One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `UnitBundle::name`: the driver. `UnitKey::new`: D3's lowering. `WasmCtx::resolve`: the bootstrap; the native twin waits for a native caller (D8). `Root` form: the bootstrap. `HostBudget::split`: the mount. |
 | Pending replies never dropped | D6's hops park and answer once; nothing evicts. |
 | Fewer events, simpler architecture | No new actor, event, or record kind. The dedicated unit root is rejected for having no behaviour, and bundle roots keep the host they have. |
 | No recursion on unbounded data | Mount iterates the unit list; relays are single hops. |
@@ -664,10 +580,8 @@ the per-unit component host.
   fetches dominate them.
 - Operators name units: every config, script, and external path gains a
   unit key, and a bundle root's path shows its unit and digest.
-- Every unit's loads still pass through the one `aether.component` (D10's
+- Every unit's loads still pass through the one `aether.component` (D9's
   revisit trigger).
-- A world unit, when it comes, has a place: beneath its own root, sharing
-  bundles, owning its log and executor.
 
 Follow-on issues, one concept each:
 
@@ -680,7 +594,7 @@ Follow-on issues, one concept each:
 5. `HostBudget::split`, the workspace as a unit member, the read-cache split
    (D7).
 6. Identity halves for the journal and driver crates (D8).
-7. `AddressForm::Root`, the `resolve` twins, `UnitMember`, and the bootstrap
+7. `AddressForm::Root`, the guest `resolve` verb, `UnitMember`, and the bootstrap
    migration (D8), which also amends ADR-0230 §3's `Address<R>` row.
 
 Issue #6821 (`load_under` placement checked against the caller) is separate
@@ -712,7 +626,7 @@ and does not block these.
   - two or three more path levels against the depth cap of 8
     (`MAX_SCOPE_PATH_DEPTH`, `crates/aether-data/src/hash.rs:204`).
 
-  Deferred (D10): it is the route if dropping a unit by subtree ever
+  Deferred (D9): it is the route if dropping a unit by subtree ever
   matters, and the first alternative the revisit reexamines.
 - **Views keyed by journal on one shared root per digest.** One actor runs
   one handler at a time (ADR-0038, ADR-0087), so every unit's folds and
@@ -721,13 +635,16 @@ and does not block these.
   and breaks I-2 (one actor folding several logs), I-4 (one root answering
   several drivers), and I-7 (a shared actor holding log state).
 - **A dedicated unit root actor.** No handlers once the embedder can spawn
-  beneath a proof; rejected under "why do we need this" (open question 4).
+  beneath a proof; rejected under "why do we need this" (D1).
 - **The journal spawns its own members from `wire`.** Needs a native
   self-reference door for `DriverParams.journal` and a readiness wait before
   the RPC bind; the embedder verb needs neither.
-- **Shared program roots keyed by (invoker, seq).** Splits one root per
-  digest into two, and picks a workspace per call at run time (open
-  question 5).
+- **Shared program roots keyed by (invoker, seq).** One root serves both
+  roles per digest (ADR-0225 decision 8), so sharing the program role
+  splits one root per digest into two, or leaves a root whose reactor role
+  belongs to one unit and program role to all. It also picks a workspace per
+  call at run time (breaks I-5), and saves instance memory only, since D5
+  already compiles once.
 - **Keep program APIs on declared dependencies and add a resolver that
   finds the nearest enclosing unit.** A new sealed `DependencyResolver`
   whose fold needs an arbitrary ancestor's lineage, where the relay reuses
@@ -739,8 +656,8 @@ and does not block these.
 - **Several engines, one journal each.** Works today and needs no
   change, but pays a process, a substrate, and a compilation per journal,
   and is what an operator keeps for isolation across hosts.
-- **Journals per instance, region, or player.** Breaks ≺ across teleports,
-  hits, drops, and dispatch (I-1).
+- **Splitting one unit's work across several journals.** Loses the order
+  between the parts, since no order exists across units (I-1, I-3).
 - **Carry `Address<JournalActor>` in the bootstrap config.** Its decode
   accepts `Beneath` and `Exact` forms, which carry positions from another
   session; a `LoadName` key carries none.
