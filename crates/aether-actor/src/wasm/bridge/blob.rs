@@ -10,14 +10,8 @@
 
 use aether_data::BlobHash;
 
+use super::abi32;
 use crate::wasm::raw;
-
-/// A guest address or length as the `_p32` ABI's `u32`. Guest memory is
-/// addressed by 32 bits on wasm32, so the conversion is exact there;
-/// saturating keeps it total without a cast.
-fn abi32(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
-}
 
 /// Take one hold on the blob `hash` names and return its length, or a
 /// negative host status with no hold taken. [`drop_hold`] gives it back.

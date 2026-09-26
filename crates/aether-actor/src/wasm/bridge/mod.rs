@@ -36,3 +36,10 @@ pub(crate) mod blob;
 pub(crate) mod log;
 pub(crate) mod mail;
 pub(crate) mod persist;
+
+/// A guest address or length as the `_p32` ABI's `u32`. Guest memory is
+/// addressed by 32 bits on wasm32, so the conversion is exact there;
+/// saturating keeps it total without a cast.
+fn abi32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}

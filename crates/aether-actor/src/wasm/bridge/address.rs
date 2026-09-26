@@ -12,13 +12,10 @@
 //! This is the transport under `WasmCtx::resolve_path`, which mints the proof
 //! from a `Live` answer.
 
-// Wire-encode: `usize` → `u32` narrowings forward the `(ptr, len)` pair to the
-// wasm32 host-fn ABI (`_p32` convention, ADR-0024), same as `asset.rs`.
-#![allow(clippy::cast_possible_truncation)]
-
 use aether_data::{ActorPath, wire};
 use alloc::string::String;
 
+use super::abi32;
 use super::asset::{take_delivered, unpack};
 use crate::wasm::raw;
 
@@ -61,7 +58,7 @@ pub fn resolve_path(path: &ActorPath) -> __ResolvedPath {
     let text = path.as_str();
     // SAFETY: FFI import; the host copies the path out before returning and
     // always hands back a live `(ptr, len)`, or traps.
-    let packed = unsafe { raw::resolve_path(text.as_ptr().addr() as u32, text.len() as u32) };
+    let packed = unsafe { raw::resolve_path(abi32(text.as_ptr().addr()), abi32(text.len())) };
     let (ptr, len) = unpack(packed);
     // SAFETY: the return is always a live host-delivered buffer.
     let bytes = unsafe { take_delivered(ptr, len) };
