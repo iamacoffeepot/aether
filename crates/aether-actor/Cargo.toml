@@ -33,8 +33,10 @@ bytemuck = { workspace = true, default-features = false }
 hashbrown = { workspace = true }
 # Decoding typed payloads (e.g. `PriorState::decode_kind`,
 # `Mail::decode_kind`) is serde-driven via `aether_data::wire`. The crate
-# stays `no_std`-friendly with `default-features = false`.
-serde = { workspace = true, default-features = false, features = ["alloc"] }
+# stays `no_std`-friendly with `default-features = false`. `derive` for the
+# `resolve_path_p32` answer, `__ResolvedPath`, which crosses the ABI as wire
+# bytes.
+serde = { workspace = true, default-features = false, features = ["alloc", "derive"] }
 # ADR-0060: the wasm shim installs a `tracing::Subscriber`
 # (`MailSubscriber`) at component boot that turns `tracing::warn!` /
 # `error!` / `info!` inside the wasm sandbox into `aether.log` mail.

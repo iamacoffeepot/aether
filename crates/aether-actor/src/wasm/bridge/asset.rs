@@ -37,7 +37,8 @@ const ASSET_NOT_FOUND: u64 = u64::MAX;
 const ASSET_ALLOC_ALIGN: usize = 1;
 
 /// Unpack the ADR-0163 host return `(ptr << 32) | len` into `(ptr, len)`.
-fn unpack(packed: u64) -> (u32, u32) {
+/// `address` unpacks the `resolve_path_p32` answer the same way.
+pub(super) fn unpack(packed: u64) -> (u32, u32) {
     ((packed >> 32) as u32, packed as u32)
 }
 
@@ -50,7 +51,7 @@ fn unpack(packed: u64) -> (u32, u32) {
 /// `ptr`/`len` must be a live buffer the host just delivered through
 /// `deliver_bytes_to_guest` (this same allocator, this alignment). A
 /// zero-length delivery carries no live buffer, so it is not freed.
-unsafe fn take_delivered(ptr: u32, len: u32) -> Vec<u8> {
+pub(super) unsafe fn take_delivered(ptr: u32, len: u32) -> Vec<u8> {
     if len == 0 {
         return Vec::new();
     }

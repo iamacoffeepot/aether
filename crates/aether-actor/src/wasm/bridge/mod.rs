@@ -21,15 +21,25 @@
 //! - `blob` — ADR-0238 guest blob reads (`blob_hold`, `blob_read`,
 //!   `blob_drop`), the transport under the guest's `GuestHold` backing.
 //!   wasm32-only: every caller is.
+//! - `address` — ADR-0230 §3 path proof (`resolve_path`), the transport under
+//!   `WasmCtx::resolve_path`, and the `__ResolvedPath` answer it decodes.
 //!
 //! Per-stage capability ctx impls in [`crate::wasm::ctx`] call these
 //! functions directly; the cross-target abstraction layer is the
 //! per-stage capability traits in [`crate::model::ctx`], not a single
 //! transport trait.
 
+pub(crate) mod address;
 pub(crate) mod asset;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod blob;
 pub(crate) mod log;
 pub(crate) mod mail;
 pub(crate) mod persist;
+
+/// A guest address or length as the `_p32` ABI's `u32`. Guest memory is
+/// addressed by 32 bits on wasm32, so the conversion is exact there;
+/// saturating keeps it total without a cast.
+fn abi32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}

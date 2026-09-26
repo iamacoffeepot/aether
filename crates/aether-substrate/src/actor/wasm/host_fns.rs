@@ -6,11 +6,12 @@
 
 use core::str::from_utf8;
 
-use aether_actor::{AssetCatalog, AssetWindow};
+use aether_actor::{__ResolvedPath, AssetCatalog, AssetWindow};
 use aether_codec::frame::max_frame_size;
-use aether_data::{BlobHash, MAX_READ_BYTES, wire};
+use aether_data::{ActorPath, BlobHash, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
+use crate::actor::native::ResolvePathError;
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
 use crate::mail::attachments::{EncodedMail, inline_payload};
 use crate::mail::boundary::is_engine_only;
@@ -894,6 +895,42 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
+    // HOST_FN_OK: ADR-0230 §3 (#6786) — a guest proves an `ActorPath` that
+    // arrived in its config or mail inside `wire` or a handler, synchronously,
+    // and keeps the proof for its later sends. Mail cannot answer it, because
+    // the proof must exist before the first send that needs it. The host
+    // resolves and proves the path through `NativeBinding::resolve_path`, the
+    // crate-private path `NativeCtx::resolve_path` takes, so the guest and
+    // native answers cannot drift apart.
+    //
+    // The guest passes the path text (a slice in guest memory). The host
+    // encodes the answer as one `__ResolvedPath` — `Live` with the route's
+    // position, `Unresolved` with the registry's refusal as text, or `NotLive`
+    // naming the canonical path — and delivers it as the packed
+    // `(ptr << 32) | len`, like `asset_catalog_p32`. One buffer carries every
+    // outcome, so no per-call status cell outlives the call. An out-of-bounds
+    // pointer, text that is not UTF-8, or text outside the ADR-0166 grammar
+    // traps: the SDK passes only a validated `ActorPath`, so only a
+    // hand-rolled guest reaches those.
+    linker.func_wrap(
+        "aether",
+        "resolve_path_p32",
+        |mut caller: Caller<'_, ComponentCtx>, path_ptr: u32, path_len: u32| -> wasmtime::Result<u64> {
+            let text = read_guest_utf8(&mut caller, path_ptr, path_len)?;
+            let path = ActorPath::new(&text).map_err(|error| {
+                wasmtime::Error::msg(format!("resolve_path: the text is not an ADR-0166 actor path: {error}"))
+            })?;
+            let answer = match caller.data().binding.resolve_path(&path) {
+                Ok(reference) => __ResolvedPath::Live { position: reference.id().0 },
+                Err(ResolvePathError::Unresolved(error)) => __ResolvedPath::Unresolved { detail: error.to_string() },
+                Err(ResolvePathError::NotLive { canonical_path }) => __ResolvedPath::NotLive { canonical_path },
+            };
+            let bytes = wire::to_vec(&answer)
+                .map_err(|error| wasmtime::Error::msg(format!("resolve_path: encode failed: {error}")))?;
+            deliver_bytes_to_guest(&mut caller, &bytes)
+        },
+    )?;
+
     // HOST_FN_OK: ADR-0238 decisions 2 and 9 — a guest's decode builds a
     // `Blob` over a tag-1 hash inside its handler, synchronously, and the
     // value's `GuestHold` must own a hold before the decode returns, which no
@@ -1012,8 +1049,8 @@ const ASSET_ALLOC_ALIGN: u32 = 1;
 
 /// Read a UTF-8 string from `(ptr, len)` in the caller's guest memory.
 /// Traps on no-memory, out-of-bounds, or invalid UTF-8 — a malformed asset
-/// name from a hand-rolled guest fails loud rather than resolving to a
-/// wrong asset.
+/// name or actor path from a hand-rolled guest fails loud rather than
+/// resolving to a wrong asset or actor.
 fn read_guest_utf8(caller: &mut Caller<'_, ComponentCtx>, ptr: u32, len: u32) -> wasmtime::Result<String> {
     let memory = caller
         .get_export("memory")
@@ -1024,8 +1061,8 @@ fn read_guest_utf8(caller: &mut Caller<'_, ComponentCtx>, ptr: u32, len: u32) ->
     let end = start
         .checked_add(len as usize)
         .filter(|end| *end <= data.len())
-        .ok_or_else(|| wasmtime::Error::msg("asset name pointer out of bounds"))?;
-    from_utf8(&data[start..end]).map(str::to_owned).map_err(|_| wasmtime::Error::msg("asset name is not valid UTF-8"))
+        .ok_or_else(|| wasmtime::Error::msg("guest string pointer out of bounds"))?;
+    from_utf8(&data[start..end]).map(str::to_owned).map_err(|_| wasmtime::Error::msg("guest string is not valid UTF-8"))
 }
 
 /// Allocate `bytes.len()` bytes in guest memory through the guest's

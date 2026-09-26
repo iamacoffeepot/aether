@@ -7,7 +7,8 @@
 
 use std::sync::mpsc;
 
-use aether_bloomery_kinds::{CallOutcome, MoveHeadResult, Processed, PublishResult};
+use aether_bloomery_kinds::{CallOutcome, MoveHeadResult, Processed, PublishResult, WatchHeadResult};
+use aether_kinds::LoadResult;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
@@ -23,6 +24,11 @@ pub enum Reply {
     Publish(PublishResult),
     /// The bundle driver's answer to an `AwaitProcessed`.
     Processed(Processed),
+    /// The component host's answer to a `LoadComponent`, boxed: it carries
+    /// the component's whole receive surface.
+    Load(Box<LoadResult>),
+    /// The journal owner's answer to a `WatchHead`.
+    Watch(WatchHeadResult),
 }
 
 /// A reply and the correlation the harness minted for the request it answers.
@@ -69,5 +75,15 @@ impl NativeActor for ReplySink {
     #[aether_actor::handler::single]
     fn on_processed(&mut self, ctx: &mut NativeCtx<'_>, processed: Processed) {
         self.forward(ctx, Reply::Processed(processed));
+    }
+
+    #[aether_actor::handler::single]
+    fn on_load_result(&mut self, ctx: &mut NativeCtx<'_>, result: LoadResult) {
+        self.forward(ctx, Reply::Load(Box::new(result)));
+    }
+
+    #[aether_actor::handler::single]
+    fn on_watch_head_result(&mut self, ctx: &mut NativeCtx<'_>, result: WatchHeadResult) {
+        self.forward(ctx, Reply::Watch(result));
     }
 }

@@ -6,9 +6,12 @@
 //! journal before boot; the `Ref`s staging returns are the handles its
 //! expected values cite. Its **drive** is the mail it sends the mounted
 //! journal owner and bundle driver — [`BloomeryHarness::call`],
-//! [`BloomeryHarness::move_head`], [`BloomeryHarness::publish`], and
-//! [`BloomeryHarness::settle`], which follows the `AwaitProcessed` →
-//! `Processed` protocol to quiescence rather than sleeping. Its **expectation** is the record sequence the loop
+//! [`BloomeryHarness::move_head`], [`BloomeryHarness::publish`],
+//! [`BloomeryHarness::watch_head`], and [`BloomeryHarness::settle`], which
+//! follows the `AwaitProcessed` → `Processed` protocol to quiescence rather
+//! than sleeping — plus [`BloomeryHarness::load`], which loads a wasm
+//! component through the component host, for a scenario whose drive is a
+//! script component's own mail. Its **expectation** is the record sequence the loop
 //! appended ([`SeededJournal::assert_appended`] over [`Record`]s), plus any
 //! view the scenario folds over the actual journal
 //! ([`SeededJournal::fold`]). The seed owns those reads because it owns the

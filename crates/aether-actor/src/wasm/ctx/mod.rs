@@ -18,8 +18,10 @@
 //! reply-class marker dropped, for helpers), `subscribe` (the flat subscribe
 //! verbs that name their publisher), `relative` (positional cluster-relative
 //! addressing), `child` (its typed counterpart) and `spawn` (detached and
-//! inline child creation).
+//! inline child creation), and `address` (proving an actor path that arrived
+//! in config or mail).
 
+mod address;
 mod child;
 mod drop;
 mod init;
@@ -34,6 +36,7 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
+pub use address::ResolvePathError;
 pub use child::InlineChild;
 pub use drop::WasmDropCtx;
 pub use init::WasmInitCtx;

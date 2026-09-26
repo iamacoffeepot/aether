@@ -1,0 +1,44 @@
+[package]
+name = "aether-bloomery-bootstrap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The environment bootstrap: one throwaway wasm actor that, loaded on a live
+# Bloomery engine with two image references in its config, imports both,
+# calls `environment.merge`, and moves the environment head
+# `(aether.workspace.environment, <platform>)` to the result — the mail an
+# operator would otherwise send by hand. Bootstrap is ordinary mail from an
+# ordinary component, never an engine mechanism, so the crate is one deletable
+# directory. The `rlib` lets the scenario name the config kind.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+# The identity half only: `WorkspaceCapability`, `Import`, and `Environment`.
+aether-workspace = { path = "../aether-workspace", default-features = false }
+# `MergeInput`, the `environment.merge` input the script stages. `library`
+# strips the bundle's own `export!` entry surface (one `export!` per wasm
+# module); `xtask dist` builds each component package in its own cargo
+# invocation, so the feature cannot unify into the bundle's own cdylib build.
+aether-bloomery-workspace-programs = { path = "../aether-bloomery-workspace-programs", features = ["library"] }
+tracing = { workspace = true, default-features = false }
+
+# `tests/environment.rs` loads the built wasm onto the shipped bloomery
+# composition, its workspace dialing the stub Engine API daemon.
+[dev-dependencies]
+aether-bloomery-journal = { path = "../aether-bloomery-journal" }
+aether-bloomery-view = { path = "../aether-bloomery-view" }
+aether-chassis-bloomery = { path = "../aether-chassis-bloomery" }
+aether-harness-bloomery = { path = "../aether-harness-bloomery" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-kinds = { path = "../aether-kinds" }
+aether-workspace = { path = "../aether-workspace", features = ["test-support"] }
+clap = { workspace = true }
+
+[lints]
+workspace = true
