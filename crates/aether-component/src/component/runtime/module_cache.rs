@@ -61,9 +61,8 @@ mod tests {
     const ALPHA: &[u8] = br#"(module (func (export "alpha")))"#;
     const BETA: &[u8] = br#"(module (func (export "beta")))"#;
 
-    /// Tripwire: every hash currently held live must answer with its own
-    /// compiled code, even when another hash's compile interleaves in
-    /// between. A key that collapsed two artifacts together — keyed on byte
+    /// Every hash currently held live must answer with its own compiled
+    /// code, even when another hash's compile interleaves in between. A key that collapsed two artifacts together — keyed on byte
     /// length, say — would hand a load the wrong module's compiled code and
     /// instantiate the wrong component under the requested name, with no
     /// error anywhere on the load path. A regression to one-slot behaviour
