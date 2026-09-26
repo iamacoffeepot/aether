@@ -256,8 +256,8 @@ consumer, and the `Address<R>` door lands for the guest first.
   trampoline proved `Live` before the birth. It is erased because a
   `child_of` list may name more than one parent.
 - **A child it spawned or loaded.** A guest loads a component by sending
-  `aether.component.load` to the component host, proved by path, and
-  `LoadResult::Ok` arrives from the loaded actor, so `ctx.sender()` is the
+  `aether.component.load` to the component host, a declared dependency
+  (`depends(ComponentHostCapability)`), and `LoadResult::Ok` arrives from the loaded actor, so `ctx.sender()` is the
   proof, as for a native requester. A detached sibling spawn returns
   nothing addressable, because the birth completes after the call, and no
   completion notice is added.
