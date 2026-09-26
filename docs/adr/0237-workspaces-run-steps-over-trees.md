@@ -8,6 +8,7 @@
 - **Amended:** 2026-09-25 — imports are an `Import` request on the workspace actor: it pulls a digest-pinned image through the Engine API and decodes its exported filesystem into a tree in the journal, under userland rules and `Config` bounds; no tarball, host path, or host pipe is read. Open question 3 is resolved (a new `aether-workspace` crate; the tar codec stays in `aether-bloomery-tar`). Open question 2 waits for a second executor. Open question 1's single writer gains a streaming artifact store the journal hands the workspace actor.
 - **Amended:** 2026-09-25 — decision 9: the allotment estimate is keyed on what the run does, not who asked. The key is the digest of the run's environment and its ordered steps (each step's tool, args and env). A `Run` carries no program identity, and the steps describe the work directly, so identical steps share an estimate and different args get their own.
 - **Amended:** 2026-09-25 — decision 3: an image carries only a bare, reusable layer (the base userland or the toolchain), never a snapshot of content that changes between runs. A source tree enters through the operator command `import-commit <commit>`, which reads the commit's tracked files outside the engine and stages them as a tree through the journal's fenced `publish`. The engine never reads Git or a host path, and no image or allowlist carries source.
+- **Amended:** 2026-09-26 — open question 4 is resolved as proposed: the journal records no commit for a source tree.
 
 Amends [ADR-0229](0229-program-cap-apis-are-extra-run-arguments.md) (the
 closed, sealed set of program APIs, `Http` / `Process`, mapped through
@@ -472,3 +473,6 @@ Deferred:
    of the commit would add an event for a fact the operator already holds.
    Heads or branches for source trees wait until something tracks a line of
    work.
+
+   *(Amended 2026-09-26, resolved: as proposed. The journal records no
+   commit; `import-commit` reports it beside the tree digest.)*
