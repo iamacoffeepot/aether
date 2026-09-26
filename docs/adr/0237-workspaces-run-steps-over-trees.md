@@ -72,7 +72,7 @@ the sandbox, or they make the program `Sampled`.
    // kinds: new crate `aether-bloomery-workspace` (identity/runtime split, ADR-0122)
    #[aether_data::kind(name = "aether.workspace.run")]
    pub struct Run {
-       pub source: ProtocolAddress<ArtifactStorage>, // where inputs are read and outputs staged (decision 8)
+       pub source: ProtocolPath<ArtifactStorage>, // where inputs are read and outputs staged (decision 8)
        pub tree: Ref<Tree>,                 // written out at /work
        pub environment: Ref<Environment>,   // the whole visible root filesystem
        pub mounts: Vec<Mount>,              // extra read-only trees (e.g. vendored crates)
@@ -126,8 +126,8 @@ the sandbox, or they make the program `Sampled`.
    }
    ```
 
-   The request carries no mailbox id and no actor reference. Its one address
-   is `source`, a typed storage address the actor proves on receipt
+   The request carries no mailbox id and no actor reference. The one actor
+   it names is `source`, a typed storage path the actor resolves on receipt
    (decision 8). The reply goes to the caller (ADR-0227
    `Replies<Run, Reply = RunResult>`). A non-zero
    exit is an `Outcome`, not a refusal, exactly as ADR-0157 treats a
@@ -191,7 +191,7 @@ the sandbox, or they make the program `Sampled`.
    #[aether_data::kind(name = "aether.workspace.import")]
    pub struct Import {
        pub image: ImageRef,                          // <repository>@sha256:<hex>; never a tag
-       pub source: ProtocolAddress<ArtifactStorage>, // where the tree is staged (decision 8)
+       pub source: ProtocolPath<ArtifactStorage>,    // where the tree is staged (decision 8)
    }
 
    #[aether_data::kind(name = "aether.workspace.import_result")]
@@ -313,7 +313,7 @@ the sandbox, or they make the program `Sampled`.
 
    | Step | Mechanism |
    |---|---|
-   | Receipt | Resolve `source` to a `ProtocolRef<ArtifactStorage>` (ADR-0231) before anything is queued. A source that does not resolve is `Refused(SourceUnavailable)` for a run and `Failed { detail }` for an import. |
+   | Receipt | Resolve `source`, a `ProtocolPath<ArtifactStorage>`, to a `ProtocolRef<ArtifactStorage>` with `ctx.resolve` (ADR-0231 §3) before anything is queued: the path compiles to its position by the lineage fold, and one route-table lookup requires a `Live` route under that canonical name. The source arrived in mail, so it is a decoded path, and the lookup also requires the route's published rows to cover `ArtifactStorage`; that comparison is made once per route and kept, since published rows only grow. A source that does not resolve is `Refused(SourceUnavailable)` for a run and `Failed { detail }` for an import. |
    | Reads | Every tree, blob, and environment the run cites is a `read` (`aether.bloomery.journal.read_artifact`) through that reference, including the checks that refuse before any container exists. |
    | Writes | Step stdout and stderr, the output tree, and an import's tree are `stage`d (`aether.bloomery.journal.stage`) through it in bounded batches as they are produced. A run that does not end `Ok` leaves what it staged cited by nothing. |
    | Codec | A `TreeSource` / `TreeSink` implementation over the reference; the container steps above are unchanged. |

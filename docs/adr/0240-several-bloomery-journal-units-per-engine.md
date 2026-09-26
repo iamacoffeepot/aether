@@ -8,10 +8,11 @@ Amends [ADR-0226](0226-native-bundle-driver.md) decisions 1 and 2,
 its 2026-09-24 amendment, and [ADR-0237](0237-workspaces-run-steps-over-trees.md)
 decisions 2, 3, 7, and 8, whose text carries the change. Uses
 [ADR-0231](0231-protocol-typed-references-and-reply-checks.md)'s
-protocol-typed addresses for the workspace's storage source (D7). Resolves the "several journals per engine" deferral in
-[ADR-0225](0225-reactor-bundles-load-by-digest.md) and ADR-0226. Gives
-[ADR-0230](0230-proven-actor-references.md) §3's `Address<R>` row its first
-consumer.
+protocol paths for the workspace's storage source (D7). Resolves the "several journals per engine" deferral in
+[ADR-0225](0225-reactor-bundles-load-by-digest.md) and ADR-0226. Gives the
+`resolve` verb that [ADR-0230](0230-proven-actor-references.md) §3 reserves
+for typed paths its first consumers: native over a `ProtocolPath<P>` (D7),
+guest over an `ActorPath<R>` (D8).
 
 ## Context
 
@@ -32,7 +33,7 @@ Every row was read from the code on `main`.
 | Workspace | `crates/aether-workspace/src/config.rs` | `WorkspaceConfig` is the actor's `Config`: the host's `cpuset`, `budget_memory_bytes`, and the per-run defaults. Each actor that resolves it claims the whole host. |
 | Module reuse | `crates/aether-component/src/component/runtime/module_cache.rs` | One slot keyed by sha256 (`ModuleCache { cached: Option<CachedModule> }`, line 25). Back-to-back loads of one digest compile once; any other load between them evicts the slot and the next load recompiles. |
 | Trampoline namespace | `crates/aether-component/src/trampoline/runtime/mod.rs` | Every loaded component is one native type, `WasmTrampoline`, whose `NAMESPACE` is the constant `EMBEDDED_SCOPE` (`"aether.embedded"`). `LoadComponent` chooses only the discriminator (`name`) and the exported actor (`export`). |
-| Bootstrap | `crates/aether-bloomery-bootstrap` | Config carries two `ActorPath`s (journal, driver), proven at `wire` with `resolve_path`, sent through unchecked `ErasedActorRef`s. `depends(WorkspaceCapability)` reaches the root singleton. |
+| Bootstrap | `crates/aether-bloomery-bootstrap` | Config carries two `ErasedActorPath`s (journal, driver), proven at `wire` with `resolve_path`, sent through unchecked `ErasedActorRef`s. `depends(WorkspaceCapability)` reaches the root singleton. |
 | Identity halves | `aether-workspace` vs journal and driver crates | `aether-workspace` has an always-on `WorkspaceCapability` marker and a `runtime` feature (ADR-0122). The journal crate depends on `aether-substrate` and `rusqlite` unconditionally, and the driver on `aether-substrate`, so a guest cannot name `JournalActor` or `BundleDriver`. |
 
 Who can place a child beneath an existing actor today:
@@ -40,7 +41,7 @@ Who can place a child beneath an existing actor today:
 | Spawner | Verb | Parent |
 |---|---|---|
 | The parent itself, from a handler | `NativeCtx::spawn_child::<C>` (staged; `C: ChildOf<A> + Instanced`) | the ctx's own actor, never a caller-supplied one |
-| The component host, for a wasm trampoline | `NativeCtx::spawn_child_scoped::<C>(parent: ErasedActorRef, …)` (`#[doc(hidden)]`) | a proven foreign parent. Its only request path is `aether.component.load_under`, documented as test-harness only, which takes the parent as `ActorPath` text |
+| The component host, for a wasm trampoline | `NativeCtx::spawn_child_scoped::<C>(parent: ErasedActorRef, …)` (`#[doc(hidden)]`) | a proven foreign parent. Its only request path is `aether.component.load_under`, documented as test-harness only, which takes the parent as `ErasedActorPath` text |
 | An embedder | `BuiltChassis::spawn_actor::<A>` | none: `A: Root` only |
 | A guest | inline children and detached siblings | its own inline cluster |
 
@@ -241,19 +242,22 @@ and a bundle root by its unit's key and its digest; no position crosses a
 boundary.**
 
 - *Upheld by:* D8 and D4. Config carries unit keys (`UnitKey`, validated on
-  decode). The bootstrap builds `Address::<JournalActor>::root_at(key)` and
-  proves it through the guest verb `WasmCtx::resolve::<R>`, which mints
-  `ActorRef<R>`; native code holds its proofs from spawn results. A
-  member's address is `member_address::<C>(unit)`, derived from the unit's proof and `C`'s
-  fixed key. A bundle root's name is `UnitBundle::name(key, digest)`, so
-  anyone holding the key and the digest derives it, and its canonical path
+  decode). The bootstrap writes each unit's paths from the actor types and
+  the key: the journal's is `ctx.link::<JournalActor>(&key)`, and a member's
+  is written beneath it with the member's fixed key,
+  `ctx.link_child::<JournalActor, C>(&journal, &C::key())`. It proves each through the guest verb
+  `WasmCtx::resolve`, which mints `ActorRef<R>`; native code holds its
+  proofs from spawn results. A
+  bundle root's name is `UnitBundle::name(key, digest)`, so anyone holding
+  the key and the digest derives it, and its canonical path
   `aether.component/aether.embedded:<key>-<digest>` splits back into both
-  because the digest is last and fixed-width. `ActorRef` has no codec.
+  because the digest is last and fixed-width. `ActorRef` has no codec, and
+  no config, kind, or record carries a `MailboxId` (ADR-0230 §1).
 - *Would be violated by:* a config slot holding the driver's path (the
   bootstrap today), a role or alias per unit, `send_to_named`, or a
   `MailboxId` in config. Closed: the bootstrap's config loses its path
-  fields, `send_to_named` is deleted, and the new `Root` address form
-  carries a key and no position. A bundle root name that cannot be split
+  fields, `send_to_named` is deleted, and every path is written from a type
+  and a key and carries no position. A bundle root name that cannot be split
   back into key and digest. Closed: `UnitBundle::name` is the only
   constructor, and `UnitKey` is short enough that the name always fits one
   segment.
@@ -496,7 +500,7 @@ singleton service that every unit's runs go through.
 | Kind names | Unchanged (`aether.workspace.run`, `aether.workspace.environment`, …). An artifact's digest is the digest of its kind-prefixed stored blob (`ReadArtifact`, `crates/aether-bloomery-kinds/src/journal/mod.rs`), so renaming `aether.workspace.environment` would change every stored environment's digest. |
 | Budget | `WorkspaceConfig.cpuset` and `budget_memory_bytes` are the whole host's, resolved once. One FIFO queue admits every unit's runs (ADR-0237 decision 9). Run-key estimates are shared by every unit, since the key is what a run does. |
 | Params | None. `WorkspaceParams { artifacts }` is removed, and the runtime half does not depend on `aether-bloomery-journal`. It keeps `aether-bloomery-kinds` (the tree kinds and the storage kinds below) and `aether-bloomery-tar`. |
-| Storage | The request's. `Run` and `Import` carry `source: ProtocolAddress<ArtifactStorage>`; the workspace reads inputs from it and stages outputs to it. It holds no artifact store. |
+| Storage | The request's. `Run` and `Import` carry `source: ProtocolPath<ArtifactStorage>`; the workspace reads inputs from it and stages outputs to it. It holds no artifact store. |
 
 **The storage protocol.** The journal implements it:
 
@@ -530,25 +534,27 @@ rather than copying it (ADR-0238 decisions 3 and 10). `ReadArtifactResult`
 already carries a `Blob`; `EncodedArtifact`'s bytes move from `Vec<u8>` to
 `Blob` as `ClosureArtifact`'s did.
 
-**The source is a checked address.** The request carries the storage
-address; the workspace never asks who sent it. The ADR-0231 pieces it uses:
+**The source is a checked path.** The request carries the storage path;
+the workspace never asks who sent it. The ADR-0231 pieces it uses:
 
 | Piece | Where | What it proves |
 |---|---|---|
-| `Address::<JournalActor>::root_at(key).narrow::<ArtifactStorage>()?` → `ProtocolAddress<ArtifactStorage>` | the builder of the request | compiles only if `ArtifactStorage: CoveredBy<JournalActor>`; the address is folded to a fully determined position when narrowed, and a key the resolver cannot fold is `NarrowError::Key` (ADR-0231 §3) |
-| `ctx.resolve(&run.source)` → `ProtocolRef<ArtifactStorage>` | the workspace, on receipt, before anything is queued | the position is live and its route's published rows still cover `ArtifactStorage` |
+| `ctx.link::<JournalActor>(&unit_key).narrow::<ArtifactStorage>()` → `ProtocolPath<ArtifactStorage>` | the unit's driver, once, from the key it was born with (`DriverParams.unit`) | compiles only if `ArtifactStorage: CoveredBy<JournalActor>`; the text `aether.bloomery.journal:<key>` is written from the type and the key, and the narrowing is type-level, with no registry lookup and no position (ADR-0230 §2, ADR-0231 §3) |
+| `ctx.resolve(&run.source)` → `ProtocolRef<ArtifactStorage>` | the workspace, on receipt, before anything is queued | the path compiles to its position by the lineage fold, and one route-table lookup finds a `Live` route under that canonical name; the source was decoded from mail, so the lookup also checks that the route's published rows cover `ArtifactStorage`, once per journal route, and keeps the answer (ADR-0231 §3) |
 
 A source that does not resolve is refused at receipt:
 `Refused(Refusal::SourceUnavailable)` for a run, `Failed { detail }` for an
 import. Every read and stage of the request goes through the resolved
 `ProtocolRef`; the reply goes to the caller, as today.
 
-**Bloomery's sources.** The unit's driver builds its journal's source once
+**Bloomery's sources.** The unit's driver writes its journal's source once
 and sets it on every `Run` it relays for its programs (D6). The program-side
 call carries every `Run` field but `source` (ADR-0237 decision 7), so a
 program cannot choose where its run reads and writes (I-5). An `Import` goes
-straight to the workspace, as today, from the bootstrap or an operator, who
-names the unit's journal as `source` the same way. No driver is involved:
+straight to the workspace, as today, from the bootstrap, which writes the
+unit's journal as `source` the same way, or from an operator, whose MCP call
+spells the path as text; it decodes as the same type and the workspace's
+`resolve` proves it like any other. No driver is involved:
 `Import` is operator mail (ADR-0237 decision 3), and the operator already
 names the unit it imports into. So each unit's runs read and
 write only its own journal, and no table maps anything to a unit.
@@ -596,22 +602,22 @@ units importing one environment converge on one image.
 
 | Piece | Change |
 |---|---|
-| `AddressForm` | gains `Root { key: Option<LoadName> }`: the root instance of `R` keyed `key`. It carries no position. `Address::<R>::root_at(key)` is bounded `R: Root + Instanced`. |
-| `WasmCtx::resolve::<R>` | `(&Address<R>) -> Result<ActorRef<R>, ResolveError>`, the guest verb only. Folds the address with `R`'s resolver and proves the route with the published-route read `Registry::live_child` already makes; only `Live` mints. An `Exact` address mints only when the route's actor type is `R`. The guest crosses one host import. Takes the name ADR-0230 reserved for this door. |
-| `UnitMember` | a trait in the journal identity half: `ChildOf<JournalActor> + Instanced` with a fixed key (`driver`). `member_address::<C: UnitMember>(unit: ActorRef<JournalActor>) -> Address<C>` is `child_address::<JournalActor, C>(unit, C::key())`. The fixed key stands in for a one-per-parent child placement that the actor model does not have yet (ADR-0166 defers a keyless native-child resolver); #6822 designs that placement, and `UnitMember` is deleted when it lands. |
+| Unit paths | written from the actor types and the unit key with ADR-0230 §2's `ActorPath<R>`: the journal is `ctx.link::<JournalActor>(&key)` (`aether.bloomery.journal:<key>`), and a member is written beneath it, `ctx.link_child::<JournalActor, C>(&journal, &C::key())`. No registry lookup and no position: the text is each type's `NAMESPACE` and its key. `.narrow::<P>()` makes a `ProtocolPath<P>` where a holder needs only a protocol (D7). |
+| `WasmCtx::resolve` | ADR-0230 §3's verb over an `ActorPath<R>`, the guest arm: the path compiles to its position by the lineage fold, and one route-table lookup checks the canonical name, `Live`, and that the route's actor-type tag is `R`'s; it compares no rows and mints `ActorRef<R>`. The guest crosses one host import. It takes the name ADR-0230 reserved. It needs the route record to carry its actor type, which it does not on main (ADR-0230 §3). |
+| Declared links | the bootstrap declares `#[actor(links(JournalActor, BundleDriver))]`, and the driver `links(JournalActor)`; `ctx.link::<R>` and `ctx.link_child` compile only for a declared link. Both targets are native, so when the bootstrap's module loads, the loader checks its compiled rows for each against the native handler manifest once, before `init`, and refuses the load on skew (ADR-0230 §3, "Declared links"). For the driver, native with native, the check is vacuous. |
+| `UnitMember` | a trait in the journal identity half: `ChildOf<JournalActor> + Instanced` with a fixed key, `C::key()` (`driver`). A member's path is its unit's path plus `ctx.link_child::<JournalActor, C>(&journal, &C::key())`. The fixed key stands in for a one-per-parent child placement that the actor model does not have yet (ADR-0166 defers a keyless native-child resolver); #6822 designs that placement, and `UnitMember` is deleted when it lands. |
 | `UnitKey`, `UnitBundle::name` | in `aether-bloomery-kinds` beside `Digest` (D4). The driver's only way to name a bundle root. |
 | `aether-bloomery-journal`, `aether-bloomery-driver` | split per ADR-0122: an always-on, `no_std` identity (the marker, its handled kinds and contract rows, `UnitMember`) and a `runtime` feature carrying the actor, `aether-substrate`, and `rusqlite`. |
-| Bootstrap config | `journal` and `driver` paths are replaced by `units: Vec<UnitKey>`. At `wire` it resolves each unit, then its driver by type; every send is `send_to(ActorRef<R>, &K)`, kind-checked. Its `Import`s name the unit's journal as `source`, narrowed from `Address::<JournalActor>::root_at(key)` (D7). |
+| Bootstrap config | `journal` and `driver` paths are replaced by `units: Vec<UnitKey>`. At `wire` it writes each unit's `ActorPath<JournalActor>` and `ActorPath<BundleDriver>` from the types and the key and resolves each with `WasmCtx::resolve` to an `ActorRef`; every send is `send_to(ActorRef<R>, &K)`, kind-checked. That includes `aether.bloomery.driver.call`, which the driver answers from a manual handler (`on_call`, `crates/aether-bloomery-driver/src/actor/mod.rs`); a protocol-typed link could not carry it, which is why the bootstrap links by actor type (ADR-0231 §3). Its journal sends, `ReadHead`, `Publish`, and `ReadArtifact`, land on single handlers (`crates/aether-bloomery-journal/src/actor.rs`). Its `Import`s name the unit's journal as `source`, `ctx.link::<JournalActor>(&key).narrow::<ArtifactStorage>()` (D7). |
 | External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. An operator's `Import` names the unit's journal as its `source` (D7). A unit's bundle root is `aether.component/aether.embedded:<key>-<digest>`, or its short path `aether.component/:<key>-<digest>`. |
 
-Only the guest verb lands. Every new verb needs a named production
-consumer: the guest verb's consumer is the bootstrap, and the chassis mount
-holds its proofs from spawn results, so no native code calls
-`NativeCtx::resolve::<R>`. The native twin lands with its first native
-caller. This departs from issue #6796's wording that the twins arrive
-together, because the consumer rule takes precedence. The workspace's
-`ctx.resolve(&ProtocolAddress<ArtifactStorage>)` (D7) is ADR-0231's
-protocol-address verb, whose consumer it is; it is not this twin.
+`resolve` is one verb, and each arm lands with a named production consumer:
+the guest arm over an `ActorPath<R>` serves the bootstrap, and the native
+arm over a `ProtocolPath<P>` serves the workspace's receipt of `Run.source`
+and `Import.source` (D7). The native arm over an `ActorPath<R>` has no
+caller, because the chassis mount holds its native proofs from spawn
+results, so it waits for its first native caller, as does the guest arm
+over a `ProtocolPath<P>`.
 
 The bootstrap's `resolve_path` use goes away; the verb stays for its native
 consumers and for guests that are handed text.
@@ -645,11 +651,11 @@ the per-unit component host.
 | Rule | How this ADR complies |
 |---|---|
 | Addressing by type markers only; no roles, aliases, config slots; no `send_to_named`; ADR-0166 is the only grammar | Units by key, members by type (`UnitMember`), bundle roots by a name built from key and digest; no path fields in config; external text is canonical ADR-0166 paths; no new grammar. `key=root` entries follow `--http-secrets`. The workspace is reached by type and keys nothing by unit: its storage is the request's typed `source`, re-proven on receipt (D7). |
-| No public `MailboxId` surface increase; stored state holds proofs | The new address form carries a key only; `UnitBundle::name` returns a `LoadName`; the driver stores `ActorRef` / `ErasedActorRef`, and the workspace holds each request's source as a `ProtocolRef<ArtifactStorage>` resolved on receipt. `LoadComponent` is unchanged. The program role's existing `Live.child: MailboxId` is untouched. |
+| No public `MailboxId` surface increase; stored state holds proofs; no serialized `MailboxId` | Every path is written from a type and a key and carries no position, and no config, kind, or record gains a `MailboxId` (ADR-0230 §1); `UnitBundle::name` returns a `LoadName`; the driver stores `ActorRef` / `ErasedActorRef`, and the workspace holds each request's source as a `ProtocolRef<ArtifactStorage>` resolved on receipt. `LoadComponent` is unchanged. The program role's existing `Live.child: MailboxId` is untouched. |
 | Representations valid by construction | `UnitKey` is fallible on construction and decode and enforces the 191-byte limit that keeps `UnitBundle::name` infallible. |
-| Unexportable invariants stay unexported | Config carries `UnitKey`s; `ActorRef` crosses nothing. A request carries its source as a `ProtocolAddress`, and the workspace proves it again on receipt. |
-| Static contract checks | A storage source is built by narrowing the journal's address to `ArtifactStorage`, which compiles only if the journal covers it; the workspace's `resolve` on receipt re-proves liveness and the published rows (D7). `child_of(JournalActor)` places the driver; identity halves make bootstrap sends kind-checked. No runtime token or injection. |
-| One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `UnitBundle::name`: the driver. `UnitKey::new`: D3's lowering. `WasmCtx::resolve`: the bootstrap; the native twin waits for a native caller (D8). `Root` form: the bootstrap. `Stage`: the workspace's source-backed sink, answered by the journal owner. `ArtifactStorage`: `Run.source` and `Import.source`. |
+| Unexportable invariants stay unexported | Config carries `UnitKey`s; `ActorRef` crosses nothing. A request carries its source as a `ProtocolPath`, an `ErasedActorPath` on the wire, and the workspace proves it again on receipt. |
+| Static contract checks | A storage source is written from the journal's type and key and narrowed to `ArtifactStorage`, which compiles only if the journal covers it; the workspace's `resolve` on receipt re-proves liveness and, for the decoded source, the published rows once per route (D7). The bootstrap's links are checked at its load, never per resolve. `child_of(JournalActor)` places the driver; identity halves make bootstrap sends kind-checked. No runtime token or injection. |
+| One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `UnitBundle::name`: the driver. `UnitKey::new`: D3's lowering. `resolve`: the bootstrap for the guest arm over `ActorPath<R>`, the workspace for the native arm over `ProtocolPath<P>` (D7, D8); the other arms wait for a caller. `ctx.link` and `narrow`: the driver and the bootstrap; `ctx.link_child` and `UnitMember`: the bootstrap. `links(..)`: the driver and the bootstrap. `Stage`: the workspace's source-backed sink, answered by the journal owner. `ArtifactStorage`: `Run.source` and `Import.source`. |
 | Pending replies never dropped | D6's hops park and answer once; nothing evicts. Each storage request is answered once, and a request whose source does not resolve is answered at receipt, never queued. |
 | Fewer events, simpler architecture | No new actor, event, or record kind; one new mail kind pair (`Stage`). The workspace sheds its store, and isolation between units is the source each driver sets, with no table. The dedicated unit root is rejected for having no behaviour, and bundle roots keep the host they have. |
 | No recursion on unbounded data | Mount iterates the unit list; relays are single hops. |
@@ -676,10 +682,10 @@ the per-unit component host.
   daemon lacks its image or a run writes it into a container.
 - A run or import that does not end `Ok` leaves the artifacts it staged in
   the journal, cited by nothing.
-- The workspace's storage depends on ADR-0231's protocol-typed addresses:
-  `#[protocol]` and `CoveredBy<R>`, `Address<R>::narrow::<P>()` to a
-  `ProtocolAddress<P>`, published contract rows, and
-  `ctx.resolve(&ProtocolAddress<P>)` to a `ProtocolRef<P>`. None is on main.
+- The workspace's storage and the bootstrap depend on the typed paths:
+  `#[protocol]` and `CoveredBy<R>` (#6843) and published contract rows
+  (#6844) are on main; ADR-0230's `ActorPath<R>` and the route's actor-type
+  tag, ADR-0231's `ProtocolPath<P>`, and `ctx.resolve` over both are not.
 - Memory grows per unit: a journal read cache share, a driver fetch cache,
   up to two closure walks in flight per journal, and one instance per
   (digest, unit) including dormant reactor roots. Compilation does not grow
@@ -707,19 +713,24 @@ Follow-on issues, one concept each:
    request path; `run/resolve.rs`'s checks over the source; step logs and
    import output staged to it; and `WorkspaceParams` and the journal
    dependency removed. A rewrite of the workspace's storage seam, not of its
-   container logic. Depends on ADR-0231's protocol, narrow, published-rows,
-   and resolve slices.
+   container logic. Depends on ADR-0230's `ActorPath<R>` and ADR-0231's
+   `ProtocolPath` and its native `resolve` arm, with the decoded-path row
+   check and its per-route cache; the protocol and
+   published-rows slices are on main (#6843, #6844).
 6. Identity halves for the journal and driver crates (D8).
-7. `AddressForm::Root`, the guest `resolve` verb, `UnitMember`, and the bootstrap
-   migration (D8), which also amends ADR-0230 §3's `Address<R>` row.
+7. `UnitMember`, the route record's actor-type tag, `#[actor(links(..))]`
+   with its load-time check, and the guest arm of `resolve` over an
+   `ActorPath<R>` (ADR-0230 §3), and the bootstrap migration to paths
+   written from unit keys (D8).
 8. Rename `aether-workspace` to `aether-bloomery-workspace` and its actor's
    namespace to `aether.bloomery.workspace`; kind names stay (D7).
 9. The journal as `ArtifactStorage` (D7): the `ArtifactStorage` protocol,
    the `Stage` kind pair (with `EncodedArtifact`'s bytes as a `Blob`) and
-   the journal owner's handler, the driver setting its journal as each
-   relayed `Run`'s `source`, the bootstrap naming its unit's journal on
-   `Import`, and the read-cache split (I-6). Depends on ADR-0231's protocol
-   and narrow slices.
+   the journal owner's handler, the driver writing its journal's path as
+   each relayed `Run`'s `source`, the bootstrap naming its unit's journal on
+   `Import`, and the read-cache split (I-6). Depends on ADR-0230's
+   `ActorPath<R>` and ADR-0231's `ProtocolPath`; `#[protocol]` is on main
+   (#6843).
 
 Issue #6821 (`load_under` placement checked against the caller) is separate
 and does not block these.
@@ -808,6 +819,8 @@ and does not block these.
   and is what an operator keeps for isolation across hosts.
 - **Splitting one unit's work across several journals.** Loses the order
   between the parts, since no order exists across units (I-1, I-3).
-- **Carry `Address<JournalActor>` in the bootstrap config.** Its decode
-  accepts `Beneath` and `Exact` forms, which carry positions from another
-  session; a `LoadName` key carries none.
+- **A path field per actor in the bootstrap config** (the bootstrap on
+  `main`). A config slot per actor is the shape the addressing rules
+  reject, and a path read from config is untyped, so each send through it
+  is unchecked by kind or pays a cast at receipt. A `UnitKey` and the actor
+  types write the same paths every time, typed at compile time.
