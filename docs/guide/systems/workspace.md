@@ -376,8 +376,46 @@ Run the steps on the host whose daemon the actor dials.
    `base.Dockerfile` with its reason and run the check again.
 3. **Import.** Mail `aether.workspace.import { image }` to `aether.workspace`
    on a Bloomery engine, once per reference. Each answers `Ok { tree }`, and a
-   second import of the same reference answers the same tree. Publishing the
-   trees under heads and merging them into an `Environment` is #6720.
+   second import of the same reference answers the same tree.
+4. **Merge.** Stage an `environment.merge.input` (`MergeInput { base,
+   toolchain }`, the two imported trees) and send
+   `aether.bloomery.driver.call` for the program `environment.merge`, in the
+   `aether-bloomery-workspace-programs` bundle bound under the
+   `Head<OpaqueBytes>` named `workspace-programs`. The Pure program answers a
+   `Transition` whose result is a stored `aether.workspace.environment`:
+   - `root` is the base tree with the toolchain image's one directory
+     `usr/local/rustup/toolchains/<channel>-<triple>` cited at the same path.
+     Every subtree the merge does not touch keeps its digest; only the
+     directories on the path to the toolchain, `dev`, and the root are new.
+   - Docker's placeholders are dropped: the empty `.dockerenv` goes, and `dev`
+     becomes an empty directory, where the runtime supplies `/dev`. A
+     non-empty `.dockerenv` or `dev` entry refuses, naming its path, because
+     the merge cannot tell it from userland content.
+   - `platform`, `provides` and `tools` come from entry names alone, so the
+     program reads no file blob. Each installed component leaves a
+     `lib/rustlib/manifest-<component>[-<target>]` file: the host triple is
+     the `X` of the `manifest-rustc-X` the directory name ends with, the
+     targets are every `manifest-rust-std-X`, and every other manifest is a
+     component, with the host suffix and a trailing `-preview` removed
+     (`clippy-preview` is `clippy`). `tools` is every executable in the
+     toolchain's `bin`.
+   - `env` holds only what every step shares: `PATH`, led by the toolchain's
+     `bin`, and `LANG=C.UTF-8`. The root is read-only, so `CARGO_HOME`,
+     `CARGO_TARGET_DIR` and `TMPDIR` belong to each step.
+
+   The input cites both trees, so the driver checks every member of both into
+   the engine blob store for the call, deduplicated by digest. That closure
+   must fit `--bloomery-closure-limit-bytes`, whose default is the 4 GiB
+   ceiling; the program itself loads only the few directories it walks.
+5. **Publish.** Programs write no journal record, so the caller moves the
+   head. Send `aether.bloomery.journal.publish` with no artifacts and one
+   `RecordedHeadMove` of the head `(aether.workspace.environment,
+   <platform>)`, such as `x86_64-unknown-linux-gnu`, to the transition's
+   result, under the journal fence. The head is named by the platform because
+   the name exists only at run time, and one head per platform lets a caller
+   ask for the environment its executor runs. A caller reads it back with
+   `Heads::binding(&RecordedHead::new(Environment::ID, platform)?)` and cites
+   it in a `Run` as `Ref<Environment>`.
 
 What the imported trees hold:
 
@@ -386,8 +424,8 @@ What the imported trees hold:
   what Docker creates in every container: an empty `console` file and empty
   `pts` and `shm` directories, beside an empty `.dockerenv` at the root.
 - The toolchain tree holds the toolchain at
-  `usr/local/rustup/toolchains/<channel>-<triple>`, which the merge program
-  selects, so no rustup proxy enters an environment.
+  `usr/local/rustup/toolchains/<channel>-<triple>`, which the merge selects,
+  so no rustup proxy from `usr/local/cargo` enters an environment.
 
 Pins are image digests; a tag beside one only names it for the reader.
 

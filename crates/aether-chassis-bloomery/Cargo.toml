@@ -54,6 +54,11 @@ aether-harness-bloomery = { path = "../aether-harness-bloomery" }
 # The Muse scenario imports the turn kinds it seeds and reads back, and locates
 # the `muse` bundle wasm by this crate's stem, so a bundle change re-runs it.
 aether-bloomery-muse = { path = "../aether-bloomery-muse" }
+# The environment scenario seeds the merge's input kind and locates the
+# `workspace-programs` bundle wasm by this crate's stem, so a bundle change re-runs it.
+aether-bloomery-workspace-programs = { path = "../aether-bloomery-workspace-programs" }
+# `Heads`, the fold the environment scenario reads the published head back through.
+aether-bloomery-view = { path = "../aether-bloomery-view" }
 # The Muse scenario reads the request body its loopback stub server received.
 serde_json = { workspace = true }
 # The crash scenario forks the `aether-bloomery` binary through the hub, SIGKILLs it, and reads the restarted engine over the wire.
