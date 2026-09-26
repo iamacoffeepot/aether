@@ -4,7 +4,8 @@
 
 # Exclude everything, so a new root, an ignored path, or a secret file stays
 # out until it is named here. `.git`, `target`, `dist`, `research`, `wishes`,
-# the agent and CI directories, `fuzz`, and the root prose files never enter.
+# the agent directories, the CI directory but for the one workflow below,
+# `fuzz`, and the root prose files never enter.
 *
 
 # The workspace manifests and the lint, format, and approval configuration
@@ -26,6 +27,10 @@
 !docs
 !scripts
 !xtask
+
+# The CI workflow `xtask/src/transform/verify/workflow.rs` embeds with
+# `include_str!`, so building xtask's targets reads it.
+!.github/workflows/ci.yml
 
 # Inside those roots, the paths `.gitignore` ignores: the rendered guide, build
 # output, and Python caches.
