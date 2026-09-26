@@ -493,8 +493,9 @@ What the source tree holds:
   `approval-policy.toml`, `.cargo`, `.config`, `crates`, `docs`, `scripts`,
   and `xtask`.
 - Inside those roots it drops the paths `.gitignore` ignores there:
-  `docs/book`, every `target`, every `__pycache__`, and every environment file
-  (`.env`, `.env.<suffix>`, `<name>.env`).
+  `docs/book`, every `target`, and every `__pycache__`. It also drops every
+  environment file at any depth: each name that starts with `.env` (`.env`,
+  `.env.<suffix>`, `.envrc`) and each `<name>.env`.
 - Everything else never enters: `.git`, `target`, `dist`, `research`, the
   agent and CI directories, `fuzz`, and the root prose files. A tree could not
   hold `.git` anyway, because `Name` refuses it.

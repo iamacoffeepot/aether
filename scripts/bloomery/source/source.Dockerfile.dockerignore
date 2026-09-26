@@ -33,8 +33,7 @@ docs/book
 **/target
 **/__pycache__
 
-# Environment files may hold secrets, at any depth: `.env`, `.env.<suffix>`,
-# and `<name>.env`.
-**/.env
-**/.env.*
+# Environment files may hold secrets, at any depth: every name that starts
+# with `.env` (`.env`, `.env.<suffix>`, `.envrc`), and `<name>.env`.
+**/.env*
 **/*.env
