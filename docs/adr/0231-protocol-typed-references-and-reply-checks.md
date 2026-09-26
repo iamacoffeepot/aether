@@ -61,29 +61,28 @@ Three further gaps:
   `crates/aether-substrate/src/actor/native/ctx/send.rs`. A kind the target
   does not handle is caught only at the target's dispatch miss.
 - **A link between actors carries no contract.** When one actor tells another
-  where a third lives, the field is an `ActorPath`
+  where a third lives, the field is an `ErasedActorPath`
   (`crates/aether-data/src/reference/actor_path.rs`), which names nothing
   about what lives there, so the receiver learns what the target handles
   only by trying it, or by a runtime check. No kind, config, or journal
   record carries the typed `Address<R>`
   (`crates/aether-data/src/reference/address.rs`); its one production use is
   the embedder's child door (`crates/aether-substrate/src/chassis/builder/built.rs`),
-  which needs only the parent's proof and the key. Naming `R` would also
-  make the receiver know an implementation type it should not depend on.
-- **The manifest's rows are not published where a proof can read them.** The
-  route record (`RouteRecord`,
+  which needs only the parent's proof and the key. A link typed by the
+  target's actor type would also make its holder depend on an
+  implementation type; a link typed by a protocol does not.
+- **The rows are published, and nothing proves against them yet.** A route
+  record (`RouteRecord`,
   `crates/aether-substrate/src/mail/registry/mailbox/route.rs`) carries a
-  canonical name and a lifecycle and no rows. The rows exist in the native
-  handler manifest (`HandlerEntry.reply`,
-  `crates/aether-data/src/name_inventory.rs`), in each wasm module's decoded
-  `ActorInputs` (`crates/aether-substrate/src/actor/wasm/kind_manifest.rs`,
-  kept on the trampoline as `actor_caps`,
-  `crates/aether-component/src/trampoline/runtime/config.rs`), and in the DAG
+  `RouteContract` on its `Live` and `Alias` lifecycles (#6844): the actor's
+  `(KindId, ReplyContract)` rows, sorted, and whether it has a `#[fallback]`
+  (`crates/aether-substrate/src/mail/registry/contract.rs`), written by the
+  same registry apply that changes the lifecycle, so one route-table lookup
+  answers both "is it `Live`" and "what does it cover". No door reads them
+  yet: there is no cast, no receipt check, and no build-skew check. The DAG
   validator's `CapabilityRegistry`
-  (`crates/aether-substrate/src/mail/capability.rs`), which also records
-  whether a mailbox has a `#[fallback]`. That registry is written under its own
-  lock on its own schedule (a guest's through `NativeCtx::sync_guest`), apart
-  from the route's lifecycle.
+  (`crates/aether-substrate/src/mail/capability.rs`) still keeps its own
+  copy, written under its own lock on its own schedule.
 
 The owner, on typed links:
 
@@ -118,10 +117,12 @@ The rules:
    the sent kind (§1).
 2. A protocol is a zero-sized type naming contract rows; the trait solver
    decides whether a target covers it (§2).
-3. A link is typed by the protocol the holder needs. `ProtocolRef<P>` is the
-   proof; `ProtocolPath<P>` is the description that crosses a boundary, an
-   actor path written only from an actor type the compiler checked against
-   `P`, and proven again on receipt (§3).
+3. A link is typed by what its holder needs: a protocol, as `ProtocolRef<P>`
+   (the proof) and `ProtocolPath<P>` (the description that crosses a
+   boundary), or a whole actor type, as ADR-0230's `ActorRef<R>` and
+   `ActorPath<R>`. A protocol path is made only by narrowing an actor path
+   the compiler checked against `P`, and every typed path is proven again on
+   receipt (§3).
 4. Every route publishes its contract rows and whether it has a `#[fallback]`
    when it goes `Live`. An `ErasedActorRef` has no send verb: a send goes
    through a typed reference, or through a cast of the erased reference over
@@ -180,9 +181,12 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
 }
 ```
 
-`Target<K>` (ADR-0232 §1) gains `type Reply: ReplyShape`: `<R as Contract<K>>::Reply`
-for an `ActorRef<R>`, `<P as Contract<K>>::Reply` for a `ProtocolRef<P>`.
-`send_detached`, `send_tracked`, `send_many`, and the context-carrying sends
+`Target<K>` (ADR-0232 §1) gains `type Reply: ReplyShape`, which is
+`<R as Contract<K>>::Reply` for an `ActorRef<R>`. A protocol implements no
+`Contract<K>` (§2), so a send through a `ProtocolRef<P>` states its bound over
+the row set instead: it finds `K`'s row in `P::Rows` with a method-level
+bound whose row index is inferred at the call site, and that row's reply
+carries the same `ReplyHandledBy<A>` bound. `send_detached`, `send_tracked`, `send_many`, and the context-carrying sends
 carry the same bound, on the native ctx as on the guest's. `Silent` and
 `Undeclared` never implement `Kind`, which keeps the three impls disjoint, as
 `ReplyShape`'s three impls already are.
@@ -314,15 +318,24 @@ kind are refused, as a kind listed twice in one protocol is.
 
 ### 3. Protocol links
 
-A link is typed by what its holder needs, not by what the target is. The proof
-is `ProtocolRef<P>`; the description that crosses a boundary is
-`ProtocolPath<P>`, an actor path with a compile-time claim. Both are made only
-from something the compiler already checked against `P`.
+A link is typed by what its holder needs, not by what the target is. The
+paths and references come in three matching pairs:
+
+| | Path (a description, with a codec) | Reference (a proof, no codec) |
+|---|---|---|
+| untyped | `ErasedActorPath` | `ErasedActorRef` |
+| actor-typed | `ActorPath<R>` (ADR-0230 §2) | `ActorRef<R>` |
+| protocol-typed | `ProtocolPath<P>` | `ProtocolRef<P>` |
+
+ADR-0230 owns the actor-typed pair. This section adds the protocol-typed
+pair, made only from something the compiler already checked against `P`.
+The references are unchanged by the paths; whether the three references
+should become one type is a separate question, not decided here.
 
 | Type | Claims | Made by | Can |
 |---|---|---|---|
 | `ProtocolRef<P>` | an actor whose rows cover `P` reached `Live` here, in this session | narrowing an `ActorRef<R>` or a `ProtocolRef<Q>`; `ctx.resolve` of a `ProtocolPath<P>`; the guard cast (§4) | send the kinds `P` lists, with §1's reply check; monitor; name its canonical path; be held in actor memory. No codec. |
-| `ProtocolPath<P>` | written here: the path was written from an actor type the compiler proved covers `P`. Decoded: only that the text is a well-formed canonical path; `P` is the writer's claim until `resolve` proves it. Nothing about existence either way. | `TypedPath::link` below, only; decoding yields one that carries the writer's claim | be a kind field, a config field, or saved state; be compared and displayed; be resolved. It grants no send. |
+| `ProtocolPath<P>` | narrowed here: the path was written from an actor type the compiler proved covers `P`. Decoded: only that the text is a well-formed canonical path; `P` is the writer's claim until `resolve` proves it. Nothing about existence either way. | narrowing an `ActorPath<R>`, only; decoding yields one that carries the writer's claim | be a kind field, a config field, or saved state; be compared and displayed; be resolved. It grants no send. |
 
 #### `ProtocolRef<P>`
 
@@ -341,89 +354,84 @@ impl<P> ProtocolRef<P> {
 ```
 
 `ProtocolRef<P>` is the existing proven target plus a phantom protocol. Sends
-through it monomorphize against `P`'s `Contract` rows: no vtable, no per-send
-lookup, nothing added to the runtime send path. It is a `Target<K>` for each
-kind `P` lists, so `ctx.send_to(&loader, &LoadMesh { path })` takes it as it
-takes an `ActorRef<R>`. A narrowed reference is a capability view: its holder
-may send only what `P` lists, whatever else the target handles. Like every
-proven type it has no codec (ADR-0230 §1).
+through it monomorphize against `P`'s rows: no vtable, no per-send lookup,
+nothing added to the runtime send path. It is a `Target<K>` for each kind `P`
+lists, so `ctx.send_to(&loader, &LoadMesh { path })` takes it as it takes an
+`ActorRef<R>`. A narrowed reference is a capability view: its holder may send
+only what `P` lists, whatever else the target handles. Like every proven type
+it has no codec (ADR-0230 §1).
 
 #### `ProtocolPath<P>`
 
 ```rust
 // aether-actor
 pub struct ProtocolPath<P> {
-    path: ActorPath,
+    path: ErasedActorPath,
     _protocol: PhantomData<fn() -> P>,
 }
 
-/// `R`'s canonical path while it is being written. No codec: it never
-/// crosses a boundary, and exists only to write a link.
-pub struct TypedPath<R> {
-    path: ActorPath,
-    _actor: PhantomData<fn() -> R>,
-}
-
-impl<R: Root + Instanced> TypedPath<R> {
-    /// `R::NAMESPACE:key`.
-    pub fn root_at(key: &LoadName) -> Self;
-}
-impl<R: Addressable> TypedPath<R> {
-    /// `<this path>/C::NAMESPACE:key`; refused only past `ActorPath`'s depth
-    /// or byte cap.
-    pub fn child_at<C: ChildOf<R> + Instanced>(&self, key: &LoadName) -> Result<TypedPath<C>, ActorPathError>;
-    /// The link: compiles only if `R`'s rows cover `P`.
-    pub fn link<P: CoveredBy<R>>(&self) -> ProtocolPath<P>;
+impl<R> ActorPath<R> {
+    /// The same text under a narrower claim: type-level only, infallible.
+    pub fn narrow<P: CoveredBy<R>>(&self) -> ProtocolPath<P>;
 }
 ```
 
-A `ProtocolPath<P>` is an `ActorPath` and a phantom protocol. Its path is
-written from the actor type: each step is the type's `NAMESPACE` and, for an
-instance, its key, so the path is always canonical and has no holes. Writing
-it reads no registry and folds nothing; the position exists only when the
-receiver resolves it. `P: CoveredBy<R>` on `link` is the compile-time link
-check, over the sealed coverage §2 defines.
+A `ProtocolPath<P>` is an `ErasedActorPath` and a phantom protocol, and it is
+made only by narrowing an `ActorPath<R>`, as a `ProtocolRef<P>` is narrowed
+from an `ActorRef<R>`. `P: CoveredBy<R>` is the compile-time link check, over
+the sealed coverage §2 defines. Narrowing keeps the text the actor path was
+written with (ADR-0230 §2: each step a type's `NAMESPACE` and its key), so a
+protocol path is canonical and has no holes; it reads no registry, folds
+nothing, and cannot fail.
 
-The writers follow the placements that have a consumer: a root instance and
-an instanced child beneath a written path, both used by ADR-0240 (D7, D8). A
-root singleton and a singleton child land with their first consumer; a root
-singleton is reached today as a declared dependency. There is no
-caller-relative form: a link to a peer that is named relative to the caller,
-such as one in the caller's own module, is written absolute from the caller's
-own canonical path before it leaves (ADR-0230 §1).
+`ProtocolPath<P>` lives in `aether-actor`, beside `Protocol`, `CoveredBy`, and
+`ActorPath<R>`, and not in `aether-data` beside `ErasedActorPath`. Its
+constructor from a bare `ErasedActorPath` is private to that crate. In
+`aether-data` the constructor would have to be public or `#[doc(hidden)]` for
+`aether-actor` to call it, and either door would let any crate attach a `P`
+claim to arbitrary text.
 
-`ProtocolPath<P>` and `TypedPath<R>` live in `aether-actor`, beside
-`Protocol` and `CoveredBy`, not in `aether-data` beside `ActorPath`. The
-writers name an actor type's placement facts, which are `aether-actor`
-traits, and the constructor from a bare `ActorPath` is private to the crate
-that holds them. In `aether-data` that constructor would have to be public or
-`#[doc(hidden)]` for `aether-actor` to call it, and either door would let any
-crate attach a `P` claim to arbitrary text.
-
-On the wire a `ProtocolPath<P>` is the path text only, with `ActorPath`'s
-schema and codec, implemented in `aether-actor`. Decoding validates the
-grammar and claims nothing about `P`: bytes from another engine, a config
-file, or an operator's MCP call decode as the same type, and only `resolve`
-turns one into anything that sends. `Debug` prints the path, because a path
-is a name, not a position.
+On the wire a `ProtocolPath<P>` is the path text only, with
+`ErasedActorPath`'s schema and codec, implemented in `aether-actor`. Decoding
+validates the grammar and claims nothing about `P`: bytes from another
+engine, a config file, or an operator's MCP call decode as the same type, and
+only `resolve` turns one into anything that sends. `Debug` prints the path,
+because a path is a name, not a position.
 
 A path names a slot by name, so the same text names the same slot in any
-session. That is why a protocol path may sit in a config or in saved state:
-what it cannot know about the far side, whether anything is live there and
-what build it is, the receipt proves.
+session. That is why a typed path may sit in a config or in saved state: what
+it cannot know about the far side, whether anything is live there and what
+build it is, the receipt proves.
+
+#### Why two typed paths
+
+An actor-typed path and a protocol-typed path claim different things, as the
+two references do. `resolve` of an `ActorPath<R>` yields an `ActorRef<R>`,
+through which every kind `R` handles is sendable, its manual rows included.
+A protocol names single and silent rows only, and a manual row covers no
+protocol row (§6), so no protocol-typed link can carry a request to a manual
+handler. The Bloomery bootstrap sends `aether.bloomery.driver.call` to the
+driver, which answers it from a manual handler (`on_call`,
+`crates/aether-bloomery-driver/src/actor/mod.rs`), so it links to the driver
+by `ActorPath<BundleDriver>` (ADR-0240 D8). A holder that needs only some
+rows, and should not depend on the implementation type, takes a
+`ProtocolPath<P>` narrowed by whoever can name it, as the Bloomery workspace
+takes its storage source (ADR-0240 D7).
 
 #### Receipt
 
 ```rust
 ctx.resolve(&path) // &ProtocolPath<P> -> Result<ProtocolRef<P>, ResolveError>
+                   // &ActorPath<R>    -> Result<ActorRef<R>, ResolveError>   (ADR-0230 §3)
 ```
 
-`resolve` is the ADR-0230 §3 verb for a typed link that arrived in mail,
-config, or saved state, and it takes the name ADR-0230 reserves. It runs
-once, in the handler that received the path. The path is canonical, so it
-never expands; it compiles to its position by the lineage fold, pure
-computation over its segments with no lookup, and one route-table lookup
-(§4) then decides:
+`resolve` is ADR-0230 §3's verb for a typed path that arrived in mail,
+config, or saved state: one spelling, the name ADR-0230 reserves, and the
+path's type decides the proof's. It runs once, in the handler that received
+the path. A typed path is canonical, so it never expands; it compiles to its
+position by the lineage fold, pure computation over its segments with no
+lookup, and one route-table lookup (§4) then decides, for a
+`ProtocolPath<P>`:
 
 - a route stands at that position under that canonical name, and it is
   `Live`, or `ResolveError::NotLive` (never registered, still `Starting`, or
@@ -433,29 +441,35 @@ computation over its segments with no lookup, and one route-table lookup
   first kind whose row is missing or different.
 
 Both refusals name the path, never a position. The rows check re-proves on
-the receiving side what `link` checked on the writing side, because the path
-crossed a boundary (ADR-0230 §1): it guards hand-written or forged text and
-build skew. For a path written by `link`, a replace never causes it to fail,
-because §5 refuses a replace that drops or changes a row. It fails on
-liveness, or when a different build or a different actor type now answers
-at the path.
+the receiving side what `narrow` checked on the writing side, because the
+path crossed a boundary (ADR-0230 §1): it guards hand-written or forged text
+and build skew. For a path narrowed from an actor path, a replace never
+causes it to fail, because §5 refuses a replace that drops or changes a row.
+It fails on liveness, or when a different build or a different actor type
+now answers at the path. `resolve` of an `ActorPath<R>` checks the same name
+and liveness, and instead of a protocol's rows it checks that the route's
+actor type is `R` and runs the build-skew check below over `R`'s rows
+(ADR-0230 §3).
 
-An untyped `ActorPath` (a config field, an MCP tool argument, an RPC `Call`)
-stays untyped: `resolve_path` proves it to an `ErasedActorRef`, after filling
-a short path's holes from the generated root and child declarations, a
-static inventory rather than the live tree, and the cast (§4) types it.
+An untyped `ErasedActorPath` (a config field, an MCP tool argument, an RPC
+`Call`) stays untyped: `resolve_path` proves it to an `ErasedActorRef`,
+after filling a short path's holes from the generated root and child
+declarations, a static inventory rather than the live tree, and the cast
+(§4) types it.
 
-`resolve` lands on both ctxs, each with its consumer: the native arm's is the
-Bloomery workspace's receipt of a request's storage source, and the guest
-arm's is the Bloomery bootstrap resolving its unit's journal and driver
-([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D7, D8). A
-guest's call is one host call, as `resolve_path`'s is.
+Each arm lands with its consumer. The native arm over a `ProtocolPath<P>`
+serves the Bloomery workspace's receipt of a request's storage source, and
+the guest arm over an `ActorPath<R>` serves the Bloomery bootstrap resolving
+its unit's journal and driver
+([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D7, D8). The
+other two arms come with their first callers. A guest's call is one host
+call, as `resolve_path`'s is.
 
 **Consumer.** The Bloomery workspace's `Run` and `Import` carry
-`source: ProtocolPath<ArtifactStorage>`, which each unit's driver writes
-from `JournalActor` and its unit key,
-`TypedPath::<JournalActor>::root_at(&key).link::<ArtifactStorage>()`, and
-the workspace resolves on receipt (ADR-0240 D7).
+`source: ProtocolPath<ArtifactStorage>`, which each unit's driver narrows
+from its journal's actor path,
+`ActorPath::<JournalActor>::root(&key).narrow::<ArtifactStorage>()`, and the
+workspace resolves on receipt (ADR-0240 D7).
 
 ### 4. Published rows, typed sends, and the guard cast
 
@@ -577,8 +591,8 @@ generic send remains for authors.
 emits for a protocol, so `R`'s compiled rows compare against a loaded target's
 published rows. Every `ActorRef<R>` door of ADR-0230 §3 that already consults
 the registry (the dependency check before `init`, the spawn and load mints, the
-embedder's typed read of a load reply, `child::<P, C>`, and the chassis
-handle's `actor_ref::<R>()`) runs the cast's rows check over the
+embedder's typed read of a load reply, `child::<P, C>`, the chassis
+handle's `actor_ref::<R>()`, and `resolve` of an `ActorPath<R>`) runs the cast's rows check over the
 rows the peer was compiled against. A peer built against a different build of
 `R` than the one loaded is refused at the door, naming the actor and the
 missing or changed kind. Rows the loaded build adds pass. A door that reads the
@@ -723,9 +737,10 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | typed `ActorRef<R>` | static check over `R`'s rows; the door that minted it checked those rows against the loaded build |
 | `ProtocolRef<P>` | static check over `P`'s rows; a kind outside `P` is a compile error even when the target handles it |
 | `ActorRef<R>` narrowed to `ProtocolRef<P>` | compiles if `P: CoveredBy<R>`, else compile error |
-| `TypedPath<R>` linked to `ProtocolPath<P>` | compiles if `P: CoveredBy<R>`, else compile error; the path is written at once, with no registry read and no position |
+| `ActorPath<R>` narrowed to `ProtocolPath<P>` | compiles if `P: CoveredBy<R>`, else compile error; the same text, with no registry read and no position |
+| `ActorPath<R>` received in mail, config, or saved state | `ctx.resolve` at receipt: `NotLive`, `OtherActor`, or `Uncovered` refuse, else an `ActorRef<R>`, which sends every kind `R` handles, manual rows included |
 | `ProtocolPath<P>` received in mail, config, or saved state | `ctx.resolve` at receipt: `NotLive` or `Uncovered` refuse, else a `ProtocolRef<P>` |
-| `ActorPath` received untyped (config, MCP, RPC) | `resolve_path` to an `ErasedActorRef`, then `cast::<T>()` |
+| `ErasedActorPath` received untyped (config, MCP, RPC) | `resolve_path` to an `ErasedActorRef`, then `cast::<T>()` |
 | `ErasedActorRef` (`ctx.sender()`, `resolve_path`, `resolve_live`) | no send; reply, monitor, key, or `cast::<T>()` first |
 | by path over the wire (MCP, RPC `Call`, `NamedMail` bundles) | exempt from §1; the boundary proves the path (ADR-0230 §3) and delivers through its stand-in |
 
@@ -769,6 +784,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | replace that adds a row | allowed; the route republishes the superset |
 | a `ProtocolPath<P>` whose path now names a different build or actor type | `Uncovered` at receipt |
 | a `ProtocolPath<P>` whose target is dead or not yet started | `NotLive` at receipt |
+| an `ActorPath<R>` whose path now names another actor type | `OtherActor` at receipt |
 | cast failure | `None`; the holder refuses or drops, nothing parked |
 | a peer compiled against a different build of `R` | refused at the registry-consulting `ActorRef<R>` door |
 | a protocol reached twice through `includes` | rows appear once |
@@ -778,10 +794,10 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 
 ### Positive
 
-- A link between actors is checked when it is made. The actor that writes a
-  link proves at compile time that the target's type covers the protocol; the
-  receiver gets a typed reference from one fold and one route-table lookup,
-  with no cast.
+- A link between actors is checked when it is made. The actor that narrows
+  an actor path proves at compile time that the target's type covers the
+  protocol; the receiver gets a typed reference from one fold and one
+  route-table lookup, with no cast.
 - Every link is an actor path on the wire, readable in a config, a log, or an
   MCP call, and no link carries a position.
 - A request whose reply the requester cannot receive does not compile, and
@@ -812,10 +828,13 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   and at replace.
 - A handler that serves a protocol row cannot be manual; it declares its row
   single, deferred, or silent.
-- A typed link needs its writer to name the target's actor type and its
-  placement. A writer that cannot name them sends an untyped `ActorPath`, and
-  the receiver pays the cast at receipt; a caller-relative peer is written
-  absolute from the writer's own path first (ADR-0230 §1).
+- A typed path needs its writer to name the target's actor type and its
+  placement. A writer that cannot name them sends an untyped
+  `ErasedActorPath`, and the receiver pays the cast at receipt; a
+  caller-relative peer is written absolute from the writer's own path first
+  (ADR-0230 §1).
+- Resolving an `ActorPath<R>` needs the route record to carry its actor
+  type, which it does not on main (ADR-0230 §3).
 - `send_ignoring_reply` still takes the sender's dispatch-miss path, which logs
   each discarded reply.
 
@@ -831,9 +850,9 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 - **Carry a typed actor description (`Address<R>`) in the kind and resolve by
   `R`.** The receiver must name `R`, often an implementation type from a
   crate it should not depend on, and learns only identity, not the contract
-  it needs. It is also a second description system beside `ActorPath`, which
+  it needs. It is also a second description system beside `ErasedActorPath`, which
   ADR-0230 rejects.
-- **Carry an untyped `ActorPath` and cast on receipt.** A runtime check at
+- **Carry an untyped `ErasedActorPath` and cast on receipt.** A runtime check at
   every receipt for a fact the sender's compiler already knew, and a mismatch
   found in production. It stays the form for writers that cannot name the
   target's type.
@@ -843,11 +862,19 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   in a config or a log. A path is written from `Addressable::NAMESPACE`, a
   `&'static str`, inside `aether-actor`, so the text form needs nothing from
   `Namespace`, which ADR-0230 §4 keeps textless.
-- **Write a `ProtocolPath<P>` from a held reference, or narrow a received
-  one.** A reference yields its path through a registry read, not from a
-  type, and a received path's `P` was checked by another crate's compiler, so
-  either would attach a claim this compiler did not check. The one writer is
-  the actor type.
+- **Make a `ProtocolPath<P>` any way but narrowing an `ActorPath<R>`**, such
+  as from a held reference or by narrowing a received path. A reference
+  yields its path through a registry read, not from a type, and a received
+  path's claim was checked by another crate's compiler, so either would
+  attach a claim this compiler did not check.
+- **One typed path, protocol-typed only, with every actor also a protocol.**
+  An actor's protocol could only be a projection of it: its single and
+  silent rows, without its placement, its `#[fallback]`, or its manual rows,
+  since a manual row covers no protocol row (§6). A path typed by the
+  driver's protocol could not carry the bootstrap's `Call`, which the driver
+  answers manually. Two typed paths mirror the two typed references, and an
+  `ActorPath<R>` resolves to the `ActorRef<R>` that sends every kind `R`
+  handles.
 - **A crate-private engine door that checks an arriving `KindId` against the
   target's rows before delivery.** A second mechanism beside the reference
   types; the stand-in keeps one rule, untyped sends only to fallback targets,
@@ -859,7 +886,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   replies with any kind, so a declared kind would be a claim the handler does
   not keep.
 - **`#[protocol(of = R)]`, deriving a protocol from one actor's rows.**
-  `ActorRef<R>` already proves `R`'s full contract.
+  `ActorRef<R>` and `ActorPath<R>` already carry `R`'s full contract.
 - **Protocols as `dyn` trait objects.** A vtable per send and a boxed or
   borrowed object per reference. Marker types give the same checks at zero
   cost.
@@ -886,12 +913,14 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   it carries the same sender bound. Decision 3 stands: a manual handler has no
   `Replies` marker.
 - **ADR-0230.** `ProtocolRef<P>` joins the proven types with no codec, and
-  `ProtocolPath<P>` is an `ActorPath` with a compile-time claim, carried with
-  `ActorPath`'s codec. The cast
+  `ProtocolPath<P>`, narrowed from ADR-0230's `ActorPath<R>`, is an
+  `ErasedActorPath` with a compile-time claim, carried with its codec. The
+  cast
   is a new door for erased references, minted in `proven.rs` under the existing
   gate. §2's `ErasedActorRef` row loses "be the target of an untyped send", and
   `send_envelope_tracked_to` / `send_envelope_detached_to` leave the public
-  surface. §3's reserved `resolve` verb takes a `ProtocolPath<P>`. The
+  surface. §3's reserved `resolve` verb takes a `ProtocolPath<P>` as well as
+  an `ActorPath<R>`. The
   registry-consulting `ActorRef<R>` doors also check `R`'s compiled rows
   against the published rows. `ctx.monitor` requires a silent `MonitorNotice`
   handler.
