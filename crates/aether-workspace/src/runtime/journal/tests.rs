@@ -13,6 +13,9 @@ use crate::runtime::testing::{TarWriter, artifact_rows};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// The artifact rows every open root holds: the empty tree the journal seeds.
+const SEEDED_ROWS: i64 = 1;
+
 /// Over 1 MiB, so the blob spans many decode copy buffers.
 fn large_payload() -> Vec<u8> {
     (0..=250u8).cycle().take(1_536 * 1024).collect()
@@ -54,7 +57,7 @@ fn an_export_decodes_into_rows_naming_the_tree_its_content_hashes_to() -> TestRe
     ])?;
     assert_eq!(tree, Ref::of_encoded(&expected)?);
     assert_eq!(store.batch()?.get::<Tree>(&tree.digest())?, Some(expected), "the root's row decodes to the tree");
-    assert_eq!(artifact_rows(&root)?, 4, "two blobs and two trees");
+    assert_eq!(artifact_rows(&root)?, SEEDED_ROWS + 4, "two blobs and two trees");
     Ok(())
 }
 
@@ -73,7 +76,7 @@ fn a_stream_cut_inside_the_large_blob_leaves_no_row_and_no_temp_file() -> TestRe
     drop(batch);
 
     assert!(matches!(error, DecodeError::Refused { refusal: Refusal::Truncated, .. }), "{error}");
-    assert_eq!(artifact_rows(&root)?, 0);
+    assert_eq!(artifact_rows(&root)?, SEEDED_ROWS);
     assert_eq!(fs::read_dir(root.join("blobs").join("tmp"))?.count(), 0);
     Ok(())
 }

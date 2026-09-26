@@ -16,6 +16,9 @@ use crate::{ImageRef, ImportResult};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// The artifact rows every open root holds: the empty tree the journal seeds.
+const SEEDED_ROWS: i64 = 1;
+
 const IMAGE: &str = "debian@sha256:1111111111111111111111111111111111111111111111111111111111111111";
 const CONTAINER: &str = "c0ffee";
 
@@ -130,7 +133,7 @@ fn a_pull_error_or_an_unlisted_digest_fails_before_any_container_exists() -> Tes
     assert!(matches!(listed, ImportResult::Failed { .. }), "{listed:?}");
     assert_eq!(pull_requests.len(), 1, "only the pull: {:?}", lines(&pull_requests));
     assert_eq!(list_requests.len(), 2, "only the pull and the inspect: {:?}", lines(&list_requests));
-    assert_eq!(artifact_rows(&root.path)?, 0);
+    assert_eq!(artifact_rows(&root.path)?, SEEDED_ROWS);
     Ok(())
 }
 
@@ -192,6 +195,6 @@ fn an_export_over_the_entry_limit_commits_nothing_and_still_removes_the_containe
         requests.last().map(StubRequest::line),
         Some(format!("DELETE /v1.44/containers/{CONTAINER}?force=true&v=true"))
     );
-    assert_eq!(artifact_rows(&root.path)?, 0);
+    assert_eq!(artifact_rows(&root.path)?, SEEDED_ROWS);
     Ok(())
 }

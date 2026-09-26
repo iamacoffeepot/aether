@@ -569,12 +569,8 @@ covers registry sources only: a git dependency would be vendored but not wired
 into the proof. A dependency-free source vendors to the empty tree, which the
 proof already accepts.
 
-Three preconditions hold for every vendor run:
+Two preconditions hold for every vendor run:
 
-- The empty run tree must be stored. Every journal holding a merged
-  environment holds it, because `environment.merge` stages an empty `dev`
-  directory. When it is missing, the workspace answers
-  `Refused(InputMissing(<digest>))`, and the program refuses naming it.
 - The source is a mount, not the run tree, so the workspace's
   `rust-toolchain.toml` check does not run. The vendor layout depends on
   cargo, not rustc, and `proof.clippy` still runs that check over the same

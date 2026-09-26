@@ -20,6 +20,9 @@ use crate::{AppendError, Batch, Digest, Journal, JournalError, OpaqueBytes, Ref,
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// The artifact rows every open root holds: the empty tree the journal seeds.
+const SEEDED_ROWS: i64 = 1;
+
 /// A fresh journal over `<temp>/journal`.
 fn open_root() -> Result<(TempDir, PathBuf, Journal), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
@@ -90,7 +93,7 @@ fn finish_after_a_short_write_is_refused() -> TestResult {
     }
 
     batch.commit()?;
-    assert_eq!(artifact_rows(&root)?, 0);
+    assert_eq!(artifact_rows(&root)?, SEEDED_ROWS);
     Ok(())
 }
 
@@ -122,7 +125,7 @@ fn dropping_an_uncommitted_batch_leaves_no_row() -> TestResult {
 
     drop(batch);
 
-    assert_eq!(artifact_rows(&root)?, 0);
+    assert_eq!(artifact_rows(&root)?, SEEDED_ROWS);
     assert!(journal.get_bytes(&blob.digest())?.is_none());
     assert!(journal.get_bytes(&tree.digest())?.is_none());
     Ok(())
@@ -144,7 +147,7 @@ fn a_staged_tree_citing_an_absent_blob_is_refused_at_commit() -> TestResult {
         }
         other => panic!("expected DanglingRef, got {other:?}"),
     }
-    assert_eq!(artifact_rows(&root)?, 0);
+    assert_eq!(artifact_rows(&root)?, SEEDED_ROWS);
     Ok(())
 }
 
@@ -162,7 +165,7 @@ fn a_second_batch_of_the_same_bytes_adds_no_row() -> TestResult {
     assert_eq!(stream(&mut second, &[b"same ", b"bytes"])?, blob);
     second.commit()?;
 
-    assert_eq!(artifact_rows(&root)?, 1);
+    assert_eq!(artifact_rows(&root)?, SEEDED_ROWS + 1);
     Ok(())
 }
 
@@ -228,7 +231,7 @@ fn append_and_a_batch_commit_on_another_thread_wait_out_each_others_writes() -> 
 
     committed?;
     appended?;
-    assert_eq!(artifact_rows(&root)?, 2);
+    assert_eq!(artifact_rows(&root)?, SEEDED_ROWS + 2);
     Ok(())
 }
 

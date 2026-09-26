@@ -14,10 +14,6 @@
 //! only `crates-io`, so the pairing covers registry sources only.
 //!
 //! **Preconditions.**
-//! - The empty run tree must be stored. Every journal holding a merged
-//!   environment holds it, because `environment.merge` stages an empty `dev`;
-//!   when it is missing, the workspace refuses with `InputMissing` and the
-//!   program refuses naming it.
 //! - The source is a mount, not the run tree, so the workspace's
 //!   `rust-toolchain.toml` check does not run here. The vendor layout depends
 //!   on cargo, not rustc, and `proof.clippy` still runs that check over the
