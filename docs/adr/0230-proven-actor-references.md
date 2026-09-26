@@ -192,7 +192,7 @@ The paths mirror the references:
 | `Namespace` | the grammar is valid | `const fn new`, a compile error when invalid | compare, `Debug`, fold to an `ActorId` |
 | `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | be the key segment of a path |
 | `ErasedActorPath` | the text is a well-formed ADR-0166 address, canonical or short (with `:name` holes); nothing about existence or placement | its fallible constructor and fallible decode | be stored, mailed, configured, persisted: carried in a kind (`NamedMail.recipient`), name a wire `Call`'s recipient, compared, displayed; become a position only inside the engine, through the host's `resolve_address`. The only description of an actor with a wire format; it carries names only. |
-| `ActorPath<R>` | written here: the text is `R`'s canonical path, written from `R`'s namespace, placement, and key. Decoded: only that the text is a well-formed canonical path; `R` is the writer's claim until `resolve` proves it. Nothing about existence either way. | its constructors from `R` below, only; decoding yields one that carries the writer's claim | everything an `ErasedActorPath` can; narrow to a `ProtocolPath<P>` (ADR-0231 §3); be resolved to an `ActorRef<R>`. It grants no send. |
+| `ActorPath<R>` | written here: the text is `R`'s canonical path, written from `R`'s namespace, placement, and key. Decoded: only that the text is a well-formed canonical path; `R` is the writer's claim until `resolve` proves it. Nothing about existence either way. | its constructors from `R` below, only for an actor that declares a link to `R`; decoding yields one that carries the writer's claim | everything an `ErasedActorPath` can; narrow to a `ProtocolPath<P>` (ADR-0231 §3); be resolved to an `ActorRef<R>`. It grants no send. |
 | `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, name its canonical path |
 | `ErasedActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload; an `ErasedActorPath` proven through `resolve_path`, on a native or a guest ctx | reply, monitor, be the target of an untyped send — inheriting, detached, or tracked, unchecked against a kind because the set it keys may be heterogeneous — be held in a capability's own table and keyed in an ordered set, name its canonical path |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key inside the engine, be printed; never be serialized (section 1) |
@@ -205,17 +205,31 @@ description of an actor. A typed path adds a compile-time claim and nothing
 on the wire.
 
 ```rust
-// aether-actor
+// aether-actor. `LinkCtx<R>` holds for a ctx typed by an actor that
+// declares `links(R)`, the shape `ctx.send::<R>` has with `DependsOn<R>`.
 impl<R: Root + Instanced> ActorPath<R> {
     /// `R::NAMESPACE:key`.
-    pub fn root(key: &LoadName) -> Self;
+    pub fn root(ctx: &impl LinkCtx<R>, key: &LoadName) -> Self;
 }
 impl<P: Addressable> ActorPath<P> {
     /// `<this path>/C::NAMESPACE:key`; refused only past the path's depth or
     /// byte cap.
-    pub fn child<C: ChildOf<P> + Instanced>(&self, key: &LoadName) -> Result<ActorPath<C>, ErasedActorPathError>;
+    pub fn child<C: ChildOf<P> + Instanced>(
+        &self,
+        ctx: &impl LinkCtx<C>,
+        key: &LoadName,
+    ) -> Result<ActorPath<C>, ErasedActorPathError>;
 }
 ```
+
+A typed path is written only by an actor that declares the link, as a typed
+send compiles only to a declared dependency. `#[actor(links(R))]` sits beside
+`depends(...)`, one list per attribute, and implements `LinksTo<R>` for the
+actor, which makes its ctxs `LinkCtx<R>`; like `DependsOn<R>`, `LinksTo<R>` is
+an `unsafe trait` that only the macro implements, because the macro also records the link the loader checks
+(section 3, "Declared links"). A link says only that the actor names `R` by
+path: `R` need not be live when the actor is created, and it may be an
+`Instanced` actor, which a dependency may not.
 
 An `ActorPath<R>` is written from the actor type: each step is a type's
 `NAMESPACE` and, for an instance, its key, so the path is canonical and has
@@ -232,8 +246,8 @@ constructor from a bare `ErasedActorPath` is private to `aether-actor`, which
 holds the placement traits, so no crate can attach an `R` to arbitrary text
 (section 4). On the wire an `ActorPath<R>` is the path text, with
 `ErasedActorPath`'s schema and codec; decoding validates the grammar and
-claims nothing about `R`. `Debug` prints the path, because a path is a name,
-not a position.
+claims nothing about `R`. `Debug` prints the path,
+because a path is a name, not a position.
 
 A loaded component's key is its load name, a validated `LoadName`; a
 window's is the name its spec gives it. There is one addressing system and
@@ -257,11 +271,11 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value. A `MonitorNotice` is host-generated mail that carries one: the host stamps the departed actor, which `register_monitor` required to be `Live`, so the watcher's `ctx.sender()` is a reference to it. | one published-route read; no lock, no allocation |
 | A position that arrived in mail, config, saved state, or from another process | the ctx verb `resolve_live`, over the host's liveness read of the published route view: `Live` mints, `Dropped` and `Unknown` refuse by name, and `Starting` reads as unknown (section 1). Minted once, at receipt, in the handler that received the field — never at the send. The registry method behind it is crate-private, so the verb is the only spelling a capability has. Native only: a guest has no `resolve_live`, because no guest API takes a `MailboxId` (amendment 2026-09-26). Its inputs are the serialized positions section 1 lists as debt, and it leaves with the last of them | one published-route read per proof; no lock, no allocation |
 | An `ErasedActorPath` that arrived in mail or config | the ctx verb `resolve_path`, on a native ctx (`NativeCtx`) and on a guest ctx (`WasmCtx`): `Unresolved` when the address names no `Starting` or `Live` route (a dropped route included), `NotLive` when its route is still `Starting` (or drops between the two reads). A guest's call crosses one host import, `resolve_path_p32`, and the host resolves and proves the path through the same crate-private path the native verb takes; the SDK mints the `ErasedActorRef` from the host's answer, as it mints the envelope sender. Native consumers are the component host's drop, replace, load-under, and describe receipts, and the trampoline's replacement dependency check; the guest consumer is the environment bootstrap script's `wire`, which proves the journal owner and the bundle driver from its config (#6786) | one address resolution plus one published-route read; for a guest, inside one host call |
-| An `ActorPath<R>` that arrived in mail, config, saved state, or from another process | the ctx verb `resolve`, on a native and a guest ctx: the name this decision reserves for its typed door, one spelling for both typed paths, where the path's type decides the proof's. An `ActorPath<R>` is canonical, because it is written from a type, so it never expands: it compiles to its position by the lineage fold, and one route-table lookup then checks that the route there carries that canonical name, that it is `Live`, and that its actor type is `R`; as at every registry-consulting `ActorRef<R>` door, `R`'s compiled contract rows are checked against the route's published ones (ADR-0231 §4). It mints an `ActorRef<R>`, through which every kind `R` handles is sendable, manual rows included; it refuses `NotLive`, `OtherActor`, or `Uncovered`, naming the path and `R::NAMESPACE`, never a position. The guest consumer is the Bloomery bootstrap, which reaches the journal and the driver this way (ADR-0240 D8); the native arm over an `ActorPath<R>` lands with its first native caller. An untyped `ErasedActorPath` stays untyped: it goes through `resolve_path` above and then ADR-0231 §4's cast | one fold plus one route-table lookup and a row comparison; for a guest, inside one host call |
-| A `ProtocolPath<P>` that arrived the same ways | the same `resolve`, which mints a `ProtocolRef<P>`: the same fold and lookup, checking the canonical name, `Live`, and that the published rows cover `P` (ADR-0231 §3). The native consumer is the Bloomery workspace's receipt of a `Run` or `Import` `source` (ADR-0240 D7); the guest arm over a `ProtocolPath<P>` lands with its first guest caller | the same |
+| An `ActorPath<R>` in the actor's memory or arrived in mail, config, saved state, or from another process | the ctx verb `resolve`, on a native and a guest ctx: the name this decision reserves for its typed door, one spelling for both typed paths, where the path's type decides the proof's; it compiles only for an actor that declares `links(R)`. An `ActorPath<R>` is canonical, so it never expands: it compiles to its position by the lineage fold, and one route-table lookup then checks that the route there carries that canonical name, that it is `Live`, and that its actor-type tag is `R`'s. Nothing else is checked, however the path arrived. For a native `R` the tag is identity, since a native namespace is claimed once per engine and caller and actor are one binary; for a guest `R` the tag stands on the load-time link check below, which proved the caller's compiled `R` against every route tagged `R` before either could run. It mints an `ActorRef<R>`, through which every kind `R` handles is sendable, manual rows included, and refuses `NotLive` or `OtherActor`, naming the path and `R::NAMESPACE`, never a position. The guest consumer is the Bloomery bootstrap, which reaches the journal and the driver this way (ADR-0240 D8); the native arm lands with its first native caller. An untyped `ErasedActorPath` stays untyped: it goes through `resolve_path` above and then ADR-0231 §4's cast | one fold plus one route-table lookup; for a guest, inside one host call |
+| A `ProtocolPath<P>` in the actor's memory or arrived the same ways | the same `resolve`, which mints a `ProtocolRef<P>` after the same fold and lookup (ADR-0231 §3). A protocol path narrowed in this binary carries its source actor's tag in memory and is checked like an `ActorPath<R>`, by name, `Live`, and tag. One decoded at a boundary carries no tag, so the lookup checks that the route's published rows cover `P`, the only row comparison left at run time; published rows only grow, so a positive answer is kept per route and protocol and never compared again. The native consumer is the Bloomery workspace's receipt of a `Run` or `Import` `source` (ADR-0240 D7); the guest arm lands with its first guest caller | the same, plus one row comparison per route and protocol for a decoded path |
 
-**The route's actor type.** Resolving an `ActorPath<R>` needs the route to
-say which actor type answers there, and on main it does not. A route record
+**The route's actor type.** Resolving a typed path needs the route to say
+which actor type answers there, and on main it does not. A route record
 (`RouteRecord`, `crates/aether-substrate/src/mail/registry/mailbox/route.rs`)
 carries its canonical name and its lifecycle, and a `Live` or `Alias`
 lifecycle carries the published `RouteContract` (ADR-0231 §4); it has no
@@ -281,7 +295,39 @@ and an inline child's spawn tag. A native type claims its namespace once per
 engine (`try_claim_namespace`,
 `crates/aether-substrate/src/actor/native/spawn/activation.rs`), so there the
 tag identifies the type. A guest type's tag is only its namespace, which two
-modules can both declare; the rows check is what tells them apart.
+modules can both declare, so for a guest the tag is identity only together
+with the load-time link check below.
+
+**Declared links.** A guest compiled against one build of `R` may meet a
+route tagged `R` from another. That skew is refused at load, once, not
+checked at each `resolve`. `#[actor(links(R))]` records a link in the
+module's `aether.kinds.inputs` section beside the `Dependency { resolver,
+namespace }` records `depends(...)` already emits
+(`crates/aether-substrate/src/actor/wasm/kind_manifest.rs`): `R::NAMESPACE`
+and the contract rows the module was compiled against, from `R`'s identity
+half. The check runs where the declared-dependency check runs, before
+`init`, at component load, module boot, and replacement
+(`crates/aether-component/src/component/runtime/dependencies.rs`, its callers
+in `load.rs`, and the trampoline's `check_dependencies` in
+`crates/aether-component/src/trampoline/runtime/replace.rs`), and it runs
+whichever module loads second:
+
+- when a module that declares `links(R)` loads, its recorded rows for `R`
+  must be covered: for a native `R`, by the rows the native handler
+  manifest records under `R::NAMESPACE` (`HandlerEntry.reply`,
+  `crates/aether-data/src/name_inventory.rs`), which exist whether or not
+  an `R` is live, so no later native birth needs a check; for a guest `R`,
+  by the published rows of every live route tagged `R`;
+- when a route tagged `R` goes `Live` from a module load, its published rows
+  must cover the recorded rows of every live link to `R`.
+
+Either refusal names the linking actor, `R`, and the first kind whose row is
+missing or different, and refuses that load; nothing already running is
+touched. A replacement of `R` cannot break a link, because ADR-0231 §5
+refuses a replacement that drops or changes a row. For a native linker to a
+native `R` the check is vacuous, both being one binary, and is not run. The
+second bullet needs the registry to keep the live links by tag, which it
+does not on main.
 
 **Amendment (2026-09-23): two births the declared-dependency check did not
 reach.** The first row checked dependencies only at component load and
@@ -376,10 +422,12 @@ a guest consumer.
   the Bloomery bootstrap
   ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D8): the
   path compiles to its position by the lineage fold, one route-table
-  lookup checks the canonical name, `Live`, the route's actor type, and
-  the published rows against `R`'s, and the SDK mints an `ActorRef<R>`
-  from the host's answer. A guest writes an `ActorPath<R>` only from an
-  actor type it compiles, so a kind-checked guest send to a native actor
+  lookup checks the canonical name, `Live`, and the route's actor-type
+  tag, and the SDK mints an `ActorRef<R>` from the host's answer. The
+  guest's compiled `R` was checked against `R`'s rows once, when the
+  bootstrap's module loaded under its declared `links(JournalActor,
+  BundleDriver)`, so no resolve compares rows. A guest writes an
+  `ActorPath<R>` only from an actor type it compiles, so a kind-checked guest send to a native actor
   needs that actor's crate to export an always-on identity half
   (ADR-0122), as `aether-workspace` does for `WorkspaceCapability`. The
   journal owner and the bundle driver gain theirs under the same decision
@@ -538,6 +586,13 @@ door, which needs only the parent's proof and the key.
   serialized type. The typed paths are not a second system: `ActorPath<R>`
   and `ProtocolPath<P>` are an `ErasedActorPath` on the wire, with its schema,
   and add only a claim that exists at compile time.
+- **Check rows on every resolve.** Comparing the caller's compiled rows
+  with the route's published ones at each `resolve` pays at run time for
+  an invariant the code already holds: a native caller and a native actor
+  are one binary, and a guest's skew is refused once, when its module
+  loads under a declared link. The one comparison left is for a
+  `ProtocolPath<P>` decoded at a boundary, and it is paid once per route
+  and protocol.
 - **Serializable references with a structural check at decode.** The first
   form of this decision. Decode cannot re-establish "reached `Live` here",
   and the type cannot know where its bytes came from, so every codec impl is

@@ -313,7 +313,7 @@ the sandbox, or they make the program `Sampled`.
 
    | Step | Mechanism |
    |---|---|
-   | Receipt | Resolve `source`, a `ProtocolPath<ArtifactStorage>`, to a `ProtocolRef<ArtifactStorage>` with `ctx.resolve` (ADR-0231 §3) before anything is queued: the path compiles to its position by the lineage fold, and one route-table lookup requires a `Live` route under that canonical name whose published rows cover `ArtifactStorage`. A source that does not resolve is `Refused(SourceUnavailable)` for a run and `Failed { detail }` for an import. |
+   | Receipt | Resolve `source`, a `ProtocolPath<ArtifactStorage>`, to a `ProtocolRef<ArtifactStorage>` with `ctx.resolve` (ADR-0231 §3) before anything is queued: the path compiles to its position by the lineage fold, and one route-table lookup requires a `Live` route under that canonical name. The source arrived in mail, so it is a decoded path, and the lookup also requires the route's published rows to cover `ArtifactStorage`; that comparison is made once per route and kept, since published rows only grow. A source that does not resolve is `Refused(SourceUnavailable)` for a run and `Failed { detail }` for an import. |
    | Reads | Every tree, blob, and environment the run cites is a `read` (`aether.bloomery.journal.read_artifact`) through that reference, including the checks that refuse before any container exists. |
    | Writes | Step stdout and stderr, the output tree, and an import's tree are `stage`d (`aether.bloomery.journal.stage`) through it in bounded batches as they are produced. A run that does not end `Ok` leaves what it staged cited by nothing. |
    | Codec | A `TreeSource` / `TreeSink` implementation over the reference; the container steps above are unchanged. |
