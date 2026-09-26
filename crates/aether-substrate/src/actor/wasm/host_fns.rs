@@ -8,7 +8,7 @@ use core::str::from_utf8;
 
 use aether_actor::{__ResolvedPath, AssetCatalog, AssetWindow};
 use aether_codec::frame::max_frame_size;
-use aether_data::{ActorPath, BlobHash, MAX_READ_BYTES, wire};
+use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
 use crate::actor::native::ResolvePathError;
@@ -903,7 +903,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // HOST_FN_OK: ADR-0230 §3 (#6786) — a guest proves an `ActorPath` that
+    // HOST_FN_OK: ADR-0230 §3 (#6786) — a guest proves an `ErasedActorPath` that
     // arrived in its config or mail inside `wire` or a handler, synchronously,
     // and keeps the proof for its later sends. Mail cannot answer it, because
     // the proof must exist before the first send that needs it. The host
@@ -918,14 +918,14 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // `(ptr << 32) | len`, like `asset_catalog_p32`. One buffer carries every
     // outcome, so no per-call status cell outlives the call. An out-of-bounds
     // pointer, text that is not UTF-8, or text outside the ADR-0166 grammar
-    // traps: the SDK passes only a validated `ActorPath`, so only a
+    // traps: the SDK passes only a validated `ErasedActorPath`, so only a
     // hand-rolled guest reaches those.
     linker.func_wrap(
         "aether",
         "resolve_path_p32",
         |mut caller: Caller<'_, ComponentCtx>, path_ptr: u32, path_len: u32| -> wasmtime::Result<u64> {
             let text = read_guest_utf8(&mut caller, path_ptr, path_len)?;
-            let path = ActorPath::new(&text).map_err(|error| {
+            let path = ErasedActorPath::new(&text).map_err(|error| {
                 wasmtime::Error::msg(format!("resolve_path: the text is not an ADR-0166 actor path: {error}"))
             })?;
             let answer = match caller.data().binding.resolve_path(&path) {

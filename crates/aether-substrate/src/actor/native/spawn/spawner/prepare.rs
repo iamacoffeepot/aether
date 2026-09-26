@@ -18,7 +18,7 @@ use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace::ActorTraceRing;
 use aether_actor::{Instanced, validate_namespace_segment};
-use aether_data::{ActorId, ActorPath, Tag, fold_lineage, with_tag};
+use aether_data::{ActorId, ErasedActorPath, Tag, fold_lineage, with_tag};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dependencies::check_declared;
@@ -42,7 +42,7 @@ pub(in crate::actor::native::spawn) struct SpawnIdentity {
     pub(in crate::actor::native::spawn) id: MailboxId,
     pub(in crate::actor::native::spawn) parent: Option<MailboxId>,
     pub(in crate::actor::native::spawn) carry: u64,
-    pub(in crate::actor::native::spawn) canonical_name: ActorPath,
+    pub(in crate::actor::native::spawn) canonical_name: ErasedActorPath,
     pub(in crate::actor::native::spawn) subname: String,
 }
 
@@ -96,7 +96,7 @@ impl Spawner {
                 (Some(parent.mailbox()), fold_lineage(parent.carry(), child_actor), rendered)
             },
         );
-        let canonical_name = ActorPath::new(&rendered).map_err(SpawnError::PathInvalid)?;
+        let canonical_name = ErasedActorPath::new(&rendered).map_err(SpawnError::PathInvalid)?;
         let id = MailboxId(with_tag(Tag::Mailbox, carry));
         Ok(SpawnIdentity { id, parent: parent_mailbox, carry, canonical_name, subname })
     }

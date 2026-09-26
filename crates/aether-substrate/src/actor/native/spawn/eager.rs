@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use aether_actor::{ActorRef, HandlesKind, Instanced, validate_namespace_segment};
-use aether_data::{ActorMail, ActorPath, Kind};
+use aether_data::{ActorMail, ErasedActorPath, Kind};
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::envelope::Envelope;
@@ -190,7 +190,7 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     /// Consume the builder and return both the proven reference and the exact
     /// canonical name registered for the new actor. Carries the same
     /// boot/embedder authority as [`Self::finish`].
-    pub fn finish_with_name(self) -> Result<(ActorRef<A>, ActorPath), SpawnError> {
+    pub fn finish_with_name(self) -> Result<(ActorRef<A>, ErasedActorPath), SpawnError> {
         self.finish_internal().map(|commit| (Registry::activated(commit.mailbox_id), commit.canonical_name))
     }
 

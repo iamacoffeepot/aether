@@ -6,7 +6,7 @@
 //! resend can only store what the first attempt did not.
 
 use aether_bloomery_kinds::{Digest, EncodedArtifact, Publish, PublishResult, ReadHead, ReadHeadResult, UnitKey};
-use aether_data::{ActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind};
 use aether_rpc::{MailEnvelope, PeerKind, Recipient, RpcClient, RpcConnection, WireFrame};
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -80,7 +80,7 @@ impl EngineJournal {
         };
         let connection = RpcClient::connect(&format!("127.0.0.1:{rpc_port}"), peer, || {})
             .with_context(|| format!("dialing the engine on port {rpc_port}"))?;
-        let journal = ActorPath::new(&format!("aether.bloomery.journal:{unit}"))?;
+        let journal = ErasedActorPath::new(&format!("aether.bloomery.journal:{unit}"))?;
         Ok(Self { connection, recipient: Recipient::local(journal) })
     }
 

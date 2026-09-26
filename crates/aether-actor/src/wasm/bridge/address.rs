@@ -12,7 +12,7 @@
 //! This is the transport under `WasmCtx::resolve_path`, which mints the proof
 //! from a `Live` answer.
 
-use aether_data::{ActorPath, wire};
+use aether_data::{ErasedActorPath, wire};
 use alloc::string::String;
 
 use super::abi32;
@@ -54,7 +54,7 @@ pub enum __ResolvedPath {
 /// Panics when the delivered bytes do not decode as a [`__ResolvedPath`]: the
 /// host and this SDK disagree on the ABI, which no guest can recover from
 /// (ADR-0063).
-pub fn resolve_path(path: &ActorPath) -> __ResolvedPath {
+pub fn resolve_path(path: &ErasedActorPath) -> __ResolvedPath {
     let text = path.as_str();
     // SAFETY: FFI import; the host copies the path out before returning and
     // always hands back a live `(ptr, len)`, or traps.

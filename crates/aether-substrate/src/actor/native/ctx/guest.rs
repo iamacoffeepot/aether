@@ -8,7 +8,7 @@
 //! hand, and never learns its own mailbox position (ADR-0230).
 
 use aether_actor::ReplyMode;
-use aether_data::{ActorPath, KindId};
+use aether_data::{ErasedActorPath, KindId};
 use aether_kinds::ComponentCapabilities;
 
 use crate::actor::native::{Dispatch, NativeActor};
@@ -69,7 +69,7 @@ impl<M: ReplyMode, A: GuestHost> NativeCtx<'_, A, M> {
     /// When the binding is untyped. Every production birth builds a typed
     /// binding, so this is a broken invariant, not an answer (ADR-0063).
     #[must_use]
-    pub fn path(&self) -> ActorPath {
+    pub fn path(&self) -> ErasedActorPath {
         self.binding
             .runtime_identity()
             .expect("NativeCtx::path requires a typed production binding")

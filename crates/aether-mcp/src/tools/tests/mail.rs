@@ -142,7 +142,7 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
         })
         .await
         .expect("direct mail prepares through the engine resolver");
-    assert_eq!(prepared.envelope.to.path, ActorPath::new(canonical).expect("fixture is an actor path"));
+    assert_eq!(prepared.envelope.to.path, ErasedActorPath::new(canonical).expect("fixture is an actor path"));
     assert_eq!(prepared.canonical_recipient, canonical);
     assert_eq!(calls.lock().expect("address-route calls mutex is never poisoned").len(), 1);
 
@@ -190,7 +190,7 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
     let request_descriptor = mcp.cache_lookup(engine, "aether.fs.list").expect("static request descriptor is cached");
     let request_kind_id = KindId(kind_id_from_parts(&request_descriptor.name, &request_descriptor.schema));
     mcp.components.lock().expect("component cache mutex is never poisoned").insert(
-        (engine, ActorPath::new(canonical).expect("fixture is an actor path")),
+        (engine, ErasedActorPath::new(canonical).expect("fixture is an actor path")),
         ComponentCapabilities {
             handlers: vec![HandlerCapability {
                 id: request_kind_id,
@@ -205,7 +205,7 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
         !mcp.components
             .lock()
             .expect("component cache mutex is never poisoned")
-            .contains_key(&(engine, ActorPath::new(supplied).expect("fixture is an actor path"))),
+            .contains_key(&(engine, ErasedActorPath::new(supplied).expect("fixture is an actor path"))),
         "only the engine-returned canonical path owns the handler contract"
     );
 
@@ -235,7 +235,7 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
     assert_eq!(calls[0].kind, ResolveAddress::ID);
     assert_eq!(
         calls[1].recipient,
-        ActorPath::new(canonical).expect("fixture is an actor path"),
+        ErasedActorPath::new(canonical).expect("fixture is an actor path"),
         "ordinary send routes to the engine-returned canonical path",
     );
     drop(calls);
@@ -271,7 +271,7 @@ async fn fire_and_forget_awaits_resolution_but_not_application_settlement() {
     .expect("fired application envelope reaches route sink");
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
     assert_eq!(calls[0].kind, ResolveAddress::ID);
-    assert_eq!(calls[1].recipient, ActorPath::new("aether.fs").expect("fixture is an actor path"));
+    assert_eq!(calls[1].recipient, ErasedActorPath::new("aether.fs").expect("fixture is an actor path"));
     drop(calls);
 }
 
@@ -324,7 +324,7 @@ async fn traced_walk_tails_each_layer_by_the_engine_paths() {
     let _ = finish_traced_dispatch(&mcp, engine, engine.0.to_string(), root, Vec::new(), TraceShape::Tree).await;
 
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
-    let tails: Vec<ActorPath> =
+    let tails: Vec<ErasedActorPath> =
         calls.iter().filter(|call| call.kind == TraceTail::ID).map(|call| call.recipient.clone()).collect();
     let resolves: Vec<Vec<String>> = calls
         .iter()
@@ -335,8 +335,8 @@ async fn traced_walk_tails_each_layer_by_the_engine_paths() {
     assert_eq!(
         tails,
         vec![
-            ActorPath::new(seed_path).expect("fixture is an actor path"),
-            ActorPath::new(child_path).expect("fixture is an actor path"),
+            ErasedActorPath::new(seed_path).expect("fixture is an actor path"),
+            ErasedActorPath::new(child_path).expect("fixture is an actor path"),
         ],
         "each layer's ring is tailed by the path the engine named",
     );

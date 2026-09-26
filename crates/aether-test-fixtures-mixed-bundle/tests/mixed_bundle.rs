@@ -10,7 +10,7 @@ use aether_bloomery_kinds::{
     Tree, Utf8Text, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
 };
 use aether_bloomery_program::declarations;
-use aether_data::{ActorPath, Cites, Kind, Storage, StorageData};
+use aether_data::{Cites, ErasedActorPath, Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::LoadComponent;
@@ -49,7 +49,7 @@ fn section_bytes(wasm: &[u8], name: &str) -> Vec<u8> {
     section
 }
 
-fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>, digest: &str) -> (ErasedActorRef, ActorPath) {
+fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>, digest: &str) -> (ErasedActorRef, ErasedActorPath) {
     let loaded = harness.load_any(&LoadComponent {
         wasm,
         name: Some(digest.to_owned()),

@@ -205,7 +205,7 @@ async fn engine_path_resolver_returns_the_engine_canonical_path() {
     let mcp = connect_mcp(port);
 
     let resolved = mcp.resolve_engine_path(engine, supplied).await.expect("routed engine resolves a short path");
-    assert_eq!(resolved, ActorPath::new(canonical).expect("fixture is an actor path"));
+    assert_eq!(resolved, ErasedActorPath::new(canonical).expect("fixture is an actor path"));
 
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
     assert_eq!(calls.len(), 1, "textual address performs exactly one uncached resolver RPC");
@@ -218,7 +218,7 @@ async fn engine_path_resolver_returns_the_engine_canonical_path() {
 /// Issue 6570: a tagged `mbx-…` address is sent to the engine's
 /// `aether.inventory.resolve`, and the canonical path it answers is what the
 /// client then sends by. Fails if the tagged text is used as the path
-/// itself: it parses as a one-segment `ActorPath`, so nothing else would
+/// itself: it parses as a one-segment `ErasedActorPath`, so nothing else would
 /// catch it.
 #[tokio::test]
 async fn a_tagged_id_resolves_to_the_engine_canonical_path() {
@@ -236,7 +236,7 @@ async fn a_tagged_id_resolves_to_the_engine_canonical_path() {
     let mcp = connect_mcp(port);
 
     let resolved = mcp.resolve_engine_path(engine, &tagged).await.expect("the engine names the tagged id");
-    assert_eq!(resolved, ActorPath::new(canonical).expect("fixture is an actor path"));
+    assert_eq!(resolved, ErasedActorPath::new(canonical).expect("fixture is an actor path"));
 
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
     assert_eq!(calls.len(), 1, "one resolve RPC names the id");

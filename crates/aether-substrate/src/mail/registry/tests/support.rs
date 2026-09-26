@@ -6,7 +6,7 @@ use std::panic;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::cost::CostCell;
@@ -152,7 +152,7 @@ pub(super) fn prepared_test_spawn(
     let cancelled = Arc::new(AtomicUsize::new(0));
     let effect = RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
         id,
-        ActorPath::new(name).expect("fixture is an actor path"),
+        ErasedActorPath::new(name).expect("fixture is an actor path"),
         Box::new(FakePreparedActivation {
             deliveries,
             scheduled,

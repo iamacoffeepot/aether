@@ -11,7 +11,7 @@
 use std::fs;
 
 use aether_component::ComponentHostCapability;
-use aether_data::{ActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
@@ -20,7 +20,7 @@ use aether_test_fixtures_kinds::{Bump, ConfigEcho, ConfigQuery, CountQuery, Coun
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
 
 /// A replace of `target` with the same fixture wasm.
-fn replace(target: &ActorPath, wasm: &[u8], config: Vec<u8>, export: Option<&str>) -> ReplaceComponent {
+fn replace(target: &ErasedActorPath, wasm: &[u8], config: Vec<u8>, export: Option<&str>) -> ReplaceComponent {
     ReplaceComponent {
         target: target.clone(),
         wasm: wasm.to_vec(),

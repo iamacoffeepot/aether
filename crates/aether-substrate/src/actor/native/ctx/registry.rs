@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_codec::InlineError;
 use aether_codec::frame::max_frame_size;
-use aether_data::{ActorPath, KindDescriptor, KindId};
+use aether_data::{ErasedActorPath, KindDescriptor, KindId};
 use aether_kinds::ComponentCapabilities;
 
 use crate::actor::native::envelope::Envelope;
@@ -72,7 +72,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// ambiguous, malformed for its root, or names no live actor.
     ///
     /// Consumer: the `aether.inventory` cap's `ResolveAddress` handler.
-    pub fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
+    pub fn canonical_path(&self, address: &ErasedActorPath) -> Result<String, AddressResolutionError> {
         self.binding.canonical_path(address)
     }
 
@@ -100,7 +100,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// whose proven path names the child's lineage, and the lifecycle cap's
     /// stuck-advance warning, which names each subscriber still owed.
     #[must_use]
-    pub fn actor_path(&self, reference: ErasedActorRef) -> ActorPath {
+    pub fn actor_path(&self, reference: ErasedActorRef) -> ErasedActorPath {
         self.binding.actor_path(reference)
     }
 

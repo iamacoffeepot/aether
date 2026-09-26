@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use aether_data::{ActorPath, Kind, KindDescriptor, SchemaType};
+use aether_data::{ErasedActorPath, Kind, KindDescriptor, SchemaType};
 
 use crate::actor::native::{DispatchId, NativeBinding, TaskCompletionWake};
 use crate::chassis::settlement::SettlementRegistry;
@@ -176,7 +176,7 @@ fn owner_shutdown_discards_unapplied_prepared_state_at_home_and_joins() {
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
             id,
-            ActorPath::new("queued-discard").expect("fixture is an actor path"),
+            ErasedActorPath::new("queued-discard").expect("fixture is an actor path"),
             Box::new(DiscardProbeActivation { dropped: dropped_tx }),
             PreparedCostCells::new(Arc::clone(mailer.cost_table()), Vec::new()),
             Vec::new(),
@@ -212,7 +212,7 @@ fn owner_drop_releases_apply_lock_before_joining_home_cancellation() {
     let id = canonical_mailbox_id("owner-drop-home-cancel");
     let birth = RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
         id,
-        ActorPath::new("owner-drop-home-cancel").expect("fixture is an actor path"),
+        ErasedActorPath::new("owner-drop-home-cancel").expect("fixture is an actor path"),
         Box::new(HomeCancelPrepared { sink, cancel_started: cancel_started_tx }),
         PreparedCostCells::new(Arc::clone(mailer.cost_table()), Vec::new()),
         Vec::new(),

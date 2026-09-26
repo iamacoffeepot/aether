@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
 
 use crate::mail::registry::authority::BootAuthority;
@@ -154,7 +154,7 @@ impl Registry {
                     applied.push(RegistryApplied::Starting { id, token });
                 }
                 RegistryEffect::PublishAlias(alias) => {
-                    let Some(canonical_name) = ActorPath::new(&alias.rendered_name)
+                    let Some(canonical_name) = ErasedActorPath::new(&alias.rendered_name)
                         .ok()
                         .filter(|_| alias.alias.0 != 0 && alias.alias != MailboxId::CHASSIS_MAILBOX_ID)
                     else {
@@ -244,7 +244,7 @@ impl Registry {
                     applied.push(RegistryApplied::AliasRetired(true));
                 }
                 RegistryEffect::ReserveStarting { route } => {
-                    let Some(canonical_name) = ActorPath::new(&route.canonical_name)
+                    let Some(canonical_name) = ErasedActorPath::new(&route.canonical_name)
                         .ok()
                         .filter(|_| route.id.0 != 0 && route.id != MailboxId::CHASSIS_MAILBOX_ID)
                     else {
@@ -316,7 +316,7 @@ impl Registry {
                     applied.push(RegistryApplied::StartingCancellation(cancellation));
                 }
                 RegistryEffect::PublishLive { route, activation, contract } => {
-                    let Some(canonical_name) = ActorPath::new(&route.canonical_name)
+                    let Some(canonical_name) = ErasedActorPath::new(&route.canonical_name)
                         .ok()
                         .filter(|_| route.id.0 != 0 && route.id != MailboxId::CHASSIS_MAILBOX_ID)
                     else {

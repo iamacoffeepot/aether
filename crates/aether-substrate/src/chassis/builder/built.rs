@@ -30,7 +30,7 @@ use crate::runtime::effect_chain::Uncaused;
 macro_rules! chassis_accessors {
     () => {
         /// Resolve a canonical or ADR-0166 short
-        /// [`ActorPath`](aether_data::ActorPath) to the position of one live
+        /// [`ErasedActorPath`](aether_data::ErasedActorPath) to the position of one live
         /// mailbox. This is the host's boundary parser (ADR-0230 §3), the one
         /// place an address becomes a position; it answers with a position
         /// and no proof, for an embedder that holds no spawn result for the
@@ -43,7 +43,7 @@ macro_rules! chassis_accessors {
         /// mailbox.
         pub fn resolve_address(
             &self,
-            address: &aether_data::ActorPath,
+            address: &aether_data::ErasedActorPath,
         ) -> Result<ResolvedAddress, AddressResolutionError> {
             self.booted.spawner.resolve_address(address)
         }

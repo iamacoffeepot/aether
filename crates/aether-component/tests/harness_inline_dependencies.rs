@@ -18,7 +18,7 @@ use std::fs;
 
 use aether_clipboard::{ClipboardCapability, ClipboardParams};
 use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{ActorPath, LoadName};
+use aether_data::{ErasedActorPath, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
@@ -122,7 +122,7 @@ fn a_replace_toward_an_unmet_inline_dependency_keeps_the_running_module() {
     let operation = HarnessOp::send_and_await_reply(
         &harness.actor_ref::<ComponentHostCapability>(),
         &ReplaceComponent {
-            target: ActorPath::new(&victim).expect("a loaded component's address is an actor path"),
+            target: ErasedActorPath::new(&victim).expect("a loaded component's address is an actor path"),
             wasm,
             drain_timeout_ms: None,
             config: Vec::new(),

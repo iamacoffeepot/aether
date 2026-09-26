@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 pub struct BindListener {
     pub addr: String,
     pub name: Option<String>,
-    pub consumer: Option<aether_data::ActorPath>,
+    pub consumer: Option<aether_data::ErasedActorPath>,
 }
 
 /// `aether.tcp.bind_listener_self` — [`BindListener`] with the sender as
@@ -55,7 +55,7 @@ pub struct BindListenerSelf {
 pub struct Connect {
     pub addr: String,
     pub name: Option<String>,
-    pub consumer: Option<aether_data::ActorPath>,
+    pub consumer: Option<aether_data::ErasedActorPath>,
 }
 
 /// `aether.tcp.connect_self` — [`Connect`] with the sender as the

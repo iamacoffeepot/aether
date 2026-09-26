@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use aether_actor::Addressable;
 use aether_chassis::boot::CommonEnv;
 use aether_chassis_headless::{HeadlessChassis, HeadlessCli};
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_demo::Demo;
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm};
 use aether_substrate::Chassis as _;
@@ -80,7 +80,7 @@ fn checked_in_boot_manifest_boots_the_demo() {
     let env = CommonEnv::resolve(cli).expect("resolve the headless env");
     let built = HeadlessChassis::build(env).expect("every boot entry in demo.boot.json loads");
 
-    let demo = ActorPath::new(&format!("aether.component/aether.embedded:{}", Demo::NAMESPACE))
+    let demo = ErasedActorPath::new(&format!("aether.component/aether.embedded:{}", Demo::NAMESPACE))
         .expect("a well-formed actor path");
     let resolved = built.resolve_address(&demo);
     assert!(resolved.is_ok(), "the demo component {demo} is not live when build returns: {resolved:?}");

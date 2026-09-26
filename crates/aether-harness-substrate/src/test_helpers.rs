@@ -48,7 +48,7 @@
 //! from a pass, and the whole point of running the scenario is to learn
 //! which of the two happened.
 
-use aether_data::{ActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind};
 use aether_kinds::NamedMail;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -341,7 +341,7 @@ pub fn write_fixture(name: &str, bytes: &[u8]) -> String {
 /// recipient is a fixture.
 pub fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     NamedMail {
-        recipient: ActorPath::new(recipient).expect("envelope recipient is a well-formed actor path"),
+        recipient: ErasedActorPath::new(recipient).expect("envelope recipient is a well-formed actor path"),
         kind_name: K::NAME.to_owned(),
         payload: mail.encode_into_bytes(),
         count: 1,

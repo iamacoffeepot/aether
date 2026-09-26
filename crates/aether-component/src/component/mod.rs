@@ -97,7 +97,7 @@ pub struct ComponentHostCapability;
 #[aether_data::kind(name = "aether.component.load_delivered", no_serde)]
 pub struct LoadDelivered {
     /// The loaded component's canonical lineage path.
-    pub path: aether_data::ActorPath,
+    pub path: aether_data::ErasedActorPath,
     /// The component's receive-side capabilities (ADR-0033).
     pub capabilities: aether_kinds::ComponentCapabilities,
 }
@@ -153,7 +153,7 @@ mod tests {
         assert_eq!(live.id(), typed, "the fixture stands the route at the typed resolver's position");
 
         for address in [canonical.as_str(), "aether.component/:camera"] {
-            let address = aether_data::ActorPath::new(address).expect("fixture is a well-formed actor path");
+            let address = aether_data::ErasedActorPath::new(address).expect("fixture is a well-formed actor path");
             let resolved = registry.resolve_address(&address).expect("address resolves to the live trampoline");
             assert_eq!(resolved.mailbox_id, typed);
             assert_eq!(resolved.canonical_path, canonical);

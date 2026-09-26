@@ -136,7 +136,7 @@ fn sender_mints_only_a_routed_component_source() {
 /// reads.
 #[test]
 fn resolve_path_proves_live_routes_and_names_the_rest() {
-    use aether_data::ActorPath;
+    use aether_data::ErasedActorPath;
 
     use crate::actor::native::ResolvePathError;
     use crate::config::RegistryQueueCapacities;
@@ -160,7 +160,7 @@ fn resolve_path_proves_live_routes_and_names_the_rest() {
     let starting = "test.native.resolve_path_starting";
     registry.reserve_starting_through_owner(starting).expect("owner accepts the Starting reservation");
     let ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-    let path = |text: &str| ActorPath::new(text).expect("a valid actor path");
+    let path = |text: &str| ErasedActorPath::new(text).expect("a valid actor path");
 
     assert_eq!(ctx.resolve_path(&path("test.native.resolve_path_live")), Ok(live));
     assert_eq!(

@@ -34,7 +34,7 @@ use aether_test_fixtures_kinds as _;
 use std::fs;
 
 use aether_actor::ErasedActorRef;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LogTailResult};
@@ -50,7 +50,7 @@ fn load_fixture(
     wasm: Vec<u8>,
     export: &str,
     name: Option<&str>,
-) -> (ErasedActorRef, ActorPath) {
+) -> (ErasedActorRef, ErasedActorPath) {
     harness
         .load_any(&LoadComponent {
             wasm,
@@ -61,7 +61,11 @@ fn load_fixture(
         .unwrap_or_else(|error| panic!("load_component {export} as {name:?}: {error}"))
 }
 
-fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> (ErasedActorRef, ActorPath) {
+fn load_source_observer(
+    harness: &mut SubstrateHarness,
+    wasm: Vec<u8>,
+    name: &str,
+) -> (ErasedActorRef, ErasedActorPath) {
     load_fixture(harness, wasm, "test.source_observer", Some(name))
 }
 

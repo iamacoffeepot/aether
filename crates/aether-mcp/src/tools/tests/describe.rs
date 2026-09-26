@@ -441,7 +441,7 @@ async fn describe_component_reads_the_cache() {
     mcp.components
         .lock()
         .expect("test setup: component cache mutex is never poisoned")
-        .insert((engine, ActorPath::new(canonical).expect("fixture is an actor path")), seeded);
+        .insert((engine, ErasedActorPath::new(canonical).expect("fixture is an actor path")), seeded);
     let hit = mcp
         .describe_component(Parameters(DescribeComponentArgs {
             engine_id: Some(engine_id.to_owned()),
@@ -523,7 +523,7 @@ async fn describe_component_keys_the_engine_resolved_path_and_forwards_the_suppl
         mcp.components
             .lock()
             .expect("component cache mutex is never poisoned")
-            .contains_key(&(engine, ActorPath::new(canonical).expect("fixture is an actor path"))),
+            .contains_key(&(engine, ErasedActorPath::new(canonical).expect("fixture is an actor path"))),
         "capabilities cache uses the engine-returned canonical path"
     );
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");

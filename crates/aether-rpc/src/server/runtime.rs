@@ -515,7 +515,7 @@ impl RpcServerState {
             }
             return;
         }
-        // Resolve and prove the recipient's `ActorPath` on arrival
+        // Resolve and prove the recipient's `ErasedActorPath` on arrival
         // (ADR-0230 section 3): this engine hosts it, so only this engine
         // expands a short path, and nothing upstream computed a position for
         // it. `accept_call` hands back an item that can only be delivered, so

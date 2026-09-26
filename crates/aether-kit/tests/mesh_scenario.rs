@@ -22,7 +22,7 @@
 //! mutation.
 
 use aether_actor::{ActorRef, Addressable};
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{
@@ -69,7 +69,7 @@ fn load_kit_export<R: Addressable>(
     harness: &mut SubstrateHarness,
     wasm: &[u8],
     name: &str,
-) -> (ActorRef<R>, ActorPath) {
+) -> (ActorRef<R>, ErasedActorPath) {
     let (actor, path) = harness
         .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: Some(name.to_owned()), config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load {}: {error}", R::NAMESPACE));
@@ -95,8 +95,8 @@ fn load_viewer(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<Mes
 
 fn capture_outlined_mesh(
     harness: &mut SubstrateHarness,
-    camera: &ActorPath,
-    viewer: &ActorPath,
+    camera: &ErasedActorPath,
+    viewer: &ErasedActorPath,
     label: &'static str,
 ) -> Vec<u8> {
     let mails = vec![envelope(&camera.to_string(), &Render), envelope(&viewer.to_string(), &Render)];

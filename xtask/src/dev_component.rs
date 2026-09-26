@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use anyhow::{Context, Result, anyhow, bail};
 use cargo_metadata::{Metadata, MetadataCommand};
 use clap::Args;
@@ -189,7 +189,7 @@ fn parse_address(value: &str) -> Result<String, String> {
     if value.starts_with("mbx-") {
         return Err("pass the component's lineage address (aether.component/:NAME), not a mailbox id".to_string());
     }
-    ActorPath::new(value).map(|_| value.to_string()).map_err(|error| format!("address: {error}"))
+    ErasedActorPath::new(value).map(|_| value.to_string()).map_err(|error| format!("address: {error}"))
 }
 
 async fn watch<B: ArtifactBuilder, C: ToolCaller>(

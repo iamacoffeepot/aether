@@ -39,7 +39,7 @@ use aether_chassis::boot::{
 };
 use aether_chassis::boot_manifest::ChassisSettings;
 use aether_chassis_headless::HeadlessChassis;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::HttpConfig;
 use aether_http::{HttpServerConfig, HttpServerHandle};
@@ -86,8 +86,8 @@ const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
 /// Poll the chassis's boundary address parser until the handler loaded under
 /// `name` resolves to its trampoline, answering its canonical address. Panics
 /// after 30s with the address and the parser's last answer.
-fn await_live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> ActorPath {
-    let address = ActorPath::new(&format!("aether.component/aether.embedded:{name}"))
+fn await_live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> ErasedActorPath {
+    let address = ErasedActorPath::new(&format!("aether.component/aether.embedded:{name}"))
         .expect("a loaded handler name forms a well-formed actor path");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {

@@ -299,7 +299,7 @@ impl NativeActor for FleetProxy {
     ///
     /// # Agent
     /// Hand the proxy a `ForwardEnvelope { recipient, kind, payload }`
-    /// — `recipient` is the substrate-local actor's `ActorPath`, sent on
+    /// — `recipient` is the substrate-local actor's `ErasedActorPath`, sent on
     /// as written for the substrate to resolve, and `kind` + `payload`
     /// the mail to deliver there. Every reply the substrate streams back
     /// relays to the sender of this `ForwardEnvelope`, and a

@@ -1,4 +1,4 @@
-//! [`crate::ActorPath`]: an unresolved, unproven, fully qualified actor
+//! [`crate::ErasedActorPath`]: an unresolved, unproven, fully qualified actor
 //! address in the ADR-0166 grammar.
 //!
 //! The text is checked when the value is built or decoded and is then stored
@@ -34,9 +34,9 @@ const RETIRED_SHORT_FORM: &str = "://";
 /// Equality is textual. A short path and its canonical expansion are unequal
 /// values, because only the engine can tell that they name the same actor.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct ActorPath(Box<str>);
+pub struct ErasedActorPath(Box<str>);
 
-/// How an [`ActorPath`] is written.
+/// How an [`ErasedActorPath`] is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActorPathForm<'a> {
     /// A canonical `/`-rendered lineage path: no step is a hole.
@@ -46,7 +46,7 @@ pub enum ActorPathForm<'a> {
     Short { root: &'a str, steps: Vec<PathSegment<'a>> },
 }
 
-/// One step of a short [`ActorPath`] after its root, as written.
+/// One step of a short [`ErasedActorPath`] after its root, as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathSegment<'a> {
     /// A step with no `:`: always a singleton child.
@@ -58,7 +58,7 @@ pub enum PathSegment<'a> {
     Hole { discriminator: &'a str },
 }
 
-impl ActorPath {
+impl ErasedActorPath {
     /// Validate `text` against the ADR-0166 address grammar.
     ///
     /// The whole text is at most [`MAX_SCOPE_PATH_BYTES`] bytes and never
@@ -71,10 +71,10 @@ impl ActorPath {
     ///
     /// # Errors
     ///
-    /// Returns [`ActorPathError`] naming the breached cap, the retired `://`
+    /// Returns [`ErasedActorPathError`] naming the breached cap, the retired `://`
     /// form, a short path whose first step is an instance, or the written
     /// step and the rule it broke.
-    pub fn new(text: &str) -> Result<Self, ActorPathError> {
+    pub fn new(text: &str) -> Result<Self, ErasedActorPathError> {
         check_path(text)?;
         Ok(Self(text.into()))
     }
@@ -100,7 +100,7 @@ impl ActorPath {
     }
 }
 
-impl fmt::Display for ActorPath {
+impl fmt::Display for ErasedActorPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -116,9 +116,9 @@ impl fmt::Display for PathSegment<'_> {
     }
 }
 
-/// [`ActorPath::new`] rejection.
+/// [`ErasedActorPath::new`] rejection.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ActorPathError {
+pub enum ErasedActorPathError {
     /// The written step at `index` (0-based; the root is 0) broke `fault`.
     Segment { index: usize, fault: SegmentFault },
     /// The path breaches the depth or byte cap.
@@ -132,7 +132,7 @@ pub enum ActorPathError {
     ShortPathFromInstance,
 }
 
-impl fmt::Display for ActorPathError {
+impl fmt::Display for ErasedActorPathError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Segment { index, fault } => write!(f, "invalid actor path: segment {index}: {}", fault.message()),
@@ -154,23 +154,23 @@ impl fmt::Display for ActorPathError {
     }
 }
 
-impl StdError for ActorPathError {}
+impl StdError for ErasedActorPathError {}
 
-fn check_path(text: &str) -> Result<(), ActorPathError> {
+fn check_path(text: &str) -> Result<(), ErasedActorPathError> {
     if text.len() > MAX_SCOPE_PATH_BYTES {
-        return Err(ActorPathError::Scope(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }));
+        return Err(ErasedActorPathError::Scope(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }));
     }
     if text.contains(RETIRED_SHORT_FORM) {
-        return Err(ActorPathError::RetiredShortForm);
+        return Err(ErasedActorPathError::RetiredShortForm);
     }
     let steps: Vec<_> = text.split('/').map(parse_segment).collect();
     if steps.len() > MAX_SCOPE_PATH_DEPTH {
-        return Err(ActorPathError::Scope(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH }));
+        return Err(ErasedActorPathError::Scope(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH }));
     }
 
     let short = steps.iter().any(|step| matches!(step, PathSegment::Hole { .. }));
     if short && !matches!(steps.first(), Some(PathSegment::Bare(_))) {
-        return Err(ActorPathError::ShortPathFromInstance);
+        return Err(ErasedActorPathError::ShortPathFromInstance);
     }
 
     steps.into_iter().enumerate().try_for_each(|(index, step)| {
@@ -181,7 +181,7 @@ fn check_path(text: &str) -> Result<(), ActorPathError> {
             }
             PathSegment::Hole { discriminator } => check_segment(discriminator.as_bytes()),
         };
-        parts.map_err(|fault| ActorPathError::Segment { index, fault })
+        parts.map_err(|fault| ErasedActorPathError::Segment { index, fault })
     })
 }
 
@@ -196,23 +196,23 @@ fn parse_segment(segment: &str) -> PathSegment<'_> {
     }
 }
 
-impl Schema for ActorPath {
+impl Schema for ErasedActorPath {
     const SCHEMA: SchemaType = SchemaType::String;
     const LABEL: Option<&'static str> = None;
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
-impl CastEligible for ActorPath {
+impl CastEligible for ErasedActorPath {
     const ELIGIBLE: bool = false;
 }
 
-impl WireEncode for ActorPath {
+impl WireEncode for ErasedActorPath {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         (*self.0).encode(out)
     }
 }
 
-impl<'de> WireDecode<'de> for ActorPath {
+impl<'de> WireDecode<'de> for ErasedActorPath {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
         let text = String::decode(cursor)?;
         check_path(&text).map_err(|_| WireError::InvalidActorPath)?;
@@ -220,13 +220,13 @@ impl<'de> WireDecode<'de> for ActorPath {
     }
 }
 
-impl Serialize for ActorPath {
+impl Serialize for ErasedActorPath {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
     }
 }
 
-impl<'de> Deserialize<'de> for ActorPath {
+impl<'de> Deserialize<'de> for ErasedActorPath {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = <Box<str>>::deserialize(deserializer)?;
         Self::new(&text).map_err(DeError::custom)
@@ -242,37 +242,37 @@ mod tests {
 
     #[test]
     fn rejects_malformed_segments_in_either_form() {
-        let segment = |index, fault| Err(ActorPathError::Segment { index, fault });
-        assert_eq!(ActorPath::new("a//b"), segment(1, SegmentFault::Empty));
-        assert_eq!(ActorPath::new("a/"), segment(1, SegmentFault::Empty));
-        assert_eq!(ActorPath::new("root/worker:bad:key"), segment(1, SegmentFault::ContainsSeparator));
-        assert_eq!(ActorPath::new("a:b/:c"), Err(ActorPathError::ShortPathFromInstance));
-        assert_eq!(ActorPath::new(":a/b"), Err(ActorPathError::ShortPathFromInstance));
-        assert_eq!(ActorPath::new("a b"), segment(0, SegmentFault::ContainsControlOrWhitespace));
-        assert_eq!(ActorPath::new(""), segment(0, SegmentFault::Empty));
-        assert_eq!(ActorPath::new("aether.component://camera"), Err(ActorPathError::RetiredShortForm));
+        let segment = |index, fault| Err(ErasedActorPathError::Segment { index, fault });
+        assert_eq!(ErasedActorPath::new("a//b"), segment(1, SegmentFault::Empty));
+        assert_eq!(ErasedActorPath::new("a/"), segment(1, SegmentFault::Empty));
+        assert_eq!(ErasedActorPath::new("root/worker:bad:key"), segment(1, SegmentFault::ContainsSeparator));
+        assert_eq!(ErasedActorPath::new("a:b/:c"), Err(ErasedActorPathError::ShortPathFromInstance));
+        assert_eq!(ErasedActorPath::new(":a/b"), Err(ErasedActorPathError::ShortPathFromInstance));
+        assert_eq!(ErasedActorPath::new("a b"), segment(0, SegmentFault::ContainsControlOrWhitespace));
+        assert_eq!(ErasedActorPath::new(""), segment(0, SegmentFault::Empty));
+        assert_eq!(ErasedActorPath::new("aether.component://camera"), Err(ErasedActorPathError::RetiredShortForm));
     }
 
     #[test]
     fn rejects_paths_over_the_scope_caps() {
-        let too_deep = Err(ActorPathError::Scope(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH }));
+        let too_deep = Err(ErasedActorPathError::Scope(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH }));
         let canonical = |depth| vec!["seg"; depth].join("/");
-        assert!(ActorPath::new(&canonical(MAX_SCOPE_PATH_DEPTH)).is_ok());
-        assert_eq!(ActorPath::new(&canonical(MAX_SCOPE_PATH_DEPTH + 1)), too_deep);
+        assert!(ErasedActorPath::new(&canonical(MAX_SCOPE_PATH_DEPTH)).is_ok());
+        assert_eq!(ErasedActorPath::new(&canonical(MAX_SCOPE_PATH_DEPTH + 1)), too_deep);
 
         let short = |holes| format!("root/{}", vec![":seg"; holes].join("/"));
-        assert!(ActorPath::new(&short(MAX_SCOPE_PATH_DEPTH - 1)).is_ok());
-        assert_eq!(ActorPath::new(&short(MAX_SCOPE_PATH_DEPTH)), too_deep);
+        assert!(ErasedActorPath::new(&short(MAX_SCOPE_PATH_DEPTH - 1)).is_ok());
+        assert_eq!(ErasedActorPath::new(&short(MAX_SCOPE_PATH_DEPTH)), too_deep);
 
         assert_eq!(
-            ActorPath::new(&"a".repeat(MAX_SCOPE_PATH_BYTES + 1)),
-            Err(ActorPathError::Scope(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }))
+            ErasedActorPath::new(&"a".repeat(MAX_SCOPE_PATH_BYTES + 1)),
+            Err(ErasedActorPathError::Scope(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }))
         );
     }
 
     #[test]
     fn form_reports_a_hole_path_as_short() {
-        let short = ActorPath::new("root/manager/:camera").expect("a short path");
+        let short = ErasedActorPath::new("root/manager/:camera").expect("a short path");
         assert_eq!(
             short.form(),
             ActorPathForm::Short {
@@ -281,7 +281,7 @@ mod tests {
             }
         );
 
-        let canonical = ActorPath::new("root/manager/worker:camera").expect("a canonical path");
+        let canonical = ErasedActorPath::new("root/manager/worker:camera").expect("a canonical path");
         assert_eq!(canonical.form(), ActorPathForm::Canonical("root/manager/worker:camera"));
     }
 
@@ -289,6 +289,6 @@ mod tests {
     fn decode_rejects_a_malformed_path() {
         let bytes = [4, 0, 0, 0, b'a', b'/', b'/', b'b'];
         let mut cursor: &[u8] = &bytes;
-        assert_eq!(ActorPath::decode(&mut cursor), Err(WireError::InvalidActorPath));
+        assert_eq!(ErasedActorPath::decode(&mut cursor), Err(WireError::InvalidActorPath));
     }
 }

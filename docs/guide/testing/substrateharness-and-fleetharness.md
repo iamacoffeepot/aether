@@ -185,7 +185,7 @@ let (panel, path) = harness.load::<WidgetPanel>(LoadComponent {
 ```
 
 `load::<R>` sets the export to `R::NAMESPACE` and returns `(ActorRef<R>,
-ActorPath)`; `load_any` sends the load as given and returns the erased
+ErasedActorPath)`; `load_any` sends the load as given and returns the erased
 reference, for a fixture actor the test cannot name. Drop and replace take the
 path: `DropComponent { target: path }`, `ReplaceComponent { target: path, … }`.
 FleetHarness returns the same path as text — `Loaded { addr, capabilities }` —

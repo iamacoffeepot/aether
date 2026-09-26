@@ -2,7 +2,7 @@
 //! and the structured misses it reports.
 
 use aether_data::tagged_id::{Tag, with_tag};
-use aether_data::{ActorId, ActorPath, MAILBOX_DOMAIN, fnv1a_64_prefixed, fold_lineage};
+use aether_data::{ActorId, ErasedActorPath, MAILBOX_DOMAIN, fnv1a_64_prefixed, fold_lineage};
 
 use crate::mail::MailboxId;
 use crate::mail::registry::{AddressResolutionError, Registry, canonical_mailbox_id, lineage_mailbox_id, noop_handler};
@@ -38,7 +38,7 @@ fn canonical_resolution_reports_the_registered_path_and_structured_misses() {
     let id = lineage_mailbox_id(canonical);
     r.try_register_inbox_with_id(&auth(), id, canonical, noop_handler()).unwrap();
 
-    let path = |text| ActorPath::new(text).expect("fixture is a well-formed actor path");
+    let path = |text| ErasedActorPath::new(text).expect("fixture is a well-formed actor path");
     let resolved = r.resolve_address(&path(canonical)).expect("canonical mailbox is live");
     assert_eq!(resolved.mailbox_id, id);
     assert_eq!(resolved.canonical_path, canonical);

@@ -14,7 +14,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use aether_actor::Instanced;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::local;
@@ -41,7 +41,7 @@ use super::{InstancedSlotEntry, Spawner};
 const BIRTH_PATIENCE: Duration = Duration::from_secs(30);
 pub(in crate::actor::native::spawn) struct SpawnCommit {
     pub(in crate::actor::native::spawn) mailbox_id: MailboxId,
-    pub(in crate::actor::native::spawn) canonical_name: ActorPath,
+    pub(in crate::actor::native::spawn) canonical_name: ErasedActorPath,
 }
 
 impl Spawner {

@@ -25,7 +25,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use aether_codec::frame::{read_frame, write_frame};
-use aether_data::{ActorPath, EngineId, Kind, Uuid};
+use aether_data::{EngineId, ErasedActorPath, Kind, Uuid};
 use aether_fleet::{FleetConfig, FleetServer};
 use aether_fs::{List, ListResult, NamespaceAddr};
 use aether_kinds::descriptors;
@@ -81,7 +81,7 @@ fn boot_hub(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, u16) {
 /// Write one `Call` for `request` at the actor path `recipient`, on `engine`
 /// when it is `Some`.
 fn write_call<K: Kind>(stream: &mut TcpStream, cid: u64, engine: Option<EngineId>, recipient: &str, request: &K) {
-    let path = ActorPath::new(recipient).expect("the recipient is an actor path");
+    let path = ErasedActorPath::new(recipient).expect("the recipient is an actor path");
     write_frame(
         stream,
         &WireFrame::Call {
@@ -177,7 +177,7 @@ impl Drop for SubstrateReaper {
             &WireFrame::Call {
                 cid: Some(99),
                 envelope: MailEnvelope {
-                    to: Recipient::local(ActorPath::new("aether.fleet").expect("the fleet namespace is a path")),
+                    to: Recipient::local(ErasedActorPath::new("aether.fleet").expect("the fleet namespace is a path")),
                     kind: TerminateEngine::ID,
                     payload: req.encode_into_bytes(),
                 },

@@ -692,7 +692,7 @@ mod control_plane {
     /// invalid WASM, name conflict, etc.
     #[aether_data::kind(name = "aether.component.load_result")]
     pub enum LoadResult {
-        Ok { path: aether_data::ActorPath, capabilities: ComponentCapabilities },
+        Ok { path: aether_data::ErasedActorPath, capabilities: ComponentCapabilities },
         Err { error: String },
     }
 
@@ -798,7 +798,7 @@ mod control_plane {
     /// once at receipt. Reply: `DropResult`.
     #[aether_data::kind(name = "aether.component.drop")]
     pub struct DropComponent {
-        pub target: aether_data::ActorPath,
+        pub target: aether_data::ErasedActorPath,
     }
 
     /// Reply to `DropComponent`. `Ok` on success; `Err` if the
@@ -818,7 +818,7 @@ mod control_plane {
     /// `aether.kinds` custom section (ADR-0028). Reply: `ReplaceResult`.
     #[aether_data::kind(name = "aether.component.replace")]
     pub struct ReplaceComponent {
-        pub target: aether_data::ActorPath,
+        pub target: aether_data::ErasedActorPath,
         #[serde(with = "aether_data::bytes")]
         pub wasm: Vec<u8>,
         /// Vestigial. ADR-0022 sized a drain phase this field capped;
@@ -987,7 +987,7 @@ mod control_plane {
         /// once through `accept_bundle`, before any item of the bundle
         /// moves: `Registry::resolve_address` expands a short path, and
         /// the position it answers must hold a live route.
-        pub recipient: aether_data::ActorPath,
+        pub recipient: aether_data::ErasedActorPath,
         pub kind_name: String,
         #[serde(with = "aether_data::bytes")]
         pub payload: Vec<u8>,

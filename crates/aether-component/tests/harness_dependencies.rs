@@ -14,7 +14,7 @@ use std::fs;
 
 use aether_actor::ActorRef;
 use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{ActorPath, LoadName};
+use aether_data::{ErasedActorPath, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
@@ -147,7 +147,7 @@ fn replace_with_unmet_dependency_keeps_running_module() {
 
     let outer = load_named(&mut harness, &wasm, "outer", None, Some("outer"), PROBE_EXPORT);
     let victim = load_named(&mut harness, &wasm, "victim", Some(&outer), Some("victim"), TARGET_EXPORT);
-    let victim_path = ActorPath::new(&victim).expect("a loaded component's address is an actor path");
+    let victim_path = ErasedActorPath::new(&victim).expect("a loaded component's address is an actor path");
 
     let replace = |harness: &mut SubstrateHarness, label: &str, export: Option<&str>| {
         let operation = HarnessOp::send_and_await_reply(

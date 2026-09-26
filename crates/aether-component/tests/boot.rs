@@ -19,7 +19,7 @@
 use std::fs;
 
 use aether_component::ComponentHostCapability;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{
@@ -41,7 +41,7 @@ const BOOT_TORN_DOWN: &str = "aether.test_fixture.boot_torn_down";
 
 /// Load one named export of the boot fixture, blocking on `LoadResult::Ok`, and
 /// return its trampoline's actor path.
-fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -> ActorPath {
+fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -> ErasedActorPath {
     let loaded = harness
         .execute(vec![(
             "load",
@@ -58,7 +58,7 @@ fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -
 }
 
 /// Drop one loaded actor, blocking on its `DropResult::Ok`.
-fn drop_actor(harness: &mut SubstrateHarness, path: ActorPath) {
+fn drop_actor(harness: &mut SubstrateHarness, path: ErasedActorPath) {
     let dropped = harness
         .execute(vec![(
             "drop",

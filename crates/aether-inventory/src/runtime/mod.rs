@@ -11,7 +11,7 @@
 // beside the body.
 use aether_actor::runtime;
 #[cfg(not(target_family = "wasm"))]
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 
 use super::{InventoryCapability, ListHandlers, ListKinds, Manifest, Resolve, ResolveAddress};
 
@@ -172,7 +172,7 @@ impl NativeActor for InventoryCapability {
         ctx: &mut NativeCtx<'_>,
         mail: ResolveAddress,
     ) -> ResolveAddressResult {
-        let resolved = ActorPath::new(&mail.address)
+        let resolved = ErasedActorPath::new(&mail.address)
             .map_err(|error| error.to_string())
             .and_then(|address| ctx.canonical_path(&address).map_err(|error| error.to_string()));
         match resolved {

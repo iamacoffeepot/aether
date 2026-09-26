@@ -16,7 +16,7 @@ use std::path::Path;
 
 use aether_actor::ActorRef;
 use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{ActorPath, LoadName};
+use aether_data::{ErasedActorPath, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{
@@ -68,7 +68,7 @@ fn panel_pings(harness: &mut SubstrateHarness, panel: ActorRef<Panel>) -> usize 
 /// fully-instantiated and tick-subscribed component. Returns the
 /// loaded component's actor path (the trampoline address), which
 /// the drop / replace scenarios target.
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorPath {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorPath {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = harness
         .execute(vec![(

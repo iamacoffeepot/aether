@@ -20,7 +20,7 @@ use std::path::Path;
 
 use aether_actor::ErasedActorRef;
 use aether_component::ComponentHostCapability;
-use aether_data::{ActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, TextInput, WindowId};
@@ -35,7 +35,7 @@ fn boot_bench() -> SubstrateHarness {
     SubstrateHarness::builder().with_component_host().build().expect("boot")
 }
 
-fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> (ErasedActorRef, ActorPath) {
+fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> (ErasedActorRef, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
         .load_any(&LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None })
@@ -65,7 +65,7 @@ fn unsubscribe_keys(harness: &mut SubstrateHarness, probe: ErasedActorRef) {
         .expect("unsubscribe sequence");
 }
 
-fn drop_component(harness: &mut SubstrateHarness, path: ActorPath) {
+fn drop_component(harness: &mut SubstrateHarness, path: ErasedActorPath) {
     let result = harness
         .execute(vec![(
             "drop",

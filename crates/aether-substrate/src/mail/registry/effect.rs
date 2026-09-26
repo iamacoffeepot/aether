@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use aether_actor::RegistryChanged;
-use aether_data::{ActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind};
 use aether_data::{KindDescriptor, MailboxDescriptor, SchemaType};
 
 use crate::actor::native::offload::blocking::DeferredCompletion;
@@ -230,7 +230,7 @@ impl PreparedMail {
 /// Private move-only birth committed by the registry owner.
 pub struct PreparedSpawnCommit {
     pub(crate) id: MailboxId,
-    pub(crate) canonical_name: ActorPath,
+    pub(crate) canonical_name: ErasedActorPath,
     activation: PreparedActivationGuard,
     pub(crate) costs: PreparedCostCells,
     pub(crate) after_init: Vec<PreparedMail>,
@@ -266,7 +266,7 @@ impl Drop for PreparedActivationGuard {
 impl PreparedSpawnCommit {
     pub(crate) fn new(
         id: MailboxId,
-        canonical_name: ActorPath,
+        canonical_name: ErasedActorPath,
         activation: Box<dyn PreparedSpawnActivation>,
         costs: PreparedCostCells,
         after_init: Vec<PreparedMail>,

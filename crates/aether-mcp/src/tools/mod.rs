@@ -32,9 +32,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use aether_codec::frame::max_frame_size;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::wire;
-use aether_data::{ActorPath, MailId};
 use aether_data::{EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, tagged_id};
 use aether_data::{EnumVariant, Primitive, SchemaType};
+use aether_data::{ErasedActorPath, MailId};
 use aether_inventory::kinds::{ListKinds, ListKindsResult, ResolveAddress, ResolveAddressResult};
 #[cfg(test)]
 use aether_kinds::KindDescriptorWire;
@@ -150,7 +150,7 @@ const INVENTORY_CAP: &str = "aether.inventory";
 /// the forward-model stand-in for the embedded hub's component registry.
 /// The key is always the canonical lineage the engine answered with, so a
 /// short-path spelling and its canonical expansion share one entry.
-pub type ComponentCache = Mutex<HashMap<(EngineId, ActorPath), ComponentCapabilities>>;
+pub type ComponentCache = Mutex<HashMap<(EngineId, ErasedActorPath), ComponentCapabilities>>;
 
 /// Per-engine reverse-lookup state, keyed by [`EngineId`] (ADR-0088 §8).
 /// Each [`EngineNames`] folds that engine's served `aether.inventory`

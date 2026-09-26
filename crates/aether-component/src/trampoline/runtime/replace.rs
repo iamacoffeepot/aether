@@ -5,7 +5,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use aether_actor::Single;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_data::canonical::kind_id_from_parts;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
@@ -211,7 +211,7 @@ impl WasmTrampolineState {
     /// that declares no group has nothing to refuse and passes.
     fn check_dependencies(
         ctx: &NativeCtx<'_, WasmTrampoline>,
-        own: &ActorPath,
+        own: &ErasedActorPath,
         group: Option<&ActorInputs>,
     ) -> Result<(), String> {
         let Some(group) = group else {
@@ -518,7 +518,7 @@ fn declared_kinds(wasm: &[u8]) -> Result<HashSet<KindId>, String> {
 
 #[derive(Clone)]
 pub(super) struct SiblingSpawnContext {
-    parent: ActorPath,
+    parent: ErasedActorPath,
     subname: String,
 }
 

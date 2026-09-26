@@ -1,4 +1,4 @@
-use aether_data::{ActorPath, MailboxId};
+use aether_data::{ErasedActorPath, MailboxId};
 
 /// The canonical runtime identity carried by every typed native actor binding
 /// (ADR-0165).
@@ -12,11 +12,11 @@ pub struct ActorRuntimeIdentity {
     mailbox: MailboxId,
     parent: Option<MailboxId>,
     carry: u64,
-    canonical_name: ActorPath,
+    canonical_name: ErasedActorPath,
 }
 
 impl ActorRuntimeIdentity {
-    pub fn new(mailbox: MailboxId, parent: Option<MailboxId>, carry: u64, canonical_name: ActorPath) -> Self {
+    pub fn new(mailbox: MailboxId, parent: Option<MailboxId>, carry: u64, canonical_name: ErasedActorPath) -> Self {
         Self { mailbox, parent, carry, canonical_name }
     }
 
@@ -32,7 +32,7 @@ impl ActorRuntimeIdentity {
         self.carry
     }
 
-    pub fn canonical_name(&self) -> &ActorPath {
+    pub fn canonical_name(&self) -> &ErasedActorPath {
         &self.canonical_name
     }
 }

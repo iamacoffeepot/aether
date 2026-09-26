@@ -34,7 +34,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use aether_component::ComponentHostCapability;
-use aether_data::{ActorPath, Kind, KindId, LoadName, ReplyContract, SessionToken, Uuid};
+use aether_data::{ErasedActorPath, Kind, KindId, LoadName, ReplyContract, SessionToken, Uuid};
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, CostTail, CostTailResult};
@@ -915,7 +915,7 @@ impl SubstrateHarness {
     pub fn load<R: Addressable>(
         &mut self,
         mut component: LoadComponent,
-    ) -> Result<(ActorRef<R>, ActorPath), SubstrateHarnessError> {
+    ) -> Result<(ActorRef<R>, ErasedActorPath), SubstrateHarnessError> {
         component.export = Some(R::NAMESPACE.to_owned());
         let (sender, path) = self.load_any(&component)?;
         let actor =
@@ -941,7 +941,7 @@ impl SubstrateHarness {
     pub fn load_any(
         &mut self,
         component: &LoadComponent,
-    ) -> Result<(ErasedActorRef, ActorPath), SubstrateHarnessError> {
+    ) -> Result<(ErasedActorRef, ErasedActorPath), SubstrateHarnessError> {
         let host = self.passive.actor_ref::<ComponentHostCapability>().erase();
         let cid = self.fresh_correlation_id();
         self.passive.send_for_reply(host, LoadComponent::ID, component.encode_into_bytes(), self.session_reply(cid));

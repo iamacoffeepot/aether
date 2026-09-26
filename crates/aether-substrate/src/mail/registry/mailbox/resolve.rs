@@ -2,7 +2,7 @@
 //! lookup shares, and the point-in-time answers it hands back.
 
 use aether_actor::ErasedActorRef;
-use aether_data::{ActorPath, ActorPathError, ActorPathForm, ScopePathError, validate_scope_path};
+use aether_data::{ActorPathForm, ErasedActorPath, ErasedActorPathError, ScopePathError, validate_scope_path};
 
 use crate::mail::registry::{AddressResolutionError, ResolvedAddress, RouteContract, lineage_mailbox_id};
 use crate::mail::{KindId, MailboxId};
@@ -128,16 +128,16 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn lookup(&self, name: &str) -> Option<MailboxId> {
-        let address = match ActorPath::new(name) {
+        let address = match ErasedActorPath::new(name) {
             Ok(address) => address,
-            Err(error @ ActorPathError::Scope(_)) => {
+            Err(error @ ErasedActorPathError::Scope(_)) => {
                 tracing::warn!(name, ?error, "scope path over cap; resolution miss");
                 return None;
             }
             Err(
-                ActorPathError::Segment { .. }
-                | ActorPathError::RetiredShortForm
-                | ActorPathError::ShortPathFromInstance,
+                ErasedActorPathError::Segment { .. }
+                | ErasedActorPathError::RetiredShortForm
+                | ErasedActorPathError::ShortPathFromInstance,
             ) => return None,
         };
         match self.resolve_address(&address) {
@@ -150,13 +150,13 @@ impl Registry {
         }
     }
 
-    /// Resolve a canonical or ADR-0166 short [`ActorPath`] to one live
+    /// Resolve a canonical or ADR-0166 short [`ErasedActorPath`] to one live
     /// mailbox: the one place an address becomes a position (ADR-0230 §3).
     /// Canonical inputs preserve the existing fold/exact-name lookup. A short
     /// path fills its holes through the generated root/child inventory before
     /// that canonical lookup, so short spellings are never hashed, stored, or
     /// reverse-reported.
-    pub fn resolve_address(&self, address: &ActorPath) -> Result<ResolvedAddress, AddressResolutionError> {
+    pub fn resolve_address(&self, address: &ErasedActorPath) -> Result<ResolvedAddress, AddressResolutionError> {
         let canonical_path = match address.form() {
             ActorPathForm::Canonical(path) => path.to_owned(),
             ActorPathForm::Short { root, steps } => {
@@ -171,7 +171,7 @@ impl Registry {
 
     fn lookup_canonical(&self, name: &str) -> Result<Option<MailboxId>, ScopePathError> {
         // ADR-0098 wire boundary: `name` is user-controlled text that arrived
-        // as an `ActorPath` (or is a short path's expansion, which can
+        // as an `ErasedActorPath` (or is a short path's expansion, which can
         // outgrow what was written), so cap its scope depth / byte size
         // before it folds to a registry key. An over-cap name is a
         // resolution miss, not a key-space bloat.
@@ -293,7 +293,7 @@ impl Registry {
     /// only a cancelled `Starting` reservation leaves the table.
     /// The crate-private path behind
     /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
-    pub(crate) fn actor_path(&self, actor: ErasedActorRef) -> Option<ActorPath> {
+    pub(crate) fn actor_path(&self, actor: ErasedActorRef) -> Option<ErasedActorPath> {
         self.routes.load().entry_for(&actor.id()).map(|route| route.canonical_name.clone())
     }
 }

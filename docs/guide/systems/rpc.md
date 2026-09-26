@@ -24,7 +24,7 @@ remain part of the stream boundary.
 ## Addressing
 
 A `Call` names its recipient with a `Recipient`: an optional engine selection
-plus an `ActorPath` (ADR-0166, canonical or short), beside the kind and the
+plus an `ErasedActorPath` (ADR-0166, canonical or short), beside the kind and the
 encoded bytes. `engine = None` means the current RPC server's local actor
 registry, not specifically the engine-control capability; a hub fleet
 operation uses that form with the `aether.fleet` path. Per-engine operations
@@ -91,7 +91,7 @@ kinds travel inside `MailEnvelope` and do not require a new `WireFrame` variant.
 `WIRE_VERSION` bump: appending keeps every earlier variant's tag, only the hub's
 RPC server produces it, and `aether-mcp` ships from the same build.
 
-`WIRE_VERSION` 2 (issue 6570) names a `Call`'s recipient by `ActorPath` in
+`WIRE_VERSION` 2 (issue 6570) names a `Call`'s recipient by `ErasedActorPath` in
 place of a mailbox id, refuses an unresolved path with `RpcError::NotPresent`,
 and drops the address from replies. Mixed versions do not interoperate: a peer built before it is
 refused at the handshake, and a stored pre-change substrate binary fails its

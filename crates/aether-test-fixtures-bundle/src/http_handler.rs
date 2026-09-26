@@ -26,7 +26,7 @@ use std::collections::btree_map::Entry;
 
 use aether_actor::{ActorInitError, DependsOn, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_component::ComponentHostCapability;
-use aether_data::{ActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind};
 use aether_http as http;
 use aether_http::HttpServerCapability;
 use aether_http::kinds::{
@@ -373,7 +373,7 @@ impl WasmActor for RoutedHttpHandler {
     /// `/routed/drop` route this actor claims.
     #[http::route(any, "/routed/drop")]
     fn on_routed_drop(&mut self, mut ctx: http::Ctx<'_, WasmCtx<'_>>, req: HttpServerRequest) -> HttpServerResponse {
-        let Ok(target) = ActorPath::new(String::from_utf8_lossy(&req.body).trim()) else {
+        let Ok(target) = ErasedActorPath::new(String::from_utf8_lossy(&req.body).trim()) else {
             return HttpServerResponse {
                 status: 400,
                 headers: Vec::new(),

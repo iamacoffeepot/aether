@@ -1,4 +1,4 @@
-//! Proving an [`ActorPath`] that arrived in config or mail —
+//! Proving an [`ErasedActorPath`] that arrived in config or mail —
 //! [`WasmCtx::resolve_path`], the guest twin of the native
 //! `NativeCtx::resolve_path` (ADR-0230 §3), and its refusal,
 //! [`ResolvePathError`].
@@ -6,7 +6,7 @@
 use core::error::Error;
 use core::fmt;
 
-use aether_data::{ActorPath, MailboxId};
+use aether_data::{ErasedActorPath, MailboxId};
 use alloc::string::String;
 
 use super::WasmCtx;
@@ -14,7 +14,7 @@ use crate::model::ctx::reply_mode::ReplyMode;
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::address::{self, __ResolvedPath};
 
-/// Why [`WasmCtx::resolve_path`] could not prove an [`ActorPath`] (ADR-0230
+/// Why [`WasmCtx::resolve_path`] could not prove an [`ErasedActorPath`] (ADR-0230
 /// §3). Neither refusal names a position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvePathError {
@@ -45,7 +45,7 @@ impl fmt::Display for ResolvePathError {
 impl Error for ResolvePathError {}
 
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
-    /// Prove an [`ActorPath`] that arrived in this component's config or in a
+    /// Prove an [`ErasedActorPath`] that arrived in this component's config or in a
     /// payload, and hand back the proven reference (ADR-0230 §3). The guest
     /// twin of the native `NativeCtx::resolve_path`: the host expands and
     /// resolves the path — ADR-0166 short-path expansion and canonical
@@ -72,7 +72,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// [`ResolvePathError::Unresolved`] with the registry's refusal when the
     /// path resolves to no route, and [`ResolvePathError::NotLive`] naming the
     /// canonical path when its route is not `Live`.
-    pub fn resolve_path(&self, address: &ActorPath) -> Result<ErasedActorRef, ResolvePathError> {
+    pub fn resolve_path(&self, address: &ErasedActorPath) -> Result<ErasedActorRef, ResolvePathError> {
         match address::resolve_path(address) {
             __ResolvedPath::Live { position } => Ok(ErasedActorRef::new(MailboxId(position))),
             __ResolvedPath::Unresolved { detail } => Err(ResolvePathError::Unresolved { detail }),

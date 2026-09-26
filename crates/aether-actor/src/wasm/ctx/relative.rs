@@ -91,7 +91,7 @@ impl<'a, A, M: ReplyMode> WasmCtx<'a, A, M> {
     /// root. The cluster root's lineage parent is outside the module (the
     /// component host, for a loaded component), and no ctx proves it
     /// (ADR-0230 §3). Reach the actor that loaded this one through the sender
-    /// of its mail ([`WasmCtx::sender`]) or through an `ActorPath` in config
+    /// of its mail ([`WasmCtx::sender`]) or through an `ErasedActorPath` in config
     /// ([`WasmCtx::resolve_path`]).
     ///
     /// Resolves by registry lookup over the per-component inline registry,

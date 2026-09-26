@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 
 use crate::actor::native::NativeCtx;
 use crate::mail::registry::{InboxHandler, OwnedDispatch};
@@ -28,7 +28,7 @@ fn actor_path_names_a_peer_before_and_after_it_departs() {
     let (binding, _caller) = registered_binding(&registry, &mailer, "test.native.path_host", discharging());
     let peer_name = "test.native.path_peer";
     let peer = registered_ref(&registry, peer_name, discharging());
-    let expected = ActorPath::new(peer_name).expect("the peer name is a canonical path");
+    let expected = ErasedActorPath::new(peer_name).expect("the peer name is a canonical path");
     let ctx = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
 
     assert_eq!(ctx.actor_path(peer), expected);
@@ -58,7 +58,7 @@ fn actor_path_names_the_sender_a_real_dispatch_stamps() {
             let _ = tx.send(dispatch);
         }),
     );
-    let expected = ActorPath::new(sender_name).expect("the sender name is a canonical path");
+    let expected = ErasedActorPath::new(sender_name).expect("the sender name is a canonical path");
 
     {
         let mut ctx = NativeCtx::new(&sender_binding, Source::with_correlation(SourceAddr::None, 0), None, None);

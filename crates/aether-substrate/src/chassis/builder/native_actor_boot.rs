@@ -7,7 +7,7 @@ use aether_actor::Root;
 use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace::ActorTraceRing;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 
 use super::passive_boot::{DynShutdown, PassiveBoot};
 use crate::actor::native::binding::NativeBinding;
@@ -114,7 +114,7 @@ where
 
         // The binding's canonical name is the root's `A::NAMESPACE`, proven
         // before any registry write so a refusal leaves nothing to unwind.
-        let canonical_name = ActorPath::new(A::NAMESPACE).map_err(|error| BootError::Other(Box::new(error)))?;
+        let canonical_name = ErasedActorPath::new(A::NAMESPACE).map_err(|error| BootError::Other(Box::new(error)))?;
 
         // Issue 607 Phase 3b (ADR-0079): claim namespace ownership for
         // this singleton's `Addressable::NAMESPACE`. The actor registry

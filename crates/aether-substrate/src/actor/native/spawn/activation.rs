@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 
 use aether_actor::local::ActorSlots;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 
 use super::reservation::ParentReservation;
 use super::{SpawnError, SpawnOutcome};
@@ -85,7 +85,7 @@ struct NativeSpawnFinalizerState<A> {
     mailbox_id: MailboxId,
     /// The staged child's name, carried onto **both** arms of the
     /// [`SpawnOutcome`] so a rejection names the birth it belongs to.
-    canonical_name: ActorPath,
+    canonical_name: ErasedActorPath,
 }
 
 impl<A: 'static> NativeSpawnFinalizer<A> {
@@ -95,7 +95,7 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
         parent_reservation: ParentReservation,
         completion: DeferredCompletion<SpawnOutcome<A>>,
         mailbox_id: MailboxId,
-        canonical_name: ActorPath,
+        canonical_name: ErasedActorPath,
         child: Weak<NativeBinding>,
     ) -> Arc<Self> {
         Self::new(
@@ -112,7 +112,7 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
     pub(super) fn external(
         outcome: crossbeam_channel::Sender<SpawnOutcome<A>>,
         mailbox_id: MailboxId,
-        canonical_name: ActorPath,
+        canonical_name: ErasedActorPath,
     ) -> Arc<Self> {
         Self::new(None, SpawnCompletionSink::Channel(outcome), mailbox_id, canonical_name)
     }
@@ -121,7 +121,7 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
         parent: Option<ParentLink>,
         completion: SpawnCompletionSink<A>,
         mailbox_id: MailboxId,
-        canonical_name: ActorPath,
+        canonical_name: ErasedActorPath,
     ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(Some(NativeSpawnFinalizerState { parent, completion, mailbox_id, canonical_name })),

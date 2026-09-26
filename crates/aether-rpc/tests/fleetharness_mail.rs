@@ -10,7 +10,7 @@
 //!   non-error ack root, and rides its correlated reply home.
 //!
 //! The recipient-path rows (issue 6570) prove the wire boundary itself: a
-//! short `ActorPath` reaches its actor through the hub, and an absent path
+//! short `ErasedActorPath` reaches its actor through the hub, and an absent path
 //! comes back as `RpcError::NotPresent` rather than a flattened `Other`.
 
 mod tests {
@@ -160,7 +160,7 @@ mod tests {
         );
     }
 
-    /// Issue 6570: a wire `Call` names its recipient by `ActorPath`, and the
+    /// Issue 6570: a wire `Call` names its recipient by `ErasedActorPath`, and the
     /// engine that hosts it expands an ADR-0166 short path on arrival. Load
     /// the probe, then address it only as `aether.component/:NAME` and expect
     /// its one `ConfigEcho`. Fails if any hop — the harness, the hub, or the
