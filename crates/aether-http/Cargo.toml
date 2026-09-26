@@ -81,7 +81,7 @@ clap = { workspace = true, optional = true }
 confique = { workspace = true, optional = true }
 # ADR-0108 §1: the inbound HTTP/1.1 request-line + header parser for the
 # `aether.http.server` cap. Pure-Rust, rides the `runtime` feature.
-httparse = { version = "1", optional = true }
+httparse = { workspace = true, optional = true }
 # Both cap runtimes log bind / accept / dispatch transitions and warn on a
 # malformed request, an unroutable path, or an egress failure. Called
 # fully-qualified (`tracing::warn!`), so it carries no `use`.

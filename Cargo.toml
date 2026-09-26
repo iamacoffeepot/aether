@@ -181,6 +181,9 @@ arc-swap = "1"
 # consumer today (`aether-chassis`); workspaced so future CLI
 # surfaces reach for the same major.
 clap = { version = "4", features = ["derive"] }
+# HTTP/1.1 head and chunk-size parsing, shared by the `aether.http.server`
+# request reader and the workspace Engine API client.
+httparse = "1"
 # Property-based testing (issue 1561). Dev-only on the two hand-rolled
 # wire boundaries — the codec round-trip law (`aether-codec`) and the
 # mail-ring reclaim state machine (`aether-substrate`). Pinned once here

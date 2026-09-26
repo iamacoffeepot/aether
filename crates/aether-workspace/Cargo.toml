@@ -25,6 +25,7 @@ runtime = [
   "dep:confique",
   "dep:tracing",
   "dep:rustls",
+  "dep:httparse",
 ]
 # Exposes `testing::StubDaemon`, the scripted Engine API server the runtime's
 # unit tests and this crate's own actor scenario dial. Off by default, so it
@@ -52,6 +53,9 @@ tempfile = { version = "3", optional = true }
 # workspace already locks: no default features, so no ambient root store and
 # no process-default provider.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+# The Engine API response head and chunk-size parser (issue 6767), shared
+# with the `aether.http.server` request reader.
+httparse = { workspace = true, optional = true }
 
 # The `#[actor]` and `Kind` derives emit a `cfg(not(target_family = "wasm"))`
 # inventory row, so native builds need `inventory` reachable; wasm guests don't.

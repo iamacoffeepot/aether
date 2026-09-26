@@ -1250,6 +1250,7 @@ dependencies = [
  "aether-workspace",
  "clap",
  "confique",
+ "httparse",
  "inventory",
  "rcgen",
  "rusqlite",
