@@ -24,11 +24,12 @@ Every row was read from the code on `main`.
 | Config | `crates/aether-chassis-bloomery/src/config.rs` | `BloomeryConfig.journal: Option<String>` is one root. `read_cache_bytes` is the journal owner's read-cache budget. |
 | Driver | `crates/aether-bloomery-driver/src/actor/` | Loads a bundle by sending `LoadComponent { name: Some(<digest>), export: Some(BUNDLE_NAMESPACE) }` to `aether.component`, so every root is a child of the component host named by its digest. Keeps `roots: HashMap<Digest, ErasedActorRef>` from each load reply's stamped sender. |
 | Bundle root | `crates/aether-bloomery-bundle-derive/src/expand/root.rs` | One generated root per digest serves both roles (ADR-0225 decision 8): a `programs` field and a `reactors` field in one actor. |
-| Program role | `crates/aether-bloomery-program/src/root.rs`, `expand/programs.rs` | The role's only state is `live: BTreeMap<u64, Live<H>>`, keyed by `Invoke.seq`. Each invocation is an inline child named `Subname::Named(seq)`. A second `Invoke` with a live seq is refused `"seq already live"`. A fetch-on-miss already relays invocation → root → the `Invoke`'s sender. |
+| Program role | `crates/aether-bloomery-program/src/root.rs`, `expand/programs.rs` | The role's only state is `live: BTreeMap<u64, Live<H>>`, keyed by `Invoke.seq`. Each invocation is an inline child named `Subname::Named(seq)`, which the host registers as `<root>/aether.embedded:<seq>`. A second `Invoke` with a live seq is refused `"seq already live"`. A fetch-on-miss already relays invocation → root → the `Invoke`'s sender. |
 | Program APIs | `expand/programs.rs` `expand_send_pending` | The invocation declares `depends(api_target::…)` and sends a captured call through `ctx.actor_ref::<T>()`, a root-singleton proof. |
 | Reactor role | `crates/aether-bloomery-reactor/src/root.rs` | One `Owner` with a cursor. `Warm` and `Event` refuse anything but `cursor + 1` with `OutOfSequence`, and a fold failure poisons the role. The loaded role is a fold of one journal's log. |
 | Workspace | `crates/aether-workspace/src/config.rs` | `WorkspaceConfig` is the actor's `Config`: the host's `cpuset`, `budget_memory_bytes`, and the per-run defaults. Each actor that resolves it claims the whole host. |
-| Module reuse | `crates/aether-component/src/component/runtime/module_cache.rs` | One slot keyed by sha256. Back-to-back loads of one digest compile once; any other load between them evicts the slot and the next load recompiles. |
+| Module reuse | `crates/aether-component/src/component/runtime/module_cache.rs` | One slot keyed by sha256 (`ModuleCache { cached: Option<CachedModule> }`, line 25). Back-to-back loads of one digest compile once; any other load between them evicts the slot and the next load recompiles. |
+| Trampoline namespace | `crates/aether-component/src/trampoline/runtime/mod.rs` | Every loaded component is one native type, `WasmTrampoline`, whose `NAMESPACE` is the constant `EMBEDDED_SCOPE` (`"aether.embedded"`). `LoadComponent` chooses only the discriminator (`name`) and the exported actor (`export`). |
 | Bootstrap | `crates/aether-bloomery-bootstrap` | Config carries two `ActorPath`s (journal, driver), proven at `wire` with `resolve_path`, sent through unchecked `ErasedActorRef`s. `depends(WorkspaceCapability)` reaches the root singleton. |
 | Identity halves | `aether-workspace` vs journal and driver crates | `aether-workspace` has an always-on `WorkspaceCapability` marker and a `runtime` feature (ADR-0122). The journal crate depends on `aether-substrate` and `rusqlite` unconditionally, and the driver on `aether-substrate`, so a guest cannot name `JournalActor` or `BundleDriver`. |
 
@@ -44,6 +45,14 @@ Who can place a child beneath an existing actor today:
 No native ctx has a parent-reference verb (issue #6796 records this). An
 embedder can look up a live child with `BuiltChassis::child::<P, C>` but
 cannot spawn one.
+
+`spawn_child_scoped::<C>` bounds `C: ChildOf<A>` against the calling actor
+`A`, not against the parent it is handed
+(`crates/aether-substrate/src/actor/native/ctx/spawn.rs:94-110`). Called from
+the component host, the bound holds for every trampoline, so
+`aether.component.load_under` can place a trampoline beneath any live actor.
+Its callers are the harness (`HarnessOp::load_component_under`) and two test
+files. Issue #6821 tracks the fix. This ADR does not use the verb.
 
 ### What collides when a second journal appears
 
@@ -103,9 +112,11 @@ everything that folds it, and bundles are engine-wide.
 | Term | Meaning |
 |---|---|
 | **unit** | One log plus every actor whose state derives from that log. |
-| **unit key** | The `LoadName` that names a unit, unique per engine. |
+| **unit key** | The `UnitKey` that names a unit, unique per engine: a `LoadName` of at most 191 bytes (D3, D4). |
 | **unit root** | The unit's log owner, the root of the unit's lineage. For a build unit it is `JournalActor` at `aether.bloomery.journal:<key>`. |
-| **member** | An actor beneath a unit root: the driver, the workspace, and the driver's bundle roots. |
+| **member** | An actor beneath a unit root: the driver and the workspace. |
+| **bundle root** | A trampoline beneath the engine's one `aether.component` that hosts one bundle's generated root for one unit, loaded under the name `<key>-<digest>` (D4). |
+| **belongs to a unit** | A member belongs by lineage, beneath the unit root. A bundle root belongs by name, through the unit key its name is built from. |
 | **build unit** | A unit whose log is a Bloomery journal and whose executor is the bundle driver. The only kind this ADR builds. |
 | **world unit** | A unit whose log is one Ergo world. Its log and executor types are not decided here. |
 | **engine-shared** | Held once per engine and keyed by content hash, or holding no log state. |
@@ -114,11 +125,13 @@ everything that folds it, and bundles are engine-wide.
 aether.bloomery.journal:<key>                          unit root: the journal
 ├── aether.workspace:workspace                         member
 └── aether.bloomery.driver:driver                      member
-    ├── aether.embedded:<digest>                        bundle root (one per digest this unit loads)
-    │   └── aether.bloomery.bundle.invocation:<seq>     inline child per live invocation
-    └── aether.embedded:<digest>
 
-engine-shared: aether.component (and its compiled-module cache), aether.http,
+aether.component                                       engine-shared host
+├── aether.embedded:<key>-<digest>                     bundle root of unit <key> (one per digest the unit loads)
+│   └── aether.embedded:<seq>                          inline child per live invocation
+└── aether.embedded:<other-key>-<digest>               the same digest's bundle root for another unit
+
+engine-shared: aether.component (and its compiled-module map), aether.http,
 the engine blob store, the RPC server, the inventory
 ```
 
@@ -146,20 +159,30 @@ world gets its own journal. A build unit holds no world.**
 - *Implication:* instances are World state (`Tile.inst`); a world scales
   inside its log (core-calculus §6.2), never by adding logs.
 
-**I-2. Every actor whose state derives from a log sits beneath that log's
-owner.**
+**I-2. Every actor whose state derives from a log belongs to that log's
+unit: a member by lineage beneath the log's owner, a bundle root by a name
+built from the unit's key.**
 
-- *Upheld by:* lineage. The driver and the workspace are
-  `#[actor(instanced, child_of(JournalActor))]` and are born beneath their
-  journal (D2). Bundle roots are loaded beneath the driver that asked for
-  them (D4), so the position a root holds names its unit.
+- *Upheld by:* lineage for members and naming for bundle roots. The driver
+  and the workspace are `#[actor(instanced, child_of(JournalActor))]` and are
+  born beneath their journal (D2). Every bundle root is loaded under the
+  name `UnitBundle::name(key, digest)`, the only constructor of that name,
+  from the unit key its driver was born with (D4). Unit keys are unique per
+  engine (D3), so two units' roots of one digest are two actors under two
+  names, and each name states the unit it folds for.
 - *Would be violated by:* one bundle root of a digest serving two units,
-  the shape on `main`, where every root is a child of `aether.component`.
-  Closed: roots are named by digest beneath their driver, so two units'
-  roots of one digest are two actors at two positions, and a driver holds
-  proofs only for the roots its own loads returned.
+  the shape on `main`, where a root's name is its digest alone. Closed: the
+  name carries the key, and a driver holds proofs only for the roots its
+  own loads returned. A name written by hand at a call site, or hashed
+  from the key and digest, would hide which unit a root belongs to. Closed
+  by review: the driver builds names only through `UnitBundle::name`. A
+  root loaded under a unit's name by some other loader (MCP
+  `load_component`) makes that unit's own load fail on `SubnameInUse`; the
+  driver never binds to it, because it keeps only its own load reply's
+  sender, as it does on `main`.
 - *Implication:* one bundle root per (digest, unit); the compiled module is
-  shared instead (D5).
+  shared instead (D5). A unit's bundle roots are not a subtree, so
+  removing a unit means dropping its `<key>-*` roots (D10).
 
 **I-3. A unit's log is totally ordered and local: every entry's position is
 its own journal's `seq`, and no entry is ordered against another unit's.**
@@ -180,11 +203,13 @@ its own journal's `seq`, and no entry is ordered against another unit's.**
 **I-4. A driver drives exactly one journal, and a bundle root answers
 exactly one driver.**
 
-- *Upheld by:* `DriverParams { journal, workspace }` is filled at birth
-  from the journal's and the workspace's spawn results (D2). A root sends
-  its replies to its `Invoke` / `Warm` / `Event` sender, and only its
-  parent driver holds a proof of it: the load reply goes to the requester
-  alone (ADR-0230 §3).
+- *Upheld by:* `DriverParams { unit, journal, workspace }` is filled at
+  birth from the unit's key and the journal's and the workspace's spawn
+  results (D2). A root sends its replies to its `Invoke` / `Warm` / `Event`
+  sender, and only the driver that loaded it holds a proof of it: the load
+  reply goes to the requester alone (ADR-0230 §3), and the driver keeps
+  that reply's stamped sender. The root's parent is `aether.component`,
+  which sends it nothing after the load.
 - *Would be violated by:* a second driver sending `Invoke` to a root of
   another unit. Closed in the type path (it holds no proof); not closed
   against a hand-written path, because ADR-0230's 2026-09-25 amendment lets
@@ -225,31 +250,43 @@ shares of it, never copies.**
 **I-7. What is engine-shared is keyed by content hash or holds no log
 state.**
 
-- *Upheld by:* the compiled-module cache is keyed by sha256 (D5); the engine
+- *Upheld by:* the compiled-module map is keyed by sha256 (D5); the engine
   blob store dedups by hash (ADR-0238); `aether.component`, `aether.http`,
-  the RPC server, and the inventory keep no fold of any journal.
+  the RPC server, and the inventory keep no fold of any journal. The bundle
+  roots beneath `aether.component` do hold folds, and each belongs to one
+  unit by name (I-2); the host keeps only their load bookkeeping.
 - *Would be violated by:* an engine-wide actor that caches a view of one
   unit's log. Closed only by review: the chassis composes no such actor,
   and a new composed actor that reads a journal is a change to this ADR.
+  One bundle root per digest holding every unit's views, keyed by journal,
+  is such an actor; it is rejected below.
 - *Implication:* sharing a bundle across units costs one instance per unit
   and one compilation per engine.
 
 **I-8. A unit is named by its key, a member by its type beneath the unit,
-and no position crosses a boundary.**
+and a bundle root by its unit's key and its digest; no position crosses a
+boundary.**
 
-- *Upheld by:* D8. Config carries unit keys (`LoadName`, validated on
+- *Upheld by:* D8 and D4. Config carries unit keys (`UnitKey`, validated on
   decode). Code builds `Address::<JournalActor>::root_at(key)` and proves it
   through `ctx.resolve::<R>`, which mints `ActorRef<R>`; a member's address
   is `member_address::<C>(unit)`, derived from the unit's proof and `C`'s
-  fixed key. `ActorRef` has no codec.
+  fixed key. A bundle root's name is `UnitBundle::name(key, digest)`, so
+  anyone holding the key and the digest derives it, and its canonical path
+  `aether.component/aether.embedded:<key>-<digest>` splits back into both
+  because the digest is last and fixed-width. `ActorRef` has no codec.
 - *Would be violated by:* a config slot holding the driver's path (the
   bootstrap today), a role or alias per unit, `send_to_named`, or a
   `MailboxId` in config. Closed: the bootstrap's config loses its path
   fields, `send_to_named` is deleted, and the new `Root` address form
-  carries a key and no position.
+  carries a key and no position. A bundle root name that cannot be split
+  back into key and digest. Closed: `UnitBundle::name` is the only
+  constructor, and `UnitKey` is short enough that the name always fits one
+  segment.
 - *Implication:* the journal and driver crates split identity from runtime
   (ADR-0122) so a guest can name their types and its sends are
-  kind-checked.
+  kind-checked. A bundle root's path reads as its unit and digest in logs,
+  traces, and MCP tools.
 
 ### Open questions for the owner
 
@@ -284,7 +321,9 @@ Each has a recommendation. None is decided silently.
    so sharing the program role means two roots per digest or a root whose
    reactor role belongs to one unit and program role to all. A shared root
    would also pick each invocation's workspace at run time (breaks I-5).
-   The saving is instance memory only, since D5 already compiles once.
+   The saving is instance memory only, since D5 already compiles once. The
+   wider form, one root per digest holding every unit's views, is rejected
+   below.
 6. **The native twin of `resolve`** (changes I-8). Issue #6796 says the
    `Address<R>` door lands as one verb on each ctx in the same change, and
    also that no ctx verb lands without a named production consumer. The
@@ -300,7 +339,7 @@ Each has a recommendation. None is decided silently.
 |---|---|---|
 | Journal (log, artifact files, read cache) | per unit | I-3 |
 | Driver (program queue, reactor following, fetch cache) | per unit | I-2, I-4 |
-| Bundle roots (program role and reactor role) | per (digest, unit) | I-2 |
+| Bundle roots (program role and reactor role) | per (digest, unit), beneath `aether.component`, named `<key>-<digest>` | I-2 |
 | Workspace (artifact store handle, run-key estimates, share of the host) | per unit | I-5, I-6 |
 | Component host, compiled modules by hash | per engine | I-7 |
 | Engine blob store (in-memory bytes by hash) | per engine | I-7 |
@@ -308,9 +347,9 @@ Each has a recommendation. None is decided silently.
 | Durable artifact files | per unit (its journal root's `blobs`) | I-3: each root is one lock and one writer (ADR-0237's 2026-09-25 amendment) |
 
 A build unit's members are `JournalActor`, `WorkspaceCapability`, and
-`BundleDriver`. A world unit follows the same rule (its log owner is its
-root, and everything that folds its log is beneath it); its types wait for
-open question 2.
+`BundleDriver`; its bundle roots belong to it by name. A world unit follows
+the same rule (its log owner is its root, and everything that folds its log
+belongs to it); its types wait for open question 2.
 
 ### D2. The chassis mounts each unit, then binds (serves I-1, I-2, I-4)
 
@@ -334,7 +373,7 @@ impl<C: Chassis> BuiltChassis<C> {
 2. `spawn_child::<JournalActor, WorkspaceCapability>(journal, Named("workspace"),
    unit_budget, WorkspaceParams { artifacts })`;
 3. `spawn_child::<JournalActor, BundleDriver>(journal, Named("driver"), limit,
-   DriverParams { journal, workspace })`.
+   DriverParams { unit: key, journal, workspace })`.
 
 Only after every unit is mounted does the RPC bind gate open (issue #6399's
 order, now over every unit). `Mounted` becomes one `MountedUnit { journal,
@@ -351,51 +390,127 @@ readiness wait before bind; it is rejected below.
 
 | Knob | Shape | Lowered to |
 |---|---|---|
-| `AETHER_BLOOMERY_UNITS` / `--bloomery-units` | comma-separated `key=root` entries, the precedent `--http-secrets` sets | `Vec<UnitSpec { key: LoadName, root: PathBuf }>` |
+| `AETHER_BLOOMERY_UNITS` / `--bloomery-units` | comma-separated `key=root` entries, the precedent `--http-secrets` sets | `Vec<UnitSpec { key: UnitKey, root: PathBuf }>` |
 | `AETHER_BLOOMERY_JOURNAL` | removed | — |
 | `closure_limit_bytes` | unchanged, a per-read ceiling | one `ClosureLimit` for every driver |
 | `read_cache_bytes` | now the engine's total | divided equally among units (D7) |
 
 Lowering refuses boot, naming the key, for: an empty list, a key that is
-not a `LoadName`, a repeated key, or two entries whose roots are the same
-directory after canonicalization. The root lock stays the guard across
-processes. Each root is opened before wasmtime, as today, so a held root
-costs no boot.
+not a `LoadName`, a key longer than 191 bytes, a repeated key, or two
+entries whose roots are the same directory after canonicalization. The
+191-byte limit is what `UnitKey::new` checks: a bundle root's name is the
+key, a dash, and 64 hex characters, and one path segment holds at most 256
+bytes (`crates/aether-data/src/reference/segment.rs`), so a longer key would
+leave the unit unable to load any bundle. The root lock stays the guard
+across processes. Each root is opened before wasmtime, as today, so a held
+root costs no boot.
 
-### D4. Bundle roots load beneath the driver (serves I-2, I-4)
+### D4. Bundle roots are named by unit key and digest (serves I-2, I-4, I-8)
 
-`LoadComponent` gains a placement:
+Every bundle root stays a trampoline beneath the one engine-level
+`aether.component`, as on `main`. Its load name is a readable fold of the
+unit key and the bundle digest:
 
 ```rust
-pub enum Placement {
-    /// Beneath `aether.component`, as every load is today.
-    Host,
-    /// Beneath the requester: the component host places the trampoline
-    /// beneath the envelope sender it stamped.
-    Requester,
+/// A `LoadName` of at most 191 bytes: the key of one unit (ADR-0240).
+/// Fallible on construction and on decode.
+pub struct UnitKey(LoadName);
+
+/// The load name of a unit's bundle root.
+pub struct UnitBundle;
+
+impl UnitBundle {
+    /// `<key>-<digest>`, the digest as 64 lowercase hex characters.
+    ///
+    /// Every bundle root is a child of the one engine-level
+    /// `aether.component`, so this name is what keeps two units' roots of
+    /// one digest apart and what says, in a log, a trace, or an MCP path,
+    /// which unit a root folds for and which bundle it runs (ADR-0240 I-2,
+    /// I-8). The digest comes last at a fixed width, so the name splits back
+    /// into key and digest even when the key contains dashes; the key's
+    /// 191-byte limit keeps the whole name inside one 256-byte segment.
+    pub fn name(key: &UnitKey, digest: &Digest) -> LoadName;
 }
 ```
 
-The driver loads every bundle with `Placement::Requester`, so a root sits
-at `<driver>/aether.embedded:<digest>`. The parent is the stamped sender, a
-proof the host already holds, so no text or position is carried.
-`aether.component.load_under` stays the harness's text seam.
+Both live beside `Digest` in `aether-bloomery-kinds`, so the driver, the
+chassis, and external tooling build the same name from the same parts.
+
+- `UnitBundle::name` is the only way a bundle root's name is built. It is
+  never written by hand at a call site, and never hashed (a
+  `sha256(key || digest)` name would hide both parts and the reason the
+  name exists).
+- The driver is born with its unit's key (`DriverParams.unit`, D2) and
+  loads each bundle with `LoadComponent { name:
+  Some(UnitBundle::name(&unit, &digest)), export: Some(BUNDLE_NAMESPACE) }`
+  sent to `aether.component`. `LoadComponent` is unchanged.
+- The driver keeps each load reply's stamped sender in
+  `roots: HashMap<Digest, ErasedActorRef>`, as it does on `main`, and sends
+  to roots only through those proofs. The name is for placement and for
+  readers; routing never parses it.
 
 This amends ADR-0226:
 
-- **Decision 1.** One driver per unit. It is its roots'
-  parent. Roots are shared by digest within one unit; `Invoke.seq` is
-  unique within one journal, which is now one driver's.
-- **Decision 2.** A root's name is still the lowercase-hex digest and it is
-  still never dropped; the name is unique beneath its driver.
+- **Decision 1.** One driver per unit. Roots are shared by digest within one
+  unit; `Invoke.seq` is unique within one journal, which is now one
+  driver's.
+- **Decision 2.** "Roots are named by digest" becomes "roots are named by
+  (unit key, digest)": a root's name is `UnitBundle::name(key, digest)`,
+  whose digest part is the same lowercase-hex `artifact_digest` ADR-0226
+  uses. Roots are still never dropped by the driver, and the name is unique
+  beneath `aether.component` because unit keys are unique per engine.
 
-### D5. One compiled module per digest per engine (serves I-7)
+A root keeps the `aether.embedded` namespace every loaded component has.
+A dedicated namespace (`aether.component/aether.bloomery.bundle:<key>-<digest>`)
+would put the reason in the address itself, but a load cannot choose its
+namespace:
 
-`ModuleCache` keeps each compiled module by content hash while any live
-trampoline of that hash exists, replacing the one slot. Bundle roots are
-never dropped (D4), so a bundle compiles once per engine however many units
-load it and in whatever order. A unit's cost for a bundle it shares is one
-instance: its linear memory and its root's fold.
+- The trampoline is one native type whose `NAMESPACE` is the constant
+  `EMBEDDED_SCOPE` (`crates/aether-component/src/trampoline/runtime/mod.rs:79`,
+  `crates/aether-actor/src/model/mod.rs:102`). A staged birth names its node
+  `ActorId::instanced(A::NAMESPACE, subname)`
+  (`crates/aether-substrate/src/actor/native/spawn/staged.rs:121-122`), and
+  `LoadComponent` carries only the subname and the export.
+- One Rust type owns one namespace (`try_claim_namespace` in
+  `crates/aether-substrate/src/actor/native/spawn/activation.rs:200`), so a
+  second namespace needs a second trampoline type.
+- The guest's `Embedded` resolver folds `instanced(EMBEDDED_SCOPE, …)`
+  (`crates/aether-actor/src/model/mod.rs:119`); the host's inline-child and
+  sibling spawns use `TRAMPOLINE_NAMESPACE`
+  (`crates/aether-substrate/src/actor/wasm/host_fns.rs`); and the registry
+  marks a mailbox a trampoline when its leaf segment starts with
+  `aether.embedded:` (`crates/aether-substrate/src/mail/registry/names.rs:61`).
+  A second trampoline type would have to be threaded through all three.
+
+The dedicated namespace is deferred (D10).
+
+### D5. Shared code, per-unit instances (serves I-2, I-7)
+
+Code is shared through the compiled module: one per digest per engine.
+`ModuleCache` holds one slot today
+(`crates/aether-component/src/component/runtime/module_cache.rs:25`), so two
+units loading different bundles in turn would recompile each. It becomes a
+map keyed by sha256 content hash that keeps each compiled module while any
+live trampoline of that hash exists. Bundle roots are never dropped (D4),
+so a bundle compiles once per engine however many units load it and in
+whatever order.
+
+Each unit gets its own bundle root instance: its own linear memory, its own
+reactor views, and its own program table. A unit's cost for a bundle it
+shares with another unit is that one instance.
+
+Code reuse and actor sharing are separate decisions. A compiled module is
+immutable code with no log state, so sharing it is I-7. An actor holds a
+fold of one log and one driver's `seq` space, so units do not share one:
+
+- the reactor role folds one log in cursor order, and a second unit's
+  `Warm` / `Event` poison it;
+- the program role keys invocations by `seq`, which is unique only within
+  one journal;
+- one actor runs one handler at a time (ADR-0038, ADR-0087), so a shared
+  root would serialize every unit's folds and runs through one mailbox;
+- a removed unit's views would stay inside a live shared actor with no way
+  to evict them.
 
 ### D6. Program API calls relay through the invoker (serves I-4, I-5)
 
@@ -437,7 +552,7 @@ pub struct HostBudget { /* cpuset, budget_memory_bytes, from WorkspaceConfig */ 
 pub struct UnitBudget { /* a disjoint core set and a memory share; no public constructor */ }
 
 impl HostBudget {
-    pub fn split(&self, shares: &[(LoadName, Share)]) -> Result<Vec<(LoadName, UnitBudget)>, SplitError>;
+    pub fn split(&self, shares: &[(UnitKey, Share)]) -> Result<Vec<(UnitKey, UnitBudget)>, SplitError>;
 }
 ```
 
@@ -465,16 +580,17 @@ engine total and each journal gets an equal share.
 This amends ADR-0237 decision 8 (one workspace actor per unit) and decision 9 (the host budget is the engine's, handed out as
 per-unit shares; admission stays FIFO within a unit's share).
 
-### D8. Addressing: units by key, members by type (serves I-8)
+### D8. Addressing: units by key, members by type, bundle roots by key and digest (serves I-8)
 
 | Piece | Change |
 |---|---|
 | `AddressForm` | gains `Root { key: Option<LoadName> }`: the root instance of `R` keyed `key`. It carries no position. `Address::<R>::root_at(key)` is bounded `R: Root + Instanced`. |
 | `NativeCtx::resolve::<R>` / `WasmCtx::resolve::<R>` | `(&Address<R>) -> Result<ActorRef<R>, ResolveError>`, one verb on each ctx in one change. Folds the address with `R`'s resolver and proves the route with the published-route read `Registry::live_child` already makes; only `Live` mints. An `Exact` address mints only when the route's actor type is `R`. The guest crosses one host import. Takes the name ADR-0230 reserved for this door. |
 | `UnitMember` | a trait in the journal identity half: `ChildOf<JournalActor> + Instanced` with a fixed key (`driver`, `workspace`). `member_address::<C: UnitMember>(unit: ActorRef<JournalActor>) -> Address<C>` is `child_address::<JournalActor, C>(unit, C::key())`. |
+| `UnitKey`, `UnitBundle::name` | in `aether-bloomery-kinds` beside `Digest` (D4). The driver's only way to name a bundle root. |
 | `aether-bloomery-journal`, `aether-bloomery-driver` | split per ADR-0122: an always-on, `no_std` identity (the marker, its handled kinds, `UnitMember`) and a `runtime` feature carrying the actor, `aether-substrate`, and `rusqlite`. |
-| Bootstrap config | `journal` and `driver` paths are replaced by `units: Vec<LoadName>`. At `wire` it resolves each unit, then its driver and workspace by type; every send is `send_to(ActorRef<R>, &K)`, kind-checked. |
-| External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. |
+| Bootstrap config | `journal` and `driver` paths are replaced by `units: Vec<UnitKey>`. At `wire` it resolves each unit, then its driver and workspace by type; every send is `send_to(ActorRef<R>, &K)`, kind-checked. |
+| External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. A unit's bundle root is `aether.component/aether.embedded:<key>-<digest>`, or its short path `aether.component/:<key>-<digest>`. |
 
 The bootstrap's `resolve_path` use goes away; the verb stays for its native
 consumers and for guests that are handed text.
@@ -484,7 +600,7 @@ consumers and for guests that are handed text.
 | Common to every unit kind | Per unit kind |
 |---|---|
 | Bundle format, digest naming, `Warm` / `Event` / `Invoke` protocols, compiled modules (D5) | the log owner's type and order |
-| One log per unit, members beneath it (I-2) | the executor's type |
+| One log per unit, everything that folds it belonging to the unit (I-2) | the executor's type |
 | Budgets handed out as shares (I-6) | whether it has a workspace, a Clock, a seed |
 
 A world unit reuses bundles unchanged and supplies its own log and executor.
@@ -496,19 +612,39 @@ bundle.
 - A world unit's log, executor, Clock, and seed (open questions 2 and 3).
 - Lending idle cores between units through a shared admission actor (I-6).
 - Adding or removing a unit while the engine runs; units exist from boot.
+  With bundle roots named by key, removing a unit means dropping its
+  `<key>-*` roots beneath `aether.component` along with its journal
+  subtree; its roots are not a subtree of their own. ADR-0226 decision 2
+  keeps the driver from dropping roots, so the dropping actor is the
+  teardown's to name.
 - Authenticating journal writes (ADR-0226), now per unit.
+- A dedicated namespace for bundle roots,
+  `aether.component/aether.bloomery.bundle:<key>-<digest>`, so the address
+  itself shows why the root exists. A load cannot choose its namespace
+  today (D4 lists the code); it needs a second trampoline type and the
+  embedded resolver, inline-child spawns, and trampoline categorisation to
+  accept it.
+- A per-unit component host (rejected for now below). It is the route if
+  dropping a unit by subtree ever matters.
+
+**Revisit when** measurement shows a bottleneck in what D4 and D5 share or
+place. The likely candidates are per-unit instance memory or instantiation
+cost, pressure on the compiled-module map, and the one engine-level
+component host as a mail hot spot. The first alternative to reexamine is
+the per-unit component host.
 
 ### Compliance with the owner's design rules
 
 | Rule | How this ADR complies |
 |---|---|
-| Addressing by type markers only; no roles, aliases, config slots; no `send_to_named`; ADR-0166 is the only grammar | Units by key, members by type (`UnitMember`); no path fields in config; external text is canonical ADR-0166 paths; no new grammar. `key=root` entries follow `--http-secrets`. |
-| No public `MailboxId` surface increase; stored state holds proofs | The new address form carries a key only; the driver stores `ActorRef` / `ErasedActorRef`; `Placement::Requester` carries no id. The program role's existing `Live.child: MailboxId` is untouched. |
-| Unexportable invariants stay unexported | Config carries `LoadName` keys; `ActorRef` crosses nothing. |
+| Addressing by type markers only; no roles, aliases, config slots; no `send_to_named`; ADR-0166 is the only grammar | Units by key, members by type (`UnitMember`), bundle roots by a name built from key and digest; no path fields in config; external text is canonical ADR-0166 paths; no new grammar. `key=root` entries follow `--http-secrets`. |
+| No public `MailboxId` surface increase; stored state holds proofs | The new address form carries a key only; `UnitBundle::name` returns a `LoadName`; the driver stores `ActorRef` / `ErasedActorRef`. `LoadComponent` is unchanged. The program role's existing `Live.child: MailboxId` is untouched. |
+| Representations valid by construction | `UnitKey` is fallible on construction and decode and enforces the 191-byte limit that keeps `UnitBundle::name` infallible. |
+| Unexportable invariants stay unexported | Config carries `UnitKey`s; `ActorRef` crosses nothing. |
 | Static contract checks | `child_of(JournalActor)` and `DependsOn` make a root-singleton workspace binding a compile error; identity halves make bootstrap sends kind-checked. No runtime token or injection. |
-| One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `Placement::Requester`: the driver. `resolve` twins: the bootstrap (open question 6). `Root` form: the bootstrap. `HostBudget::split`: the mount. |
+| One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `UnitBundle::name`: the driver. `UnitKey::new`: D3's lowering. `resolve` twins: the bootstrap (open question 6). `Root` form: the bootstrap. `HostBudget::split`: the mount. |
 | Pending replies never dropped | D6's hops park and answer once; nothing evicts. |
-| Fewer events, simpler architecture | No new actor, event, or record kind. The dedicated unit root is rejected for having no behaviour. |
+| Fewer events, simpler architecture | No new actor, event, or record kind. The dedicated unit root is rejected for having no behaviour, and bundle roots keep the host they have. |
 | No recursion on unbounded data | Mount iterates the unit list; relays are single hops. |
 | No z-index; no drive or storage figures | None appear. |
 | Bring-up is throwaway script components | The bootstrap stays a deletable component; the engine gains no bring-up mechanism. |
@@ -527,15 +663,17 @@ bundle.
 - Program API calls take two more in-engine hops. Workspace runs and HTTP
   fetches dominate them.
 - Operators name units: every config, script, and external path gains a
-  unit key.
+  unit key, and a bundle root's path shows its unit and digest.
+- Every unit's loads still pass through the one `aether.component` (D10's
+  revisit trigger).
 - A world unit, when it comes, has a place: beneath its own root, sharing
   bundles, owning its log and executor.
 
 Follow-on issues, one concept each:
 
 1. Embedder `BuiltChassis::spawn_child` and the multi-unit mount (D2, D3).
-2. `Placement::Requester` on `LoadComponent`, and the driver loading
-   beneath itself (D4).
+2. `UnitKey`, `UnitBundle::name`, and the driver naming its roots by unit
+   key and digest (D4).
 3. The compiled-module map keyed by hash (D5).
 4. Program API relay through the invoker, the API list in each program's
    section record, and dropping the invocation's `depends` (D6).
@@ -545,8 +683,43 @@ Follow-on issues, one concept each:
 7. `AddressForm::Root`, the `resolve` twins, `UnitMember`, and the bootstrap
    migration (D8), which also amends ADR-0230 §3's `Address<R>` row.
 
+Issue #6821 (`load_under` placement checked against the caller) is separate
+and does not block these.
+
 ## Alternatives considered
 
+- **Bundle roots loaded beneath their driver** (`Placement::Requester` on
+  `LoadComponent`, this ADR's first draft). It gives each unit a subtree,
+  but the host places a trampoline beneath a foreign parent only through
+  `spawn_child_scoped`, whose `ChildOf` bound is checked against the host
+  rather than the parent (#6821), so the placement would rest on that hole
+  or need a `child_of(BundleDriver)` fact on the trampoline. The name in D4
+  keeps units apart with no change to `LoadComponent`, and a subtree
+  matters only for runtime teardown, which is deferred.
+- **A per-unit component host.** `ComponentHostCapability` is
+  `#[actor(singleton, root)]`, and an instanced variant under the same
+  `aether.component` namespace would give that namespace two cardinalities;
+  the address index marks it `Contradictory` and drops it, which breaks
+  `aether.component/:NAME` short paths
+  (`crates/aether-substrate/src/mail/registry/address.rs:293-316`). So it
+  needs a new host type and namespace, and also:
+  - an engine-wide compiler split: the `Engine`, `Linker`, module map, boot
+    registry, and inventory egress the one host owns today;
+  - a third `child_of` on the trampoline;
+  - ownership checks on drop and replace, so one unit's host cannot touch
+    another's roots;
+  - MCP arguments to target a unit's host;
+  - two or three more path levels against the depth cap of 8
+    (`MAX_SCOPE_PATH_DEPTH`, `crates/aether-data/src/hash.rs:204`).
+
+  Deferred (D10): it is the route if dropping a unit by subtree ever
+  matters, and the first alternative the revisit reexamines.
+- **Views keyed by journal on one shared root per digest.** One actor runs
+  one handler at a time (ADR-0038, ADR-0087), so every unit's folds and
+  program runs would serialize through it. It has no eviction for a
+  removed unit's views, needs the program table keyed by (invoker, seq),
+  and breaks I-2 (one actor folding several logs), I-4 (one root answering
+  several drivers), and I-7 (a shared actor holding log state).
 - **A dedicated unit root actor.** No handlers once the embedder can spawn
   beneath a proof; rejected under "why do we need this" (open question 4).
 - **The journal spawns its own members from `wire`.** Needs a native
