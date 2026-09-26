@@ -1,4 +1,4 @@
-//! Where a bring-up run stands, and the pure builders for the mail each step
+//! Where a bootstrap run stands, and the pure builders for the mail each step
 //! sends.
 
 use aether_actor::{ActorInitError, ErasedActorRef};
@@ -18,7 +18,7 @@ const MERGE: &str = "environment.merge";
 
 /// The origin every call names, so the driver's idempotency key is scoped to
 /// this script (ADR-0226 decision 11).
-const ORIGIN: &str = "aether.bloomery.bringup";
+const ORIGIN: &str = "aether.bloomery.bootstrap";
 
 /// The two native actors the script mails, proven once at `wire`.
 #[derive(Debug, Clone, Copy)]
@@ -29,7 +29,7 @@ pub struct Peers {
     pub driver: ErasedActorRef,
 }
 
-/// The bring-up's lifecycle. Stored state holds only proofs, never an id or a
+/// The bootstrap's lifecycle. Stored state holds only proofs, never an id or a
 /// path.
 #[derive(Debug)]
 pub enum Run {

@@ -455,8 +455,8 @@ the recipient. Any loaded component can reach any `Live` actor whose path it
 can spell, so a native actor that must not take guest mail cannot rely on its
 path being unknown.
 
-The worked example is the environment bring-up script,
-`crates/aether-bloomery-bringup`: its `wire` proves the journal owner and the
+The worked example is the environment bootstrap script,
+`crates/aether-bloomery-bootstrap`: its `wire` proves the journal owner and the
 bundle driver from its config, logs one error and stops on a refusal, and
 otherwise drives an import, merge, and publish sequence through the two proofs
 (see [Building an environment](workspace.md#building-an-environment)).

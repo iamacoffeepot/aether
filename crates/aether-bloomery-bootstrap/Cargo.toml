@@ -1,15 +1,15 @@
 [package]
-name = "aether-bloomery-bringup"
+name = "aether-bloomery-bootstrap"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
 
-# The environment bring-up: one throwaway wasm actor that, loaded on a live
+# The environment bootstrap: one throwaway wasm actor that, loaded on a live
 # Bloomery engine with two image references in its config, imports both,
 # calls `environment.merge`, and moves the environment head
 # `(aether.workspace.environment, <platform>)` to the result — the mail an
-# operator would otherwise send by hand. Bring-up is ordinary mail from an
+# operator would otherwise send by hand. Bootstrap is ordinary mail from an
 # ordinary component, never an engine mechanism, so the crate is one deletable
 # directory. The `rlib` lets the scenario name the config kind.
 [lib]

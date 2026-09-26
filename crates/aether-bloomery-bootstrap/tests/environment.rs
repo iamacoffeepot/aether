@@ -1,4 +1,4 @@
-//! End-to-end: the bring-up script loaded on the shipped bloomery composition, its workspace dialing a scripted
+//! End-to-end: the bootstrap script loaded on the shipped bloomery composition, its workspace dialing a scripted
 //! Engine API daemon that serves both imports. The script proves the journal owner and the bundle driver by path,
 //! then imports, merges, and moves the environment head with no mail from the test.
 #![cfg(unix)]
@@ -7,7 +7,7 @@ use std::error::Error;
 use std::fs;
 use std::thread;
 
-use aether_bloomery_bringup::BringupConfig;
+use aether_bloomery_bootstrap::BootstrapConfig;
 use aether_bloomery_journal::{Batch, JournalReader, Seq};
 use aether_bloomery_kinds::{
     Head, Name, NativeOrigin, Node, OpaqueBytes, ProgramName, ProgramRef, RecordedHead, RecordedHeadMove,
@@ -80,12 +80,12 @@ fn toolchain_export() -> Vec<u8> {
 }
 
 #[test]
-fn the_bringup_script_imports_merges_and_publishes_the_environment_head() -> Result<(), Box<dyn Error>> {
+fn the_bootstrap_script_imports_merges_and_publishes_the_environment_head() -> Result<(), Box<dyn Error>> {
     // Catches a guest `resolve_path` that does not prove the mounted instanced roots, a step whose reply the
     // script drops or sends in the wrong order, a merge call keyed by anything but the input digest, and a head
     // named by anything but the merged environment's platform.
     let (Some(bundle_path), Some(script_path)) =
-        (require_wasm("aether_bloomery_workspace_programs"), require_wasm("aether_bloomery_bringup"))
+        (require_wasm("aether_bloomery_workspace_programs"), require_wasm("aether_bloomery_bootstrap"))
     else {
         return Ok(());
     };
@@ -96,7 +96,7 @@ fn the_bringup_script_imports_merges_and_publishes_the_environment_head() -> Res
     let stub = StubDaemon::bind()?;
     let cli = BloomeryCli::try_parse_from(["aether-bloomery", "--workspace-endpoint", &stub.endpoint()])?;
     let mut harness = SeededJournal::new([batch]).boot_with_argv(cli);
-    let config = BringupConfig {
+    let config = BootstrapConfig {
         base: Some(ImageRef::new(BASE)?),
         toolchain: Some(ImageRef::new(TOOLCHAIN)?),
         journal: Some(ActorPath::new("aether.bloomery.journal:journal")?),
@@ -133,7 +133,7 @@ fn the_bringup_script_imports_merges_and_publishes_the_environment_head() -> Res
         program: ProgramRef::new(bundle, ProgramName::new("environment.merge")?),
         input: transition.input,
         source: RequestSource::Native {
-            origin: NativeOrigin::new("aether.bloomery.bringup")?,
+            origin: NativeOrigin::new("aether.bloomery.bootstrap")?,
             key: u64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7]),
         },
     };

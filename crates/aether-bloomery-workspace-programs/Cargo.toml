@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 
 # `library` strips this bundle's `export!` entry surface (one `export!` per wasm
 # module), so a module that embeds the rlib links no second `receive_p32` /
-# `init`. Its consumer is `aether-bloomery-bringup`, which stages a
+# `init`. Its consumer is `aether-bloomery-bootstrap`, which stages a
 # `MergeInput`. The bundle's own cdylib build never enables it.
 [features]
 library = []

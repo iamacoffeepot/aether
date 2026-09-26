@@ -1,9 +1,9 @@
-//! `aether-bloomery-bringup` — the environment bring-up script.
+//! `aether-bloomery-bootstrap` — the environment bootstrap script.
 //!
 //! On a live Bloomery engine an environment is built from two imported
 //! images, the distro userland and the Rust toolchain (ADR-0237 decision 3).
 //! Each step needs the previous step's reply, so a static mail bundle cannot
-//! do it. [`EnvironmentBringup`], loaded with the two image references and the
+//! do it. [`EnvironmentBootstrap`], loaded with the two image references and the
 //! paths of the journal owner and the bundle driver as its config, sends the
 //! mail an operator would:
 //!
@@ -24,7 +24,7 @@
 //!
 //! The journal owner and the bundle driver are instanced roots in native-only
 //! crates, so the script cannot name their types. It proves both paths once
-//! at `wire` with `resolve_path` and keeps the two proofs. Bring-up is
+//! at `wire` with `resolve_path` and keeps the two proofs. Bootstrap is
 //! ordinary mail from an ordinary component, which is why it lives in its own
 //! throwaway crate rather than in the workspace or the engine.
 
@@ -40,25 +40,25 @@ use aether_bloomery_kinds::{CallOutcome, PublishResult, ReadArtifact, ReadArtifa
 use aether_data::ActorPath;
 use aether_workspace::{Import, ImportResult, WorkspaceCapability};
 
-use config::Bringup;
-pub use config::BringupConfig;
+use config::Bootstrap;
+pub use config::BootstrapConfig;
 use phase::{MergeProgram, Peers, Phase, Run};
 
 /// Builds and publishes one environment from its config's two images, then
 /// idles.
-pub struct EnvironmentBringup {
-    config: Bringup,
+pub struct EnvironmentBootstrap {
+    config: Bootstrap,
     merge: MergeProgram,
     run: Run,
 }
 
 #[actor(depends(WorkspaceCapability))]
-impl WasmActor for EnvironmentBringup {
-    type Config = BringupConfig;
-    const NAMESPACE: &'static str = "aether.bloomery.bringup";
+impl WasmActor for EnvironmentBootstrap {
+    type Config = BootstrapConfig;
+    const NAMESPACE: &'static str = "aether.bloomery.bootstrap";
 
-    fn init(config: BringupConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Self { config: config.into_bringup()?, merge: MergeProgram::new()?, run: Run::Unwired })
+    fn init(config: BootstrapConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self { config: config.into_bootstrap()?, merge: MergeProgram::new()?, run: Run::Unwired })
     }
 
     /// Prove both peers, then import the base. A refused path is logged and
@@ -126,7 +126,7 @@ impl WasmActor for EnvironmentBringup {
     }
 
     /// A publish's answer: after staging, call the merge; after the head move,
-    /// the bring-up is done. A fence conflict resends the same publish at the
+    /// the bootstrap is done. A fence conflict resends the same publish at the
     /// journal's head.
     #[handler::single]
     fn on_publish_result(&mut self, ctx: &mut WasmCtx<'_>, result: PublishResult) {
@@ -150,7 +150,7 @@ impl WasmActor for EnvironmentBringup {
                         platform = moved.head().as_str(),
                         environment = %moved.to(),
                         head,
-                        "the environment head moved; bring-up done",
+                        "the environment head moved; bootstrap done",
                     );
                 }
                 live(peers, Phase::Done)
@@ -221,14 +221,14 @@ impl WasmActor for EnvironmentBringup {
     }
 }
 
-impl EnvironmentBringup {
+impl EnvironmentBootstrap {
     /// Take the live run out for one reply, or log that `reply` arrived while
     /// the run was not live and keep it as it was.
     fn take_live(&mut self, reply: &str) -> Option<(Peers, Phase)> {
         match mem::replace(&mut self.run, Run::Stopped) {
             Run::Live { peers, phase } => Some((peers, phase)),
             other => {
-                tracing::error!(reply, run = ?other, "a reply arrived while the bring-up is not running");
+                tracing::error!(reply, run = ?other, "a reply arrived while the bootstrap is not running");
                 self.run = other;
                 None
             }
@@ -240,7 +240,7 @@ impl EnvironmentBringup {
 fn prove<A>(ctx: &WasmCtx<'_, A>, path: &ActorPath) -> Option<ErasedActorRef> {
     ctx.resolve_path(path)
         .inspect_err(
-            |error| tracing::error!(path = path.as_str(), %error, "a peer path does not prove; bring-up stopped"),
+            |error| tracing::error!(path = path.as_str(), %error, "a peer path does not prove; bootstrap stopped"),
         )
         .ok()
 }
@@ -252,14 +252,14 @@ const fn live(peers: Peers, phase: Phase) -> Run {
 
 /// Log that `step` was refused with `detail`, and stop.
 fn stop(step: &str, detail: &str) -> Run {
-    tracing::error!(step, detail, "bring-up stopped");
+    tracing::error!(step, detail, "bootstrap stopped");
     Run::Stopped
 }
 
 /// Log that `reply` arrived while the run waited on `phase`, and stop.
 fn out_of_phase(reply: &str, phase: &Phase) -> Run {
-    tracing::error!(reply, ?phase, "a reply arrived out of phase; bring-up stopped");
+    tracing::error!(reply, ?phase, "a reply arrived out of phase; bootstrap stopped");
     Run::Stopped
 }
 
-aether_actor::export!(default = EnvironmentBringup);
+aether_actor::export!(default = EnvironmentBootstrap);

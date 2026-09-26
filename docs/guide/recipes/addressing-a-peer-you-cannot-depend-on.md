@@ -169,8 +169,8 @@ the component path in a drop or replace request, is proven the same way
 through `resolve_path`, whose refusal names the path, never a position. A
 guest has the same verb, `WasmCtx::resolve_path`: an `ActorPath` from its
 config or a payload is proven once, at `wire` or at receipt, and kept as an
-`ErasedActorRef` (the environment bring-up script in
-`crates/aether-bloomery-bringup` proves the journal owner and the bundle driver
+`ErasedActorRef` (the environment bootstrap script in
+`crates/aether-bloomery-bootstrap` proves the journal owner and the bundle driver
 this way). A payload-borne position still has no guest door, so a guest keeps
 the envelope sender instead of a payload-borne id.
 

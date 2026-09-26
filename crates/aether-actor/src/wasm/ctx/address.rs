@@ -63,8 +63,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// checked by kind: a kind the actor does not handle is caught only at the
     /// recipient.
     ///
-    /// Its consumer is the environment bring-up script
-    /// (`aether-bloomery-bringup`), whose `wire` proves the journal owner and
+    /// Its consumer is the environment bootstrap script
+    /// (`aether-bloomery-bootstrap`), whose `wire` proves the journal owner and
     /// the bundle driver from its config.
     ///
     /// # Errors

@@ -42,7 +42,7 @@ members = [
     "crates/aether-mesh",
     "crates/aether-kit",
     "crates/aether-demo",
-    "crates/aether-bloomery-bringup",
+    "crates/aether-bloomery-bootstrap",
     "crates/aether-widget",
     "crates/aether-rpc",
     "crates/aether-fleet",
@@ -96,8 +96,8 @@ members = [
 # there for.
 #
 # The split is by role, not by dependency: the members left out are the build
-# pipeline (`xtask`), the throwaway bring-up components (the `aether-demo`
-# release demo and `aether-bloomery-bringup`), and the
+# pipeline (`xtask`), the throwaway script components (the `aether-demo`
+# release demo and `aether-bloomery-bootstrap`), and the
 # `aether-test-fixtures-*` wasm crates `cargo xtask dist` cross-builds by `-p`. Nothing below depends on any of
 # them, so leaving them out narrows the build rather than deferring it.
 #

@@ -387,8 +387,8 @@ Run the steps on the host whose daemon the actor dials.
    `(OpaqueBytes, workspace-programs)` to that digest.
    `describe_kinds(names: ["aether.bloomery.journal.publish"], detail:
    "schema")` prints the shape.
-4. **Load the bring-up.** `upload_component` the built
-   `aether_bloomery_bringup.wasm` (`crates/aether-bloomery-bringup`), then
+4. **Load the bootstrap.** `upload_component` the built
+   `aether_bloomery_bootstrap.wasm` (`crates/aether-bloomery-bootstrap`), then
    `load_component` it with the two references `publish.sh` printed and the
    two actors it mails as its config:
 
@@ -403,10 +403,10 @@ Run the steps on the host whose daemon the actor dials.
 
    The component declares `aether.workspace` a dependency, so the load is
    refused on an engine without the workspace. A config missing a field is
-   refused naming the field, as ``aether.bloomery.bringup.config has no `base` ``.
+   refused naming the field, as ``aether.bloomery.bootstrap.config has no `base` ``.
 5. **Watch.** `actor_logs` on
-   `aether.component/aether.embedded:aether.bloomery.bringup`. It logs one
-   `info` line per step and ends with `the environment head moved; bring-up
+   `aether.component/aether.embedded:aether.bloomery.bootstrap`. It logs one
+   `info` line per step and ends with `the environment head moved; bootstrap
    done`. On the first refusal it logs one `error` and sends nothing more.
 
 The merge call's key is the input digest's first eight bytes, so a rerun over
@@ -414,7 +414,7 @@ the same images replays the recorded merge (ADR-0226 decision 11) and moves the
 head to the same digest again, which appends one more head-move event. New
 images get a new key. The script records nothing of its own.
 
-### What the bring-up sends
+### What the bootstrap sends
 
 The script proves both actors from its config at `wire`, then sends, one
 request at a time:
@@ -470,15 +470,15 @@ What each `error` log means:
 
 | Message | Meaning |
 |---|---|
-| `a peer path does not prove; bring-up stopped` | the `journal` or `driver` path names no `Live` actor; `error` is the refusal, `Unresolved` with the registry's text or `NotLive` with the canonical path |
-| `bring-up stopped`, `step = import` | an import failed; `detail` is the workspace's failure text |
-| `bring-up stopped`, `step = read the journal head` | the journal could not read its head |
-| `bring-up stopped`, `step = stage the merge input` | the input did not encode, or the journal staged other than one artifact |
-| `bring-up stopped`, `step = environment.merge` | the call faulted or was refused; `refused: HeadUnbound` means step 3 did not run |
-| `bring-up stopped`, `step = read the environment` | the result is missing, is not an environment, does not hash to its digest, or its platform names no head |
-| `bring-up stopped`, `step = publish` | the journal refused a publish |
-| `a reply arrived out of phase; bring-up stopped` | a reply arrived that the script was not waiting on |
-| `a reply arrived while the bring-up is not running` | a reply arrived after the script stopped or before `wire` |
+| `a peer path does not prove; bootstrap stopped` | the `journal` or `driver` path names no `Live` actor; `error` is the refusal, `Unresolved` with the registry's text or `NotLive` with the canonical path |
+| `bootstrap stopped`, `step = import` | an import failed; `detail` is the workspace's failure text |
+| `bootstrap stopped`, `step = read the journal head` | the journal could not read its head |
+| `bootstrap stopped`, `step = stage the merge input` | the input did not encode, or the journal staged other than one artifact |
+| `bootstrap stopped`, `step = environment.merge` | the call faulted or was refused; `refused: HeadUnbound` means step 3 did not run |
+| `bootstrap stopped`, `step = read the environment` | the result is missing, is not an environment, does not hash to its digest, or its platform names no head |
+| `bootstrap stopped`, `step = publish` | the journal refused a publish |
+| `a reply arrived out of phase; bootstrap stopped` | a reply arrived that the script was not waiting on |
+| `a reply arrived while the bootstrap is not running` | a reply arrived after the script stopped or before `wire` |
 
 What the imported trees hold:
 
@@ -657,7 +657,7 @@ Its input, `proof.clippy.input`, cites three trees:
 | Field | What it is | Where the run sees it |
 |---|---|---|
 | `source: Ref<Tree>` | the cargo workspace under proof, such as the result of `source.select` ([Importing a source tree](#importing-a-source-tree)) | `/work` |
-| `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (the head move in [What the bring-up sends](#what-the-bring-up-sends)) | the root |
+| `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (the head move in [What the bootstrap sends](#what-the-bootstrap-sends)) | the root |
 | `vendor: Ref<Tree>` | the `Vendored.tree` of a `vendor.cargo` run over a source with the same `Cargo.lock` (see [Vendoring crate sources](#vendoring-crate-sources)) | `/vendor`, read-only |
 
 The program reads no head and no journal record, so the caller reads the
