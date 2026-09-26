@@ -5,10 +5,14 @@
 //!   the imported toolchain directory in the imported base userland and
 //!   declares the [`aether_workspace::Environment`] the result is
 //!   (decision 3).
-//!
-//! The cargo proofs that run in that environment join this bundle as a
-//! `proof` module beside `environment`.
+//! - [`proof`] holds `proof.clippy`, the Sampled program that runs clippy over
+//!   a source tree in that environment through the workspace and records
+//!   whether it passed (decisions 2, 4, and 7).
 
 pub mod environment;
+pub mod proof;
 
-aether_actor::export!(public = [environment::EnvironmentMerge], generators = [aether_bloomery_bundle::bundle]);
+aether_actor::export!(
+    public = [environment::EnvironmentMerge, proof::ClippyProof],
+    generators = [aether_bloomery_bundle::bundle]
+);

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The bundle of workspace programs: environment.merge, which builds a run environment from the imported base and toolchain trees (ADR-0237)."
+description = "The bundle of workspace programs: environment.merge, which builds a run environment from the imported base and toolchain trees, and proof.clippy, which runs clippy over a source tree in that environment (ADR-0237)."
 
 # One bundle crate: the cdylib is the program bundle `cargo xtask build-wasm`
 # discovers structurally (cdylib + aether-actor); the rlib lets the native
