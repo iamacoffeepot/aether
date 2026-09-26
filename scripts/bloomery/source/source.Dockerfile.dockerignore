@@ -1,0 +1,40 @@
+# The build context of `source.Dockerfile`, as a fail-closed allowlist. BuildKit
+# reads this file instead of any `.dockerignore` at the checkout root, so the
+# checkout cannot widen it. The last matching pattern wins.
+
+# Exclude everything, so a new root, an ignored path, or a secret file stays
+# out until it is named here. `.git`, `target`, `dist`, `research`, `wishes`,
+# the agent and CI directories, `fuzz`, and the root prose files never enter.
+*
+
+# The workspace manifests and the lint, format, and approval configuration
+# cargo and the `cargo xtask` lanes read.
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!rustfmt.toml
+!clippy.toml
+!approval-policy.toml
+
+# Cargo's own configuration and nextest's.
+!.cargo
+!.config
+
+# The workspace members, the guide and ADRs the doc lanes read, and the scripts
+# and xtask the lanes run.
+!crates
+!docs
+!scripts
+!xtask
+
+# Inside those roots, the paths `.gitignore` ignores: the rendered guide, build
+# output, and Python caches.
+docs/book
+**/target
+**/__pycache__
+
+# Environment files may hold secrets, at any depth: `.env`, `.env.<suffix>`,
+# and `<name>.env`.
+**/.env
+**/.env.*
+**/*.env
