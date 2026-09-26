@@ -1,0 +1,176 @@
+//! Protocols (ADR-0231 §2, §6): a stable set of contract rows, independent of
+//! any implementation, and the sealed check that a target covers them.
+//!
+//! A protocol is a type implementing [`Protocol`], whose [`Protocol::Rows`] is
+//! a tuple of [`Row<K, O>`]s. Everything else is computed here from that tuple
+//! through sealed traits: [`RowSet::CONTRACTS`] is the rows' list in the
+//! manifest's [`ReplyContract`] vocabulary, [`CoversRows`] decides whether a
+//! target has every row, and [`CoveredBy`] is the protocol-side name of that
+//! answer. A hand-written [`Protocol`] impl only declares rows, so no impl can
+//! state a list or a coverage claim that disagrees with them.
+//!
+//! `#[protocol]` on a trait of signatures is sugar for the declaration:
+//!
+//! ```ignore
+//! #[protocol]
+//! pub trait MeshLoader {
+//!     fn load(mail: LoadMesh) -> MeshLoadResult;
+//!     fn set_mode(mail: SetMode);
+//! }
+//!
+//! // expands to
+//! pub struct MeshLoader;
+//!
+//! impl Protocol for MeshLoader {
+//!     type Rows = (Row<LoadMesh, MeshLoadResult>, Row<SetMode, Silent>);
+//! }
+//! ```
+//!
+//! A target covers a row only through a [`Contract<K>`] row with the same kind
+//! and the exact reply type. A `#[fallback]` emits no row and a
+//! `#[handler::manual]` handler's row is [`Undeclared`](crate::Undeclared), so
+//! neither covers anything.
+
+use core::marker::PhantomData;
+
+use aether_data::{ActorMail, Kind, KindId, ReplyContract};
+
+use super::contract::{Contract, ReplyShape, Silent};
+
+/// One protocol row: kind `K`, answered with `O`, a reply kind or [`Silent`].
+///
+/// A type-level label only, never constructed: a protocol names its rows as
+/// the tuple [`Protocol::Rows`].
+pub struct Row<K, O>(PhantomData<fn() -> (K, O)>);
+
+mod reply_sealed {
+    /// Private supertrait sealing [`super::RowReply`] to [`super::Silent`]
+    /// and every reply kind.
+    pub trait Sealed {}
+
+    impl Sealed for super::Silent {}
+    impl<O: aether_data::ActorMail> Sealed for O {}
+}
+
+/// What a protocol row can name as its reply: a reply kind or [`Silent`].
+/// Sealed.
+///
+/// [`Undeclared`](crate::Undeclared) is left out, so a protocol has no manual
+/// row (ADR-0231 §6): a row that answers by hand promises nothing a sender can
+/// check.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a protocol row's reply",
+    label = "not a reply kind or `Silent`",
+    note = "a protocol row is single (`-> O`) or silent (no return); a manual row has no protocol spelling (ADR-0231 §6)"
+)]
+pub trait RowReply: ReplyShape + reply_sealed::Sealed {}
+
+impl RowReply for Silent {}
+
+// The failure a reader needs is the row reply, not the `ActorMail` bound
+// this impl's where-clause adds.
+#[diagnostic::do_not_recommend]
+impl<O: ActorMail> RowReply for O {}
+
+mod rows_sealed {
+    /// Private supertrait sealing [`super::RowSet`] to the tuples of
+    /// [`super::Row`]s this module implements it for.
+    pub trait Sealed {}
+}
+
+/// A protocol's rows: a tuple `(Row<K1, O1>, …, Row<Kn, On>)` of one to 16
+/// rows. Sealed, so the list below is always derived from the tuple.
+///
+/// Sixteen rows is the cap on one protocol.
+pub trait RowSet: rows_sealed::Sealed {
+    /// The rows as `(kind, reply)` pairs in the manifest's [`ReplyContract`]
+    /// vocabulary, in tuple order: `One(O::ID)` for a row `O`, `None` for a
+    /// [`Silent`] row. The same mapping `#[actor]` uses for
+    /// [`Contracts::CONTRACTS`](crate::Contracts::CONTRACTS), so the two lists
+    /// compare directly.
+    const CONTRACTS: &'static [(KindId, ReplyContract)];
+}
+
+mod covers_sealed {
+    /// Private supertrait sealing [`super::CoversRows`] to the blanket impls
+    /// this module emits per tuple arity.
+    pub trait Sealed<Rows> {}
+}
+
+/// `T: CoversRows<Rows>` holds when `T` has a [`Contract<K>`] row with the
+/// exact reply for every row in `Rows`. Sealed, and implemented by one blanket
+/// per tuple arity, so this is the only place coverage is computed.
+pub trait CoversRows<Rows>: covers_sealed::Sealed<Rows> {}
+
+/// Emits the `RowSet` and `CoversRows` impls for every tuple arity from the
+/// full parameter list down to one row, peeling one row per step.
+macro_rules! row_tuples {
+    () => {};
+    ($head_kind:ident $head_reply:ident $(, $kind:ident $reply:ident)*) => {
+        row_tuples!(@impl $head_kind $head_reply $(, $kind $reply)*);
+        row_tuples!($($kind $reply),*);
+    };
+    (@impl $($kind:ident $reply:ident),+) => {
+        impl<$($kind: Kind, $reply: RowReply),+> rows_sealed::Sealed for ($(Row<$kind, $reply>,)+) {}
+
+        impl<$($kind: Kind, $reply: RowReply),+> RowSet for ($(Row<$kind, $reply>,)+) {
+            const CONTRACTS: &'static [(KindId, ReplyContract)] =
+                &[$((<$kind as Kind>::ID, <$reply as ReplyShape>::CONTRACT)),+];
+        }
+
+        impl<T, $($kind: Kind, $reply: RowReply),+> covers_sealed::Sealed<($(Row<$kind, $reply>,)+)> for T
+        where
+            $(T: Contract<$kind, Reply = $reply>),+
+        {
+        }
+
+        impl<T, $($kind: Kind, $reply: RowReply),+> CoversRows<($(Row<$kind, $reply>,)+)> for T
+        where
+            $(T: Contract<$kind, Reply = $reply>),+
+        {
+        }
+    };
+}
+
+row_tuples!(
+    K1 O1, K2 O2, K3 O3, K4 O4, K5 O5, K6 O6, K7 O7, K8 O8,
+    K9 O9, K10 O10, K11 O11, K12 O12, K13 O13, K14 O14, K15 O15, K16 O16
+);
+
+/// A protocol (ADR-0231 §2): a type naming a stable set of contract rows.
+///
+/// Usually written with `#[protocol]` on a trait of signatures. A hand-written
+/// impl is safe: it only declares [`Rows`](Protocol::Rows), and the rows'
+/// list ([`RowSet::CONTRACTS`]) and who covers them ([`CoveredBy`]) are
+/// derived from that declaration.
+pub trait Protocol {
+    /// The rows, a tuple of [`Row<K, O>`]s.
+    type Rows: RowSet;
+}
+
+mod covered_sealed {
+    /// Private supertrait sealing [`super::CoveredBy`] to its blanket impl.
+    pub trait Sealed<R> {}
+}
+
+/// `P: CoveredBy<R>` holds when the target `R` has every row of the protocol
+/// `P`: for each [`Row<K, O>`], a [`Contract<K>`] row replying exactly `O`.
+///
+/// Rows match by kind and exact reply type, never by method name. A silent row
+/// is covered only by a silent handler and a row `O` only by a handler that
+/// replies `O`, directly or deferred. A kind the target handles only through
+/// `#[fallback]` has no row, and a `#[handler::manual]` handler's row is
+/// [`Undeclared`](crate::Undeclared), so neither covers.
+///
+/// Sealed: the one impl is the blanket over [`Protocol`] and [`CoversRows`].
+#[diagnostic::on_unimplemented(
+    message = "`{R}` does not cover the protocol `{Self}`",
+    label = "`{R}` lacks a row of `{Self}`, or `{Self}` is not a protocol",
+    note = "a target covers a protocol with a handler for each of its kinds replying exactly the row's reply; \
+            a `#[fallback]` or `#[handler::manual]` handler covers nothing"
+)]
+pub trait CoveredBy<R>: covered_sealed::Sealed<R> {}
+
+impl<P: Protocol, R: CoversRows<P::Rows>> covered_sealed::Sealed<R> for P {}
+
+impl<P: Protocol, R: CoversRows<P::Rows>> CoveredBy<R> for P {}

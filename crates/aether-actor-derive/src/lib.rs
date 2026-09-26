@@ -5,8 +5,8 @@
 #![allow(clippy::option_if_let_else)]
 
 //! Proc macros for the actor SDK: the `#[actor]`, `#[runtime]`, `#[handler]`,
-//! `#[handler_set]`, `#[fallback]`, `#[capability]`, and `#[local]`
-//! attributes, plus the `export_asset!` asset embed. `aether-actor` re-exports
+//! `#[handler_set]`, `#[fallback]`, `#[capability]`, `#[local]`, and
+//! `#[protocol]` attributes, plus the `export_asset!` asset embed. `aether-actor` re-exports
 //! all of them; a component depends on that crate, not on this one. The
 //! data-layer `Kind` and `Schema` derives live in `aether-data-derive`.
 
@@ -20,6 +20,7 @@ mod kind_imports;
 mod manifest;
 mod native_expand;
 mod opts;
+mod protocol;
 mod reply_markers;
 mod wasm_expand;
 
@@ -247,6 +248,49 @@ pub fn handler_set(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
     let item = parse_macro_input!(item as ItemTrait);
     match handler_set::expand_handler_set(item) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `#[protocol]` (ADR-0231 §2): sits on a trait whose method signatures are a
+/// protocol's contract rows, and replaces it with a unit struct implementing
+/// `aether_actor::Protocol`.
+///
+/// ```ignore
+/// #[protocol]
+/// pub trait MeshLoader {
+///     fn load(mail: LoadMesh) -> MeshLoadResult;
+///     fn ping(mail: Ping) -> Pong;
+///     fn set_mode(mail: SetMode);
+/// }
+/// ```
+///
+/// is exactly the hand-written declaration
+///
+/// ```ignore
+/// pub struct MeshLoader;
+///
+/// impl Protocol for MeshLoader {
+///     type Rows = (Row<LoadMesh, MeshLoadResult>, Row<Ping, Pong>, Row<SetMode, Silent>);
+/// }
+/// ```
+///
+/// with the struct's docs listing each row under its method name. `-> O` is a
+/// single row and a missing return (or `-> ()`) a silent one; a target's
+/// deferred `-> Pending<O>` handler covers the row `O`, which is spelled
+/// `-> O` here. A manual row has no spelling (ADR-0231 §6). A target covers the
+/// protocol, `MeshLoader: CoveredBy<R>`, when it has a row for every kind with
+/// the exact reply, matched by kind, never by method name.
+///
+/// The trait takes no arguments, generics, supertraits, where-clause,
+/// `unsafe`, or `auto`, and holds one to 16 method signatures, each with no
+/// receiver, generics, body, or qualifiers and one parameter named by an
+/// identifier or `_`. A kind appears once. Only doc comments are allowed.
+#[proc_macro_attribute]
+pub fn protocol(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as ItemTrait);
+    match protocol::expand_protocol(&attr.into(), &item) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }

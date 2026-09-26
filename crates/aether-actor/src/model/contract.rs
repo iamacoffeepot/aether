@@ -83,7 +83,9 @@ impl SilentRow for Undeclared {}
 /// `T` handles `K` and answers it with `O`, with nothing ([`Silent`]), or by
 /// hand ([`Undeclared`]).
 ///
-/// No `Addressable` supertrait: a protocol (ADR-0231 §2) carries rows too.
+/// A protocol (ADR-0231 §2) has no `Contract` rows: it declares its rows as
+/// [`Protocol::Rows`](crate::Protocol::Rows), and a target covers them through
+/// these rows ([`CoveredBy`](crate::CoveredBy)).
 #[diagnostic::on_unimplemented(
     message = "`{Self}` has no contract row for `{K}`",
     label = "no handler for `{K}` on this target",
