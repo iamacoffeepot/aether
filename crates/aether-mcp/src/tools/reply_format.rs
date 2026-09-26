@@ -26,9 +26,13 @@ pub(super) const MAX_FORMAT_DEPTH: usize = 64;
 /// reply.
 const WILDCARD: &str = "*";
 
-/// A reply mask that passed validation against the kinds it names.
+/// A reply mask that passed validation against the kinds it names. Its mask
+/// is private, so [`ReplyFormat::parse`] is the only way to build one.
 #[derive(Debug)]
-pub(super) enum ReplyFormat {
+pub(super) struct ReplyFormat(Mask);
+
+#[derive(Debug)]
+enum Mask {
     /// Per-kind masks, keyed by the `KindId` of the exact descriptor each was
     /// validated against, so a reply of another shape is never walked with
     /// one.
@@ -41,7 +45,7 @@ pub(super) enum ReplyFormat {
 /// One validated mask node, aligned with the schema node it was checked
 /// against (after removing any `Option` layers).
 #[derive(Debug)]
-pub(super) enum FormatNode {
+enum FormatNode {
     /// A leaf the function applies to.
     Leaf(Sigil),
     /// Struct fields, or a struct variant's fields.
@@ -75,7 +79,7 @@ impl ReplyFormat {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("format: \"*\" takes a function name such as \"$hex\", got {value}"))
                 .and_then(|name| output_sigil(name).map_err(|reason| anyhow::anyhow!("format: \"*\": {reason}")))?;
-            return Ok(Self::Every(sigil));
+            return Ok(Self(Mask::Every(sigil)));
         }
 
         let mut kinds = HashMap::with_capacity(raw.len());
@@ -85,19 +89,19 @@ impl ReplyFormat {
                 .map_err(|refusal| anyhow::anyhow!("format: {name}: {}: {}", refusal.path, refusal.reason))?;
             kinds.insert(KindId(kind_id_from_parts(&descriptor.name, &descriptor.schema)), node);
         }
-        Ok(Self::Kinds(kinds))
+        Ok(Self(Mask::Kinds(kinds)))
     }
 
     /// Format one decoded reply of kind `kind` whose schema is `schema`. A
     /// reply whose kind the mask does not name, with no wildcard, is returned
     /// unchanged.
     pub(super) fn apply(&self, kind: KindId, value: Value, schema: &SchemaType) -> Value {
-        match self {
-            Self::Kinds(kinds) => match kinds.get(&kind) {
+        match &self.0 {
+            Mask::Kinds(kinds) => match kinds.get(&kind) {
                 Some(node) => apply_node(node, value, schema),
                 None => value,
             },
-            Self::Every(sigil) => apply_every(*sigil, value, schema),
+            Mask::Every(sigil) => apply_every(*sigil, value, schema),
         }
     }
 }
