@@ -163,11 +163,12 @@ value it read at boot.
 `aether-bloomery` takes the same flags. Its one integration is `aether.http`,
 deny-by-default, so the host a Sampled program posts to must be on
 `--http-allowlist`, and a credential for it is bound with `/bearer`.
-`--bloomery-journal` names the journal root, a directory the engine creates
-when it is absent:
+`--bloomery-units` names the engine's units as comma-separated `key=root`
+entries, one entry for now; each root is a journal directory the engine
+creates when it is absent:
 
 ```sh
-aether-bloomery --bloomery-journal /var/lib/aether/journal \
+aether-bloomery --bloomery-units primary=/var/lib/aether/journal \
   --secrets-dir /etc/aether/secrets \
   --http-allowlist api.muse.example \
   --http-secrets api.muse.example/bearer=muse

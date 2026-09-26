@@ -1,9 +1,9 @@
 //! Bloomery chassis: [`BloomeryChassis`] (issue #6244), the journal-driven
 //! engine. Boots the shared base stratum plus the component host and a held
 //! RPC server, then the mount seam spawns the journal owner and the bundle
-//! driver over one journal root, and only then does the RPC listener bind
-//! (issue #6399), so an engine a caller can reach can already take driver
-//! calls.
+//! driver over the one configured unit's journal root, and only then does the
+//! RPC listener bind (issue #6399), so an engine a caller can reach can
+//! already take driver calls.
 //!
 //! The composition is deliberately narrow. Its integrations are HTTP egress
 //! for Sampled programs (ADR-0234 decision 7), composed with the capability's
@@ -45,7 +45,7 @@ use aether_substrate::{Chassis, SubstrateBoot};
 use aether_workspace::{WorkspaceCapability, WorkspaceParams};
 
 use crate::cli::BloomeryCli;
-use crate::config::BloomeryConfig;
+use crate::config::{self, BloomeryConfig};
 use crate::mount::{self, Mounted};
 
 /// Marker type for the bloomery chassis. Carries no fields — the
@@ -69,7 +69,7 @@ impl Chassis for BloomeryChassis {
 
 impl BloomeryChassis {
     /// Build the bloomery chassis: the hub's prologue with headless's lift —
-    /// lower the bloomery knobs, open the journal root and hand its artifact
+    /// lower the bloomery knobs, open the unit's journal root and hand its artifact
     /// store to the env, stand up the substrate, re-apply the resolved
     /// log filter, lift the base out of the env, compose the shared stratum
     /// plus the component host, HTTP egress, the workspace actor, and the held
@@ -90,20 +90,22 @@ impl BloomeryChassis {
     /// fails, or the RPC port cannot be bound.
     pub fn build_mounted(mut env: BloomeryEnv) -> Result<(BuiltChassis<Self>, Mounted), BootError> {
         // Lower the bloomery knobs first, before anything with a side effect:
-        // an unset journal or an out-of-range closure limit is a typo in the
+        // a bad unit list or an out-of-range closure limit is a typo in the
         // operator's own argv, and refusing it here costs nothing, where
         // refusing it at the mount seam would first stand up wasmtime.
         // `--describe` / `--print-config` exit in `run_chassis_main`'s prelude
         // before `build` is called, so they never reach this and still answer
-        // with no journal configured.
+        // with no units configured.
         let bloomery = mem::take(&mut env.bloomery);
-        let (root, limit) = bloomery.to_journal_and_limit()?;
+        let (units, limit) = bloomery.to_units_and_limit()?;
+        let unit = config::sole_unit(units)?;
         // Open the root before wasmtime too: a root another engine holds, or
         // one that cannot be created, refuses boot here, naming the root.
-        let journal = Journal::open(&root).map_err(|error| {
+        let journal = Journal::open(&unit.root).map_err(|error| {
             BootError::Other(Box::new(io::Error::other(format!(
-                "the bloomery journal root {} does not open: {error}",
-                root.display()
+                "the bloomery journal root {} of unit `{}` does not open: {error}",
+                unit.root.display(),
+                unit.key
             ))))
         })?;
         // The workspace actor writes its imports through this store, which
@@ -116,9 +118,10 @@ impl BloomeryChassis {
         let builder = composed::<Self>(&mut boot, base, env)?;
         validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         let built = builder.driver(SignalDriverCapability::new(boot)).build()?;
-        let mounted = mount::mount(&built, journal, limit, ReadCacheBudget::new(bloomery.read_cache_bytes))?;
+        let mounted = mount::mount(&built, &unit.key, journal, limit, ReadCacheBudget::new(bloomery.read_cache_bytes))?;
         tracing::info!(
-            journal_root = %root.display(),
+            unit = %unit.key,
+            journal_root = %unit.root.display(),
             journal = ?mounted.journal,
             driver = ?mounted.driver,
             "bloomery chassis mounted the journal owner and the bundle driver",
@@ -144,7 +147,7 @@ pub struct BloomeryEnv {
     /// [`BloomeryChassis::build_mounted`]); the field carries the whole resolved
     /// member so its values resolve once.
     pub runtime: RuntimeConfig,
-    /// The bloomery knobs. Lowered to the journal root and the driver's
+    /// The bloomery knobs. Lowered to the unit list and the driver's
     /// closure limit at the top of [`BloomeryChassis::build_mounted`], then applied off
     /// the builder at the mount seam.
     pub bloomery: BloomeryConfig,
@@ -255,10 +258,13 @@ mod config_manifest_tests {
         // the endpoint key an unknown-env boot error and leave imports
         // unanswered; a later edit that composes `with_full_stack_caps`, which
         // would add process exec and fs; and a dropped `declare_config_member`
-        // that would make the journal knob warn as unknown.
+        // that would make the units knob warn as unknown. The retired
+        // single-journal knob must stay unclaimed, so a stale env key is an
+        // unknown-env boot error rather than a silently ignored journal.
         let manifest = config_manifest::<BloomeryChassis>().expect("bloomery config manifest");
         let known = manifest.known_keys(&chassis_residual_knobs());
-        assert!(known.contains("AETHER_BLOOMERY_JOURNAL"), "bloomery must claim its journal knob");
+        assert!(known.contains("AETHER_BLOOMERY_UNITS"), "bloomery must claim its units knob");
+        assert!(!known.contains("AETHER_BLOOMERY_JOURNAL"), "the single-journal knob is retired");
         assert!(known.contains("AETHER_BLOOMERY_CLOSURE_LIMIT_BYTES"), "bloomery must claim its closure-limit knob");
         assert!(known.contains("AETHER_RPC_PORT"), "bloomery must claim the RPC port via the composed RpcServerConfig");
         assert!(known.contains("AETHER_HTTP_ALLOWLIST"), "bloomery must claim the http egress allowlist knob");

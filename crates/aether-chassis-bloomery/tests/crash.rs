@@ -29,7 +29,7 @@ use aether_bloomery_kinds::{
 };
 use aether_data::{EngineId, Kind};
 use aether_fleet::RestartPolicy;
-use aether_harness_bloomery::{Record, SeededJournal};
+use aether_harness_bloomery::{Record, SeededJournal, UNIT};
 use aether_harness_fleet::{FleetHarness, poll_until};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_rpc::ReplyEnvelope;
@@ -122,7 +122,7 @@ fn kill_when_recorded(journal: &Path, seq: Seq, pid: u32) -> bool {
 #[test]
 fn a_killed_engine_restarts_over_its_journal_and_faults_the_in_flight_call_interrupted() -> Result<(), Box<dyn Error>> {
     // Catches: a journal that does not reopen after a kill mid-WAL, so the
-    // successor never mounts; a restart that loses `--bloomery-journal` or
+    // successor never mounts; a restart that loses `--bloomery-units` or
     // opens another file, so the head is not 5; an in-flight request that is
     // re-run instead of faulted, which wedges `AwaitProcessed` and queues key 3
     // behind it; an `Interrupted` fault with the wrong cause, or recorded twice;
@@ -150,7 +150,8 @@ fn a_killed_engine_restarts_over_its_journal_and_faults_the_in_flight_call_inter
         burst_limit: 1,
         burst_window: Duration::from_mins(5),
     });
-    let engine = fleet.spawn_binary(&wrapper, vec!["--bloomery-journal".to_owned(), journal.display().to_string()]);
+    let engine =
+        fleet.spawn_binary(&wrapper, vec!["--bloomery-units".to_owned(), format!("{UNIT}={}", journal.display())]);
     let first_pid: u32 = fs::read_to_string(&pids)?.lines().next().expect("the first engine logged its pid").parse()?;
 
     let origin = NativeOrigin::new("test.crash")?;

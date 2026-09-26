@@ -54,7 +54,7 @@ pub enum Command {
         /// The fenced write.
         request: AppendRecords,
     },
-    /// Load a bundle's wasm under its digest name.
+    /// Load a bundle's wasm under the unit's bundle name for its digest.
     Load {
         /// Ticket the matching [`LoadOutcome`] arrives under.
         ticket: LoadTicket,

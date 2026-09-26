@@ -29,7 +29,8 @@ use crate::config::BloomeryOverlay;
     after_help = env_only_after_help()
 )]
 pub struct BloomeryCli {
-    /// Bloomery knobs: `--bloomery-journal` / `--bloomery-closure-limit-bytes`.
+    /// Bloomery knobs: `--bloomery-units` / `--bloomery-closure-limit-bytes` /
+    /// `--bloomery-read-cache-bytes`.
     #[command(flatten)]
     pub bloomery: BloomeryOverlay,
 

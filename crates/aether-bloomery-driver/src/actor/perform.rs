@@ -1,7 +1,7 @@
 //! Performing the core's commands: one iterative loop over typed sends.
 
 use aether_actor::{DependsOn, ReplyMode};
-use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery};
+use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery, UnitBundle};
 use aether_component::ComponentHostCapability;
 use aether_data::{ActorMail, Kind};
 use aether_kinds::LoadComponent;
@@ -14,7 +14,7 @@ impl BundleDriver {
     /// Perform each [`Command`] in order, then return.
     ///
     /// Journal reads and appends go to the handed-over journal reference, loads go
-    /// to the component host under the bundle's digest name, root commands go
+    /// to the component host under the unit's bundle name, root commands go
     /// to the reference the digest's load reply was stamped with, and answers
     /// and fetch answers release the parked reply. Every send carries its ticket as the request
     /// context, so the reply routes back to the core continuation that issued
@@ -45,7 +45,7 @@ impl BundleDriver {
                     let _ = ctx.send_with_context::<ComponentHostCapability>(
                         &LoadComponent {
                             wasm,
-                            name: Some(bundle.to_string()),
+                            name: Some(UnitBundle::name(&self.unit, &bundle).as_str().to_owned()),
                             config: Vec::new(),
                             export: Some(BUNDLE_NAMESPACE.to_owned()),
                         },

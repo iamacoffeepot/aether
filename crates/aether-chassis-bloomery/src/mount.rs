@@ -12,7 +12,7 @@ use std::io;
 use aether_actor::ActorRef;
 use aether_bloomery_driver::{BundleDriver, DriverParams};
 use aether_bloomery_journal::{Journal, JournalActor, ReadCacheBudget};
-use aether_bloomery_kinds::ClosureLimit;
+use aether_bloomery_kinds::{ClosureLimit, UnitKey};
 use aether_substrate::Subname;
 use aether_substrate::chassis::builder::BuiltChassis;
 use aether_substrate::chassis::error::BootError;
@@ -25,18 +25,18 @@ use crate::chassis::BloomeryChassis;
 /// than resolving either by path.
 #[derive(Debug, Clone, Copy)]
 pub struct Mounted {
-    /// The journal owner, `aether.bloomery.journal:journal`.
+    /// The journal owner, `aether.bloomery.journal:<key>` for the unit's key.
     pub journal: ActorRef<JournalActor>,
     /// The bundle driver, `aether.bloomery.driver:driver`.
     pub driver: ActorRef<BundleDriver>,
 }
 
 /// Spawn the journal owner over `journal` with the `read_cache` budget under
-/// `Subname::Named("journal")` and the bundle driver under
-/// `Subname::Named("driver")` over the journal's born reference, so the engine
-/// answers as `aether.bloomery.journal:journal` and
-/// `aether.bloomery.driver:driver`, and hand both references back as
-/// [`Mounted`].
+/// `Subname::Named(unit)` and the bundle driver under `Subname::Named("driver")`
+/// over the unit's key and the journal's born reference, so the engine answers
+/// as `aether.bloomery.journal:<key>` and `aether.bloomery.driver:driver`, and
+/// hand both references back as [`Mounted`]. The journal's name is already the
+/// unit-root name ADR-0240 D1 gives it.
 ///
 /// Takes the already-opened journal and lowered budgets rather than the config:
 /// `BloomeryChassis::build_mounted` lowers the knobs and opens the root before
@@ -48,16 +48,17 @@ pub struct Mounted {
 /// Returns [`BootError`] when either spawn fails.
 pub fn mount(
     built: &BuiltChassis<BloomeryChassis>,
+    unit: &UnitKey,
     journal: Journal,
     limit: ClosureLimit,
     read_cache: ReadCacheBudget,
 ) -> Result<Mounted, BootError> {
     let journal = built
-        .spawn_actor::<JournalActor>(Subname::Named("journal"), read_cache, journal)
+        .spawn_actor::<JournalActor>(Subname::Named(unit.as_str()), read_cache, journal)
         .finish()
-        .map_err(|error| spawn_failed("aether.bloomery.journal:journal", &error))?;
+        .map_err(|error| spawn_failed(&format!("aether.bloomery.journal:{unit}"), &error))?;
     let driver = built
-        .spawn_actor::<BundleDriver>(Subname::Named("driver"), limit, DriverParams { journal })
+        .spawn_actor::<BundleDriver>(Subname::Named("driver"), limit, DriverParams { unit: unit.clone(), journal })
         .finish()
         .map_err(|error| spawn_failed("aether.bloomery.driver:driver", &error))?;
     Ok(Mounted { journal, driver })

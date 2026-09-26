@@ -15,9 +15,9 @@ use aether_http::HttpConfig;
 use aether_substrate::Subname;
 use aether_substrate::config::{ConfigMember, ConfigSources, SecretsDir, StageArgv};
 
-use crate::BloomeryHarness;
 use crate::drive::ReplySink;
 use crate::seed::SeededJournal;
+use crate::{BloomeryHarness, UNIT};
 
 impl SeededJournal {
     /// Boot the bloomery chassis over this journal and spawn the harness's
@@ -48,7 +48,8 @@ impl SeededJournal {
     /// `--config` file, which are never read. So `--http-allowlist`,
     /// `--http-secrets`, and every other flag resolve exactly as they do in the
     /// binary, and nothing leaks in from the process that runs the harness.
-    /// The seed's journal always wins over `--bloomery-journal`.
+    /// The seed's unit, [`UNIT`] over the seeded journal root,
+    /// always wins over `--bloomery-units`.
     ///
     /// A secret an `--http-secrets` binding names is read from the secrets
     /// directory once, at boot, by `aether.http`, and never leaves it: the
@@ -134,13 +135,13 @@ impl BloomeryHarness {
 }
 
 /// A chassis env over `sources`, a hermetic source stack (programmatic over
-/// argv over default, never the process environment), with the bloomery
-/// journal pointing at `journal`.
+/// argv over default, never the process environment), with the one bloomery
+/// unit, [`UNIT`], rooted at `journal`.
 ///
 /// Every member the chassis resolves chassis-side is resolved off `sources`
 /// here, as `BloomeryEnv::from_cli` does in the binary, so a staged argv layer
 /// is consumed rather than refused as orphaned, and an unstaged member takes
-/// its compiled default. The resolved journal is then replaced by `journal`.
+/// its compiled default. The resolved unit list is then replaced by that unit.
 fn env(journal: &Path, mut sources: ConfigSources) -> BloomeryEnv {
     let actor_ring = resolve::<ActorRingConfig>(&mut sources);
     let scheduler_tuning = resolve::<SchedulerTuningConfig>(&mut sources);
@@ -151,7 +152,7 @@ fn env(journal: &Path, mut sources: ConfigSources) -> BloomeryEnv {
     BloomeryEnv::new(
         ChassisBase { sources, actor_ring, scheduler_tuning, registry_queues, settlement },
         runtime,
-        BloomeryConfig { journal: Some(journal.display().to_string()), ..bloomery },
+        BloomeryConfig { units: Some(format!("{UNIT}={}", journal.display())), ..bloomery },
     )
 }
 

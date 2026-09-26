@@ -23,9 +23,10 @@
 //! is ever in flight.
 //!
 //! The [`BundleDriver`] actor is the native shell around the core. Native code
-//! spawns it over a born journal owner, passing the journal's reference in
-//! [`DriverParams`]; it performs journal reads, appends, and the watch as mail
-//! to the journal owner, bundle loads for both roles to the component host,
+//! spawns it over a born journal owner, passing the unit's key and the
+//! journal's reference in [`DriverParams`]; it performs journal reads,
+//! appends, and the watch as mail to the journal owner, bundle loads for both
+//! roles to the component host under the unit's bundle name (ADR-0240 D4),
 //! `Invoke` to loaded program roots, and `Warm` / `Event` / `StatusQuery` to
 //! loaded reactor roots — each root the stamped sender of its bundle's load
 //! reply, kept by digest — and feeds each reply back through its ticketed

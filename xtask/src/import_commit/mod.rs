@@ -1,5 +1,6 @@
-//! `cargo xtask import-commit <commit> --rpc-port <port>`: stage the files one
-//! commit tracks as a journal tree (ADR-0237 decision 3).
+//! `cargo xtask import-commit <commit> --rpc-port <port> --unit <key>`: stage
+//! the files one commit tracks as a journal tree (ADR-0237 decision 3) in the
+//! journal of the unit `<key>` names (ADR-0240 D8).
 //!
 //! The lane runs outside every engine. It reads exactly what the commit
 //! tracks, through `git ls-tree` and one `git cat-file --batch`, so no
@@ -26,9 +27,10 @@ mod tests;
 
 use std::path::Path;
 
+use aether_bloomery_kinds::UnitKey;
 use aether_codec::frame::{install_max_frame_size, max_frame_size};
 use aether_rpc::FrameSizeConfig;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
 
 /// Arguments for `cargo xtask import-commit`.
@@ -39,6 +41,10 @@ pub struct ImportCommitArgs {
     /// The Bloomery engine's RPC port on 127.0.0.1.
     #[arg(long)]
     rpc_port: u16,
+    /// The unit key of the journal to stage into: the engine's journal owner
+    /// for it answers at `aether.bloomery.journal:<key>`.
+    #[arg(long)]
+    unit: String,
 }
 
 /// Import the commit's tracked files into the engine's journal and print the
@@ -48,13 +54,14 @@ pub struct ImportCommitArgs {
 /// batch may use half the frame cap, leaving the other half for the envelope
 /// and each artifact's citations.
 pub fn run(args: &ImportCommitArgs) -> Result<()> {
+    let unit = UnitKey::new(&args.unit).with_context(|| format!("--unit {:?} is not a unit key", args.unit))?;
     install_max_frame_size(FrameSizeConfig::try_from_env()?.to_max_frame_size());
 
     let listing = read::read_commit(Path::new("."), &args.commit)?;
     let built = tree::build(&listing)?;
     let batches = batch::split(built.artifacts, max_frame_size() / 2)?;
 
-    let mut journal = publish::EngineJournal::connect(args.rpc_port)?;
+    let mut journal = publish::EngineJournal::connect(args.rpc_port, &unit)?;
     let fence = journal.read_head()?;
     publish::publish(&mut journal, fence, batches)?;
 
