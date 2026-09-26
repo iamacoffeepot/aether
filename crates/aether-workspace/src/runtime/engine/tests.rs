@@ -49,6 +49,15 @@ fn a_body_cut_short_is_an_error_not_a_shorter_body() {
 }
 
 #[test]
+fn an_empty_chunk_size_line_is_an_error_not_the_end_of_the_body() {
+    // Catches httparse reading a bare CRLF as chunk size 0: without the guard
+    // in front of `parse_chunk_size`, a garbled stream ends as a shorter body
+    // instead of failing the read.
+    let empty_size = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n\r\nNEXT";
+    assert_eq!(body_of(empty_size).expect_err("empty chunk-size line").kind(), ErrorKind::InvalidData);
+}
+
+#[test]
 fn a_pull_stream_carrying_an_error_under_a_200_fails_the_pull() {
     // Catches a pull judged by its status alone: the daemon reports a missing
     // manifest inside the 200 progress stream, and the import must stop there.

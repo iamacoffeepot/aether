@@ -5,11 +5,14 @@
 //! framing runs to the end of the stream. A request body is either a small
 //! JSON document sent with its length, or a stream the caller writes through
 //! [`ChunkedWriter`] one bounded chunk at a time, so a tar of any size crosses
-//! without being held. Every line the client reads is bounded, and a response
-//! body is only ever read a buffer at a time, so no claimed length sizes an
-//! allocation.
+//! without being held. Response heads and chunk-size lines parse through
+//! [`httparse`] over the crate's own bounded line reads; every other part —
+//! request writing, [`ChunkedWriter`], framing, and the bounds themselves —
+//! is this module's own. A response body is only ever read a buffer at a
+//! time, so no claimed length sizes an allocation.
 
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::str::from_utf8;
 
 use super::EngineError;
 
@@ -175,29 +178,59 @@ impl<R: Read> Response<R> {
     /// [`EngineError::Io`] when reading fails.
     pub fn read(input: R) -> Result<Self, EngineError> {
         let mut reader = BufReader::new(input);
-        let status_line =
-            read_line(&mut reader)?.ok_or_else(|| protocol("the connection closed before a status line"))?;
-        let status = parse_status(&status_line)?;
+
+        // Accumulate the status line and header lines into one buffer, up to
+        // and including the blank line that ends the head — the line
+        // terminators stay in, since `httparse` parses them as part of the
+        // head. Bounded at `MAX_HEADERS` header lines before parsing ever
+        // runs, so a peer cannot grow this buffer unboundedly.
+        let mut head = read_line(&mut reader)?.ok_or_else(|| protocol("the connection closed before a status line"))?;
+        let status_line_bytes = head.len();
+        let mut header_lines = 0usize;
+        loop {
+            let line = read_line(&mut reader)?.ok_or_else(|| protocol("the connection closed inside the headers"))?;
+            let blank = is_blank(&line);
+            head.extend_from_slice(&line);
+            if blank {
+                break;
+            }
+            if header_lines == MAX_HEADERS {
+                return Err(protocol("more than 128 header lines"));
+            }
+            header_lines += 1;
+        }
+
+        let mut header_storage = [httparse::EMPTY_HEADER; MAX_HEADERS];
+        let mut response = httparse::Response::new(&mut header_storage);
+        match response.parse(&head) {
+            Ok(httparse::Status::Complete(len)) if len == head.len() => {}
+            Ok(httparse::Status::Complete(_) | httparse::Status::Partial) => {
+                return Err(protocol("a malformed response head"));
+            }
+            Err(httparse::Error::TooManyHeaders) => return Err(protocol("more than 128 header lines")),
+            Err(httparse::Error::Version) => return Err(protocol("not HTTP/1.x")),
+            Err(error) => return Err(protocol(&format!("a malformed response head: {error}"))),
+        }
+
+        // httparse accepts any three digits as a status code, so the
+        // documented range still gets its own check.
+        let status = response.code.filter(|code| (100..600).contains(code)).ok_or_else(|| {
+            let status_line = strip_terminator(&head[..status_line_bytes]);
+            protocol(&format!("a malformed status line {:?}", String::from_utf8_lossy(status_line)))
+        })?;
 
         let mut length = None;
         let mut chunked = false;
-        for count in 0.. {
-            let line = read_line(&mut reader)?.ok_or_else(|| protocol("the connection closed inside the headers"))?;
-            if line.is_empty() {
-                break;
-            }
-            if count == MAX_HEADERS {
-                return Err(protocol("more than 128 header lines"));
-            }
-            let (name, value) = line.split_once(':').ok_or_else(|| protocol("a header line without a colon"))?;
-            let value = value.trim();
-            if name.eq_ignore_ascii_case("transfer-encoding") {
+        for header in response.headers.iter() {
+            if header.name.eq_ignore_ascii_case("transfer-encoding") {
+                let value = from_utf8(header.value).map_err(|_| protocol("unsupported transfer encoding"))?;
                 chunked = value.rsplit(',').next().is_some_and(|last| last.trim().eq_ignore_ascii_case("chunked"));
                 if !chunked {
                     return Err(protocol(&format!("unsupported transfer encoding {value:?}")));
                 }
-            } else if name.eq_ignore_ascii_case("content-length") {
-                let parsed = value.parse::<u64>().map_err(|_| protocol("a malformed Content-Length"))?;
+            } else if header.name.eq_ignore_ascii_case("content-length") {
+                let value = from_utf8(header.value).map_err(|_| protocol("a malformed Content-Length"))?;
+                let parsed = value.trim().parse::<u64>().map_err(|_| protocol("a malformed Content-Length"))?;
                 if length.is_some_and(|earlier| earlier != parsed) {
                     return Err(protocol("conflicting Content-Length headers"));
                 }
@@ -320,18 +353,32 @@ fn read_bounded(reader: &mut impl Read, buf: &mut [u8], left: u64) -> io::Result
     Ok(read)
 }
 
+/// A chunk-size line's terminator is normalized to CRLF before it reaches
+/// [`httparse::parse_chunk_size`] (which requires one), so the reader's own
+/// tolerance for a bare LF survives the move to it.
 fn read_chunk_size(reader: &mut impl BufRead) -> io::Result<u64> {
     let line = read_line(reader)
         .map_err(to_io)?
         .ok_or_else(|| io::Error::new(ErrorKind::UnexpectedEof, "the response body ended before a chunk size"))?;
-    let digits = line.split(';').next().unwrap_or_default().trim();
-    u64::from_str_radix(digits, 16)
-        .map_err(|_| io::Error::new(ErrorKind::InvalidData, format!("a malformed chunk size {digits:?}")))
+    let malformed = |line: &[u8]| {
+        io::Error::new(ErrorKind::InvalidData, format!("a malformed chunk size {:?}", String::from_utf8_lossy(line)))
+    };
+    let stripped = strip_terminator(&line);
+    // `httparse` reads a line with no hex digit at all — a bare terminator —
+    // as chunk size zero, which would end the body early on a garbled
+    // stream; refuse it before that ever runs.
+    if !stripped.first().is_some_and(u8::is_ascii_hexdigit) {
+        return Err(malformed(stripped));
+    }
+    match httparse::parse_chunk_size(&[stripped, b"\r\n"].concat()) {
+        Ok(httparse::Status::Complete((_, size))) => Ok(size),
+        Ok(httparse::Status::Partial) | Err(httparse::InvalidChunkSize) => Err(malformed(stripped)),
+    }
 }
 
 fn expect_crlf(reader: &mut impl BufRead) -> io::Result<()> {
     match read_line(reader).map_err(to_io)? {
-        Some(line) if line.is_empty() => Ok(()),
+        Some(line) if is_blank(&line) => Ok(()),
         Some(_) => Err(io::Error::new(ErrorKind::InvalidData, "a chunk longer than its size")),
         None => Err(io::Error::new(ErrorKind::UnexpectedEof, "the response body ended inside a chunk")),
     }
@@ -340,7 +387,7 @@ fn expect_crlf(reader: &mut impl BufRead) -> io::Result<()> {
 fn skip_trailers(reader: &mut impl BufRead) -> io::Result<()> {
     for _ in 0..=MAX_HEADERS {
         match read_line(reader).map_err(to_io)? {
-            Some(line) if line.is_empty() => return Ok(()),
+            Some(line) if is_blank(&line) => return Ok(()),
             Some(_) => {}
             None => return Err(io::Error::new(ErrorKind::UnexpectedEof, "the response ended inside its trailers")),
         }
@@ -348,38 +395,35 @@ fn skip_trailers(reader: &mut impl BufRead) -> io::Result<()> {
     Err(io::Error::new(ErrorKind::InvalidData, "more than 128 trailer lines"))
 }
 
-/// Read one CRLF- or LF-terminated line of at most [`MAX_LINE_BYTES`], without
-/// its terminator. `None` at a clean end of stream.
-fn read_line(reader: &mut impl BufRead) -> Result<Option<String>, EngineError> {
+/// Read one CRLF- or LF-terminated line of at most [`MAX_LINE_BYTES`],
+/// keeping its terminator — the head [`Response::read`] accumulates is
+/// parsed by `httparse` as raw bytes, terminators included. `None` at a
+/// clean end of stream.
+fn read_line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, EngineError> {
     let mut line = Vec::new();
     let read = reader.take(MAX_LINE_BYTES + 1).read_until(b'\n', &mut line)?;
     if read == 0 {
         return Ok(None);
     }
-    if line.pop() != Some(b'\n') {
+    if line.last() != Some(&b'\n') {
         return Err(if read as u64 > MAX_LINE_BYTES {
             protocol("a line longer than 8 KiB")
         } else {
             EngineError::Io(io::Error::new(ErrorKind::UnexpectedEof, "the connection closed inside a line"))
         });
     }
-    if line.last() == Some(&b'\r') {
-        line.pop();
-    }
-    String::from_utf8(line).map(Some).map_err(|_| protocol("a line that is not UTF-8"))
+    Ok(Some(line))
 }
 
-fn parse_status(line: &str) -> Result<u16, EngineError> {
-    let mut parts = line.splitn(3, ' ');
-    let version = parts.next().unwrap_or_default();
-    if !version.starts_with("HTTP/1.") {
-        return Err(protocol(&format!("a status line that is not HTTP/1.x: {line:?}")));
-    }
-    parts
-        .next()
-        .and_then(|code| code.parse::<u16>().ok())
-        .filter(|code| (100..600).contains(code))
-        .ok_or_else(|| protocol(&format!("a malformed status line {line:?}")))
+/// Strip a line's terminator (`\r\n`, or a bare `\n`), for the callers that
+/// read a [`read_line`] result as content rather than raw head bytes.
+fn strip_terminator(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r\n".as_slice()).or_else(|| line.strip_suffix(b"\n".as_slice())).unwrap_or(line)
+}
+
+/// Whether a [`read_line`] result carries no content: a lone `\r\n` or `\n`.
+fn is_blank(line: &[u8]) -> bool {
+    strip_terminator(line).is_empty()
 }
 
 fn protocol(detail: &str) -> EngineError {
