@@ -7,8 +7,9 @@ use std::time::Duration;
 use super::api::{ContainerId, Waited};
 use super::http::Response;
 use super::logs::{self, Demux, Lengths, Output};
+use super::stats::peak_bytes;
 use super::{ENDPOINT_KEY, Endpoint, Engine, EngineError, TLS_CA_FILE_KEY, TLS_CERT_FILE_KEY, TLS_KEY_FILE_KEY};
-use crate::runtime::testing::{StubDaemon, StubReply, log_stream};
+use crate::runtime::testing::{StubDaemon, StubReply, log_stream, stats_stream};
 use crate::{ImageRef, WorkspaceConfig};
 
 const IMAGE: &str = "debian@sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -292,4 +293,48 @@ impl Read for OneByte<'_> {
         self.0 = rest;
         Ok(1)
     }
+}
+
+#[test]
+fn a_stats_peak_is_usage_less_the_inactive_file_cache_or_the_high_water_mark() {
+    // Catches a peak that counts the reclaimable page cache as use (a build
+    // that reads many files would have its memory estimate inflated until it
+    // never fits), a v1 sample read with the v2 field name, a v1 `max_usage`
+    // ignored, and a later smaller sample lowering the peak.
+    let v2 = stats_stream(&[(500, 200), (900, 100), (400, 0)]);
+    assert_eq!(peak_bytes(v2.as_slice()).expect("v2 samples"), Some(800));
+
+    let v1 = br#"{"memory_stats":{"usage":700,"max_usage":1000,"stats":{"total_inactive_file":300}}}
+{"memory_stats":{"usage":900,"stats":{"total_inactive_file":100}}}
+"#;
+    assert_eq!(peak_bytes(v1.as_slice()).expect("v1 samples"), Some(1000));
+}
+
+#[test]
+fn a_stats_stream_with_no_memory_reported_has_no_peak_and_an_oversized_line_is_refused() {
+    // Catches a zero peak reported as an observation (the estimate would
+    // floor a real build to the minimum) and an unbounded line read, which
+    // would let the daemon size an allocation.
+    let empty: &[u8] = b"";
+    assert_eq!(peak_bytes(empty).expect("an empty stream"), None);
+    let unstarted = b"{\"memory_stats\":{}}\n{\"memory_stats\":{\"usage\":0}}\n";
+    assert_eq!(peak_bytes(unstarted.as_slice()).expect("zero samples"), None);
+
+    let mut long = vec![b' '; (1 << 20) + 1];
+    long.push(b'\n');
+    assert_eq!(peak_bytes(long.as_slice()).expect_err("a line over 1 MiB").kind(), ErrorKind::InvalidData);
+}
+
+#[test]
+fn a_stats_stream_cut_mid_sample_answers_the_peak_so_far() {
+    // Catches the stop being read as a failure: stopping a stream cuts it,
+    // and the samples already read are the observation, not an error.
+    let mut cut = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    let sample = stats_stream(&[(600, 100)]);
+    cut.extend_from_slice(format!("{:x}\r\n", sample.len()).as_bytes());
+    cut.extend_from_slice(&sample);
+    cut.extend_from_slice(b"\r\n40\r\n{\"memory_stats\":");
+
+    let body = Response::read(cut.as_slice()).expect("a stats head").body;
+    assert_eq!(peak_bytes(body).expect("a cut stream"), Some(500));
 }

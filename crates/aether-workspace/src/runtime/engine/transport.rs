@@ -73,6 +73,38 @@ impl Transport {
             }
         }
     }
+
+    /// A second handle on this connection's socket that can shut it down
+    /// from another thread. rustls state cannot be cloned, so a TLS
+    /// connection's handle is its TCP socket.
+    pub fn closer(&self) -> io::Result<Closer> {
+        match *self {
+            #[cfg(unix)]
+            Self::Unix(ref stream) => stream.try_clone().map(Closer::Unix),
+            Self::Tls(ref stream) => stream.sock.try_clone().map(Closer::Tcp),
+        }
+    }
+}
+
+/// A second handle on a [`Transport`]'s socket, for shutting it down while
+/// another thread reads it.
+pub enum Closer {
+    #[cfg(unix)]
+    Unix(UnixStream),
+    Tcp(TcpStream),
+}
+
+impl Closer {
+    /// Shut both halves of the socket down, so a read blocked on the
+    /// connection returns. Over TLS no `close_notify` is sent: the reader
+    /// sees a cut stream.
+    pub fn shutdown(&self) -> io::Result<()> {
+        match *self {
+            #[cfg(unix)]
+            Self::Unix(ref stream) => stream.shutdown(Shutdown::Both),
+            Self::Tcp(ref stream) => stream.shutdown(Shutdown::Both),
+        }
+    }
 }
 
 /// Dial the first address `tls.host` resolves to that accepts, then complete

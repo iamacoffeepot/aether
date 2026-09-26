@@ -12,10 +12,12 @@ use aether_bloomery_tar::Limits;
 use aether_data::wire::encode_to_vec;
 use tempfile::TempDir;
 
-use super::{Allotment, Runner};
+use super::{Allotment, Ran, Runner};
 use crate::runtime::engine::{Endpoint, Engine};
+use crate::runtime::provision::CpuSet;
 use crate::runtime::testing::{
-    RUN_CONTAINER, RUN_VOLUME, RunScript, StubDaemon, StubReply, StubRequest, TarWriter, artifact_rows,
+    RUN_CONTAINER, RUN_PEAK_MEMORY_BYTES, RUN_VOLUME, RunScript, StubDaemon, StubReply, StubRequest, TarWriter,
+    artifact_rows,
 };
 use crate::{
     EnvVar, Environment, Mounts, Network, Outcome, Platform, Provides, Refusal, Resource, Run, RunResult,
@@ -83,25 +85,38 @@ impl Fixture {
         })
     }
 
-    /// Run `run` against a stub serving `replies`, and return the answer and
-    /// the requests the stub read.
+    /// Run `run` under `allotment` against a stub serving `replies`, and
+    /// return the answer and the requests the stub read.
     fn execute(
         &self,
         run: &Run,
-        deadline: Duration,
+        allotment: &Allotment,
         replies: Vec<StubReply>,
     ) -> Result<(RunResult, Vec<StubRequest>), Box<dyn Error>> {
+        let (ran, requests) = self.observe(run, allotment, replies)?;
+        Ok((ran.result, requests))
+    }
+
+    /// [`Fixture::execute`], keeping what the runner observed beside the
+    /// answer.
+    fn observe(
+        &self,
+        run: &Run,
+        allotment: &Allotment,
+        replies: Vec<StubReply>,
+    ) -> Result<(Ran, Vec<StubRequest>), Box<dyn Error>> {
         let stub = StubDaemon::bind()?;
         let runner = Runner {
             engine: Engine::new(Endpoint::from_config(&stub.config())?),
             artifacts: self.store.clone(),
-            allotment: Allotment { deadline, memory_bytes: 1 << 30, pids: 64, output: Limits::new(1_000, 1 << 30)? },
+            pids: PIDS,
+            output: Limits::new(1_000, 1 << 30)?,
         };
         thread::scope(|scope| {
             let served = scope.spawn(|| stub.serve(replies));
-            let answer = runner.answer(run);
+            let ran = runner.answer(run, allotment);
             let requests = served.join().map_err(|_| "the stub thread panicked")??;
-            Ok((answer, requests))
+            Ok((ran, requests))
         })
     }
 
@@ -170,7 +185,17 @@ fn script<'a>(fixture: &'a str, output: &'a [u8]) -> RunScript<'a> {
     RunScript { environment: fixture, logs: LOGS, exit_code: 0, output }
 }
 
-const SECONDS: Duration = Duration::from_secs(10);
+/// Every fixture run's fixed pids limit.
+const PIDS: u32 = 64;
+
+/// Two cores, 1 GiB, and `deadline`.
+fn allotment(deadline: Duration) -> Result<Allotment, Box<dyn Error>> {
+    Ok(Allotment { cpus: CpuSet::parse("2-3")?, memory_bytes: 1 << 30, deadline })
+}
+
+fn seconds() -> Result<Allotment, Box<dyn Error>> {
+    allotment(Duration::from_secs(10))
+}
 
 #[test]
 fn a_run_resolves_creates_writes_starts_waits_reads_logs_and_output_then_removes() -> TestResult {
@@ -183,10 +208,10 @@ fn a_run_resolves_creates_writes_starts_waits_reads_logs_and_output_then_removes
     let output = built_work();
     let hex = fixture.hex();
 
-    let (answer, requests) =
-        fixture.execute(&fixture.run("tool", "target")?, SECONDS, script(&hex, &output).replies())?;
+    let (ran, requests) =
+        fixture.observe(&fixture.run("tool", "target")?, &seconds()?, script(&hex, &output).replies())?;
 
-    let outcome = outcome(answer)?;
+    let outcome = outcome(ran.result)?;
     assert_eq!(
         lines(&requests),
         [
@@ -196,6 +221,7 @@ fn a_run_resolves_creates_writes_starts_waits_reads_logs_and_output_then_removes
             "POST /v1.44/containers/create".to_owned(),
             format!("PUT /v1.44/containers/{RUN_CONTAINER}/archive?path=/work"),
             format!("POST /v1.44/containers/{RUN_CONTAINER}/start"),
+            format!("GET /v1.44/containers/{RUN_CONTAINER}/stats?stream=true"),
             format!("POST /v1.44/containers/{RUN_CONTAINER}/wait"),
             format!("GET /v1.44/containers/{RUN_CONTAINER}/json"),
             format!("GET /v1.44/containers/{RUN_CONTAINER}/logs?stdout=1&stderr=1"),
@@ -216,6 +242,8 @@ fn a_run_resolves_creates_writes_starts_waits_reads_logs_and_output_then_removes
     let reader = fixture.store.batch()?;
     assert!(reader.blob_reader(&step.stderr)?.is_some(), "the stderr blob is committed");
     assert!(reader.get::<Tree>(&outcome.tree.digest())?.is_some(), "the output tree is committed");
+    assert_eq!(ran.observed.peak_memory_bytes, Some(RUN_PEAK_MEMORY_BYTES), "the step's sampled peak is observed");
+    assert!(ran.observed.wall.is_some(), "the run's wall time is observed");
     Ok(())
 }
 
@@ -230,7 +258,7 @@ fn a_transport_failure_mid_run_still_removes_everything_and_answers_failed_namin
     replies.truncate(5);
     replies.extend([StubReply::hang_up(), StubReply::with_length(204, ""), StubReply::with_length(204, "")]);
 
-    let (answer, requests) = fixture.execute(&fixture.run("tool", "target")?, SECONDS, replies)?;
+    let (answer, requests) = fixture.execute(&fixture.run("tool", "target")?, &seconds()?, replies)?;
 
     let detail = detail(&answer)?;
     assert!(detail.starts_with(&format!("starting container {RUN_CONTAINER}:")), "{detail}");
@@ -253,7 +281,7 @@ fn a_step_past_the_deadline_is_killed_and_answers_exhausted_time() -> TestResult
     let fixture = Fixture::new(Vec::new())?;
     let hex = fixture.hex();
     let mut replies = script(&hex, &[]).replies();
-    replies.truncate(6);
+    replies.truncate(7);
     replies.extend([
         StubReply::hold(),
         StubReply::with_length(204, ""),
@@ -261,11 +289,12 @@ fn a_step_past_the_deadline_is_killed_and_answers_exhausted_time() -> TestResult
         StubReply::with_length(204, ""),
     ]);
 
-    let (answer, requests) = fixture.execute(&fixture.run("tool", "target")?, Duration::from_millis(300), replies)?;
+    let (answer, requests) =
+        fixture.execute(&fixture.run("tool", "target")?, &allotment(Duration::from_millis(300))?, replies)?;
 
     assert_eq!(answer, RunResult::Exhausted(Resource::Time));
     assert_eq!(
-        lines(&requests[6..]),
+        lines(&requests[7..]),
         [
             format!("POST /v1.44/containers/{RUN_CONTAINER}/wait"),
             format!("POST /v1.44/containers/{RUN_CONTAINER}/kill"),
@@ -283,14 +312,14 @@ fn an_oom_killed_step_answers_exhausted_memory() -> TestResult {
     let fixture = Fixture::new(Vec::new())?;
     let hex = fixture.hex();
     let mut replies = script(&hex, &[]).replies();
-    replies.truncate(7);
+    replies.truncate(8);
     replies.extend([
         StubReply::with_length(200, r#"{"State":{"ExitCode":137,"OOMKilled":true}}"#),
         StubReply::with_length(204, ""),
         StubReply::with_length(204, ""),
     ]);
 
-    let (answer, _) = fixture.execute(&fixture.run("tool", "target")?, SECONDS, replies)?;
+    let (answer, _) = fixture.execute(&fixture.run("tool", "target")?, &seconds()?, replies)?;
 
     assert_eq!(answer, RunResult::Exhausted(Resource::Memory));
     Ok(())
@@ -306,7 +335,7 @@ fn an_image_labelled_for_another_environment_is_refused_before_anything_is_creat
         StubReply::with_length(200, r#"{"Config":{"Labels":{"aether.workspace.environment":"00"}}}"#),
     ];
 
-    let (answer, requests) = fixture.execute(&fixture.run("tool", "target")?, SECONDS, replies)?;
+    let (answer, requests) = fixture.execute(&fixture.run("tool", "target")?, &seconds()?, replies)?;
 
     assert_eq!(answer, RunResult::Refused(Refusal::EnvironmentUnavailable));
     assert_eq!(requests.len(), 2, "{:?}", lines(&requests));
@@ -324,8 +353,8 @@ fn a_toolchain_file_asking_for_more_than_the_environment_provides_is_refused_wit
     let refused = Fixture::new(vec![("rust-toolchain.toml", wants)])?;
     let accepted = Fixture::new(vec![("rust-toolchain.toml", fits)])?;
 
-    let (answer, requests) = refused.execute(&refused.run("tool", "target")?, SECONDS, Vec::new())?;
-    let (neighbour, _) = accepted.execute(&accepted.run("tool", "target")?, SECONDS, Vec::new())?;
+    let (answer, requests) = refused.execute(&refused.run("tool", "target")?, &seconds()?, Vec::new())?;
+    let (neighbour, _) = accepted.execute(&accepted.run("tool", "target")?, &seconds()?, Vec::new())?;
 
     let provided = RustToolchain::new("1.97.1", vec!["clippy".to_owned()], Vec::new())?;
     let tree_wants = RustToolchain::new("1.97.1", vec!["clippy".to_owned(), "rustfmt".to_owned()], Vec::new())?;
@@ -344,8 +373,8 @@ fn a_tool_that_is_not_an_executable_in_the_root_is_unknown() -> TestResult {
     // plain file would run, or that trusts the table without walking the root.
     let fixture = Fixture::new(Vec::new())?;
 
-    let (plain, _) = fixture.execute(&fixture.run("text", "target")?, SECONDS, Vec::new())?;
-    let (absent, _) = fixture.execute(&fixture.run("cargo", "target")?, SECONDS, Vec::new())?;
+    let (plain, _) = fixture.execute(&fixture.run("text", "target")?, &seconds()?, Vec::new())?;
+    let (absent, _) = fixture.execute(&fixture.run("cargo", "target")?, &seconds()?, Vec::new())?;
 
     assert_eq!(plain, RunResult::Refused(Refusal::UnknownTool(ToolName::new("text")?)));
     assert_eq!(absent, RunResult::Refused(Refusal::UnknownTool(ToolName::new("cargo")?)));
@@ -360,7 +389,7 @@ fn an_environment_the_journal_lacks_is_input_missing() -> TestResult {
     let absent = Digest::from_bytes([9; 32]);
     let run = Run { environment: Ref::from_digest(absent), ..fixture.run("tool", "target")? };
 
-    let (answer, requests) = fixture.execute(&run, SECONDS, Vec::new())?;
+    let (answer, requests) = fixture.execute(&run, &seconds()?, Vec::new())?;
 
     assert_eq!(answer, RunResult::Refused(Refusal::InputMissing(absent)));
     assert!(requests.is_empty());
@@ -378,12 +407,12 @@ fn an_output_holding_a_fifo_answers_failed_naming_it_and_commits_nothing() -> Te
     let rows = fixture.rows()?;
 
     let (answer, requests) =
-        fixture.execute(&fixture.run("tool", "target")?, SECONDS, script(&hex, &output).replies())?;
+        fixture.execute(&fixture.run("tool", "target")?, &seconds()?, script(&hex, &output).replies())?;
 
     let detail = detail(&answer)?;
     assert!(detail.contains("work/pipe"), "{detail}");
     assert_eq!(fixture.rows()?, rows);
-    assert_eq!(requests.len(), 14, "cleanup still ran: {:?}", lines(&requests));
+    assert_eq!(requests.len(), 15, "cleanup still ran: {:?}", lines(&requests));
     Ok(())
 }
 
@@ -404,7 +433,7 @@ fn a_nested_scratch_directory_is_absent_from_the_output_tree() -> TestResult {
         .finish();
 
     let (answer, _) =
-        fixture.execute(&fixture.run("tool", "crates/app/target")?, SECONDS, script(&hex, &output).replies())?;
+        fixture.execute(&fixture.run("tool", "crates/app/target")?, &seconds()?, script(&hex, &output).replies())?;
 
     let app = tree_of(vec![("src", Node::File(Ref::of_bytes(b"s\n")))])?;
     let crates =
@@ -424,9 +453,9 @@ fn the_same_run_twice_answers_byte_equal_results_and_adds_no_rows() -> TestResul
     let output = built_work();
     let run = fixture.run("tool", "target")?;
 
-    let (first, _) = fixture.execute(&run, SECONDS, script(&hex, &output).replies())?;
+    let (first, _) = fixture.execute(&run, &seconds()?, script(&hex, &output).replies())?;
     let rows = fixture.rows()?;
-    let (second, _) = fixture.execute(&run, SECONDS, script(&hex, &output).replies())?;
+    let (second, _) = fixture.execute(&run, &seconds()?, script(&hex, &output).replies())?;
 
     assert!(matches!(first, RunResult::Ok(_)), "{first:?}");
     assert_eq!(encode_to_vec(&first)?, encode_to_vec(&second)?);
@@ -450,7 +479,7 @@ fn a_step_with_stdin_attaches_before_start_and_streams_the_whole_blob() -> TestR
     let mut replies = script(&hex, &output).replies();
     replies.insert(5, StubReply::upgrade());
 
-    let (answer, requests) = fixture.execute(&run, SECONDS, replies)?;
+    let (answer, requests) = fixture.execute(&run, &seconds()?, replies)?;
 
     outcome(answer)?;
     assert_eq!(
@@ -470,9 +499,11 @@ fn a_step_with_stdin_attaches_before_start_and_streams_the_whole_blob() -> TestR
 #[test]
 fn the_step_container_carries_the_sandbox_pins_with_the_environment_overlaid_in_order() -> TestResult {
     // Catches a dropped pin (a writable root, the network on, swap beyond the
-    // memory limit, capabilities kept, no tmpfs over scratch) and an overlay
-    // in the wrong order: the step's PATH must win over the environment's,
-    // and nothing may move SOURCE_DATE_EPOCH.
+    // memory limit, capabilities kept, no tmpfs over scratch, the container
+    // free to use every host core) and an overlay in the wrong order: the
+    // step's PATH must win over the environment's, and nothing may move
+    // SOURCE_DATE_EPOCH. The CPU, memory, and pids settings must come from
+    // the run's allotment and the fixed pids limit, not a constant.
     let fixture = Fixture::new(Vec::new())?;
     let hex = fixture.hex();
     let output = built_work();
@@ -481,7 +512,7 @@ fn the_step_container_carries_the_sandbox_pins_with_the_environment_overlaid_in_
     steps[0].env = vec![EnvVar::new("PATH", "/opt/bin")?, EnvVar::new("SOURCE_DATE_EPOCH", "1")?];
     run.steps = Steps::new(steps)?;
 
-    let (_, requests) = fixture.execute(&run, SECONDS, script(&hex, &output).replies())?;
+    let (_, requests) = fixture.execute(&run, &seconds()?, script(&hex, &output).replies())?;
 
     let spec: serde_json::Value = serde_json::from_slice(&requests[3].body)?;
     let host = &spec["HostConfig"];
@@ -490,8 +521,33 @@ fn the_step_container_carries_the_sandbox_pins_with_the_environment_overlaid_in_
     assert_eq!((&spec["WorkingDir"], &spec["User"]), (&"/work".into(), &"0:0".into()));
     assert_eq!(host["ReadonlyRootfs"], true);
     assert_eq!(host["NetworkMode"], "none");
-    assert_eq!(host["Memory"], host["MemorySwap"]);
+    assert_eq!(host["CpusetCpus"], "2-3");
+    assert_eq!(host["NanoCpus"], 2_000_000_000u64);
+    assert_eq!((&host["Memory"], &host["MemorySwap"]), (&(1u64 << 30).into(), &(1u64 << 30).into()));
+    assert_eq!(host["PidsLimit"], PIDS);
     assert_eq!(host["CapDrop"], serde_json::json!(["ALL"]));
     assert_eq!(host["Tmpfs"], serde_json::json!({ "/work/target": "rw,exec" }));
+    Ok(())
+}
+
+#[test]
+fn a_stats_stream_that_hangs_up_leaves_the_answer_unchanged_and_the_peak_unobserved() -> TestResult {
+    // Catches an observation that changes a result: a stats connection the
+    // daemon drops must neither fail the run nor alter its outcome, and must
+    // not invent a peak.
+    let fixture = Fixture::new(Vec::new())?;
+    let hex = fixture.hex();
+    let output = built_work();
+    let run = fixture.run("tool", "target")?;
+    let mut dropped = script(&hex, &output).replies();
+    dropped[6] = StubReply::hang_up();
+
+    let (sampled, _) = fixture.observe(&run, &seconds()?, script(&hex, &output).replies())?;
+    let (unsampled, requests) = fixture.observe(&run, &seconds()?, dropped)?;
+
+    assert!(matches!(sampled.result, RunResult::Ok(_)), "{:?}", sampled.result);
+    assert_eq!(encode_to_vec(&unsampled.result)?, encode_to_vec(&sampled.result)?);
+    assert_eq!(unsampled.observed.peak_memory_bytes, None);
+    assert_eq!(requests.len(), 15, "the run went on past the dropped stats call: {:?}", lines(&requests));
     Ok(())
 }

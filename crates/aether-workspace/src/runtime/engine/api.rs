@@ -3,8 +3,8 @@
 //! Import pulls and inspects an image, and creates, exports, and removes a
 //! container. Run reads the daemon's platform, imports and inspects the
 //! environment image, creates and removes volumes, and drives each step's
-//! container: archive put and get, a hijacked stdin attach, start, wait,
-//! kill, inspect, and logs.
+//! container: archive put and get, a hijacked stdin attach, start, a stats
+//! stream, wait, kill, inspect, and logs.
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use super::http::{Body, ChunkedWriter, Method, Request, RequestBody, Response};
 use super::progress;
+use super::stats::StatsStream;
 use super::transport::Transport;
 use super::{Engine, EngineError, UploadError};
 use crate::ImageRef;
@@ -276,6 +277,16 @@ impl Engine {
     pub fn start(&self, container: &ContainerId) -> Result<(), EngineError> {
         let target = format!("/{API_VERSION}/containers/{container}/start");
         self.call(Method::Post, &target, RequestBody::Empty)?.success().map(drop)
+    }
+
+    /// Open the container's stats stream, reading the response head here so
+    /// the connection is made before the caller's next request.
+    pub fn stats(&self, container: &ContainerId) -> Result<StatsStream, EngineError> {
+        let target = format!("/{API_VERSION}/containers/{container}/stats?stream=true");
+        let mut transport = self.connect()?;
+        let closer = transport.closer()?;
+        Request { method: Method::Get, target: &target, body: RequestBody::Empty }.write_to(&mut transport)?;
+        Ok(StatsStream::new(Response::read(transport)?.success()?, closer))
     }
 
     /// Wait for the container to stop, at most `timeout`.

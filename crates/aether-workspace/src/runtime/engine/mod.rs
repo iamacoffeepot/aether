@@ -15,6 +15,7 @@ mod api;
 mod http;
 pub mod logs;
 mod progress;
+pub mod stats;
 mod tls;
 mod transport;
 

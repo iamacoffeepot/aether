@@ -54,8 +54,11 @@ pub struct BloomeryCli {
     /// shadows `AETHER_WORKSPACE_ENDPOINT`, the Docker Engine API endpoint
     /// (`unix:///var/run/docker.sock` when absent; `DOCKER_HOST` is never
     /// read), and `--workspace-tls-{ca,cert,key}-file` name the PEM files a
-    /// `tcp://` endpoint's mutual TLS needs, beside the import bounds, the run
-    /// allotment, and the in-flight bound.
+    /// `tcp://` endpoint's mutual TLS needs, beside the import bounds and the
+    /// import in-flight bound, the run budget knobs (ADR-0237 decision 9:
+    /// `--workspace-cpuset`, `--workspace-budget-memory-bytes`,
+    /// `--workspace-run-cores`, the default allotment, the maximum deadline,
+    /// and the headroom), and the fixed pids and output limits.
     #[command(flatten)]
     pub workspace: WorkspaceOverlay,
 
