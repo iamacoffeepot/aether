@@ -20,8 +20,9 @@ use crate::artifact::{ARTIFACTS_DDL, CITATIONS_DDL, split_artifact};
 use crate::batch::Batch;
 use crate::blobs::{BlobDir, create_synced};
 use crate::clock::{Clock, SystemClock};
-use crate::closure::{Closure, ClosureReader, plan_closure, read_each};
+use crate::closure::{Closure, plan_closure, read_each};
 use crate::draft::Draft;
+use crate::worker::WorkerReader;
 use crate::{DecodeError, Digest, Entry, Seq};
 
 /// Kind prefix and payload of one stored artifact, or `None` when absent.
@@ -37,7 +38,7 @@ const LOCK_FILE: &str = "lock";
 /// same root, such as an [`crate::ArtifactBatch`] commit racing an `append`,
 /// before it fails `SQLITE_BUSY`. Both writers insert rows only (blob bytes
 /// land before their transaction begins), so a wait this long means a writer
-/// is wedged. A [`ClosureReader`] connection waits the same bound.
+/// is wedged. A [`WorkerReader`] connection waits the same bound.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ENTRIES_DDL: &str = "
@@ -270,12 +271,12 @@ impl Journal {
         plan_closure(&self.conn, *root, limit)?.read_with(|members| read_each(&self.blobs, &members, check_in))
     }
 
-    /// A [`ClosureReader`] over this root, for a worker thread to walk
-    /// closures on its own read-only connection. It shares the root's lock,
-    /// so the root stays locked while the reader lives, even after this
-    /// journal drops.
-    pub(crate) fn closure_reader(&self) -> ClosureReader {
-        ClosureReader::new(self.root.join(DATABASE_FILE), self.blobs.clone(), Arc::clone(&self.lock))
+    /// A [`WorkerReader`] over this root, for a worker thread to read
+    /// closures and single artifacts on its own read-only connection. It
+    /// shares the root's lock, so the root stays locked while the reader
+    /// lives, even after this journal drops.
+    pub(crate) fn worker_reader(&self) -> WorkerReader {
+        WorkerReader::new(self.root.join(DATABASE_FILE), self.blobs.clone(), Arc::clone(&self.lock))
     }
 
     /// Entries with `seq > since`, ascending, at most `limit`.

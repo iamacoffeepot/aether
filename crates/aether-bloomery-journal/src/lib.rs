@@ -46,9 +46,10 @@
 //! write that does. It also answers [`aether_bloomery_kinds::WatchHead`], a
 //! bounded long poll that is answered once a committed write moves the head
 //! past `after`, and [`aether_bloomery_kinds::ReadClosure`], a read of an
-//! artifact's transitive closure under a validated byte limit. The closure
-//! walk runs off the actor's thread on its task queue (ADR-0093), so a large
-//! closure never holds up the actor's other requests.
+//! artifact's transitive closure under a validated byte limit.
+//! [`aether_bloomery_kinds::ReadArtifact`] and `ReadClosure` both run off the
+//! actor's thread, each on its own task queue (ADR-0093), so a large artifact
+//! or closure never holds up the actor's other requests.
 //!
 //! A blob stored for the first time records its citation edges in the
 //! `citations` table inside the same append transaction, so the edges are
@@ -68,6 +69,7 @@ mod journal;
 mod reader;
 mod store;
 mod watch;
+mod worker;
 
 pub use actor::{JournalActor, MAX_HEAD_WATCHERS, MAX_READ_EVENTS};
 pub use aether_bloomery_kinds::{

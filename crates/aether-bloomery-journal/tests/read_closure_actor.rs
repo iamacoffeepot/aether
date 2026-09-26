@@ -1,14 +1,18 @@
 //! A named journal owner answers closure reads with each of its replies.
+//! Both off-dispatcher reads, `ReadClosure` and `ReadArtifact`, keep other journal mail answered
+//! while one is blocked.
 
 mod actor_support;
 
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use aether_bloomery_journal::{Batch, Clock, Digest, Journal, JournalActor, OpaqueBytes, Ref, Seq};
-use aether_bloomery_kinds::{ClosureLimit, ReadArtifact, ReadClosure, ReadClosureResult};
+use aether_bloomery_kinds::{
+    ClosureLimit, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, ReadHead, ReadHeadResult,
+};
 use aether_data::Kind;
 use aether_substrate::Subname;
 use aether_substrate::testing::{bare_substrate, boot_test_chassis_with};
@@ -110,23 +114,17 @@ impl Drop for ReleaseFifo<'_> {
     }
 }
 
+/// Replace the blob file stored under `digest` with a FIFO, so a read of it blocks in `File::open`
+/// until a writer opens the FIFO, and return the FIFO's path.
 #[cfg(unix)]
-#[test]
-fn a_blocked_closure_read_does_not_delay_a_read_artifact() -> Result<(), Box<dyn Error>> {
-    // Catches a closure walk still running on the journal's dispatcher thread (the `ReadArtifact`
-    // behind it is not answered while the walk blocks), and a closure reply parked across the
-    // worker and then dropped (the walk's own caller never hears back once the walk finishes).
+fn replace_blob_with_fifo(journal_root: &Path, digest: Digest) -> Result<PathBuf, Box<dyn Error>> {
     use std::ffi::CString;
-    use std::fs::{self, OpenOptions};
+    use std::fs;
     use std::io;
     use std::os::unix::ffi::OsStrExt;
 
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("journal");
-    let (members, _) = seed(&path)?;
-    let root = members[0].digest;
-    let leaf_hex = members[1].digest.to_string();
-    let fifo = path.join("blobs").join(&leaf_hex[..2]).join(&leaf_hex);
+    let hex = digest.to_string();
+    let fifo = journal_root.join("blobs").join(&hex[..2]).join(&hex);
     fs::remove_file(&fifo)?;
     let fifo_name = CString::new(fifo.as_os_str().as_bytes())?;
     // SAFETY: `fifo_name` is a valid NUL-terminated path that outlives the call, and `mkfifo` only
@@ -135,6 +133,22 @@ fn a_blocked_closure_read_does_not_delay_a_read_artifact() -> Result<(), Box<dyn
     if status != 0 {
         return Err(io::Error::last_os_error().into());
     }
+    Ok(fifo)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_blocked_closure_read_does_not_delay_a_read_artifact() -> Result<(), Box<dyn Error>> {
+    // Catches a closure walk still running on the journal's dispatcher thread (the `ReadArtifact`
+    // behind it is not answered while the walk blocks), and a closure reply parked across the
+    // worker and then dropped (the walk's own caller never hears back once the walk finishes).
+    use std::fs::OpenOptions;
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("journal");
+    let (members, _) = seed(&path)?;
+    let root = members[0].digest;
+    let fifo = replace_blob_with_fifo(&path, members[1].digest)?;
 
     let (registry, mailer) = bare_substrate();
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
@@ -166,6 +180,50 @@ fn a_blocked_closure_read_does_not_delay_a_read_artifact() -> Result<(), Box<dyn
     drop(OpenOptions::new().write(true).open(&fifo)?);
     let arrival = probe_rx.recv_timeout(Duration::from_secs(2)).expect("closure reply within two seconds");
     assert_eq!(arrival, (1, Probed::NotFound));
+    drop(release);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_blocked_read_artifact_does_not_delay_other_journal_mail() -> Result<(), Box<dyn Error>> {
+    // Catches an artifact read still running on the journal's dispatcher thread (the `ReadHead`
+    // behind it is not answered while the read blocks), and an artifact reply parked across the
+    // worker and then dropped (the read's own caller never hears back once the read finishes).
+    use std::fs::OpenOptions;
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("journal");
+    let (members, _) = seed(&path)?;
+    let root = members[0].digest;
+    let fifo = replace_blob_with_fifo(&path, root)?;
+
+    let (registry, mailer) = bare_substrate();
+    let (reader, rx) = caller(&registry, "test.journal_actor.blocked_artifact_reader");
+    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let journal = chassis
+        .spawn_actor::<JournalActor>(
+            Subname::Named("blocked_artifact"),
+            (),
+            Journal::open(&path).expect("open the journal root"),
+        )
+        .finish()
+        .expect("journal birth");
+
+    // Declared after the chassis so that, unwinding, it releases a blocked read before teardown.
+    let release = ReleaseFifo(&fifo);
+
+    // The read blocks opening the root's FIFO until a writer opens it.
+    request(&registry, journal, reader, 1, &ReadArtifact { digest: root });
+    request(&registry, journal, reader, 2, &ReadHead);
+    assert!(matches!(reply::<ReadHeadResult>(&rx, 2), ReadHeadResult::Ok { .. }));
+
+    // A blocking open waits for the read's reader; closing at once fails the root's length check.
+    drop(OpenOptions::new().write(true).open(&fifo)?);
+    assert!(matches!(
+        reply::<ReadArtifactResult>(&rx, 1),
+        ReadArtifactResult::Err { digest, .. } if digest == root
+    ));
     drop(release);
     Ok(())
 }
