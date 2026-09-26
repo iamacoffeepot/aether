@@ -14,12 +14,13 @@
 - **Amended:** 2026-09-24 — a guest host's receive surface is a declaration the substrate reads: a native actor that runs a guest implements `GuestHost`, and `NativeCtx::sync_guest` makes its accept set and cost rows match that declaration, so no actor reads its own position and no other actor writes a guest host's accept set. `NativeCtx::path`, bounded on `GuestHost`, reads a guest host's own canonical path as text only (issue 6350).
 - **Amended:** 2026-09-24 — §3: an `ActorPath` that arrived in a payload is proven through the ctx verb `resolve_path`: the host resolves the address and the published-route read proves it at once; a refusal names the path or its canonical path, never an id (#6324).
 - **Amended:** 2026-09-25 — §3: a guest proves an `ActorPath` that arrived in its config or mail through `WasmCtx::resolve_path`, the native verb's twin with the same resolution, proof, and refusals; its first consumer is the environment bootstrap script (#6786). Any loaded component can now reach any `Live` actor whose path it can spell, and its sends through the answer are unchecked by kind.
-- **Amended:** 2026-09-26 — §3: a guest's doors are settled against the native ones (#6796). No ctx proves an actor's parent outside a guest's inline cluster, and a loaded component's lineage parent is the component host, not its loader; a guest proves a component it loads from the load reply's sender; a guest's detached sibling spawn yields no reference; a guest has no `resolve_live`, because no guest API takes a `MailboxId`; and the `Address<R>` door lands guest-first, as `WasmCtx::resolve::<R>` for the Bloomery bootstrap, with the native twin waiting for a native caller ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D8).
+- **Amended:** 2026-09-26 — §3: a guest's doors are settled against the native ones (#6796). No ctx proves an actor's parent outside a guest's inline cluster, and a loaded component's lineage parent is the component host, not its loader; a guest proves a component it loads from the load reply's sender; a guest's detached sibling spawn yields no reference; a guest has no `resolve_live`, because no guest API takes a `MailboxId`; and a guest resolves a typed link, a `ProtocolPath<P>`, through `WasmCtx::resolve`, whose consumer is the Bloomery bootstrap ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D8).
 
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
 stays how a position is *derived*; a derived position stops being something
 a caller can *send to*), [ADR-0166](0166-typed-actor-lineage-and-abbreviated-external-addresses.md)
-(its string grammar becomes the text form of one typed value),
+(its string grammar becomes `ActorPath`, the one value that describes an
+actor across a boundary),
 [ADR-0075](0075-actor-typed-sender-api-and-chassis-cap-marker-split.md)
 (`HandlesKind<K>` gains a stored, kind-typed reference), and
 [ADR-0133](0133-reply-based-stream-handles-for-the-http-server-data-phase.md) (its
@@ -125,14 +126,50 @@ same id is a well-formed position that may hold a different actor or nothing.
 So the proven types implement no `Serialize`, `Deserialize`, `WireEncode`,
 `WireDecode`, or `Schema`. They cannot be a kind field, a config field, or
 saved state; they exist only in the memory of the context that proved them.
-`Address<R>` is the one form that crosses a boundary, because it claims
-nothing, and the receiver proves it again on its own side.
+An `ActorPath` is the one form that crosses a boundary, because it carries
+names only and claims nothing, and the receiver proves it again on its own
+side. A typed link, `ProtocolPath<P>`
+([ADR-0231](0231-protocol-typed-references-and-reply-checks.md) §3), is an
+`ActorPath` on the wire.
+
+**No serialized type carries a `MailboxId`.** A description that crosses a
+boundary (a kind field, a config field, saved or dehydrated state, a journal
+record, an MCP or RPC payload, a trace or log export) names an actor by its
+path. A position stays inside the engine, where it is a registry key and a
+routing input; outside, nothing can tell a registered position from a
+computed one (Context). A caller-relative reference, such as a peer in the
+caller's own module, is rendered absolute before it leaves the actor: the
+ctx reads the actor's own canonical path and writes the peer's beneath it.
+Every actor therefore needs a ctx verb for its own path, and no self verb
+returns a `MailboxId` in its place. On main the only own-path read is
+`NativeCtx::path`, bounded on `GuestHost`; the general verb lands with its
+first consumer.
+
+An exception is narrow, named, and justified in the decision that makes it,
+never a general public API. An engine-internal ring, for example, may hold
+positions in memory as long as what it exports renders them as canonical
+paths.
+
+The serialized positions on main are debt under this rule. A follow-up
+removes them; this section records the rule and the list, not each fix.
+
+| Where | Serialized position |
+|---|---|
+| `crates/aether-kinds/src/trace.rs` | `TraceEvent`'s and `MailNodeWire`'s `sender` and `recipient` |
+| `crates/aether-kinds/src/diagnostics.rs` | `aether.mail.unresolved`'s `recipient_mailbox_id` |
+| `crates/aether-kinds/src/input.rs` | `WindowId`, declared as a `MailboxId` and rendered as the tagged `mbx-…` string |
+| `crates/aether-kinds/src/lib.rs` | `LogEntry.origin: Option<MailboxId>` |
+| `crates/aether-data/src/mail.rs` | the mail sender schema: `MailId.sender`, and `SourceAddr`'s `EngineMailbox` and `Component` |
+| `crates/aether-data/src/reference/address.rs` | `Address<R>`'s codec: `AddressForm::Beneath { parent }` and `AddressForm::Exact { id }` (section 5 deletes the type) |
+| `crates/aether-window/src/kinds.rs` | `SubscribeWindow`, `UnsubscribeWindow`, and `UnsubscribeAllWindows` `.mailbox` |
+| `crates/aether-http/src/kinds.rs` | `RegisterRoute`, `UnregisterRoute`, and `UnregisterRoutesAll` `.mailbox` |
+| `crates/aether-data/src/schema.rs` | `MailboxDescriptor.id`, the mailbox table the engine ships to the hub |
 
 ### 2. The types
 
 ```rust
 pub struct Namespace(&'static str);
-pub enum Address<R> { Scoped { key }, Beneath { parent, key }, Exact { id } }
+pub struct ActorPath(Box<str>);
 pub struct ActorRef<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 pub struct ErasedActorRef { id: MailboxId }
 ```
@@ -140,21 +177,23 @@ pub struct ErasedActorRef { id: MailboxId }
 | Type | Claims | Made by | Can |
 |---|---|---|---|
 | `Namespace` | the grammar is valid | `const fn new`, a compile error when invalid | compare, `Debug`, fold to an `ActorId` |
-| `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | build an `Address` |
-| `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()` | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
-| `ActorPath` | the text is a well-formed ADR-0166 address, canonical or short (with `:name` holes); nothing about existence or placement | its fallible constructor and fallible decode | be carried in a kind (`NamedMail.recipient`) and name a wire `Call`'s recipient, compared, displayed; become a position only inside the engine, through the host's `resolve_address` |
-| `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address`, name its canonical path |
+| `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | be the key segment of a path |
+| `ActorPath` | the text is a well-formed ADR-0166 address, canonical or short (with `:name` holes); nothing about existence or placement | its fallible constructor and fallible decode | be stored, mailed, configured, persisted: carried in a kind (`NamedMail.recipient`), name a wire `Call`'s recipient, compared, displayed; become a position only inside the engine, through the host's `resolve_address`. The only description of an actor with a wire format; it carries names only. |
+| `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, name its canonical path |
 | `ErasedActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload; an `ActorPath` proven through `resolve_path`, on a native or a guest ctx | reply, monitor, be the target of an untyped send — inheriting, detached, or tracked, unchecked against a kind because the set it keys may be heterogeneous — be held in a capability's own table and keyed in an ordered set, name its canonical path |
-| `MailboxId` | nothing; it is a position | the fold, decode | be a registry key, be printed |
+| `MailboxId` | nothing; it is a position | the fold, decode | be a registry key inside the engine, be printed; never be serialized (section 1) |
 
 `ActorRef::id()` is free and total. There is no function from a `MailboxId`
 to anything sendable outside the registry.
 
-`ActorPath` is the text form of ADR-0166's grammar, and `Address<R>` is its
-typed description. Which `Address<R>` constructor exists is decided by `R`'s placement facts (`Root`, `ChildOf<P>`,
-`Singleton`, `Instanced`): a child address needs a proven parent. A loaded
-component's key is its load name, a validated `LoadName`; a window's is its
-window id. There is one addressing system and this is its value type.
+`ActorPath` is the text form of ADR-0166's grammar and the only description
+of an actor. A typed link is a `ProtocolPath<P>` (ADR-0231 §3): an
+`ActorPath` written from an actor type's namespace and placement facts
+(`Root`, `ChildOf<P>`, `Singleton`, `Instanced`), a child's beneath its
+parent's, with a compile-time claim about the protocol the actor covers. A
+loaded component's key is its load name, a validated `LoadName`; a window's
+is the name its spec gives it. There is one addressing system and
+`ActorPath` is its value type.
 
 A capability keeps the envelope sender as an `ErasedActorRef`.
 
@@ -170,11 +209,11 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | A declared dependency of the actor | the `#[actor]` dependency list (`depends(A, B, …)`) is emitted to the wasm custom section; each entry folds to its position through its strategy — `One` at the root, `Embedded` beneath the placement's parent — and the host requires a `Live` route there before `init` (native: at chassis build, and at spawn for a spawned child). A missing dependency refuses the load and names it. | none for `One` — at depth 1 the fold is a `const`; one registry read per `Embedded` entry |
 | Self, parent, inline cluster members | structural; the host supplies them at `init` and the SDK mints them. On a guest the parent is the inline one, inside the module (`WasmCtx::parent`). No ctx has a verb that proves an actor's parent across a module boundary or on a native actor; a native child reaches its parent by declaring it, when the parent is a root singleton | none |
 | A child this actor spawned or loaded | A native staged spawn's completion, `TaskDone<SpawnOutcome<C>, _>`, carries `ActorRef<C>` on its `Ok` arm, minted by the registry when the birth's finalizer runs after the owner has published the child's `Live` route. A loaded component's successful `LoadResult` is delivered from the loaded actor itself: the component host hands its owed reply to the trampoline it spawned, which replies in its own name, so the requester keeps the reply's stamped sender — `ctx.sender()` for an actor, the reply event's sender for an embedder. `LoadResult::Ok` carries the canonical `ActorPath` and no position. A guest's inline spawn returns the typed `InlineChild<C>` handle; a parent keeping children of several types keeps the erased form instead — `InlineChild::erase`, or `spawn_inline_child_by_tag`'s `ErasedActorRef` — a proof without the type. A guest that loads a component takes the proof from the load reply's sender the same way, through `WasmCtx::sender`. A guest's detached sibling spawn (`WasmCtx::spawn_child`, ADR-0097) yields no reference, because the birth completes after the call returns. Two embedder cases share the row: an embedder spawn's `finish` returns `ActorRef<A>` once its commit has published the route, and a chassis-composed actor's reference is recorded at boot, when the route goes `Live`, and read back by type through the chassis handle's `actor_ref::<R>()` | none for a spawn or a load; one published-route read when an embedder types a load reply's sender |
-| A child beneath a reference an embedder already holds | the embedder builds the child's `Address<C>` from the parent's proof and the child's key — `child_address::<P, C>(parent, key)`, bounded `C: ChildOf<P> + Instanced` — and the chassis handle's `child::<P, C>` folds it with `C`'s resolver beneath the parent's position and proves the route with the published-route read `resolve_live` takes: only `Live` mints, and `Starting`, `Dropped`, and never-registered positions refuse with `ChildRefused`, which names the key and `C::NAMESPACE`, never a position. This is the first provider of the `Address<R>` form, fed by a held proof rather than a foreign address; its consumer is the substrate harness's `child`, which reaches a component's spawned child or a window capability's opened window without rendering an address | one published-route read per lookup |
+| A child beneath a reference an embedder already holds | the embedder hands the chassis handle's `child::<P, C>(parent, key)` the parent's proof and the child's key, bounded `C: ChildOf<P> + Instanced`; the door folds the key with `C`'s resolver beneath the parent's position and proves the route with the published-route read `resolve_live` takes: only `Live` mints, and `Starting`, `Dropped`, and never-registered positions refuse with `ChildRefused`, which names the key and `C::NAMESPACE`, never a position. The proof and the key are all it takes; no description type is involved. Its consumer is the substrate harness's `child`, which reaches a component's spawned child or a window capability's opened window without rendering a path | one published-route read per lookup |
 | The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value. A `MonitorNotice` is host-generated mail that carries one: the host stamps the departed actor, which `register_monitor` required to be `Live`, so the watcher's `ctx.sender()` is a reference to it. | one published-route read; no lock, no allocation |
-| A position that arrived in mail, config, saved state, or from another process | the ctx verb `resolve_live`, over the host's liveness read of the published route view: `Live` mints, `Dropped` and `Unknown` refuse by name, and `Starting` reads as unknown (section 1). Minted once, at receipt, in the handler that received the field — never at the send. The registry method behind it is crate-private, so the verb is the only spelling a capability has. Native only: a guest has no `resolve_live`, because no guest API takes a `MailboxId` (amendment 2026-09-26). | one published-route read per proof; no lock, no allocation |
+| A position that arrived in mail, config, saved state, or from another process | the ctx verb `resolve_live`, over the host's liveness read of the published route view: `Live` mints, `Dropped` and `Unknown` refuse by name, and `Starting` reads as unknown (section 1). Minted once, at receipt, in the handler that received the field — never at the send. The registry method behind it is crate-private, so the verb is the only spelling a capability has. Native only: a guest has no `resolve_live`, because no guest API takes a `MailboxId` (amendment 2026-09-26). Its inputs are the serialized positions section 1 lists as debt, and it leaves with the last of them | one published-route read per proof; no lock, no allocation |
 | An `ActorPath` that arrived in mail or config | the ctx verb `resolve_path`, on a native ctx (`NativeCtx`) and on a guest ctx (`WasmCtx`): `Unresolved` when the address names no `Starting` or `Live` route (a dropped route included), `NotLive` when its route is still `Starting` (or drops between the two reads). A guest's call crosses one host import, `resolve_path_p32`, and the host resolves and proves the path through the same crate-private path the native verb takes; the SDK mints the `ErasedActorRef` from the host's answer, as it mints the envelope sender. Native consumers are the component host's drop, replace, load-under, and describe receipts, and the trampoline's replacement dependency check; the guest consumer is the environment bootstrap script's `wire`, which proves the journal owner and the bundle driver from its config (#6786) | one address resolution plus one published-route read; for a guest, inside one host call |
-| An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands guest-first, as `WasmCtx::resolve::<R>`, whose consumer is the Bloomery bootstrap (ADR-0240 D8); the native twin, `NativeCtx::resolve::<R>`, lands with its first native caller (amendment 2026-09-26). The first site that would have held one — the editor shell's `RegionSpec.target`, issue #6306 — dropped the field instead, so the region announces itself and the shell keeps the envelope sender; the door stays unprovided. | — |
+| A typed link, `ProtocolPath<P>`, that arrived in mail, config, saved state, or from another process | the ctx verb `resolve`, on a native and a guest ctx (ADR-0231 §3): the name this decision reserves for its typed door. A `ProtocolPath<P>` is always canonical, because it is written from a type, so it never expands: it compiles to its position by the lineage fold, and one route-table lookup then checks that the route there carries that canonical name, that it is `Live`, and that its published contract rows cover `P`. It mints a `ProtocolRef<P>`, or refuses `NotLive` or `Uncovered`, naming the path and never a position. The native consumer is the Bloomery workspace's receipt of a `Run` or `Import` `source`; the guest consumer is the Bloomery bootstrap (ADR-0240 D7, D8). An untyped `ActorPath` stays untyped: it goes through `resolve_path` above and then ADR-0231 §4's cast | one fold plus one route-table lookup and a row comparison; for a guest, inside one host call |
 
 **Amendment (2026-09-23): two births the declared-dependency check did not
 reach.** The first row checked dependencies only at component load and
@@ -229,12 +268,11 @@ The consequences:
 - The proof lives only in the guest's memory. It is minted once, at
   `wire` or at receipt, and stored; it is never re-derived at a send.
 
-The `Address<R>` row stays unprovided.
-
 **Amendment (2026-09-26): which doors a guest has.** A guest proves
 references through the doors above, and four rows answer differently for
 it (#6796). Two must not exist for a guest, one waits for a production
-consumer, and the `Address<R>` door lands for the guest first.
+consumer, and the typed-link door, `resolve` over a `ProtocolPath<P>`, has
+a guest consumer.
 
 - **A module's own parent.** No ctx proves its actor's parent outside a
   guest's inline cluster. A native child whose parent is a root singleton
@@ -265,20 +303,22 @@ consumer, and the `Address<R>` door lands for the guest first.
   takes or returns one. A guest is told where to send by an `ActorPath`,
   proved through `resolve_path`, or by the envelope sender. No guest on main
   proves a position it received.
-- **`Address<R>`, guest first.** Neither ctx resolves a foreign
-  `Address<R>` yet. [ADR-0240](0240-several-bloomery-journal-units-per-engine.md)
-  D8 lands the door as the guest verb `WasmCtx::resolve::<R>`, whose
-  consumer is the Bloomery bootstrap: it folds the address with `R`'s
-  resolver, proves the route through the published-route read the
-  embedder's `child` already makes, and mints an `ActorRef<R>`.
-  `NativeCtx::resolve::<R>` lands with its first native caller, because a
-  door needs a named production consumer and no native code holds a
-  foreign `Address<R>`. A guest can resolve only a type it compiles, so a
-  kind-checked guest send to a native actor needs that actor's crate to
+- **A typed link.** A guest resolves a `ProtocolPath<P>` through
+  `WasmCtx::resolve`, the twin of the native verb, whose guest consumer is
+  the Bloomery bootstrap
+  ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D8): the
+  path compiles to its position by the lineage fold, one route-table
+  lookup checks the canonical name, `Live`, and the published rows against
+  `P`, and the SDK mints a `ProtocolRef<P>` from the host's answer. A guest
+  writes a `ProtocolPath<P>` only from an actor type it compiles, so a
+  kind-checked guest link to a native actor needs that actor's crate to
   export an always-on identity half (ADR-0122), as `aether-workspace`
   does for `WorkspaceCapability`. The journal owner and the bundle driver
-  gain theirs under the same decision (#6823), and the bootstrap's sends to them
-  then go through `send_to(ActorRef<R>, &K)`, checked by kind.
+  gain theirs under the same decision (#6823), and the bootstrap's sends to
+  them then go through `send_to(ProtocolRef<P>, &K)`, checked by kind.
+  No verb mints an `ActorRef<R>` from a description: a native actor holds
+  those from its doors above, and a link to an actor another actor names
+  is typed by the protocol the holder needs.
 
 An off-thread helper that only wakes its own actor — an accept loop, a socket
 reader, a timer — holds a `SelfWake<K>` from the ctx (`ctx.self_wake::<K>()`)
@@ -288,22 +328,28 @@ proof of, like the http reader choosing a live route member, holds an
 `ActorProbe` from `ctx.actor_probe()` beside its `SelfWake<K>`, and the probe
 grants no send, no lookup by name or position, and no registry.
 
-What arrived stays a position. The payload-borne door changes nothing about
-the wire: `SubscribeWindow.mailbox` is still a `MailboxId` and still decodes
-as one, because a proof cannot cross a boundary (section 1). The proof it
-yields lives only in the receiver's memory, from the moment of receipt until
-the row is dropped.
+What arrived stays what it was. A position in a payload, such as
+`SubscribeWindow.mailbox`, is section 1's debt: the payload-borne door
+proves it at receipt and changes nothing about the wire, because a proof
+cannot cross a boundary, and the rule removes the field rather than the
+door making it safe. The proof it yields lives only in the receiver's
+memory, from the moment of receipt until the row is dropped.
 
-The position and the proof have different owners. `Resolve` stays the single
-derivation of a position, fed by an `Address<R>` and never by text. The host
-is the single authority on whether that position is occupied, and it is the
-only thing that can turn one into a reference. Handing a reference to a peer
-means sending `reference.address()`; the peer's `resolve` is one synchronous
-host call and no mail. Persisted state stores an `Address` for the same
-reason, and this is enforced by the types having no codec rather than by
+The position and the proof have different owners. A position is derived
+only inside the engine: `Resolve` folds a declared dependency or a spawn
+from the actor's own type, and the host's `resolve_address` compiles a
+canonical path to its position by the same lineage fold, after filling a
+short path's holes from the generated root and child declarations. The
+host is the single authority on whether that position is occupied, and it
+is the only thing that can turn one into a reference. Handing a reference
+to a peer means sending a path, a `ProtocolPath<P>` written from the
+actor's type; the peer's `resolve` is one synchronous host call and no
+mail. Persisted state stores a path for the same reason, and so does state
+an actor dehydrates across `replace_component`: `on_rehydrate` resolves it
+again. This is enforced by the proven types having no codec rather than by
 convention.
 
-Strings exist in exactly one place: text crosses the MCP, RPC, and harness boundary as an `ActorPath`, validated on construction and on decode. A wire `Call` names its recipient by that path, beside the engine that hosts it, so a malformed path fails the frame decode and never reaches resolution, and no mailbox id crosses the wire as a recipient. Nothing outside the engine computes a position for a path: not aether-mcp, not a harness, and not the hub, which relays an engine-addressed `Call` to that engine's proxy with the path as written. The engine that hosts the recipient resolves the path when the `Call` arrives, through the host's `resolve_address`, the one place an `ActorPath` becomes a position, and proves the answer at once through the payload-borne door above. The proof does not leave the RPC server's handler: the server holds a deliver-only item, the same shape a bundle item takes, and delivering it is all it can do. A path that does not resolve to a `Live` actor is not present, whatever the reason: never registered, still starting, dropped, or a short path that is ambiguous or names no declared child. The call closes with `RpcError::NotPresent`, which names the path and carries the registry's diagnostic; nothing is parked or dropped, and the hub relays the refusal to the caller unchanged. A client holding an id an engine reported, from a trace tree or a window listing, asks that engine for the id's canonical path and sends by the path. A reply on the wire carries its kind and bytes and no address.
+Strings exist in exactly one place: text crosses the MCP, RPC, and harness boundary as an `ActorPath`, validated on construction and on decode. A wire `Call` names its recipient by that path, beside the engine that hosts it, so a malformed path fails the frame decode and never reaches resolution, and no mailbox id crosses the wire as a recipient. Nothing outside the engine computes a position for a path: not aether-mcp, not a harness, and not the hub, which relays an engine-addressed `Call` to that engine's proxy with the path as written. The engine that hosts the recipient resolves the path when the `Call` arrives, through the host's `resolve_address`, the one place an `ActorPath` becomes a position, and proves the answer at once through the payload-borne door above. The proof does not leave the RPC server's handler: the server holds a deliver-only item, the same shape a bundle item takes, and delivering it is all it can do. A path that does not resolve to a `Live` actor is not present, whatever the reason: never registered, still starting, dropped, or a short path that is ambiguous or names no declared child. The call closes with `RpcError::NotPresent`, which names the path and carries the registry's diagnostic; nothing is parked or dropped, and the hub relays the refusal to the caller unchanged. An id an engine still reports, in a trace tree or a window listing, is section 1's debt; until it goes, a client asks that engine for the id's canonical path and sends by the path. A reply on the wire carries its kind and bytes and no address.
 A mail bundle — the `NamedMail` list that `DispatchTraced` and `CaptureFrame`
 carry — is the same boundary inside a payload: the receiving capability proves
 every `ActorPath` recipient once, before any item moves, and a proven item can
@@ -320,8 +366,11 @@ fine in a log and useless as an address. The registry renders canonical
 names from the macro-emitted inventory records, which never pass through the
 type.
 
-`Namespace`, `LoadName`, `Address<R>`, and `ActorPath` live in `aether-data`, because kinds
-in `aether-kinds` carry addresses and `aether-actor` depends on that crate.
+`Namespace`, `LoadName`, and `ActorPath` live in `aether-data`, because kinds
+in `aether-kinds` carry paths and `aether-actor` depends on that crate.
+`ProtocolPath<P>` lives in `aether-actor` (ADR-0231 §3): its constructors
+take an actor type, and a constructor in `aether-data` would be a door that
+attaches a protocol to arbitrary text.
 The proven types live beside `Addressable` in `aether-actor` with
 crate-private constructors: nothing serializable names them, so no kind crate
 needs them, and the guest SDK mints its own from the host's answers without
@@ -343,7 +392,11 @@ and `Mailbox<K>`; public access to `mailbox_id_from_name`,
 `ctx.actor::<R>()` and `actor_at::<R>(id)` returning something sendable
 straight from a fold or a raw id (`actor_at` is gone from both native ctxs),
 and `resolve_actor::<R>(&str)` keyed by text; `LoadResult`'s rendered
-`name: String` as an address to re-hash, and its `mailbox_id`.
+`name: String` as an address to re-hash, and its `mailbox_id`; `Address<R>`
+and `AddressForm` with their codec, and the helpers that build one
+(`address`, `address_at`, `address_named`, `child_address`, and
+`ActorRef::address`), whose one production use is the embedder's child
+door, which needs only the parent's proof and the key.
 
 ## Consequences
 
@@ -356,9 +409,10 @@ and `resolve_actor::<R>(&str)` keyed by text; `LoadResult`'s rendered
 - Steady-state sends get cheaper. A stored reference or a constant replaces a
   fold recomputed per `ctx.actor::<R>()` call. No mail is added anywhere on
   the send path.
-- A kind never carries a reference. A kind that names an actor to send to
-  carries an `Address<R>`, which is not cast-shape (`Pod`), and its receiver
-  pays one synchronous host call to resolve it, once. Most of the affected
+- A kind never carries a reference or a position. A kind that names an
+  actor to send to carries an `ActorPath`, or a `ProtocolPath<P>` when its
+  writer can name the actor's type; neither is cast-shape (`Pod`), and its
+  receiver pays one synchronous host call to resolve it, once. Most of the affected
   families are subscribe and register shapes, and many can drop the field in
   favor of the envelope sender, as `SubscribeWindowSelf` already does.
 - Mail addressed to a position nobody has registered is no longer expressible
@@ -405,6 +459,14 @@ and `resolve_actor::<R>(&str)` keyed by text; `LoadResult`'s rendered
 - **One type with a state parameter (`ActorRef<R, S>`).** The states carry
   different data (a description, an id, an unsendable id), so it is three
   structs under one name and a longer spelling at every use.
+- **A typed description type beside `ActorPath` (`Address<R>`).** An enum
+  of a caller-relative form, a beneath-a-parent form, and an exact form,
+  with its own codec. Two description systems conflict: every boundary
+  picks one, every receiver accepts both, and new work cannot tell which
+  one it should build on. The second one also carried positions
+  (`Beneath { parent }`, `Exact { id }`), which section 1 forbids in any
+  serialized type. A typed link is a `ProtocolPath<P>` instead: an
+  `ActorPath` on the wire, with a claim that exists only at compile time.
 - **Serializable references with a structural check at decode.** The first
   form of this decision. Decode cannot re-establish "reached `Live` here",
   and the type cannot know where its bytes came from, so every codec impl is
