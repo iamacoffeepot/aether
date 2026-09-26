@@ -454,8 +454,7 @@ meaning.
 - **Naming.** `actor/native/blob/` meant ADR-0087's unit of dispatch when this
   ADR was written; that unit is now the burst (`actor/native/burst/`, #6781).
   The store's module is `store/`, with the internal types `BlobStore` /
-  `BlobEntry`, and the value is `Blob`. ADR-0087's unit of dispatch is to be
-  renamed separately.
+  `BlobEntry`, and the value is `Blob`.
 - **Negative.**
   - Mail carrying attachments pays a schema walk at egress.
   - The first in-process send of an `Owned` value copies it into the store
