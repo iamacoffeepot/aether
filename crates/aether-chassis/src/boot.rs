@@ -995,9 +995,9 @@ impl CommonEnv {
 }
 
 /// Wire the worker count and the full-stack app caps that desktop and headless
-/// share (`Input`, `ComponentHost`, `Fs`, `Text`, `Inventory`, `Http`, `Tcp`,
-/// `Process`). The renderer / window / audio caps each chassis
-/// adds after this in `.with_actor::<_>()` chains.
+/// share (`Input`, `ComponentHost`, `Fs`, `Text`, `Http`, `Tcp`, `Process`).
+/// `Inventory` rides [`with_rpc_server`] instead. The renderer / window /
+/// audio caps each chassis adds after this in `.with_actor::<_>()` chains.
 ///
 /// The universal base stratum — the aborter, the config sources, the non-cap
 /// ring / scheduler / settlement members, the two declare-only members, and
@@ -1035,7 +1035,6 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
         // Programmatic: the fs cap uses the exact roots resolved chassis-side.
         .with_actor_configured::<FsCapability>((), boot.namespace_roots)
         .with_actor::<TextCapability>(())
-        .with_actor::<InventoryCapability>(())
         // Builder-resolved off the source stack: `HttpConfig`.
         .with_actor::<HttpCapability>(())
         .with_actor::<TcpCapability>(())
@@ -1185,9 +1184,15 @@ pub fn run_describe_prelude<C: BootableChassis>(meta: &ChassisMeta) -> Result<Pr
 /// so a dial before then is refused and reachable means ready.
 /// [`boot_standard`] opens it after the boot components have loaded, and the
 /// Bloomery's `build_mounted` after mounting its journal owner and driver.
+///
+/// `aether.inventory` is composed here, ahead of the server, because the RPC
+/// server is the door `aether-mcp` enters through and `aether-mcp` resolves
+/// every textual address and every kind outside its static vocabulary through
+/// the inventory. Composing them together means an engine a caller can reach
+/// over RPC can always be driven, however narrow the rest of its roster.
 #[must_use]
 pub fn with_rpc_server<C: Chassis>(builder: Builder<C>) -> Builder<C> {
-    builder.with_actor::<RpcServerCapability>(RpcServerParams {
+    builder.with_actor::<InventoryCapability>(()).with_actor::<RpcServerCapability>(RpcServerParams {
         peer_kind: PeerKind::Substrate {
             engine_name: aether_substrate::engine_name::<C>(),
             engine_version: env!("CARGO_PKG_VERSION").into(),

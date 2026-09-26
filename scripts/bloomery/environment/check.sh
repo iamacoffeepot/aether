@@ -10,8 +10,9 @@
 # so the check covers exactly the images an import will take. Then:
 #
 #   1. `cargo fetch --locked` runs in the toolchain image, into a throwaway
-#      volume. Fetching needs the network and CA certificates; building does
-#      not, so the base carries neither.
+#      volume. Building needs neither the network nor the fetch, so the check
+#      below runs offline; the base carries CA certificates only because
+#      `vendor.cargo` fetches inside the environment.
 #   2. A throwaway image is built FROM the base, with the toolchain directory
 #      (`rustc --print sysroot` in the toolchain image) copied in at the same
 #      path and nothing else.

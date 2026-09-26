@@ -17,7 +17,8 @@
 //! allowlisted host (ADR-0235), so no program carries one. The workspace
 //! actor is the engine's only route to a container; `aether.process` is not
 //! composed, and no TCP, HTTP-serving, or fs capability rides this engine,
-//! while the RPC server keeps it drivable over MCP (ADR-0155 §3).
+//! while the RPC server and the inventory composed with it keep it drivable
+//! over MCP (ADR-0155 §3).
 
 use std::io;
 use std::mem;
@@ -209,7 +210,9 @@ impl BootableChassis for BloomeryChassis {
     /// egress for Sampled programs (ADR-0234 decision 7), the workspace actor
     /// over the env's artifact store (ADR-0237 decision 8), the RPC server
     /// (ADR-0155 §3) composed held so [`BloomeryChassis::build_mounted`] binds
-    /// it after the mount, and the bloomery config declaration. The env's
+    /// it after the mount, the inventory `with_rpc_server` composes beside it
+    /// so MCP can resolve addresses and kinds, and the bloomery config
+    /// declaration. The env's
     /// store is `None` on the describe / print-config path, which composes the
     /// workspace to list it and never boots it.
     ///
