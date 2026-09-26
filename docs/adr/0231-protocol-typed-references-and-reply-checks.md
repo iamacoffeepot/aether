@@ -474,7 +474,7 @@ call, as `resolve_path`'s is.
 **Consumer.** The Bloomery workspace's `Run` and `Import` carry
 `source: ProtocolPath<ArtifactStorage>`, which each unit's driver narrows
 from its journal's actor path,
-`ActorPath::<JournalActor>::root(ctx, &key).narrow::<ArtifactStorage>()`, and the
+`ctx.link::<JournalActor>(&key).narrow::<ArtifactStorage>()`, and the
 workspace resolves on receipt (ADR-0240 D7).
 
 ### 4. Published rows, typed sends, and the guard cast

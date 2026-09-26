@@ -192,7 +192,7 @@ The paths mirror the references:
 | `Namespace` | the grammar is valid | `const fn new`, a compile error when invalid | compare, `Debug`, fold to an `ActorId` |
 | `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | be the key segment of a path |
 | `ErasedActorPath` | the text is a well-formed ADR-0166 address, canonical or short (with `:name` holes); nothing about existence or placement | its fallible constructor and fallible decode | be stored, mailed, configured, persisted: carried in a kind (`NamedMail.recipient`), name a wire `Call`'s recipient, compared, displayed; become a position only inside the engine, through the host's `resolve_address`. The only description of an actor with a wire format; it carries names only. |
-| `ActorPath<R>` | written here: the text is `R`'s canonical path, written from `R`'s namespace, placement, and key. Decoded: only that the text is a well-formed canonical path; `R` is the writer's claim until `resolve` proves it. Nothing about existence either way. | its constructors from `R` below, only for an actor that declares a link to `R`; decoding yields one that carries the writer's claim | everything an `ErasedActorPath` can; narrow to a `ProtocolPath<P>` (ADR-0231 §3); be resolved to an `ActorRef<R>`. It grants no send. |
+| `ActorPath<R>` | written here: the text is `R`'s canonical path, written from `R`'s namespace, placement, and key. Decoded: only that the text is a well-formed canonical path; `R` is the writer's claim until `resolve` proves it. Nothing about existence either way. | the ctx verbs `link` and `link_child` below, only for an actor that declares a link to `R`; decoding yields one that carries the writer's claim | everything an `ErasedActorPath` can; narrow to a `ProtocolPath<P>` (ADR-0231 §3); be resolved to an `ActorRef<R>`. It grants no send. |
 | `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, name its canonical path |
 | `ErasedActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload; an `ErasedActorPath` proven through `resolve_path`, on a native or a guest ctx | reply, monitor, be the target of an untyped send — inheriting, detached, or tracked, unchecked against a kind because the set it keys may be heterogeneous — be held in a capability's own table and keyed in an ordered set, name its canonical path |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key inside the engine, be printed; never be serialized (section 1) |
@@ -205,45 +205,57 @@ description of an actor. A typed path adds a compile-time claim and nothing
 on the wire.
 
 ```rust
-// aether-actor. `LinkCtx<R>` holds for a ctx typed by an actor that
-// declares `links(R)`, the shape `ctx.send::<R>` has with `DependsOn<R>`.
-impl<R: Root + Instanced> ActorPath<R> {
+// aether-actor: flat verbs on every ctx typed by its actor `A`
+impl<A> WasmCtx<'_, A> {           // and NativeCtx, WireCtx
     /// `R::NAMESPACE:key`.
-    pub fn root(ctx: &impl LinkCtx<R>, key: &LoadName) -> Self;
-}
-impl<P: Addressable> ActorPath<P> {
-    /// `<this path>/C::NAMESPACE:key`; refused only past the path's depth or
+    pub fn link<R: Root + Instanced>(&self, key: &LoadName) -> ActorPath<R>
+    where
+        A: LinksTo<R>;
+
+    /// `<parent>/C::NAMESPACE:key`; refused only past the path's depth or
     /// byte cap.
-    pub fn child<C: ChildOf<P> + Instanced>(
+    pub fn link_child<P: Addressable, C: ChildOf<P> + Instanced>(
         &self,
-        ctx: &impl LinkCtx<C>,
+        parent: &ActorPath<P>,
         key: &LoadName,
-    ) -> Result<ActorPath<C>, ErasedActorPathError>;
+    ) -> Result<ActorPath<C>, ErasedActorPathError>
+    where
+        A: LinksTo<C>;
 }
 ```
 
 A typed path is written only by an actor that declares the link, as a typed
-send compiles only to a declared dependency. `#[actor(links(R))]` sits beside
-`depends(...)`, one list per attribute, and implements `LinksTo<R>` for the
-actor, which makes its ctxs `LinkCtx<R>`; like `DependsOn<R>`, `LinksTo<R>` is
-an `unsafe trait` that only the macro implements, because the macro also records the link the loader checks
-(section 3, "Declared links"). A link says only that the actor names `R` by
-path: `R` need not be live when the actor is created, and it may be an
-`Instanced` actor, which a dependency may not.
+send compiles only to a declared dependency: `link` pairs with `links(R)` the
+way `send` pairs with `depends(R)`, and both are flat verbs on the ctx
+(`ctx.link::<JournalActor>(&key)`). `#[actor(links(R))]` sits beside
+`depends(...)`, one list per attribute, and its expansion implements
+`LinksTo<R>` for the actor and records the link the loader checks (section 3,
+"Declared links"). A link says only that the actor names `R` by path: `R` need
+not be live when the actor is created, and it may be an `Instanced` actor,
+which a dependency may not.
+
+`LinksTo<R>` is a safe trait. A wrong impl is a logic error, not undefined
+behaviour, so `unsafe` is the wrong tool for it. A hand-written impl compiles
+and skips the recorded link: the verbs then accept `R`, and the load check
+never sees that the actor names it. That is the same hole a hand-written
+`Contract<K>` row has today (`crates/aether-actor/src/model/contract.rs`),
+and it is not closed here: issue #6842 (contract rows exist only where a
+handler does) decides how a trait the macro emits in a user crate is made
+impossible to write by hand, and `LinksTo<R>` follows that decision.
 
 An `ActorPath<R>` is written from the actor type: each step is a type's
 `NAMESPACE` and, for an instance, its key, so the path is canonical and has
 no holes. Writing one reads no registry and folds nothing; the position
-exists only when a receiver resolves it. Which constructor exists is decided
-by `R`'s placement facts (`Root`, `ChildOf<P>`, `Singleton`, `Instanced`),
-and a constructor lands with its first consumer: a root instance and an
-instanced child beneath a written path serve the Bloomery driver and
-bootstrap ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D7,
+exists only when a receiver resolves it. Which verb exists is decided by
+`R`'s placement facts (`Root`, `ChildOf<P>`, `Singleton`, `Instanced`), and a
+verb lands with its first consumer: `link` for a root instance and
+`link_child` for an instanced child beneath a written path serve the
+Bloomery driver and bootstrap ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D7,
 D8), and a root singleton or a singleton child comes with the first caller
 that needs one. There is no caller-relative form: a peer named relative to
 the caller is written absolute from the caller's own path (section 1). The
-constructor from a bare `ErasedActorPath` is private to `aether-actor`, which
-holds the placement traits, so no crate can attach an `R` to arbitrary text
+constructor behind the verbs, from a bare `ErasedActorPath`, is private to
+`aether-actor`, which holds the placement traits, so no crate can attach an `R` to arbitrary text
 (section 4). On the wire an `ActorPath<R>` is the path text, with
 `ErasedActorPath`'s schema and codec; decoding validates the grammar and
 claims nothing about `R`. `Debug` prints the path,
