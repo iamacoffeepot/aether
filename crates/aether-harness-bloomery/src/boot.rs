@@ -48,7 +48,7 @@ impl SeededJournal {
     /// `--config` file, which are never read. So `--http-allowlist`,
     /// `--http-secrets`, and every other flag resolve exactly as they do in the
     /// binary, and nothing leaks in from the process that runs the harness.
-    /// The seed's unit, [`UNIT`](crate::UNIT) over the seeded journal root,
+    /// The seed's unit, [`UNIT`] over the seeded journal root,
     /// always wins over `--bloomery-units`.
     ///
     /// A secret an `--http-secrets` binding names is read from the secrets
