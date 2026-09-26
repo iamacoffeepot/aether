@@ -203,9 +203,9 @@ No door turns a foreign `Address<R>` (one that arrived in mail, config, or
 saved state) into a reference yet (ADR-0230 §3). The door lands for guests
 first, as `WasmCtx::resolve::<R>`, with the Bloomery bootstrap as its consumer
 (ADR-0240 D8); the native twin, `NativeCtx::resolve::<R>`, lands with its
-first native caller. The editor shell's
-`RegionSpec.target` was the first site that would have needed one; issue
-#6306 dropped the field instead, and the region announces itself.
+first native caller. The editor shell's `RegionSpec.target` was the first site
+that would have needed one; issue #6306 dropped the field instead, and the
+region announces itself.
 
 ## What not to write
 

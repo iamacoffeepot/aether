@@ -460,8 +460,7 @@ A guest can load a component itself. It proves the component host
 sender of `LoadResult::Ok`, which is the loaded actor, as its reference to the
 component, as
 [Loading, dropping, and the trampoline address](#loading-dropping-and-the-trampoline-address)
-describes. The loaded component
-has no door back to its loader;
+describes. The loaded component has no door back to its loader;
 [Talking back to the actor that loaded you](../recipes/addressing-a-peer-you-cannot-depend-on.md#talking-back-to-the-actor-that-loaded-you)
 shows the two shapes that reach it.
 
