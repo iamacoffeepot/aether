@@ -228,7 +228,12 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         <C as WasmActor>::State: ErasedWasmActor,
     {
         let (is_counter, full_subname) = resolve_subname(subname)?;
-        let alias = MailboxId(mail::spawn_inline_child_scoped(self.mailbox, is_counter, &full_subname));
+        // The actor-type tag the rehydrate reconstruct matches against the
+        // module's exported types (ADR-0114 §5) — the same `hash(NAMESPACE)`
+        // tag `init_typed_p32` selects on — and the key the host reads the
+        // alias's contract rows by (ADR-0231 §4).
+        let type_tag = ActorTypeTag::of::<C>().0;
+        let alias = MailboxId(mail::spawn_inline_child_scoped(self.mailbox, type_tag, is_counter, &full_subname));
         // Re-decode an owned `C::Config` for the in-guest `init` from the
         // same bytes the detached path would have shipped — symmetric with
         // `spawn_child`'s encode-in-guest / decode-in-host round-trip, and
@@ -237,11 +242,6 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         let Some(owned) = <C::Config as Kind>::decode_from_bytes(&bytes) else {
             return Err(SpawnError::InitFailed(ActorInitError::new("spawn_inline_child: Config round-trip failed")));
         };
-        // The actor-type tag the rehydrate reconstruct matches against the
-        // module's exported types (ADR-0114 §5) — the same `hash(NAMESPACE)`
-        // tag `init_typed_p32` selects on. This is the id definition for the
-        // child type, so the disallowed-method allow mirrors `spawn_child`.
-        let type_tag = ActorTypeTag::of::<C>().0;
         // The executing actor is both the scoped host fold seed and the
         // logical parent recorded for relative addressing and reconstruction.
         let record = ChildRecord { type_tag, full_subname, is_counter, parent: self.mailbox, config_bytes: bytes };

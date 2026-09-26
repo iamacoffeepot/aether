@@ -12,6 +12,7 @@ use std::sync::Arc;
 use aether_data::ActorPath;
 
 use crate::mail::MailboxId;
+use crate::mail::registry::RouteContract;
 use crate::mail::registry::effect::ActivationToken;
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 
@@ -31,14 +32,19 @@ pub(super) enum RouteLifecycle {
     Starting {
         token: ActivationToken,
     },
+    /// A published actor route. `contract` is what its actor handles
+    /// (ADR-0231 §4), written by the same apply that made it `Live`.
     Live {
         endpoint: RouteEndpoint,
+        contract: RouteContract,
     },
     /// Logical Wasm inline-child route. Dispatch follows the target's
     /// current lifecycle and endpoint while preserving the alias as the
-    /// routed recipient for guest membrane demux.
+    /// routed recipient for guest membrane demux. `contract` is the child
+    /// type's own, written when the alias is staged.
     Alias {
         target_parent: MailboxId,
+        contract: RouteContract,
     },
     Dropped,
 }

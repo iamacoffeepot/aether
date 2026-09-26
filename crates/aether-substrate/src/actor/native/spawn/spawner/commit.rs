@@ -172,6 +172,12 @@ impl Spawner {
         // ADR-0099 §3: register under the lineage-folded `id`, not
         // `hash(full_name)` — the rendered name is display / reverse-map
         // only and no longer derives the id.
+        // ADR-0231 §4: the route goes `Live` publishing no rows and takes
+        // its actor's contract once `wire` has run, below — a guest host's
+        // is its guest's, which `wire` records, and publishing the host's
+        // own framework arms first would make the guest's rows a shrink the
+        // registry refuses. This is pre-seal boot, on the calling thread,
+        // before the dispatcher runs.
         let registered = self.registry.try_register_inbox_with_id(
             authority,
             id,
@@ -271,6 +277,13 @@ impl Spawner {
             let mut wire_ctx = NativeCtx::for_wire(&transport, EffectChain::Uncaused(Uncaused::ChassisBoot));
             A::wire(actor.as_mut(), &mut wire_ctx);
         });
+        if let Err(error) = self.registry.publish_contract(authority, id, transport.route_contract::<A>()) {
+            tracing::warn!(
+                target: "aether_substrate::spawn",
+                actor = %full_name,
+                "spawned actor's contract was not published: {error}",
+            );
+        }
 
         // Pre-load bootstrap mail. tx is alive (rx is held by the
         // transport; nobody's polling yet), so these sends always

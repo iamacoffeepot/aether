@@ -163,7 +163,7 @@ impl Registry {
                     let target_live =
                         match staged_route(&staged_routes, inner, alias.target_parent).map(|route| &route.lifecycle) {
                             Some(RouteLifecycle::Starting { .. }) => false,
-                            Some(RouteLifecycle::Live { endpoint: RouteEndpoint::Inbox { .. } }) => true,
+                            Some(RouteLifecycle::Live { endpoint: RouteEndpoint::Inbox { .. }, .. }) => true,
                             _ => {
                                 return Err(RegistryEffectError::AliasTargetUnavailable {
                                     alias: alias.alias,
@@ -172,10 +172,27 @@ impl Registry {
                             }
                         };
                     match staged_route(&staged_routes, inner, alias.alias) {
+                        // The same alias published again: its contract may only
+                        // grow, so the rows are replaced only when the new ones
+                        // keep the published ones (ADR-0231 §5).
                         Some(RouteRecord {
                             canonical_name: existing,
-                            lifecycle: RouteLifecycle::Alias { target_parent },
+                            lifecycle: RouteLifecycle::Alias { target_parent, contract },
                         }) if *existing == canonical_name && *target_parent == alias.target_parent => {
+                            if let Some(contract_break) = contract.first_break(&alias.contract) {
+                                return Err(RegistryEffectError::ContractBroken { id: alias.alias, contract_break });
+                            }
+                            if *contract != alias.contract {
+                                let record = RouteRecord {
+                                    canonical_name,
+                                    lifecycle: RouteLifecycle::Alias {
+                                        target_parent: alias.target_parent,
+                                        contract: alias.contract,
+                                    },
+                                };
+                                staged_routes.insert(alias.alias, Some(record.clone()));
+                                publication.route_updates.push(Update::Insert(alias.alias, record));
+                            }
                             applied.push(RegistryApplied::Mailbox(alias.alias));
                             continue;
                         }
@@ -189,7 +206,10 @@ impl Registry {
                     }
                     let record = RouteRecord {
                         canonical_name,
-                        lifecycle: RouteLifecycle::Alias { target_parent: alias.target_parent },
+                        lifecycle: RouteLifecycle::Alias {
+                            target_parent: alias.target_parent,
+                            contract: alias.contract,
+                        },
                     };
                     staged_routes.insert(alias.alias, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(alias.alias, record));
@@ -207,7 +227,7 @@ impl Registry {
                         applied.push(RegistryApplied::AliasRetired(false));
                         continue;
                     };
-                    let RouteLifecycle::Alias { target_parent } = record.lifecycle else {
+                    let RouteLifecycle::Alias { target_parent, .. } = record.lifecycle else {
                         applied.push(RegistryApplied::AliasRetired(false));
                         continue;
                     };
@@ -246,7 +266,7 @@ impl Registry {
                     publication.route_updates.push(Update::Insert(route.id, record));
                     applied.push(RegistryApplied::Starting { id: route.id, token });
                 }
-                RegistryEffect::PromoteStarting { id, token, activation } => {
+                RegistryEffect::PromoteStarting { id, token, activation, contract } => {
                     let reserved = matches!(
                         staged_route(&staged_routes, inner, id).map(|route| &route.lifecycle),
                         Some(RouteLifecycle::Starting { token: current }) if *current == token
@@ -258,8 +278,10 @@ impl Registry {
                         return Err(RegistryEffectError::ActivationRejected);
                     };
                     let endpoint = RouteEndpoint::from_entry(activation.into_legacy());
-                    let record =
-                        RouteRecord { canonical_name, lifecycle: RouteLifecycle::Live { endpoint: endpoint.clone() } };
+                    let record = RouteRecord {
+                        canonical_name,
+                        lifecycle: RouteLifecycle::Live { endpoint: endpoint.clone(), contract },
+                    };
                     staged_routes.insert(id, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(id, record));
                     publication.inventory_dirty = true;
@@ -293,7 +315,7 @@ impl Registry {
                     };
                     applied.push(RegistryApplied::StartingCancellation(cancellation));
                 }
-                RegistryEffect::PublishLive { route, activation } => {
+                RegistryEffect::PublishLive { route, activation, contract } => {
                     let Some(canonical_name) = ActorPath::new(&route.canonical_name)
                         .ok()
                         .filter(|_| route.id.0 != 0 && route.id != MailboxId::CHASSIS_MAILBOX_ID)
@@ -304,6 +326,7 @@ impl Registry {
                         canonical_name,
                         lifecycle: RouteLifecycle::Live {
                             endpoint: RouteEndpoint::from_entry(activation.into_legacy()),
+                            contract,
                         },
                     };
                     match staged_route(&staged_routes, inner, route.id) {
@@ -320,6 +343,25 @@ impl Registry {
                     publication.inventory_dirty = true;
                     applied.push(RegistryApplied::Mailbox(route.id));
                 }
+                RegistryEffect::RepublishContract { id, contract } => {
+                    let Some(mut record) = staged_route(&staged_routes, inner, id).cloned() else {
+                        return Err(RegistryEffectError::ContractUnpublished(id));
+                    };
+                    let (RouteLifecycle::Live { contract: published, .. }
+                    | RouteLifecycle::Alias { contract: published, .. }) = &mut record.lifecycle
+                    else {
+                        return Err(RegistryEffectError::ContractUnpublished(id));
+                    };
+                    if let Some(contract_break) = published.first_break(&contract) {
+                        return Err(RegistryEffectError::ContractBroken { id, contract_break });
+                    }
+                    if *published != contract {
+                        *published = contract;
+                        staged_routes.insert(id, Some(record.clone()));
+                        publication.route_updates.push(Update::Insert(id, record));
+                    }
+                    applied.push(RegistryApplied::ContractPublished(id));
+                }
                 RegistryEffect::DropMailbox(id) => {
                     let Some(mut record) = staged_route(&staged_routes, inner, id).cloned() else {
                         return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
@@ -332,8 +374,10 @@ impl Registry {
                             return Err(RegistryEffectError::Drop(DropError::AlreadyDropped(id)));
                         }
                         RouteLifecycle::Live { .. } => true,
-                        RouteLifecycle::Alias { target_parent } => staged_route(&staged_routes, inner, *target_parent)
-                            .is_some_and(|target| matches!(target.lifecycle, RouteLifecycle::Live { .. })),
+                        RouteLifecycle::Alias { target_parent, .. } => {
+                            staged_route(&staged_routes, inner, *target_parent)
+                                .is_some_and(|target| matches!(target.lifecycle, RouteLifecycle::Live { .. }))
+                        }
                     };
                     record.lifecycle = RouteLifecycle::Dropped;
                     let name = record.canonical_name.to_string();
@@ -347,7 +391,8 @@ impl Registry {
                         applied.push(RegistryApplied::SeizeInstalled(false));
                         continue;
                     };
-                    let RouteLifecycle::Live { endpoint: RouteEndpoint::Inbox { handler, seize } } = &record.lifecycle
+                    let RouteLifecycle::Live { endpoint: RouteEndpoint::Inbox { handler, seize }, contract } =
+                        &record.lifecycle
                     else {
                         applied.push(RegistryApplied::SeizeInstalled(false));
                         continue;
@@ -360,6 +405,7 @@ impl Registry {
                     assert!(replacement.set(handle).is_ok(), "fresh seize cell must accept its first handle");
                     record.lifecycle = RouteLifecycle::Live {
                         endpoint: RouteEndpoint::Inbox { handler: Arc::clone(handler), seize: replacement },
+                        contract: contract.clone(),
                     };
                     staged_routes.insert(id, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(id, record.clone()));

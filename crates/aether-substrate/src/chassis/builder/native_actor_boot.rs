@@ -20,7 +20,7 @@ use crate::chassis::error::BootError;
 use crate::config::{ConfigError, ConfigMember, ConfigSources};
 use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
-use crate::mail::registry::Registry;
+use crate::mail::registry::{Registry, RouteContract};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::scheduler::{Drainable, SeizeHandle, WakeHandle};
 
@@ -227,6 +227,14 @@ where
         // (empty) covers any cap the macro didn't touch.
         let capabilities = A::capabilities();
         ctx.mail_send_handle().capability_registry().register(resources.mailbox_id, &capabilities);
+        // ADR-0231 §4: the route went `Live` at its claim, before `A` was
+        // known to `init`, so it publishes `A`'s contract here, pre-seal and
+        // before any dispatcher runs.
+        if let Err(error) =
+            ctx.registry().publish_contract(ctx.boot_authority(), resources.mailbox_id, RouteContract::of::<A>())
+        {
+            tracing::warn!(target: "aether_substrate::chassis", actor = A::NAMESPACE, "contract not published: {error}");
+        }
 
         // iamacoffeepot/aether#1128: seed this native cap's per-handler
         // cost cells into the global `CostTable` (same hook as the

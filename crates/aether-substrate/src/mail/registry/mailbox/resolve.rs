@@ -4,7 +4,7 @@
 use aether_actor::ErasedActorRef;
 use aether_data::{ActorPath, ActorPathError, ActorPathForm, ScopePathError, validate_scope_path};
 
-use crate::mail::registry::{AddressResolutionError, ResolvedAddress, lineage_mailbox_id};
+use crate::mail::registry::{AddressResolutionError, ResolvedAddress, RouteContract, lineage_mailbox_id};
 use crate::mail::{KindId, MailboxId};
 use crate::scheduler::SeizeHandle;
 
@@ -12,8 +12,15 @@ use super::route::{RouteEndpoint, RouteLifecycle, RouteRecord};
 use super::{CapturedDisposition, MailboxEntry, Registry};
 
 pub(super) enum ResolvedRoute<'a> {
-    Starting { target: MailboxId },
-    Live { endpoint: &'a RouteEndpoint },
+    Starting {
+        target: MailboxId,
+    },
+    /// A live endpoint, and the contract the resolved route publishes: an
+    /// alias reports its own rows, not its target parent's.
+    Live {
+        endpoint: &'a RouteEndpoint,
+        contract: &'a RouteContract,
+    },
     Dropped,
     Unknown,
 }
@@ -27,13 +34,15 @@ where
     };
     match &route.lifecycle {
         RouteLifecycle::Starting { .. } => ResolvedRoute::Starting { target: recipient },
-        RouteLifecycle::Live { endpoint } => ResolvedRoute::Live { endpoint },
-        RouteLifecycle::Alias { target_parent } => match route_for(*target_parent).map(|route| &route.lifecycle) {
-            Some(RouteLifecycle::Starting { .. }) => ResolvedRoute::Starting { target: *target_parent },
-            Some(RouteLifecycle::Live { endpoint }) => ResolvedRoute::Live { endpoint },
-            Some(RouteLifecycle::Dropped) => ResolvedRoute::Dropped,
-            Some(RouteLifecycle::Alias { .. }) | None => ResolvedRoute::Unknown,
-        },
+        RouteLifecycle::Live { endpoint, contract } => ResolvedRoute::Live { endpoint, contract },
+        RouteLifecycle::Alias { target_parent, contract } => {
+            match route_for(*target_parent).map(|route| &route.lifecycle) {
+                Some(RouteLifecycle::Starting { .. }) => ResolvedRoute::Starting { target: *target_parent },
+                Some(RouteLifecycle::Live { endpoint, .. }) => ResolvedRoute::Live { endpoint, contract },
+                Some(RouteLifecycle::Dropped) => ResolvedRoute::Dropped,
+                Some(RouteLifecycle::Alias { .. }) | None => ResolvedRoute::Unknown,
+            }
+        }
         RouteLifecycle::Dropped => ResolvedRoute::Dropped,
     }
 }
@@ -201,7 +210,7 @@ impl Registry {
     pub(crate) fn entry_at(&self, id: MailboxId) -> Option<MailboxEntry> {
         let routes = self.routes.load();
         match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
-            ResolvedRoute::Live { endpoint } => Some(endpoint.as_entry()),
+            ResolvedRoute::Live { endpoint, .. } => Some(endpoint.as_entry()),
             ResolvedRoute::Dropped => Some(MailboxEntry::Dropped),
             ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => None,
         }
@@ -218,7 +227,7 @@ impl Registry {
             let routes = self.routes.load();
             let (endpoint, starting, dropped) = match resolve_route(recipient, |id| routes.entry_for(&id)) {
                 ResolvedRoute::Starting { .. } => (None, true, false),
-                ResolvedRoute::Live { endpoint } => (Some(endpoint.clone()), false, false),
+                ResolvedRoute::Live { endpoint, .. } => (Some(endpoint.clone()), false, false),
                 ResolvedRoute::Dropped => (None, false, true),
                 ResolvedRoute::Unknown => (None, false, false),
             };
@@ -252,6 +261,21 @@ impl Registry {
             RouteResolution::Dropped
         } else {
             RouteResolution::Unknown
+        }
+    }
+
+    /// The contract the route `id` publishes (ADR-0231 §4), answered only
+    /// while it resolves `Live`: an actor route's own rows, or an inline
+    /// alias's own rows while its target parent is `Live`. One read of the
+    /// published view answers both whether the route is live and what it
+    /// covers.
+    ///
+    /// Consumer: `PassiveChassis::published_contract`, the test door.
+    pub(crate) fn published_contract(&self, id: MailboxId) -> Option<RouteContract> {
+        let routes = self.routes.load();
+        match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
+            ResolvedRoute::Live { contract, .. } => Some(contract.clone()),
+            ResolvedRoute::Starting { .. } | ResolvedRoute::Dropped | ResolvedRoute::Unknown => None,
         }
     }
 

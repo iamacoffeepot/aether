@@ -15,7 +15,7 @@ use crate::actor::native::ResolvePathError;
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
 use crate::mail::attachments::{EncodedMail, inline_payload};
 use crate::mail::boundary::is_engine_only;
-use crate::mail::registry::PreparedAliasRoute;
+use crate::mail::registry::{PreparedAliasRoute, RouteContract};
 use crate::mail::{KindId, MailboxId, SourceAddr};
 use crate::runtime::log_install;
 
@@ -426,9 +426,14 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             };
             let target_parent = ctx.sender;
             let alias_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:{full_subname}");
-            caller
-                .data_mut()
-                .stage_alias(PreparedAliasRoute::new(alias_id, alias_name, target_parent));
+            // The unscoped import names no actor type, so its alias publishes
+            // no contract rows (ADR-0231 §4).
+            caller.data_mut().stage_alias(PreparedAliasRoute::new(
+                alias_id,
+                alias_name,
+                target_parent,
+                RouteContract::empty(),
+            ));
             alias_id.0
         },
     )?;
@@ -436,11 +441,15 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // Issue 4490: nested inline births use the executing actor mailbox as
     // their routing seed and rendered-name parent. The target endpoint stays
     // the physical trampoline root; only logical route identity nests.
+    // ADR-0231 §4: `tag` is the child's actor-type tag, which selects the
+    // contract the alias publishes from the resident module's inline map; a
+    // tag the module does not declare publishes no rows.
     linker.func_wrap(
         "aether",
         "spawn_inline_child_scoped_p32",
         |mut caller: Caller<'_, ComponentCtx>,
          parent: u64,
+         tag: u64,
          is_counter: u32,
          subname_ptr: u32,
          subname_len: u32|
@@ -503,9 +512,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             ));
             let target_parent = caller.data().sender;
             let alias_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:{full_subname}");
-            caller
-                .data_mut()
-                .stage_alias(PreparedAliasRoute::new(alias_id, alias_name, target_parent));
+            let contract = caller.data().inline_contract(tag);
+            caller.data_mut().stage_alias(PreparedAliasRoute::new(alias_id, alias_name, target_parent, contract));
             alias_id.0
         },
     )?;

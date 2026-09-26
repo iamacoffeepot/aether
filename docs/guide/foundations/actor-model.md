@@ -295,7 +295,10 @@ pairs in the vocabulary the inputs manifest and the native handler inventory
 report, with an adopted handler set's rows appended. A `#[fallback]`
 contributes neither. The reply checks
 [ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
-specifies are built on them.
+specifies are built on them. A route publishes its actor's rows, and whether it
+has a `#[fallback]`, on its route record when it goes `Live`: a native actor its
+own, a wasm component its guest's (republished on replace), and an inline
+child's alias its own type's.
 
 ### Helpers that only send
 

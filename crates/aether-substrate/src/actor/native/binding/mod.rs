@@ -36,6 +36,8 @@ use std::sync::{Arc, OnceLock};
 
 use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
 use crate::mail::mailer::Mailer;
+#[cfg(feature = "wasm")]
+use crate::mail::registry::RouteContract;
 use crate::runtime::lifecycle::FatalAborter;
 use aether_actor::RequestContextTable;
 
@@ -177,4 +179,10 @@ pub struct NativeBinding {
     parent_child_reservation: Mutex<Option<LiveChildReservation>>,
     /// ADR-0139: typed request contexts keyed by reply correlation id.
     request_contexts: Mutex<RequestContextTable>,
+    /// ADR-0231 §4: the contract of the guest this guest host hosts or last
+    /// hosted, recorded by `NativeCtx::sync_guest`. `None` until a guest is
+    /// first resident, and for every actor that hosts none, whose route
+    /// publishes its own `#[actor]` contract instead.
+    #[cfg(feature = "wasm")]
+    guest_contract: Mutex<Option<RouteContract>>,
 }

@@ -23,7 +23,7 @@ pub(super) fn live_inventory(mailboxes: &FxHashMap<MailboxId, RouteRecord>) -> V
         .iter()
         .filter(|(_, route)| match &route.lifecycle {
             RouteLifecycle::Live { .. } => true,
-            RouteLifecycle::Alias { target_parent } => mailboxes
+            RouteLifecycle::Alias { target_parent, .. } => mailboxes
                 .get(target_parent)
                 .is_some_and(|target| matches!(&target.lifecycle, RouteLifecycle::Live { .. })),
             RouteLifecycle::Starting { .. } | RouteLifecycle::Dropped => false,

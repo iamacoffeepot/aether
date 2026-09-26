@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::mem;
 use std::sync::Arc;
 
+use crate::mail::registry::RouteContract;
 use crate::mail::registry::effect::{
     ActivationReservation, ActivationToken, EffectBatch, PreparedActivation, PreparedCostCells, PreparedMail,
     PreparedSpawnFailure, RegistryApplied, RegistryEffect, RegistryEffectError,
@@ -100,19 +101,42 @@ impl Registry {
     }
 
     /// Second ack of the same handshake: hand the owner the endpoint the
-    /// caller thread finished wiring at its own execution home, and block
-    /// until the route is `Live` and its parked mail has been released.
+    /// caller thread finished wiring at its own execution home, and the
+    /// contract the route publishes with it (ADR-0231 §4), and block until
+    /// the route is `Live` and its parked mail has been released.
     pub(crate) fn promote_starting_through_owner(
         &self,
         id: MailboxId,
         token: ActivationToken,
         handler: Arc<dyn InboxHandler>,
+        contract: RouteContract,
     ) -> Result<(), RegistryEffectError> {
         let effect = RegistryEffect::PromoteStarting {
             id,
             token,
             activation: PreparedActivation::legacy(MailboxEntry::Inbox { handler, seize: SeizeCell::default() }),
+            contract,
         };
+        let Some(completion) = self.submit(EffectBatch::new(vec![effect])) else {
+            return Err(RegistryEffectError::OwnerClosed);
+        };
+        completion.wait().map(|_| ())
+    }
+
+    /// Replace the contract the `Live` route `id` publishes (ADR-0231 §4)
+    /// through the owner, and block until it applies. Refused when
+    /// `contract` breaks the published one (§5).
+    ///
+    /// The post-seal pumped boot of a Claim-stage reservation publishes its
+    /// actor's contract here: the route went `Live` at the claim, before the
+    /// actor's type ran `init`. The caller is an embedder thread, never a
+    /// pool worker, so waiting on the owner cannot starve it.
+    pub(crate) fn publish_contract_through_owner(
+        &self,
+        id: MailboxId,
+        contract: RouteContract,
+    ) -> Result<(), RegistryEffectError> {
+        let effect = RegistryEffect::RepublishContract { id, contract };
         let Some(completion) = self.submit(EffectBatch::new(vec![effect])) else {
             return Err(RegistryEffectError::OwnerClosed);
         };
@@ -206,7 +230,8 @@ impl Registry {
         };
         let canonical_name =
             inner.mailboxes.get(&id).expect("Starting route exists while promoting").canonical_name.clone();
-        let record = RouteRecord { canonical_name, lifecycle: RouteLifecycle::Live { endpoint } };
+        let record =
+            RouteRecord { canonical_name, lifecycle: RouteLifecycle::Live { endpoint, contract: installed.contract } };
         inner.mailboxes.insert(id, record.clone());
         publication.route_updates.push(Update::Insert(id, record));
         publication.inventory_dirty = true;
@@ -229,7 +254,7 @@ impl Registry {
                 pending.parked.push_back(mail);
                 None
             }
-            ResolvedRoute::Live { endpoint } => {
+            ResolvedRoute::Live { endpoint, .. } => {
                 Some(RouteContinuation { disposition: CapturedDisposition::Live { endpoint: endpoint.clone() }, mail })
             }
             ResolvedRoute::Dropped => Some(RouteContinuation { mail, disposition: CapturedDisposition::Dropped }),

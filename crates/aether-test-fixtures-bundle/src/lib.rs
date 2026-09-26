@@ -36,7 +36,7 @@ mod stateful_replace;
 mod tcp_load_probe;
 mod ui_widget;
 
-pub use contract_replace::{ContractBase, ContractChanged, ContractDropped, ContractExtended};
+pub use contract_replace::{ContractBase, ContractChanged, ContractDropped, ContractExtended, ContractFallback};
 pub use correlation_carry::{CarryRequester, ReplyHolder};
 pub use cube::Cube;
 pub use dependent_probe::DependentProbe;
@@ -112,6 +112,7 @@ aether_actor::export!(
         ContractDropped,
         ContractChanged,
         ContractExtended,
+        ContractFallback,
     ],
     private = [InlineChild, InlineDespawnChild],
 );

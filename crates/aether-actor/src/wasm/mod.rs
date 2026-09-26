@@ -425,10 +425,11 @@ pub(crate) fn __validate_inline_child_alias(alias: u64) -> Result<aether_data::M
 #[doc(hidden)]
 pub fn __alloc_inline_child_alias(
     parent: u64,
+    tag: u64,
     is_counter: bool,
     subname: &str,
 ) -> Result<aether_data::MailboxId, SpawnError> {
-    __validate_inline_child_alias(bridge::mail::spawn_inline_child_scoped(parent, is_counter, subname))
+    __validate_inline_child_alias(bridge::mail::spawn_inline_child_scoped(parent, tag, is_counter, subname))
 }
 
 pub mod guest_alloc;
@@ -1584,6 +1585,7 @@ macro_rules! __export_internal {
                     )?;
                     let __aether_alias = $crate::wasm::__alloc_inline_child_alias(
                         __aether_parent,
+                        __aether_tag.0,
                         __aether_is_counter,
                         __aether_subname,
                     )?;

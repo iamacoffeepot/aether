@@ -34,7 +34,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use aether_component::ComponentHostCapability;
-use aether_data::{ActorPath, Kind, KindId, LoadName, SessionToken, Uuid};
+use aether_data::{ActorPath, Kind, KindId, LoadName, ReplyContract, SessionToken, Uuid};
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, CostTail, CostTailResult};
@@ -876,6 +876,15 @@ impl SubstrateHarness {
     #[must_use]
     pub fn accepts(&self, actor: ErasedActorRef, kind: KindId) -> bool {
         self.passive.accepts(actor, kind)
+    }
+
+    /// The contract `actor`'s route publishes (ADR-0231 §4): its `(KindId,
+    /// ReplyContract)` rows sorted by kind, and whether it has a
+    /// `#[fallback]`. `None` while the route does not resolve `Live`.
+    /// Consumers: `aether-component/tests/harness_published_contract.rs`.
+    #[must_use]
+    pub fn published_contract(&self, actor: ErasedActorRef) -> Option<(Vec<(KindId, ReplyContract)>, bool)> {
+        self.passive.published_contract(actor)
     }
 
     /// `actor`'s per-handler cost rows (ADR-0036), what the `actor_cost` MCP tool reports.

@@ -8,10 +8,10 @@ use std::sync::{Arc, OnceLock};
 use super::identity::BindingIdentity;
 use super::outbound::OutboundBuffer;
 use super::{ChildReservationTable, NativeBinding};
-use crate::actor::native::ActorProbe;
 use crate::actor::native::ctx::ResolvePathError;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
+use crate::actor::native::{ActorProbe, NativeActor};
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
 use crate::chassis::ctx::ChassisCtx;
@@ -21,7 +21,9 @@ use crate::mail::CostCells;
 use crate::mail::mailer::Mailer;
 #[cfg(feature = "wasm")]
 use crate::mail::outbound::HubOutbound;
-use crate::mail::registry::{AddressResolutionError, RegistrySubscription};
+#[cfg(feature = "wasm")]
+use crate::mail::registry::effect::RegistryBatch;
+use crate::mail::registry::{AddressResolutionError, RegistrySubscription, RouteContract};
 use crate::mail::{KindId, MailId, MailboxId};
 use crate::runtime::lifecycle::FatalAborter;
 #[cfg(any(test, feature = "test-support"))]
@@ -90,6 +92,8 @@ impl NativeBinding {
             child_reservations: Mutex::new(ChildReservationTable::new()),
             parent_child_reservation: Mutex::new(None),
             request_contexts: Mutex::new(RequestContextTable::new()),
+            #[cfg(feature = "wasm")]
+            guest_contract: Mutex::new(None),
         }
     }
 
@@ -154,6 +158,8 @@ impl NativeBinding {
             child_reservations: Mutex::new(ChildReservationTable::new()),
             parent_child_reservation: Mutex::new(None),
             request_contexts: Mutex::new(RequestContextTable::new()),
+            #[cfg(feature = "wasm")]
+            guest_contract: Mutex::new(None),
         }
     }
 
@@ -354,16 +360,50 @@ impl NativeBinding {
     /// both the global table and the per-actor cache. The path behind
     /// [`NativeCtx::sync_guest`](crate::actor::native::ctx::NativeCtx::sync_guest)
     /// for a resident guest.
+    ///
+    /// It also records the guest's contract as the one this actor's route
+    /// publishes (ADR-0231 §4), and when that changes, stages its republish
+    /// at this turn's flush, in turn order with the actor's other owner
+    /// batches and with no one waiting on it: a handler never waits on the
+    /// registry owner (ADR-0165), and a refusal is warn-logged. A birth
+    /// reads the recorded contract when its route goes `Live`
+    /// ([`Self::route_contract`]), so the republish it also stages finds
+    /// the rows already published.
     #[cfg(feature = "wasm")]
     pub(crate) fn host_guest(&self, guest: &ComponentCapabilities, measured: &[KindId]) {
         self.mailer.capability_registry().register(self.self_mailbox(), guest);
         self.seed_costs(measured);
+
+        let contract = RouteContract::from_capabilities(guest);
+        let mut recorded = self.guest_contract.lock().expect("guest contract lock poisoned; fail-fast per ADR-0063");
+        if recorded.as_ref() != Some(&contract) {
+            *recorded = Some(contract.clone());
+            drop(recorded);
+            self.stage_logged_owner_batch(RegistryBatch::republish_contract(self.self_mailbox(), contract));
+        }
+    }
+
+    /// The contract this actor's route publishes (ADR-0231 §4): the
+    /// contract of the guest a guest host hosts or last hosted, else `A`'s
+    /// own `#[actor]` contract. Every native birth path publishes through
+    /// it, so a guest host goes `Live` with its guest's rows and never with
+    /// its framework arms, which only its host reaches.
+    pub(crate) fn route_contract<A: NativeActor>(&self) -> RouteContract {
+        #[cfg(feature = "wasm")]
+        let guest = self.guest_contract.lock().expect("guest contract lock poisoned; fail-fast per ADR-0063").clone();
+        #[cfg(not(feature = "wasm"))]
+        let guest = None;
+        guest.unwrap_or_else(RouteContract::of::<A>)
     }
 
     /// Clear this actor's accept set and drop its cost rows, then re-seed
     /// `measured` into both indexes. The path behind
     /// [`NativeCtx::sync_guest`](crate::actor::native::ctx::NativeCtx::sync_guest)
     /// for an empty slot.
+    ///
+    /// The route keeps publishing the last guest's contract: an unload does
+    /// not shrink a published contract (ADR-0231 §5), and a refill is held
+    /// to the dropped guest's rows.
     #[cfg(feature = "wasm")]
     pub(crate) fn release_guest(&self, measured: &[KindId]) {
         self.mailer.capability_registry().remove(self.self_mailbox());

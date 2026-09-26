@@ -3,12 +3,14 @@
 //! `ContractBase` handles `Bump` silently, raising `TickObserved` at the
 //! substrate-harness observer, and answers `CountQuery` with `CountReport`.
 //! Each other type is a candidate replacement for it: `ContractDropped` lacks
-//! the `CountQuery` row, `ContractChanged` answers it with nothing, and
-//! `ContractExtended` keeps both rows and adds a silent `InlineProbe`.
+//! the `CountQuery` row, `ContractChanged` answers it with nothing,
+//! `ContractExtended` keeps both rows and adds a silent `InlineProbe`, and
+//! `ContractFallback` keeps both rows, bumps as `ContractBase` does, and adds
+//! a `#[fallback]`.
 
 #![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and these fixtures are stateless — the same allow `peer_routing` carries
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Mail, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, InlineProbe, SubstrateHarnessObserver, TickObserved};
 
 pub struct ContractBase;
@@ -83,4 +85,28 @@ impl WasmActor for ContractExtended {
 
     #[handler::single]
     fn on_inline_probe(&mut self, _ctx: &mut WasmCtx<'_>, _probe: InlineProbe) {}
+}
+
+pub struct ContractFallback;
+
+#[actor(depends(SubstrateHarnessObserver))]
+impl WasmActor for ContractFallback {
+    const NAMESPACE: &'static str = "test.contract.fallback";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(ContractFallback)
+    }
+
+    #[handler::single]
+    fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
+        ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
+    }
+
+    #[handler::single]
+    fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
+        CountReport { count: 0 }
+    }
+
+    #[fallback]
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }

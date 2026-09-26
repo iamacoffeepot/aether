@@ -205,16 +205,18 @@ pub fn spawn_inline_child(is_counter: bool, subname: &str) -> u64 {
 
 /// Issue 4490: allocate an inline alias beneath the executing actor. The
 /// host validates `parent` as this component's root or inline alias before
-/// folding or rendering the new address. The unscoped bridge remains only
-/// for staged compatibility with legacy guests.
+/// folding or rendering the new address, and publishes the contract rows of
+/// the child's actor type `tag` on the alias (ADR-0231 §4). The unscoped
+/// bridge remains only for staged compatibility with legacy guests.
 #[must_use]
-pub fn spawn_inline_child_scoped(parent: u64, is_counter: bool, subname: &str) -> u64 {
+pub fn spawn_inline_child_scoped(parent: u64, tag: u64, is_counter: bool, subname: &str) -> u64 {
     let subname_bytes = subname.as_bytes();
     // SAFETY: the slice remains valid for the call and is copied host-side;
     // the scalar parent is validated against the active component cluster.
     unsafe {
         raw::spawn_inline_child_scoped(
             parent,
+            tag,
             u32::from(is_counter),
             subname_bytes.as_ptr().addr() as u32,
             subname_bytes.len() as u32,

@@ -16,7 +16,7 @@ replace, and drop behavior.
 | Failure phase | Guest left behind | Capability/introspection risk |
 |---|---|---|
 | new wasm compile, manifest parse, or export selection | prior slot is unchanged: old guest or an already-empty post-drop slot | existing descriptions still reflect the prior registry snapshot, not a new guest |
-| replacement drops or changes a handler row of the hosted type (ADR-0231 §5) | prior slot is unchanged: old guest or empty post-drop slot | existing descriptions still reflect the prior registry snapshot, not a new guest |
+| replacement drops or changes a handler row of the hosted type, or drops its `#[fallback]` (ADR-0231 §5) | prior slot is unchanged: old guest or empty post-drop slot | existing descriptions still reflect the prior registry snapshot, not a new guest |
 | new guest instantiation failure (its `init` fails) | prior slot is unchanged: the old guest never ran a hook, or the empty post-drop slot stays empty | existing descriptions still reflect the prior registry snapshot, not a new guest |
 | `save_state` host-call rejection during dehydrate | old guest object is restored after its unwire/dehydrate hooks already ran | old description remains the best snapshot, but the guest may have changed its own lifecycle state |
 | replacement does not declare the kind of a request context the old guest carries (ADR-0139 §4) | old guest object is restored after its unwire/dehydrate hooks already ran, keeping its contexts, pending replies and counters | old description remains the best snapshot, but the guest may have changed its own lifecycle state |

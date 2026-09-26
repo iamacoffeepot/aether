@@ -46,6 +46,15 @@ impl Registry {
         owner.submit_deferred(batch, completion)
     }
 
+    /// Submit a batch no one waits on. The owner warn-logs a refusal; with
+    /// no owner attached there is nothing to apply it and it is dropped.
+    pub(crate) fn submit_logged(&self, batch: EffectBatch) {
+        match self.owner.get() {
+            Some(owner) => owner.submit_logged(batch),
+            None => drop(batch.discard_prepared()),
+        }
+    }
+
     pub(crate) fn park_or_drop(&self, mail: Mail, observed_generation: u64) -> ParkAdmission {
         match self.owner.get() {
             Some(owner) => owner.park_or_drop(mail, observed_generation),

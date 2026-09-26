@@ -23,7 +23,7 @@ use crate::chassis::settlement::SettlementRegistry;
 use crate::config::ConfigMemberRecord;
 use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
-use crate::mail::registry::Registry;
+use crate::mail::registry::{Registry, RouteContract};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 
 use super::root_pusher::RootPusher;
@@ -306,6 +306,20 @@ impl<'a> DriverCtx<'a> {
             Uncaused::ChassisBoot,
         ) {
             Ok(slot) => {
+                // ADR-0231 §4: the Claim-stage reservation went `Live` before
+                // `A` was known, so the route publishes `A`'s contract now,
+                // pre-seal, before the driver pumps it.
+                if let Err(error) = self.inner.registry().publish_contract(
+                    self.inner.boot_authority(),
+                    mailbox_id,
+                    RouteContract::of::<A>(),
+                ) {
+                    tracing::warn!(
+                        target: "aether_substrate::chassis",
+                        actor = A::NAMESPACE,
+                        "contract not published: {error}",
+                    );
+                }
                 // ADR-0230: the Claim-stage reservation published the route
                 // before the seal and the actor is now wired, so record its
                 // reference for the chassis handle's `actor_ref`.

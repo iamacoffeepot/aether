@@ -1,0 +1,177 @@
+//! Published route contracts (ADR-0231 §4, issue #6836).
+//!
+//! A route publishes its actor's `(KindId, ReplyContract)` rows and its
+//! fallback flag on its route record when it goes `Live`: a wasm trampoline
+//! its guest's, republished on replace and kept through an unload; an inline
+//! child's alias its own type's, private children included; a native
+//! capability its `#[actor]` surface. Each scenario reads the published
+//! contract through the harness's `published_contract` door.
+//!
+//! Skipped when the fixture wasm hasn't been built (`require_wasm`); CI
+//! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes a
+//! hard panic there.
+
+use std::fs;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced};
+use aether_component::ComponentHostCapability;
+use aether_data::{Kind, KindId, LoadName, ReplyContract};
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_substrate::actor::native::{Dispatch, NativeActor};
+use aether_test_fixtures_bundle::{ContractBase, InlineChild, InlineParent, InlineStatefulChild, InlineStatefulParent};
+use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, InlineProbe};
+
+const BUNDLE: &str = "aether_test_fixtures_bundle";
+const EXTENDED_EXPORT: &str = "test.contract.extended";
+
+type Published = (Vec<(KindId, ReplyContract)>, bool);
+
+/// `rows` sorted by kind, the order a published contract holds them in.
+fn sorted(mut rows: Vec<(KindId, ReplyContract)>) -> Vec<(KindId, ReplyContract)> {
+    rows.sort_by_key(|(kind, _)| *kind);
+    rows
+}
+
+fn harness() -> SubstrateHarness {
+    SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot")
+}
+
+fn load_request(wasm: Vec<u8>, name: &str) -> LoadComponent {
+    LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None }
+}
+
+/// Poll `actor`'s published contract until it equals `expected`, to a bounded
+/// deadline. A republish is staged at the trampoline's turn flush and applied
+/// by the registry owner with no chain the reply's settlement covers, so the
+/// reply does not order it.
+fn await_published(harness: &SubstrateHarness, actor: ErasedActorRef, expected: &Published) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let published = harness.published_contract(actor);
+        if published.as_ref() == Some(expected) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "the published contract never became {expected:?}; last {published:?}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The `C` inline child keyed `name` beneath `parent`, once its alias is live.
+/// The alias is a registry-owner batch the parent's `wire` stages, which the
+/// load reply does not order, so poll to a bounded deadline.
+fn await_child<P, C>(harness: &SubstrateHarness, parent: ActorRef<P>, name: &str) -> ActorRef<C>
+where
+    P: Addressable,
+    C: ChildOf<P> + Instanced,
+{
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match harness.child::<P, C>(&parent, LoadName::new(name).expect("a valid instance key")) {
+            Ok(child) => return child,
+            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Err(error) => panic!("inline child {name} never went live within 5s: {error}"),
+        }
+    }
+}
+
+/// A loaded trampoline publishes its guest's rows and fallback flag, and
+/// neither its own framework arms nor its forwarding fallback. A replace
+/// republishes the replacement's rows, and an unload keeps them. Catches a
+/// trampoline that publishes its own `#[actor]` contract or nothing, a
+/// replace that never republishes, and an unload that sheds the rows.
+#[test]
+fn a_loaded_component_publishes_its_guest_contract_through_replace_and_drop() {
+    let Some(wasm_path) = require_wasm(BUNDLE) else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let mut harness = harness();
+
+    let (victim, path) = harness
+        .load::<ContractBase>(load_request(wasm.clone(), "victim"))
+        .unwrap_or_else(|error| panic!("the base must load: {error}"));
+    let base = sorted(vec![(Bump::ID, ReplyContract::None), (CountQuery::ID, ReplyContract::One(CountReport::ID))]);
+    assert_eq!(harness.published_contract(victim.erase()), Some((base.clone(), false)));
+
+    let replace = ReplaceComponent {
+        target: path.clone(),
+        wasm,
+        drain_timeout_ms: None,
+        config: Vec::new(),
+        export: Some(EXTENDED_EXPORT.to_owned()),
+    };
+    let operation = HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), &replace);
+    let replaced = harness.execute(vec![("replace", operation)]).expect("replace operation");
+    if let ReplaceResult::Err { error } = replaced.reply::<ReplaceResult>("replace").expect("decode ReplaceResult") {
+        panic!("a replace that only adds a row must succeed: {error}");
+    }
+    let extended = (sorted([base, vec![(InlineProbe::ID, ReplyContract::None)]].concat()), false);
+    await_published(&harness, victim.erase(), &extended);
+
+    let drop = DropComponent { target: path };
+    let operation = HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), &drop);
+    let dropped = harness.execute(vec![("drop", operation)]).expect("drop operation");
+    if let DropResult::Err { error } = dropped.reply::<DropResult>("drop").expect("decode DropResult") {
+        panic!("the victim must drop: {error}");
+    }
+    assert_eq!(
+        harness.published_contract(victim.erase()),
+        Some(extended),
+        "the emptied slot keeps publishing the dropped guest's contract"
+    );
+}
+
+/// An inline child's alias publishes its own type's rows: an exported child
+/// type from the module's exported groups, and a private one from its
+/// private section. The stateful parent publishes only a fallback, so a
+/// parent-row alias is visible, and the private child's rows exist nowhere
+/// but that section. Catches an untagged host call, a map lookup that takes
+/// the wrong entry, and a map that leaves out private children.
+#[test]
+fn an_inline_child_alias_publishes_its_own_type_contract() {
+    let Some(wasm_path) = require_wasm(BUNDLE) else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let mut harness = harness();
+
+    let (stateful_parent, _) = harness
+        .load::<InlineStatefulParent>(load_request(wasm.clone(), "stateful_parent"))
+        .unwrap_or_else(|error| panic!("the stateful parent must load: {error}"));
+    let stateful_child = await_child::<InlineStatefulParent, InlineStatefulChild>(&harness, stateful_parent, "widget");
+    assert_eq!(harness.published_contract(stateful_parent.erase()), Some((Vec::new(), true)));
+    assert_eq!(
+        harness.published_contract(stateful_child.erase()),
+        Some((sorted(vec![(Bump::ID, ReplyContract::None), (CountQuery::ID, ReplyContract::Manual)]), false)),
+    );
+
+    let (private_parent, _) = harness
+        .load::<InlineParent>(load_request(wasm, "private_parent"))
+        .unwrap_or_else(|error| panic!("the private-child parent must load: {error}"));
+    let private_child = await_child::<InlineParent, InlineChild>(&harness, private_parent, "widget");
+    assert_eq!(
+        harness.published_contract(private_child.erase()),
+        Some((vec![(InlineProbe::ID, ReplyContract::Manual)], false)),
+    );
+}
+
+/// A native capability booted with the chassis publishes its `#[actor]`
+/// receive surface. Catches a boot path that leaves the route it claimed
+/// publishing no rows.
+#[test]
+fn a_native_capability_publishes_its_actor_contract() {
+    let harness = harness();
+    let capabilities =
+        <ComponentHostCapability as Dispatch<<ComponentHostCapability as NativeActor>::State>>::capabilities();
+    let rows = sorted(capabilities.handlers.iter().map(|handler| (handler.id, handler.reply)).collect());
+    assert!(!rows.is_empty(), "the component host declares handlers");
+
+    assert_eq!(
+        harness.published_contract(harness.actor_ref::<ComponentHostCapability>().erase()),
+        Some((rows, capabilities.fallback.is_some())),
+    );
+}

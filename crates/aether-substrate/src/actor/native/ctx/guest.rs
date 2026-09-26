@@ -27,11 +27,15 @@ pub trait GuestHost: NativeActor {
 }
 
 impl<M: ReplyMode, A: GuestHost> NativeCtx<'_, A, M> {
-    /// Make this actor's accept set and cost rows match what `A` declares for
-    /// `state`. `Some`: the accept set becomes exactly the guest's, and cost
-    /// cells are seeded, reusing existing ones, for `A`'s measured framework
-    /// arms plus every guest handler. `None`: the actor accepts nothing, its
-    /// cost rows are dropped, and the framework arms are re-seeded.
+    /// Make this actor's accept set, cost rows, and published contract match
+    /// what `A` declares for `state`. `Some`: the accept set becomes exactly
+    /// the guest's, cost cells are seeded, reusing existing ones, for `A`'s
+    /// measured framework arms plus every guest handler, and the route's
+    /// published contract (ADR-0231 §4) becomes the guest's rows and
+    /// fallback flag, republished at this turn's flush when it changed.
+    /// `None`: the actor accepts nothing, its cost rows are dropped, the
+    /// framework arms are re-seeded, and the route keeps publishing the last
+    /// guest's contract, which a published contract never sheds (§5).
     /// Idempotent.
     ///
     /// The framework arms ride along in both arms (iamacoffeepot/aether#4269):

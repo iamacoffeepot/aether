@@ -137,10 +137,13 @@ unsafe extern "C" {
     pub fn spawn_inline_child(is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
     /// Issue 4490: scoped inline-child alias allocation. `parent` is the
     /// executing actor's current mailbox and is validated host-side before it
-    /// becomes the alias routing seed and rendered-name parent. The remaining
-    /// arguments and failure sentinel match [`spawn_inline_child`].
+    /// becomes the alias routing seed and rendered-name parent. `tag` is the
+    /// child's actor-type tag, `ActorId::singleton(NAMESPACE)`, from which the
+    /// host picks the contract rows the alias publishes (ADR-0231 §4). The
+    /// remaining arguments and failure sentinel match [`spawn_inline_child`].
     #[link_name = "spawn_inline_child_scoped_p32"]
-    pub fn spawn_inline_child_scoped(parent: u64, is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
+    pub fn spawn_inline_child_scoped(parent: u64, tag: u64, is_counter: u32, subname_ptr: u32, subname_len: u32)
+    -> u64;
     /// ADR-0114 teardown (#4228): retire the alias route
     /// [`spawn_inline_child`] registered, because the child it addressed was
     /// despawned. `alias` is that call's returned `MailboxId` raw value. The
@@ -354,7 +357,13 @@ pub unsafe fn spawn_inline_child(_is_counter: u32, _subname_ptr: u32, _subname_l
 /// Always panics — fail-fast per ADR-0063.
 #[cfg(not(target_family = "wasm"))]
 #[must_use]
-pub unsafe fn spawn_inline_child_scoped(_parent: u64, _is_counter: u32, _subname_ptr: u32, _subname_len: u32) -> u64 {
+pub unsafe fn spawn_inline_child_scoped(
+    _parent: u64,
+    _tag: u64,
+    _is_counter: u32,
+    _subname_ptr: u32,
+    _subname_len: u32,
+) -> u64 {
     panic!("aether-actor: spawn_inline_child_scoped called outside the FFI guest");
 }
 
