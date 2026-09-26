@@ -327,6 +327,41 @@ impl Protocol for MeshLoader {
 }
 ```
 
+### Typed paths and links
+
+An actor names another actor by type in what it stores or sends through a typed
+path: `ActorPath<R>` claims an `R` lives at the text, and `ProtocolPath<P>`
+claims an actor covering the protocol `P` does
+([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)
+§2, ADR-0231 §3). An actor writes one only for a link it declares with
+`#[actor(links(R))]`, one list beside `depends(R)`. A link is not a dependency:
+the path is a name, so `R` need not be live when the actor is created, and it
+may be an instanced actor, which `depends` refuses.
+
+`ctx.link::<R>(&key)` writes the root instance's path `R::NAMESPACE:key`, and
+`ctx.link_child::<P, C>(&parent, &key)` writes `<parent>/C::NAMESPACE:key`
+beneath a path already written; the second refuses only a path past the depth or
+byte cap. Each step is a type's `NAMESPACE` and its key, so the text is the
+canonical name the registry gives that instance, and writing it reads no
+registry. A guest ctx has both verbs and a native ctx has `link`.
+`path.narrow::<P>()` keeps the text under the narrower claim and compiles only
+for `P: CoveredBy<R>`.
+
+Both paths are kind fields, carried as the path text with `ErasedActorPath`'s
+schema. Decoding one accepts only a well-formed canonical path and claims
+nothing about `R` or `P`, and neither grants a send: a path claims nothing
+until its receiver's `resolve` proves it (#6837, #6829). The first consumer, a
+Bloomery unit's driver, is to write its journal's storage source this way
+(ADR-0240 D7):
+
+```rust
+#[actor(links(JournalActor))]
+impl NativeActor for BundleDriver { /* … */ }
+
+// in a handler
+let source: ProtocolPath<ArtifactStorage> = ctx.link::<JournalActor>(&unit_key).narrow::<ArtifactStorage>();
+```
+
 ### Helpers that only send
 
 The class marker rides on the context type — a single handler's `WasmCtx<'_>`

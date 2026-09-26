@@ -1,0 +1,20 @@
+error[E0277]: `Bootstrap` does not declare a link to `Unit`
+  --> tests/ui/rejects_link_without_declared_link.rs:37:25
+   |
+37 |         let _unit = ctx.link::<Unit>(&key);
+   |                         ^^^^ unsatisfied trait bound
+   |
+help: the trait `LinksTo<Unit>` is not implemented for `Bootstrap`
+  --> tests/ui/rejects_link_without_declared_link.rs:24:1
+   |
+24 | struct Bootstrap;
+   | ^^^^^^^^^^^^^^^^
+   = note: add `Unit` to the `links(...)` list on the actor's `#[actor(...)]` attribute
+note: required by a bound in `aether_actor::wasm::ctx::link::<impl WasmCtx<'_, A, M>>::link`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/link.rs
+   |
+   |     pub fn link<R: Root + Instanced>(&self, key: &LoadName) -> ActorPath<R>
+   |            ---- required by a bound in this associated function
+   |     where
+   |         A: LinksTo<R>,
+   |            ^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::link::<impl WasmCtx<'_, A, M>>::link`

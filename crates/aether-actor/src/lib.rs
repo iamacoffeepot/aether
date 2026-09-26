@@ -41,6 +41,7 @@ pub mod local;
 pub mod log;
 pub mod mail;
 pub mod model;
+mod path;
 pub mod reference;
 pub mod request_context;
 pub mod trace;
@@ -57,10 +58,13 @@ pub use model::slot::Slot;
 pub use model::{
     Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, Contract, Contracts, CoveredBy,
     CoversRows, DependencyResolver, DependsOn, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced,
-    Lifecycle, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol, Publisher, Publishes, Replies,
+    Lifecycle, LinksTo, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol, Publisher, Publishes, Replies,
     ReplyShape, Resolve, Root, Row, RowReply, RowSet, SendableTo, Silent, SilentRow, Singleton, Subname, Undeclared,
     root_mailbox, validate_namespace_segment,
 };
+#[doc(hidden)]
+pub use path::__link;
+pub use path::{ActorPath, ProtocolPath};
 #[doc(hidden)]
 pub use reference::{__mint_actor_ref, __mint_erased_actor_ref};
 // The `resolve_path_p32` answer (ADR-0230 §3): the substrate's host fn encodes

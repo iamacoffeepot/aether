@@ -18,13 +18,14 @@
 //! reply-class marker dropped, for helpers), `subscribe` (the flat subscribe
 //! verbs that name their publisher), `relative` (positional cluster-relative
 //! addressing), `child` (its typed counterpart) and `spawn` (detached and
-//! inline child creation), and `address` (proving an actor path that arrived
-//! in config or mail).
+//! inline child creation), `address` (proving an actor path that arrived
+//! in config or mail), and `link` (writing a typed path to a declared link).
 
 mod address;
 mod child;
 mod drop;
 mod init;
+mod link;
 mod receive;
 mod relative;
 mod send;

@@ -1,0 +1,24 @@
+error[E0277]: `Unit` has no contract row for `Poke`
+  --> tests/ui/rejects_narrow_to_uncovered_protocol.rs:52:54
+   |
+52 |         let _other = ctx.link::<Unit>(&key).narrow::<Other>();
+   |                                             ------   ^^^^^ no handler for `Poke` on this target
+   |                                             |
+   |                                             required by a bound introduced by this call
+   |
+   = note: a `#[fallback]` does not count as handling a kind
+help: the trait `Contract<Poke>` is not implemented for `Unit`
+      but trait `Contract<Ping>` is implemented for it
+  --> tests/ui/rejects_narrow_to_uncovered_protocol.rs:36:1
+   |
+36 | #[actor(instanced, root, rt_ok)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `Ping`, found `Poke`
+   = note: required for `Unit` to implement `CoversRows<(Row<Ping, Pong>, Row<Poke, Silent>)>`
+   = note: required for `Other` to implement `CoveredBy<Unit>`
+note: required by a bound in `aether_actor::path::protocol_path::<impl ActorPath<R>>::narrow`
+  --> $WORKSPACE/crates/aether-actor/src/path/protocol_path.rs
+   |
+   |     pub fn narrow<P: CoveredBy<R>>(&self) -> ProtocolPath<P> {
+   |                      ^^^^^^^^^^^^ required by this bound in `aether_actor::path::protocol_path::<impl ActorPath<R>>::narrow`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

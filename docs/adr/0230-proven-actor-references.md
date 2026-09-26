@@ -500,6 +500,10 @@ constructors take an actor type and its placement facts, which are
 `aether-actor` traits, and a constructor in `aether-data` would have to be
 public or `#[doc(hidden)]` for `aether-actor` to call, a door that attaches an
 actor type or a protocol to arbitrary text.
+`NativeCtx::link`, defined in `aether-substrate`, writes through the one
+`#[doc(hidden)]` writer `aether-actor` exports, `__link`, which is bounded by
+the verb's own `A: LinksTo<R>` and takes a key, never text, so it attaches `R`
+to no text but `R`'s own canonical path.
 The proven types live beside `Addressable` in `aether-actor` with
 crate-private constructors: nothing serializable names them, so no kind crate
 needs them, and the guest SDK mints its own from the host's answers without

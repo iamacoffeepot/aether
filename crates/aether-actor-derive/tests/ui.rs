@@ -6,8 +6,10 @@
 //! `rejects_struct_ambiguous_runtime.rs:8`, `rejects_struct_no_handler.rs:6`,
 //! `rejects_struct_no_namespace.rs:7`,
 //! `rejects_actor_child_of_cardinality_native.rs:10`,
-//! `rejects_actor_composable_native.rs:8`, and
-//! `rejects_generic_native_lineage_struct.rs:6`. Those files are read off disk
+//! `rejects_actor_composable_native.rs:8`,
+//! `rejects_generic_native_lineage_struct.rs:6`, `accepts_declared_links.rs:34`,
+//! `rejects_link_without_declared_link.rs:21`, and
+//! `rejects_narrow_to_uncovered_protocol.rs:36`. Those files are read off disk
 //! by the struct-hosted harvest rather than compiled as cases; the `rt_` prefix
 //! is the current spelling of that set, not the exclusion rule.
 //!
@@ -350,6 +352,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "accepts_actor_split_task_handler",
     "accepts_actor_typed_handler_wasm",
     "accepts_bare_type_address_of_embedded_peer",
+    "accepts_declared_links",
     "accepts_cfg_gated_handler_native",
     "accepts_cfg_gated_handler_set_wasm",
     "accepts_cfg_gated_handler_wasm",
@@ -394,6 +397,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_handler_set_duplicate_adoption",
     "rejects_handler_set_without_body",
     "rejects_inline_child_send_unhandled_kind",
+    "rejects_link_without_declared_link",
     "rejects_malformed_actor_composable",
     "rejects_malformed_actor_lineage",
     "rejects_malformed_export",
@@ -403,6 +407,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_missing_namespace_native",
     "rejects_missing_namespace_wasm",
     "rejects_missing_rehydrate",
+    "rejects_narrow_to_uncovered_protocol",
     "rejects_nonself_handler_wasm",
     "rejects_protocol_fallback_and_manual_rows",
     "rejects_protocol_reply_mismatch",
