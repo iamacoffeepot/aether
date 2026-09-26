@@ -101,8 +101,8 @@ pub enum FaultReason {
     Refused { reason: Detail },
     /// The program panicked. Caught by the driver.
     Panicked { message: Detail },
-    /// Reserved: the driver enforces no timeout in this brick.
-    TimedOut { after_millis: u64 },
+    /// An executor's time allotment ran out. The deadline is the executor's and is not recorded.
+    TimedOut,
     /// Reserved: no out-of-process program exists in this brick.
     Crashed { stderr_tail: Detail },
     /// The input's transitive closure exceeded the driver's byte cap. Nothing was loaded.
@@ -113,6 +113,10 @@ pub enum FaultReason {
     ProtocolViolation { reason: Detail },
     /// The request was outstanding when the engine stopped.
     Interrupted,
+    /// An executor's memory allotment ran out.
+    ResourceExhausted,
+    /// An executor failed during the attempt for a reason outside the request.
+    ExecutorFailed { reason: Detail },
 }
 
 #[cfg(test)]

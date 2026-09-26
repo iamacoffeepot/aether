@@ -86,7 +86,7 @@ fn decode_refuses_an_over_cap_fault_detail() -> Result<(), Box<dyn Error>> {
         InputDecode,
         Refused { reason: String },
         Panicked { message: String },
-        TimedOut { after_millis: u64 },
+        TimedOut,
         Crashed { stderr_tail: String },
     }
 

@@ -225,6 +225,25 @@ pub enum EngineError {
     Json(serde_json::Error),
 }
 
+impl EngineError {
+    /// The failure's class, with nothing the host or the daemon wrote: no
+    /// endpoint, no daemon message, no I/O text. A connection or I/O failure
+    /// keeps its [`io::ErrorKind`], and a status keeps its code. It is what a
+    /// recorded fault may carry; [`fmt::Display`] keeps the full text for the
+    /// log.
+    #[must_use]
+    pub fn cause(&self) -> String {
+        match self {
+            Self::Connect { source, .. } => format!("connecting to the Docker daemon failed ({})", source.kind()),
+            Self::Io(error) => format!("talking to the Docker daemon failed ({})", error.kind()),
+            Self::Protocol(_) => "malformed Engine API response".to_owned(),
+            Self::Status { status, .. } => format!("the Docker daemon answered {status}"),
+            Self::Pull(_) => "the image pull failed".to_owned(),
+            Self::Json(_) => "malformed Engine API JSON".to_owned(),
+        }
+    }
+}
+
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

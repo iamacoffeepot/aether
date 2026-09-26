@@ -72,8 +72,17 @@ pub struct AsyncSession {
 impl AsyncSession {
     /// Drive the future with a noop waker. The invocation child sends on
     /// [`PollResult::NeedArtifact`] and calls [`Self::fulfill`] on the reply.
+    ///
+    /// An executor binding that ended the invocation during this poll wins
+    /// over whatever the program's future returned: the session finishes
+    /// [`Invoked::Faulted`], and the program's result and staged artifacts are
+    /// dropped.
     pub fn poll(&mut self) -> PollResult {
-        match poll_once(self.future.as_mut()) {
+        let polled = poll_once(self.future.as_mut());
+        if let Some(fault) = self.owner.env::<Async>().take_ended() {
+            return PollResult::Finished(Invoked::Faulted { seq: self.seq, fault });
+        }
+        match polled {
             Poll::Ready(Ok((result, staged))) => {
                 PollResult::Finished(Invoked::Completed { seq: self.seq, result, staged })
             }

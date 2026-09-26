@@ -61,6 +61,16 @@ pub struct CleanupError {
     failures: Vec<(String, EngineError)>,
 }
 
+impl CleanupError {
+    /// Each failed removal's object and [`EngineError::cause`], never the
+    /// daemon's words.
+    pub fn cause(&self) -> String {
+        let removals: Vec<String> =
+            self.failures.iter().map(|(object, error)| format!("removing {object}: {}", error.cause())).collect();
+        removals.join("; ")
+    }
+}
+
 impl fmt::Display for CleanupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, (object, error)) in self.failures.iter().enumerate() {

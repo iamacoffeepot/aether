@@ -1,0 +1,25 @@
+[package]
+name = "aether-test-fixtures-program-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# WASM fixture bundle whose one program takes `Workspace`, so its invocation
+# declares `WorkspaceCapability` and the host loads it only where that
+# capability is composed: the bloomery chassis. The chassis workspace scenario
+# drives it against a scripted daemon. Structural discovery (cdylib +
+# aether-actor) includes it in `cargo xtask build-wasm`.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-bundle = { path = "../aether-bloomery-bundle" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-program = { path = "../aether-bloomery-program" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-workspace = { path = "../aether-workspace", default-features = false }
+
+[lints]
+workspace = true

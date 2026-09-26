@@ -2,18 +2,19 @@
 
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::io;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use aether_bloomery_journal::{ArtifactBatch, ArtifactStore, Journal};
+use aether_bloomery_journal::{ArtifactBatch, ArtifactStore, Journal, JournalError};
 use aether_bloomery_kinds::{Digest, Name, Node, OpaqueBytes, Ref, Tree};
 use aether_bloomery_tar::Limits;
 use aether_data::wire::encode_to_vec;
 use tempfile::TempDir;
 
-use super::{Allotment, Ran, Runner};
-use crate::runtime::engine::{Endpoint, Engine};
+use super::{Allotment, Ran, RunError, Runner};
+use crate::runtime::engine::{Endpoint, Engine, EngineError};
 use crate::runtime::provision::CpuSet;
 use crate::runtime::testing::{
     RUN_CONTAINER, RUN_PEAK_MEMORY_BYTES, RUN_VOLUME, RunScript, StubDaemon, StubReply, StubRequest, TarWriter,
@@ -549,5 +550,45 @@ fn a_stats_stream_that_hangs_up_leaves_the_answer_unchanged_and_the_peak_unobser
     assert_eq!(encode_to_vec(&unsampled.result)?, encode_to_vec(&sampled.result)?);
     assert_eq!(unsampled.observed.peak_memory_bytes, None);
     assert_eq!(requests.len(), 15, "the run went on past the dropped stats call: {:?}", lines(&requests));
+    Ok(())
+}
+
+#[test]
+fn a_failure_cause_keeps_the_call_and_drops_the_endpoint_the_daemon_message_and_the_journal_path() -> TestResult {
+    // Catches a cause that falls back to a wrapped error's text, which the
+    // driver would record: the endpoint's socket path, the daemon's own
+    // message, or the journal root path would reach the journal.
+    let socket = "/srv/host-only/docker.sock";
+    let message = "no such image: registry.internal.example/secret";
+    let root = "/srv/host-only/journal";
+    let causes = [
+        RunError::Engine {
+            call: "reading the daemon's platform".to_owned(),
+            error: EngineError::Connect {
+                endpoint: format!("unix://{socket}"),
+                source: io::Error::new(io::ErrorKind::NotFound, format!("{socket}: missing")),
+            },
+        },
+        RunError::Engine {
+            call: format!("starting container {RUN_CONTAINER}"),
+            error: EngineError::Status { status: 404, message: message.to_owned() },
+        },
+        RunError::Journal {
+            during: "opening a batch",
+            error: JournalError::Io { path: PathBuf::from(root), error: io::Error::other(root) },
+        },
+    ]
+    .map(|error| (error.to_string(), error.cause()));
+
+    for (full, cause) in &causes {
+        let cause = cause.as_str();
+        for host in [socket, message, root] {
+            assert!(!cause.contains(host), "{cause:?} holds {host:?}");
+        }
+        let call = full.split(':').next().ok_or("an empty full text")?;
+        assert!(cause.starts_with(&format!("{call}:")), "{cause:?} does not name the call {call:?}");
+    }
+    assert!(causes[0].0.contains(socket), "the log text keeps the endpoint: {:?}", causes[0].0);
+    assert!(causes[1].1.as_str().ends_with("answered 404"), "{:?}", causes[1].1);
     Ok(())
 }

@@ -14,7 +14,7 @@ use core::task::{Context, Poll};
 
 use aether_actor::{Addressable, CallerAddressable, ErasedActorRef, Replies, ReplyMode, Sends, Singleton, WasmCtx};
 use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, EncodedArtifact, OpaqueBytes, ReadArtifactResult, Ref, Refusal, Utf8Text,
+    ClosureArtifact, Digest, EncodedArtifact, ExecutorFault, OpaqueBytes, ReadArtifactResult, Ref, Refusal, Utf8Text,
 };
 use aether_data::{ActorMail, Cites, Kind, KindId, Storage};
 
@@ -35,6 +35,7 @@ struct Inner {
     pending: Option<Pending>,
     call_reply: Option<Result<(KindId, Vec<u8>), Refusal>>,
     terminal: BTreeMap<Digest, Refusal>,
+    ended: Option<ExecutorFault>,
 }
 
 /// One `ReadArtifact` the invocation child must send to its bundle root before polling again.
@@ -135,17 +136,18 @@ mod sealed {
 
     impl Sealed for super::Http {}
     impl Sealed for super::Process {}
+    impl Sealed for super::Workspace {}
 }
 
 /// Trailing `run` argument constructed from [`Env<Async>`].
 ///
-/// The set is closed: [`Http`] and [`Process`] are its only members, and the
-/// trait is sealed. `#[program]` accepts a trailing binding only by one of
-/// those names, maps the name to its target capability through the table in
-/// `__macro_internals::api_target`, and emits a check at the parameter that
-/// this trait's [`Self::Target`] is the table's type. The bundle's invocation
-/// declares each distinct target as a dependency and sends a captured call
-/// only through a proof minted from that declaration.
+/// The set is closed: [`Http`], [`Process`], and [`Workspace`] are its only
+/// members, and the trait is sealed. `#[program]` accepts a trailing binding
+/// only by one of those names, maps the name to its target capability through
+/// the table in `__macro_internals::api_target`, and emits a check at the
+/// parameter that this trait's [`Self::Target`] is the table's type. The
+/// bundle's invocation declares each distinct target as a dependency and sends
+/// a captured call only through a proof minted from that declaration.
 pub trait InjectedApi: sealed::Sealed + Sized {
     /// Actor this binding may send to.
     type Target: Addressable;
@@ -156,7 +158,7 @@ pub trait InjectedApi: sealed::Sealed + Sized {
 }
 
 /// Actor handle sharing the invocation environment pointer with [`Env<Async>`]:
-/// the one implementation [`Http`] and [`Process`] share.
+/// the one implementation [`Http`], [`Process`], and [`Workspace`] share.
 struct Binding<A: Addressable> {
     env: Env<Async>,
     _target: PhantomData<A>,
@@ -169,7 +171,7 @@ impl<A: Addressable> Binding<A> {
     }
 
     /// Send `mail` and await `<A as Replies<K>>::Reply`.
-    fn call<K>(&mut self, mail: K) -> impl Future<Output = Result<<A as Replies<K>>::Reply, Refusal>> + Send + 'static
+    fn call<K>(&mut self, mail: K) -> Call<A, K>
     where
         A: Singleton + CallerAddressable + Replies<K> + Unpin + 'static,
         K: ActorMail + Send + Unpin + 'static,
@@ -219,6 +221,69 @@ impl Process {
         mail: aether_process::Run,
     ) -> impl Future<Output = Result<aether_process::RunResult, Refusal>> + Send + 'static {
         self.0.call(mail)
+    }
+}
+
+/// Sampled workspace API: runs steps over a stored tree through
+/// [`aether_workspace::WorkspaceCapability`] (ADR-0237 decision 7).
+pub struct Workspace(Binding<aether_workspace::WorkspaceCapability>);
+
+impl InjectedApi for Workspace {
+    type Target = aether_workspace::WorkspaceCapability;
+    const SAMPLED: bool = true;
+
+    fn from_env(env: &mut Env<Async>) -> Self {
+        Self(Binding::new(env))
+    }
+}
+
+impl Workspace {
+    /// Await the outcome of `run`, or the workspace's refusal. A non-zero exit is an outcome.
+    ///
+    /// An exhausted allotment or an executor failure ends the invocation instead of
+    /// resolving; the program never observes either.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::InputDecode`] when the reply is not a `RunResult`; the pump's
+    /// refusal when the call could not be sent.
+    pub fn run(
+        &mut self,
+        run: aether_workspace::Run,
+    ) -> impl Future<Output = Result<Result<aether_workspace::Outcome, aether_workspace::Refusal>, Refusal>> + Send + 'static
+    {
+        RunCall { call: self.0.call(run) }
+    }
+}
+
+/// [`Workspace::run`]'s future: the run's outcome or refusal resolves; an
+/// exhausted allotment or an executor failure ends the invocation through
+/// [`Env::end`] and never resolves.
+struct RunCall {
+    call: Call<aether_workspace::WorkspaceCapability, aether_workspace::Run>,
+}
+
+impl Future for RunCall {
+    type Output = Result<Result<aether_workspace::Outcome, aether_workspace::Refusal>, Refusal>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let env = this.call.env;
+        let fault = match Pin::new(&mut this.call).poll(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(refusal)) => return Poll::Ready(Err(refusal)),
+            Poll::Ready(Ok(aether_workspace::RunResult::Ok(outcome))) => return Poll::Ready(Ok(Ok(outcome))),
+            Poll::Ready(Ok(aether_workspace::RunResult::Refused(refusal))) => return Poll::Ready(Ok(Err(refusal))),
+            Poll::Ready(Ok(aether_workspace::RunResult::Exhausted(aether_workspace::Resource::Time))) => {
+                ExecutorFault::TimedOut
+            }
+            Poll::Ready(Ok(aether_workspace::RunResult::Exhausted(aether_workspace::Resource::Memory))) => {
+                ExecutorFault::ResourceExhausted
+            }
+            Poll::Ready(Ok(aether_workspace::RunResult::Failed { detail })) => ExecutorFault::Failed { reason: detail },
+        };
+        env.end(fault);
+        Poll::Pending
     }
 }
 
@@ -276,6 +341,7 @@ impl EnvOwner {
                 pending: None,
                 call_reply: None,
                 terminal: BTreeMap::new(),
+                ended: None,
             })),
         }
     }
@@ -419,6 +485,17 @@ impl Env<Async> {
 
     pub(crate) fn reject_call(self, refusal: Refusal) {
         self.cell().borrow_mut().call_reply = Some(Err(refusal));
+    }
+
+    /// End the invocation with `fault`: the session finishes `Invoked::Faulted`
+    /// on this poll, whatever the program's future returned. Only an executor
+    /// binding's future calls it.
+    pub(crate) fn end(self, fault: ExecutorFault) {
+        self.cell().borrow_mut().ended = Some(fault);
+    }
+
+    pub(crate) fn take_ended(self) -> Option<ExecutorFault> {
+        self.cell().borrow_mut().ended.take()
     }
 
     pub(crate) fn fail(self, digest: Digest, refusal: Refusal) {

@@ -13,6 +13,7 @@ aether-bloomery-program-derive = { path = "../aether-bloomery-program-derive" }
 aether-data = { path = "../aether-data" }
 aether-http = { path = "../aether-http", default-features = false }
 aether-process = { path = "../aether-process", default-features = false }
+aether-workspace = { path = "../aether-workspace", default-features = false }
 
 [dev-dependencies]
 aether-component = { path = "../aether-component" }
