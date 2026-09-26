@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use aether_actor::{ActorRef, Addressable, ErasedActorRef};
-use aether_data::{Address, ErasedActorPath};
+use aether_actor::{ActorRef, ErasedActorRef, Instanced};
+use aether_data::{ErasedActorPath, LoadName};
 use crossbeam_channel::Receiver;
 
 use crate::actor::registry::ActorRegistry;
@@ -225,10 +225,14 @@ impl Spawner {
         self.registry.loaded::<R>(sender)
     }
 
-    /// Prove the child a held parent's `address` names, keeping the registry
+    /// Prove the child at `key` beneath a held `parent`, keeping the registry
     /// itself behind the spawner. The chassis handle's `child` forwards here.
-    pub(crate) fn live_child<C: Addressable>(&self, address: &Address<C>) -> Result<ActorRef<C>, ChildRefused> {
-        self.registry.live_child(address)
+    pub(crate) fn live_child<C: Instanced>(
+        &self,
+        parent: ErasedActorRef,
+        key: LoadName,
+    ) -> Result<ActorRef<C>, ChildRefused> {
+        self.registry.live_child::<C>(parent, key)
     }
 
     /// Body of the chassis handle's `send_tracked`: push `payload` to the

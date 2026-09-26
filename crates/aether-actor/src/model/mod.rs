@@ -20,7 +20,6 @@
 //! restores the markers to their natural home alongside the rest of
 //! the actor SDK.
 
-pub mod address;
 mod contract;
 pub mod ctx;
 mod link;
@@ -56,11 +55,10 @@ pub trait Resolve {
     #[must_use]
     fn resolve(caller_carry: u64, namespace: &str, args: Self::Args<'_>) -> MailboxId;
 
-    /// Fold an address key to a resolution candidate (ADR-0230): the same
-    /// derivation as `resolve`, entered through the `Option<&str>` key
-    /// shape an `Address` carries. Each strategy delegates to its own
-    /// `resolve` and returns `None` for the key shape it cannot fold —
-    /// never a fallback id.
+    /// Fold an optional key to a resolution candidate (ADR-0230): the same
+    /// derivation as `resolve`, entered through an `Option<&str>` key.
+    /// Each strategy delegates to its own `resolve` and returns `None` for
+    /// the key shape it cannot fold — never a fallback id.
     #[must_use]
     fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId>;
 }

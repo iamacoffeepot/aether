@@ -199,8 +199,8 @@ this way). A guest has no door for a payload-borne position and will not get
 one, because no guest API takes a `MailboxId`; a guest is told where to send by
 an `ErasedActorPath` or by the envelope sender.
 
-No door turns a foreign `Address<R>` (one that arrived in mail, config, or
-saved state) into a reference yet (ADR-0230 §3). The door lands for guests
+No door turns a foreign typed path, an `ActorPath<R>` (ADR-0230 §2) that
+arrived in mail, config, or saved state, into a reference yet (ADR-0230 §3). The door lands for guests
 first, as `WasmCtx::resolve::<R>`, with the Bloomery bootstrap as its consumer
 (ADR-0240 D8); the native twin, `NativeCtx::resolve::<R>`, lands with its
 first native caller. The editor shell's `RegionSpec.target` was the first site

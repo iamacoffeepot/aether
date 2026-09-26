@@ -52,7 +52,6 @@ pub use asset::{AssetCatalog, AssetInfo, AssetWindow};
 #[doc(hidden)]
 pub use blob::guest::__mint_guest_blob;
 pub use local::Local;
-pub use model::address::{address, address_at, address_named, child_address};
 pub use model::ctx::{Erased, MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
 pub use model::{
