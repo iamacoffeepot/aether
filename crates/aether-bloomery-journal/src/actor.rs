@@ -6,9 +6,9 @@ use crate::watch::Watchers;
 use crate::{AppendError, Batch, Closure, Journal};
 use aether_actor::{Manual, actor};
 use aether_bloomery_kinds::{
-    AppendRecords, AppendRecordsResult, DriverRecord, JournalEntry, MoveHead, MoveHeadResult, Publish, PublishResult,
-    ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, ReadEvents, ReadEventsResult, ReadHead,
-    ReadHeadResult, RecordedHeadMove, Seq, WatchHead, WatchHeadResult, artifact_digest,
+    AppendRecords, AppendRecordsResult, ClosureArtifact, DriverRecord, JournalEntry, MoveHead, MoveHeadResult, Publish,
+    PublishResult, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, ReadEvents, ReadEventsResult,
+    ReadHead, ReadHeadResult, RecordedHeadMove, Seq, WatchHead, WatchHeadResult,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -72,28 +72,35 @@ impl NativeActor for JournalActor {
         }
     }
 
+    /// Read one stored artifact. Its payload is checked into the engine blob
+    /// store, so the reply carries it without copying.
     #[handler::single]
-    fn on_read_artifact(&self, _ctx: &mut NativeCtx<'_>, request: ReadArtifact) -> ReadArtifactResult {
+    fn on_read_artifact(&self, ctx: &mut NativeCtx<'_>, request: ReadArtifact) -> ReadArtifactResult {
         let digest = request.digest;
         match self.journal.get_bytes(&digest) {
-            Ok(Some((kind, bytes))) if artifact_digest(kind, &bytes) == digest => {
-                ReadArtifactResult::Found { digest, kind, bytes }
+            Ok(Some((kind, bytes))) => {
+                let artifact = ClosureArtifact::new(kind, ctx.check_in(bytes.into_boxed_slice()));
+                if artifact.claimed().unverified() == digest {
+                    ReadArtifactResult::Found { artifact }
+                } else {
+                    ReadArtifactResult::Err {
+                        digest,
+                        message: "stored artifact bytes do not match the requested digest".into(),
+                    }
+                }
             }
-            Ok(Some(_)) => ReadArtifactResult::Err {
-                digest,
-                message: "stored artifact bytes do not match the requested digest".into(),
-            },
             Ok(None) => ReadArtifactResult::Missing { digest },
             Err(error) => ReadArtifactResult::Err { digest, message: error.to_string() },
         }
     }
 
-    /// Read an artifact's transitive closure under the requested byte limit.
-    /// A plain read: writes nothing and wakes no watcher.
+    /// Read an artifact's transitive closure under the requested byte limit,
+    /// checking each member into the engine blob store. A plain read: writes
+    /// nothing and wakes no watcher.
     #[handler::single]
-    fn on_read_closure(&self, _ctx: &mut NativeCtx<'_>, request: ReadClosure) -> ReadClosureResult {
+    fn on_read_closure(&self, ctx: &mut NativeCtx<'_>, request: ReadClosure) -> ReadClosureResult {
         let ReadClosure { root, limit_bytes } = request;
-        match self.journal.read_closure(&root, limit_bytes) {
+        match self.journal.read_closure(&root, limit_bytes, |payload| ctx.check_in(payload)) {
             Ok(Closure::Found(artifacts)) => ReadClosureResult::Found { root, artifacts },
             Ok(Closure::Missing(digest)) => ReadClosureResult::Missing { root, digest },
             Ok(Closure::TooLarge) => ReadClosureResult::TooLarge { root, limit_bytes },

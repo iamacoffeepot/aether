@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use aether_data::KindId;
 
-use crate::{Digest, Entry, Seq};
+use crate::{ClosureArtifact, Digest, Entry, Seq};
 
 pub use append::{AppendRecords, AppendRecordsResult, DriverRecord};
 pub use artifact::{ArtifactCitation, EncodedArtifact};
@@ -119,17 +119,15 @@ pub struct ReadArtifact {
     pub digest: Digest,
 }
 
-/// Kind and unprefixed payload of one stored artifact, or an explicit refusal.
-#[aether_data::kind(name = "aether.bloomery.journal.read_artifact_result", eq, no_serde)]
+/// One stored artifact as a [`ClosureArtifact`], or an explicit refusal.
+#[aether_data::kind(name = "aether.bloomery.journal.read_artifact_result", no_serde)]
 pub enum ReadArtifactResult {
-    /// Stored bytes whose kind and payload hash to the requested digest.
+    /// The stored artifact. Its claimed digest is the requested one, and a
+    /// reader verifies it through [`ClosureArtifact::load`].
     Found {
-        /// Requested digest.
-        digest: Digest,
-        /// Stored artifact kind.
-        kind: KindId,
-        /// Stored payload after the eight-byte kind prefix.
-        bytes: Vec<u8>,
+        /// Stored kind, payload after the eight-byte kind prefix, and the
+        /// digest the journal claims for them.
+        artifact: ClosureArtifact,
     },
     /// No artifact exists at the requested digest.
     Missing {

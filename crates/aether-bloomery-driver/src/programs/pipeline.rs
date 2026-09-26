@@ -266,7 +266,9 @@ impl ProgramCore {
             self.abort(format!("request {seq} reached its closure with no declaration"), out);
             return;
         };
-        let Some(member) = artifacts.iter().find(|artifact| artifact.digest() == input) else {
+        // The claim and kind are what the journal answered. The program
+        // verifies the input's bytes and kind prefix when it reads them.
+        let Some(member) = artifacts.iter().find(|artifact| artifact.claimed().unverified() == input) else {
             self.fail_active(bundle, seq, FaultReason::InputMissing, out);
             return;
         };

@@ -11,11 +11,18 @@ impl ProgramCore {
     /// Continue one reactor-set artifact read, caching the decode by digest.
     ///
     /// A missing, wrong-kind, or undecodable set caches as `None` and selects
-    /// nothing; a read error aborts, because it says nothing about the bytes.
+    /// nothing; a read error aborts, because it says nothing about the bytes,
+    /// and so do bytes that do not hash to `digest`.
     pub(crate) fn continue_set_artifact(&mut self, digest: Digest, result: ReadArtifactResult, out: &mut Vec<Command>) {
         let set = match result {
-            ReadArtifactResult::Found { kind, bytes, .. } if kind == ReactorSet::ID => {
-                ReactorSet::decode_storage(&bytes).ok().map(|data| data.value)
+            ReadArtifactResult::Found { artifact } if artifact.kind() == ReactorSet::ID => {
+                match artifact.load(digest) {
+                    Ok(bytes) => ReactorSet::decode_storage(&bytes).ok().map(|data| data.value),
+                    Err(mismatch) => {
+                        self.abort(format!("reactor set read failed: {mismatch}"), out);
+                        return;
+                    }
+                }
             }
             ReadArtifactResult::Found { .. } | ReadArtifactResult::Missing { .. } => None,
             ReadArtifactResult::Err { message, .. } => {

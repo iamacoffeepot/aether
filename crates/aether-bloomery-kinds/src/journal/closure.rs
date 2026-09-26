@@ -8,12 +8,14 @@ use core::fmt;
 
 use crate::{ClosureArtifact, Digest};
 
-/// Byte budget for one closure read: at least one stored blob's kind prefix, at most 16 MiB.
+/// Byte budget for one closure read: at least one stored blob's kind prefix, at most 4 GiB.
 ///
 /// A closure always contains its root, and every stored blob is at least
 /// the eight-byte kind prefix, so a smaller limit could never be satisfied.
-/// The ceiling keeps a `Found` reply well under the default mail frame
-/// limit. Construction and every decode path re-run the same check.
+/// The ceiling bounds the resident bytes the journal checks into the engine
+/// blob store for one closure, not a mail frame: members cross mail as
+/// [`Blob`](aether_data::Blob)s (ADR-0238 decision 10). Construction and
+/// every decode path re-run the same check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
 #[storage(validate)]
 pub struct ClosureLimit(u64);
@@ -22,8 +24,8 @@ impl ClosureLimit {
     /// Smallest accepted limit: one kind prefix.
     pub const MIN_BYTES: u64 = 8;
 
-    /// Largest accepted limit: 16 MiB.
-    pub const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    /// Largest accepted limit: 4 GiB of resident closure bytes.
+    pub const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
     /// Accept a byte limit in `MIN_BYTES ..= MAX_BYTES`.
     ///
@@ -106,7 +108,7 @@ pub struct ReadClosure {
 }
 
 /// Exactly one outcome of a closure read.
-#[aether_data::kind(name = "aether.bloomery.journal.read_closure_result", eq, no_serde)]
+#[aether_data::kind(name = "aether.bloomery.journal.read_closure_result", no_serde)]
 pub enum ReadClosureResult {
     /// Every distinct reachable artifact, within the limit.
     Found {

@@ -21,7 +21,10 @@ use super::ticket::{
 /// `Fetched` delivers a bundle root's fetch-on-miss answer, and `Abort`
 /// reports that the core's journal view cannot be trusted or a required
 /// record cannot be written; the shell maps it to `fatal_abort` (ADR-0063).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// It carries [`Invoke`] and [`ReadArtifactResult`], whose closure members
+/// hold `Blob`s, so it has no equality: tests compare fields.
+#[derive(Debug, Clone)]
 pub enum Command {
     /// Read journal entries after the request boundary.
     ReadEvents {

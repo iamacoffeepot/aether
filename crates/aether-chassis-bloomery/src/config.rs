@@ -38,7 +38,7 @@ pub struct BloomeryConfig {
     ///
     /// Lowered once through [`ClosureLimit::new`] (ADR-0226 decision 4); a
     /// refused value is a boot error naming the key, never a panic.
-    #[config(default = 16_777_216)]
+    #[config(default = 4_294_967_296u64)]
     pub closure_limit_bytes: u64,
 }
 
@@ -91,7 +91,7 @@ mod tests {
     fn default_closure_limit_is_accepted() {
         // Resolving off an empty stack must yield the declared default, and the
         // default must be a limit `ClosureLimit::new` accepts: catches the
-        // derive's `default = 16_777_216` literal drifting above a lowered
+        // derive's `default = 4_294_967_296u64` literal drifting above a lowered
         // `ClosureLimit::MAX_BYTES`, which would fail every default boot.
         let mut sources = ConfigSources::new(None);
         let mut config = sources.resolve::<BloomeryConfig>().expect("resolve off an empty stack");

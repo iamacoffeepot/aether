@@ -159,10 +159,47 @@ impl Program for ReadUncited {
     }
 }
 
-export!(public = [Summarize, Refuse, FetchBody, Stall, ReadUncited], generators = [aether_bloomery_bundle::bundle],);
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.read_large.input")]
+struct ReadLargeInput {
+    text: Ref<Utf8Text>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.read_large.result")]
+struct ReadLargeResult {
+    len: u64,
+    tail: Ref<Utf8Text>,
+}
+
+/// Bytes of the input text [`ReadLarge`] stages back as its tail.
+const TAIL_BYTES: usize = 16;
+
+struct ReadLarge;
+
+#[program]
+impl Program for ReadLarge {
+    const NAME: &'static str = "test.program.read_large";
+    const MODE: Mode = Mode::Pure;
+    const INTENT: &'static str = "Read a large cited text whole and stage its length and its last sixteen bytes.";
+    type Input = ReadLargeInput;
+    type Result = ReadLargeResult;
+
+    async fn run(input: Self::Input, env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
+        let text = env.read_text(input.text).await?;
+        let tail = text.get(text.len().saturating_sub(TAIL_BYTES)..).ok_or(Refusal::InputDecode)?;
+        Ok(ReadLargeResult { len: text.len() as u64, tail: env.stage_text(tail) })
+    }
+}
+
+export!(
+    public = [Summarize, Refuse, FetchBody, Stall, ReadUncited, ReadLarge],
+    generators = [aether_bloomery_bundle::bundle],
+);
 
 const _: Summarize = Summarize;
 const _: Refuse = Refuse;
 const _: FetchBody = FetchBody;
 const _: Stall = Stall;
 const _: ReadUncited = ReadUncited;
+const _: ReadLarge = ReadLarge;

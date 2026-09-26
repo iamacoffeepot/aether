@@ -31,8 +31,10 @@ impl ProgramCore {
         true
     }
 
-    /// Continue the digest's one bundle artifact read: decode its roles, then
-    /// wake its program request and drive routing.
+    /// Continue the digest's one bundle artifact read: load and verify its
+    /// bytes, decode its roles, then wake its program request and drive
+    /// routing. Bytes that do not hash to the bundle digest make the bundle
+    /// unavailable.
     pub(crate) fn continue_bundle_artifact(
         &mut self,
         bundle: Digest,
@@ -40,11 +42,12 @@ impl ProgramCore {
         out: &mut Vec<Command>,
     ) {
         let read = match result {
-            ReadArtifactResult::Found { kind, bytes, .. } if kind == OpaqueBytes::ID => {
-                declared_roles(&bytes).map(|roles| (roles, bytes))
-            }
-            ReadArtifactResult::Found { kind, .. } => {
-                Err(Detail::new(format!("bundle artifact has kind {}, expected opaque bytes", kind.0)))
+            ReadArtifactResult::Found { artifact } if artifact.kind() == OpaqueBytes::ID => artifact
+                .load(bundle)
+                .map_err(|mismatch| Detail::new(mismatch.to_string()))
+                .and_then(|bytes| declared_roles(&bytes).map(|roles| (roles, bytes))),
+            ReadArtifactResult::Found { artifact } => {
+                Err(Detail::new(format!("bundle artifact has kind {}, expected opaque bytes", artifact.kind().0)))
             }
             ReadArtifactResult::Missing { .. } => Err(Detail::new("bundle artifact is missing")),
             ReadArtifactResult::Err { message, .. } => Err(Detail::new(message)),

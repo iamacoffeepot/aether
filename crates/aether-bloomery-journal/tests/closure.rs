@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_bloomery_journal::{Batch, Closure, Digest, Journal, JournalError, OpaqueBytes, Ref, Seq, artifact_blob};
-use aether_bloomery_kinds::{ClosureArtifact, ClosureLimit};
-use aether_data::Kind;
+use aether_bloomery_kinds::ClosureLimit;
+use aether_data::{Blob, Kind};
 use common::FixedClock;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -30,6 +30,8 @@ struct Diamond {
     branches: [Digest; 2],
     leaf: Digest,
     total_bytes: u64,
+    /// Each member's staged blob, kind prefix included, by digest.
+    blobs: Vec<(Digest, Vec<u8>)>,
 }
 
 impl Diamond {
@@ -50,17 +52,31 @@ fn stage_diamond(journal: &mut Journal) -> Result<Diamond, Box<dyn Error>> {
 
     let digests = [root.digest(), first.digest(), second.digest(), leaf.digest()];
     let mut total_bytes = 0;
-    for digest in &digests {
-        total_bytes += u64::try_from(batch.staged_blob(digest).ok_or("staged blob")?.len())?;
+    let mut blobs = Vec::new();
+    for digest in digests {
+        let blob = batch.staged_blob(&digest).ok_or("staged blob")?;
+        total_bytes += u64::try_from(blob.len())?;
+        blobs.push((digest, blob.to_vec()));
     }
 
     journal.append(Seq(0), &batch)?;
-    Ok(Diamond { root: root.digest(), branches: [first.digest(), second.digest()], leaf: leaf.digest(), total_bytes })
+    Ok(Diamond {
+        root: root.digest(),
+        branches: [first.digest(), second.digest()],
+        leaf: leaf.digest(),
+        total_bytes,
+        blobs,
+    })
+}
+
+/// Check each payload into a plain owned `Blob`, as a test stands in for the engine store.
+fn check_in(payload: Box<[u8]>) -> Blob {
+    Blob::from(payload.into_vec())
 }
 
 fn found_digests(closure: Closure) -> Vec<Digest> {
     match closure {
-        Closure::Found(artifacts) => artifacts.iter().map(ClosureArtifact::digest).collect(),
+        Closure::Found(artifacts) => artifacts.iter().map(|artifact| artifact.claimed().unverified()).collect(),
         other => panic!("expected Found, got {other:?}"),
     }
 }
@@ -76,12 +92,24 @@ fn blob_path(root: &Path, digest: &Digest) -> PathBuf {
 
 #[test]
 fn a_diamond_closure_is_root_first_breadth_first_and_deduplicated() -> Result<(), Box<dyn Error>> {
-    // Catches a non-transitive walk, a shared leaf returned twice, and a nondeterministic child order.
+    // Catches a non-transitive walk, a shared leaf returned twice, and a nondeterministic child
+    // order; and, by loading every member against its digest, a kind prefix left in the
+    // checked-in payload or one member checked in with another's bytes.
     let (_root, mut journal) = common::temp_journal(0)?;
     let diamond = stage_diamond(&mut journal)?;
 
-    let closure = journal.read_closure(&diamond.root, ClosureLimit::new(ClosureLimit::MAX_BYTES)?)?;
-    assert_eq!(found_digests(closure), diamond.expected_order());
+    let Closure::Found(artifacts) =
+        journal.read_closure(&diamond.root, ClosureLimit::new(ClosureLimit::MAX_BYTES)?, check_in)?
+    else {
+        panic!("expected Found");
+    };
+    let digests: Vec<Digest> = artifacts.iter().map(|artifact| artifact.claimed().unverified()).collect();
+    assert_eq!(digests, diamond.expected_order());
+    for artifact in &artifacts {
+        let digest = artifact.claimed().unverified();
+        let (_, staged) = diamond.blobs.iter().find(|(staged, _)| *staged == digest).ok_or("staged member")?;
+        assert_eq!(artifact.load(digest).as_deref(), Ok(&staged[8..]), "member {digest} loads its own payload");
+    }
     Ok(())
 }
 
@@ -91,10 +119,10 @@ fn a_limit_equal_to_the_total_blob_length_fits_and_one_byte_less_does_not() -> R
     let (_root, mut journal) = common::temp_journal(0)?;
     let diamond = stage_diamond(&mut journal)?;
 
-    let exact = journal.read_closure(&diamond.root, ClosureLimit::new(diamond.total_bytes)?)?;
+    let exact = journal.read_closure(&diamond.root, ClosureLimit::new(diamond.total_bytes)?, check_in)?;
     assert_eq!(found_digests(exact), diamond.expected_order());
-    let short = journal.read_closure(&diamond.root, ClosureLimit::new(diamond.total_bytes - 1)?)?;
-    assert_eq!(short, Closure::TooLarge);
+    let short = journal.read_closure(&diamond.root, ClosureLimit::new(diamond.total_bytes - 1)?, check_in)?;
+    assert!(matches!(short, Closure::TooLarge), "expected TooLarge, got {short:?}");
     Ok(())
 }
 
@@ -106,7 +134,8 @@ fn a_root_larger_than_the_limit_is_too_large_not_an_empty_list() -> Result<(), B
     let root = batch.stage_bytes(&[9; 64]);
     journal.append(Seq(0), &batch)?;
 
-    assert_eq!(journal.read_closure(&root.digest(), ClosureLimit::new(64)?)?, Closure::TooLarge);
+    let closure = journal.read_closure(&root.digest(), ClosureLimit::new(64)?, check_in)?;
+    assert!(matches!(closure, Closure::TooLarge), "expected TooLarge, got {closure:?}");
     Ok(())
 }
 
@@ -116,7 +145,8 @@ fn an_unstored_root_is_missing() -> Result<(), Box<dyn Error>> {
     let (_root, journal) = common::temp_journal(0)?;
     let absent = Digest::from_bytes([4; 32]);
 
-    assert_eq!(journal.read_closure(&absent, ClosureLimit::new(ClosureLimit::MAX_BYTES)?)?, Closure::Missing(absent));
+    let closure = journal.read_closure(&absent, ClosureLimit::new(ClosureLimit::MAX_BYTES)?, check_in)?;
+    assert!(matches!(closure, Closure::Missing(digest) if digest == absent), "expected Missing, got {closure:?}");
     Ok(())
 }
 
@@ -126,7 +156,8 @@ fn citation_edges_survive_a_reopen() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let diamond = stage_diamond(&mut open(temp.path())?)?;
 
-    let closure = open(temp.path())?.read_closure(&diamond.root, ClosureLimit::new(ClosureLimit::MAX_BYTES)?)?;
+    let closure =
+        open(temp.path())?.read_closure(&diamond.root, ClosureLimit::new(ClosureLimit::MAX_BYTES)?, check_in)?;
     assert_eq!(found_digests(closure), diamond.expected_order());
     Ok(())
 }
@@ -141,7 +172,7 @@ fn a_member_whose_bytes_do_not_hash_to_its_digest_is_an_error() -> Result<(), Bo
     fs::write(blob_path(temp.path(), &diamond.leaf), artifact_blob(OpaqueBytes::ID, b"forged leaf"))?;
 
     let error = open(temp.path())?
-        .read_closure(&diamond.root, ClosureLimit::new(ClosureLimit::MAX_BYTES)?)
+        .read_closure(&diamond.root, ClosureLimit::new(ClosureLimit::MAX_BYTES)?, check_in)
         .expect_err("forged member must fail");
     assert!(
         matches!(error, JournalError::ArtifactDigestMismatch(digest) if digest == diamond.leaf),

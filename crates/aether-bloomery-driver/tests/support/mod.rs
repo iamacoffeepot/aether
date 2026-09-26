@@ -316,9 +316,7 @@ impl World {
     /// Answer one artifact read from the stored artifacts.
     fn artifact(&self, request: &ReadArtifact) -> ReadArtifactResult {
         match self.artifacts.get(&request.digest) {
-            Some((kind, bytes)) => {
-                ReadArtifactResult::Found { digest: request.digest, kind: *kind, bytes: bytes.clone() }
-            }
+            Some((kind, bytes)) => ReadArtifactResult::Found { artifact: ClosureArtifact::new(*kind, bytes.clone()) },
             None => ReadArtifactResult::Missing { digest: request.digest },
         }
     }

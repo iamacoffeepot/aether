@@ -10,7 +10,8 @@ use aether_bloomery_program::{
     Async, AsyncProgram, Env, Http, InjectedApi, Pending, PollResult, Process, Program, Started, Sync, SyncProgram,
     invoke, start_async,
 };
-use aether_data::{Cites, Kind, Storage};
+use aether_data::wire::{decode_from_slice, encode_to_vec};
+use aether_data::{Cites, Kind, MAX_READ_BYTES, Storage};
 use aether_http::{Fetch, FetchResult, HttpMethod};
 use aether_process::{Run, RunResult};
 
@@ -29,6 +30,16 @@ fn closure_of<K: Storage + Clone + Cites>(value: &K) -> Result<ClosureArtifact, 
 
 fn send<P: SyncProgram>(input: Digest, closure: Vec<ClosureArtifact>) -> Invoked {
     invoke::<P>(Invoke::new(7, program_name::<P>(), input, closure))
+}
+
+/// `artifact` decoded again after one byte of its claimed digest was flipped: the member a
+/// sender that lies about its digest carries. Its bytes are unchanged, so they still decode.
+fn with_altered_claim(artifact: &ClosureArtifact) -> Result<ClosureArtifact, Box<dyn Error>> {
+    let mut bytes = encode_to_vec(artifact)?;
+    bytes[0] ^= 0x01;
+    let altered: ClosureArtifact = decode_from_slice(&bytes)?;
+    assert_ne!(altered.claimed(), artifact.claimed(), "the flipped byte is the claim's");
+    Ok(altered)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -141,6 +152,56 @@ impl SyncProgram for Dedupe {
     }
 }
 
+/// Reads its cited text with `injected_text` and stages it back whole.
+struct EchoText;
+
+impl Program for EchoText {
+    const NAME: &'static str = "echo.text";
+    const MODE: Mode = Mode::Pure;
+    const INTENT: &'static str = "Read cited text and stage it back.";
+    type Input = CiteResult;
+    type Result = CiteResult;
+}
+
+impl SyncProgram for EchoText {
+    fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
+        let text = env.injected_text(input.text)?;
+        Ok(CiteResult { text: env.stage_text(&text) })
+    }
+}
+
+#[test]
+fn a_member_whose_claim_was_altered_refuses_before_decode() -> Result<(), Box<dyn Error>> {
+    // Catches a typed `injected` read or an `injected_text` read that decodes a member without
+    // hashing it against the digest it was read under. Both payloads decode, so only
+    // verification refuses them.
+    let child = with_altered_claim(&closure_of(&Child { n: 1 })?)?;
+    match send::<MissingInput>(child.claimed().unverified(), vec![child]) {
+        Invoked::Refused { seq: 7, refusal: Refusal::InputDecode } => {}
+        other => panic!("expected InputDecode for a typed read, got {other:?}"),
+    }
+
+    let text = with_altered_claim(&ClosureArtifact::new(Utf8Text::ID, b"hello".to_vec()))?;
+    let input = closure_of(&CiteResult { text: Ref::from_digest(text.claimed().unverified()) })?;
+    match send::<EchoText>(input.claimed().unverified(), vec![input, text]) {
+        Invoked::Refused { seq: 7, refusal: Refusal::InputDecode } => Ok(()),
+        other => panic!("expected InputDecode for a text read, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_text_member_past_one_read_window_reads_back_whole() -> Result<(), Box<dyn Error>> {
+    // Catches an `Env` read that truncates a member at a `MAX_READ_BYTES` window.
+    let text = format!("{}z", "a".repeat(MAX_READ_BYTES));
+    let member = ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec());
+    let input = closure_of(&CiteResult { text: Ref::of_text(&text) })?;
+    let Invoked::Completed { result, .. } = send::<EchoText>(input.claimed().unverified(), vec![input, member]) else {
+        panic!("expected Completed");
+    };
+    assert_eq!(result, encoded(&CiteResult { text: Ref::of_text(&text) })?.digest());
+    Ok(())
+}
+
 #[test]
 fn absent_input_is_input_missing() {
     match send::<MissingInput>(Digest::from_bytes([1; 32]), Vec::new()) {
@@ -153,7 +214,7 @@ fn absent_input_is_input_missing() {
 fn wrong_kind_input_is_input_decode() -> Result<(), Box<dyn Error>> {
     let child = Child { n: 1 };
     let artifact = closure_of(&child)?;
-    match send::<Cite>(artifact.digest(), vec![artifact]) {
+    match send::<Cite>(artifact.claimed().unverified(), vec![artifact]) {
         Invoked::Refused { seq: 7, refusal: Refusal::InputDecode } => Ok(()),
         other => panic!("expected InputDecode, got {other:?}"),
     }
@@ -162,7 +223,7 @@ fn wrong_kind_input_is_input_decode() -> Result<(), Box<dyn Error>> {
 #[test]
 fn undecodable_input_is_input_decode() {
     let artifact = ClosureArtifact::new(Child::ID, vec![0xff, 0xff, 0xff]);
-    match send::<MissingInput>(artifact.digest(), vec![artifact]) {
+    match send::<MissingInput>(artifact.claimed().unverified(), vec![artifact]) {
         Invoked::Refused { seq: 7, refusal: Refusal::InputDecode } => {}
         other => panic!("expected InputDecode, got {other:?}"),
     }
@@ -172,7 +233,7 @@ fn undecodable_input_is_input_decode() {
 fn read_outside_the_closure_is_input_missing() -> Result<(), Box<dyn Error>> {
     let child = Child { n: 1 };
     let artifact = closure_of(&child)?;
-    match send::<MissingRead>(artifact.digest(), vec![artifact]) {
+    match send::<MissingRead>(artifact.claimed().unverified(), vec![artifact]) {
         Invoked::Refused { seq: 7, refusal: Refusal::InputMissing } => Ok(()),
         other => panic!("expected InputMissing, got {other:?}"),
     }
@@ -185,7 +246,7 @@ fn completed_reads_a_closure_child_and_stages_cited_text() -> Result<(), Box<dyn
     let input = CiteInput { child: Ref::of_encoded(&child)? };
     let input_artifact = closure_of(&input)?;
     let Invoked::Completed { seq, result, staged } =
-        send::<Cite>(input_artifact.digest(), vec![child_artifact, input_artifact])
+        send::<Cite>(input_artifact.claimed().unverified(), vec![child_artifact, input_artifact])
     else {
         panic!("expected Completed");
     };
@@ -202,7 +263,7 @@ fn completed_reads_a_closure_child_and_stages_cited_text() -> Result<(), Box<dyn
 fn unreachable_staged_blob_is_refused() -> Result<(), Box<dyn Error>> {
     let child = Child { n: 1 };
     let artifact = closure_of(&child)?;
-    match send::<Orphan>(artifact.digest(), vec![artifact]) {
+    match send::<Orphan>(artifact.claimed().unverified(), vec![artifact]) {
         Invoked::Refused { seq: 7, refusal: Refusal::Refused { reason } } => {
             assert!(reason.as_str().contains("is not reachable from the result"), "{}", reason.as_str());
             Ok(())
@@ -215,7 +276,7 @@ fn unreachable_staged_blob_is_refused() -> Result<(), Box<dyn Error>> {
 fn staging_the_same_bytes_twice_yields_one_encoded_artifact() -> Result<(), Box<dyn Error>> {
     let child = Child { n: 1 };
     let artifact = closure_of(&child)?;
-    let Invoked::Completed { staged, .. } = send::<Dedupe>(artifact.digest(), vec![artifact]) else {
+    let Invoked::Completed { staged, .. } = send::<Dedupe>(artifact.claimed().unverified(), vec![artifact]) else {
         panic!("expected Completed");
     };
     let bytes = EncodedArtifact::opaque_bytes(b"same");
@@ -277,7 +338,7 @@ fn async_hit_path_does_not_fetch() -> Result<(), Box<dyn Error>> {
     let text_artifact = ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec());
     let input = SummarizeInput { text: Ref::of_text(text) };
     let input_artifact = closure_of(&input)?;
-    match drive_async(input_artifact.digest(), vec![text_artifact, input_artifact], None) {
+    match drive_async(input_artifact.claimed().unverified(), vec![text_artifact, input_artifact], None) {
         Invoked::Completed { seq: 7, result, staged } => {
             let expected = SummarizeResult { text: Ref::of_text("summary:hello") };
             let expected_encoded = encoded(&expected)?;
@@ -294,12 +355,8 @@ fn async_miss_fetches_and_completes() -> Result<(), Box<dyn Error>> {
     let text = "hello";
     let input = SummarizeInput { text: Ref::of_text(text) };
     let input_artifact = closure_of(&input)?;
-    let reply = ReadArtifactResult::Found {
-        digest: Ref::of_text(text).digest(),
-        kind: Utf8Text::ID,
-        bytes: text.as_bytes().to_vec(),
-    };
-    match drive_async(input_artifact.digest(), vec![input_artifact], Some(reply)) {
+    let reply = ReadArtifactResult::Found { artifact: ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec()) };
+    match drive_async(input_artifact.claimed().unverified(), vec![input_artifact], Some(reply)) {
         Invoked::Completed { seq: 7, result, staged } => {
             let expected = SummarizeResult { text: Ref::of_text("summary:hello") };
             let expected_encoded = encoded(&expected)?;
@@ -317,7 +374,7 @@ fn async_miss_after_journal_missing_is_input_missing() -> Result<(), Box<dyn Err
     let input = SummarizeInput { text: Ref::of_text(text) };
     let input_artifact = closure_of(&input)?;
     let reply = ReadArtifactResult::Missing { digest: Ref::of_text(text).digest() };
-    match drive_async(input_artifact.digest(), vec![input_artifact], Some(reply)) {
+    match drive_async(input_artifact.claimed().unverified(), vec![input_artifact], Some(reply)) {
         Invoked::Refused { seq: 7, refusal: Refusal::InputMissing } => Ok(()),
         other => panic!("expected InputMissing after Missing, got {other:?}"),
     }
@@ -373,7 +430,7 @@ fn sampled_http_fetch_yields_need_send_then_completes() -> Result<(), Box<dyn Er
     match start_async::<SampledHttp>(Invoke::new(
         7,
         program_name::<SampledHttp>(),
-        input_artifact.digest(),
+        input_artifact.claimed().unverified(),
         vec![input_artifact],
     )) {
         Started::Finished(other) => panic!("expected Live NeedSend, got Finished {other:?}"),
@@ -449,7 +506,7 @@ fn sampled_process_run_yields_need_send_then_completes() -> Result<(), Box<dyn E
     match start_async::<SampledProcess>(Invoke::new(
         7,
         program_name::<SampledProcess>(),
-        input_artifact.digest(),
+        input_artifact.claimed().unverified(),
         vec![input_artifact],
     )) {
         Started::Finished(other) => panic!("expected Live NeedSend, got Finished {other:?}"),

@@ -51,13 +51,14 @@ fn program_name(name: &str) -> ProgramName {
 
 fn assert_fixture_section(wasm: &[u8]) {
     let decoded = declarations(&section_bytes(wasm)).expect("aether.bloomery.programs decodes");
-    assert_eq!(decoded.len(), 5, "the custom section lists every exported program");
+    assert_eq!(decoded.len(), 6, "the custom section lists every exported program");
     let names: Vec<&str> = decoded.iter().map(|program| program.name.as_str()).collect();
     assert!(names.contains(&"test.program.summarize"), "{names:?}");
     assert!(names.contains(&"test.program.refuse"), "{names:?}");
     assert!(names.contains(&"test.program.fetch_body"), "{names:?}");
     assert!(names.contains(&"test.program.stall"), "{names:?}");
     assert!(names.contains(&"test.program.read_uncited"), "{names:?}");
+    assert!(names.contains(&"test.program.read_large"), "{names:?}");
     let summarize = decoded
         .iter()
         .find(|program| program.name.as_str() == "test.program.summarize")
@@ -123,7 +124,7 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
     let summarize = Invoke::new(
         1,
         program_name("test.program.summarize"),
-        input_artifact.digest(),
+        input_artifact.claimed().unverified(),
         vec![text_artifact, input_artifact],
     );
     let summarized = harness
@@ -155,7 +156,12 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
 
     let refuse_input = RefuseInput { marker: 1 };
     let refuse_artifact = closure_of(&refuse_input)?;
-    let refuse = Invoke::new(2, program_name("test.program.refuse"), refuse_artifact.digest(), vec![refuse_artifact]);
+    let refuse = Invoke::new(
+        2,
+        program_name("test.program.refuse"),
+        refuse_artifact.claimed().unverified(),
+        vec![refuse_artifact],
+    );
     let refused =
         harness.execute(vec![("refuse", HarnessOp::send_and_await_reply(root, &refuse))]).expect("refuse invoke");
     match refused.reply::<Invoked>("refuse").expect("decode refuse Invoked") {

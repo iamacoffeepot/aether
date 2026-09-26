@@ -10,7 +10,6 @@ use core::fmt;
 use core::future::Future;
 use core::marker::PhantomData;
 use core::pin::Pin;
-use core::str;
 use core::task::{Context, Poll};
 
 use aether_actor::{Addressable, CallerAddressable, ErasedActorRef, Replies, ReplyMode, Sends, Singleton, WasmCtx};
@@ -263,10 +262,12 @@ pub struct EnvOwner {
 }
 
 impl EnvOwner {
+    /// Key each member by the digest its sender claims. No byte is read:
+    /// a typed read verifies the member it loads.
     pub(crate) fn from_closure(closure: Vec<ClosureArtifact>) -> Self {
         let mut artifacts = BTreeMap::new();
         for artifact in closure {
-            artifacts.insert(artifact.digest(), artifact);
+            artifacts.insert(artifact.claimed().unverified(), artifact);
         }
         Self {
             inner: Box::new(RefCell::new(Inner {
@@ -294,11 +295,9 @@ pub struct Env<M> {
 
 impl<M> Env<M> {
     fn cell(&self) -> &RefCell<Inner> {
-        // SAFETY: `inner` is the `RefCell` inside an [`EnvOwner`] that outlives
-        // every handle cloned from it — the local in a sync `run`, or the
-        // `AsyncSession` that owns both the box and the boxed future.
         // SAFETY: `inner` is the address of the `RefCell` inside an [`EnvOwner`]
-        // that outlives every handle cloned from it.
+        // that outlives every handle cloned from it — the local in a sync
+        // `run`, or the `AsyncSession` that owns both the box and the boxed future.
         unsafe { &*(self.inner as *const RefCell<Inner>) }
     }
 
@@ -307,7 +306,8 @@ impl<M> Env<M> {
     /// # Errors
     ///
     /// [`Refusal::InputMissing`] when the digest is absent (or a journal fetch reported missing).
-    /// [`Refusal::InputDecode`] when the kind prefix differs or the payload does not decode.
+    /// [`Refusal::InputDecode`] when the kind prefix differs, the bytes do not hash to the
+    /// digest, or the payload does not decode.
     pub fn injected<K: Storage>(&self, r: Ref<K>) -> Result<K, Refusal> {
         self.decode_injected(r.digest())
     }
@@ -317,17 +317,10 @@ impl<M> Env<M> {
     /// # Errors
     ///
     /// [`Refusal::InputMissing`] when the digest is absent (or a journal fetch reported missing).
-    /// [`Refusal::InputDecode`] when the kind prefix differs or the payload is not UTF-8.
+    /// [`Refusal::InputDecode`] when the kind prefix differs, the bytes do not hash to the
+    /// digest, or the payload is not UTF-8.
     pub fn injected_text(&self, r: Ref<Utf8Text>) -> Result<String, Refusal> {
-        let inner = self.cell().borrow();
-        if let Some(refusal) = inner.terminal.get(&r.digest()) {
-            return Err(refusal.clone());
-        }
-        let artifact = inner.closure.get(&r.digest()).ok_or(Refusal::InputMissing)?;
-        if artifact.kind() != Utf8Text::ID {
-            return Err(Refusal::InputDecode);
-        }
-        str::from_utf8(artifact.bytes()).map(String::from).map_err(|_| Refusal::InputDecode)
+        String::from_utf8(self.load_injected(r.digest(), Utf8Text::ID)?).map_err(|_| Refusal::InputDecode)
     }
 
     /// Stage `payload` as [`OpaqueBytes`]. Identical payloads yield one artifact.
@@ -361,15 +354,22 @@ impl<M> Env<M> {
     }
 
     fn decode_injected<K: Storage>(&self, digest: Digest) -> Result<K, Refusal> {
+        K::decode_storage(&self.load_injected(digest, K::ID)?).map(|data| data.value).map_err(|_| Refusal::InputDecode)
+    }
+
+    /// The payload of the member at `digest`, loaded through
+    /// [`ClosureArtifact::load`]: every byte is hashed against `digest`
+    /// before any is returned, so a mismatch refuses before a decode sees it.
+    fn load_injected(&self, digest: Digest, kind: KindId) -> Result<Vec<u8>, Refusal> {
         let inner = self.cell().borrow();
         if let Some(refusal) = inner.terminal.get(&digest) {
             return Err(refusal.clone());
         }
         let artifact = inner.closure.get(&digest).ok_or(Refusal::InputMissing)?;
-        if artifact.kind() != K::ID {
+        if artifact.kind() != kind {
             return Err(Refusal::InputDecode);
         }
-        K::decode_storage(artifact.bytes()).map(|data| data.value).map_err(|_| Refusal::InputDecode)
+        Ok(artifact.load(digest)?)
     }
 
     fn record(&mut self, artifact: EncodedArtifact) -> Digest {
@@ -432,9 +432,12 @@ impl Env<Async> {
     pub(crate) fn fulfill(self, result: ReadArtifactResult) {
         let mut inner = self.cell().borrow_mut();
         match result {
-            ReadArtifactResult::Found { digest, kind, bytes } => {
+            ReadArtifactResult::Found { artifact } => {
+                // `AsyncSession::fulfill` matched the claim to the requested
+                // digest; a read verifies the bytes against that digest.
+                let digest = artifact.claimed().unverified();
                 inner.terminal.remove(&digest);
-                inner.closure.insert(digest, ClosureArtifact::new(kind, bytes));
+                inner.closure.insert(digest, artifact);
             }
             ReadArtifactResult::Missing { digest } => {
                 inner.terminal.insert(digest, Refusal::InputMissing);
