@@ -1,5 +1,5 @@
-//! Drive: requests to the mounted journal owner and bundle driver, and the
-//! replies the sink forwards back.
+//! Drive: requests to the mounted journal owner, the bundle driver, and the
+//! component host, and the replies the sink forwards back.
 //!
 //! Every request goes out through the embedder's
 //! `BuiltChassis::send_for_reply` with the sink as its reply target and a
@@ -18,9 +18,12 @@ use std::time::{Duration, Instant};
 
 use aether_actor::ErasedActorRef;
 use aether_bloomery_kinds::{
-    AwaitProcessed, Call, CallOutcome, MoveHead, MoveHeadResult, Processed, Publish, PublishResult, Seq,
+    AwaitProcessed, Call, CallOutcome, MoveHead, MoveHeadResult, Processed, Publish, PublishResult, Seq, WatchHead,
+    WatchHeadResult,
 };
+use aether_component::ComponentHostCapability;
 use aether_data::Kind;
+use aether_kinds::{LoadComponent, LoadResult};
 use aether_substrate::ReplyTarget;
 
 pub use sink::{Arrival, Reply, ReplySink};
@@ -46,7 +49,8 @@ pub struct Pending<K> {
 }
 
 /// A reply kind the harness's sink receives: [`CallOutcome`],
-/// [`MoveHeadResult`], [`PublishResult`], or [`Processed`].
+/// [`MoveHeadResult`], [`PublishResult`], [`Processed`], [`LoadResult`], or
+/// [`WatchHeadResult`].
 pub trait Answer: sealed::Sealed {}
 
 mod sealed {
@@ -95,10 +99,30 @@ impl sealed::Sealed for Processed {
     }
 }
 
+impl sealed::Sealed for LoadResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::Load(result) => Ok(*result),
+            other => Err(other),
+        }
+    }
+}
+
+impl sealed::Sealed for WatchHeadResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::Watch(result) => Ok(result),
+            other => Err(other),
+        }
+    }
+}
+
 impl Answer for CallOutcome {}
 impl Answer for MoveHeadResult {}
 impl Answer for PublishResult {}
 impl Answer for Processed {}
+impl Answer for LoadResult {}
+impl Answer for WatchHeadResult {}
 
 impl BloomeryHarness {
     /// Send one `Call` to the bundle driver as a tracked root, wait for its
@@ -146,6 +170,29 @@ impl BloomeryHarness {
     /// Panics when no result arrives within thirty seconds.
     pub fn publish(&mut self, publish: &Publish) -> PublishResult {
         let pending = self.request(self.mounted.journal.erase(), publish);
+        self.wait(pending)
+    }
+
+    /// Send one `LoadComponent` to the component host and wait for its result,
+    /// so a scenario loads a wasm component onto the booted engine the way an
+    /// operator's `load_component` does.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no result arrives within thirty seconds.
+    pub fn load(&mut self, load: &LoadComponent) -> LoadResult {
+        let pending = self.request(self.chassis.actor_ref::<ComponentHostCapability>().erase(), load);
+        self.wait(pending)
+    }
+
+    /// Send one `WatchHead { after }` to the journal owner and wait for its
+    /// answer, which comes once a committed write moves the head past `after`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no answer arrives within thirty seconds.
+    pub fn watch_head(&mut self, after: Seq) -> WatchHeadResult {
+        let pending = self.request(self.mounted.journal.erase(), &WatchHead { after: after.0 });
         self.wait(pending)
     }
 

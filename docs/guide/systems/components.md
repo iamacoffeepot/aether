@@ -412,6 +412,55 @@ load refuses. A private child, listed under `export!`'s `private = [..]`, is
 checked the same way, so a module whose private child depends on an absent
 actor does not load.
 
+## Addressing an actor by path
+
+A declared dependency reaches only an actor whose type the guest can compile
+and name. A native actor in a native-only crate, such as a Bloomery engine's
+journal owner or bundle driver, has no type a guest can write, and an
+`Instanced` actor cannot be declared at all. A guest reaches such an actor by
+its path instead: the operator names it in the component's config as an
+`ActorPath`, validated on decode, and the guest proves it once with
+`ctx.resolve_path(&path)` ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)
+§3):
+
+```rust
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    match ctx.resolve_path(&self.config.journal) {
+        Ok(journal) => self.journal = Some(journal),
+        Err(error) => tracing::error!(path = self.config.journal.as_str(), %error, "the journal does not prove"),
+    }
+}
+```
+
+The verb is the guest twin of the native `NativeCtx::resolve_path`. The host
+expands and resolves the path, short or canonical, and proves the answer
+through the same path the native verb takes, so both answer the same way. It
+refuses in two ways, and neither names a position:
+
+| Refusal | When |
+|---|---|
+| `ResolvePathError::Unresolved { detail }` | the path names no `Starting` or `Live` route, a dropped route included; `detail` is the registry's refusal as text |
+| `ResolvePathError::NotLive { canonical_path }` | the route is still `Starting`, or drops between the two reads |
+
+It costs one address resolution plus one published-route read, inside one host
+call. Call it once, at `wire` (a `WireCtx` derefs to `WasmCtx`) or at receipt,
+and keep the `ErasedActorRef` it returns; never re-resolve at a send. The verb
+is on the receive and `wire` ctx only, not on `WasmInitCtx`, so a refused path
+does not fail the load: the guest decides what a refusal means.
+
+Sends through the reference are unchecked by kind. It is an `ErasedActorRef`,
+because the guest cannot name the actor's type, so `ctx.send_to(journal, &kind)`
+compiles for any kind, and a kind the actor does not handle is caught only at
+the recipient. Any loaded component can reach any `Live` actor whose path it
+can spell, so a native actor that must not take guest mail cannot rely on its
+path being unknown.
+
+The worked example is the environment bring-up script,
+`crates/aether-bloomery-bringup`: its `wire` proves the journal owner and the
+bundle driver from its config, logs one error and stops on a refusal, and
+otherwise drives an import, merge, and publish sequence through the two proofs
+(see [Building an environment](workspace.md#building-an-environment)).
+
 ## Where to read more
 
 - The actor this specializes — its lifecycle, `#[actor]`, handlers, addressing —

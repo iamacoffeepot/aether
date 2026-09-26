@@ -124,6 +124,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery-bringup"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-journal",
+ "aether-bloomery-kinds",
+ "aether-bloomery-view",
+ "aether-bloomery-workspace-programs",
+ "aether-chassis-bloomery",
+ "aether-data",
+ "aether-harness-bloomery",
+ "aether-harness-substrate",
+ "aether-kinds",
+ "aether-workspace",
+ "clap",
+ "tracing",
+]
+
+[[package]]
 name = "aether-bloomery-bundle"
 version = "0.3.0-alpha"
 dependencies = [
@@ -602,8 +621,10 @@ dependencies = [
  "aether-bloomery-view",
  "aether-chassis",
  "aether-chassis-bloomery",
+ "aether-component",
  "aether-data",
  "aether-http",
+ "aether-kinds",
  "aether-substrate",
  "tempfile",
 ]

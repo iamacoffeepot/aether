@@ -21,10 +21,14 @@ aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-chassis = { path = "../aether-chassis" }
 aether-chassis-bloomery = { path = "../aether-chassis-bloomery" }
+# `ComponentHostCapability`, the component host `BloomeryHarness::load` mails.
+aether-component = { path = "../aether-component" }
 aether-data = { path = "../aether-data" }
 # `HttpConfig`, which `BloomeryHarness::start_allowing` stages as the
 # programmatic HTTP egress config.
 aether-http = { path = "../aether-http" }
+# `LoadComponent` / `LoadResult`, the request and reply of `BloomeryHarness::load`.
+aether-kinds = { path = "../aether-kinds" }
 # `test-support` for `BuiltChassis::send_for_reply` and
 # `BuiltChassis::send_tracked`, the test-scoped pushes the harness drives the
 # built-but-never-run chassis through.

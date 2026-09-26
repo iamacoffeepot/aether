@@ -655,6 +655,12 @@ impl TarWriter {
         self.entry(path, b'0', 0o644, "", content)
     }
 
+    /// A regular file of mode 0755, which decodes as an executable.
+    #[must_use]
+    pub fn executable(self, path: &str, content: &[u8]) -> Self {
+        self.entry(path, b'0', 0o755, "", content)
+    }
+
     /// A symlink to `target`, verbatim.
     #[must_use]
     pub fn symlink(self, path: &str, target: &str) -> Self {
@@ -688,8 +694,10 @@ impl TarWriter {
     }
 
     fn entry(mut self, path: &str, typeflag: u8, mode: u32, link: &str, content: &[u8]) -> Self {
+        let (prefix, name) = split_ustar(path);
         let mut header = [0u8; BLOCK_BYTES];
-        header[..path.len()].copy_from_slice(path.as_bytes());
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[345..345 + prefix.len()].copy_from_slice(prefix.as_bytes());
         octal(&mut header[100..108], u64::from(mode));
         octal(&mut header[108..116], 0);
         octal(&mut header[116..124], 0);
@@ -709,6 +717,25 @@ impl TarWriter {
         self.bytes.resize(self.bytes.len() + padding, 0);
         self
     }
+}
+
+/// `path` as a ustar `(prefix, name)` pair: the whole path as the name when it
+/// fits the 100-byte field, else split at the first `/` that leaves a name that
+/// fits, as a daemon's export spells a deep path such as a rustup toolchain's
+/// component manifests.
+///
+/// # Panics
+///
+/// When no `/` splits `path` into a prefix of at most 155 bytes and a name of
+/// at most 100.
+fn split_ustar(path: &str) -> (&str, &str) {
+    if path.len() <= 100 {
+        return ("", path);
+    }
+    path.match_indices('/')
+        .map(|(at, _)| (&path[..at], &path[at + 1..]))
+        .find(|(prefix, name)| prefix.len() <= 155 && name.len() <= 100)
+        .unwrap_or_else(|| panic!("{path} does not fit a ustar prefix and name"))
 }
 
 /// Write `value` as zero-padded octal filling all but the field's last byte,

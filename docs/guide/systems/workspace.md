@@ -375,11 +375,56 @@ Run the steps on the host whose daemon the actor dials.
    A missing `-dev` package fails a crate's build script here, before any
    import: without `libasound2-dev`, `alsa-sys` fails. Add the package to
    `base.Dockerfile` with its reason and run the check again.
-3. **Import.** Mail `aether.workspace.import { image }` to `aether.workspace`
-   on a Bloomery engine, once per reference. Each answers `Ok { tree }`, and a
+3. **Bind the bundle.** `environment.merge` runs from the
+   `aether-bloomery-workspace-programs` bundle bound under the
+   `Head<OpaqueBytes>` named `workspace-programs`, once per journal. Read the
+   fence with `aether.bloomery.journal.read_head`, then send
+   `aether.bloomery.journal.publish` to `aether.bloomery.journal:journal` with
+   one artifact, the bundle's built wasm as an `OpaqueBytes` artifact (the
+   `OpaqueBytes` kind id, the file's bytes, no citations), and no moves. The
+   `Committed` reply lists the artifact's digest. A second publish at the new
+   head, with no artifacts, carries one `RecordedHeadMove` of the head
+   `(OpaqueBytes, workspace-programs)` to that digest.
+   `describe_kinds(names: ["aether.bloomery.journal.publish"], detail:
+   "schema")` prints the shape.
+4. **Load the bring-up.** `upload_component` the built
+   `aether_bloomery_bringup.wasm` (`crates/aether-bloomery-bringup`), then
+   `load_component` it with the two references `publish.sh` printed and the
+   two actors it mails as its config:
+
+   ```json
+   {
+     "base": "localhost:5000/aether-env/base@sha256:<digest>",
+     "toolchain": "localhost:5000/aether-env/toolchain@sha256:<digest>",
+     "journal": "aether.bloomery.journal:journal",
+     "driver": "aether.bloomery.driver:driver"
+   }
+   ```
+
+   The component declares `aether.workspace` a dependency, so the load is
+   refused on an engine without the workspace. A config missing a field is
+   refused naming the field, as ``aether.bloomery.bringup.config has no `base` ``.
+5. **Watch.** `actor_logs` on
+   `aether.component/aether.embedded:aether.bloomery.bringup`. It logs one
+   `info` line per step and ends with `the environment head moved; bring-up
+   done`. On the first refusal it logs one `error` and sends nothing more.
+
+The merge call's key is the input digest's first eight bytes, so a rerun over
+the same images replays the recorded merge (ADR-0226 decision 11) and moves the
+head to the same digest again, which appends one more head-move event. New
+images get a new key. The script records nothing of its own.
+
+### What the bring-up sends
+
+The script proves both actors from its config at `wire`, then sends, one
+request at a time:
+
+1. **Import.** `aether.workspace.import { image }` to `aether.workspace`, once
+   per reference, the base first. Each answers `Ok { tree }`, and a
    second import of the same reference answers the same tree.
-4. **Merge.** Stage an `environment.merge.input` (`MergeInput { base,
-   toolchain }`, the two imported trees) and send
+2. **Merge.** After `aether.bloomery.journal.read_head` for the fence, it
+   stages an `environment.merge.input` (`MergeInput { base,
+   toolchain }`, the two imported trees) and sends
    `aether.bloomery.driver.call` for the program `environment.merge`, in the
    `aether-bloomery-workspace-programs` bundle bound under the
    `Head<OpaqueBytes>` named `workspace-programs`. The Pure program answers a
@@ -408,8 +453,9 @@ Run the steps on the host whose daemon the actor dials.
    the engine blob store for the call, deduplicated by digest. That closure
    must fit `--bloomery-closure-limit-bytes`, whose default is the 4 GiB
    ceiling; the program itself loads only the few directories it walks.
-5. **Publish.** Programs write no journal record, so the caller moves the
-   head. Send `aether.bloomery.journal.publish` with no artifacts and one
+3. **Publish.** Programs write no journal record, so the caller moves the
+   head. After `aether.bloomery.journal.read_artifact` of the transition's
+   result, it sends `aether.bloomery.journal.publish` with no artifacts and one
    `RecordedHeadMove` of the head `(aether.workspace.environment,
    <platform>)`, such as `x86_64-unknown-linux-gnu`, to the transition's
    result, under the journal fence. The head is named by the platform because
@@ -417,6 +463,22 @@ Run the steps on the host whose daemon the actor dials.
    ask for the environment its executor runs. A caller reads it back with
    `Heads::binding(&RecordedHead::new(Environment::ID, platform)?)` and cites
    it in a `Run` as `Ref<Environment>`.
+
+A fence conflict on either publish is resent at the journal's head.
+
+What each `error` log means:
+
+| Message | Meaning |
+|---|---|
+| `a peer path does not prove; bring-up stopped` | the `journal` or `driver` path names no `Live` actor; `error` is the refusal, `Unresolved` with the registry's text or `NotLive` with the canonical path |
+| `bring-up stopped`, `step = import` | an import failed; `detail` is the workspace's failure text |
+| `bring-up stopped`, `step = read the journal head` | the journal could not read its head |
+| `bring-up stopped`, `step = stage the merge input` | the input did not encode, or the journal staged other than one artifact |
+| `bring-up stopped`, `step = environment.merge` | the call faulted or was refused; `refused: HeadUnbound` means step 3 did not run |
+| `bring-up stopped`, `step = read the environment` | the result is missing, is not an environment, does not hash to its digest, or its platform names no head |
+| `bring-up stopped`, `step = publish` | the journal refused a publish |
+| `a reply arrived out of phase; bring-up stopped` | a reply arrived that the script was not waiting on |
+| `a reply arrived while the bring-up is not running` | a reply arrived after the script stopped or before `wire` |
 
 What the imported trees hold:
 
@@ -595,7 +657,7 @@ Its input, `proof.clippy.input`, cites three trees:
 | Field | What it is | Where the run sees it |
 |---|---|---|
 | `source: Ref<Tree>` | the cargo workspace under proof, such as the result of `source.select` ([Importing a source tree](#importing-a-source-tree)) | `/work` |
-| `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (step 5 of [Building an environment](#building-an-environment)) | the root |
+| `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (the head move in [What the bring-up sends](#what-the-bring-up-sends)) | the root |
 | `vendor: Ref<Tree>` | the `Vendored.tree` of a `vendor.cargo` run over a source with the same `Cargo.lock` (see [Vendoring crate sources](#vendoring-crate-sources)) | `/vendor`, read-only |
 
 The program reads no head and no journal record, so the caller reads the

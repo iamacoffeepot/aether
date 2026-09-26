@@ -34,6 +34,7 @@ use aether_data::tagged_id::Tag;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
+mod address;
 mod blob;
 
 /// A disarmed, unstamped inbound for `Component::deliver`: `payload` of `kind`

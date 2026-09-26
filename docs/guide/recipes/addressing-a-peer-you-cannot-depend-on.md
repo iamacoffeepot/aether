@@ -166,8 +166,13 @@ actor does that with the ctx verb `resolve_live`
 (`crates/aether-substrate/src/actor/native/ctx/address.rs`) and keeps the
 proof, not the position. An address that arrives as an `ActorPath`, such as
 the component path in a drop or replace request, is proven the same way
-through `resolve_path`, whose refusal names the path, never a position. A guest has no such verb, so a guest keeps the
-envelope sender instead of a payload-borne id.
+through `resolve_path`, whose refusal names the path, never a position. A
+guest has the same verb, `WasmCtx::resolve_path`: an `ActorPath` from its
+config or a payload is proven once, at `wire` or at receipt, and kept as an
+`ErasedActorRef` (the environment bring-up script in
+`crates/aether-bloomery-bringup` proves the journal owner and the bundle driver
+this way). A payload-borne position still has no guest door, so a guest keeps
+the envelope sender instead of a payload-borne id.
 
 No door turns a foreign `Address<R>` (one that arrived in mail, config, or
 saved state) into a reference yet (ADR-0230 §3). The editor shell's
