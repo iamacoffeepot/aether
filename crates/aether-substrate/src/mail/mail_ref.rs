@@ -10,14 +10,14 @@
 //! - **`InRing`** — a zero-copy reference into a per-producer
 //!   [`MailRing`] (Phase 2, iamacoffeepot/aether#1105): the producing
 //!   actor buffered this mail's bytes into its ring as one mail of a
-//!   blob, and the recipient reads them in place. The ref carries an
+//!   burst, and the recipient reads them in place. The ref carries an
 //!   `Arc<MailRing>`, so the ring outlives every in-flight ref by
 //!   refcount alone — no registry, no resolve-after-drop window.
 //!
 //! # Lock lifecycle is RAII on the ref
 //!
-//! Each `InRing` ref owns exactly one count of its blob's reclaim lock:
-//! [`push_blob`](MailRing::push_blob) sets the lock to the blob's mail
+//! Each `InRing` ref owns exactly one count of its burst's reclaim lock:
+//! [`push_burst`](MailRing::push_burst) sets the lock to the burst's mail
 //! count, and one ref is minted per mail ([`MailRef::in_ring`], which
 //! does *not* touch the lock — it is pre-counted). The ref releases its
 //! count on `Drop` and acquires another on `Clone`, so the count tracks
@@ -39,13 +39,13 @@ pub enum MailRef {
     /// copy-out fallback).
     Owned(Box<[u8]>),
     /// A zero-copy reference into a per-producer ring. Holds one count of
-    /// the blob's reclaim lock for its lifetime (see the module docs).
+    /// the burst's reclaim lock for its lifetime (see the module docs).
     InRing { ring: Arc<MailRing>, header_off: u32, payload_off: u32, len: u32 },
 }
 
 impl MailRef {
-    /// Mint an `InRing` ref for one mail of a just-written blob. Does
-    /// **not** touch the lock — [`MailRing::push_blob`] already counted
+    /// Mint an `InRing` ref for one mail of a just-written burst. Does
+    /// **not** touch the lock — [`MailRing::push_burst`] already counted
     /// this ref. Cloning the returned ref acquires another count; dropping
     /// it releases one.
     #[must_use]
@@ -61,7 +61,7 @@ impl MailRef {
         match self {
             Self::Owned(bytes) => bytes,
             Self::InRing { ring, payload_off, len, .. } => {
-                // SAFETY: this ref holds one count of the blob lock for its
+                // SAFETY: this ref holds one count of the burst lock for its
                 // whole lifetime, so the producer cannot reclaim/overwrite
                 // the region while the returned borrow (tied to `&self`) is
                 // live.
@@ -116,7 +116,7 @@ impl Clone for MailRef {
             Self::InRing { ring, header_off, payload_off, len } => {
                 // A clone is a new live holder of the region — acquire
                 // another lock count so reclaim waits for it too.
-                // SAFETY: `self` already holds a count, keeping the blob
+                // SAFETY: `self` already holds a count, keeping the burst
                 // live across the increment.
                 unsafe { ring.acquire(*header_off) };
                 Self::InRing { ring: Arc::clone(ring), header_off: *header_off, payload_off: *payload_off, len: *len }
@@ -129,7 +129,7 @@ impl Drop for MailRef {
     fn drop(&mut self) {
         if let Self::InRing { ring, header_off, .. } = self {
             // Release the one lock count this ref held; the producer
-            // reclaims the blob once the count reaches zero.
+            // reclaims the burst once the count reaches zero.
             // SAFETY: this ref held exactly one count for `header_off`.
             unsafe { ring.release(*header_off) };
         }
@@ -157,7 +157,7 @@ impl From<Vec<u8>> for MailRef {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test code: push_blob unwraps assert via panic on a sized ring")]
+#[allow(clippy::unwrap_used, reason = "test code: push_burst unwraps assert via panic on a sized ring")]
 mod tests {
     use super::*;
     use crate::mail::ring::OutMail;
@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn in_ring_reads_in_place_and_releases_on_drop() {
         let ring = Arc::new(MailRing::with_capacity(1024));
-        let locs = ring.push_blob(&[OutMail { recipient: 1, kind: 2, payload: &[10, 20, 30] }]).unwrap();
+        let locs = ring.push_burst(&[OutMail { recipient: 1, kind: 2, payload: &[10, 20, 30] }]).unwrap();
         let live = ring.live_bytes();
         assert!(live > 0);
         let r = MailRef::in_ring(Arc::clone(&ring), locs[0]);
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn in_ring_clone_holds_region_until_both_drop() {
         let ring = Arc::new(MailRing::with_capacity(1024));
-        let locs = ring.push_blob(&[OutMail { recipient: 1, kind: 2, payload: &[7; 16] }]).unwrap();
+        let locs = ring.push_burst(&[OutMail { recipient: 1, kind: 2, payload: &[7; 16] }]).unwrap();
         let live = ring.live_bytes();
         let a = MailRef::in_ring(Arc::clone(&ring), locs[0]);
         let b = a.clone();
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn in_ring_into_vec_copies_then_releases() {
         let ring = Arc::new(MailRing::with_capacity(1024));
-        let locs = ring.push_blob(&[OutMail { recipient: 9, kind: 9, payload: &[1, 2, 3, 4, 5] }]).unwrap();
+        let locs = ring.push_burst(&[OutMail { recipient: 9, kind: 9, payload: &[1, 2, 3, 4, 5] }]).unwrap();
         let live = ring.live_bytes();
         let r = MailRef::in_ring(Arc::clone(&ring), locs[0]);
         let v = r.into_vec();

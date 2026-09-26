@@ -252,7 +252,7 @@ mod tests {
         // the relocated truncation contract that
         // `over_capacity_backlog_flags_truncation_not_a_wrong_rate` once
         // tested via the sweep path, now unreachable after the per-cell
-        // burst clamp.)
+        // backlog clamp.)
         use crate::perf::harness::{CellResult, Stats, Tier};
 
         let cell = |topo: &str, throughput_mps: Option<f64>| CellResult {

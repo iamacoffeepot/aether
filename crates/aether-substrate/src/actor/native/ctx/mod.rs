@@ -356,7 +356,7 @@ impl<M: ReplyMode, A> Drop for NativeCtx<'_, A, M> {
     /// `unwire`), so its scope *is* the handler's lifetime — dropping it
     /// is the universal "handler finished" hook. Flushing the binding's
     /// outbound buffer here forms the handler's buffered sends into one
-    /// ring blob and routes them, covering the main dispatch loop, the
+    /// ring burst and routes them, covering the main dispatch loop, the
     /// shutdown-drain loop, and `unwire` with a single hook (no
     /// per-call-site flush to forget and silently drop mail).
     /// Idempotent — an empty buffer no-ops.

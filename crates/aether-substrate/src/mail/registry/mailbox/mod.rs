@@ -58,7 +58,7 @@ pub use route::RouteEndpoint;
 /// deferred-population pattern). Installation replaces the route with a
 /// populated cell so an older published snapshot remains unchanged.
 /// Closure / `Inline` handlers have no slot to seize, so their cell stays
-/// empty forever and the blob demuxer deposits their mail as usual.
+/// empty forever and the burst demuxer deposits their mail as usual.
 pub type SeizeCell = Arc<OnceLock<SeizeHandle>>;
 
 /// What a given mailbox actually is. The registry records this so the

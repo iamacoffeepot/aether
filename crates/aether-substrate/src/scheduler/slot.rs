@@ -45,10 +45,10 @@ use crate::actor::native::Envelope;
 /// The one envelope a [`Drainable::seize_and_run`] caller hands the
 /// just-seized slot to dispatch in place (ADR-0087 §4,
 /// iamacoffeepot/aether#1135). Alias for the actor-layer
-/// [`Envelope`] the `BlobWork` demuxer
-/// builds from the blob's `Mail`, with
+/// [`Envelope`] the `BurstWork` demuxer
+/// builds from the burst's `Mail`, with
 /// `enqueue_depth = 0` and (iamacoffeepot/aether#1150) `t_enqueue` set to
-/// the blob-pickup instant, so the recipient's `Received` reads a real
+/// the burst-pickup instant, so the recipient's `Received` reads a real
 /// `t_received − t_enqueue` drain rather than the pre-#1150 ≈ 0.
 pub type SeizeSeed = Envelope;
 
@@ -124,7 +124,7 @@ impl SlotState {
     /// Demux-side: claim a `free` slot for an *in-place* dispatch
     /// (ADR-0087 §4, iamacoffeepot/aether#1135). CAS `Idle → Running`,
     /// returning `true` on the winning transition. Distinct from
-    /// [`Self::enter_running`] (`Ready → Running`): a blob demuxer holds
+    /// [`Self::enter_running`] (`Ready → Running`): a burst demuxer holds
     /// the recipient's mail in hand and wants to run it *without* an
     /// inbox round-trip, so it seizes a slot that no sender has woken
     /// yet (state `Idle`). A `false` means the slot is already in flight
@@ -294,7 +294,7 @@ pub trait Drainable: Send + Sync + 'static {
     /// / `Closed` → drop).
     ///
     /// Default: deposit-only / unreachable. Mock fixtures (and the
-    /// `BlobWork` blob itself, which has no actor of its own) never get
+    /// `BurstWork` burst itself, which has no actor of its own) never get
     /// seized, so the default just parks the slot back to `Idle` and
     /// returns. A real `DispatcherSlot` overrides it.
     fn seize_and_run(&self, _seed: SeizeSeed, _budget: BatchBudget) -> CycleResult {
@@ -357,7 +357,7 @@ pub trait Drainable: Send + Sync + 'static {
 pub struct WakeSink {
     injector: Arc<Injector<Arc<dyn Drainable>>>,
     spin: Arc<SpinPark>,
-    /// Pool worker count — the hard cap on how many blob clones a recruit
+    /// Pool worker count — the hard cap on how many burst clones a recruit
     /// injects (iamacoffeepot/aether#1147). Recruiting more copies than
     /// workers cannot add parallelism (no more than `workers` can drain
     /// concurrently); the excess just churns the injector. See
@@ -391,11 +391,11 @@ impl WakeSink {
     /// it LIFO), else spill to the shared injector and notify the
     /// coordinator (route-to-spinner / unpark-one). The default inlines the
     /// **whole local cascade** warm ([`worker_deque::try_push_local_budgeted`],
-    /// iamacoffeepot/aether#1174) — a produced blob is a descendant of the
-    /// cascade already on this worker — until the per-burst **time valve**
+    /// iamacoffeepot/aether#1174) — a produced burst is a descendant of the
+    /// cascade already on this worker — until the per-cascade **time valve**
     /// (`worker_deque::time_budget`, default 12µs) trips and spills a heavy
     /// cascade to parallelise. This is the non-demux wake destination, shared
-    /// by [`WakeHandle::wake`], the producer-side blob push, and an inline
+    /// by [`WakeHandle::wake`], the producer-side burst push, and an inline
     /// recipient that yielded mid-drain (ADR-0087 Phase 3b). The injector push
     /// is infallible; shutdown is observed through the coordinator's flag.
     pub(crate) fn schedule(&self, slot: Arc<dyn Drainable>) {
@@ -416,7 +416,7 @@ impl WakeSink {
         self.workers
     }
 
-    /// Recruit `count` workers to a shared cooperative blob
+    /// Recruit `count` workers to a shared cooperative burst
     /// (iamacoffeepot/aether#1137): push `count` clones of the same
     /// `Drainable` onto the shared injector, then wake up to `count` parked
     /// siblings to race its cursor. This is the broadcast-recruit the
@@ -491,8 +491,8 @@ impl WakeHandle {
         // own-deque, #1064 route-to-spinner): own deque under the local
         // bound keeps a chain warm with no notify; otherwise spill to the
         // injector + notify a spinner (or unpark one). See
-        // [`WakeSink::schedule`]. The Phase 3b blob-demux deposit+collect
-        // arm retired in iamacoffeepot/aether#1135 — `BlobWork` now
+        // [`WakeSink::schedule`]. The Phase 3b burst-demux deposit+collect
+        // arm retired in iamacoffeepot/aether#1135 — `BurstWork` now
         // seizes free recipients (`Idle → Running`) and dispatches in
         // place rather than depositing through `route_mail` and
         // collecting the woken slot here.
@@ -511,7 +511,7 @@ impl WakeHandle {
 /// Demux-side handle to a recipient's dispatcher slot (ADR-0087 §4,
 /// iamacoffeepot/aether#1135). Surfaced on the registry's
 /// [`MailboxEntry::Inbox`](crate::mail::registry::MailboxEntry) entry so
-/// a `BlobWork` demuxing a fan-out can resolve recipient → slot up front
+/// a `BurstWork` demuxing a fan-out can resolve recipient → slot up front
 /// and dispatch its mail *in place* — seizing the slot (`Idle → Running`)
 /// and running the full per-envelope wrapper rather than depositing the
 /// mail on the inbox mpsc and bouncing it back out through a `try_recv`
@@ -597,7 +597,7 @@ pub mod tests {
     /// ready-queue path, which sits below the recruit gate, so the
     /// `workers - 1` recruit cap (iamacoffeepot/aether#1147) never
     /// engages — any plausible pool size behaves identically. Shared
-    /// with `pool::tests` (same parent module); `blob::work::tests`
+    /// with `pool::tests` (same parent module); `burst::work::tests`
     /// keeps its own local copy since it lives outside `scheduler`.
     pub const TEST_WORKERS: usize = 8;
 

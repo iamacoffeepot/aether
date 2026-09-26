@@ -291,7 +291,7 @@ where
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         // iamacoffeepot/aether#1135: surface the seize handle on this
-        // actor's `Inbox` entry so the blob demuxer can dispatch its
+        // actor's `Inbox` entry so the burst demuxer can dispatch its
         // fan-out in place rather than depositing + repop'ing through the
         // inbox. Same `(state, weak)` pair the wake handle carries; the
         // registry owns the strong slot ref, so the demuxer's `Weak`

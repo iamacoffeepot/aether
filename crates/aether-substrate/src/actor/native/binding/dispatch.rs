@@ -15,7 +15,7 @@ use aether_data::Kind;
 /// per-actor `InflightTable` (crate-internal). Each method
 /// takes the table lock for one operation — mint+insert at dispatch,
 /// fill-output from the worker, take at completion — matching the
-/// `outbound` / `blob_producer` locking pattern (uncontended, single
+/// `outbound` / `burst_producer` locking pattern (uncontended, single
 /// logical writer).
 impl NativeBinding {
     /// Insert a freshly-minted in-flight dispatch entry and return its

@@ -66,7 +66,7 @@
 // The vocabulary — what a native actor *is* and what it holds — sits flat
 // here; the machinery around it nests one level down, a directory per concept:
 // how an actor is born (`spawn`), where it drains (`slot`), how it moves work
-// off its own thread (`offload`), and how its outbound mail fans out (`blob`).
+// off its own thread (`offload`), and how its outbound mail fans out (`burst`).
 pub mod binding;
 pub mod ctx;
 pub(crate) mod dependencies;
@@ -74,7 +74,7 @@ pub mod envelope;
 pub(crate) mod identity;
 pub mod local;
 
-pub(crate) mod blob;
+pub(crate) mod burst;
 pub mod offload;
 mod probe;
 pub mod slot;

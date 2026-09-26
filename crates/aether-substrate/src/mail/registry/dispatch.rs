@@ -269,7 +269,7 @@ pub struct OwnedDispatch {
     /// iamacoffeepot/aether#1150: when the consumer side took this
     /// envelope. On the `route_mail` Inbox arm it is the **deposit**
     /// instant (placed into the recipient's inbox); on the #1135 in-place
-    /// blob path the `BlobWork` demuxer stamps it with the **blob-pickup**
+    /// burst path the `BurstWork` demuxer stamps it with the **burst-pickup**
     /// instant instead (when the draining worker entered `run_cycle`),
     /// shared by every mail that worker dispatches. The recipient's
     /// dispatcher reads it at its `Received` hook and folds it into

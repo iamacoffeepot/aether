@@ -255,7 +255,7 @@ impl Mailer {
     /// path calls this once per mail at flush.
     ///
     /// iamacoffeepot/aether#1158: `t_construct_start` is the instant the
-    /// blob opened (the first buffered send of the flush window); `t −
+    /// burst opened (the first buffered send of the flush window); `t −
     /// t_construct_start` is the **construct** span.
     pub(crate) fn record_sent_event_at(&self, sent: SentRecord) {
         self.trace_handle.record_sent_event_at(sent);

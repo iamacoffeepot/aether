@@ -9,7 +9,7 @@ use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 
 /// Default admission bound for the ADR-0165 registry owner queue, in
-/// commands. Sized so a legitimate burst never touches it — a birth storm
+/// commands. Sized so a legitimate spike never touches it — a birth storm
 /// parks tens of envelopes, and a batch is one per handler flush — while a
 /// sender spraying nonexistent recipients is capped at a few megabytes of
 /// owner-held memory rather than growing without limit.
@@ -100,7 +100,7 @@ impl Default for RingCapacities {
 /// and installed into the scheduler's process-global before the pool
 /// starts (`crate::scheduler::install_tuning`). `Copy` so it rides the
 /// builder seam as an ordinary value; the deep hot-path getters (the
-/// worker loop, the blob-flush recruiter, the handoff-EWMA seed) read the
+/// worker loop, the burst-flush recruiter, the handoff-EWMA seed) read the
 /// installed value rather than env. The chassis-bin `SchedulerTuningConfig`
 /// derive-`Config` knob lowers to this; substrate-core never reads env
 /// (issue 464), so the resolution lives bundle-side and only the resolved
@@ -121,7 +121,7 @@ pub struct SchedulerTuning {
     /// `256`).
     pub local_sticky_max: usize,
     /// Keep-local time valve (microseconds): `Some` pins/disables the
-    /// burst spill valve (`0` disables it), `None` derives it from the
+    /// cascade spill valve (`0` disables it), `None` derives it from the
     /// measured handoff cost (chassis-boot key `AETHER_LOCAL_TIME_BUDGET_US`; default
     /// `None`).
     pub time_budget_micros: Option<u64>,
@@ -137,11 +137,11 @@ pub struct SchedulerTuning {
     /// `AETHER_HANDOFF_COST_NS`; default `None`).
     pub handoff_cost_nanos: Option<u64>,
     /// Minimum fresh-group count for a flush to broadcast-recruit siblings
-    /// (chassis-boot key `AETHER_BLOB_RECRUIT_MIN`; default `9`).
-    pub blob_recruit_min: usize,
+    /// (chassis-boot key `AETHER_BURST_RECRUIT_MIN`; default `9`).
+    pub burst_recruit_min: usize,
     /// Cap on the number of sibling copies a single flush injects when
-    /// recruiting (chassis-boot key `AETHER_BLOB_RECRUIT_MAX`; default `32`).
-    pub blob_recruit_max: usize,
+    /// recruiting (chassis-boot key `AETHER_BURST_RECRUIT_MAX`; default `32`).
+    pub burst_recruit_max: usize,
     /// Pins the recruit wake break-even (nanoseconds) and freezes live
     /// refinement; `None` uses the box-measured handoff cost (env
     /// `AETHER_WAKE_COST_NANOS`; default `None`).
@@ -163,8 +163,8 @@ pub const SCHEDULER_TUNING_ENV_KEYS: [&str; 9] = [
     "AETHER_PEER_STEAL",
     "AETHER_LOCAL_CHAIN_BACKSTOP",
     "AETHER_HANDOFF_COST_NS",
-    "AETHER_BLOB_RECRUIT_MIN",
-    "AETHER_BLOB_RECRUIT_MAX",
+    "AETHER_BURST_RECRUIT_MIN",
+    "AETHER_BURST_RECRUIT_MAX",
     "AETHER_WAKE_COST_NANOS",
 ];
 
@@ -177,8 +177,8 @@ impl Default for SchedulerTuning {
             peer_steal: false,
             local_chain_backstop: 64,
             handoff_cost_nanos: None,
-            blob_recruit_min: 9,
-            blob_recruit_max: 32,
+            burst_recruit_min: 9,
+            burst_recruit_max: 32,
             wake_cost_nanos: None,
         }
     }

@@ -1,17 +1,17 @@
-//! [`BlobWork`] — a producer's buffered fan-out as a single **cursor-shared
+//! [`BurstWork`] — a producer's buffered fan-out as a single **cursor-shared
 //! cooperative** work unit (ADR-0087, iamacoffeepot/aether#1137; builds on
-//! the Phase 3b blob + the iamacoffeepot/aether#1135 claim-and-dispatch-
+//! the Phase 3b burst + the iamacoffeepot/aether#1135 claim-and-dispatch-
 //! direct demux).
 //!
 //! A handler's outbound mail is grouped **by recipient** into one shared
-//! blob and scheduled once. Many workers drain it cooperatively: each
+//! burst and scheduled once. Many workers drain it cooperatively: each
 //! claims a whole recipient-group off a shared cursor (the packed
 //! [`Lifecycle`] word), seizes that recipient, and dispatches its mail
 //! **in place** — the iamacoffeepot/aether#1135 fast path, now run by N
 //! workers in parallel instead of one. A wide / heavy fan-out parallelises
 //! across the pool instead of serialising on the demuxing worker
 //! (iamacoffeepot/aether#1134 measured that serialisation; #1137 closes
-//! it). Recruitment is a **broadcast** — the producer re-submits the blob
+//! it). Recruitment is a **broadcast** — the producer re-submits the burst
 //! `Arc` to the shared injector + notify (`WakeSink::recruit`), so parked
 //! siblings wake and race the cursor — not the own-deque spill the prior
 //! 3c path used (which kept work local and never woke a sibling, so it
@@ -24,33 +24,33 @@
 //! recipient's mail, in send order. Cross-recipient groups run concurrently
 //! — the spine makes that explicitly sound (different recipients → async,
 //! no ordering guarantee). Each recipient appears in **at most one** group
-//! per blob; successive flushes to the same recipient append to its
+//! per burst; successive flushes to the same recipient append to its
 //! existing group (preserving cross-flush FIFO) rather than racing a second
 //! group.
 //!
-//! ## Single active blob + append (cross-flush FIFO)
+//! ## Single active burst + append (cross-flush FIFO)
 //!
-//! [`BlobProducer`] keeps **one active blob per producing actor**.
+//! [`BurstProducer`] keeps **one active burst per producing actor**.
 //! Successive flushes append (new recipients → new groups via
 //! [`Lifecycle::publish`]; seen recipients → push onto the existing group's
-//! buffer). The blob retires when fully drained; the next flush rolls a
+//! buffer). The burst retires when fully drained; the next flush rolls a
 //! fresh one. Accumulation is what preserves per-recipient FIFO across
-//! flushes under burst: a second flush to a not-yet-drained recipient lands
+//! flushes under load: a second flush to a not-yet-drained recipient lands
 //! in the same group rather than a second group two workers could seize
 //! out of order. A flush that overflows the group array (or hits a retired
-//! blob) rolls the remainder into a fresh blob — the overflow remainder
+//! burst) rolls the remainder into a fresh burst — the overflow remainder
 //! is always *new* recipients (seen recipients push to existing groups, no
-//! new-group pressure), so the rolled blob shares no recipient with the
-//! one it rolled from. The detached (overflowed-out) blob itself stays on
+//! new-group pressure), so the rolled burst shares no recipient with the
+//! one it rolled from. The detached (overflowed-out) burst itself stays on
 //! the producer's `detached` list with its recipient index (pruned of
-//! retired blobs at each flush), and a later flush routes a recipient that
+//! retired bursts at each flush), and a later flush routes a recipient that
 //! misses the active index through the detached indexes first —
 //! newest-first — pushing onto a still-open group there (and re-scheduling
-//! that blob for pickup) instead of opening a second group in the active
-//! blob; a closed detached group deposits through `route_mail`, which the
+//! that burst for pickup) instead of opening a second group in the active
+//! burst; a closed detached group deposits through `route_mail`, which the
 //! close barrier makes strictly-after. The invariant the ordering spine
 //! rests on: **a recipient has at most one unclosed group across all of a
-//! producer's live blobs**, so no two workers ever hold same-recipient
+//! producer's live bursts**, so no two workers ever hold same-recipient
 //! mail concurrently (iamacoffeepot/aether#1533).
 //!
 //! ## Closeable per-group buffer (the merge-vs-claim handshake)
@@ -91,7 +91,7 @@
 //! Recruiting siblings for a *cheap* fan-out would regress the
 //! iamacoffeepot/aether#1116 narrow-local win (needless wakeups for cheap
 //! handlers). The original gate used **width** as a proxy — broadcast only
-//! when the fresh-group count cleared `AETHER_BLOB_RECRUIT_MIN` — but width
+//! when the fresh-group count cleared `AETHER_BURST_RECRUIT_MIN` — but width
 //! cannot tell a heavy narrow fan-out (which benefits from parallelism)
 //! from a trivial one (which does not), so a heavy `<= 8` fan-out stayed
 //! serial and a single global threshold could not be right for two
@@ -100,18 +100,18 @@
 //! per-handler execution-cost EWMA over the flush's fresh recipient groups
 //! and size recruitment by the actual work. The recipient group is the unit
 //! of parallelism (a worker drains a whole group; groups can't split), so
-//! the blob is a parallel-machine makespan problem — optimal
+//! the burst is a parallel-machine makespan problem — optimal
 //! `K ≈ ceil(total_work / max_group_work)`, clamped to `[1, min(G, W)]` and
 //! gated by `total_work > wake_cost_nanos()` (the box-calibrated wake break-even). [`recruit_k`]
-//! is that closed form. A cheap narrow blob yields `K = 1` and stays local
+//! is that closed form. A cheap narrow burst yields `K = 1` and stays local
 //! — preserving the #1116 win for the right reason (cheapness, not
-//! narrowness) — while a heavy narrow blob recruits its full group count.
+//! narrowness) — while a heavy narrow burst recruits its full group count.
 //!
 //! When any contributing handler's cell is **unknown cost** — a neutral
 //! seed (`samples == 0`, known-but-never-run) or a high mean-abs-deviation
 //! (bimodal, untrustworthy) — the cost estimate is noise, so the flush
-//! falls back to the **width gate** (`AETHER_BLOB_RECRUIT_MIN`) for that
-//! blob rather than recruiting on a bad number. Width is the confidence
+//! falls back to the **width gate** (`AETHER_BURST_RECRUIT_MIN`) for that
+//! burst rather than recruiting on a bad number. Width is the confidence
 //! fallback, no longer the primary signal.
 //!
 //! **Aggregation scope (iamacoffeepot/aether#1178 step 5):** both terms range
@@ -143,33 +143,33 @@ use crate::mail::registry::DispatchParts;
 use crate::mail::{KindId, Mail, MailboxId};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost_nanos, tuning};
 
-/// Floor for a fresh blob's group-array capacity — a little headroom so a
+/// Floor for a fresh burst's group-array capacity — a little headroom so a
 /// couple of subsequent flushes to *new* recipients can accumulate before
-/// the array overflows and the producer rolls a fresh blob. Kept small: a
+/// the array overflows and the producer rolls a fresh burst. Kept small: a
 /// wide fan-out already sizes its array to its own width
 /// ([`group_cap_for`]), so the floor only governs *narrow* flushes (a chain
 /// hop, a tiny fan-out), where a large floor is pure wasted allocation —
-/// those blobs almost always drain before any second flush appends.
+/// those bursts almost always drain before any second flush appends.
 const GROUP_CAP_MIN: usize = 4;
 
 /// Minimum fresh-group count for a flush to broadcast-recruit siblings.
-/// Resolved from `AETHER_BLOB_RECRUIT_MIN`; values `< 1` coerce to the
+/// Resolved from `AETHER_BURST_RECRUIT_MIN`; values `< 1` coerce to the
 /// default. **Default 9** keeps narrow `<= 8`
 /// fan-outs on the producer-local inline path (the
 /// iamacoffeepot/aether#1116 narrow-local win) and recruits only wider
 /// fan-outs. See the module doc on the width-vs-cost proxy limitation
 /// (iamacoffeepot/aether#1127).
 fn recruit_min() -> usize {
-    tuning().blob_recruit_min
+    tuning().burst_recruit_min
 }
 
 /// Cap on the number of sibling copies a single flush injects when
-/// recruiting. Resolved from `AETHER_BLOB_RECRUIT_MAX`; bounds the
+/// recruiting. Resolved from `AETHER_BURST_RECRUIT_MAX`; bounds the
 /// injector churn for a very wide fan-out (over-recruiting past the worker
 /// count just re-parks the extra workers — harmless but wasteful). Default
 /// 32.
 fn recruit_cap() -> usize {
-    tuning().blob_recruit_max
+    tuning().burst_recruit_max
 }
 
 /// High-MAD confidence threshold: a handler whose mean-absolute-deviation
@@ -195,7 +195,7 @@ const MAD_CONFIDENCE_DEN: u64 = 1;
 /// floor now lives in `handoff_cost_nanos`.
 fn wake_cost_nanos() -> u64 {
     // A `0` override would disable the recruit wake gate entirely (every
-    // blob clears the break-even); the resolution layer filters `< 1` to
+    // burst clears the break-even); the resolution layer filters `< 1` to
     // `None` for consistency with `AETHER_HANDOFF_COST_NS`, so a pinned
     // value always exceeds the floor and an unset/rejected knob falls
     // through to the measured cost.
@@ -208,7 +208,7 @@ fn wake_cost_nanos() -> u64 {
 /// The cost-aware recruit target `K` (iamacoffeepot/aether#1178): how many
 /// workers (including the producer's own) should drain this flush's fresh
 /// groups. The recipient group is the unit of parallelism (a worker drains
-/// a whole group; groups can't split), so the blob is a parallel-machine
+/// a whole group; groups can't split), so the burst is a parallel-machine
 /// makespan problem and the optimum is `K ≈ ceil(total_work /
 /// max_group_work)`, clamped to `[1, min(G, W)]`. Both work terms range over
 /// the same set — this flush's fresh groups — and differ only in how they
@@ -218,16 +218,16 @@ fn wake_cost_nanos() -> u64 {
 /// - `max_group_work` takes the largest single group: how *spreadable* that
 ///   work is. It is the longest pole in the tent — a group is drained by one
 ///   worker and never split, so the fattest group's serial drain is a floor
-///   on the blob's makespan that no `K` can beat, and workers past
+///   on the burst's makespan that no `K` can beat, and workers past
 ///   `total_work / max_group_work` would find nothing left to claim,
 /// - `g` is the fresh-group count `G` (can't use more workers than groups),
 /// - `w` is the pool worker count `W` (can't use more workers than exist),
 /// - `wake_cost` is the per-handoff wake break-even (nanos) the caller
-///   measured ([`wake_cost_nanos`]); at or below it the blob stays local.
+///   measured ([`wake_cost_nanos`]); at or below it the burst stays local.
 ///
-/// Below the wake break-even (`wake_cost`) the whole blob is too
+/// Below the wake break-even (`wake_cost`) the whole burst is too
 /// cheap to amortize a sibling wakeup, so `K = 1` (stay local). The divide
-/// rounds to nearest (`+ max_group_work / 2`) so a blob that needs "just
+/// rounds to nearest (`+ max_group_work / 2`) so a burst that needs "just
 /// over" one extra worker gets it. Integer-only — the EWMA is fixed-point
 /// nanos (iamacoffeepot/aether#1128), no float on the flush path.
 fn recruit_k(total_work: u64, max_group_work: u64, g: usize, w: usize, wake_cost: u64) -> usize {
@@ -275,7 +275,7 @@ fn group_mail_cost(costs: &CostLookup<'_>, recipient: MailboxId, kind: KindId) -
     }
 }
 
-/// One recipient's mail within a blob, behind a closeable buffer. See the
+/// One recipient's mail within a burst, behind a closeable buffer. See the
 /// module doc (§Closeable per-group buffer) for the SPSC drain-loop /
 /// close-on-empty FIFO contract.
 struct GroupBuf {
@@ -293,7 +293,7 @@ struct Group {
     /// Replaces a `std::sync::Mutex` — on macOS that lazily creates a
     /// `pthread_mutex_t` on first lock and destroys it on drop, and the
     /// #1140 profile found that per-group create + destroy churn (a fresh
-    /// group per flush) to be the dominant blob-machinery cost. A bare
+    /// group per flush) to be the dominant burst-machinery cost. A bare
     /// atomic flag has no OS object: zero-cost to construct and drop.
     /// Contention is rare by construction (one producer, one cursor-winning
     /// worker — §Closeable per-group buffer), so the spin almost never loops.
@@ -397,14 +397,14 @@ impl Group {
 
     /// Consume a group whose [`Lifecycle::publish`] failed (retired / full),
     /// so it was never claimable, and return its mail for the producer to
-    /// roll into a fresh blob. No worker can have touched it (the cursor
+    /// roll into a fresh burst. No worker can have touched it (the cursor
     /// never reached its index), so taking it by value is sound.
     fn into_mails(self) -> Vec<Mail> {
         self.buf.into_inner().mails
     }
 }
 
-/// A write-once slot in a blob's group array. Backed by a bare
+/// A write-once slot in a burst's group array. Backed by a bare
 /// `UnsafeCell<MaybeUninit<Group>>` rather than a `OnceLock`: the per-slot
 /// `Once` synchronization a `OnceLock` performs is **redundant** here,
 /// because publication is already ordered by the lifecycle word — the
@@ -417,7 +417,7 @@ struct GroupSlot {
     cell: UnsafeCell<MaybeUninit<Group>>,
 }
 
-// SAFETY: `BlobWork` is shared across worker threads via `Arc`, so its
+// SAFETY: `BurstWork` is shared across worker threads via `Arc`, so its
 // group slots must be `Sync`. Concurrent access is sound by the
 // write-once / publish-before-claim discipline: (1) the single producer
 // writes each slot exactly once, before the `publish` whose release-store
@@ -473,11 +473,11 @@ impl GroupSlot {
     }
 }
 
-/// Outcome of folding one flush into a blob ([`BlobWork::append_flush`]).
+/// Outcome of folding one flush into a burst ([`BurstWork::append_flush`]).
 struct FlushOutcome {
-    /// Mail that did not fit (blob retired or group array full) — the
-    /// producer rolls it into a fresh blob. Always *new* recipients (seen
-    /// recipients push to existing groups), so a rolled blob shares no
+    /// Mail that did not fit (burst retired or group array full) — the
+    /// producer rolls it into a fresh burst. Always *new* recipients (seen
+    /// recipients push to existing groups), so a rolled burst shares no
     /// recipient with this one.
     leftover: Vec<Mail>,
     /// Number of new groups this flush published — the width that drives
@@ -499,14 +499,14 @@ struct FlushOutcome {
     /// **trustworthy** (seeded, run at least once, low MAD). `false` if any
     /// contributing cell was unknown cost (a neutral seed, an absent
     /// handler, or high-MAD) — the recruiter then ignores `total_work` /
-    /// `max_group_work` and falls back to the width gate for this blob.
+    /// `max_group_work` and falls back to the width gate for this burst.
     cost_confident: bool,
 }
 
-/// One producer's shared cooperative blob. Constructed empty (sized to a
+/// One producer's shared cooperative burst. Constructed empty (sized to a
 /// flush) and filled via [`Self::append_flush`]; drained by any number of
 /// workers via the [`Drainable`] impl.
-pub struct BlobWork {
+pub struct BurstWork {
     lifecycle: Lifecycle,
     /// Fixed-capacity group array. The initialized prefix is exactly
     /// `[0, lifecycle.len())`: the producer writes a slot before the
@@ -514,7 +514,7 @@ pub struct BlobWork {
     /// groups back out (see [`Self::append_flush`]), so `len` always tracks
     /// the initialized prefix — which [`Drop`] relies on. Sized to the
     /// first flush (with a [`GROUP_CAP_MIN`] floor); the producer rolls a
-    /// fresh blob on overflow.
+    /// fresh burst on overflow.
     groups: Box<[GroupSlot]>,
     mailer: Arc<Mailer>,
     /// Where a recipient that yields mid-drain ([`CycleResult::Requeue`]) is
@@ -522,16 +522,16 @@ pub struct BlobWork {
     sink: WakeSink,
 }
 
-impl BlobWork {
-    /// An empty blob with a `cap`-slot group array (all slots uninit).
+impl BurstWork {
+    /// An empty burst with a `cap`-slot group array (all slots uninit).
     fn empty(cap: usize, mailer: Arc<Mailer>, sink: WakeSink) -> Arc<Self> {
         let groups = (0..cap).map(|_| GroupSlot::empty()).collect();
         Arc::new(Self { lifecycle: Lifecycle::new(0), groups, mailer, sink })
     }
 
-    /// Producer (single-threaded for a given blob): fold one flush's mail
-    /// in. `index` is this blob's producer-private recipient → group-index
-    /// map (held by the [`BlobProducer`]). New recipients become new groups
+    /// Producer (single-threaded for a given burst): fold one flush's mail
+    /// in. `index` is this burst's producer-private recipient → group-index
+    /// map (held by the [`BurstProducer`]). New recipients become new groups
     /// (written then published); seen recipients push onto their existing
     /// group's buffer (or, if it has been closed, deposit through
     /// `route_mail`). Returns the leftover (overflow / retired), the
@@ -580,9 +580,9 @@ impl BlobWork {
                     self.mailer.push(mail);
                 }
             } else if base + staged >= cap {
-                // Group array full — roll the rest into a fresh blob. Only
+                // Group array full — roll the rest into a fresh burst. Only
                 // *new* recipients reach here (seen ones push above), so a
-                // rolled blob shares no recipient with this one.
+                // rolled burst shares no recipient with this one.
                 leftover.push(mail);
             } else {
                 let recipient = mail.recipient;
@@ -618,10 +618,10 @@ impl BlobWork {
                 FlushOutcome { leftover, fresh_groups: staged, total_work, max_group_work, cost_confident }
             }
             Published::Retired | Published::Full => {
-                // The blob retired (or hit the wire ceiling) between staging
+                // The burst retired (or hit the wire ceiling) between staging
                 // and publish: the staged groups never became claimable.
                 // Take each back out (restoring the initialized prefix to
-                // `[0, len)`) and roll its mail into a fresh blob.
+                // `[0, len)`) and roll its mail into a fresh burst.
                 for j in 0..staged {
                     // SAFETY: slot `base + j` was written this flush and never
                     // published (`len` did not advance), so no worker claimed
@@ -639,7 +639,7 @@ impl BlobWork {
     /// Dispatch one group's mail to its recipient, draining the closeable
     /// buffer in batches until empty (then the buffer self-closes — the
     /// FIFO barrier). Each batch's mail dispatches in send order via the
-    /// #1135 per-mail fast path. `received` is the blob-pickup stamp this
+    /// #1135 per-mail fast path. `received` is the burst-pickup stamp this
     /// worker took at `run_cycle` entry (iamacoffeepot/aether#1150),
     /// threaded onto each dispatched mail's `t_enqueue`.
     fn dispatch_group(&self, group: &Group, budget: BatchBudget, received: Nanos) {
@@ -652,7 +652,7 @@ impl BlobWork {
 
     /// The iamacoffeepot/aether#1135 per-mail demux step: seize the
     /// recipient and dispatch in place, or deposit through `route_mail`.
-    /// `received` is this worker's blob-pickup stamp
+    /// `received` is this worker's burst-pickup stamp
     /// (iamacoffeepot/aether#1150), carried onto the in-place seed's
     /// `t_enqueue`.
     fn dispatch_one(&self, recipient: MailboxId, mail: Mail, budget: BatchBudget, received: Nanos) {
@@ -677,7 +677,7 @@ impl BlobWork {
                         mail_id: mail.mail_id,
                         root: mail.root,
                         parent_mail: mail.parent_mail,
-                        // iamacoffeepot/aether#1150: the blob-pickup stamp, not
+                        // iamacoffeepot/aether#1150: the burst-pickup stamp, not
                         // a fresh `now` — `now` here ≈ `t_received` and collapsed
                         // residence to ~0. With the pickup instant, the recipient's
                         // `Received` reads a real `t_received − t_enqueue` drain.
@@ -697,23 +697,23 @@ impl BlobWork {
     }
 }
 
-impl Drainable for BlobWork {
+impl Drainable for BurstWork {
     fn run_cycle(&self, budget: BatchBudget) -> CycleResult {
-        // iamacoffeepot/aether#1150: the blob-received stamp. One clock
-        // read marks when this worker picked up the blob and began
+        // iamacoffeepot/aether#1150: the burst-received stamp. One clock
+        // read marks when this worker picked up the burst and began
         // draining; every mail it dispatches this cycle inherits it as
         // `t_enqueue`, so `t_received − t_enqueue` measures where in the
-        // drain that mail's handler entry landed (the in-blob
+        // drain that mail's handler entry landed (the in-burst
         // serialization a serial fan-out pays), not ~0. Stamped per
         // `run_cycle`, so a recruited sibling worker anchors its own
         // share of the groups against its own pickup instant.
         let received = self.mailer.now_nanos();
-        // Drain to cursor exhaustion: a worker that picks up the blob runs
+        // Drain to cursor exhaustion: a worker that picks up the burst runs
         // it in full, claiming and dispatching every group it wins off the
         // shared cursor until the cursor is drained. The parallelism is
-        // cooperative — recruitment puts N copies of this blob in flight, so
+        // cooperative — recruitment puts N copies of this burst in flight, so
         // N workers race the one cursor and split the groups between them —
-        // not a per-worker yield. A blob is a finite, one-shot fan-out, so
+        // not a per-worker yield. A burst is a finite, one-shot fan-out, so
         // (unlike an actor's ongoing inbox) it needs no fairness throttle;
         // the per-recipient `budget` still bounds each recipient's own inbox
         // drain inside `dispatch_group`. Late appends past the cursor are
@@ -730,7 +730,7 @@ impl Drainable for BlobWork {
     }
 
     fn label(&self) -> &'static str {
-        "blob"
+        "burst"
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -738,7 +738,7 @@ impl Drainable for BlobWork {
     }
 }
 
-impl Drop for BlobWork {
+impl Drop for BurstWork {
     fn drop(&mut self) {
         // The initialized slots are exactly `[0, len)` (see the `groups`
         // field doc). All `Arc` refs are gone (we are in `Drop`), so no
@@ -756,7 +756,7 @@ impl Drop for BlobWork {
             // yields an empty Vec here — the drained and dropped paths are
             // mutually exclusive per mail. `record_finished` no-ops on an
             // absent mail id, so a lineage-less mail settles nothing. No obligation guard to
-            // disarm: blob mail is a plain `Mail`, not an `OwnedDispatch`;
+            // disarm: burst mail is a plain `Mail`, not an `OwnedDispatch`;
             // arming happens at demux time inside `dispatch_one` or
             // `route_mail`, never on the buffered `Mail` itself.
             for mail in group.into_mails() {
@@ -767,64 +767,64 @@ impl Drop for BlobWork {
     }
 }
 
-/// One producing actor's blob lifecycle: keeps a single active blob,
+/// One producing actor's burst lifecycle: keeps a single active burst,
 /// appends each flush to it (rolling a fresh one when it retires or
 /// overflows), and recruits drainers. Lives on the actor's
 /// [`NativeBinding`](crate::actor::native::NativeBinding)
 /// and is driven only from the actor's own thread, so `&mut self` access is
 /// single-threaded.
-pub struct BlobProducer {
+pub struct BurstProducer {
     mailer: Arc<Mailer>,
     sink: WakeSink,
-    /// The active blob + its producer-private recipient → group-index map.
-    /// `None` until the first flush, and after a retired blob is dropped.
-    active: Option<(Arc<BlobWork>, FxHashMap<MailboxId, usize>)>,
-    /// Overflowed-out blobs that may still hold open (undrained) groups,
+    /// The active burst + its producer-private recipient → group-index map.
+    /// `None` until the first flush, and after a retired burst is dropped.
+    active: Option<(Arc<BurstWork>, FxHashMap<MailboxId, usize>)>,
+    /// Overflowed-out bursts that may still hold open (undrained) groups,
     /// each with its recipient → group-index map, oldest first. A later
     /// flush routes a recipient that misses the active index through these
     /// indexes ([`Self::route_detached`]) so it pushes onto its existing
     /// open group instead of opening a second live group another worker
-    /// could drain first — the cross-blob FIFO inversion
+    /// could drain first — the cross-burst FIFO inversion
     /// (iamacoffeepot/aether#1533). Producer-private (no new sharing),
-    /// empty except during overflow bursts, and self-bounding: entries
-    /// leave when their blob retires (pruned at each flush).
-    detached: Vec<(Arc<BlobWork>, FxHashMap<MailboxId, usize>)>,
+    /// empty except during overflow spikes, and self-bounding: entries
+    /// leave when their burst retires (pruned at each flush).
+    detached: Vec<(Arc<BurstWork>, FxHashMap<MailboxId, usize>)>,
 }
 
-impl BlobProducer {
+impl BurstProducer {
     /// Build a producer over the pool's [`WakeSink`] and the shared
     /// [`Mailer`].
     pub fn new(mailer: Arc<Mailer>, sink: WakeSink) -> Self {
         Self { mailer, sink, active: None, detached: Vec::new() }
     }
 
-    /// Fold one flush's routed mail into the active blob (or fresh blobs),
+    /// Fold one flush's routed mail into the active burst (or fresh bursts),
     /// scheduling a drainer and broadcast-recruiting siblings for wide
     /// fan-outs. Called on the producing actor's thread.
     pub fn flush(&mut self, routed: Vec<Mail>) {
-        // Prune detached blobs that have retired (fully drained — every
+        // Prune detached bursts that have retired (fully drained — every
         // group closed, so nothing left to order against). Entries leave
         // on retire, keeping the list self-bounding.
-        self.detached.retain(|(blob, _)| !blob.lifecycle.is_retired());
+        self.detached.retain(|(burst, _)| !burst.lifecycle.is_retired());
 
         let mut pending = self.route_detached(routed);
         while !pending.is_empty() {
-            // Ensure a live (un-retired) active blob, sized to the pending
+            // Ensure a live (un-retired) active burst, sized to the pending
             // mail if we have to make a fresh one.
             let need_new = match &self.active {
-                Some((blob, _)) => blob.lifecycle.is_retired(),
+                Some((burst, _)) => burst.lifecycle.is_retired(),
                 None => true,
             };
             if need_new {
                 let cap = group_cap_for(&pending);
-                let blob = BlobWork::empty(cap, Arc::clone(&self.mailer), self.sink.clone());
-                self.active = Some((blob, FxHashMap::default()));
+                let burst = BurstWork::empty(cap, Arc::clone(&self.mailer), self.sink.clone());
+                self.active = Some((burst, FxHashMap::default()));
             }
 
-            let (blob, index) = self.active.as_mut().expect("active set above");
-            let outcome = blob.append_flush(mem::take(&mut pending), index);
-            let blob_arc: Arc<BlobWork> = Arc::clone(blob);
-            let blob_dyn: Arc<dyn Drainable> = blob_arc;
+            let (burst, index) = self.active.as_mut().expect("active set above");
+            let outcome = burst.append_flush(mem::take(&mut pending), index);
+            let burst_arc: Arc<BurstWork> = Arc::clone(burst);
+            let burst_dyn: Arc<dyn Drainable> = burst_arc;
 
             // Always schedule a drainer so newly-published groups (and any
             // pushes onto still-open groups) are picked up even if every
@@ -833,50 +833,50 @@ impl BlobProducer {
             // (the #1116 win); a heavy / wide fan-out additionally
             // broadcast-recruits siblings, sized by the cost-aware
             // recruiter (iamacoffeepot/aether#1178).
-            self.sink.schedule(Arc::clone(&blob_dyn));
+            self.sink.schedule(Arc::clone(&burst_dyn));
             let extra = recruit_extra(&outcome, self.sink.workers(), wake_cost_nanos());
             if extra > 0 {
-                self.sink.recruit(&blob_dyn, extra);
+                self.sink.recruit(&burst_dyn, extra);
             }
 
             pending = outcome.leftover;
-            // Non-empty leftover means the active blob could not take these
+            // Non-empty leftover means the active burst could not take these
             // groups — its array is full (or it retired mid-publish). Detach
-            // it so the remainder rolls into a fresh blob next iteration;
-            // otherwise we'd re-append to the same full blob forever. The
-            // leftover is always *new* recipients, so the fresh blob shares
-            // none of its groups — but the detached blob may still hold
+            // it so the remainder rolls into a fresh burst next iteration;
+            // otherwise we'd re-append to the same full burst forever. The
+            // leftover is always *new* recipients, so the fresh burst shares
+            // none of its groups — but the detached burst may still hold
             // open (undrained) groups, so it moves onto `detached` with its
             // index rather than being forgotten: the next flush must keep
             // routing same-recipient mail onto those groups, or the fresh
-            // blob would open a second live group whichever worker drains
+            // burst would open a second live group whichever worker drains
             // first wins (the iamacoffeepot/aether#1533 FIFO inversion). A
-            // blob that retired mid-publish has every group closed already,
+            // burst that retired mid-publish has every group closed already,
             // so it drops here and never enters the list.
             if !pending.is_empty()
-                && let Some((blob, index)) = self.active.take()
-                && !blob.lifecycle.is_retired()
+                && let Some((burst, index)) = self.active.take()
+                && !burst.lifecycle.is_retired()
             {
-                self.detached.push((blob, index));
+                self.detached.push((burst, index));
             }
         }
     }
 
-    /// Route one flush's mail through the detached blobs' recipient indexes
-    /// before it reaches the active blob. A recipient already in the active
+    /// Route one flush's mail through the detached bursts' recipient indexes
+    /// before it reaches the active burst. A recipient already in the active
     /// index passes through untouched (`append_flush` pushes onto its open
     /// group there). A recipient that misses the active index but has a
-    /// group in a detached blob — scanned newest-first — **pushes onto that
+    /// group in a detached burst — scanned newest-first — **pushes onto that
     /// group** when it is still open (the same [`Group::push`] the active
     /// path uses, so FIFO rides the group buffer), and deposits through
     /// [`Mailer::push`] when it has closed (safe: close-on-empty means
     /// every predecessor was dispatched, and the deposit's wake makes the
     /// slot `Ready`, so a later in-place seize loses and lands behind it).
-    /// Every detached blob that took a push is re-scheduled through the
+    /// Every detached burst that took a push is re-scheduled through the
     /// sink — the same pickup guarantee [`Self::flush`] gives the active
-    /// blob. Only mail whose recipient misses everywhere is returned, to
-    /// become fresh groups in the active blob — upholding the at-most-one-
-    /// unclosed-group invariant (module doc §Single active blob + append;
+    /// burst. Only mail whose recipient misses everywhere is returned, to
+    /// become fresh groups in the active burst — upholding the at-most-one-
+    /// unclosed-group invariant (module doc §Single active burst + append;
     /// iamacoffeepot/aether#1533).
     fn route_detached(&self, routed: Vec<Mail>) -> Vec<Mail> {
         if self.detached.is_empty() {
@@ -890,15 +890,15 @@ impl BlobProducer {
                 pending.push(mail);
                 continue;
             }
-            for (i, (blob, index)) in self.detached.iter().enumerate().rev() {
+            for (i, (burst, index)) in self.detached.iter().enumerate().rev() {
                 let Some(&g) = index.get(&mail.recipient) else {
                     continue;
                 };
-                // SAFETY: `g` is in this blob's producer-private index, so
+                // SAFETY: `g` is in this burst's producer-private index, so
                 // this producer wrote and published the slot (a failed
                 // publish removes its entries); published slots are never
                 // mutated after the write.
-                let group = unsafe { blob.groups[g].get() };
+                let group = unsafe { burst.groups[g].get() };
                 match group.push(mail) {
                     Ok(()) => pushed[i] = true,
                     // Closed (drained) — deposit lands strictly after
@@ -909,17 +909,17 @@ impl BlobProducer {
             }
             pending.push(mail);
         }
-        for (i, (blob, _)) in self.detached.iter().enumerate() {
+        for (i, (burst, _)) in self.detached.iter().enumerate() {
             if pushed[i] {
-                let blob_arc: Arc<BlobWork> = Arc::clone(blob);
-                self.sink.schedule(blob_arc);
+                let burst_arc: Arc<BurstWork> = Arc::clone(burst);
+                self.sink.schedule(burst_arc);
             }
         }
         pending
     }
 }
 
-/// Size a fresh blob's group array. The mail count is an upper bound on the
+/// Size a fresh burst's group array. The mail count is an upper bound on the
 /// distinct-recipient count (the real group count), so sizing to it —
 /// clamped to the [`GROUP_CAP_MIN`] floor and the wire ceiling — never
 /// under-sizes the first flush, and avoids a throwaway `HashSet` built just
@@ -1038,7 +1038,7 @@ mod tests {
             // ADR-0094: this mock stands in for the real
             // `DispatcherSlot::seize_and_run` → `dispatch_one`, which
             // discharges the seed's obligation. Mirror that here so the
-            // armed in-place demux seed (`blob::work::dispatch_one`) does
+            // armed in-place demux seed (`burst::work::dispatch_one`) does
             // not trip the debug guard on drop.
             seed.discharge();
             let _ = self.direct.send(seed.payload.bytes()[0]);
@@ -1087,7 +1087,7 @@ mod tests {
             directs.push(direct_rx);
         }
 
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+        let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         producer.flush(routed);
         drain_injector(&injector);
 
@@ -1107,7 +1107,7 @@ mod tests {
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let (id, _fix, direct_rx, _dep) = seizable_recipient(&registry, "r");
 
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+        let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         producer.flush(vec![mail_to(id, 0), mail_to(id, 1), mail_to(id, 2)]);
         drain_injector(&injector);
 
@@ -1126,7 +1126,7 @@ mod tests {
         let (id, fixture, direct_rx, deposit_rx) = seizable_recipient(&registry, "r");
         assert!(fixture.state.seize(), "mark the recipient busy before the demux");
 
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+        let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         producer.flush(vec![mail_to(id, 9)]);
         drain_injector(&injector);
 
@@ -1143,7 +1143,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<u8>();
         let id = register_byte_forwarding_inbox(&registry, "sink", tx);
 
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+        let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         producer.flush(vec![mail_to(id, 3)]);
         drain_injector(&injector);
 
@@ -1159,7 +1159,7 @@ mod tests {
         let (a, _fa, a_rx, _ad) = seizable_recipient(&registry, "a");
         let (b, _fb, b_rx, _bd) = seizable_recipient(&registry, "b");
 
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+        let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         producer.flush(vec![mail_to(a, 1)]);
         drain_injector(&injector);
         producer.flush(vec![mail_to(b, 2)]);
@@ -1169,17 +1169,17 @@ mod tests {
         assert_eq!(b_rx.try_recv().ok(), Some(2));
     }
 
-    /// Overflowing the group array rolls the remainder into a fresh blob;
+    /// Overflowing the group array rolls the remainder into a fresh burst;
     /// every recipient still gets its mail exactly once. Flush 1 of
     /// `GROUP_CAP_MIN` distinct recipients sizes the array to exactly that
     /// (full); flush 2's brand-new recipients overflow and roll into a
-    /// second blob. (Two flushes with no drain between also exercises the
+    /// second burst. (Two flushes with no drain between also exercises the
     /// full-but-not-retired roll path — the case that previously looped.)
     #[test]
-    fn overflow_rolls_fresh_blob_no_loss() {
+    fn overflow_rolls_fresh_burst_no_loss() {
         let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+        let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         // Keep every fixture (and its receivers) alive to drain time — the
         // seize handle holds only a `Weak` to the fixture, so a dropped
         // fixture would make `try_seize` upgrade to `None` and silently
@@ -1216,27 +1216,27 @@ mod tests {
     }
 
     /// iamacoffeepot/aether#1533: same-recipient FIFO holds *across* an
-    /// overflow detach. Flush r1 → R (blob1, left undrained), force a
-    /// group-array overflow with brand-new recipients (blob1 detaches;
-    /// blob2 takes the leftover), then flush r2 → R. The producer must
-    /// route r2 onto R's still-open group in detached blob1 — not open a
-    /// second R group in active blob2 — so draining blob2 strictly
-    /// *before* blob1 still observes r1 then r2. (Pre-fix, r2 landed in
-    /// blob2 and the early blob2 drain dispatched r2 first.) Drain order
+    /// overflow detach. Flush r1 → R (burst1, left undrained), force a
+    /// group-array overflow with brand-new recipients (burst1 detaches;
+    /// burst2 takes the leftover), then flush r2 → R. The producer must
+    /// route r2 onto R's still-open group in detached burst1 — not open a
+    /// second R group in active burst2 — so draining burst2 strictly
+    /// *before* burst1 still observes r1 then r2. (Pre-fix, r2 landed in
+    /// burst2 and the early burst2 drain dispatched r2 first.) Drain order
     /// is driven entirely by the test — no timing dependence.
     #[test]
-    fn detached_blob_keeps_same_recipient_fifo_across_overflow() {
+    fn detached_burst_keeps_same_recipient_fifo_across_overflow() {
         let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let (r, _fix, direct_rx, _dep) = seizable_recipient(&registry, "r");
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+        let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
 
-        // Flush 1: r1 → R. blob1 (cap = GROUP_CAP_MIN) holds R's open
+        // Flush 1: r1 → R. burst1 (cap = GROUP_CAP_MIN) holds R's open
         // group; nothing drains yet.
         producer.flush(vec![mail_to(r, 1)]);
 
-        // Flush 2: enough brand-new recipients to overflow blob1's group
-        // array → blob1 detaches; blob2 takes the leftover (new
+        // Flush 2: enough brand-new recipients to overflow burst1's group
+        // array → burst1 detaches; burst2 takes the leftover (new
         // recipients only).
         let mut fixtures = Vec::new();
         let mut fresh_rxs = Vec::new();
@@ -1248,18 +1248,18 @@ mod tests {
             fresh_rxs.push(direct);
         }
         producer.flush(routed);
-        assert_eq!(producer.detached.len(), 1, "overflow moves blob1 onto the detached list");
+        assert_eq!(producer.detached.len(), 1, "overflow moves burst1 onto the detached list");
 
-        // Flush 3: r2 → R appends to R's open group in detached blob1.
+        // Flush 3: r2 → R appends to R's open group in detached burst1.
         producer.flush(vec![mail_to(r, 2)]);
 
-        // Drain blob2 strictly BEFORE blob1 — the order that inverted
+        // Drain burst2 strictly BEFORE burst1 — the order that inverted
         // pre-fix.
-        let blob1 = Arc::clone(&producer.detached[0].0);
-        let blob2 = Arc::clone(&producer.active.as_ref().expect("active blob2").0);
-        assert!(!Arc::ptr_eq(&blob1, &blob2), "overflow rolled a second blob");
-        assert_eq!(blob2.run_cycle(BatchBudget::standard()), CycleResult::Idle);
-        assert_eq!(blob1.run_cycle(BatchBudget::standard()), CycleResult::Idle);
+        let burst1 = Arc::clone(&producer.detached[0].0);
+        let burst2 = Arc::clone(&producer.active.as_ref().expect("active burst2").0);
+        assert!(!Arc::ptr_eq(&burst1, &burst2), "overflow rolled a second burst");
+        assert_eq!(burst2.run_cycle(BatchBudget::standard()), CycleResult::Idle);
+        assert_eq!(burst1.run_cycle(BatchBudget::standard()), CycleResult::Idle);
         // Mop up the scheduled copies (both cursors are exhausted).
         drain_injector(&injector);
 
@@ -1273,9 +1273,9 @@ mod tests {
             assert!(rx.try_recv().is_err(), "fresh recipient {i} exactly once");
         }
 
-        // Self-bounding: blob1 retired on full drain, and the next flush
+        // Self-bounding: burst1 retired on full drain, and the next flush
         // prunes its detached entry.
-        assert!(blob1.lifecycle.is_retired(), "blob1 retired after drain");
+        assert!(burst1.lifecycle.is_retired(), "burst1 retired after drain");
         producer.flush(Vec::new());
         assert!(producer.detached.is_empty(), "retired detached entry pruned at flush entry");
     }
@@ -1285,14 +1285,14 @@ mod tests {
     fn empty_flush_noop() {
         let (_registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+        let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         producer.flush(Vec::new());
         assert_eq!(drain_injector(&injector), 0, "no work scheduled for an empty flush");
     }
 
     /// A mailer wired to a settlement registry on both seams — the same two
     /// installs the chassis builder performs at boot. Mirrors
-    /// `chassis::inbox::tests::test_env`; blob tests that exercise the
+    /// `chassis::inbox::tests::test_env`; burst tests that exercise the
     /// drop-settles path need settlement observable.
     fn settlement_env() -> (Arc<Registry>, Arc<Mailer>, Arc<SettlementRegistry>) {
         let registry = Arc::new(Registry::new());
@@ -1303,10 +1303,10 @@ mod tests {
         (registry, mailer, settlement)
     }
 
-    /// A `BlobWork` dropped with un-demuxed mail settles each mail's root so
+    /// A `BurstWork` dropped with un-demuxed mail settles each mail's root so
     /// traced waiters fire `Settled` rather than hanging to timeout.
     #[test]
-    fn dropped_blob_settles_undemuxed_mail() {
+    fn dropped_burst_settles_undemuxed_mail() {
         let (_registry, mailer, settlement) = settlement_env();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let recipient = MailboxId(0x200);
@@ -1316,11 +1316,11 @@ mod tests {
         mailer.record_sent_inflight(root);
         let settle = settlement.subscribe_settlement(root);
 
-        // Build a blob and append one lineage-stamped mail — never drained.
-        let blob = BlobWork::empty(4, Arc::clone(&mailer), wake_sink(&injector));
+        // Build a burst and append one lineage-stamped mail — never drained.
+        let burst = BurstWork::empty(4, Arc::clone(&mailer), wake_sink(&injector));
         let mail_id = MailId::new(producer, 11);
         let mut index = FxHashMap::default();
-        blob.append_flush(
+        burst.append_flush(
             vec![Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1).with_lineage(
                 Some(mail_id),
                 Some(root),
@@ -1329,16 +1329,16 @@ mod tests {
             &mut index,
         );
 
-        // Drop the blob without draining: Drop should record Finished.
-        drop(blob);
+        // Drop the burst without draining: Drop should record Finished.
+        drop(burst);
 
-        settle.recv().expect("dropped blob records Finished for un-demuxed mail");
+        settle.recv().expect("dropped burst records Finished for un-demuxed mail");
     }
 
-    /// A `BlobWork` dropped with a lineage-less mail settles nothing — the
+    /// A `BurstWork` dropped with a lineage-less mail settles nothing — the
     /// no-op parity `record_finished` provides for lineage-less mail.
     #[test]
-    fn dropped_blob_none_mail_id_settles_nothing() {
+    fn dropped_burst_none_mail_id_settles_nothing() {
         let (_registry, mailer, settlement) = settlement_env();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let recipient = MailboxId(0x202);
@@ -1349,12 +1349,12 @@ mod tests {
         mailer.record_sent_inflight(guard_root);
         let guard_rx = settlement.subscribe_settlement(guard_root);
 
-        let blob = BlobWork::empty(4, Arc::clone(&mailer), wake_sink(&injector));
+        let burst = BurstWork::empty(4, Arc::clone(&mailer), wake_sink(&injector));
         let mut index = FxHashMap::default();
         // Mail with no lineage stamped.
-        blob.append_flush(vec![Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1)], &mut index);
+        burst.append_flush(vec![Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1)], &mut index);
 
-        drop(blob);
+        drop(burst);
 
         assert!(guard_rx.try_recv().is_err(), "a lineage-less mail does not settle any root");
     }
@@ -1376,7 +1376,7 @@ mod tests {
 
         let pool = Pool::start(PoolConfig { workers: 8, ..PoolConfig::default() }, Arc::new(PanicAborter));
         let (registry, mailer) = bare_substrate();
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), pool.wake_sink());
+        let mut producer = BurstProducer::new(Arc::clone(&mailer), pool.wake_sink());
 
         let mut fixtures = Vec::new();
         let mut rxs = Vec::new();
@@ -1528,9 +1528,9 @@ mod tests {
         seed_steady_cost(&mailer, a, 10_000);
         seed_steady_cost(&mailer, b, 5_000);
 
-        let blob = BlobWork::empty(8, Arc::clone(&mailer), wake_sink(&injector));
+        let burst = BurstWork::empty(8, Arc::clone(&mailer), wake_sink(&injector));
         let mut index = FxHashMap::default();
-        let outcome = blob.append_flush(vec![mail_to(a, 0), mail_to(a, 1), mail_to(b, 2)], &mut index);
+        let outcome = burst.append_flush(vec![mail_to(a, 0), mail_to(a, 1), mail_to(b, 2)], &mut index);
 
         assert_eq!(outcome.fresh_groups, 2, "two distinct recipients");
         assert_eq!(outcome.total_work, 25_000, "total_work = a(2×10_000) + b(1×5_000)");
@@ -1538,7 +1538,7 @@ mod tests {
         assert!(outcome.cost_confident, "both handlers seeded + steady");
     }
 
-    /// A blob whose recipient has no EWMA history (a neutral-seed cell, or
+    /// A burst whose recipient has no EWMA history (a neutral-seed cell, or
     /// no cell at all) is "unknown cost": `cost_confident` is false, so the
     /// recruiter falls back to the width gate. Here a wide fan-out of unseen
     /// recipients clears `recruit_min` and recruits via the *fallback* path,
@@ -1557,13 +1557,13 @@ mod tests {
             fixtures.push(fix);
         }
 
-        let blob = BlobWork::empty(16, Arc::clone(&mailer), wake_sink(&injector));
+        let burst = BurstWork::empty(16, Arc::clone(&mailer), wake_sink(&injector));
         let mut index = FxHashMap::default();
-        let outcome = blob.append_flush(routed, &mut index);
+        let outcome = burst.append_flush(routed, &mut index);
 
         assert_eq!(outcome.fresh_groups, 12);
         assert_eq!(outcome.total_work, 0, "no seeded handlers → no measured work");
-        assert!(!outcome.cost_confident, "unseeded handlers mark the blob unknown-cost");
+        assert!(!outcome.cost_confident, "unseeded handlers mark the burst unknown-cost");
         // The width fallback recruits (12 >= recruit_min 9): G.min(cap) - 1 =
         // 11 (the final W cap lives in WakeSink::recruit, as it did pre-#1178).
         let extra = recruit_extra(&outcome, 8, 10_000);
@@ -1571,7 +1571,7 @@ mod tests {
     }
 
     /// A *narrow* unseeded fan-out (below `recruit_min`) takes the width
-    /// fallback and recruits nobody — the cost-unknown narrow blob behaves
+    /// fallback and recruits nobody — the cost-unknown narrow burst behaves
     /// exactly as the pre-#1178 width gate did.
     #[test]
     fn unknown_cost_narrow_stays_local_via_width() {
@@ -1585,9 +1585,9 @@ mod tests {
             fixtures.push(fix);
         }
 
-        let blob = BlobWork::empty(8, Arc::clone(&mailer), wake_sink(&injector));
+        let burst = BurstWork::empty(8, Arc::clone(&mailer), wake_sink(&injector));
         let mut index = FxHashMap::default();
-        let outcome = blob.append_flush(routed, &mut index);
+        let outcome = burst.append_flush(routed, &mut index);
 
         assert!(!outcome.cost_confident);
         assert_eq!(
@@ -1600,7 +1600,7 @@ mod tests {
     /// A heavy *narrow* fan-out (below `recruit_min`) with trustworthy cost
     /// recruits its full group count — the headline #1178 win: the old width
     /// gate left this serial, the cost gate parallelises it without anyone
-    /// touching `AETHER_BLOB_RECRUIT_MIN`.
+    /// touching `AETHER_BURST_RECRUIT_MIN`.
     #[test]
     fn heavy_narrow_recruits_without_width_threshold() {
         let (registry, mailer) = bare_substrate();
@@ -1616,9 +1616,9 @@ mod tests {
             fixtures.push(fix);
         }
 
-        let blob = BlobWork::empty(8, Arc::clone(&mailer), wake_sink(&injector));
+        let burst = BurstWork::empty(8, Arc::clone(&mailer), wake_sink(&injector));
         let mut index = FxHashMap::default();
-        let outcome = blob.append_flush(routed, &mut index);
+        let outcome = burst.append_flush(routed, &mut index);
 
         assert!(outcome.cost_confident, "all three handlers seeded + steady");
         assert_eq!(outcome.fresh_groups, 3);
@@ -1644,9 +1644,9 @@ mod tests {
             fixtures.push(fix);
         }
 
-        let blob = BlobWork::empty(8, Arc::clone(&mailer), wake_sink(&injector));
+        let burst = BurstWork::empty(8, Arc::clone(&mailer), wake_sink(&injector));
         let mut index = FxHashMap::default();
-        let outcome = blob.append_flush(routed, &mut index);
+        let outcome = burst.append_flush(routed, &mut index);
 
         assert!(outcome.cost_confident);
         assert_eq!(

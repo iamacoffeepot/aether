@@ -136,7 +136,7 @@ fn macro_emitted_cap_routes_structured_kind_through_dispatch() {
     drop(chassis);
 }
 
-/// iamacoffeepot/aether#1135: a blob demuxer seeds a free `Pooled` actor
+/// iamacoffeepot/aether#1135: a burst demuxer seeds a free `Pooled` actor
 /// via `seize_and_run` — the seed dispatches in place (no inbox deposit /
 /// `try_recv` repop) and the slot returns to `Idle`. Boots a real Pooled
 /// actor through the chassis, lets it quiesce, then resolves the seize

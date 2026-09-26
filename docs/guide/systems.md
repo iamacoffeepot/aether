@@ -9,7 +9,7 @@ source families, not only the original engine core.
 |---|---|
 | [Mail and kinds](systems/mail-and-kinds.md) | addressing, payload identity, delivery and replies |
 | [Concurrency](systems/concurrency.md) | actor seriality and safe blocking boundaries |
-| [Scheduler](systems/scheduler.md) | blobs, ready work, worker policy and cost-aware dispatch |
+| [Scheduler](systems/scheduler.md) | bursts, ready work, worker policy and cost-aware dispatch |
 | [Frame lifecycle](systems/lifecycle.md) | ordered stages, subscriptions, advance and shutdown |
 | [Tracing and settlement](systems/tracing-and-settlement.md) | causal trees, holds and exact completion |
 | [Logging](systems/logging.md) | per-actor rings and out-of-actor diagnostics |

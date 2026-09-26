@@ -48,7 +48,7 @@ pub fn drive_for_tier(drive: Drive, tier: Tier) -> Drive {
     }
 }
 
-/// Default per-tick `Ping` burst for a `Saturate` cell when
+/// Default per-tick `Ping` count for a `Saturate` cell when
 /// `AETHER_PERF_BACKLOG` is unset. This is the *requested* depth, not the
 /// effective one: a relay writes `2 + out_degree` trace-ring slots per
 /// inbound mail (`Received` + `Finished` on dispatch, plus one `Sent` per
@@ -57,7 +57,7 @@ pub fn drive_for_tier(drive: Drive, tier: Tier) -> Drive {
 /// ring_cap`, not `backlog <= ring_cap`. At 512 a low-fan-out cell stays
 /// well under cap, but a wide fan-out laps it (`fanout-8`:
 /// `512 * (2 + 8) = 5120 > 4096`). [`run_sweep_samples`] therefore clamps
-/// each `Saturate` cell's burst to `ring_cap / (2 + max_out_degree(topo))`
+/// each `Saturate` cell's backlog to `ring_cap / (2 + max_out_degree(topo))`
 /// so every cell stays measurable regardless of fan-out
 /// (iamacoffeepot/aether#1226).
 ///
@@ -132,12 +132,12 @@ pub fn scheduler_tuning_from_env() -> SchedulerTuning {
             .filter(|&n| n > 0)
             .unwrap_or(defaults.local_chain_backstop),
         handoff_cost_nanos: parsed::<u64>("AETHER_HANDOFF_COST_NS").filter(|&n| n >= 1).or(defaults.handoff_cost_nanos),
-        blob_recruit_min: parsed::<usize>("AETHER_BLOB_RECRUIT_MIN")
+        burst_recruit_min: parsed::<usize>("AETHER_BURST_RECRUIT_MIN")
             .filter(|&n| n > 0)
-            .unwrap_or(defaults.blob_recruit_min),
-        blob_recruit_max: parsed::<usize>("AETHER_BLOB_RECRUIT_MAX")
+            .unwrap_or(defaults.burst_recruit_min),
+        burst_recruit_max: parsed::<usize>("AETHER_BURST_RECRUIT_MAX")
             .filter(|&n| n > 0)
-            .unwrap_or(defaults.blob_recruit_max),
+            .unwrap_or(defaults.burst_recruit_max),
         wake_cost_nanos: parsed::<u64>("AETHER_WAKE_COST_NANOS").filter(|&n| n >= 1).or(defaults.wake_cost_nanos),
     }
 }
@@ -151,7 +151,7 @@ pub fn scheduler_tuning_from_env() -> SchedulerTuning {
 /// It does **not** account for fan-out: a relay records `2 + out_degree`
 /// ring slots per inbound mail, so the tighter per-topology bound
 /// (`backlog * (2 + out_degree) <= ring_cap`) lives at the cell in
-/// [`run_sweep_samples`], which clamps each `Saturate` burst to
+/// [`run_sweep_samples`], which clamps each `Saturate` backlog to
 /// `ring_cap / (2 + max_out_degree(topo))` (iamacoffeepot/aether#1226).
 ///
 /// [`run_sweep_samples`]: crate::perf::harness::run_sweep_samples

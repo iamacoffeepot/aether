@@ -62,14 +62,14 @@ pub enum TraceEvent {
         recipient: MailboxId,
         kind: KindId,
         /// iamacoffeepot/aether#1158: the instant the producer's
-        /// outbound blob **opened** — the first buffered send of the
+        /// outbound burst **opened** — the first buffered send of the
         /// flush window (stamped once when the handler's outbound buffer
         /// transitions empty→non-empty, shared by every mail in the
         /// frame). Eager paths (chassis-root pushes, wasm trampoline,
         /// spawner-less test bindings) route immediately, so
         /// their construct-start *is* `t` (construct ≈ 0). `t −
         /// t_construct_start` is the **construct** span (the producer
-        /// building the blob), the producer-side leg ahead of `queued`.
+        /// building the burst), the producer-side leg ahead of `queued`.
         t_construct_start: Nanos,
         /// iamacoffeepot/aether#1150: for buffered sends this is the
         /// frame's **flush-begin** instant (stamped once when the handler's
@@ -86,17 +86,17 @@ pub enum TraceEvent {
         t: Nanos,
         /// iamacoffeepot/aether#1134, re-anchored by
         /// iamacoffeepot/aether#1150: the instant the consumer side first
-        /// took responsibility for this mail. On the #1135 in-place blob
-        /// path it is the **blob-pickup** stamp — when the draining worker
-        /// entered `run_cycle` for the blob this mail rode in (shared by
+        /// took responsibility for this mail. On the #1135 in-place burst
+        /// path it is the **burst-pickup** stamp — when the draining worker
+        /// entered `run_cycle` for the burst this mail rode in (shared by
         /// every mail that worker dispatches that cycle). On the
         /// `route_mail` Inbox path it remains the **deposit** instant. With
         /// `t_sent` now anchored at flush-begin (also #1150), the hop
         /// decomposes cleanly: **queued** (`t_enqueue − t_sent`:
-        /// flush-begin → the worker picks up the blob / the deposit lands
+        /// flush-begin → the worker picks up the burst / the deposit lands
         /// = wakeup + scheduling) and **drain** (`t − t_enqueue`: pickup →
-        /// this mail's handler entry = where in the blob's drain it
-        /// landed, the in-blob serialization a serial fan-out pays). Riding
+        /// this mail's handler entry = where in the burst's drain it
+        /// landed, the in-burst serialization a serial fan-out pays). Riding
         /// the existing `Received` event avoids a per-mail ring entry and a
         /// second clock read on the recipient side. Pre-#1150 the in-place
         /// path stamped this at pop time (≈ `t`), collapsing `drain` to ~0
@@ -106,7 +106,7 @@ pub enum TraceEvent {
         /// deposit — this worker's own-deque len plus the shared injector
         /// len (`worker_deque::pending_depth`). Splits residence into
         /// *wakeup* (depth 0 → the deposit had to wake/schedule a worker)
-        /// vs *wait-behind-N* (depth N → N runnable slots/blobs already
+        /// vs *wait-behind-N* (depth N → N runnable slots/bursts already
         /// ahead = offered load). `0` when the deposit ran off any pool
         /// worker (chassis-root injects: `Tick`, MCP sends, test injects).
         enqueue_depth: u32,
@@ -179,16 +179,16 @@ pub struct MailNodeWire {
     pub recipient: MailboxId,
     pub kind: KindId,
     /// iamacoffeepot/aether#1158: the instant the producer's outbound
-    /// blob opened (the first buffered send of the flush window), seeded
+    /// burst opened (the first buffered send of the flush window), seeded
     /// from the `Sent` event's `t_construct_start`. Always present (the
     /// `Sent` event always carries it). `t_sent − t_construct_start` is
-    /// the **construct** span (the producer building the blob); on eager
+    /// the **construct** span (the producer building the burst); on eager
     /// paths it equals `t_sent`, so construct ≈ 0.
     pub t_construct_start: Nanos,
     pub t_sent: Nanos,
     /// iamacoffeepot/aether#1134, re-anchored by
     /// iamacoffeepot/aether#1150 (the `Received` event's `t_enqueue`):
-    /// when the consumer side first took the mail — the blob-pickup
+    /// when the consumer side first took the mail — the burst-pickup
     /// instant on the in-place path, or the inbox deposit on the
     /// `route_mail` path. `None` until the `Received` event lands.
     /// `t_enqueue − t_sent` is the **queued** span (flush-begin →

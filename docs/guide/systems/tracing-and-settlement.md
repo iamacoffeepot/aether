@@ -187,12 +187,12 @@ hop in a cascade without instrumenting anything. Here is where each one is taken
 for a single mail:
 
 ```text
-●  t_construct_start    the sender's outbound blob opens (its first buffered send)
+●  t_construct_start    the sender's outbound burst opens (its first buffered send)
 │     construct         the rest of the sending handler runs, buffering more sends
-●  t_sent               flush — at the handler boundary the blob is routed
-│     queued            wakeup + scheduling: waiting for a worker to take the blob
-●  t_enqueue            a worker picks up the blob (enters its run cycle)
-│     drain             earlier mail in the blob is dispatched ahead of this one
+●  t_sent               flush — at the handler boundary the burst is routed
+│     queued            wakeup + scheduling: waiting for a worker to take the burst
+●  t_enqueue            a worker picks up the burst (enters its run cycle)
+│     drain             earlier mail in the burst is dispatched ahead of this one
 ●  t_received           this mail's handler is entered
 │     handler           the handler runs
 ●  t_finished           the handler returns
@@ -202,7 +202,7 @@ The two spans you reach for most are **queue latency** — how long the mail wai
 before a handler ran it — and **handler duration** (`t_finished − t_received`).
 The finer **queued** / **drain** split says *why* a hop waited: scheduling
 pressure (no worker free yet) versus a long serial fan-out dispatched ahead of it
-in the same blob — [The scheduler](scheduler.md) maps each span back to the
+in the same burst — [The scheduler](scheduler.md) maps each span back to the
 dispatch machinery.
 A node still missing `t_finished` is mail that hasn't finished handling yet.
 
@@ -243,7 +243,7 @@ not the in-flight work the ring is actively protecting. A tree self-reports wher
 it was truncated, but old or high-volume chains can come back incomplete or not at
 all. The starting size and the growth ceiling are tunable
 (`AETHER_ACTOR_TRACE_RING_SIZE` and `AETHER_ACTOR_TRACE_RING_MAX_SIZE`) if you
-routinely lose chains to bursts; even so, read a trace promptly after the work
+routinely lose chains to traffic spikes; even so, read a trace promptly after the work
 rather than counting on reconstructing something from minutes ago.
 
 ## How an agent uses it

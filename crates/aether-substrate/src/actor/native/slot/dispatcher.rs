@@ -37,7 +37,7 @@
 //! ## In-place demux seed (iamacoffeepot/aether#1135)
 //!
 //! [`Drainable::seize_and_run`] is the demux-direct counterpart to
-//! [`Drainable::run_cycle`]: a [`crate::actor::native::blob::work::BlobWork`]
+//! [`Drainable::run_cycle`]: a [`crate::actor::native::burst::work::BurstWork`]
 //! that has **seized** this slot (`Idle → Running`) hands it one
 //! envelope to dispatch in place — skipping the inbox deposit +
 //! `try_recv` repop the deposit-then-wake path paid. Both methods share
@@ -99,7 +99,7 @@ use crate::mail::mailer::Mailer;
 use crate::mail::{MailboxId, Source};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::scheduler::{
-    BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, burst_note_mail, time_budget,
+    BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, cascade_note_mail, time_budget,
 };
 
 /// Worker-pool-side wrapper for a native actor. One instance per
@@ -315,8 +315,8 @@ where
         // iamacoffeepot/aether#1135: the demux-direct seed runs first,
         // in place — no inbox deposit, no `try_recv` repop. The seed's
         // `Received` carries `enqueue_depth = 0` and (iamacoffeepot/aether#1150)
-        // `t_enqueue` = the blob-pickup stamp the `BlobWork` demuxer took at
-        // `run_cycle` entry, so `t_received − t_enqueue` is the real in-blob
+        // `t_enqueue` = the burst-pickup stamp the `BurstWork` demuxer took at
+        // `run_cycle` entry, so `t_received − t_enqueue` is the real in-burst
         // drain (pre-#1150 the pop-time stamp made it ≈ 0).
         if let Some(seed) = seed {
             self.dispatch_one(actor, seed);
@@ -533,13 +533,13 @@ where
     A: NativeActor,
 {
     // iamacoffeepot/aether#1160: note this envelope against the worker's
-    // local-drain burst *before* running the handler, so a blob this
+    // local-drain cascade *before* running the handler, so a burst this
     // handler produces (scheduled at `ctx` drop below) is measured against
-    // a burst start that already covers this handler. With the time valve
-    // on, the burst's first mail anchors the start (one clock read per
-    // burst); with it off, this is a no-op. A pumped slot never runs the
+    // a cascade start that already covers this handler. With the time valve
+    // on, the cascade's first mail anchors the start (one clock read per
+    // cascade); with it off, this is a no-op. A pumped slot never runs the
     // time budget, so this is always a no-op there.
-    burst_note_mail(time_budget());
+    cascade_note_mail(time_budget());
     // #1757: the single dispatched envelope moves into `ctx.inbound` below,
     // so read its `Copy` trace/settlement fields out first — the `Received`
     // / `Finished` / cost brackets and the settlement tail run off these

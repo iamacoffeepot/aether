@@ -26,7 +26,7 @@
 //! - `AETHER_PERF_DRIVE` — `latency` (per-hop spans; default) or
 //!   `saturate` (completed mails/sec under a backlog flood,
 //!   iamacoffeepot/aether#1202).
-//! - `AETHER_PERF_BACKLOG` — per-tick `Ping` burst in `saturate` mode
+//! - `AETHER_PERF_BACKLOG` — per-tick `Ping` count in `saturate` mode
 //!   (default `512`, clamped to the trace ring capacity).
 //! - `AETHER_LATENCY_PACE_HZ` — `latency` mode only: pace one frame per
 //!   period (else flat-out).

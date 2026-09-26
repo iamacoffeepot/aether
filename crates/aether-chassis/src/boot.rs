@@ -301,14 +301,14 @@ pub struct SchedulerTuningConfig {
     ///
     /// The minimum fresh-group count for a flush to broadcast-recruit
     /// siblings (default `9`; `0` coerces to it).
-    #[config(env = "AETHER_BLOB_RECRUIT_MIN", default = 9, nonzero)]
-    pub blob_recruit_min: usize,
+    #[config(env = "AETHER_BURST_RECRUIT_MIN", default = 9, nonzero)]
+    pub burst_recruit_min: usize,
     /// Maximum number of sibling workers a single flush recruits.
     ///
     /// The cap on sibling copies a single flush injects when recruiting
     /// (default `32`; `0` coerces to it).
-    #[config(env = "AETHER_BLOB_RECRUIT_MAX", default = 32, nonzero)]
-    pub blob_recruit_max: usize,
+    #[config(env = "AETHER_BURST_RECRUIT_MAX", default = 32, nonzero)]
+    pub burst_recruit_max: usize,
     /// Pin the recruit wake break-even cost in nanoseconds; unset auto-tunes.
     ///
     /// Pins the break-even and freezes live refinement. Unset / `< 1` →
@@ -329,8 +329,8 @@ impl Default for SchedulerTuningConfig {
             peer_steal: false,
             local_chain_backstop: 64,
             handoff_cost_nanos: None,
-            blob_recruit_min: 9,
-            blob_recruit_max: 32,
+            burst_recruit_min: 9,
+            burst_recruit_max: 32,
             wake_cost_nanos: None,
         }
     }
@@ -354,8 +354,8 @@ impl SchedulerTuningConfig {
             peer_steal: self.peer_steal,
             local_chain_backstop: self.local_chain_backstop,
             handoff_cost_nanos: self.handoff_cost_nanos.filter(|&n| n >= 1),
-            blob_recruit_min: self.blob_recruit_min,
-            blob_recruit_max: self.blob_recruit_max,
+            burst_recruit_min: self.burst_recruit_min,
+            burst_recruit_max: self.burst_recruit_max,
             wake_cost_nanos: self.wake_cost_nanos.filter(|&n| n >= 1),
         }
     }
@@ -1326,8 +1326,8 @@ mod tests {
         assert_eq!(layer.local_sticky_max, default.local_sticky_max);
         assert_eq!(layer.peer_steal, default.peer_steal);
         assert_eq!(layer.local_chain_backstop, default.local_chain_backstop);
-        assert_eq!(layer.blob_recruit_min, default.blob_recruit_min);
-        assert_eq!(layer.blob_recruit_max, default.blob_recruit_max);
+        assert_eq!(layer.burst_recruit_min, default.burst_recruit_min);
+        assert_eq!(layer.burst_recruit_max, default.burst_recruit_max);
         // The three adaptive knobs default unset (None → measured/derived).
         assert_eq!(layer.time_budget_micros, None);
         assert_eq!(layer.handoff_cost_nanos, None);

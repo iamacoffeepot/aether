@@ -49,7 +49,7 @@ pub use slot::{
     SeizeHandle, SeizeSeed, SlotState, SlotStateLabel, WakeHandle, WakeSink,
 };
 pub use spin_park::{Acquired, SpinPark};
-pub use worker_deque::{burst_note_mail, pending_depth, time_budget};
+pub use worker_deque::{cascade_note_mail, pending_depth, time_budget};
 
 use std::sync::OnceLock;
 

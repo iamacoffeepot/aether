@@ -1,17 +1,17 @@
 # The scheduler
 
-> **Governing ADR:** [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) (the blob as the unit of dispatch + the
+> **Governing ADR:** [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md) (the burst as the unit of dispatch + the
 > work-stealing pool). The *contracts* the scheduler enforces — single-threaded
 > actors, per-recipient FIFO, cooperative dispatch — are **stable**; they live on
 > [Concurrency & blocking](concurrency.md) and the
 > [invariants page](../foundations/invariants.md). The *mechanism* on this page
 > is **live and still being tuned** — knob defaults and fairness levers shift
 > under perf work — so read it as a reminder-grade map at named-module fidelity,
-> with [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) and the source as the authority when a detail is
+> with [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md) and the source as the authority when a detail is
 > load-bearing.
 
-This page draws the machinery out: how a handler's sends become a **blob**, how
-a blob reaches other workers, how the **run-token** keeps an actor
+This page draws the machinery out: how a handler's sends become a **burst**, how
+a burst reaches other workers, how the **run-token** keeps an actor
 single-threaded, which levers govern wakeup and fairness, where causal **roots**
 enter, and how to map a trace tree's timestamps back to all of it.
 [Concurrency & blocking](concurrency.md) covers what the contracts mean for code
@@ -27,51 +27,51 @@ The cast of modules, all under `crates/aether-substrate/src/`:
 | `scheduler/spin_park.rs` | `SpinPark` — the spin-then-park coordinator (route-to-spinner) |
 | `scheduler/worker_deque.rs` | the per-worker deque, the keep-local valve, the chain backstop |
 | `scheduler/calibrate.rs` | the measured cross-worker handoff cost the valves scale from |
-| `mail/ring.rs` | `MailRing` — the per-actor outbound byte ring blobs are written into |
+| `mail/ring.rs` | `MailRing` — the per-actor outbound byte ring bursts are written into |
 | `mail/mail_ref.rs` | `MailRef` — the `InRing` / `Owned` payload handle an inbox envelope carries |
 | `actor/native/binding/outbound.rs` | the outbound buffer and its `ACTOR_RING_BYTES` bound |
 | `actor/native/binding/flush.rs` | `flush_outbound` at the handler boundary |
-| `actor/native/blob/work.rs` | `BlobWork` / `BlobProducer` — the cursor-shared cooperative blob |
-| `actor/native/blob/lifecycle.rs` | the packed `Lifecycle` word (cursor / len / done / seal) |
+| `actor/native/burst/work.rs` | `BurstWork` / `BurstProducer` — the cursor-shared cooperative burst |
+| `actor/native/burst/lifecycle.rs` | the packed `Lifecycle` word (cursor / len / done / seal) |
 
-## The blob lifecycle
+## The burst lifecycle
 
-One handler execution's buffered output is the base unit of work — the **blob**
-([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)'s axiom). Everything below is the life of one blob, from
+One handler execution's buffered output is the base unit of work — the **burst**
+([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md)'s axiom). Everything below is the life of one burst, from
 the first `send` inside a handler to the ring bytes being reclaimed.
 
 **1. Sends buffer into the producer's ring.** While a handler runs, each `send`
 writes its payload bytes straight into that actor's own outbound `MailRing`
 (`mail/ring.rs`) — a fixed-size (64 KiB, `ACTOR_RING_BYTES` in
 `actor/native/binding/outbound.rs`), single-producer, multi-consumer, *reclaiming* byte
-ring. The first send of a handler invocation opens a blob in the ring
-(`open_blob`); each subsequent send appends in place (`append`) — no staging
+ring. The first send of a handler invocation opens a burst in the ring
+(`open_burst`); each subsequent send appends in place (`append`) — no staging
 buffer, no per-mail allocation. The ring **never blocks its producer**: when a
-blob doesn't fit (`RingFull`), the payload is copied out to a heap buffer
+burst doesn't fit (`RingFull`), the payload is copied out to a heap buffer
 instead (`MailRef::Owned`), so the ring is a bounded zero-copy fast path whose
 fallback costs the same memcpy an eagerly-allocated envelope would. (These rings
 are distinct from the loss-tolerant trace/log rings of ADR-0081 — a mail ring is
 no-loss, and a region stays live until every reader has released it.)
 
 **2. Flush at the handler boundary.** When the handler returns,
-`NativeBinding::flush_outbound` (`actor/native/binding/flush.rs`) seals the open blob (`MailRing::seal` publishes
+`NativeBinding::flush_outbound` (`actor/native/binding/flush.rs`) seals the open burst (`MailRing::seal` publishes
 the region's reclaim lock) and mints one `MailRef` per buffered mail —
 `InRing` for ring-resident payloads, `Owned` for the copy-out fallback. The
 whole window then routes as a single unit. This boundary is the amortization
 point: a fan-out of N recipients costs one scheduling synchronization, never N
 queue pushes and N wakeups.
 
-**3. Group by recipient.** `BlobProducer::flush` (`actor/native/blob/work.rs`)
-folds the routed mail into the actor's **single active `BlobWork`**, grouped by
-recipient. A new recipient becomes a fresh **group**, written into the blob's
+**3. Group by recipient.** `BurstProducer::flush` (`actor/native/burst/work.rs`)
+folds the routed mail into the actor's **single active `BurstWork`**, grouped by
+recipient. A new recipient becomes a fresh **group**, written into the burst's
 group array and published through the packed `Lifecycle` word; a recipient seen
 before pushes onto its existing group's buffer. That append rule is what
 preserves per-recipient FIFO *across* flushes: a producer has at most one
-unclosed group per recipient across all of its live blobs, so two workers can
+unclosed group per recipient across all of its live bursts, so two workers can
 never hold same-recipient mail concurrently.
 
 **4. Keep warm — and recruit when it's worth it.** Every flush schedules one
-drainer copy of the blob through `WakeSink::schedule`. On a pool worker that
+drainer copy of the burst through `WakeSink::schedule`. On a pool worker that
 push lands on the worker's **own deque** (the keep-local path — same worker,
 LIFO pop, no cross-thread handoff), so a chain or a cheap fan-out stays on one
 warm worker. A flush whose fresh groups carry enough measured work additionally
@@ -82,15 +82,15 @@ flush's fresh groups — one by summing them, the other by taking the largest,
 which is why a fan-out dominated by one fat group recruits nobody: a group is
 drained by a single worker, so no `K` beats that group's own serial drain. Then
 `WakeSink::recruit` pushes that many
-clones of the blob to the shared injector and unparks that many workers. When
+clones of the burst to the shared injector and unparks that many workers. When
 any contributing cost cell is untrustworthy, the decision falls back to the
-width gate (`AETHER_BLOB_RECRUIT_MIN`, default 9 — so a fan-out 8 wide or
-narrower stays local), capped by `AETHER_BLOB_RECRUIT_MAX` (default 32).
+width gate (`AETHER_BURST_RECRUIT_MIN`, default 9 — so a fan-out 8 wide or
+narrower stays local), capped by `AETHER_BURST_RECRUIT_MAX` (default 32).
 
-**5. The cursor race.** A blob is published and raced, never owned. Each worker
-that picks up a copy runs `BlobWork::run_cycle`, which loops
+**5. The cursor race.** A burst is published and raced, never owned. Each worker
+that picks up a copy runs `BurstWork::run_cycle`, which loops
 `Lifecycle::claim` — one CAS on the packed lifecycle word
-(`actor/native/blob/lifecycle.rs`: `[seal | done | len | cursor]` in a single
+(`actor/native/burst/lifecycle.rs`: `[seal | done | len | cursor]` in a single
 `AtomicU64`) — and each claim hands a whole recipient-group to exactly one
 worker. There is no placement decision and no load balancer: N recruited
 workers race the one cursor and split the groups between them, contending on a
@@ -112,10 +112,10 @@ current holder's drain (or the wake it triggers) picks it up. The inbox's own
 ordering keeps FIFO intact on that path. Non-`Pooled` recipients (inline
 handlers) and ADR-0045 ref-carrying kinds always take the deposit path.
 
-**7. Reclamation.** Each blob region in the ring starts with its
-`BlobHeader.lock` equal to its mail count; every `MailRef::InRing` holds one
+**7. Reclamation.** Each burst region in the ring starts with its
+`BurstHeader.lock` equal to its mail count; every `MailRef::InRing` holds one
 count and releases it on drop (RAII — cloning acquires another). The producer
-reclaims lazily: at the next `open_blob` it advances the ring's front cursor
+reclaims lazily: at the next `open_burst` it advances the ring's front cursor
 past any frontmost regions whose lock has reached zero; a wrap writes a skip
 filler and restarts at offset 0. The lock staying above zero for the entire
 dispatch is what makes decode-in-place sound — a handler borrowing `&[u8]` into
@@ -155,7 +155,7 @@ Four transitions carry the load:
 - **`enter_running` (`Ready → Running`)** — the worker side. The worker that
   popped the slot claims it for a drain cycle. Only the popper calls this, so
   one worker drains at a time.
-- **`seize` (`Idle → Running`)** — the demux side. A blob worker holding a free
+- **`seize` (`Idle → Running`)** — the demux side. A burst worker holding a free
   recipient's mail in hand claims the token directly and dispatches in place,
   skipping the inbox round-trip. A loss leaves the state untouched and the mail
   deposits instead — the two CAS entry points (`try_wake` vs `seize`) agree, in
@@ -189,7 +189,7 @@ spinner's scan picks the work up for free. Only the genuine idle edge (no
 spinner) pays a parked-worker unpark. The lost-wakeup race between "producer
 skips the wake" and "spinner gives up and parks" is closed by symmetric `SeqCst`
 fences plus a register-before-decrement rule on the idle list; the module doc
-in `scheduler/spin_park.rs` is the full argument. Blob recruitment bypasses the
+in `scheduler/spin_park.rs` is the full argument. Burst recruitment bypasses the
 route-to-spinner gate on purpose (`SpinPark::wake_workers`): one spinner can't
 drain N clones, so recruit unparks N siblings directly.
 
@@ -203,7 +203,7 @@ between handler turns, never a handler itself: dispatch is cooperative, and a
 running handler is uninterruptible.
 
 **The keep-local valve.** By default a worker inlines its whole local cascade —
-every blob a running handler produces goes to its own deque — until the burst
+every burst a running handler produces goes to its own deque — until the cascade
 has run longer than the **time valve**, at which point the backlog spills to the
 injector so a heavy cascade parallelizes. The valve is adaptive
 (`worker_deque::time_budget`): a small multiple (6×, clamped to 6–60µs) of the
@@ -281,11 +281,11 @@ The trace tree's per-mail timestamps
 lifecycle above, so a slow span names a mechanism:
 
 ```text
-●  t_construct_start    open_blob — the handler's first buffered send
+●  t_construct_start    open_burst — the handler's first buffered send
 │     construct         the rest of the handler runs, appending sends to the ring
-●  t_sent               flush_outbound — the handler boundary; the blob routes
-│     queued            scheduling: waiting for a worker to pick the blob up
-●  t_enqueue            a worker's BlobWork::run_cycle begins (the pickup stamp)
+●  t_sent               flush_outbound — the handler boundary; the burst routes
+│     queued            scheduling: waiting for a worker to pick the burst up
+●  t_enqueue            a worker's BurstWork::run_cycle begins (the pickup stamp)
 │     drain             groups/mail this worker dispatches ahead of this one
 ●  t_received           the recipient's handler is entered
 │     handler           the handler runs
@@ -296,20 +296,20 @@ lifecycle above, so a slow span names a mechanism:
   first send. A long construct is a long handler, never scheduling pressure.
 - **queued** (`t_sent → t_enqueue`) is the scheduler's share. Kept-local work
   reads near zero (the producing worker pops its own deque next); a spilled or
-  recruited blob pays the injector trip and possibly a parked-worker wakeup —
+  recruited burst pays the injector trip and possibly a parked-worker wakeup —
   on the order of the calibrated handoff cost, single-digit µs. A *large*
   queued span means real pressure: every worker busy, or work waiting behind a
   backlog (the per-envelope `enqueue_depth` in the rings records the depth
   observed at deposit).
-- **drain** (`t_enqueue → t_received`) is in-blob serialization: groups the
+- **drain** (`t_enqueue → t_received`) is in-burst serialization: groups the
   same worker claimed ahead of this one, plus earlier mail in this mail's own
   recipient-group. A long drain on a wide fan-out means it under-parallelized —
   check whether recruitment fell back to the width gate (untrusted cost cells)
-  or the fan-out sat below `AETHER_BLOB_RECRUIT_MIN`. A single fat group is the
+  or the fan-out sat below `AETHER_BURST_RECRUIT_MIN`. A single fat group is the
   longest pole: groups never split across workers, so no recruitment shortens
   one recipient's serial share.
 - Each recruited sibling stamps its own `t_enqueue` at its own `run_cycle`
-  entry, so one blob's mails can carry different pickup instants — that spread
+  entry, so one burst's mails can carry different pickup instants — that spread
   *is* the cooperative drain, made visible.
 
 Over MCP the tree surfaces `t_construct_start` / `t_sent` / `t_received` /
@@ -324,5 +324,5 @@ Over MCP the tree surfaces `t_construct_start` / `t_sent` / `t_received` /
   [Mail, kinds & scheduling](mail-and-kinds.md).
 - The timestamp vocabulary and settlement —
   [Tracing & settlement](tracing-and-settlement.md).
-- The design record — [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md), including the forward-notes that
+- The design record — [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-burst-unit-of-dispatch.md), including the forward-notes that
   track where implementation refined the original framing.

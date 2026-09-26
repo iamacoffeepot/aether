@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-04-21
-- **Superseded in part (2026-06-04):** the **§2 Threading model** below — one OS thread per actor (thread-per-component) — was retired. Actors are now multiplexed onto a shared work-stealing scheduler (the worker pool reintroduced by issue #635, refined into blob dispatch by ADR-0087); the single-threaded-per-actor property is preserved by the run-token, not a dedicated thread. A dedicated OS thread is now the exception, spawned only for blocking I/O. See ADR-0087 for the current dispatch model. The original decision is preserved below.
+- **Superseded in part (2026-06-04):** the **§2 Threading model** below — one OS thread per actor (thread-per-component) — was retired. Actors are now multiplexed onto a shared work-stealing scheduler (the worker pool reintroduced by issue #635, refined into burst dispatch by ADR-0087); the single-threaded-per-actor property is preserved by the run-token, not a dedicated thread. A dedicated OS thread is now the exception, spawned only for blocking I/O. See ADR-0087 for the current dispatch model. The original decision is preserved below.
 
 ## Context
 

@@ -3,7 +3,7 @@
 //!
 //! The keep-local time valve ([`super::worker_deque::time_budget`],
 //! default 12µs) is a proxy for one thing: the cost of *not* inlining a
-//! blob — handing it to a parked sibling, which pays a `thread::park` →
+//! burst — handing it to a parked sibling, which pays a `thread::park` →
 //! `unpark` → wake → first cursor-claim round trip before it runs. The
 //! 12µs default was derived from a historical ~4.3µs handoff figure
 //! (`12 ≈ 3 × 4.3`), but that number was measured once, long ago, on one
@@ -306,7 +306,7 @@ pub fn log_handoff_calibration() {
 /// `unpark`s the worker; the worker wakes, sets the pong flag and
 /// `unpark`s the waker; the waker wakes and records `t0.elapsed()`. That
 /// round trip is **two** `unpark → wake` edges — the same edge a producer
-/// pays to hand a blob to a parked sibling — so one handoff is half the
+/// pays to hand a burst to a parked sibling — so one handoff is half the
 /// round trip. The flags guard each `park` against a spurious return so
 /// the lockstep can't desync into a deadlock, and the sticky unpark token
 /// means an `unpark` that races ahead of its `park` is not lost.

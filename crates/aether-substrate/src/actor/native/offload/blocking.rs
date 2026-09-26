@@ -25,7 +25,7 @@
 //!   `DispatchId` to its held `(hold, reply_to, context)` plus a
 //!   completion output slot the worker fills. Lives behind a `&self`
 //!   interior-mutability `Mutex` on [`NativeBinding`](crate::actor::native::binding),
-//!   like `outbound` / `blob_producer`; the single logical writer is the
+//!   like `outbound` / `burst_producer`; the single logical writer is the
 //!   actor's own dispatch thread.
 //! - [`TaskCompletionWake`] — a substrate-internal framework kind the
 //!   worker pushes (carrying just the `DispatchId`) to the actor's own
@@ -238,7 +238,7 @@ struct InflightEntry {
 /// plain-actor-state rule (ADR-0038).
 ///
 /// The `Mutex` is for `&self` interior mutability + `Sync` only, like
-/// [`NativeBinding`](crate::actor::native::binding)'s `outbound` / `blob_producer`: the
+/// [`NativeBinding`](crate::actor::native::binding)'s `outbound` / `burst_producer`: the
 /// actor's own dispatch thread is the single logical writer of the
 /// `(hold, reply_to, context)` slot and the reader of the output, while
 /// the worker thread fills the output slot once. Contention is the brief

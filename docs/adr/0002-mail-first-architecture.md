@@ -2,7 +2,7 @@
 
 - **Status:** Accepted (elevated from Proposed by ADR-0003)
 - **Date:** 2026-04-13
-- **Superseded in part (2026-06-04):** the *Component granularity* decision below — the "subsystem-sized, not entity-sized" rule — was lifted by ADR-0079 (instanced actors as a first-class category) and ADR-0087 (the mail blob as the unit of dispatch). Fine-grained / per-instance actors (e.g. one actor per TCP session) are now first-class and cheap. The original text is preserved below as the decision as made; see the inline note in that section.
+- **Superseded in part (2026-06-04):** the *Component granularity* decision below — the "subsystem-sized, not entity-sized" rule — was lifted by ADR-0079 (instanced actors as a first-class category) and ADR-0087 (the mail burst as the unit of dispatch). Fine-grained / per-instance actors (e.g. one actor per TCP session) are now first-class and cheap. The original text is preserved below as the decision as made; see the inline note in that section.
 
 ## Context
 
@@ -43,7 +43,7 @@ There is no shared memory between components. Anything one component needs to kn
 > **Superseded by ADR-0079 + ADR-0087 (2026-06-04).** The prohibition on
 > fine-grained / per-entity actors below was a performance hedge from the early
 > engine. Instanced actors are now a first-class category (ADR-0079), and the
-> blob dispatcher (ADR-0087) makes large volumes of mail across many small
+> burst dispatcher (ADR-0087) makes large volumes of mail across many small
 > actors cheap — so an actor per TCP session, per monster, or per document is an
 > expected pattern, not an anti-pattern. (They're cheap because actors are
 > multiplexed onto the shared work-stealing scheduler, ADR-0087 — not one OS

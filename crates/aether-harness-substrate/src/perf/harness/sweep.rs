@@ -14,10 +14,10 @@ use super::{CellResult, CellSamples, Topology, effective_trace_ring_cap, run_cel
 ///   frame-loop latency), `None` runs flat-out (warm — isolates per-hop
 ///   dispatch cost). This is the harness's historical behaviour,
 ///   verbatim.
-/// - `Saturate` emits a burst of `backlog` `Ping`s on each tick and
+/// - `Saturate` emits `backlog` `Ping`s on each tick and
 ///   measures completed mails/sec. `SubstrateHarness::advance` drains the queue
 ///   to quiescence every frame (`harness.rs:630`), so one Ping per tick can
-///   never build a backlog — the burst is what creates the deep ready
+///   never build a backlog — the per-tick `Ping` count is what creates the deep ready
 ///   queue the throughput metric is meant to capture. Per-hop latency
 ///   under saturation is contended and high-variance, so a saturate cell
 ///   reports throughput only, not the latency spans.
@@ -57,7 +57,7 @@ pub struct SweepConfig {
 pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
     // Issue 1990: the effective trace-ring cap (env knob or const
     // default) governs both the sweep's `SubstrateHarness` rings and the
-    // per-cell burst clamp below — resolved once so they can't drift.
+    // per-cell backlog clamp below — resolved once so they can't drift.
     let trace_ring_cap = effective_trace_ring_cap();
     let mut rows: Vec<CellSamples> = Vec::new();
 
@@ -163,7 +163,7 @@ mod tests {
             eprintln!("skipping: no wgpu adapter");
             return;
         };
-        // One frame bursts `backlog` roots; `advance(1)` drains them all.
+        // One frame emits `backlog` roots; `advance(1)` drains them all.
         // Every relay hop completes (`t_received` + `t_finished`), so the
         // handler-sample count is the completed-`Ping` count.
         assert_eq!(
@@ -185,7 +185,7 @@ mod tests {
         // `fanout-8`'s throughput cell entirely. `fanout(8)` is `Tier::Light`
         // (the default tier), so the `Saturate` arm survives `drive_for_tier`
         // and this is the exact reproduction at the default depth. The
-        // per-cell burst clamp (`4096 / 10 = 409`) must keep the cell
+        // per-cell backlog clamp (`4096 / 10 = 409`) must keep the cell
         // measurable: a finite, positive, non-truncated rate.
         let Some(cell) = saturate_cell(2, fanout(8), DEFAULT_SATURATE_BACKLOG) else {
             eprintln!("skipping: no wgpu adapter");
@@ -235,7 +235,7 @@ mod tests {
         // Regression guard (iamacoffeepot/aether#1202): `saturate_cell` above
         // hardcodes `frames: 1`, but the `perf-trial` bin builds the sweep
         // with AETHER_PERF_FRAMES (default 200). Saturate must advance
-        // exactly once regardless — re-bursting `backlog` roots every frame
+        // exactly once regardless — re-emitting `backlog` roots every frame
         // would multiply the offered load by `frames`, lap the 4096-entry
         // trace rings, and trip the truncation gate so the cell reports no
         // rate. That was the original bug: the trial emitted a throughput
@@ -272,7 +272,7 @@ mod tests {
 
     // The former `over_capacity_backlog_flags_truncation_not_a_wrong_rate`
     // lived here and fed an over-capacity backlog straight to the sweep to
-    // force a lap. The per-cell burst clamp (iamacoffeepot/aether#1226) now
+    // force a lap. The per-cell backlog clamp (iamacoffeepot/aether#1226) now
     // bounds every `Saturate` cell to `ring_cap / (2 + max_out_degree)`, so
     // the sweep path can no longer lap a ring — its premise is unreachable.
     // The truncation contract (a `None`-rate cell is surfaced flagged, not
@@ -330,7 +330,7 @@ mod tests {
         };
         let keepup = cell.keepup.expect("a real cell harvests keep-up counters");
         assert_eq!(keepup.offered, keepup.completed, "a drained run handles every offered mail (offered == completed)");
-        // `real_cell` advances 4 frames at burst 1 → 4 roots.
+        // `real_cell` advances 4 frames at 1 `Ping` per tick → 4 roots.
         assert_eq!(keepup.offered, 4 * hops as u64, "offered = frames × hops-per-root");
         assert!(keepup.expected_nanos > 0, "a paced cell carries a positive 60 Hz budget");
     }

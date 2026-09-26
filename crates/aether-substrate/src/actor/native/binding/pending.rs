@@ -49,7 +49,7 @@ pub(super) struct PendingMail {
 /// inline handler (ADR-0165). Recorded beside the window rather than on every
 /// [`PendingMail`] because the origin of an ordinary native send is always the
 /// binding's own mailbox: the native window keeps the exact `Vec<Mail>` shape
-/// [`BlobProducer::flush`](super::blob::work::BlobProducer::flush) consumes, and
+/// [`BurstProducer::flush`](super::burst::work::BurstProducer::flush) consumes, and
 /// no flush pays a per-mail route tag for a case only a wasm trampoline reaches
 /// (iamacoffeepot/aether#4178).
 #[derive(Clone, Copy)]

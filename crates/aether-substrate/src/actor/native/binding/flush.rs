@@ -1,5 +1,5 @@
-//! Sealing the outbound window and routing it (ADR-0087): one ring blob, one
-//! mail reference per buffered mail, then the cursor-shared blob producer or
+//! Sealing the outbound window and routing it (ADR-0087): one ring burst, one
+//! mail reference per buffered mail, then the cursor-shared burst producer or
 //! the per-mail fallback.
 
 use std::sync::Arc;
@@ -17,13 +17,13 @@ use crate::actor::wasm::component::ComponentCtx;
 use crate::mail::MailId;
 
 impl NativeBinding {
-    /// ADR-0087 / 2c: seal the open ring blob and route the buffered
+    /// ADR-0087 / 2c: seal the open ring burst and route the buffered
     /// mail. Called at handler end (via [`super::ctx::NativeCtx`](crate::actor::native::ctx::NativeCtx)'s
     /// `Drop`). A no-op when nothing is buffered.
     ///
     /// The payloads are already in the ring (written by
     /// `push_envelope_buffered` as each send happened) or copied out to
-    /// `Owned`; this just [`seal`](crate::mail::ring::MailRing::seal)s the blob — publishing
+    /// `Owned`; this just [`seal`](crate::mail::ring::MailRing::seal)s the burst — publishing
     /// each in-ring mail's lock — and mints one [`MailRef`] per pending
     /// entry: [`MailRef::InRing`] for ring-resident payloads (the
     /// recipient reads them in place), [`MailRef::Owned`] for the
@@ -40,7 +40,7 @@ impl NativeBinding {
     ///
     /// ADR-0087 Phase 3b: when a pool [`WakeSink`](crate::scheduler::WakeSink)
     /// is wired (every production binding — derived from the chassis
-    /// `Spawner`), the whole blob is pushed as **one** `BlobWork` work
+    /// `Spawner`), the whole burst is pushed as **one** `BurstWork` work
     /// item rather than routed per mail, so a fan-out of N costs one
     /// deque push + an inline demux instead of N pushes + up to N
     /// parked-worker wakeups.
@@ -54,9 +54,9 @@ impl NativeBinding {
         self.flush_outbound_inner();
     }
 
-    /// Seal the open blob, mint a [`MailRef`] per buffered mail, and
-    /// route. Folds the blob into this actor's cursor-shared
-    /// [`BlobWork`](crate::actor::native::blob::work::BlobWork) when a pool [`Spawner`](crate::Spawner) is wired,
+    /// Seal the open burst, mint a [`MailRef`] per buffered mail, and
+    /// route. Folds the burst into this actor's cursor-shared
+    /// [`BurstWork`](crate::actor::native::burst::work::BurstWork) when a pool [`Spawner`](crate::Spawner) is wired,
     /// else routes per mail (test bindings without a spawner); a no-op
     /// when nothing is buffered.
     ///
@@ -72,7 +72,7 @@ impl NativeBinding {
     pub(super) fn flush_outbound_inner(&self) {
         let flush_begin;
         // iamacoffeepot/aether#1158: the construct-start anchor stamped
-        // when this outbound window opened (a native blob send or a retained
+        // when this outbound window opened (a native burst send or a retained
         // component send). Read it here and reset for the next window; fall
         // back to `flush_begin` (construct ≈ 0) on the impossible `None` so
         // the field is never a wire hole.
@@ -87,13 +87,13 @@ impl NativeBinding {
             if buf.activation_held {
                 return;
             }
-            // Seal the open blob first (publishes the in-ring locks), so a
+            // Seal the open burst first (publishes the in-ring locks), so a
             // `MailRef::InRing` minted below reads a finalized header.
-            if buf.blob_open {
+            if buf.burst_open {
                 if let Some(ring) = buf.ring.as_ref() {
                     ring.seal();
                 }
-                buf.blob_open = false;
+                buf.burst_open = false;
             }
             if buf.mails.is_empty() && buf.births.is_empty() && buf.owner_batches.is_empty() {
                 // Reset the stale anchor so the next window re-stamps.
@@ -101,7 +101,7 @@ impl NativeBinding {
                 return;
             }
             flush_begin = self.mailer.now_nanos();
-            // Take the anchor and reset so the next blob re-stamps.
+            // Take the anchor and reset so the next burst re-stamps.
             construct_start = buf.construct_start.take().unwrap_or(flush_begin);
             let OutboundBuffer { ring, mails, .. } = &mut *buf;
             let ring = ring.as_ref();
@@ -169,23 +169,23 @@ impl NativeBinding {
     }
 
     /// ADR-0087 / iamacoffeepot/aether#1137: fold native mail into this
-    /// actor's single active cursor-shared blob. A staged component mail keeps
+    /// actor's single active cursor-shared burst. A staged component mail keeps
     /// the direct component route that supplies its canonical origin; the
     /// activation-only mixed window routes sequentially so send order remains
     /// explicit.
     fn route_pending_mails(&self, routed: Vec<Mail>, component_origins: &[ComponentOrigin]) {
-        // Fold the blob into this
-        // actor's single active cursor-shared blob (recipient-grouped,
+        // Fold the burst into this
+        // actor's single active cursor-shared burst (recipient-grouped,
         // cooperatively drained, broadcast-recruited for wide fan-outs)
         // when a pool sink is wired. Otherwise route per mail (a test
         // binding with no `Spawner`, or the activation window that admitted
         // guest-authored mail). The window arrives as the `Vec<Mail>` the
         // producer consumes, so the steady-state path hands it straight on.
         if self.spawner.is_some() && component_origins.is_empty() {
-            let mut guard = self.blob_producer.lock().expect("blob_producer poisoned; fail-fast per ADR-0063");
+            let mut guard = self.burst_producer.lock().expect("burst_producer poisoned; fail-fast per ADR-0063");
             let producer = guard.get_or_insert_with(|| {
                 let sink = self.spawner.as_ref().expect("spawner present in this branch").wake_sink().clone();
-                super::blob::work::BlobProducer::new(Arc::clone(&self.mailer), sink)
+                super::burst::work::BurstProducer::new(Arc::clone(&self.mailer), sink)
             });
             producer.flush(routed);
         } else {
@@ -241,7 +241,7 @@ mod tests {
     use std::time::Duration;
 
     /// 2b: the buffered send path holds mail until flush, then forms one
-    /// blob and routes each mail to its recipient with bytes + kind
+    /// burst and routes each mail to its recipient with bytes + kind
     /// intact. Nothing reaches the sink before `flush_outbound`.
     #[test]
     fn buffered_sends_route_only_after_flush() {
@@ -352,9 +352,9 @@ mod tests {
         transport.flush_outbound();
     }
 
-    /// 2b load-bearing race: the producer flushes tagged blobs into its
+    /// 2b load-bearing race: the producer flushes tagged bursts into its
     /// ring while consumer threads read each `InRing` payload in place
-    /// and drop the envelope (RAII-releasing the blob lock). A reused
+    /// and drop the envelope (RAII-releasing the burst lock). A reused
     /// region — the producer overwriting bytes a consumer is mid-read on
     /// — would surface as a tag mismatch. This lifts the 2a ring stress
     /// test onto the full 2b path: buffer → flush → route → mpsc →
@@ -393,7 +393,7 @@ mod tests {
                                     bytes.iter().all(|&b| b == tag),
                                     "decode-in-place saw a reused region: expected tag {tag}"
                                 );
-                                drop(env); // RAII release of the blob lock
+                                drop(env); // RAII release of the burst lock
                                 consumed.fetch_add(1, Ordering::AcqRel);
                             }
                             // Empty for the timeout: exit only once the

@@ -15,7 +15,7 @@ use crate::mail::{MailId, Source, SourceAddr};
 use crate::store::BlobEntry;
 
 /// Per-actor outbound ring capacity (ADR-0087). Sized to hold a typical
-/// handler's small-mail fan-out as one blob; a mail that doesn't fit (a
+/// handler's small-mail fan-out as one burst; a mail that doesn't fit (a
 /// large payload, or a very wide fan-out that fills the ring) degrades to
 /// the [`MailRef::Owned`](crate::mail::MailRef::Owned) copy-out valve in
 /// [`NativeBinding::flush_outbound`] / `push_envelope_buffered` rather
@@ -23,11 +23,11 @@ use crate::store::BlobEntry;
 /// on iamacoffeepot/aether#1101.
 pub(super) const ACTOR_RING_BYTES: usize = 64 * 1024;
 
-/// Per-actor send-side buffer that builds blobs **in place** (2c,
+/// Per-actor send-side buffer that builds bursts **in place** (2c,
 /// iamacoffeepot/aether#1110). `push_envelope_buffered` writes each send
-/// straight into the ring as it happens — the blob is opened lazily on
+/// straight into the ring as it happens — the burst is opened lazily on
 /// the first send of a flush window — and records only route metadata
-/// here. `flush_outbound` seals the blob and routes. There is no payload
+/// here. `flush_outbound` seals the burst and routes. There is no payload
 /// staging buffer: the bytes land in the ring exactly once (the only
 /// copy is out of the caller's slice, which is unavoidable since it is
 /// not stable past the call).
@@ -44,9 +44,9 @@ pub(super) struct OutboundBuffer {
     /// Lazily created on the first buffered send. `Arc` so each minted
     /// [`MailRef::InRing`](crate::mail::MailRef::InRing) carries the ring's lifetime by refcount.
     pub(super) ring: Option<Arc<MailRing>>,
-    /// Whether a ring blob is currently open — between the first send of
+    /// Whether a ring burst is currently open — between the first send of
     /// a flush window and the flush's `seal`.
-    pub(super) blob_open: bool,
+    pub(super) burst_open: bool,
     /// iamacoffeepot/aether#1158: the instant this outbound window
     /// **opened** — stamped by its first buffered native or component send,
     /// shared by every mail in the window. The
@@ -75,7 +75,7 @@ impl OutboundBuffer {
         Self {
             activation_held: false,
             ring: None,
-            blob_open: false,
+            burst_open: false,
             construct_start: None,
             mails: Vec::new(),
             component_origins: Vec::new(),
@@ -108,7 +108,7 @@ impl NativeBinding {
     /// Rather than allocating an
     /// owned `Vec` and routing immediately, it copies the bytes into the
     /// reused per-actor scratch arena and records the route
-    /// metadata; [`Self::flush_outbound`] forms the blob and routes at
+    /// metadata; [`Self::flush_outbound`] forms the burst and routes at
     /// handler end.
     ///
     /// The settlement-counter increment stays **eager** (fired here, at
@@ -168,22 +168,22 @@ impl NativeBinding {
         // deferred `Sent` is built from the routed `Mail`.
         self.mailer.record_sent_inflight(root);
         let mut buf = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
-        // Write the payload into the ring in place. Open the blob lazily
+        // Write the payload into the ring in place. Open the burst lazily
         // on the first send of this flush window; on `RingFull` (full ring
         // or oversized payload) copy out to `Owned` — the never-block
-        // valve. The open blob is left intact on `RingFull`, so a later
+        // valve. The open burst is left intact on `RingFull`, so a later
         // send (after a consumer frees space) can still extend it.
         let payload = {
-            let OutboundBuffer { ring, blob_open, construct_start, .. } = &mut *buf;
+            let OutboundBuffer { ring, burst_open, construct_start, .. } = &mut *buf;
             let ring = ring.get_or_insert_with(|| Arc::new(MailRing::with_capacity(ACTOR_RING_BYTES)));
-            if !*blob_open {
-                ring.open_blob();
-                *blob_open = true;
-                // iamacoffeepot/aether#1158: the blob just opened — stamp
+            if !*burst_open {
+                ring.open_burst();
+                *burst_open = true;
+                // iamacoffeepot/aether#1158: the burst just opened — stamp
                 // the construct-start instant shared by every mail in this
                 // flush window. `t_sent − t_construct_start` (flush-begin −
                 // this) is the **construct** span (the producer building
-                // the blob).
+                // the burst).
                 if construct_start.is_none() {
                     *construct_start = Some(self.mailer.now_nanos());
                 }

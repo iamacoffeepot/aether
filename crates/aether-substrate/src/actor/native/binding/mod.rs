@@ -45,7 +45,7 @@ use super::spawn::reservation::{ChildReservationTable, LiveChildReservation};
 
 // The modules below reach `actor::native`'s own items through `super::` paths,
 // which resolve against this module — so bind them here.
-pub(super) use super::{blob, offload};
+pub(super) use super::{burst, offload};
 
 mod activation;
 mod dispatch;
@@ -128,10 +128,10 @@ pub struct NativeBinding {
     /// drain → close → exit path without setting the flag.
     shutdown_flag: Arc<AtomicBool>,
     /// ADR-0087 / 2b (iamacoffeepot/aether#1105): per-actor send-side
-    /// blob buffer. The per-handler [`super::ctx::NativeCtx`] send
+    /// burst buffer. The per-handler [`super::ctx::NativeCtx`] send
     /// path buffers into this (via [`Self::push_envelope_buffered`]); the handler-end
     /// flush ([`Self::flush_outbound`], driven by `NativeCtx`'s `Drop`)
-    /// forms one ring blob and routes a
+    /// forms one ring burst and routes a
     /// [`MailRef::InRing`](crate::mail::MailRef::InRing) per mail.
     ///
     /// `Mutex` only for the `&self` interior-mutability + `Sync`
@@ -149,12 +149,12 @@ pub struct NativeBinding {
     /// mutex, before guest code can run or the actor can become wakeable.
     activation_held: AtomicBool,
     /// iamacoffeepot/aether#1137: this actor's single active cursor-shared
-    /// blob + its recruitment. Built lazily on the first deferred flush
+    /// burst + its recruitment. Built lazily on the first deferred flush
     /// from the spawner's [`WakeSink`](crate::scheduler::WakeSink), so a
     /// test binding with no `Spawner` never builds one and stays on the
     /// eager per-mail route. `Mutex` only for `&self` interior mutability —
     /// driven solely from this actor's dispatch thread, so uncontended.
-    blob_producer: Mutex<Option<blob::work::BlobProducer>>,
+    burst_producer: Mutex<Option<burst::work::BurstProducer>>,
     /// ADR-0093: the hold-until-resolve in-flight ledger. Maps a
     /// [`DispatchId`](super::offload::blocking::DispatchId) minted by
     /// [`super::ctx::NativeCtx::dispatch_blocking`] to its held
@@ -163,7 +163,7 @@ pub struct NativeBinding {
     /// removes it when the completion-wake lands; the worker thread fills
     /// the output slot once. `Mutex` only for `&self` interior
     /// mutability — the same single-logical-writer discipline as
-    /// `outbound` / `blob_producer`.
+    /// `outbound` / `burst_producer`.
     inflight: offload::blocking::InflightLedger,
     /// ADR-0165: parent-local uniqueness reservations for staged and live
     /// children. This table is actor-local bookkeeping only; reserving or
