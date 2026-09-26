@@ -1,4 +1,4 @@
-# ADR-0239: Hex Byte Strings in the Schema Vocabulary
+# ADR-0239: Fixed Byte Strings in the Schema Vocabulary
 
 - **Status:** Proposed
 - **Date:** 2026-09-26
@@ -36,25 +36,27 @@ whose job is a non-default JSON form over an unchanged wire.
 
 ## Decision
 
-1. **One new arm, `SchemaType::HexBytes { len: u32 }`.** On the wire it is
-   exactly `len` raw bytes, the same as `[u8; len]`. In JSON it is a
-   lowercase hex string of exactly `2 * len` characters. The arm is appended
-   after `Blob`, so its `SchemaType` wire discriminant is 13 and every
-   existing stored `SchemaType` still decodes. It can only describe
+1. **One new arm, `SchemaType::FixedBytes { len: u32 }`:** an opaque byte
+   string of fixed length, such as a digest, a hash, or a key, as opposed to
+   `[u8; N]`, which stays an array of small numbers (an RGB triple). On the
+   wire it is exactly `len` raw bytes, the same as `[u8; len]`. In JSON it is
+   a lowercase hex string of exactly `2 * len` characters. The arm is
+   appended after `Blob`, so its `SchemaType` wire discriminant is 13 and
+   every existing stored `SchemaType` still decodes. It can only describe
    fixed-length bytes, so no hex marker can land on a non-byte array.
 
 2. **The arm is nominal: it hashes as `[u8; len]`.** The canonical
    serializer, `schema_to_shape`, and the ADR-0059 field-hash fold all write
-   `HexBytes { len }` exactly as `Array { element: Scalar(U8), len }`.
+   `FixedBytes { len }` exactly as `Array { element: Scalar(U8), len }`.
    `SchemaShape` gains no arm. This amends ADR-0032: `SchemaShape` is no
-   longer `SchemaType`'s arm-for-arm twin, and `HexBytes` is the first arm
+   longer `SchemaType`'s arm-for-arm twin, and `FixedBytes` is the first arm
    that exists only in `SchemaType`. `KindId`s and storage field hashes do
    not move, and tripwire tests pin both against `[u8; 32]`.
 
 3. **Wasm components carry it in the labels sidecar.** `LabelNode` gains an
-   appended `HexBytes` arm. The substrate's sidecar merge
+   appended `FixedBytes` arm. The substrate's sidecar merge
    (`kind_manifest::merge_schema`) turns `SchemaShape::Array { Scalar(U8),
-   len }` with `LabelNode::HexBytes` into `SchemaType::HexBytes { len }`;
+   len }` with `LabelNode::FixedBytes` into `SchemaType::FixedBytes { len }`;
    the label on any other shape falls back to the plain merge, since the
    shape side wins.
 
@@ -66,7 +68,7 @@ whose job is a non-default JSON form over an unchanged wire.
    `ImageRef`.
 
 5. **`Digest` and `Ref<K>` adopt it.** Their `SCHEMA` becomes
-   `HexBytes { len: 32 }` and their `LABEL_NODE` becomes `LabelNode::HexBytes`.
+   `FixedBytes { len: 32 }` and their `LABEL_NODE` becomes `LabelNode::FixedBytes`.
    Their wire and storage impls still delegate to `[u8; 32]`. Every kind that
    embeds them follows through its `Schema` delegation.
 
@@ -80,12 +82,12 @@ whose job is a non-default JSON form over an unchanged wire.
   Neither is hashed.
 - The number-array JSON form of a digest stops being accepted. Anything that
   wrote digests as arrays (scratch operator helpers) must switch to hex.
-- `compare_component_contracts` reports `[u8; 32]` → `HexBytes { len: 32 }`
+- `compare_component_contracts` reports `[u8; 32]` → `FixedBytes { len: 32 }`
   as an input-schema change although the wire is identical. That is correct:
   the JSON contract changed.
 - Every exhaustive match on `SchemaType` and `LabelNode` gains an arm, so the
   vocabulary, codec, substrate merge, and adopters change in one PR.
-- `describe_kinds` renders the arm as `Hex<len>` in its compact shape.
+- `describe_kinds` renders the arm as `FixedBytes<len>` in its compact shape.
 - Deferred: `AssetInfo.sha256: [u8; 32]` in `aether-kinds` can adopt the arm
   later. Maps keyed by hex bytes stay unsupported until a kind needs one.
 
