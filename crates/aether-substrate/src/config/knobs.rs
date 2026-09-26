@@ -121,7 +121,7 @@ pub struct SchedulerTuning {
     /// `256`).
     pub local_sticky_max: usize,
     /// Keep-local time valve (microseconds): `Some` pins/disables the
-    /// burst spill valve (`0` disables it), `None` derives it from the
+    /// cascade spill valve (`0` disables it), `None` derives it from the
     /// measured handoff cost (chassis-boot key `AETHER_LOCAL_TIME_BUDGET_US`; default
     /// `None`).
     pub time_budget_micros: Option<u64>,

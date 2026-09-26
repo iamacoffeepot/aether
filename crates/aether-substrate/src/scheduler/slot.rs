@@ -392,7 +392,7 @@ impl WakeSink {
     /// coordinator (route-to-spinner / unpark-one). The default inlines the
     /// **whole local cascade** warm ([`worker_deque::try_push_local_budgeted`],
     /// iamacoffeepot/aether#1174) — a produced blob is a descendant of the
-    /// cascade already on this worker — until the per-burst **time valve**
+    /// cascade already on this worker — until the per-cascade **time valve**
     /// (`worker_deque::time_budget`, default 12µs) trips and spills a heavy
     /// cascade to parallelise. This is the non-demux wake destination, shared
     /// by [`WakeHandle::wake`], the producer-side blob push, and an inline

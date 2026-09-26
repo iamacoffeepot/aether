@@ -99,7 +99,7 @@ use crate::mail::mailer::Mailer;
 use crate::mail::{MailboxId, Source};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::scheduler::{
-    BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, burst_note_mail, time_budget,
+    BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, cascade_note_mail, time_budget,
 };
 
 /// Worker-pool-side wrapper for a native actor. One instance per
@@ -533,13 +533,13 @@ where
     A: NativeActor,
 {
     // iamacoffeepot/aether#1160: note this envelope against the worker's
-    // local-drain burst *before* running the handler, so a blob this
+    // local-drain cascade *before* running the handler, so a blob this
     // handler produces (scheduled at `ctx` drop below) is measured against
-    // a burst start that already covers this handler. With the time valve
-    // on, the burst's first mail anchors the start (one clock read per
-    // burst); with it off, this is a no-op. A pumped slot never runs the
+    // a cascade start that already covers this handler. With the time valve
+    // on, the cascade's first mail anchors the start (one clock read per
+    // cascade); with it off, this is a no-op. A pumped slot never runs the
     // time budget, so this is always a no-op there.
-    burst_note_mail(time_budget());
+    cascade_note_mail(time_budget());
     // #1757: the single dispatched envelope moves into `ctx.inbound` below,
     // so read its `Copy` trace/settlement fields out first — the `Received`
     // / `Finished` / cost brackets and the settlement tail run off these

@@ -315,13 +315,13 @@ fn worker_loop(
 /// LIFO pop keeps the freshest hop warmest. By default the **local cascade**
 /// inlines on the own deque (`WakeSink::schedule` →
 /// `worker_deque::try_push_local_budgeted`, iamacoffeepot/aether#1174) —
-/// produced blobs are cascade descendants kept warm — until the per-burst
+/// produced blobs are cascade descendants kept warm — until the per-cascade
 /// **time valve** (`worker_deque::time_budget`, default 12µs) trips and spills
 /// a heavy cascade to parallelise. The own deque is checked first so a pushed
 /// slot is never stranded.
 ///
-/// When the own deque is empty, this resets the local-drain burst
-/// (iamacoffeepot/aether#1160) — one local cascade is one burst, so the
+/// When the own deque is empty, this resets the local-drain cascade
+/// (iamacoffeepot/aether#1160) — one local cascade gets one budget, so the
 /// next cascade (this worker's freshly-produced blobs, or work it's about
 /// to steal) starts a fresh keep-local budget — then steals into the deque
 /// from the injector (off-worker producers + spilled fan-out + requeued
@@ -389,9 +389,9 @@ fn acquire_slot(
         return Some(slot);
     }
     // Own deque drained empty — the local cascade is over. Close its
-    // keep-local burst (iamacoffeepot/aether#1160) so stolen work, or this
+    // keep-local cascade (iamacoffeepot/aether#1160) so stolen work, or this
     // worker's next cascade, starts under a fresh mail/time budget.
-    worker_deque::burst_reset();
+    worker_deque::cascade_reset();
     if let Some(slot) = worker_deque::steal_into_local(idx, stealers, injector, peer_steal) {
         return Some(slot);
     }

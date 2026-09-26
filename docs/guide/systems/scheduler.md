@@ -203,7 +203,7 @@ between handler turns, never a handler itself: dispatch is cooperative, and a
 running handler is uninterruptible.
 
 **The keep-local valve.** By default a worker inlines its whole local cascade —
-every blob a running handler produces goes to its own deque — until the burst
+every blob a running handler produces goes to its own deque — until the cascade
 has run longer than the **time valve**, at which point the backlog spills to the
 injector so a heavy cascade parallelizes. The valve is adaptive
 (`worker_deque::time_budget`): a small multiple (6×, clamped to 6–60µs) of the

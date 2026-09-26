@@ -176,7 +176,7 @@ pub fn two_level_tree() -> Topology {
 /// multi-blob workload that exercises the keep-local **time budget**
 /// (iamacoffeepot/aether#1160): the spill decision for the deepest blob
 /// fires after the interior nodes (A/B/C) have run, so with heavy interiors
-/// the burst's elapsed exceeds the time budget and the blob spills →
+/// the cascade's elapsed exceeds the time budget and the blob spills →
 /// parallelises, matching the `cap == 1` baseline. A *mail-count-only*
 /// budget keeps it local and serialises the heavy leaves — a regression the
 /// time budget exists to prevent.
@@ -198,7 +198,7 @@ pub fn two_level_tree_heavy(work_iters: u64) -> Topology {
 /// interior routers (A, B, C) trivial — a *non-uniform* "trivial router →
 /// heavy worker" cascade. This is the time budget's **blind spot**
 /// (iamacoffeepot/aether#1160): the spill decision fires *before* the heavy
-/// leaves run, so the burst's elapsed (only the trivial interiors) never
+/// leaves run, so the cascade's elapsed (only the trivial interiors) never
 /// exceeds the time budget, the deepest blob is kept local, and the heavy
 /// leaves serialise — a regression that a *past-elapsed* budget structurally
 /// cannot catch (the cost is in the blob being scheduled, i.e. the future).
