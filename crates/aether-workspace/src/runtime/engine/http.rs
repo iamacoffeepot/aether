@@ -185,6 +185,7 @@ impl<R: Read> Response<R> {
         // head. Bounded at `MAX_HEADERS` header lines before parsing ever
         // runs, so a peer cannot grow this buffer unboundedly.
         let mut head = read_line(&mut reader)?.ok_or_else(|| protocol("the connection closed before a status line"))?;
+        let status_line_bytes = head.len();
         let mut header_lines = 0usize;
         loop {
             let line = read_line(&mut reader)?.ok_or_else(|| protocol("the connection closed inside the headers"))?;
@@ -213,10 +214,10 @@ impl<R: Read> Response<R> {
 
         // httparse accepts any three digits as a status code, so the
         // documented range still gets its own check.
-        let status = response
-            .code
-            .filter(|code| (100..600).contains(code))
-            .ok_or_else(|| protocol(&format!("a malformed status line {:?}", String::from_utf8_lossy(&head))))?;
+        let status = response.code.filter(|code| (100..600).contains(code)).ok_or_else(|| {
+            let status_line = strip_terminator(&head[..status_line_bytes]);
+            protocol(&format!("a malformed status line {:?}", String::from_utf8_lossy(status_line)))
+        })?;
 
         let mut length = None;
         let mut chunked = false;
@@ -369,9 +370,7 @@ fn read_chunk_size(reader: &mut impl BufRead) -> io::Result<u64> {
     if !stripped.first().is_some_and(u8::is_ascii_hexdigit) {
         return Err(malformed(stripped));
     }
-    let mut normalized = stripped.to_vec();
-    normalized.extend_from_slice(b"\r\n");
-    match httparse::parse_chunk_size(&normalized) {
+    match httparse::parse_chunk_size(&[stripped, b"\r\n"].concat()) {
         Ok(httparse::Status::Complete((_, size))) => Ok(size),
         Ok(httparse::Status::Partial) | Err(httparse::InvalidChunkSize) => Err(malformed(stripped)),
     }
