@@ -26,7 +26,7 @@
 //! `cargo test`.
 
 use aether_component::ComponentHostCapability;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::require_runtime;
@@ -51,7 +51,7 @@ const COMPONENT_NAME: &str = "tile";
 /// the loaded component's mailbox id so a test can drop it. The bundle
 /// takes no config. Panics on load failure so the test surfaces the
 /// error message.
-fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorPath {
+fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorPath {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
     let loaded = harness
         .execute(vec![(

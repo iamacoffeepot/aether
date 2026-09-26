@@ -11,7 +11,7 @@
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_substrate::mail::registry::noop_handler;
 use aether_substrate::testing::registered_ref;
 use aether_substrate::{AddressResolutionError, Registry};
@@ -32,7 +32,7 @@ fn the_component_host_hole_expands_through_the_linked_inventory() {
     // inventory submissions link into this test binary — the linker drops
     // unreferenced statics out of an rlib, and without that reference the
     // host's facts never reach `AddressIndex`.
-    let path = |text: &str| ActorPath::new(text).expect("fixture is a well-formed actor path");
+    let path = |text: &str| ErasedActorPath::new(text).expect("fixture is a well-formed actor path");
     let short = format!("{}/:camera", ComponentHostCapability::NAMESPACE);
     let registry = Registry::new();
     registered_ref(&registry, CANONICAL, noop_handler());

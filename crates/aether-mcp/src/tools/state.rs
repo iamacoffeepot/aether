@@ -9,7 +9,7 @@ use super::{
     component_config_bytes, descriptors, engine_envelope, frame_size_aware_error, internal_msg, local_envelope,
     max_frame_size, reject_zero_replicas, selector_with_explicit_export, tagged_id, wire,
 };
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_data::canonical::kind_id_from_parts;
 use aether_kinds::{DescribeComponent, DescribeComponentResult, ListEngines, ListEnginesResult};
 use std::collections::HashMap;
@@ -120,17 +120,17 @@ impl Mcp {
         }
     }
 
-    /// Resolve one operator-supplied address to the canonical `ActorPath`
+    /// Resolve one operator-supplied address to the canonical `ErasedActorPath`
     /// the selected engine answers for it, which is what a `Call` then names.
     ///
     /// A tagged `mbx-…` id is sent to the engine's `aether.inventory.resolve`,
     /// which returns the registered path for that id; an id the engine names
     /// no path for is an error naming the id and the engine. The tagged text
-    /// is never sent as a path itself: it parses as a one-segment `ActorPath`,
+    /// is never sent as a path itself: it parses as a one-segment `ErasedActorPath`,
     /// so nothing downstream would catch it. Every textual address makes one
     /// uncached `aether.inventory.resolve_address` RPC, so ADR-0166 expansion
     /// and liveness stay owned by the engine registry.
-    pub(super) async fn resolve_engine_path(&self, engine: EngineId, address: &str) -> anyhow::Result<ActorPath> {
+    pub(super) async fn resolve_engine_path(&self, engine: EngineId, address: &str) -> anyhow::Result<ErasedActorPath> {
         if address.starts_with("mbx-") {
             parse_mailbox_id(address).map_err(|error| anyhow::anyhow!("{}", error.message))?;
             return self
@@ -142,7 +142,7 @@ impl Mcp {
         }
 
         let canonical = self.resolve_textual_address(engine, address).await?;
-        ActorPath::new(&canonical).map_err(|error| {
+        ErasedActorPath::new(&canonical).map_err(|error| {
             anyhow::anyhow!("engine answered {address:?} with a non-path lineage {canonical:?}: {error}")
         })
     }
@@ -155,11 +155,11 @@ impl Mcp {
         &self,
         engine: EngineId,
         tagged: Vec<String>,
-    ) -> anyhow::Result<Vec<Option<ActorPath>>> {
+    ) -> anyhow::Result<Vec<Option<ErasedActorPath>>> {
         let reply = self.session.call_one(engine_envelope(engine, INVENTORY_CAP, &Resolve { ids: tagged })).await?;
         let ResolveResult { resolved } = ResolveResult::decode_from_bytes(&reply.payload)
             .ok_or_else(|| anyhow::anyhow!("undecodable ResolveResult"))?;
-        Ok(resolved.into_iter().map(|entry| entry.name.and_then(|name| ActorPath::new(&name).ok())).collect())
+        Ok(resolved.into_iter().map(|entry| entry.name.and_then(|name| ErasedActorPath::new(&name).ok())).collect())
     }
 
     /// Resolve one textual address in the selected engine through
@@ -167,7 +167,7 @@ impl Mcp {
     /// canonical lineage. No position crosses it; every sender takes the
     /// path through [`Self::resolve_engine_path`].
     async fn resolve_textual_address(&self, engine: EngineId, address: &str) -> anyhow::Result<String> {
-        ActorPath::new(address)?;
+        ErasedActorPath::new(address)?;
         let reply = self
             .session
             .call_one(engine_envelope(engine, INVENTORY_CAP, &ResolveAddress { address: address.to_owned() }))
@@ -188,7 +188,7 @@ impl Mcp {
         engine: EngineId,
         address: &str,
         tool: &str,
-    ) -> Result<ActorPath, McpError> {
+    ) -> Result<ErasedActorPath, McpError> {
         if address.starts_with("mbx-") {
             return Err(McpError::invalid_params(
                 format!(
@@ -421,7 +421,7 @@ impl Mcp {
                 .await
                 .map_err(|e| anyhow::anyhow!("{e} (kind {})", spec.kind_name))?;
             out.push(NamedMail {
-                recipient: ActorPath::new(&spec.address)
+                recipient: ErasedActorPath::new(&spec.address)
                     .map_err(|error| anyhow::anyhow!("{error} (address {:?})", spec.address))?,
                 kind_name: spec.kind_name.clone(),
                 payload,

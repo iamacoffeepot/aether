@@ -37,7 +37,7 @@ use std::mem;
 
 use aether_actor::{ActorInitError, ErasedActorRef, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_bloomery_kinds::{CallOutcome, PublishResult, ReadArtifact, ReadArtifactResult, ReadHead, ReadHeadResult};
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_workspace::{Import, ImportResult, WorkspaceCapability};
 
 use config::Bootstrap;
@@ -237,7 +237,7 @@ impl EnvironmentBootstrap {
 }
 
 /// Prove `path`, or log the refusal naming it.
-fn prove<A>(ctx: &WasmCtx<'_, A>, path: &ActorPath) -> Option<ErasedActorRef> {
+fn prove<A>(ctx: &WasmCtx<'_, A>, path: &ErasedActorPath) -> Option<ErasedActorRef> {
     ctx.resolve_path(path)
         .inspect_err(
             |error| tracing::error!(path = path.as_str(), %error, "a peer path does not prove; bootstrap stopped"),

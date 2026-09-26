@@ -3,7 +3,7 @@
 //! actor's binding retains that logical parent (ADR-0099 §3 / ADR-0165), and
 //! a composed name outside the ADR-0166 grammar is refused at staging.
 
-use aether_data::{ActorPath, ActorPathError, MAX_SCOPE_PATH_DEPTH, ScopePathError};
+use aether_data::{ActorPathError, ErasedActorPath, MAX_SCOPE_PATH_DEPTH, ScopePathError};
 
 use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::actor::native::spawn::{SpawnError, Subname};
@@ -15,7 +15,7 @@ use super::support::{ActivationConfig, ActivationProbe, activation_fixture};
 fn spawned_binding_retains_the_logical_parent_mailbox() {
     let (spawner, _registry, _mailer, _pool) = activation_fixture();
     let parent_mailbox = MailboxId(0x4b01);
-    let parent_name = ActorPath::new("test.parent:root").expect("fixture is an actor path");
+    let parent_name = ErasedActorPath::new("test.parent:root").expect("fixture is an actor path");
     let parent = ActorRuntimeIdentity::new(parent_mailbox, None, parent_mailbox.0, parent_name);
     let root =
         spawner.prepare_identity::<ActivationProbe>(Subname::Named("root"), None).expect("prepare root identity");
@@ -39,8 +39,8 @@ fn spawned_binding_retains_the_logical_parent_mailbox() {
 fn a_lineage_past_the_depth_cap_is_refused_at_staging() {
     let (spawner, _registry, _mailer, _pool) = activation_fixture();
     let parent_mailbox = MailboxId(0x4b02);
-    let parent_name =
-        ActorPath::new(&["test.parent"; MAX_SCOPE_PATH_DEPTH].join("/")).expect("a parent at the depth cap is a path");
+    let parent_name = ErasedActorPath::new(&["test.parent"; MAX_SCOPE_PATH_DEPTH].join("/"))
+        .expect("a parent at the depth cap is a path");
     let parent = ActorRuntimeIdentity::new(parent_mailbox, None, parent_mailbox.0, parent_name);
 
     let refused = spawner.prepare_identity::<ActivationProbe>(Subname::Named("deep"), Some(&parent));

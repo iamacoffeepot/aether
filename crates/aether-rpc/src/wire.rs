@@ -18,13 +18,13 @@
 //! The full design (peer model, dispatch flow, settlement signalling) is
 //! on issues 750 and 763.
 
-use aether_data::{ActorPath, EngineId, KindId};
+use aether_data::{EngineId, ErasedActorPath, KindId};
 use serde::{Deserialize, Serialize};
 
 /// Wire-format version negotiated at handshake. Bump on any breaking
 /// shape change to [`WireFrame`] or its substructs; mismatched peers
 /// get kicked (no downgrade, no negotiation per issue 750). Version 2
-/// names a `Call`'s recipient by [`ActorPath`] and drops the address from
+/// names a `Call`'s recipient by [`ErasedActorPath`] and drops the address from
 /// replies (issue 6570).
 pub const WIRE_VERSION: u32 = 2;
 
@@ -121,7 +121,7 @@ pub struct KindDescriptor {
 /// already-encoded bytes.
 ///
 /// The recipient is a [`Recipient`], an engine selection plus an
-/// [`ActorPath`]. The engine that hosts the recipient resolves the path
+/// [`ErasedActorPath`]. The engine that hosts the recipient resolves the path
 /// when the `Call` arrives (ADR-0230 §3); nothing upstream computes a
 /// mailbox id for it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,7 +132,7 @@ pub struct MailEnvelope {
     pub payload: Vec<u8>,
 }
 
-/// A `Call`'s recipient: which engine, and the actor's [`ActorPath`] in it.
+/// A `Call`'s recipient: which engine, and the actor's [`ErasedActorPath`] in it.
 ///
 /// `engine = None` names the local actor system of the server the `Call`
 /// reached. `engine = Some(id)` asks a hub to relay the `Call` to that
@@ -144,14 +144,14 @@ pub struct MailEnvelope {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Recipient {
     pub engine: Option<EngineId>,
-    pub path: ActorPath,
+    pub path: ErasedActorPath,
 }
 
 impl Recipient {
     /// A recipient in the local actor system of the server the `Call`
     /// reaches (no engine routing).
     #[must_use]
-    pub const fn local(path: ActorPath) -> Self {
+    pub const fn local(path: ErasedActorPath) -> Self {
         Self { engine: None, path }
     }
 }
@@ -176,12 +176,12 @@ pub struct ReplyEnvelope {
 /// engine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
 pub enum RpcError {
-    /// The recipient's [`ActorPath`] does not resolve to a `Live` actor in
+    /// The recipient's [`ErasedActorPath`] does not resolve to a `Live` actor in
     /// the engine that hosts it, whatever the reason: never registered,
     /// still starting, dropped, or a short path that is ambiguous or names
     /// no declared child. `detail` is that engine's diagnostic, including
     /// ADR-0166's candidate spellings for an ambiguous hole.
-    NotPresent { path: ActorPath, detail: String },
+    NotPresent { path: ErasedActorPath, detail: String },
     /// The kind id isn't in this server's kind registry.
     UnknownKind { kind: KindId },
     /// Target carried `engine = Some(_)` — cross-engine routing is

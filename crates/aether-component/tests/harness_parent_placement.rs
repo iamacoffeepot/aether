@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use aether_actor::{ActorRef, Addressable, EMBEDDED_SCOPE, actor};
 use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{ActorPath, Kind, LoadName};
+use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
@@ -163,7 +163,7 @@ struct HatchHeld;
 /// Stages the held parent from a handler, as any actor births a child, and
 /// keeps its receipt's name until the birth is decided.
 struct Launcher {
-    staged: Option<ActorPath>,
+    staged: Option<ErasedActorPath>,
 }
 
 #[actor(singleton, root)]

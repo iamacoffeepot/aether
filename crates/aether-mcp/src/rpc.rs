@@ -539,7 +539,7 @@ fn register_call(
 mod tests {
     use super::RpcSession;
     use aether_codec::frame::{read_frame, write_frame};
-    use aether_data::{ActorPath, KindId};
+    use aether_data::{ErasedActorPath, KindId};
     use aether_rpc::{HelloAck, MailEnvelope, PeerKind, Recipient, ReplyEnvelope, WIRE_VERSION, WireFrame};
     use std::io::{BufReader, ErrorKind};
     use std::net::{Shutdown, TcpListener, TcpStream};
@@ -724,7 +724,7 @@ mod tests {
     /// and bytes back, so the contents don't matter.
     fn probe_envelope() -> MailEnvelope {
         MailEnvelope {
-            to: Recipient::local(ActorPath::new("test.probe").expect("the probe path is a path")),
+            to: Recipient::local(ErasedActorPath::new("test.probe").expect("the probe path is a path")),
             kind: KindId(1),
             payload: vec![1, 2, 3],
         }

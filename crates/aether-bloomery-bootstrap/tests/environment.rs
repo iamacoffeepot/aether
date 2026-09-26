@@ -15,7 +15,7 @@ use aether_bloomery_kinds::{
 };
 use aether_bloomery_view::Heads;
 use aether_chassis_bloomery::BloomeryCli;
-use aether_data::{ActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind};
 use aether_harness_bloomery::{Record, SeededJournal, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_kinds::{LoadComponent, LoadResult};
@@ -99,8 +99,8 @@ fn the_bootstrap_script_imports_merges_and_publishes_the_environment_head() -> R
     let config = BootstrapConfig {
         base: Some(ImageRef::new(BASE)?),
         toolchain: Some(ImageRef::new(TOOLCHAIN)?),
-        journal: Some(ActorPath::new(&format!("aether.bloomery.journal:{UNIT}"))?),
-        driver: Some(ActorPath::new("aether.bloomery.driver:driver")?),
+        journal: Some(ErasedActorPath::new(&format!("aether.bloomery.journal:{UNIT}"))?),
+        driver: Some(ErasedActorPath::new("aether.bloomery.driver:driver")?),
     };
     let load =
         LoadComponent { wasm: fs::read(script_path)?, name: None, config: config.encode_into_bytes(), export: None };

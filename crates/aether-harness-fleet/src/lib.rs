@@ -50,7 +50,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_codec::frame::{FrameError, read_frame, write_frame};
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_data::{EngineId, Kind, KindId, MailId, Uuid};
 use aether_fleet::{FleetConfig, FleetServer, RestartPolicy};
 use aether_kinds::NamedMail;
@@ -760,7 +760,7 @@ impl FleetHarness {
 
     /// Route a mail to a recipient on a forked substrate and return the
     /// reply envelopes (one per `ReplyEvent`). `recipient` is an
-    /// `ActorPath` in text — a chassis cap (`aether.fs`), a loaded
+    /// `ErasedActorPath` in text — a chassis cap (`aether.fs`), a loaded
     /// component's lineage address
     /// (`aether.component/aether.embedded:<name>`), or an ADR-0166 short
     /// path (`aether.component/:<name>`) the engine expands on arrival.
@@ -905,7 +905,7 @@ impl FleetHarness {
     /// [`terminate_quietly`](Self::terminate_quietly) drain; the caller
     /// decides whether a write error panics or is swallowed.
     ///
-    /// `recipient` becomes the `Call`'s `ActorPath` as written, so the
+    /// `recipient` becomes the `Call`'s `ErasedActorPath` as written, so the
     /// engine that hosts it resolves it (ADR-0230 §3). A malformed path is
     /// a scenario bug and panics naming the text.
     fn write_call(
@@ -916,7 +916,7 @@ impl FleetHarness {
         kind: KindId,
         payload: Vec<u8>,
     ) -> Result<(), FrameError> {
-        let path = ActorPath::new(recipient)
+        let path = ErasedActorPath::new(recipient)
             .unwrap_or_else(|error| panic!("call recipient {recipient:?} is not an actor path: {error}"));
         write_frame(
             &mut self.stream,
@@ -1019,7 +1019,7 @@ impl FleetHarness {
     {
         let batch = DispatchTraced {
             mails: vec![NamedMail {
-                recipient: ActorPath::new(recipient).expect("send_traced recipient is a well-formed actor path"),
+                recipient: ErasedActorPath::new(recipient).expect("send_traced recipient is a well-formed actor path"),
                 kind_name: K::NAME.to_owned(),
                 payload: mail.encode_into_bytes(),
                 count: 1,
@@ -1142,8 +1142,9 @@ fn boot_hub(
 /// yield a single reply yielded zero or many.
 /// The `ReplaceComponent.target` for a scenario-supplied component address.
 /// A malformed address is a scenario bug, so it panics naming the text.
-fn replace_target(address: &str) -> ActorPath {
-    ActorPath::new(address).unwrap_or_else(|error| panic!("replace target {address:?} is not an actor path: {error}"))
+fn replace_target(address: &str) -> ErasedActorPath {
+    ErasedActorPath::new(address)
+        .unwrap_or_else(|error| panic!("replace target {address:?} is not an actor path: {error}"))
 }
 
 fn single_reply(replies: &[ReplyEnvelope], label: &str) -> Vec<u8> {

@@ -388,7 +388,7 @@ impl AddressIndex {
     }
 
     /// Expand a short path's parsed root and steps to its canonical path. The
-    /// steps come from an `ActorPath`, so their grammar and the written caps
+    /// steps come from an `ErasedActorPath`, so their grammar and the written caps
     /// already hold; the byte cap is rechecked as the path grows, because a
     /// hole expands into `namespace:discriminator`.
     pub(super) fn expand(&self, root: &str, steps: &[PathSegment<'_>]) -> Result<String, AddressResolutionError> {
@@ -488,14 +488,14 @@ fn validate_owned_scope_path(segments: &[String]) -> Result<(), AddressResolutio
 
 #[cfg(test)]
 mod tests {
-    use aether_data::{ActorPath, ActorPathForm};
+    use aether_data::{ActorPathForm, ErasedActorPath};
 
     use super::*;
 
-    /// Parse `text` as a short `ActorPath` and expand it, as
+    /// Parse `text` as a short `ErasedActorPath` and expand it, as
     /// `Registry::resolve_address` does.
     fn expand(index: &AddressIndex, text: &str) -> Result<String, AddressResolutionError> {
-        let path = ActorPath::new(text).expect("fixture is a well-formed actor path");
+        let path = ErasedActorPath::new(text).expect("fixture is a well-formed actor path");
         let ActorPathForm::Short { root, steps } = path.form() else {
             panic!("fixture `{text}` is not a short path");
         };

@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 
 use crate::mail::MailboxId;
 use crate::mail::registry::RouteContract;
@@ -23,7 +23,7 @@ use super::{MailboxEntry, SeizeCell};
 /// reference (`Mailer::actor_path`) has no failure to report.
 #[derive(Clone)]
 pub(super) struct RouteRecord {
-    pub(super) canonical_name: ActorPath,
+    pub(super) canonical_name: ErasedActorPath,
     pub(super) lifecycle: RouteLifecycle,
 }
 

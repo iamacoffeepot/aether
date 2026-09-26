@@ -45,7 +45,7 @@ pub use aether_actor::Manual;
 // vacate/close `MonitorNotice` (each cap monitors its registrants and purges
 // its own rows), so the host names no peer cap's type or kinds.
 use aether_actor::{ErasedActorRef, OutboundReply, Single};
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_data::{MailboxCategory, Source};
 
 use std::collections::{HashMap, HashSet};
@@ -436,7 +436,7 @@ impl NativeActor for ComponentHostCapability {
         // path that is ambiguous rather than absent reports its candidate
         // spellings instead of collapsing to "nothing registered" (ADR-0166
         // §5, issue 4125).
-        let proven = ActorPath::new(&payload.name)
+        let proven = ErasedActorPath::new(&payload.name)
             .map_err(|error| error.to_string())
             .and_then(|name| ctx.resolve_path(&name).map_err(|error| error.to_string()));
         let actor = match proven {

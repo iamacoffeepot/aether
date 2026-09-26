@@ -28,7 +28,7 @@ use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::fs;
 
 use aether_actor::{ActorRef, Addressable};
-use aether_data::{ActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
@@ -57,7 +57,7 @@ fn load_kit_export<R: Addressable>(
     wasm: &[u8],
     name: &str,
     config: Vec<u8>,
-) -> (ActorRef<R>, ActorPath) {
+) -> (ActorRef<R>, ErasedActorPath) {
     let (actor, path) = harness
         .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: Some(name.to_owned()), config, export: None })
         .unwrap_or_else(|error| panic!("load {}: {error}", R::NAMESPACE));
@@ -104,7 +104,7 @@ fn ground_stripes() -> Vec<NamedMail> {
 /// the camera's `Render` publishes its (controller-driven) `view_proj`, then
 /// the striped ground accumulates under it, both into the accumulator right
 /// before the GPU readback.
-fn capture_scene(harness: &mut SubstrateHarness, camera: &ActorPath, label: &'static str) -> Vec<u8> {
+fn capture_scene(harness: &mut SubstrateHarness, camera: &ErasedActorPath, label: &'static str) -> Vec<u8> {
     let mut pre = vec![envelope(&camera.to_string(), &Render)];
     pre.extend(ground_stripes());
     let captured =

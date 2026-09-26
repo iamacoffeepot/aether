@@ -167,7 +167,7 @@ The skeleton every tool follows:
    `aether.component/aether.embedded:web`, the form `load_component`
    hands back — or an ADR-0166 short path, or a tagged `mbx-…` id.
    `mcp.resolve_engine_path(engine, address)` takes whichever form arrives and
-   asks the selected engine for the canonical `ActorPath`: text goes to the
+   asks the selected engine for the canonical `ErasedActorPath`: text goes to the
    inventory cap's `resolve_address`, and a tagged id to its `resolve`, which
    names the id's registered path. Pass that path to `engine_envelope_to(engine,
    path, &request)`, which stamps `K::ID` and encodes the payload;

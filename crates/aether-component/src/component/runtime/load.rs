@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use aether_actor::{ErasedActorRef, MailSender, Manual, OutboundReply, ReplyMode, Single};
-use aether_data::{ActorPath, Kind, KindDescriptor};
+use aether_data::{ErasedActorPath, Kind, KindDescriptor};
 use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult};
 use wasmtime::Module;
 
@@ -176,7 +176,7 @@ impl ComponentHostCapabilityState {
         // ADR-0230 §1: the parent must be `Live`. A `Starting` parent resolves
         // as an address but does not prove, so a child is never staged beneath
         // an unborn parent; the proof carries the parent's own canonical path.
-        let resolved = ActorPath::new(&payload.parent)
+        let resolved = ErasedActorPath::new(&payload.parent)
             .map_err(|error| error.to_string())
             .and_then(|parent| ctx.resolve_path(&parent).map_err(|error| error.to_string()));
         let parent = match resolved {

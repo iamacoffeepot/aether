@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 
 use aether_actor::ReplyMode;
-use aether_data::{ActorLineageRecord, ActorPath};
+use aether_data::{ActorLineageRecord, ErasedActorPath};
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::wasm::kind_manifest::{ActorInputs, Dependency};
 
@@ -48,7 +48,7 @@ pub fn replacement_refusal<A, M: ReplyMode>(
     // closed.
     let parent = canonical
         .rsplit_once('/')
-        .and_then(|(path, _)| ActorPath::new(path).ok())
+        .and_then(|(path, _)| ErasedActorPath::new(path).ok())
         .and_then(|path| ctx.resolve_path(&path).ok());
     ctx.missing_dependency(parent, dependencies).map(|namespace| dependency_refusal(canonical, namespace))
 }

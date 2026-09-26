@@ -3,7 +3,7 @@ use std::collections::hash_map::Entry;
 use std::iter;
 use std::time::Duration;
 
-use aether_data::{ActorPath, EngineId, Kind, MailId, tagged_id};
+use aether_data::{EngineId, ErasedActorPath, Kind, MailId, tagged_id};
 use aether_kinds::trace::{DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult};
 use aether_trace::walk::TreeWalk;
 use rmcp::ErrorData as McpError;
@@ -106,7 +106,7 @@ pub(super) async fn settle_mail_item(
             // The prepared direct path carries the engine's canonical lineage
             // forward, so a short-path spelling consults the same
             // component-capability cache entry as its canonical spelling.
-            let declared_reply = ActorPath::new(&delivered.canonical_recipient).ok().and_then(|canonical| {
+            let declared_reply = ErasedActorPath::new(&delivered.canonical_recipient).ok().and_then(|canonical| {
                 let cache = mcp.components.lock().expect("component cache mutex is never poisoned");
                 cache.get(&(delivered.engine, canonical)).and_then(|caps| {
                     caps.handlers.iter().find(|handler| handler.name == delivered.kind_name).and_then(|handler| {
@@ -150,7 +150,7 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
     // Encode the batch before sending — a bad spec produces a
     // clean invalid-params error and never touches the wire.
     // Same shape `CaptureFrame` carries: `Vec<NamedMail>` with
-    // `ActorPath` recipients the substrate proves once, before any
+    // `ErasedActorPath` recipients the substrate proves once, before any
     // item moves, via `accept_bundle`. ADR-0091: descriptors come from
     // the per-engine merged view so a component's own kinds
     // encode after `load_component`.

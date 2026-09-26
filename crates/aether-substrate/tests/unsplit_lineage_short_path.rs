@@ -16,7 +16,7 @@
 //! here.
 
 use aether_actor::{Addressable, actor};
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_substrate::Registry;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -82,6 +82,6 @@ fn an_unsplit_declaration_is_not_gated_out_of_its_cardinality_fact() {
     registered_ref(&registry, &canonical, noop_handler());
 
     let path =
-        ActorPath::new(&format!("{}/:one", UnsplitRoot::NAMESPACE)).expect("fixture is a well-formed actor path");
+        ErasedActorPath::new(&format!("{}/:one", UnsplitRoot::NAMESPACE)).expect("fixture is a well-formed actor path");
     assert_eq!(registry.resolve_address(&path).map(|resolved| resolved.canonical_path), Ok(canonical));
 }

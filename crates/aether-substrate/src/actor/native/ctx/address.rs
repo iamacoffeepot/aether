@@ -3,13 +3,13 @@
 //! "Who it can address" is answered by proof. [`NativeCtx::actor_ref`] mints
 //! one for a declared dependency, [`NativeCtx::resolve_live`] proves a
 //! position that arrived in a payload, and [`NativeCtx::resolve_path`] proves
-//! an [`ActorPath`] that arrived in one; each hands back a proven reference,
+//! an [`ErasedActorPath`] that arrived in one; each hands back a proven reference,
 //! which is what ADR-0230 lets a cap keep past the handler that received it
 //! and what the flat send verbs route through. [`NativeCtx::accept_bundle`] is
 //! the bundle front of the payload-borne door: it proves a mail bundle's
 //! addresses and hands back items that can only be delivered.
 //! [`NativeCtx::accept_call`] is its one-item form for a wire `Call`, whose
-//! recipient is an [`ActorPath`] proven on arrival.
+//! recipient is an [`ErasedActorPath`] proven on arrival.
 //!
 //! Beside these doors sit `outbound_parent` and `outbound_root`, the lineage
 //! every inheriting send stamps so it joins the handler's causal chain
@@ -22,7 +22,7 @@ use aether_actor::{
     ActorRef, Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef, ReplyMode,
     Singleton,
 };
-use aether_data::{ActorPath, KindId, MailId, MailboxId};
+use aether_data::{ErasedActorPath, KindId, MailId, MailboxId};
 use aether_kinds::NamedMail;
 
 use crate::mail::registry::{AddressResolutionError, Registry, ResolveLiveError};
@@ -30,7 +30,7 @@ use crate::mail::{BoundaryMail, boundary};
 
 use super::NativeCtx;
 
-/// Why an [`ActorPath`] that arrived in a payload could not be proven (ADR-0230 §3).
+/// Why an [`ErasedActorPath`] that arrived in a payload could not be proven (ADR-0230 §3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvePathError {
     /// The registry's own refusal: an unknown or instanced root, an illegal or
@@ -99,7 +99,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.binding.mailer().registry().resolve_live(position)
     }
 
-    /// Prove an [`ActorPath`] that arrived in a payload: the address front of
+    /// Prove an [`ErasedActorPath`] that arrived in a payload: the address front of
     /// [`Self::resolve_live`]. The host's `resolve_address` expands and
     /// resolves the path — ADR-0166 short-path expansion and canonical
     /// validation are the registry's own — and the answered position is
@@ -114,14 +114,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// Its consumers are the component host's drop, replace, load-under, and
     /// describe receipts, and the trampoline's replacement dependency check.
-    pub fn resolve_path(&self, address: &ActorPath) -> Result<ErasedActorRef, ResolvePathError> {
+    pub fn resolve_path(&self, address: &ErasedActorPath) -> Result<ErasedActorRef, ResolvePathError> {
         self.binding.resolve_path(address)
     }
 
     /// Prove a mail bundle that crossed the MCP or harness boundary inside a
     /// payload (ADR-0230 §3): the bundle front of [`Self::resolve_live`].
     ///
-    /// Every item's [`ActorPath`] recipient resolves
+    /// Every item's [`ErasedActorPath`] recipient resolves
     /// and is proven before any item is returned, so a refusal — an absent,
     /// ambiguous, dropped, or still-starting recipient, or an unknown kind —
     /// moves no mail; the error names the recipient and `label`. The items
@@ -138,7 +138,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Prove a wire `Call`'s recipient on arrival (ADR-0230 §3): the one-item
     /// form of [`Self::accept_bundle`].
     ///
-    /// `recipient` is the [`ActorPath`] the `Call` named. It resolves against
+    /// `recipient` is the [`ErasedActorPath`] the `Call` named. It resolves against
     /// this engine, so a short path expands against this engine's
     /// declarations, and the answered position is proven at once. A path that
     /// does not resolve to a `Live` actor — never registered, still starting,
@@ -151,7 +151,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// Its consumer is `RpcServerCapability`'s `Call` receipt, which answers a
     /// refusal as `RpcError::NotPresent`.
-    pub fn accept_call(&self, recipient: &ActorPath, kind: KindId, payload: Vec<u8>) -> Result<BoundaryMail, String> {
+    pub fn accept_call(
+        &self,
+        recipient: &ErasedActorPath,
+        kind: KindId,
+        payload: Vec<u8>,
+    ) -> Result<BoundaryMail, String> {
         boundary::accept_call(self.boundary_registry(), recipient, kind, payload)
     }
 

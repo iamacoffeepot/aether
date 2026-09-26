@@ -1,7 +1,7 @@
 //! The bootstrap's config: the two images to import and the two actors to mail.
 
 use aether_actor::ActorInitError;
-use aether_data::{ActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind};
 use aether_workspace::ImageRef;
 
 /// What the operator hands `load_component` as `config`: the base and
@@ -20,9 +20,9 @@ pub struct BootstrapConfig {
     pub toolchain: Option<ImageRef>,
     /// The journal owner, `aether.bloomery.journal:<key>` on a Bloomery engine,
     /// where `<key>` is the unit's key.
-    pub journal: Option<ActorPath>,
+    pub journal: Option<ErasedActorPath>,
     /// The bundle driver, `aether.bloomery.driver:driver` on a Bloomery engine.
-    pub driver: Option<ActorPath>,
+    pub driver: Option<ErasedActorPath>,
 }
 
 /// A whole config: both images and both peer paths.
@@ -33,9 +33,9 @@ pub struct Bootstrap {
     /// The Rust toolchain image.
     pub toolchain: ImageRef,
     /// The journal owner's path.
-    pub journal: ActorPath,
+    pub journal: ErasedActorPath,
     /// The bundle driver's path.
-    pub driver: ActorPath,
+    pub driver: ErasedActorPath,
 }
 
 impl BootstrapConfig {

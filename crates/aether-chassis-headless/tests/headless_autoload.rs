@@ -32,7 +32,7 @@ use aether_chassis::boot::{
 };
 use aether_chassis::boot_manifest::ChassisSettings;
 use aether_chassis_headless::HeadlessChassis;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::{HttpConfig, HttpServerConfig};
 use aether_lifecycle::LifecycleConfig;
@@ -109,7 +109,7 @@ mod tests {
         // `build` returns only once every boot component has answered its
         // load, so the probe resolves at once, with no wait.
         let built = HeadlessChassis::build(headless_env(sandbox, autoload)).expect("build headless chassis");
-        let address = ActorPath::new("aether.component/aether.embedded:probe").expect("a well-formed actor path");
+        let address = ErasedActorPath::new("aether.component/aether.embedded:probe").expect("a well-formed actor path");
         let resolved = built.resolve_address(&address);
         assert!(resolved.is_ok(), "boot component {address} is not live when build returns: {resolved:?}");
     }

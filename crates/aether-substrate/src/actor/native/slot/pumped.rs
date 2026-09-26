@@ -198,7 +198,7 @@ mod tests {
     use aether_actor::log::ActorLogRing;
     use aether_actor::trace::ActorTraceRing;
     use aether_actor::{Addressable, HandlesKind, Local as _, MailSender, Manual, One};
-    use aether_data::{ActorPath, Kind, KindId, MailId, MailboxId, Source, SourceAddr};
+    use aether_data::{ErasedActorPath, Kind, KindId, MailId, MailboxId, Source, SourceAddr};
     use aether_kinds::trace::TraceEvent;
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
 
@@ -403,7 +403,7 @@ mod tests {
             Arc::clone(&fx.mailer),
             self_id,
             self_id.0,
-            ActorPath::new(PumpProbe::NAMESPACE).expect("fixture is an actor path"),
+            ErasedActorPath::new(PumpProbe::NAMESPACE).expect("fixture is an actor path"),
             Arc::clone(&fx.aborter),
             Some(Arc::clone(&fx.spawner)),
         ));

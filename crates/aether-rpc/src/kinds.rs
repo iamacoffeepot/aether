@@ -1,6 +1,6 @@
 //! `aether.rpc` mail kinds owned by the RPC server capability (ADR-0121).
 
-use aether_data::{ActorPath, EngineId, KindId};
+use aether_data::{EngineId, ErasedActorPath, KindId};
 
 use crate::RpcError;
 
@@ -34,7 +34,7 @@ pub struct RpcInboundReady {}
 /// mail's `Source`. Hub-internal: it never crosses the RPC wire.
 #[aether_data::kind(name = "aether.rpc.forward")]
 pub struct ForwardEnvelope {
-    pub recipient: ActorPath,
+    pub recipient: ErasedActorPath,
     pub kind: KindId,
     #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,

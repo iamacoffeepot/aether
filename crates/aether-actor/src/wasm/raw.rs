@@ -179,7 +179,7 @@ unsafe extern "C" {
     /// holding the wire-encoded answer, a `__ResolvedPath`, which the SDK
     /// decodes and frees as [`asset_catalog`] does. The host traps on an
     /// out-of-bounds pointer, text that is not UTF-8, and text outside the
-    /// ADR-0166 path grammar; the SDK passes only a validated `ActorPath`.
+    /// ADR-0166 path grammar; the SDK passes only a validated `ErasedActorPath`.
     #[link_name = "resolve_path_p32"]
     pub fn resolve_path(path_ptr: u32, path_len: u32) -> u64;
     /// ADR-0238 decisions 2 and 9: take one hold on the blob whose 32-byte

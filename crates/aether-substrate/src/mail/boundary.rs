@@ -1,11 +1,11 @@
 //! A mail bundle that crossed the boundary inside a payload, proven once.
 //!
 //! `DispatchTraced` and `CaptureFrame` carry a list of [`NamedMail`]s: each
-//! item names its recipient as an [`ActorPath`], an
+//! item names its recipient as an [`ErasedActorPath`], an
 //! address and nothing more. ADR-0230 section 3 makes the receiving engine
 //! prove that address once and send only through the proof, so a bundle is
 //! the same boundary inside a payload, and a wire `Call` is the same boundary
-//! for one item: its recipient is an `ActorPath` the hosting engine proves on
+//! for one item: its recipient is an `ErasedActorPath` the hosting engine proves on
 //! arrival.
 //! [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle) proves every recipient
 //! before any item moves, and
@@ -27,7 +27,7 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use aether_actor::ErasedActorRef;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_data::name_inventory::engine_only_kinds;
 use aether_kinds::NamedMail;
 
@@ -81,7 +81,7 @@ pub(crate) fn accept(registry: &Registry, bundle: Vec<NamedMail>, label: &str) -
 }
 
 /// Prove one wire `Call`'s recipient (ADR-0230 §3): the one-item form of
-/// [`accept`], for a boundary that names its recipient by [`ActorPath`] and
+/// [`accept`], for a boundary that names its recipient by [`ErasedActorPath`] and
 /// its kind by id.
 ///
 /// The path resolves and is proven exactly as a bundle item's is, so a short
@@ -94,7 +94,7 @@ pub(crate) fn accept(registry: &Registry, bundle: Vec<NamedMail>, label: &str) -
 /// forwards or calls this, so the wire door checks once.
 pub(crate) fn accept_call(
     registry: &Registry,
-    recipient: &ActorPath,
+    recipient: &ErasedActorPath,
     kind: KindId,
     payload: Vec<u8>,
 ) -> Result<BoundaryMail, String> {
@@ -104,7 +104,7 @@ pub(crate) fn accept_call(
 /// Resolve `recipient` through [`Registry::resolve_address`] and prove the
 /// answered position at once through [`Registry::resolve_live`]. The position
 /// never leaves this function; each refusal is the registry's error text.
-fn prove(registry: &Registry, recipient: &ActorPath) -> Result<ErasedActorRef, String> {
+fn prove(registry: &Registry, recipient: &ErasedActorPath) -> Result<ErasedActorRef, String> {
     let resolved = registry.resolve_address(recipient).map_err(|error| error.to_string())?;
     registry.resolve_live(resolved.mailbox_id).map_err(|error| error.to_string())
 }
@@ -140,7 +140,7 @@ pub fn is_engine_only(kind: KindId) -> bool {
 #[cfg(test)]
 mod tests {
     use aether_actor::Addressable;
-    use aether_data::{ActorPath, Kind, KindDescriptor, Schema};
+    use aether_data::{ErasedActorPath, Kind, KindDescriptor, Schema};
     use aether_kinds::MonitorNotice;
 
     use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -211,7 +211,7 @@ mod tests {
 
     fn bundle(recipient: &str) -> Vec<NamedMail> {
         vec![NamedMail {
-            recipient: ActorPath::new(recipient).expect("fixture recipient is a well-formed actor path"),
+            recipient: ErasedActorPath::new(recipient).expect("fixture recipient is a well-formed actor path"),
             kind_name: <Poke as Kind>::NAME.to_owned(),
             payload: Poke { value: 1 }.encode_into_bytes(),
             count: 1,
@@ -267,7 +267,8 @@ mod tests {
             )
             .expect("fresh kind");
         let item = NamedMail {
-            recipient: ActorPath::new("test.bundle_diagnostics.absent").expect("fixture recipient is well formed"),
+            recipient: ErasedActorPath::new("test.bundle_diagnostics.absent")
+                .expect("fixture recipient is well formed"),
             kind_name: <MonitorNotice as Kind>::NAME.to_owned(),
             payload: MonitorNotice.encode_into_bytes(),
             count: 1,

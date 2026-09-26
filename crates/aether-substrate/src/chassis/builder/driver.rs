@@ -8,7 +8,7 @@ use aether_actor::Root;
 use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace::ActorTraceRing;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dependencies::check_declared;
@@ -375,7 +375,7 @@ where
 {
     // The binding's canonical name is the root's `A::NAMESPACE`, proven
     // before the transport is built.
-    let canonical_name = ActorPath::new(A::NAMESPACE).map_err(|error| BootError::Other(Box::new(error)))?;
+    let canonical_name = ErasedActorPath::new(A::NAMESPACE).map_err(|error| BootError::Other(Box::new(error)))?;
     let mailer = spawner.mailer();
     let ring_capacities = spawner.ring_capacities();
     // Per-cap transport; install the claim's inbox re-lineaged onto the

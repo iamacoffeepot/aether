@@ -42,7 +42,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use aether_component::ComponentHostCapability;
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
@@ -105,7 +105,7 @@ fn artifact_dir(id: &str) -> PathBuf {
 /// no longer naturally ordered ahead of advance — `SendAndAwaitReply`
 /// blocks on `LoadResult` before returning. Returns the lineage path the
 /// probe registered at — the path a capture bundle's `NamedMail` carries.
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorPath {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorPath {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
         .load_any(&LoadComponent {

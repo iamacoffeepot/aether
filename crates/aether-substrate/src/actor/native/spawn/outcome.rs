@@ -5,7 +5,7 @@
 use std::fmt;
 
 use aether_actor::{ActorRef, Addressable};
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 
 use crate::actor::native::DispatchId;
 
@@ -16,7 +16,7 @@ use super::SpawnError;
 /// live; the authoritative result arrives as a later `TaskDone`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpawnReceipt {
-    pub canonical_name: ActorPath,
+    pub canonical_name: ErasedActorPath,
     pub completion: DispatchId,
 }
 
@@ -34,7 +34,7 @@ pub struct SpawnReceipt {
 /// published Live and catch-up is armed. A parent that keeps or mails its child
 /// holds that reference and sends through `ctx.send_to(&child, ..)`.
 pub struct SpawnOutcome<A> {
-    pub canonical_name: ActorPath,
+    pub canonical_name: ErasedActorPath,
     pub result: Result<ActorRef<A>, SpawnError>,
 }
 

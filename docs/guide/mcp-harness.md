@@ -109,7 +109,7 @@ wire bytes against that kind's descriptor. A textual `address` may be a
 canonical lineage (`aether.component/aether.embedded:camera`) or an ADR-0166
 short path (`aether.component/:camera`). The selected engine resolves either
 spelling to the same canonical path before dispatch, and the `Call` names its
-recipient by that `ActorPath`; aether-mcp does not hash operator strings or keep
+recipient by that `ErasedActorPath`; aether-mcp does not hash operator strings or keep
 an alias cache. A tagged `mbx-…` id, on tools that accept it, is sent to the
 selected engine's `aether.inventory.resolve` for its canonical path, and the
 mail goes by that path. By default each item *blocks* until its

@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(live.id(), typed, "the fixture stands the route at the typed resolver's position");
 
         for address in [canonical, "aether.window/:main"] {
-            let address = aether_data::ActorPath::new(address).expect("fixture is a well-formed actor path");
+            let address = aether_data::ErasedActorPath::new(address).expect("fixture is a well-formed actor path");
             let resolved = registry.resolve_address(&address).expect("resolve live window address");
             assert_eq!(resolved.mailbox_id, typed);
             assert_eq!(resolved.canonical_path, canonical);

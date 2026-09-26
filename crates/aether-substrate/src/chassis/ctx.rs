@@ -727,7 +727,7 @@ mod tests {
     use crate::actor::native::local::with_stamped;
     use aether_kinds::descriptors;
 
-    use aether_data::ActorPath;
+    use aether_data::ErasedActorPath;
 
     use crate::actor::registry::ActorRegistry;
     use crate::config::RingCapacities;
@@ -814,7 +814,7 @@ mod tests {
             references: &references,
         });
         let name = "test.unclaim.retire";
-        let expected = ActorPath::new(name).expect("the claimed name is a canonical path");
+        let expected = ErasedActorPath::new(name).expect("the claimed name is a canonical path");
 
         let claim = ctx.claim_mailbox_with_override(name).expect("first claim succeeds");
         let reference = registry.resolve_live(claim.id).expect("the claimed route is live");

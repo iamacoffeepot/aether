@@ -266,7 +266,7 @@ path. Unknown roots, illegal segments, ambiguous children, path-limit
 violations, and a valid expansion with no live mailbox remain distinct
 resolution errors.
 
-At the boundary the text becomes an `aether_data::ActorPath`. Its grammar is
+At the boundary the text becomes an `aether_data::ErasedActorPath`. Its grammar is
 checked when it is built or decoded, so a malformed address fails there rather
 than in the engine; it is stored as written, holes included; and it becomes a
 position only in the engine's `resolve_address`, which fills holes and checks
@@ -582,8 +582,8 @@ bare-type spelling reaches it when the base is the type's own namespace; a
 component loaded under any other name is reached through the reference its load
 proved, never by folding the name at the send site.
 
-`LoadResult.path` is an `ActorPath`: the host's `resolve_address` parser, at
-the MCP, RPC, and harness boundary, is the one place an `ActorPath` becomes a
+`LoadResult.path` is an `ErasedActorPath`: the host's `resolve_address` parser, at
+the MCP, RPC, and harness boundary, is the one place an `ErasedActorPath` becomes a
 position
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
 The reply carries no position. A successful load reply is sent by the loaded
@@ -658,7 +658,7 @@ ordered prepared birth to the parent's buffer
 ([ADR-0165](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0165-handlers-read-views-emit-effects.md)). Nothing in the shared
 registry moves while the handler runs, so no spawn takes a global lock
 mid-turn. What comes back is a `SpawnReceipt`: the child's `canonical_name`,
-an `ActorPath` derived from the parent's identity and proven against the
+an `ErasedActorPath` derived from the parent's identity and proven against the
 ADR-0166 address grammar on the spot, which names the child for correlation,
 plus a `completion` `DispatchId`. A lineage too deep or too long for that
 grammar never gets a receipt: `.stage()` itself returns
@@ -687,7 +687,7 @@ first, say) surfaces as one typed failure rather than a silent half-spawn. A
 
 ```rust
 struct SpawnOutcome<A> {
-    canonical_name: ActorPath,
+    canonical_name: ErasedActorPath,
     result: Result<ActorRef<A>, SpawnError>,
 }
 ```

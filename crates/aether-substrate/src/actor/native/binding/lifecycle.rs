@@ -29,7 +29,7 @@ use crate::runtime::lifecycle::FatalAborter;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime::lifecycle::PanicAborter;
 use aether_actor::{CallerScope, ErasedActorRef, RequestContextTable};
-use aether_data::{ActorPath, KindDescriptor};
+use aether_data::{ErasedActorPath, KindDescriptor};
 use aether_kinds::ComponentCapabilities;
 
 impl NativeBinding {
@@ -52,7 +52,7 @@ impl NativeBinding {
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
         carry: u64,
-        canonical_name: ActorPath,
+        canonical_name: ErasedActorPath,
         aborter: Arc<dyn FatalAborter>,
         spawner: Option<Arc<crate::Spawner>>,
     ) -> Self {
@@ -67,7 +67,7 @@ impl NativeBinding {
         self_mailbox: MailboxId,
         parent_mailbox: Option<MailboxId>,
         carry: u64,
-        canonical_name: ActorPath,
+        canonical_name: ErasedActorPath,
         aborter: Arc<dyn FatalAborter>,
         spawner: Option<Arc<crate::Spawner>>,
     ) -> Self {
@@ -109,7 +109,7 @@ impl NativeBinding {
     /// `canonical_name` is the root actor's `A::NAMESPACE`, proven by the
     /// caller before it claims the mailbox.
     #[must_use]
-    pub(crate) fn from_ctx(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId, canonical_name: ActorPath) -> Self {
+    pub(crate) fn from_ctx(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId, canonical_name: ErasedActorPath) -> Self {
         Self::new(
             ctx.mail_send_handle(),
             self_mailbox,
@@ -288,13 +288,13 @@ impl NativeBinding {
 
     /// The canonical path of the live actor an address names. The path behind
     /// [`NativeCtx::canonical_path`](crate::actor::native::ctx::NativeCtx::canonical_path).
-    pub(crate) fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
+    pub(crate) fn canonical_path(&self, address: &ErasedActorPath) -> Result<String, AddressResolutionError> {
         self.mailer.canonical_path(address)
     }
 
     /// The canonical path of the route a reference proves. The path behind
     /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
-    pub(crate) fn actor_path(&self, reference: ErasedActorRef) -> ActorPath {
+    pub(crate) fn actor_path(&self, reference: ErasedActorRef) -> ErasedActorPath {
         self.mailer.actor_path(reference)
     }
 
@@ -307,7 +307,7 @@ impl NativeBinding {
 
     /// Prove an address that arrived in a payload. The path behind
     /// [`NativeCtx::resolve_path`](crate::actor::native::ctx::NativeCtx::resolve_path).
-    pub(crate) fn resolve_path(&self, address: &ActorPath) -> Result<ErasedActorRef, ResolvePathError> {
+    pub(crate) fn resolve_path(&self, address: &ErasedActorPath) -> Result<ErasedActorRef, ResolvePathError> {
         self.mailer.resolve_path(address)
     }
 

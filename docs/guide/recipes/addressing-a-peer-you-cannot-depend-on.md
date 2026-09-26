@@ -171,7 +171,7 @@ Two shapes reach the loader, and both reuse doors above:
   itself, so the loader keeps that reply's `ctx.sender()` as its proof of the
   component and mails the component through it. The component keeps
   `ctx.sender()` from that mail, as in the reverse direction above.
-- **The loader's path rides in config.** The loader puts its own `ActorPath`
+- **The loader's path rides in config.** The loader puts its own `ErasedActorPath`
   in the component's config, and the component's `wire` proves it once with
   `ctx.resolve_path` and keeps the `ErasedActorRef`.
 
@@ -188,16 +188,16 @@ shell has nothing to resolve.
 A position that arrives in a payload is proven once, at receipt. A native
 actor does that with the ctx verb `resolve_live`
 (`crates/aether-substrate/src/actor/native/ctx/address.rs`) and keeps the
-proof, not the position. An address that arrives as an `ActorPath`, such as
+proof, not the position. An address that arrives as an `ErasedActorPath`, such as
 the component path in a drop or replace request, is proven the same way
 through `resolve_path`, whose refusal names the path, never a position. A
-guest has the same verb, `WasmCtx::resolve_path`: an `ActorPath` from its
+guest has the same verb, `WasmCtx::resolve_path`: an `ErasedActorPath` from its
 config or a payload is proven once, at `wire` or at receipt, and kept as an
 `ErasedActorRef` (the environment bootstrap script in
 `crates/aether-bloomery-bootstrap` proves the journal owner and the bundle driver
 this way). A guest has no door for a payload-borne position and will not get
 one, because no guest API takes a `MailboxId`; a guest is told where to send by
-an `ActorPath` or by the envelope sender.
+an `ErasedActorPath` or by the envelope sender.
 
 No door turns a foreign `Address<R>` (one that arrived in mail, config, or
 saved state) into a reference yet (ADR-0230 §3). The door lands for guests

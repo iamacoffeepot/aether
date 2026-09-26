@@ -46,7 +46,7 @@ use crate::store::BlobStore;
 use aether_actor::ErasedActorRef;
 use aether_codec::frame::max_frame_size;
 use aether_data::tagged_id::{self, Tag};
-use aether_data::{ActorPath, Kind, KindDescriptor, KindId};
+use aether_data::{ErasedActorPath, Kind, KindDescriptor, KindId};
 use aether_kinds::ComponentCapabilities;
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use std::sync::OnceLock;
@@ -400,7 +400,7 @@ impl Mailer {
     /// [`Registry::resolve_address`], keeping only the path. The
     /// crate-private path behind
     /// [`NativeCtx::canonical_path`](crate::actor::native::ctx::NativeCtx::canonical_path).
-    pub(crate) fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
+    pub(crate) fn canonical_path(&self, address: &ErasedActorPath) -> Result<String, AddressResolutionError> {
         self.registry.resolve_address(address).map(|resolved| resolved.canonical_path)
     }
 
@@ -415,7 +415,7 @@ impl Mailer {
     /// route's proven name through `Dropped`, and removes a route only when
     /// a `Starting` reservation is cancelled, so a missing record is a broken
     /// invariant (ADR-0063).
-    pub(crate) fn actor_path(&self, reference: ErasedActorRef) -> ActorPath {
+    pub(crate) fn actor_path(&self, reference: ErasedActorRef) -> ErasedActorPath {
         self.registry
             .actor_path(reference)
             .expect("a minted reference names a route whose proven canonical name the registry keeps for the session")
@@ -432,7 +432,7 @@ impl Mailer {
     /// expands and resolves it, and the answered position is proven at once
     /// through [`Registry::resolve_live`]. The crate-private path behind
     /// [`NativeCtx::resolve_path`](crate::actor::native::ctx::NativeCtx::resolve_path).
-    pub(crate) fn resolve_path(&self, address: &ActorPath) -> Result<ErasedActorRef, ResolvePathError> {
+    pub(crate) fn resolve_path(&self, address: &ErasedActorPath) -> Result<ErasedActorRef, ResolvePathError> {
         let ResolvedAddress { mailbox_id, canonical_path } =
             self.registry.resolve_address(address).map_err(ResolvePathError::Unresolved)?;
         self.registry.resolve_live(mailbox_id).map_err(|_| ResolvePathError::NotLive { canonical_path })

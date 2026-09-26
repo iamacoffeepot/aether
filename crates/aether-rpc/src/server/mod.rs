@@ -8,7 +8,7 @@
 //! them through an internal mpsc; an `RpcInboundReady` wake mail tells the
 //! cap's dispatcher to drain.
 //!
-//! On `Call`, the cap resolves and proves the recipient's `ActorPath` on
+//! On `Call`, the cap resolves and proves the recipient's `ErasedActorPath` on
 //! arrival through `NativeCtx::accept_call` (ADR-0230 §3) and delivers the
 //! item via `NativeCtx::deliver_detached` (fresh causal chain — the wake
 //! mail is causally unrelated to the wire-borne Call), then subscribes

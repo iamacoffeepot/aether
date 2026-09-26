@@ -5,7 +5,7 @@ use super::*;
 use crate::{Hello, HelloAck, PeerKind, Recipient, WIRE_VERSION, WireFrame};
 use aether_actor::Addressable;
 use aether_codec::frame::{read_frame, write_frame};
-use aether_data::ActorPath;
+use aether_data::ErasedActorPath;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::builder::PassiveChassis;
@@ -21,7 +21,7 @@ const ABSENT: &str = "test.rpc.absent";
 
 /// The local recipient naming actor `A` by its namespace path.
 fn recipient_of<A: Addressable>() -> Recipient {
-    Recipient::local(ActorPath::new(A::NAMESPACE).expect("an actor namespace is a path"))
+    Recipient::local(ErasedActorPath::new(A::NAMESPACE).expect("an actor namespace is a path"))
 }
 
 fn test_peer_kind() -> PeerKind {
@@ -321,7 +321,7 @@ fn call_to_an_absent_path_closes_not_present() {
     let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(5));
     complete_handshake(&mut stream);
 
-    let absent = ActorPath::new(ABSENT).expect("the absent fixture is a path");
+    let absent = ErasedActorPath::new(ABSENT).expect("the absent fixture is a path");
     write_frame(
         &mut stream,
         &WireFrame::Call {
@@ -360,7 +360,7 @@ fn call_carrying_an_engine_only_kind_closes_with_err_before_dispatch() {
         &WireFrame::Call {
             cid: Some(13),
             envelope: MailEnvelope {
-                to: Recipient::local(ActorPath::new(ABSENT).expect("the absent fixture is a path")),
+                to: Recipient::local(ErasedActorPath::new(ABSENT).expect("the absent fixture is a path")),
                 kind: <MonitorNotice as Kind>::ID,
                 payload: MonitorNotice.encode_into_bytes(),
             },
@@ -395,7 +395,7 @@ fn engine_call_without_a_route_closes_with_unknown_engine() {
             envelope: MailEnvelope {
                 to: Recipient {
                     engine: Some(engine),
-                    path: ActorPath::new(ABSENT).expect("the absent fixture is a path"),
+                    path: ErasedActorPath::new(ABSENT).expect("the absent fixture is a path"),
                 },
                 kind: <TestEchoRequest as Kind>::ID,
                 payload: TestEchoRequest { value: 1 }.encode_into_bytes(),
@@ -574,7 +574,8 @@ fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
     // envelopes, addressed at the deferred-echo actor by name (the
     // trace cap resolves names through the registry).
     let recipient = || {
-        ActorPath::new(<DeferredEchoActor as Addressable>::NAMESPACE).expect("a namespace is a well-formed actor path")
+        ErasedActorPath::new(<DeferredEchoActor as Addressable>::NAMESPACE)
+            .expect("a namespace is a well-formed actor path")
     };
     let batch = DispatchTraced {
         mails: vec![

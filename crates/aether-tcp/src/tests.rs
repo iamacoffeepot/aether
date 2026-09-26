@@ -14,7 +14,7 @@ use super::{
     SessionData, SessionWrite, TcpCapability, TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
 use aether_actor::{Addressable, ErasedActorRef};
-use aether_data::{ActorPath, Kind, LoadName, SessionToken, Uuid};
+use aether_data::{ErasedActorPath, Kind, LoadName, SessionToken, Uuid};
 use aether_kinds::descriptors;
 use aether_substrate::ReplyTarget;
 use aether_substrate::actor::native::PumpedSlot;
@@ -161,8 +161,8 @@ fn register_session_consumer(registry: &Registry, name: &str) -> mpsc::Receiver<
     rx
 }
 
-fn address(text: &str) -> ActorPath {
-    ActorPath::new(text).expect("test address is a valid actor path")
+fn address(text: &str) -> ErasedActorPath {
+    ErasedActorPath::new(text).expect("test address is a valid actor path")
 }
 
 fn framed_body(body: &[u8]) -> Vec<u8> {

@@ -18,7 +18,7 @@ use std::path::Path;
 
 use aether_actor::ErasedActorRef;
 use aether_component::ComponentHostCapability;
-use aether_data::{ActorPath, Kind, KindId};
+use aether_data::{ErasedActorPath, Kind, KindId};
 use aether_fs::{FsCapability, Write};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -31,7 +31,7 @@ use std::fs;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-fn load_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> (ErasedActorRef, ActorPath) {
+fn load_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> (ErasedActorRef, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
         .load_any(&LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None })

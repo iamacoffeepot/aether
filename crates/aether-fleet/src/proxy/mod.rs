@@ -135,7 +135,7 @@ mod tests {
     };
     use aether_actor::{ActorRef, Addressable};
     use aether_codec::frame::{max_frame_size, read_frame, write_frame};
-    use aether_data::{ActorPath, EngineId, Kind, Uuid};
+    use aether_data::{EngineId, ErasedActorPath, Kind, Uuid};
     use aether_kinds::TerminateEngine;
     use aether_rpc::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
     use aether_rpc::server::{RpcBind, RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
@@ -221,7 +221,8 @@ mod tests {
         // Pushed from the embedder (rather than through an actor send) so
         // the test controls the reply target the proxy parks.
         let fwd = ForwardEnvelope {
-            recipient: ActorPath::new(<TestEchoActor as Addressable>::NAMESPACE).expect("the echo namespace is a path"),
+            recipient: ErasedActorPath::new(<TestEchoActor as Addressable>::NAMESPACE)
+                .expect("the echo namespace is a path"),
             kind: <TestEchoRequest as Kind>::ID,
             payload: TestEchoRequest { value: 42 }.encode_into_bytes(),
         };
@@ -532,7 +533,8 @@ mod tests {
     /// it without reading it.
     fn echo_forward() -> ForwardEnvelope {
         ForwardEnvelope {
-            recipient: ActorPath::new(<TestEchoActor as Addressable>::NAMESPACE).expect("the echo namespace is a path"),
+            recipient: ErasedActorPath::new(<TestEchoActor as Addressable>::NAMESPACE)
+                .expect("the echo namespace is a path"),
             kind: <TestEchoRequest as Kind>::ID,
             payload: TestEchoRequest { value: 1 }.encode_into_bytes(),
         }

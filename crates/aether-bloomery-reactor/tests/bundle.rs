@@ -8,7 +8,7 @@ use aether_bloomery_kinds::{
     BUNDLE_NAMESPACE, Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, Program, REACTORS_SECTION,
     Ref, SetHead, Status, StatusQuery, Tree, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
 };
-use aether_data::{ActorPath, Kind, Storage, StorageData};
+use aether_data::{ErasedActorPath, Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::LoadComponent;
@@ -34,7 +34,7 @@ fn fold_fail(seq: u64) -> JournalEntry {
     JournalEntry { seq, kind: REACTOR_FOLD_FAIL_KIND, cause: None, recorded_at_millis: 0, bytes: Vec::new() }
 }
 
-fn load_root(harness: &mut SubstrateHarness, wasm_path: &Path) -> (String, ErasedActorRef, ActorPath) {
+fn load_root(harness: &mut SubstrateHarness, wasm_path: &Path) -> (String, ErasedActorRef, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let digest = artifact_digest(OpaqueBytes::ID, &wasm).to_string();
     let loaded = harness.load_any(&LoadComponent {

@@ -422,7 +422,7 @@ and name. A native actor in a native-only crate, such as a Bloomery engine's
 journal owner or bundle driver, has no type a guest can write, and an
 `Instanced` actor cannot be declared at all. A guest reaches such an actor by
 its path instead: the operator names it in the component's config as an
-`ActorPath`, validated on decode, and the guest proves it once with
+`ErasedActorPath`, validated on decode, and the guest proves it once with
 `ctx.resolve_path(&path)` ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)
 §3):
 
