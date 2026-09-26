@@ -16,7 +16,8 @@ pub struct ClippyInput {
     /// `(aether.workspace.environment, <platform>)`.
     pub environment: Ref<Environment>,
     /// The `cargo vendor` tree for the source's `Cargo.lock`, mounted
-    /// read-only at `/vendor`; an empty tree serves a crate with no
-    /// dependencies.
+    /// read-only at `/vendor`: the `Vendored.tree` of a `vendor.cargo`
+    /// transition over a source with the same `Cargo.lock`. An empty tree
+    /// serves a crate with no dependencies.
     pub vendor: Ref<Tree>,
 }
