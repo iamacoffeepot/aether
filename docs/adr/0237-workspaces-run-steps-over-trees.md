@@ -7,6 +7,7 @@
 - **Amended:** 2026-09-25 — RunResult gains Failed { detail } for executor failures during a run; like Exhausted it never reaches the program.
 - **Amended:** 2026-09-25 — imports are an `Import` request on the workspace actor: it pulls a digest-pinned image through the Engine API and decodes its exported filesystem into a tree in the journal, under userland rules and `Config` bounds; no tarball, host path, or host pipe is read. Open question 3 is resolved (a new `aether-workspace` crate; the tar codec stays in `aether-bloomery-tar`). Open question 2 waits for a second executor. Open question 1's single writer gains a streaming artifact store the journal hands the workspace actor.
 - **Amended:** 2026-09-25 — decision 9: the allotment estimate is keyed on what the run does, not who asked. The key is the digest of the run's environment and its ordered steps (each step's tool, args and env). A `Run` carries no program identity, and the steps describe the work directly, so identical steps share an estimate and different args get their own.
+- **Amended:** 2026-09-25 — decision 3: an image carries only a bare, reusable layer (the base userland or the toolchain), never a snapshot of content that changes between runs. A source tree enters through the operator command `import-commit <commit>`, which reads the commit's tracked files outside the engine and stages them as a tree through the journal's fenced `publish`. The engine never reads Git or a host path, and no image or allowlist carries source.
 
 Amends [ADR-0229](0229-program-cap-apis-are-extra-run-arguments.md) (the
 closed, sealed set of program APIs, `Http` / `Process`, mapped through
@@ -203,6 +204,21 @@ the sandbox, or they make the program `Sampled`.
    operator or consumed by the merge program, and the actor records no
    event.)*
 
+   *(Amended 2026-09-25: an image carries only a bare, reusable layer, the
+   base userland or the toolchain, never a snapshot of content that changes
+   between runs. A source tree does not enter through `Import`. The operator
+   command `import-commit <commit>` runs outside the engine: it reads exactly
+   the files the commit tracks, builds their blobs and tree nodes in canonical
+   order, and stages them with the journal's fenced
+   `aether.bloomery.journal.publish`, in batches the RPC frame bounds, the
+   last of which moves a source head to the root tree. The engine never reads
+   Git, a repository, or a host path; only the tree crosses. Untracked files,
+   build output, and ignored secrets are absent by construction, so no
+   allowlist exists. The tree is identified by its digest, and the command
+   reports the commit it read beside it. The work a Bloomery run does on a
+   source tree produces new trees in the journal, so only changes made outside
+   the journal are ever imported.)*
+
 4. **The sandbox pins what it can; the rest makes a program Sampled.**
 
    | Hidden input | Handling |
@@ -338,6 +354,10 @@ Prerequisites (follow-on issues):
    *(Amended 2026-09-25: the native import path is the workspace actor's
    `Import` request (decision 3).)*
 
+   *(Amended 2026-09-25: a source tree is staged by `import-commit`, not
+   imported (decision 3). The source image recipe and the `source.select`
+   program that took the checkout out of an imported image are retired.)*
+
 Deferred:
 
 - **Blob bytes out of the SQLite file.** The journal stays one SQLite file:
@@ -445,3 +465,9 @@ Deferred:
    depends on `aether-bloomery-kinds`; its runtime half holds the actor and
    depends on `aether-bloomery-journal` and on `aether-bloomery-tar`, which
    stays its own crate.)*
+4. **Where a source tree's commit is recorded.** `import-commit` reports
+   the commit beside the tree digest, and the journal holds only the tree and
+   the head move. Proposed: record nothing more. The head is named for the
+   line of work it tracks, a proof cites the tree digest, and a new record
+   kind or a commit-named head would add an event for a fact the operator
+   already holds.
