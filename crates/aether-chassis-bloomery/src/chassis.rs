@@ -23,7 +23,7 @@ use std::io;
 use std::mem;
 use std::sync::Arc;
 
-use aether_bloomery_journal::{ArtifactStore, Journal};
+use aether_bloomery_journal::{ArtifactStore, Journal, ReadCacheBudget};
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
     chassis_residual_knobs, install_frame_size, with_rpc_server,
@@ -95,7 +95,8 @@ impl BloomeryChassis {
         // `--describe` / `--print-config` exit in `run_chassis_main`'s prelude
         // before `build` is called, so they never reach this and still answer
         // with no journal configured.
-        let (root, limit) = mem::take(&mut env.bloomery).to_journal_and_limit()?;
+        let bloomery = mem::take(&mut env.bloomery);
+        let (root, limit) = bloomery.to_journal_and_limit()?;
         // Open the root before wasmtime too: a root another engine holds, or
         // one that cannot be created, refuses boot here, naming the root.
         let journal = Journal::open(&root).map_err(|error| {
@@ -114,7 +115,7 @@ impl BloomeryChassis {
         let builder = composed::<Self>(&mut boot, base, env)?;
         validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         let built = builder.driver(SignalDriverCapability::new(boot)).build()?;
-        let mounted = mount::mount(&built, journal, limit)?;
+        let mounted = mount::mount(&built, journal, limit, ReadCacheBudget::new(bloomery.read_cache_bytes))?;
         tracing::info!(
             journal_root = %root.display(),
             journal = ?mounted.journal,

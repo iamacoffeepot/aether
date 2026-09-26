@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use aether_bloomery_journal::{Batch, Clock, Draft, Journal, JournalActor, Seq};
+use aether_bloomery_journal::{Batch, Clock, Draft, Journal, JournalActor, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{JournalEntry, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult};
 use aether_data::Kind;
 use aether_substrate::Subname;
@@ -84,7 +84,7 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
     let alpha = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("alpha"),
-            (),
+            ReadCacheBudget::default(),
             Journal::open(&alpha_path).expect("open the journal root"),
         )
         .finish()
@@ -92,7 +92,7 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
     let beta = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("beta"),
-            (),
+            ReadCacheBudget::default(),
             Journal::open(&beta_path).expect("open the journal root"),
         )
         .finish()

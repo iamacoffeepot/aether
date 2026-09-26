@@ -82,7 +82,7 @@ pub fn reply<K: Kind>(rx: &mpsc::Receiver<OwnedDispatch>, correlation: u64) -> K
 
 /// One member as the probe read it: the digest its sender claims, its kind, and its payload
 /// loaded against that claim.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
     pub digest: Digest,
     pub kind: KindId,
@@ -98,7 +98,7 @@ impl Member {
 }
 
 /// One reply the probe decoded, projected to plain values.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Probed {
     /// A `ReadArtifactResult::Found`.
     Artifact(Member),

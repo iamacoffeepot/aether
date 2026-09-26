@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use aether_bloomery_journal::{Batch, Journal, JournalActor, JournalReader, Seq};
+use aether_bloomery_journal::{Batch, Journal, JournalActor, JournalReader, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
     Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_blob, artifact_digest,
 };
@@ -119,7 +119,7 @@ fn named_owners_return_isolated_artifacts_with_order_independent_correlation() {
     let alpha = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("artifact_alpha"),
-            (),
+            ReadCacheBudget::default(),
             Journal::open(&alpha_path).expect("open the journal root"),
         )
         .finish()
@@ -127,7 +127,7 @@ fn named_owners_return_isolated_artifacts_with_order_independent_correlation() {
     let beta = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("artifact_beta"),
-            (),
+            ReadCacheBudget::default(),
             Journal::open(&beta_path).expect("open the journal root"),
         )
         .finish()
@@ -168,7 +168,7 @@ fn text_kind_and_absent_digest_are_distinct_from_opaque_or_empty_bytes() {
     let owner = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("artifact_text"),
-            (),
+            ReadCacheBudget::default(),
             Journal::open(&path).expect("open the journal root"),
         )
         .finish()
@@ -202,7 +202,7 @@ fn changed_payload_and_short_prefix_are_errors_without_journal_writes() {
     let mismatch_owner = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("artifact_mismatch"),
-            (),
+            ReadCacheBudget::default(),
             Journal::open(&mismatch_path).expect("open the journal root"),
         )
         .finish()
@@ -210,7 +210,7 @@ fn changed_payload_and_short_prefix_are_errors_without_journal_writes() {
     let short_owner = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("artifact_short"),
-            (),
+            ReadCacheBudget::default(),
             Journal::open(&short_path).expect("open the journal root"),
         )
         .finish()

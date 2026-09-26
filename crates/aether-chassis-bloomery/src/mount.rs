@@ -11,7 +11,7 @@ use std::io;
 
 use aether_actor::ActorRef;
 use aether_bloomery_driver::{BundleDriver, DriverParams};
-use aether_bloomery_journal::{Journal, JournalActor};
+use aether_bloomery_journal::{Journal, JournalActor, ReadCacheBudget};
 use aether_bloomery_kinds::ClosureLimit;
 use aether_substrate::Subname;
 use aether_substrate::chassis::builder::BuiltChassis;
@@ -31,13 +31,14 @@ pub struct Mounted {
     pub driver: ActorRef<BundleDriver>,
 }
 
-/// Spawn the journal owner over `journal` under `Subname::Named("journal")`
-/// and the bundle driver under `Subname::Named("driver")` over the journal's
-/// born reference, so the engine answers as `aether.bloomery.journal:journal`
-/// and `aether.bloomery.driver:driver`, and hand both references back as
+/// Spawn the journal owner over `journal` with the `read_cache` budget under
+/// `Subname::Named("journal")` and the bundle driver under
+/// `Subname::Named("driver")` over the journal's born reference, so the engine
+/// answers as `aether.bloomery.journal:journal` and
+/// `aether.bloomery.driver:driver`, and hand both references back as
 /// [`Mounted`].
 ///
-/// Takes the already-opened journal and lowered limit rather than the config:
+/// Takes the already-opened journal and lowered budgets rather than the config:
 /// `BloomeryChassis::build_mounted` lowers the knobs and opens the root before
 /// it stands up the substrate, so an unset or held journal root never reaches
 /// this seam.
@@ -49,9 +50,10 @@ pub fn mount(
     built: &BuiltChassis<BloomeryChassis>,
     journal: Journal,
     limit: ClosureLimit,
+    read_cache: ReadCacheBudget,
 ) -> Result<Mounted, BootError> {
     let journal = built
-        .spawn_actor::<JournalActor>(Subname::Named("journal"), (), journal)
+        .spawn_actor::<JournalActor>(Subname::Named("journal"), read_cache, journal)
         .finish()
         .map_err(|error| spawn_failed("aether.bloomery.journal:journal", &error))?;
     let driver = built

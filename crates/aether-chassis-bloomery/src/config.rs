@@ -1,15 +1,17 @@
-//! The bloomery chassis knobs: the journal root and the closure byte budget.
+//! The bloomery chassis knobs: the journal root, the closure byte budget, and
+//! the read-cache budget.
 //!
 //! [`BloomeryConfig`] is the chassis's own derive-`Config` member, resolved off
 //! the source stack into [`BloomeryEnv`](crate::chassis::BloomeryEnv) and declared
 //! on the builder by [`compose`](aether_substrate::chassis::BootableChassis::compose),
-//! so the known-key sweep and `--print-config` list both knobs. `build` lowers
-//! its value to the typed pair the journal owner and the bundle driver spawn
+//! so the known-key sweep and `--print-config` list every knob. `build` lowers
+//! its value to the typed values the journal owner and the bundle driver spawn
 //! over before it stands up the substrate, so a refused knob costs no boot.
 
 use std::io;
 use std::path::PathBuf;
 
+use aether_bloomery_journal::ReadCacheBudget;
 use aether_bloomery_kinds::ClosureLimit;
 use aether_substrate::chassis::error::BootError;
 
@@ -40,6 +42,16 @@ pub struct BloomeryConfig {
     /// refused value is a boot error naming the key, never a panic.
     #[config(default = 4_294_967_296u64)]
     pub closure_limit_bytes: u64,
+    /// Byte budget for the journal owner's read cache: the members it checked
+    /// in for closure and artifact reads, kept resident so a later read skips
+    /// their files and hashes.
+    ///
+    /// Charged per check-in allocation, so a cached member counts its whole
+    /// slab, and the least recently used slab is evicted first. `0` disables
+    /// the cache. The default, 2 GiB, fits one environment plus a source tree
+    /// read as one slab.
+    #[config(default = 2_147_483_648u64)]
+    pub read_cache_bytes: u64,
 }
 
 impl Default for BloomeryConfig {
@@ -49,7 +61,11 @@ impl Default for BloomeryConfig {
         // `Default` would leave `closure_limit_bytes: 0`, which
         // `ClosureLimit::new` refuses — the honest default is stated rather
         // than derived, the way `impl Default for RuntimeConfig` does.
-        Self { journal: None, closure_limit_bytes: ClosureLimit::MAX_BYTES }
+        Self {
+            journal: None,
+            closure_limit_bytes: ClosureLimit::MAX_BYTES,
+            read_cache_bytes: ReadCacheBudget::DEFAULT_BYTES,
+        }
     }
 }
 
@@ -84,6 +100,7 @@ impl BloomeryConfig {
 #[cfg(test)]
 mod tests {
     use super::BloomeryConfig;
+    use aether_bloomery_journal::ReadCacheBudget;
     use aether_bloomery_kinds::ClosureLimit;
     use aether_substrate::config::ConfigSources;
 
@@ -96,6 +113,7 @@ mod tests {
         let mut sources = ConfigSources::new(None);
         let mut config = sources.resolve::<BloomeryConfig>().expect("resolve off an empty stack");
         assert_eq!(config.closure_limit_bytes, ClosureLimit::MAX_BYTES);
+        assert_eq!(config.read_cache_bytes, ReadCacheBudget::DEFAULT_BYTES);
         config.journal = Some("journal".to_owned());
         let (_, limit) = config.to_journal_and_limit().expect("the default limit lowers");
         assert_eq!(limit.get(), ClosureLimit::MAX_BYTES);

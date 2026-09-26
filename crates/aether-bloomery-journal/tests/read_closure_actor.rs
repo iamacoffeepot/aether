@@ -1,15 +1,16 @@
 //! A named journal owner answers closure reads with each of its replies.
 //! Both off-dispatcher reads, `ReadClosure` and `ReadArtifact`, keep other journal mail answered
-//! while one is blocked.
+//! while one is blocked, and both serve members the read cache still holds without their files.
 
 mod actor_support;
 
 use std::error::Error;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use aether_bloomery_journal::{Batch, Clock, Digest, Journal, JournalActor, OpaqueBytes, Ref, Seq};
+use aether_bloomery_journal::{Batch, Clock, Digest, Journal, JournalActor, OpaqueBytes, ReadCacheBudget, Ref, Seq};
 use aether_bloomery_kinds::{
     ClosureLimit, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, ReadHead, ReadHeadResult,
 };
@@ -37,7 +38,14 @@ struct Node {
 /// total blob length.
 fn seed(journal_root: &Path) -> Result<(Vec<Member>, u64), Box<dyn Error>> {
     let mut batch = Batch::new();
-    let leaf = batch.stage_bytes(b"closure leaf");
+    let seeded = stage(&mut batch, b"closure leaf")?;
+    Journal::open_with_clock(journal_root, Box::new(FixedClock))?.append(Seq(0), &batch)?;
+    Ok(seeded)
+}
+
+/// Stage root → a leaf holding `leaf_text` into `batch`, returning what [`seed`] returns.
+fn stage(batch: &mut Batch, leaf_text: &[u8]) -> Result<(Vec<Member>, u64), Box<dyn Error>> {
+    let leaf = batch.stage_bytes(leaf_text);
     let root = batch.stage_encoded(&Node { leaf })?;
     let mut members = Vec::new();
     let mut total_bytes = 0;
@@ -46,9 +54,19 @@ fn seed(journal_root: &Path) -> Result<(Vec<Member>, u64), Box<dyn Error>> {
         total_bytes += u64::try_from(blob.len())?;
         members.push(Member { digest, kind, payload: Ok(blob[8..].to_vec()) });
     }
-
-    Journal::open_with_clock(journal_root, Box::new(FixedClock))?.append(Seq(0), &batch)?;
     Ok((members, total_bytes))
+}
+
+/// The summed payload lengths of `members`, which is what the read cache charges their group.
+fn payload_bytes(members: &[Member]) -> Result<u64, Box<dyn Error>> {
+    members.iter().map(|member| Ok(u64::try_from(member.payload.as_ref().map_or(0, Vec::len))?)).sum()
+}
+
+/// Delete the blob file stored under `digest`.
+fn remove_blob(journal_root: &Path, digest: Digest) -> Result<(), Box<dyn Error>> {
+    let hex = digest.to_string();
+    fs::remove_file(journal_root.join("blobs").join(&hex[..2]).join(&hex))?;
+    Ok(())
 }
 
 #[test]
@@ -67,7 +85,7 @@ fn read_closure_replies_found_too_large_and_missing() -> Result<(), Box<dyn Erro
     let journal = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("closure"),
-            (),
+            ReadCacheBudget::default(),
             Journal::open(&path).expect("open the journal root"),
         )
         .finish()
@@ -98,6 +116,91 @@ fn read_closure_replies_found_too_large_and_missing() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+#[test]
+fn a_cached_member_is_served_without_its_file() -> Result<(), Box<dyn Error>> {
+    // Catches a closure read that ignores the read cache and rereads every member file, and an
+    // artifact read that does not consult it: both files are gone before the second reads.
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("journal");
+    let (members, _) = seed(&path)?;
+    let root = members[0].digest;
+    let leaf = members[1].clone();
+
+    let (registry, mailer) = bare_substrate();
+    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let journal = chassis
+        .spawn_actor::<JournalActor>(
+            Subname::Named("cached"),
+            ReadCacheBudget::default(),
+            Journal::open(&path).expect("open the journal root"),
+        )
+        .finish()
+        .expect("journal birth");
+    let (arrivals, probe_rx) = mpsc::channel();
+    let probe =
+        chassis.spawn_actor::<BlobProbe>(Subname::Named("cached_probe"), (), arrivals).finish().expect("probe birth");
+
+    let expected = Probed::Closure { root, members };
+    let generous = ClosureLimit::new(ClosureLimit::MAX_BYTES)?;
+    request(&registry, journal, probe.erase(), 1, &ReadClosure { root, limit_bytes: generous });
+    let arrival = probe_rx.recv_timeout(Duration::from_secs(2)).expect("first closure reply within two seconds");
+    assert_eq!(arrival, (1, expected.clone()));
+
+    remove_blob(&path, root)?;
+    remove_blob(&path, leaf.digest)?;
+    request(&registry, journal, probe.erase(), 2, &ReadClosure { root, limit_bytes: generous });
+    let arrival = probe_rx.recv_timeout(Duration::from_secs(2)).expect("second closure reply within two seconds");
+    assert_eq!(arrival, (2, expected));
+
+    request(&registry, journal, probe.erase(), 3, &ReadArtifact { digest: leaf.digest });
+    let arrival = probe_rx.recv_timeout(Duration::from_secs(2)).expect("artifact reply within two seconds");
+    assert_eq!(arrival, (3, Probed::Artifact(leaf)));
+    Ok(())
+}
+
+#[test]
+fn an_evicted_member_is_read_from_disk_again() -> Result<(), Box<dyn Error>> {
+    // Catches an ignored budget (reading B evicts nothing, so A still hits after its leaf file is
+    // gone) and a stale entry kept past its group's eviction.
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("journal");
+    let mut batch = Batch::new();
+    let (first, _) = stage(&mut batch, b"closure leaf a")?;
+    let (second, _) = stage(&mut batch, b"closure leaf b")?;
+    Journal::open_with_clock(&path, Box::new(FixedClock))?.append(Seq(0), &batch)?;
+    let budget = ReadCacheBudget::new(payload_bytes(&first)?.max(payload_bytes(&second)?));
+    let (first_root, first_leaf, second_root) = (first[0].digest, first[1].digest, second[0].digest);
+
+    let (registry, mailer) = bare_substrate();
+    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let journal = chassis
+        .spawn_actor::<JournalActor>(
+            Subname::Named("evicting"),
+            budget,
+            Journal::open(&path).expect("open the journal root"),
+        )
+        .finish()
+        .expect("journal birth");
+    let (arrivals, probe_rx) = mpsc::channel();
+    let probe =
+        chassis.spawn_actor::<BlobProbe>(Subname::Named("evicting_probe"), (), arrivals).finish().expect("probe birth");
+
+    let generous = ClosureLimit::new(ClosureLimit::MAX_BYTES)?;
+    request(&registry, journal, probe.erase(), 1, &ReadClosure { root: first_root, limit_bytes: generous });
+    let arrival = probe_rx.recv_timeout(Duration::from_secs(2)).expect("first closure reply within two seconds");
+    assert_eq!(arrival, (1, Probed::Closure { root: first_root, members: first }));
+
+    request(&registry, journal, probe.erase(), 2, &ReadClosure { root: second_root, limit_bytes: generous });
+    let arrival = probe_rx.recv_timeout(Duration::from_secs(2)).expect("second closure reply within two seconds");
+    assert_eq!(arrival, (2, Probed::Closure { root: second_root, members: second }));
+
+    remove_blob(&path, first_leaf)?;
+    request(&registry, journal, probe.erase(), 3, &ReadClosure { root: first_root, limit_bytes: generous });
+    let arrival = probe_rx.recv_timeout(Duration::from_secs(2)).expect("reread closure reply within two seconds");
+    assert_eq!(arrival, (3, Probed::NotFound));
+    Ok(())
+}
+
 /// Opens the FIFO's write end without blocking when dropped, so a run whose walk is still parked in
 /// `File::open` on the read end gets released during unwinding instead of hanging teardown. With no
 /// reader waiting the open fails, which is fine: nothing needs releasing.
@@ -119,7 +222,6 @@ impl Drop for ReleaseFifo<'_> {
 #[cfg(unix)]
 fn replace_blob_with_fifo(journal_root: &Path, digest: Digest) -> Result<PathBuf, Box<dyn Error>> {
     use std::ffi::CString;
-    use std::fs;
     use std::io;
     use std::os::unix::ffi::OsStrExt;
 
@@ -155,7 +257,7 @@ fn a_blocked_closure_read_does_not_delay_a_read_artifact() -> Result<(), Box<dyn
     let journal = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("blocked"),
-            (),
+            ReadCacheBudget::default(),
             Journal::open(&path).expect("open the journal root"),
         )
         .finish()
@@ -204,7 +306,7 @@ fn a_blocked_read_artifact_does_not_delay_other_journal_mail() -> Result<(), Box
     let journal = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("blocked_artifact"),
-            (),
+            ReadCacheBudget::default(),
             Journal::open(&path).expect("open the journal root"),
         )
         .finish()
