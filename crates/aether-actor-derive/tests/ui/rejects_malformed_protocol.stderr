@@ -1,0 +1,41 @@
+error: #[protocol] takes no arguments
+  --> tests/ui/rejects_malformed_protocol.rs:10:12
+   |
+10 | #[protocol(includes(Pingable))]
+   |            ^^^^^^^^^^^^^^^^^^
+
+error: a protocol row has no receiver: `fn name(mail: K) -> O;`
+  --> tests/ui/rejects_malformed_protocol.rs:17:17
+   |
+17 |     fn receiver(&self, mail: Ping) -> Pong;
+   |                 ^^^^^
+
+error: a protocol row has no body: `fn name(mail: K) -> O;`
+  --> tests/ui/rejects_malformed_protocol.rs:18:25
+   |
+18 |     fn body(mail: Note) {}
+   |                         ^^
+
+error: a protocol row takes no generics
+  --> tests/ui/rejects_malformed_protocol.rs:19:15
+   |
+19 |     fn generic<T>(mail: Tick);
+   |               ^^^
+
+error: a protocol row is spelled `-> O`, not `-> Pending<O>`; a target's deferred `-> Pending<O>` handler covers the row `O`
+  --> tests/ui/rejects_malformed_protocol.rs:20:29
+   |
+20 |     fn deferred(mail: Load) -> Pending<Loaded>;
+   |                             ^^^^^^^^^^^^^^^^^^
+
+error: this kind already has a row in this protocol, `receiver`: a protocol lists a kind once
+  --> tests/ui/rejects_malformed_protocol.rs:21:24
+   |
+21 |     fn duplicate(mail: Ping);
+   |                        ^^^^
+
+error: a protocol declares at least one row: `fn name(mail: K) -> O;` or `fn name(mail: K);`
+  --> tests/ui/rejects_malformed_protocol.rs:25:7
+   |
+25 | trait Empty {}
+   |       ^^^^^

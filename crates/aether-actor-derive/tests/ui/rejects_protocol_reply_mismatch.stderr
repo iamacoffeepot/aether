@@ -1,0 +1,57 @@
+error[E0271]: type mismatch resolving `<WrongReply as Contract<Ping>>::Reply == Pong`
+  --> tests/ui/rejects_protocol_reply_mismatch.rs:94:22
+   |
+94 |     assert_covered::<Pinger, WrongReply>();
+   |                      ^^^^^^ type mismatch resolving `<WrongReply as Contract<Ping>>::Reply == Pong`
+   |
+note: expected this to be `Pong`
+  --> tests/ui/rejects_protocol_reply_mismatch.rs:56:66
+   |
+56 |     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, mail: Ping) -> Other {
+   |                                                                  ^^^^^
+   = note: required for `WrongReply` to implement `CoversRows<(Row<Ping, Pong>,)>`
+   = note: required for `Pinger` to implement `CoveredBy<WrongReply>`
+note: required by a bound in `assert_covered`
+  --> tests/ui/rejects_protocol_reply_mismatch.rs:91:22
+   |
+91 | fn assert_covered<P: CoveredBy<R>, R>() {}
+   |                      ^^^^^^^^^^^^ required by this bound in `assert_covered`
+
+error[E0271]: type mismatch resolving `<SilentForSingle as Contract<Ping>>::Reply == Pong`
+  --> tests/ui/rejects_protocol_reply_mismatch.rs:95:22
+   |
+95 |     assert_covered::<Pinger, SilentForSingle>();
+   |                      ^^^^^^ type mismatch resolving `<SilentForSingle as Contract<Ping>>::Reply == Pong`
+   |
+note: expected this to be `Pong`
+  --> tests/ui/rejects_protocol_reply_mismatch.rs:63:1
+   |
+63 | #[actor]
+   | ^^^^^^^^
+   = note: required for `SilentForSingle` to implement `CoversRows<(Row<Ping, Pong>,)>`
+   = note: required for `Pinger` to implement `CoveredBy<SilentForSingle>`
+note: required by a bound in `assert_covered`
+  --> tests/ui/rejects_protocol_reply_mismatch.rs:91:22
+   |
+91 | fn assert_covered<P: CoveredBy<R>, R>() {}
+   |                      ^^^^^^^^^^^^ required by this bound in `assert_covered`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0271]: type mismatch resolving `<SingleForSilent as Contract<Note>>::Reply == Silent`
+  --> tests/ui/rejects_protocol_reply_mismatch.rs:96:22
+   |
+96 |     assert_covered::<Noter, SingleForSilent>();
+   |                      ^^^^^ type mismatch resolving `<SingleForSilent as Contract<Note>>::Reply == Silent`
+   |
+note: expected this to be `Silent`
+  --> tests/ui/rejects_protocol_reply_mismatch.rs:86:66
+   |
+86 |     fn on_note(&mut self, _ctx: &mut WasmCtx<'_>, mail: Note) -> Pong {
+   |                                                                  ^^^^
+   = note: required for `SingleForSilent` to implement `CoversRows<(Row<Note, Silent>,)>`
+   = note: required for `Noter` to implement `CoveredBy<SingleForSilent>`
+note: required by a bound in `assert_covered`
+  --> tests/ui/rejects_protocol_reply_mismatch.rs:91:22
+   |
+91 | fn assert_covered<P: CoveredBy<R>, R>() {}
+   |                      ^^^^^^^^^^^^ required by this bound in `assert_covered`

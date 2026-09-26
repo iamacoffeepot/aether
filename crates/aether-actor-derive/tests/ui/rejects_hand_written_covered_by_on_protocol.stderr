@@ -1,0 +1,9 @@
+error[E0119]: conflicting implementations of trait `CoveredBy<Target>` for type `Pinger`
+  --> tests/ui/rejects_hand_written_covered_by_on_protocol.rs:32:1
+   |
+32 | impl CoveredBy<Target> for Pinger {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: conflicting implementation in crate `aether_actor`:
+           - impl<P, R> CoveredBy<R> for P
+             where P: Protocol, R: CoversRows<<P as Protocol>::Rows>;

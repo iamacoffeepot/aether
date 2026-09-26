@@ -126,7 +126,7 @@ The rules:
 | § | Decision | On main |
 |---|---|---|
 | 1 | Static reply check on typed sends | not built |
-| 2 | `#[protocol]` and `CoveredBy` | not built; per-handler `Contract<K>` rows and per-actor `Contracts::CONTRACTS` are built |
+| 2 | `#[protocol]` and `CoveredBy` | built: `Row`, `RowReply`, `RowSet`, `CoversRows`, `Protocol`, `CoveredBy` (`crates/aether-actor/src/model/protocol.rs`) and `#[protocol]` (`crates/aether-actor-derive/src/protocol.rs`), over the per-handler `Contract<K>` rows and per-actor `Contracts::CONTRACTS`; `includes` and protocol-to-protocol coverage are not built |
 | 3 | `ProtocolRef<P>`, `ProtocolAddress<P>`, narrowing, receipt | not built |
 | 4 | Published rows, no erased send verb, the cast, build skew | not built |
 | 5 | Replace preserves contracts | built for handler rows: `crates/aether-data/src/contract.rs`, `crates/aether-component/src/trampoline/runtime/contract.rs`; the fallback rule is not |
@@ -217,57 +217,89 @@ pub trait MeshLoader {
 ```
 
 A signature with no return type is a silent row and `-> O` is a single row; a
-target's deferred `-> Pending<O>` handler has the row `O` and covers it. There
-is no spelling for a manual row (§6). The method name labels the row in rustdoc
-and diagnostics; a target matches rows by kind, never by method name. Each
-parameter needs a name or `_`, because an attribute's input must parse.
+target's deferred `-> Pending<O>` handler has the row `O` and covers it, and
+`-> Pending<O>` in a protocol is refused. There is no spelling for a manual row
+(§6). The method name labels the row in the protocol's rustdoc; a target
+matches rows by kind, never by method name. Each parameter needs a name or `_`,
+because an attribute's input must parse.
 
 The attribute replaces the trait with a unit struct, so the trait never exists
-as a trait object and a protocol costs nothing at run time. It expands to:
+as a trait object and a protocol costs nothing at run time. The struct's docs
+list each row under its method name. The expansion is only a declaration of the
+rows as a type:
 
 ```rust
 pub struct MeshLoader;
 
-impl Contract<LoadMesh> for MeshLoader { type Reply = MeshLoadResult; }
-impl Contract<Ping> for MeshLoader { type Reply = Pong; }
-impl Contract<SetMode> for MeshLoader { type Reply = Silent; }
-
 impl Protocol for MeshLoader {
-    const CONTRACTS: &'static [(KindId, ReplyContract)] = &[
-        (LoadMesh::ID, ReplyContract::One(MeshLoadResult::ID)),
-        (Ping::ID, ReplyContract::One(Pong::ID)),
-        (SetMode::ID, ReplyContract::None),
-    ];
-}
-
-/// Any target whose rows cover this protocol narrows to it.
-impl<R> CoveredBy<R> for MeshLoader
-where
-    R: Contract<LoadMesh, Reply = MeshLoadResult>
-        + Contract<Ping, Reply = Pong>
-        + Contract<SetMode, Reply = Silent>,
-{
+    type Rows = (Row<LoadMesh, MeshLoadResult>, Row<Ping, Pong>, Row<SetMode, Silent>);
 }
 ```
+
+Everything else is computed from `Rows` in `aether-actor`
+(`crates/aether-actor/src/model/protocol.rs`), through sealed traits:
+
+```rust
+/// One row: kind `K` answered with `O`. A type only, never constructed.
+pub struct Row<K, O>(PhantomData<fn() -> (K, O)>);
+
+/// A reply kind or `Silent`. `Undeclared` is left out (§6).
+pub trait RowReply: ReplyShape + Sealed {}
+
+/// Tuples of one to 16 rows.
+pub trait RowSet: Sealed {
+    const CONTRACTS: &'static [(KindId, ReplyContract)];
+}
+
+/// One blanket per tuple arity, the only place coverage is computed.
+pub trait CoversRows<Rows>: Sealed<Rows> {}
+impl<T, K1: Kind, O1: RowReply, /* … */> CoversRows<(Row<K1, O1>, /* … */)> for T
+where
+    T: Contract<K1, Reply = O1>, /* … */
+{
+}
+
+pub trait Protocol {
+    type Rows: RowSet;
+}
+
+/// Any target whose rows cover the protocol narrows to it.
+pub trait CoveredBy<R>: Sealed<R> {}
+impl<P: Protocol, R: CoversRows<P::Rows>> CoveredBy<R> for P {}
+```
+
+`Protocol` is safe to implement by hand, because an impl only declares rows:
+the rows' list and who covers them follow from the declaration, so no impl can
+state either one differently. `CoveredBy` has only its blanket: a hand-written
+impl on a type that is not a protocol fails the private seal, and on a protocol
+it collides with the blanket.
 
 The trait solver decides coverage. A target covers a row only with the same
 kind and the exact reply type: a silent row is covered only by a silent
 handler, and a row `O` only by a handler that replies `O`. A kind the target
 handles only through `#[fallback]` has no row and never covers. `CoveredBy<R>`
-holds for any actor whose `#[actor]` rows match and for any protocol that
-includes this one. `CONTRACTS` reuses the manifest's `ReplyContract`, so the
-const list and a live target's published rows (§4) compare in one vocabulary,
-exactly as `#[actor]`'s `Contracts::CONTRACTS` already do.
+holds for any actor whose `#[actor]` rows match. `RowSet::CONTRACTS` maps each
+row as `#[actor]`'s `Contracts::CONTRACTS` does, `One(O::ID)` for a row `O` and
+`None` for a silent row, so the protocol's list and a live target's published
+rows (§4) compare in one vocabulary.
 
-**Composition.** `#[protocol(includes(Pingable, Describable))]` adds the
-included protocols' rows to the `Contract` impls, the `CONTRACTS` list, and the
-`CoveredBy` where-clause. A proc macro cannot read another item, so every
+A protocol implements no `Contract<K>`. Deriving one from `Rows` needs a
+type-level lookup of `K` in the tuple, and a blanket impl cannot express it:
+positional impls overlap (`E0119`) when two rows could share a kind, and an
+inferred row index is an unconstrained impl parameter (`E0207`). Two places
+need a protocol's row for `K`: a `ProtocolRef<P>` send, and narrowing, which
+needs one protocol covered by another (§3). Both find the row with a
+method-level bound on `P::Rows` whose row index is inferred at the call site.
+
+**Composition.** `#[protocol(includes(Pingable, Describable))]` concatenates the
+included protocols' rows into `Rows`, so the `CONTRACTS` list and coverage
+follow from the concatenation. A proc macro cannot read another item, so every
 `#[protocol]` also emits a hidden `macro_rules!` bridge carrying its rows, and
 `includes` invokes it, the technique ADR-0169 uses to paste a handler set's
 markers. The bridge carries the protocol's own path beside its rows, and the
 expansion dedupes by protocol, so a protocol reached twice through a diamond of
 `includes` contributes its rows once. Two distinct protocols that list the same
-kind are a conflicting-impl error.
+kind are refused, as a kind listed twice in one protocol is.
 
 ### 3. Protocol links
 
