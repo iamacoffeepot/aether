@@ -7,7 +7,7 @@
 
 use std::sync::mpsc;
 
-use aether_bloomery_kinds::{CallOutcome, MoveHeadResult, Processed};
+use aether_bloomery_kinds::{CallOutcome, MoveHeadResult, Processed, PublishResult};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
@@ -19,6 +19,8 @@ pub enum Reply {
     Call(Box<CallOutcome>),
     /// The journal owner's answer to a `MoveHead`.
     MoveHead(MoveHeadResult),
+    /// The journal owner's answer to a `Publish`.
+    Publish(PublishResult),
     /// The bundle driver's answer to an `AwaitProcessed`.
     Processed(Processed),
 }
@@ -57,6 +59,11 @@ impl NativeActor for ReplySink {
     #[aether_actor::handler::single]
     fn on_move_head_result(&mut self, ctx: &mut NativeCtx<'_>, result: MoveHeadResult) {
         self.forward(ctx, Reply::MoveHead(result));
+    }
+
+    #[aether_actor::handler::single]
+    fn on_publish_result(&mut self, ctx: &mut NativeCtx<'_>, result: PublishResult) {
+        self.forward(ctx, Reply::Publish(result));
     }
 
     #[aether_actor::handler::single]

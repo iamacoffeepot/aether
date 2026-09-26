@@ -1,0 +1,26 @@
+[package]
+name = "aether-bloomery-workspace-programs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The bundle of workspace programs: environment.merge, which builds a run environment from the imported base and toolchain trees (ADR-0237)."
+
+# One bundle crate: the cdylib is the program bundle `cargo xtask build-wasm`
+# discovers structurally (cdylib + aether-actor); the rlib lets the native
+# integration test drive `EnvironmentMerge` through `invoke` and the chassis
+# scenario seed its input kind.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-bundle = { path = "../aether-bloomery-bundle" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-program = { path = "../aether-bloomery-program" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+# The identity half only: the `Environment` kind and the values it carries.
+aether-workspace = { path = "../aether-workspace", default-features = false }
+
+[lints]
+workspace = true

@@ -32,6 +32,7 @@ members = [
     "crates/aether-bloomery-bundle-derive",
     "crates/aether-bloomery-driver",
     "crates/aether-bloomery-muse",
+    "crates/aether-bloomery-workspace-programs",
     "crates/aether-workspace",
     "crates/aether-http-derive",
     "crates/aether-data-derive",
@@ -159,6 +160,7 @@ default-members = [
     "crates/aether-bloomery-bundle-derive",
     "crates/aether-bloomery-driver",
     "crates/aether-bloomery-muse",
+    "crates/aether-bloomery-workspace-programs",
     "crates/aether-workspace",
 ]
 exclude = [

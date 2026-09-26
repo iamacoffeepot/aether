@@ -285,6 +285,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery-workspace-programs"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-bundle",
+ "aether-bloomery-kinds",
+ "aether-bloomery-program",
+ "aether-data",
+ "aether-workspace",
+]
+
+[[package]]
 name = "aether-chassis"
 version = "0.3.0-alpha"
 dependencies = [
@@ -323,6 +335,8 @@ dependencies = [
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
  "aether-bloomery-muse",
+ "aether-bloomery-view",
+ "aether-bloomery-workspace-programs",
  "aether-chassis",
  "aether-component",
  "aether-data",

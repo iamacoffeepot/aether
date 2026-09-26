@@ -17,7 +17,9 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use aether_actor::ErasedActorRef;
-use aether_bloomery_kinds::{AwaitProcessed, Call, CallOutcome, MoveHead, MoveHeadResult, Processed, Seq};
+use aether_bloomery_kinds::{
+    AwaitProcessed, Call, CallOutcome, MoveHead, MoveHeadResult, Processed, Publish, PublishResult, Seq,
+};
 use aether_data::Kind;
 use aether_substrate::ReplyTarget;
 
@@ -44,7 +46,7 @@ pub struct Pending<K> {
 }
 
 /// A reply kind the harness's sink receives: [`CallOutcome`],
-/// [`MoveHeadResult`], or [`Processed`].
+/// [`MoveHeadResult`], [`PublishResult`], or [`Processed`].
 pub trait Answer: sealed::Sealed {}
 
 mod sealed {
@@ -75,6 +77,15 @@ impl sealed::Sealed for MoveHeadResult {
     }
 }
 
+impl sealed::Sealed for PublishResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::Publish(result) => Ok(result),
+            other => Err(other),
+        }
+    }
+}
+
 impl sealed::Sealed for Processed {
     fn take(reply: Reply) -> Result<Self, Reply> {
         match reply {
@@ -86,6 +97,7 @@ impl sealed::Sealed for Processed {
 
 impl Answer for CallOutcome {}
 impl Answer for MoveHeadResult {}
+impl Answer for PublishResult {}
 impl Answer for Processed {}
 
 impl BloomeryHarness {
@@ -122,6 +134,18 @@ impl BloomeryHarness {
     /// Panics when no result arrives within thirty seconds.
     pub fn move_head(&mut self, move_head: &MoveHead) -> MoveHeadResult {
         let pending = self.request(self.mounted.journal.erase(), move_head);
+        self.wait(pending)
+    }
+
+    /// Send one fenced `Publish` to the journal owner and wait for its result:
+    /// the one way to move a head whose name exists only at run time, since
+    /// its moves are `RecordedHeadMove`s.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no result arrives within thirty seconds.
+    pub fn publish(&mut self, publish: &Publish) -> PublishResult {
+        let pending = self.request(self.mounted.journal.erase(), publish);
         self.wait(pending)
     }
 
