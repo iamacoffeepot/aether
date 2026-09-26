@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root, child_address};
-use aether_data::{KindId, LoadName, MailId, SessionToken};
+use aether_data::{KindId, LoadName, MailId, ReplyContract, SessionToken};
 use aether_kinds::{CostTail, CostTailResult};
 use crossbeam_channel::Receiver;
 
@@ -22,7 +22,9 @@ use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::registry::effect::RegistryEffectError;
-use crate::mail::registry::{AddressResolutionError, AdoptRefused, ChildRefused, Registry, ResolvedAddress};
+use crate::mail::registry::{
+    AddressResolutionError, AdoptRefused, ChildRefused, Registry, ResolvedAddress, RouteContract,
+};
 use crate::runtime::effect_chain::Uncaused;
 
 macro_rules! chassis_accessors {
@@ -223,6 +225,16 @@ impl<C: Chassis> PassiveChassis<C> {
         self.booted.spawner.mailer().capability_registry().accepts_actor(actor, kind)
     }
 
+    /// The contract the route `actor` proves publishes (ADR-0231 §4): its
+    /// `(KindId, ReplyContract)` rows sorted by kind, and whether it has a
+    /// `#[fallback]`. `None` while the route does not resolve `Live`.
+    ///
+    /// Consumer: `SubstrateHarness::published_contract`.
+    #[must_use]
+    pub fn published_contract(&self, actor: ErasedActorRef) -> Option<(Vec<(KindId, ReplyContract)>, bool)> {
+        self.booted.spawner.mailer().registry().published_contract(actor.id()).map(RouteContract::into_parts)
+    }
+
     /// `actor`'s per-handler cost rows (ADR-0036), filtered by `request`: what
     /// the `actor_cost` MCP tool reports.
     ///
@@ -333,15 +345,21 @@ impl<C: Chassis> PassiveChassis<C> {
 
         let boot = if let Some(recovered) = self.recover_reservation(A::NAMESPACE) {
             recovered.and_then(|MailboxClaim { id: mailbox_id, inbox, wake_slot, .. }| {
-                assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall).map(
-                    |slot| {
-                        // ADR-0230: the Claim-stage reservation published the
-                        // route before the seal and the actor is now wired.
-                        self.booted.references.record(Registry::activated::<A>(mailbox_id));
-                        self.lock_reserved().remove(A::NAMESPACE);
-                        (slot, wake_slot)
-                    },
-                )
+                let slot =
+                    assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall)?;
+                // ADR-0231 §4: the reservation went `Live` at the Claim stage,
+                // before `A` was known, so its route publishes `A`'s contract
+                // now, through the owner.
+                spawner
+                    .mailer()
+                    .registry()
+                    .publish_contract_through_owner(mailbox_id, RouteContract::of::<A>())
+                    .map_err(|error| owner_boot_error(&error))?;
+                // ADR-0230: the Claim-stage reservation published the route
+                // before the seal and the actor is now wired.
+                self.booted.references.record(Registry::activated::<A>(mailbox_id));
+                self.lock_reserved().remove(A::NAMESPACE);
+                Ok((slot, wake_slot))
             })
         } else {
             let mailer = spawner.mailer();
@@ -353,7 +371,7 @@ impl<C: Chassis> PassiveChassis<C> {
                     match assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall)
                     {
                         Ok(slot) => registry
-                            .promote_starting_through_owner(mailbox_id, token, handler)
+                            .promote_starting_through_owner(mailbox_id, token, handler, RouteContract::of::<A>())
                             .map(|()| {
                                 // ADR-0230: the owner has published the route `Live`.
                                 self.booted.references.record(Registry::activated::<A>(mailbox_id));

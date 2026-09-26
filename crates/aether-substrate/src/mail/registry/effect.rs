@@ -16,6 +16,7 @@ use super::mailbox::MailboxEntry;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::canonical_mailbox_id;
+use crate::mail::registry::{ContractBreak, RouteContract};
 use crate::mail::view::View;
 use crate::mail::{CostCell, CostTable, KindId, MailId, MailboxId, SourceAddr};
 use crate::scheduler::SeizeHandle;
@@ -71,17 +72,24 @@ pub struct PreparedRoute {
 
 /// Logical inline-child route prepared by a Wasm host call. The owner stores
 /// only the target mailbox identity; it never clones or retains the parent's
-/// endpoint, dispatcher slot, or component Store.
+/// endpoint, dispatcher slot, or component Store. `contract` is the child
+/// type's (ADR-0231 §4), which the alias publishes when it is staged.
 pub struct PreparedAliasRoute {
     pub(crate) alias: MailboxId,
     pub rendered_name: Arc<str>,
     pub(crate) target_parent: MailboxId,
+    pub(crate) contract: RouteContract,
 }
 
 impl PreparedAliasRoute {
     #[must_use]
-    pub(crate) fn new(alias: MailboxId, rendered_name: impl Into<Arc<str>>, target_parent: MailboxId) -> Self {
-        Self { alias, rendered_name: rendered_name.into(), target_parent }
+    pub(crate) fn new(
+        alias: MailboxId,
+        rendered_name: impl Into<Arc<str>>,
+        target_parent: MailboxId,
+        contract: RouteContract,
+    ) -> Self {
+        Self { alias, rendered_name: rendered_name.into(), target_parent, contract }
     }
 }
 
@@ -198,6 +206,9 @@ pub trait LiveActivation: Send {
 
 pub struct InstalledActivation {
     pub(crate) entry: MailboxEntry,
+    /// The contract the route publishes as it goes `Live` (ADR-0231 §4),
+    /// read after the actor's `wire`, so a guest host publishes its guest's.
+    pub(crate) contract: RouteContract,
     pub(crate) catch_up: Box<dyn FnOnce() + Send>,
 }
 
@@ -341,11 +352,13 @@ pub enum RegistryEffect {
     /// thread that reserved `id` as `Starting` has finished running the
     /// actor's `init` and `wire` at its own execution home, and hands the
     /// owner the endpoint to publish. Parked mail drains to it in
-    /// owner-observed order as part of the same apply.
+    /// owner-observed order as part of the same apply, and the route
+    /// publishes `contract` with its `Live` lifecycle.
     PromoteStarting {
         id: MailboxId,
         token: ActivationToken,
         activation: PreparedActivation,
+        contract: RouteContract,
     },
     CancelStarting {
         id: MailboxId,
@@ -354,6 +367,15 @@ pub enum RegistryEffect {
     PublishLive {
         route: PreparedRoute,
         activation: PreparedActivation,
+        contract: RouteContract,
+    },
+    /// Replace the contract a `Live` or `Alias` route publishes (ADR-0231
+    /// §4). Refused when `contract` breaks the published one (§5), so a
+    /// published contract only grows whatever the caller, and refused for a
+    /// route that is neither `Live` nor `Alias`, which publishes none.
+    RepublishContract {
+        id: MailboxId,
+        contract: RouteContract,
     },
     DropMailbox(MailboxId),
     InstallSeize {
@@ -375,14 +397,26 @@ impl RegistryEffect {
         Self::ReserveStarting { route: PreparedRoute::with_id(id, canonical_name) }
     }
 
+    /// Publish a closure route under its name-derived id. It publishes no
+    /// contract rows.
     pub(super) fn publish_named(canonical_name: String, entry: MailboxEntry) -> Self {
-        Self::PublishLive { route: PreparedRoute::named(canonical_name), activation: PreparedActivation::legacy(entry) }
+        Self::PublishLive {
+            route: PreparedRoute::named(canonical_name),
+            activation: PreparedActivation::legacy(entry),
+            contract: RouteContract::empty(),
+        }
     }
 
-    pub(super) fn publish_with_id(id: MailboxId, canonical_name: String, entry: MailboxEntry) -> Self {
+    pub(super) fn publish_with_id(
+        id: MailboxId,
+        canonical_name: String,
+        entry: MailboxEntry,
+        contract: RouteContract,
+    ) -> Self {
         Self::PublishLive {
             route: PreparedRoute::with_id(id, canonical_name),
             activation: PreparedActivation::legacy(entry),
+            contract,
         }
     }
 }
@@ -407,6 +441,9 @@ pub enum RegistryApplied {
     /// route was retired, `false` when the id named no alias to retire.
     AliasRetired(bool),
     SeizeInstalled(bool),
+    /// Outcome of [`RegistryEffect::RepublishContract`]: the route now
+    /// publishes the given contract.
+    ContractPublished(MailboxId),
     Kind(KindId),
 }
 
@@ -415,7 +452,19 @@ pub enum RegistryEffectError {
     Name(super::NameConflict),
     Drop(super::DropError),
     Kind(super::KindConflict),
-    AliasTargetUnavailable { alias: MailboxId, target_parent: MailboxId },
+    AliasTargetUnavailable {
+        alias: MailboxId,
+        target_parent: MailboxId,
+    },
+    /// A republish or an alias re-publication whose contract breaks the one
+    /// the route already publishes (ADR-0231 §5).
+    ContractBroken {
+        id: MailboxId,
+        contract_break: ContractBreak,
+    },
+    /// A republish for a route that is neither `Live` nor `Alias`, so it
+    /// publishes no contract to replace.
+    ContractUnpublished(MailboxId),
     ActivationRejected,
     OwnerClosed,
 }
@@ -429,6 +478,10 @@ impl fmt::Display for RegistryEffectError {
             Self::AliasTargetUnavailable { alias, target_parent } => {
                 write!(formatter, "inline alias {alias} targets unavailable parent {target_parent}")
             }
+            Self::ContractBroken { id, contract_break } => {
+                write!(formatter, "route {id} republished a contract that {contract_break}")
+            }
+            Self::ContractUnpublished(id) => write!(formatter, "route {id} publishes no contract to replace"),
             Self::ActivationRejected => {
                 formatter.write_str("prepared actor activation could not reserve its lifecycle")
             }
@@ -481,6 +534,13 @@ impl RegistryBatch {
         Self { batch: EffectBatch::new(vec![RegistryEffect::RetireAlias(alias.into_alias())]) }
     }
 
+    /// Replace the contract this actor's own route publishes. Staged by a
+    /// guest host whose resident guest changed (`NativeCtx::sync_guest`), so
+    /// only the substrate builds one.
+    pub(crate) fn republish_contract(id: MailboxId, contract: RouteContract) -> Self {
+        Self { batch: EffectBatch::new(vec![RegistryEffect::RepublishContract { id, contract }]) }
+    }
+
     pub(crate) fn into_effects(self) -> EffectBatch {
         self.batch
     }
@@ -522,6 +582,9 @@ type RegistryOwnerBatchResult = Result<Vec<RegistryApplied>, RegistryEffectError
 pub(super) enum RegistryBatchCompletionSink {
     Channel(crossbeam_channel::Sender<RegistryOwnerBatchResult>),
     Deferred(DeferredCompletion<RegistryBatchResult>),
+    /// A batch staged with no one waiting on it: a refusal is warn-logged,
+    /// and an owner that closed first is shutdown, not a refusal.
+    Logged,
 }
 
 impl RegistryBatchCompletionSink {
@@ -531,6 +594,13 @@ impl RegistryBatchCompletionSink {
                 let _ = sender.send(result);
             }
             Self::Deferred(completion) => completion.complete(result.map(|_| ()).map_err(RegistryBatchError::from)),
+            Self::Logged => {
+                if let Err(error) = result
+                    && !matches!(error, RegistryEffectError::OwnerClosed)
+                {
+                    tracing::warn!(target: "aether_substrate::registry", "staged registry batch refused: {error}");
+                }
+            }
         }
     }
 }

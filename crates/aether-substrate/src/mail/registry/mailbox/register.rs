@@ -8,10 +8,10 @@ use aether_actor::ErasedActorRef;
 
 use crate::mail::MailboxId;
 use crate::mail::registry::authority::BootAuthority;
-use crate::mail::registry::canonical_mailbox_id;
 use crate::mail::registry::effect::{RegistryApplied, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::errors::{DropError, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
+use crate::mail::registry::{RouteContract, canonical_mailbox_id};
 use crate::scheduler::SeizeHandle;
 
 use super::{MailboxEntry, Registry, SeizeCell};
@@ -20,11 +20,18 @@ impl Registry {
     /// Insert a mailbox, allocating its id from the name hash (ADR-0029).
     /// On a `Dropped` entry at the same id (same name re-registered
     /// after a drop), the entry transitions back to live. Any other
-    /// occupied entry is a collision.
-    fn insert(&self, authority: &BootAuthority, name: String, entry: MailboxEntry) -> Result<MailboxId, NameConflict> {
+    /// occupied entry is a collision. The route publishes `contract` as it
+    /// goes `Live` (ADR-0231 §4).
+    fn insert(
+        &self,
+        authority: &BootAuthority,
+        name: String,
+        entry: MailboxEntry,
+        contract: RouteContract,
+    ) -> Result<MailboxId, NameConflict> {
         // Depth-1 / root registrations derive the id from the name
         // (ADR-0029) — the lineage fold's fixed point.
-        self.insert_with_id(authority, canonical_mailbox_id(&name), name, entry)
+        self.insert_with_id(authority, canonical_mailbox_id(&name), name, entry, contract)
     }
 
     /// ADR-0099 §3: register under an explicit, caller-computed `id`
@@ -40,8 +47,9 @@ impl Registry {
         id: MailboxId,
         name: String,
         entry: MailboxEntry,
+        contract: RouteContract,
     ) -> Result<MailboxId, NameConflict> {
-        match self.apply_one(authority, RegistryEffect::publish_with_id(id, name, entry)) {
+        match self.apply_one(authority, RegistryEffect::publish_with_id(id, name, entry, contract)) {
             Ok(RegistryApplied::Mailbox(id)) => Ok(id),
             Err(RegistryEffectError::Name(error)) => Err(error),
             Ok(_) | Err(_) => unreachable!("publish-live returns mailbox or name conflict"),
@@ -136,7 +144,12 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> MailboxId {
-        match self.insert(authority, name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() }) {
+        match self.insert(
+            authority,
+            name.into(),
+            MailboxEntry::Inbox { handler, seize: SeizeCell::default() },
+            RouteContract::empty(),
+        ) {
             Ok(id) => id,
             Err(NameConflict { name }) => {
                 panic!("mailbox name already registered: {name}")
@@ -166,7 +179,12 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> Result<MailboxId, NameConflict> {
-        self.insert(authority, name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() })
+        self.insert(
+            authority,
+            name.into(),
+            MailboxEntry::Inbox { handler, seize: SeizeCell::default() },
+            RouteContract::empty(),
+        )
     }
 
     /// ADR-0099 §3: [`Self::try_register_inbox`] but under an explicit,
@@ -179,6 +197,10 @@ impl Registry {
     /// embedder eager spawn can name it (iamacoffeepot/aether#4156). A
     /// handler stages a `RegistryEffect` through the ADR-0165 owner
     /// instead.
+    ///
+    /// The route publishes no contract rows; the direct spawn commit
+    /// publishes its actor's once `wire` has run
+    /// ([`Self::publish_contract`]).
     pub(crate) fn try_register_inbox_with_id(
         &self,
         authority: &BootAuthority,
@@ -186,7 +208,36 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> Result<MailboxId, NameConflict> {
-        self.insert_with_id(authority, id, name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() })
+        self.insert_with_id(
+            authority,
+            id,
+            name.into(),
+            MailboxEntry::Inbox { handler, seize: SeizeCell::default() },
+            RouteContract::empty(),
+        )
+    }
+
+    /// Replace the contract the `Live` route `id` publishes (ADR-0231 §4),
+    /// refused when `contract` breaks the published one (§5).
+    ///
+    /// Direct write path, for the pre-seal boot paths whose route went
+    /// `Live` at its claim, before the actor's `init` ran: the chassis
+    /// capability boot, the driver's pumped boot, and the direct spawn
+    /// commit of a guest host, whose contract is its guest's, known only
+    /// after `wire`.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryEffectError::ContractBroken`] for a contract that breaks
+    /// the published one, and [`RegistryEffectError::ContractUnpublished`]
+    /// for a route that is not published.
+    pub(crate) fn publish_contract(
+        &self,
+        authority: &BootAuthority,
+        id: MailboxId,
+        contract: RouteContract,
+    ) -> Result<(), RegistryEffectError> {
+        self.apply_one(authority, RegistryEffect::RepublishContract { id, contract }).map(|_| ())
     }
 
     /// Issue 838: register a mailbox whose handler runs inline on
@@ -231,7 +282,7 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InlineHandler>,
     ) -> ErasedActorRef {
-        let id = match self.insert(authority, name.into(), MailboxEntry::Inline(handler)) {
+        let id = match self.insert(authority, name.into(), MailboxEntry::Inline(handler), RouteContract::empty()) {
             Ok(id) => id,
             Err(NameConflict { name }) => {
                 panic!("mailbox name already registered: {name}")

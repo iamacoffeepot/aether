@@ -25,6 +25,7 @@ use crate::mail::registry::InboxHandler;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
 use crate::mail::registry::RegistryOwnerLease;
+use crate::mail::registry::RouteContract;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
 use crate::mail::registry::lineage_mailbox_id;
 use crate::mail::{Mail, MailId, MailRef, MailboxId, Source};
@@ -1212,7 +1213,7 @@ fn wat_scoped_spawns(parent: MailboxId) -> String {
             (import "aether" "spawn_sibling_scoped_p32"
                 (func $spawn_sibling (param i64 i64 i32 i32 i32 i32 i32) (result i64)))
             (import "aether" "spawn_inline_child_scoped_p32"
-                (func $spawn_inline (param i64 i32 i32 i32) (result i64)))
+                (func $spawn_inline (param i64 i64 i32 i32 i32) (result i64)))
             (memory (export "memory") 1)
             {WAT_REALLOC}
             (data (i32.const 32) "leaf")
@@ -1221,6 +1222,7 @@ fn wat_scoped_spawns(parent: MailboxId) -> String {
             (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 200
                 i64.const {parent}
+                i64.const 0
                 i32.const 0
                 i32.const 32
                 i32.const 4
@@ -1602,7 +1604,7 @@ fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
     let parent_name = format!("{root_name}/{TRAMPOLINE_NAMESPACE}:branch");
     let parent = lineage_mailbox_id(&parent_name);
     let mut ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), root, None);
-    ctx.stage_alias(PreparedAliasRoute::new(parent, parent_name.clone(), root));
+    ctx.stage_alias(PreparedAliasRoute::new(parent, parent_name.clone(), root, RouteContract::empty()));
     let mut component = instantiate_with_ctx(&wat_scoped_spawns(parent), ctx);
 
     component
@@ -1688,6 +1690,7 @@ fn inline_alias_routes_into_parent_slot_inbox() {
             alias_id,
             alias_name.clone(),
             parent_id,
+            RouteContract::empty(),
         ))]))
         .expect("owner accepts the alias batch");
     owner.run_once();
@@ -1755,7 +1758,7 @@ fn pending_inline_alias_is_trusted_before_owner_publication() {
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
     let alias = MailboxId(aether_data::with_tag(Tag::Mailbox, 0xA11A5));
     let mut ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), sender, None);
-    ctx.stage_alias(PreparedAliasRoute::new(alias, "pending-inline-alias", sender));
+    ctx.stage_alias(PreparedAliasRoute::new(alias, "pending-inline-alias", sender, RouteContract::empty()));
 
     assert!(!registry.is_alias_to(alias, sender), "the owner has not published the route yet");
     assert!(host_fns::is_own_cluster_alias(&ctx, alias), "the prepared alias is already trusted in-cluster");

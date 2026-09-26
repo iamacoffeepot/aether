@@ -16,6 +16,7 @@
 
 mod address;
 mod authority;
+mod contract;
 mod dispatch;
 #[allow(dead_code, reason = "owner effects and inventory subscriptions are foundations consumed by arc follow-ups")]
 pub(crate) mod effect;
@@ -39,6 +40,7 @@ pub use address::{
     ActorAddressInventoryError, AddressResolutionError, AmbiguousHole, ResolvedAddress, ambiguous_holes,
 };
 pub use authority::BootAuthority;
+pub use contract::{ContractBreak, RouteContract};
 pub use dispatch::{DispatchParts, MailDispatch, OwnedDispatch};
 #[cfg(test)]
 pub(crate) use dispatch::{test_dispatch, test_owned_dispatch};

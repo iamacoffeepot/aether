@@ -344,8 +344,8 @@ its hooks ran does not undo them ([ADR-0016](https://github.com/iamacoffeepot/ae
 - candidate compile, manifest, or export-selection errors happen before the old
   instance is touched;
 - a candidate whose hosted type drops or changes a handler row of the type the
-  slot hosts is refused before the old instance is touched; added rows are
-  allowed ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §5);
+  slot hosts, or drops its `#[fallback]`, is refused before the old instance is
+  touched; added rows and an added fallback are allowed ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §5);
 - a candidate whose hosted type (the named export, or the type the slot hosts
   for a replace with no export) declares a dependency with no `Live` route is
   refused before the old instance is touched ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md));

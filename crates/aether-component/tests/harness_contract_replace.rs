@@ -4,8 +4,10 @@
 //! type the slot hosts is refused with `ReplaceResult::Err` before the old
 //! instance is touched, so the old module keeps serving; a replacement that
 //! only adds rows succeeds, and the added row then binds the next replace. A
-//! refill after `DropComponent` is held to the dropped module's rows. The
-//! fixtures are the bundle's `test.contract.*` exports.
+//! refill after `DropComponent` is held to the dropped module's rows. A
+//! `#[fallback]` counts like a row: one may be added, and a replacement that
+//! drops it is refused. The fixtures are the bundle's `test.contract.*`
+//! exports.
 
 use std::fs;
 
@@ -21,6 +23,7 @@ const BASE_EXPORT: &str = "test.contract.base";
 const DROPPED_EXPORT: &str = "test.contract.dropped";
 const CHANGED_EXPORT: &str = "test.contract.changed";
 const EXTENDED_EXPORT: &str = "test.contract.extended";
+const FALLBACK_EXPORT: &str = "test.contract.fallback";
 const COUNT_QUERY: &str = "aether.test_fixtures.count_query";
 const INLINE_PROBE: &str = "aether.test_fixtures.inline_probe";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
@@ -150,4 +153,30 @@ fn a_refill_after_drop_is_held_to_the_dropped_contract() {
     if let ReplaceResult::Err { error } = fixture.replace("refill-base", BASE_EXPORT) {
         panic!("a refill that keeps the dropped module's rows must succeed: {error}");
     }
+}
+
+#[test]
+fn an_added_fallback_is_accepted_and_a_replace_that_drops_it_is_refused() {
+    let Some(mut fixture) = Fixture::start() else {
+        return;
+    };
+
+    if let ReplaceResult::Err { error } = fixture.replace("replace-fallback", FALLBACK_EXPORT) {
+        panic!("a replace that only adds a fallback must succeed: {error}");
+    }
+
+    // The extended type keeps every row and adds one, so only the dropped
+    // fallback breaks the contract.
+    let ReplaceResult::Err { error } = fixture.replace("replace-extended", EXTENDED_EXPORT) else {
+        panic!("a replace that drops the fallback must be refused");
+    };
+    assert_eq!(error, format!("{} replacement drops its fallback", fixture.victim), "the refusal names the fallback");
+
+    let victim = fixture.trampoline();
+    let baseline = fixture.harness.count_observed(TICK_OBSERVED);
+    fixture
+        .harness
+        .execute(vec![("bump", HarnessOp::send_and_settle(victim.erase(), &Bump))])
+        .expect("bump the victim");
+    assert_eq!(fixture.harness.count_observed(TICK_OBSERVED), baseline + 1, "the fallback guest must still serve");
 }

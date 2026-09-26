@@ -67,7 +67,10 @@ pub(super) fn component_origin(origins: &[ComponentOrigin], mail_id: Option<Mail
     origins.iter().find(|origin| origin.mail_id == mail_id).map(|origin| origin.sender)
 }
 
+/// One registry batch a handler staged, and the completion its result
+/// wakes, or `None` for a batch no handler waits on, whose refusal is
+/// warn-logged.
 pub(super) struct PendingOwnerBatchWork {
     pub(super) batch: RegistryBatch,
-    pub(super) completion: super::offload::blocking::DeferredCompletion<RegistryBatchResult>,
+    pub(super) completion: Option<super::offload::blocking::DeferredCompletion<RegistryBatchResult>>,
 }

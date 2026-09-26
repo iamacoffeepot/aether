@@ -10,7 +10,9 @@ use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::owner::RegistryOwnerLease;
-use crate::mail::registry::{MailboxEntry, Registry, canonical_mailbox_id, lineage_mailbox_id, noop_handler};
+use crate::mail::registry::{
+    MailboxEntry, Registry, RouteContract, canonical_mailbox_id, lineage_mailbox_id, noop_handler,
+};
 use crate::mail::{KindId, Mail};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority as auth;
@@ -51,6 +53,7 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
             alias_id,
             alias_name.clone(),
             parent_id,
+            RouteContract::empty(),
         ))]))
         .unwrap();
     owner.run_once();
@@ -104,6 +107,7 @@ fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
                 alias_id,
                 alias_name,
                 target_parent,
+                RouteContract::empty(),
             ))]))
             .unwrap()
     };

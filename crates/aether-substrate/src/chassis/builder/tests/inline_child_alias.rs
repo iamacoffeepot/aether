@@ -33,6 +33,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     use crate::actor::native::spawn::Subname;
     use crate::actor::registry::MonitorError;
     use crate::mail::registry::MailboxEntry;
+    use crate::mail::registry::RouteContract;
     use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
     use aether_actor::HandlesKind;
     use aether_data::Kind;
@@ -163,6 +164,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
             alias_id,
             alias_name.clone(),
             host_id,
+            RouteContract::empty(),
         ))]))
         .expect("registry accepts the alias batch");
     assert!(
@@ -252,6 +254,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     use crate::actor::native::spawn::Subname;
     use crate::actor::registry::MonitorError;
     use crate::mail::registry::MailboxEntry;
+    use crate::mail::registry::RouteContract;
     use crate::mail::registry::RouteResolution;
     use crate::mail::registry::effect::{EffectBatch, PreparedAliasRetirement, PreparedAliasRoute, RegistryEffect};
     use aether_actor::HandlesKind;
@@ -382,7 +385,10 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     let alias_id = lineage_mailbox_id(&alias_name);
     let published = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
-            alias_id, alias_name, host_id,
+            alias_id,
+            alias_name,
+            host_id,
+            RouteContract::empty(),
         ))]))
         .expect("registry accepts the alias batch");
     assert!(

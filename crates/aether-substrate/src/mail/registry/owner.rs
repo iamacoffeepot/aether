@@ -148,6 +148,10 @@ impl RegistryOwnerHandle {
         self.submit_with(batch, RegistryBatchCompletionSink::Deferred(completion)).is_some()
     }
 
+    pub(super) fn submit_logged(&self, batch: EffectBatch) {
+        let _ = self.submit_with(batch, RegistryBatchCompletionSink::Logged);
+    }
+
     fn submit_with(&self, batch: EffectBatch, completion: RegistryBatchCompletionSink) -> Option<()> {
         let mut state = self.state.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
         if !state.accepting {

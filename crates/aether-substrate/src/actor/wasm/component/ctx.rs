@@ -2,6 +2,8 @@ use std::cell::Cell;
 use std::mem;
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
+
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::blob_table::BlobTable;
 use crate::actor::wasm::reply_table::ReplyTable;
@@ -9,7 +11,7 @@ use crate::mail::attachments::{Attachments, EncodedMail, ResolveError, plain_pay
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{
-    DispatchParts, MailboxEntry, OwnedDispatch, PreparedAliasRetirement, PreparedAliasRoute, Registry,
+    DispatchParts, MailboxEntry, OwnedDispatch, PreparedAliasRetirement, PreparedAliasRoute, Registry, RouteContract,
 };
 use crate::mail::{Mail, MailId, MailKind, MailboxId, Source, SourceAddr};
 use crate::scheduler::pending_depth;
@@ -177,6 +179,12 @@ pub struct ComponentCtx {
     /// through the registry owner and fans a departure notice out to its
     /// watchers — the teardown mirror of the publish path.
     pending_alias_retirements: Vec<PreparedAliasRetirement>,
+    /// ADR-0231 §4: the contract each inline-child actor type of the resident
+    /// module publishes, keyed by actor-type tag, so an alias staged by the
+    /// `spawn_inline_child_scoped_p32` host fn carries its child type's rows.
+    /// Installed before `Component::instantiate`; empty on the test paths
+    /// that build a bare ctx, where every alias publishes no rows.
+    inline_contracts: FxHashMap<u64, RouteContract>,
     /// ADR-0163 §3 asset load window. `Some` for a component loaded
     /// through the trampoline (installed before `Component::instantiate`,
     /// so the guest's `init` and `wire` can pull assets); the
@@ -282,6 +290,7 @@ impl ComponentCtx {
             pending_spawns: Vec::new(),
             pending_aliases: Vec::new(),
             pending_alias_retirements: Vec::new(),
+            inline_contracts: FxHashMap::default(),
             load_window: None,
         }
     }
@@ -349,6 +358,22 @@ impl ComponentCtx {
     /// `WasmTrampoline::init` right after it builds the ctx.
     pub fn install_load_window(&mut self, window: LoadWindow) {
         self.load_window = Some(window);
+    }
+
+    /// Install the contract of every inline-child actor type the resident
+    /// module can spawn, keyed by actor-type tag (ADR-0231 §4), before
+    /// `Component::instantiate`, so an alias the guest stages from its
+    /// `init` onward publishes its child type's rows. Called by the wasm
+    /// trampoline's `init` and its replace, which build the map from the
+    /// module's exported and private input groups.
+    pub fn install_inline_contracts(&mut self, contracts: impl IntoIterator<Item = (u64, RouteContract)>) {
+        self.inline_contracts = contracts.into_iter().collect();
+    }
+
+    /// The contract an inline child of actor type `tag` publishes, or the
+    /// empty contract for a tag the resident module does not declare.
+    pub(crate) fn inline_contract(&self, tag: u64) -> RouteContract {
+        self.inline_contracts.get(&tag).cloned().unwrap_or_else(RouteContract::empty)
     }
 
     /// Close the asset load window when the guest's `wire` returns

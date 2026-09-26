@@ -156,7 +156,12 @@ impl NativeBinding {
         if !owner_batches.is_empty() {
             let registry = self.spawner.as_ref().expect("staged owner batches require a spawner").registry();
             for work in owner_batches {
-                let _ = registry.submit_deferred(work.batch.into_effects(), work.completion);
+                match work.completion {
+                    Some(completion) => {
+                        let _ = registry.submit_deferred(work.batch.into_effects(), completion);
+                    }
+                    None => registry.submit_logged(work.batch.into_effects()),
+                }
             }
         }
 

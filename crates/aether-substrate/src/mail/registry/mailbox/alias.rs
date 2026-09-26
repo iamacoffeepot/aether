@@ -14,7 +14,7 @@ impl Registry {
     /// answers with that parent.
     pub(crate) fn alias_parent(&self, alias: MailboxId) -> Option<MailboxId> {
         match self.routes.load().entry_for(&alias).map(|route| &route.lifecycle) {
-            Some(RouteLifecycle::Alias { target_parent }) => Some(*target_parent),
+            Some(RouteLifecycle::Alias { target_parent, .. }) => Some(*target_parent),
             _ => None,
         }
     }
@@ -48,7 +48,7 @@ impl Registry {
             .load()
             .entries()
             .filter(|(_, route)| {
-                matches!(route.lifecycle, RouteLifecycle::Alias { target_parent: parent } if parent == target_parent)
+                matches!(route.lifecycle, RouteLifecycle::Alias { target_parent: parent, .. } if parent == target_parent)
             })
             .map(|(alias, _)| *alias)
             .collect()

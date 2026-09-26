@@ -228,6 +228,18 @@ impl NativeBinding {
             .lock()
             .expect("outbound buffer poisoned; fail-fast per ADR-0063")
             .owner_batches
-            .push(PendingOwnerBatchWork { batch, completion });
+            .push(PendingOwnerBatchWork { batch, completion: Some(completion) });
+    }
+
+    /// Append one registry batch no handler waits on to the ordered outbound
+    /// work: submitted at flush on the same path as
+    /// [`Self::stage_owner_batch`], with a refusal warn-logged.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn stage_logged_owner_batch(&self, batch: RegistryBatch) {
+        self.outbound
+            .lock()
+            .expect("outbound buffer poisoned; fail-fast per ADR-0063")
+            .owner_batches
+            .push(PendingOwnerBatchWork { batch, completion: None });
     }
 }

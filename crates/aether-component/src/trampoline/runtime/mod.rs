@@ -89,6 +89,12 @@ impl NativeActor for WasmTrampoline {
         let load_window = asset_manifest::LoadWindow::index(Arc::clone(&config.wasm_bytes))
             .map_err(|e| BootError::Other(io::Error::other(format!("asset index failed: {e}")).into()))?;
         substrate_ctx.install_load_window(load_window);
+        // ADR-0231 §4: an inline child the guest spawns publishes its own
+        // type's rows, read from this module's exported and private groups.
+        substrate_ctx.install_inline_contracts(
+            contract::inline_contracts(&config.actor_caps, &config.wasm_bytes)
+                .map_err(|e| BootError::Other(io::Error::other(format!("inline contracts unreadable: {e}")).into()))?,
+        );
         // ADR-0090 (issue 1257): thread the load mail's config bytes
         // into the guest's typed `init`. An empty slice ("no config")
         // is decoded uniformly by a `Config = ()` guest via

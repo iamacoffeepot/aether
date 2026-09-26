@@ -221,10 +221,11 @@ impl WasmTrampolineState {
     }
 
     /// ADR-0231 §5: the replacement's hosted type must keep every handler
-    /// row of the type this slot hosts now — the live guest, or the dropped
-    /// one a refill takes over from — and may add rows. The predecessor
-    /// resolves from the retained module the way the replacement does, and a
-    /// failure to resolve it refuses the replace.
+    /// row, and the `#[fallback]` if it has one, of the type this slot hosts
+    /// now — the live guest, or the dropped one a refill takes over from —
+    /// and may add rows. The predecessor resolves from the retained module
+    /// the way the replacement does, and a failure to resolve it refuses the
+    /// replace.
     fn check_contract(
         &self,
         ctx: &NativeCtx<'_, WasmTrampoline>,
@@ -234,8 +235,9 @@ impl WasmTrampolineState {
         let old_boot = kind_manifest::read_boot_namespace_from_bytes(&self.wasm_bytes)?;
         let (predecessor, _) = self.resolve_replace_target(None, &self.actor_caps, old_boot.as_deref())?;
         let predecessor = predecessor.map(|group| group.capabilities.clone()).unwrap_or_default();
-        contract::contract_break(&predecessor, replacement)
-            .map_or(Ok(()), |kind| Err(contract::contract_refusal(target, &ctx.kind_label(kind))))
+        contract::contract_break(&predecessor, replacement).map_or(Ok(()), |contract_break| {
+            Err(contract::contract_refusal(target, contract_break, |kind| ctx.kind_label(kind)))
+        })
     }
 
     /// ADR-0139 §4 (#6429): every request context the old instance carries
@@ -393,6 +395,12 @@ impl WasmTrampolineState {
         // the replacement's `init` can pull assets; closed after instantiate
         // (replace re-runs `init`, not `wire`).
         substrate_ctx.install_load_window(load_window);
+        // ADR-0231 §4: an inline child the replacement spawns publishes its
+        // own type's rows, read from the replacement module.
+        match contract::inline_contracts(&actors, &payload.wasm) {
+            Ok(contracts) => substrate_ctx.install_inline_contracts(contracts),
+            Err(error) => return ReplaceResult::Err { error },
+        }
 
         // #6134: instantiate the candidate while the old guest is still
         // installed and wired. `init` cannot send mail, so starting it early

@@ -589,6 +589,9 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
         let seize = SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn));
         let wake = WakeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn), spawner.wake_sink().clone());
         spawner.retain_activated_slot(id, slot_dyn, wake.clone());
+        // ADR-0231 §4: read after `wire`, so a guest host's route goes `Live`
+        // with the guest `wire` recorded.
+        let contract = binding.route_contract::<A>();
         let catch_up = Box::new(move || {
             // The owner has published the Live route and released the
             // registry publication lock before invoking this suffix. Owner
@@ -612,7 +615,7 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
             }
         });
 
-        InstalledActivation { entry, catch_up }
+        InstalledActivation { entry, contract, catch_up }
     }
 
     fn cancel_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()> {

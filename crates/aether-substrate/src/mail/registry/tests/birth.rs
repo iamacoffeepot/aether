@@ -17,8 +17,8 @@ use crate::mail::registry::effect::{
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
 use crate::mail::registry::{
-    DropError, InboxHandler, MailboxEntry, OwnedDispatch, Registry, canonical_mailbox_id, lineage_mailbox_id,
-    noop_handler,
+    DropError, InboxHandler, MailboxEntry, OwnedDispatch, Registry, RouteContract, canonical_mailbox_id,
+    lineage_mailbox_id, noop_handler,
 };
 use crate::mail::{KindId, Mail, MailRef};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -417,7 +417,9 @@ fn promoting_a_reservation_publishes_the_endpoint_and_releases_parked_mail() {
         let _ = delivered_tx.try_send(());
     });
 
-    registry.promote_starting_through_owner(id, token, handler).expect("owner accepts the second ack");
+    registry
+        .promote_starting_through_owner(id, token, handler, RouteContract::empty())
+        .expect("owner accepts the second ack");
     assert!(registry.entry_at(id).is_some(), "the second ack published the caller's endpoint as Live");
     for _ in 0..2 {
         delivered_rx.recv_timeout(Duration::from_secs(5)).expect("parked mail reaches the promoted endpoint");

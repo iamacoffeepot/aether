@@ -16,7 +16,7 @@ use crate::mail::registry::effect::{
     PreparedCostCells, PreparedMail, PreparedSpawnActivation, PreparedSpawnCommit, PreparedSpawnFailure,
     RegistryApplied, RegistryEffect,
 };
-use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry, canonical_mailbox_id};
+use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry, RouteContract, canonical_mailbox_id};
 use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 use crate::testing::boot_authority as auth;
 
@@ -126,6 +126,7 @@ impl LiveActivation for FakeLiveActivation {
                 }),
                 seize: Arc::default(),
             },
+            contract: RouteContract::empty(),
             catch_up: Box::new(|| {}),
         }
     }
