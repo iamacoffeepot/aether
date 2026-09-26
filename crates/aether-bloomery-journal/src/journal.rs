@@ -20,7 +20,7 @@ use crate::artifact::{ARTIFACTS_DDL, CITATIONS_DDL, split_artifact};
 use crate::batch::Batch;
 use crate::blobs::{BlobDir, create_synced};
 use crate::clock::{Clock, SystemClock};
-use crate::closure::{Closure, walk_closure};
+use crate::closure::{Closure, ClosureReader, walk_closure};
 use crate::draft::Draft;
 use crate::{DecodeError, Digest, Entry, Seq};
 
@@ -37,8 +37,8 @@ const LOCK_FILE: &str = "lock";
 /// same root, such as an [`crate::ArtifactBatch`] commit racing an `append`,
 /// before it fails `SQLITE_BUSY`. Both writers insert rows only (blob bytes
 /// land before their transaction begins), so a wait this long means a writer
-/// is wedged.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+/// is wedged. A [`ClosureReader`] connection waits the same bound.
+pub const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ENTRIES_DDL: &str = "
 CREATE TABLE IF NOT EXISTS entries (
@@ -265,6 +265,14 @@ impl Journal {
         check_in: impl FnMut(Box<[u8]>) -> Blob,
     ) -> Result<Closure, JournalError> {
         walk_closure(&self.conn, &self.blobs, *root, limit, check_in)
+    }
+
+    /// A [`ClosureReader`] over this root, for a worker thread to walk
+    /// closures on its own read-only connection. It shares the root's lock,
+    /// so the root stays locked while the reader lives, even after this
+    /// journal drops.
+    pub(crate) fn closure_reader(&self) -> ClosureReader {
+        ClosureReader::new(self.root.join(DATABASE_FILE), self.blobs.clone(), Arc::clone(&self.lock))
     }
 
     /// Entries with `seq > since`, ascending, at most `limit`.

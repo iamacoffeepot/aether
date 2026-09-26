@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use aether_bloomery_journal::{Batch, Clock, Digest, Journal, JournalActor, OpaqueBytes, Ref, Seq};
-use aether_bloomery_kinds::{ClosureLimit, ReadClosure, ReadClosureResult};
+use aether_bloomery_kinds::{ClosureLimit, ReadArtifact, ReadClosure, ReadClosureResult};
 use aether_data::Kind;
 use aether_substrate::Subname;
 use aether_substrate::testing::{bare_substrate, boot_test_chassis_with};
@@ -91,5 +91,80 @@ fn read_closure_replies_found_too_large_and_missing() -> Result<(), Box<dyn Erro
         reply::<ReadClosureResult>(&rx, 3),
         ReadClosureResult::Missing { root, digest } if root == absent && digest == absent
     ));
+    Ok(())
+}
+
+/// Opens the FIFO's write end without blocking when dropped, so a run whose walk is still parked in
+/// `File::open` on the read end gets released during unwinding instead of hanging teardown. With no
+/// reader waiting the open fails, which is fine: nothing needs releasing.
+#[cfg(unix)]
+struct ReleaseFifo<'a>(&'a Path);
+
+#[cfg(unix)]
+impl Drop for ReleaseFifo<'_> {
+    fn drop(&mut self) {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        drop(OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(self.0));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_blocked_closure_read_does_not_delay_a_read_artifact() -> Result<(), Box<dyn Error>> {
+    // Catches a closure walk still running on the journal's dispatcher thread (the `ReadArtifact`
+    // behind it is not answered while the walk blocks), and a closure reply parked across the
+    // worker and then dropped (the walk's own caller never hears back once the walk finishes).
+    use std::ffi::CString;
+    use std::fs::{self, OpenOptions};
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("journal");
+    let (members, _) = seed(&path)?;
+    let root = members[0].digest;
+    let leaf_hex = members[1].digest.to_string();
+    let fifo = path.join("blobs").join(&leaf_hex[..2]).join(&leaf_hex);
+    fs::remove_file(&fifo)?;
+    let fifo_name = CString::new(fifo.as_os_str().as_bytes())?;
+    // SAFETY: `fifo_name` is a valid NUL-terminated path that outlives the call, and `mkfifo` only
+    // reads it.
+    let status = unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) };
+    if status != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let journal = chassis
+        .spawn_actor::<JournalActor>(
+            Subname::Named("blocked"),
+            (),
+            Journal::open(&path).expect("open the journal root"),
+        )
+        .finish()
+        .expect("journal birth");
+    let (arrivals, probe_rx) = mpsc::channel();
+    let probe =
+        chassis.spawn_actor::<BlobProbe>(Subname::Named("blocked_probe"), (), arrivals).finish().expect("probe birth");
+
+    // Declared after the chassis so that, unwinding, it releases a blocked walk before teardown.
+    let release = ReleaseFifo(&fifo);
+
+    // The walk checks the root in, then blocks opening the leaf's FIFO until a writer opens it.
+    let generous = ClosureLimit::new(ClosureLimit::MAX_BYTES)?;
+    request(&registry, journal, probe.erase(), 1, &ReadClosure { root, limit_bytes: generous });
+    request(&registry, journal, probe.erase(), 2, &ReadArtifact { digest: root });
+    let root_member = members.into_iter().next().ok_or("root member")?;
+    let arrival = probe_rx.recv_timeout(Duration::from_secs(2)).expect("artifact reply within two seconds");
+    assert_eq!(arrival, (2, Probed::Artifact(root_member)));
+
+    // A blocking open waits for the walk's reader; closing at once fails the leaf's length check.
+    drop(OpenOptions::new().write(true).open(&fifo)?);
+    let arrival = probe_rx.recv_timeout(Duration::from_secs(2)).expect("closure reply within two seconds");
+    assert_eq!(arrival, (1, Probed::NotFound));
+    drop(release);
     Ok(())
 }

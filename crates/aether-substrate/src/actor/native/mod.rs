@@ -85,6 +85,7 @@ pub use binding::NativeBinding;
 pub use ctx::{Erased, ExportedHandles, NativeCtx, NativeInitCtx, ResolvePathError};
 pub use envelope::Envelope;
 pub use offload::blocking::{DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskCompletionWake, TaskDone};
+pub use offload::check_in::BlobCheckIn;
 pub use offload::self_wake::SelfWake;
 pub use probe::ActorProbe;
 pub use slot::pumped::PumpedSlot;

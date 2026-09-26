@@ -1,14 +1,16 @@
 //! Breadth-first transitive closure over the stored citation edges, under a byte budget.
 
 use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use aether_bloomery_kinds::{ClosureArtifact, ClosureLimit};
 use aether_data::Blob;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::Digest;
 use crate::blobs::BlobDir;
-use crate::journal::JournalError;
+use crate::journal::{BUSY_TIMEOUT, JournalError, RootLock};
 
 /// Outcome of [`crate::Journal::read_closure`].
 #[derive(Debug, Clone)]
@@ -20,6 +22,48 @@ pub enum Closure {
     Missing(Digest),
     /// The total stored blob length exceeds the limit. Nothing is returned.
     TooLarge,
+}
+
+/// Walks closures over one locked journal root on whatever thread holds it.
+///
+/// Crate-private: the module is private and nothing re-exports it. Made by
+/// [`crate::Journal::closure_reader`], and `Send`, so the journal actor moves
+/// one into a hold-until-resolve worker (ADR-0093). Each read opens its own
+/// read-only connection on the calling thread; WAL gives that connection every
+/// transaction committed before it opened. The reader shares the root's lock,
+/// so the root stays locked while a walk runs.
+pub struct ClosureReader {
+    database: PathBuf,
+    blobs: BlobDir,
+    _lock: Arc<RootLock>,
+}
+
+impl ClosureReader {
+    #[must_use]
+    pub fn new(database: PathBuf, blobs: BlobDir, lock: Arc<RootLock>) -> Self {
+        Self { database, blobs, _lock: lock }
+    }
+
+    /// As [`crate::Journal::read_closure`], over a read-only connection opened
+    /// on the calling thread.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Journal::read_closure`], plus [`JournalError::Backend`] when
+    /// the connection cannot be opened.
+    pub fn read(
+        &self,
+        root: &Digest,
+        limit: ClosureLimit,
+        check_in: impl FnMut(Box<[u8]>) -> Blob,
+    ) -> Result<Closure, JournalError> {
+        let conn = Connection::open_with_flags(
+            &self.database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        walk_closure(&conn, &self.blobs, *root, limit, check_in)
+    }
 }
 
 /// Walk `root`'s closure in one read snapshot. Each digest is enqueued at

@@ -23,6 +23,11 @@
 //! lock. Cloning the value adds a strong reference and dropping it lets one
 //! go; native actors keep no table of their own.
 //!
+//! A handler whose ADR-0093 worker reads bytes off the dispatcher hands that
+//! worker a `BlobCheckIn` from `NativeCtx::blob_check_in`, so the worker checks
+//! the bytes in where it read them. The handle holds a clone of this store and
+//! does nothing but check in.
+//!
 //! # How entries are freed
 //!
 //! The index holds [`Weak`] references, so it never keeps bytes alive: an
@@ -73,6 +78,9 @@ pub const RESIDENT_WARNING_START_BYTES: usize = 256 * 1024 * 1024;
 type Index = FxHashMap<BlobHash, Weak<BlobEntry>>;
 
 /// The in-memory store of immutable checked-in bytes. See the module docs.
+///
+/// A clone is another handle on the same store.
+#[derive(Clone)]
 pub struct BlobStore {
     shared: Arc<Shared>,
 }
