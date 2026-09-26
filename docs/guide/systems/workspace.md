@@ -437,3 +437,56 @@ Pins are image digests; a tag beside one only names it for the reader.
   both trees share one libc.
 - `apt-get` output changes from day to day, so a rebuilt base can have a new
   digest. An environment records the imported tree digest, not the recipe.
+
+## The clippy proof
+
+`proof.clippy` is the first program that runs cargo through the `Workspace`
+binding. It lives in the `aether-bloomery-workspace-programs` bundle beside
+`environment.merge` and answers whether a source tree passes clippy in a
+published environment. It is Sampled, because the verdict depends on the run.
+
+Its input, `proof.clippy.input`, cites three trees:
+
+| Field | What it is | Where the run sees it |
+|---|---|---|
+| `source: Ref<Tree>` | the cargo workspace under proof | `/work` |
+| `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (step 5 of [Building an environment](#building-an-environment)) | the root |
+| `vendor: Ref<Tree>` | a `cargo vendor` tree for the source's `Cargo.lock` | `/vendor`, read-only |
+
+The program reads no head and no journal record, so the caller reads the
+environment head and passes the environment as an input. The run has the
+network off and a read-only root, so crate sources are an input too (ADR-0237
+decision 4): cargo replaces crates.io with the vendor tree. A crate with no
+dependencies passes an empty tree.
+
+The program asks for one run, and every argument is fixed:
+
+| Part | Value |
+|---|---|
+| Tool | `cargo`, resolved through the environment's `tools` table; cargo finds `cargo-clippy` on the environment's `PATH` |
+| Args | `--config source.crates-io.replace-with="vendored"` `--config source.vendored.directory="/vendor"` `clippy --workspace --all-targets --frozen -- -D warnings` |
+| Env | `CARGO_HOME=/work/tmp/cargo-home`, `CARGO_TARGET_DIR=/work/target`, `TMPDIR=/work/tmp` |
+| Mounts | the vendor tree at `vendor` |
+| Scratch | `target` and `tmp`, so neither the build output nor cargo's home reaches the output tree |
+| Network | `Off` |
+
+The args are CI's lint command plus `--frozen`, which means locked and offline.
+Because nothing varies, every clippy proof in one environment has the same run
+key and shares one allotment estimate (see [Provisioning](#provisioning)).
+
+The answer maps to the result, `proof.clippy.result`, or to a refusal:
+
+| Run answer | Program answer |
+|---|---|
+| `Ok`, one step with exit `Some(0)` | `Passed { stderr }` |
+| `Ok`, one step with any other exit | `Failed { stderr }` |
+| `Ok` with any other step count | the program's `Refused`, naming the count |
+| `Refused(..)` | the program's `Refused`, naming the workspace refusal |
+| `Exhausted(..)` or `Failed { .. }` | never seen: the binding ends the invocation, and the driver records the fault |
+
+`stderr` is the step's stored stderr, where cargo reports each denied lint,
+cited by reference and never copied. The result cites nothing else: the
+transition's input already cites the source, the environment, and the vendor
+tree. A workspace refusal, such as `ToolchainMismatch` when the source's
+`rust-toolchain.toml` asks for a component the environment lacks, is never
+recorded as a failed proof of the tree.
