@@ -210,9 +210,10 @@ the sandbox, or they make the program `Sampled`.
    command `import-commit <commit>` runs outside the engine: it reads exactly
    the files the commit tracks, builds their blobs and tree nodes in canonical
    order, and stages them with the journal's fenced
-   `aether.bloomery.journal.publish`, in batches the RPC frame bounds, the
-   last of which moves a source head to the root tree. The engine never reads
-   Git, a repository, or a host path; only the tree crosses. Untracked files,
+   `aether.bloomery.journal.publish`, in batches the RPC frame bounds, with
+   no head move: the result is the root tree's digest, which a program input
+   cites like any other tree. The engine never reads Git, a repository, or a
+   host path; only the tree crosses. Untracked files,
    build output, and ignored secrets are absent by construction, so no
    allowlist exists. The tree is identified by its digest, and the command
    reports the commit it read beside it. The work a Bloomery run does on a
@@ -466,8 +467,8 @@ Deferred:
    depends on `aether-bloomery-journal` and on `aether-bloomery-tar`, which
    stays its own crate.)*
 4. **Where a source tree's commit is recorded.** `import-commit` reports
-   the commit beside the tree digest, and the journal holds only the tree and
-   the head move. Proposed: record nothing more. The head is named for the
-   line of work it tracks, a proof cites the tree digest, and a new record
-   kind or a commit-named head would add an event for a fact the operator
-   already holds.
+   the commit beside the tree digest, and the journal holds only the tree.
+   Proposed: record nothing more. A proof cites the tree digest, and a record
+   of the commit would add an event for a fact the operator already holds.
+   Heads or branches for source trees wait until something tracks a line of
+   work.
