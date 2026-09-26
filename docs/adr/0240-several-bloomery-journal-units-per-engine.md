@@ -535,7 +535,7 @@ address; the workspace never asks who sent it. The ADR-0231 pieces it uses:
 
 | Piece | Where | What it proves |
 |---|---|---|
-| `Address::<JournalActor>::root_at(key).narrow::<ArtifactStorage>()` → `ProtocolAddress<ArtifactStorage>` | the builder of the request | compiles only if `ArtifactStorage: CoveredBy<JournalActor>`; the address is folded to a fully determined position when narrowed |
+| `Address::<JournalActor>::root_at(key).narrow::<ArtifactStorage>()?` → `ProtocolAddress<ArtifactStorage>` | the builder of the request | compiles only if `ArtifactStorage: CoveredBy<JournalActor>`; the address is folded to a fully determined position when narrowed, and a key the resolver cannot fold is `NarrowError::Key` (ADR-0231 §3) |
 | `ctx.resolve(&run.source)` → `ProtocolRef<ArtifactStorage>` | the workspace, on receipt, before anything is queued | the position is live and its route's published rows still cover `ArtifactStorage` |
 
 A source that does not resolve is refused at receipt:
