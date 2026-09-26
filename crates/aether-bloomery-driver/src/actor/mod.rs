@@ -5,10 +5,10 @@
 //! [`ProgramCore`] and keeps its first commands; `wire` performs them once the
 //! mailbox is live. Commands go to the journal owner (reads, appends, and the
 //! watch), the component host (loads, each under the unit's bundle name) and
-//! bundle roots. The core names a loaded bundle by
-//! its digest; the shell keeps each root's proven reference, taken from its
-//! load reply's stamped sender (ADR-0230 §3), keyed by that digest, and sends
-//! to it with the command's ticket as the request context. Inbound [`Call`],
+//! bundle roots. The core names a loaded bundle by its digest; the shell keeps
+//! each root's proven reference, taken from its load reply's stamped sender
+//! (ADR-0230 §3), keyed by that digest, and sends to it with the command's
+//! ticket as the request context. Inbound [`Call`],
 //! [`AwaitProcessed`], and a bundle root's fetch-on-miss [`ReadArtifact`]
 //! mail defers its reply, is fed to the core, and parks the reply keyed by
 //! its [`CallerId`]; each reply kind recovers its ticket from the request

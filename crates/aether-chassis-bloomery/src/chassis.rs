@@ -1,9 +1,9 @@
 //! Bloomery chassis: [`BloomeryChassis`] (issue #6244), the journal-driven
 //! engine. Boots the shared base stratum plus the component host and a held
 //! RPC server, then the mount seam spawns the journal owner and the bundle
-//! driver over the one configured unit's journal root, and only then does the RPC listener bind
-//! (issue #6399), so an engine a caller can reach can already take driver
-//! calls.
+//! driver over the one configured unit's journal root, and only then does the
+//! RPC listener bind (issue #6399), so an engine a caller can reach can
+//! already take driver calls.
 //!
 //! The composition is deliberately narrow. Its integrations are HTTP egress
 //! for Sampled programs (ADR-0234 decision 7), composed with the capability's
