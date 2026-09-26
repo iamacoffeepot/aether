@@ -1,79 +1,40 @@
 //! Named journal owners return exact stored artifacts and refuse corrupt blob files.
 
+mod actor_support;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 use std::time::Duration;
 
-use aether_actor::{ActorRef, ErasedActorRef, actor};
 use aether_bloomery_journal::{Batch, Journal, JournalActor, JournalReader, Seq};
 use aether_bloomery_kinds::{
     Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_blob, artifact_digest,
 };
-use aether_data::{Kind, Source, SourceAddr, Storage, StorageData};
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-use aether_substrate::mail::MailRef;
-use aether_substrate::mail::registry::{DispatchParts, MailboxEntry, OwnedDispatch, Registry};
-use aether_substrate::testing::{bare_substrate, boot_test_chassis_with, registered_ref};
-use aether_substrate::{BootError, Subname};
+use aether_data::{Kind, KindId, Storage, StorageData};
+use aether_substrate::Subname;
+use aether_substrate::mail::registry::OwnedDispatch;
+use aether_substrate::testing::{bare_substrate, boot_test_chassis_with};
+
+use actor_support::{BlobProbe, Member, Probed, TestAnchor, caller, reply, request};
 
 const CLUSTER: Head<OpaqueBytes> = Head::new("cluster.alpha");
 
-#[aether_data::kind(name = "test.bloomery.journal_actor.anchor_ping", default, no_serde)]
-struct AnchorPing;
-
-struct TestAnchor {
-    pings: u64,
+/// What a reader should find at `digest`: `payload` under `kind`, verified.
+fn found(digest: Digest, kind: KindId, payload: &[u8]) -> Probed {
+    Probed::Artifact(Member { digest, kind, payload: Ok(payload.to_vec()) })
 }
 
-#[actor(singleton, root)]
-impl NativeActor for TestAnchor {
-    type Config = ();
-    const NAMESPACE: &'static str = "test.bloomery.journal_actor.anchor";
-
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { pings: 0 })
+/// Probe arrivals for `correlations`, keyed by correlation in any arrival order.
+fn probed_by_correlation(rx: &mpsc::Receiver<actor_support::Arrival>, correlations: &[u64]) -> BTreeMap<u64, Probed> {
+    let mut arrivals = BTreeMap::new();
+    for _ in correlations {
+        let (correlation, probed) = rx.recv_timeout(Duration::from_secs(2)).expect("probe arrival within two seconds");
+        assert!(correlations.contains(&correlation), "unexpected correlation {correlation}");
+        assert!(arrivals.insert(correlation, probed).is_none(), "duplicate correlation {correlation}");
     }
-
-    #[handler::single]
-    fn on_anchor_ping(&mut self, _ctx: &mut NativeCtx<'_>, _mail: AnchorPing) {
-        self.pings += 1;
-    }
-}
-
-fn caller(registry: &Registry, name: &str) -> (ErasedActorRef, mpsc::Receiver<OwnedDispatch>) {
-    let (tx, rx) = mpsc::channel();
-    let mailbox = registered_ref(
-        registry,
-        name,
-        Arc::new(move |dispatch: OwnedDispatch| {
-            dispatch.discharge();
-            tx.send(dispatch).expect("capture reply");
-        }),
-    );
-    (mailbox, rx)
-}
-
-fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: ErasedActorRef, correlation: u64, mail: &K) {
-    let target = target.erase();
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("actor mailbox registered") else {
-        panic!("actor mailbox is not an inbox");
-    };
-    handler.enqueue(OwnedDispatch::disarmed(
-        DispatchParts {
-            sender: Source::with_correlation(SourceAddr::Component(caller.id()), correlation),
-            ..DispatchParts::new(K::ID, MailRef::from(mail.encode_into_bytes()))
-        },
-        target,
-    ));
-}
-
-fn reply<K: Kind>(rx: &mpsc::Receiver<OwnedDispatch>, correlation: u64) -> K {
-    let dispatch = rx.recv_timeout(Duration::from_secs(2)).expect("reply within two seconds");
-    assert_eq!(dispatch.kind, K::ID);
-    assert_eq!(dispatch.sender.correlation_id, correlation);
-    K::decode_from_bytes(dispatch.payload.bytes()).expect("decode reply")
+    arrivals
 }
 
 struct Seeded {
@@ -149,6 +110,12 @@ fn named_owners_return_isolated_artifacts_with_order_independent_correlation() {
     let (registry, mailer) = bare_substrate();
     let (caller_id, rx) = caller(&registry, "test.journal_actor.artifact_caller");
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let (arrivals, probe_rx) = mpsc::channel();
+    let probe = chassis
+        .spawn_actor::<BlobProbe>(Subname::Named("artifact_probe"), (), arrivals)
+        .finish()
+        .expect("probe birth")
+        .erase();
     let alpha = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("artifact_alpha"),
@@ -167,41 +134,21 @@ fn named_owners_return_isolated_artifacts_with_order_independent_correlation() {
         .expect("beta birth");
     assert_ne!(alpha, beta);
 
-    request(&registry, alpha, caller_id, 11, &read);
-    request(&registry, beta, caller_id, 22, &ReadArtifact { digest: beta_seed.blob });
-    request(&registry, alpha, caller_id, 33, &ReadArtifact { digest: alpha_seed.empty });
-    request(&registry, beta, caller_id, 44, &ReadArtifact { digest: beta_seed.set });
-    let replies = replies_by_correlation(&rx, &[11, 22, 33, 44]);
-    assert_eq!(
-        replies.get(&11),
-        Some(&ReadArtifactResult::Found {
-            digest: alpha_seed.blob,
-            kind: OpaqueBytes::ID,
-            bytes: b"alpha component".to_vec()
-        })
-    );
-    assert_eq!(
-        replies.get(&22),
-        Some(&ReadArtifactResult::Found {
-            digest: beta_seed.blob,
-            kind: OpaqueBytes::ID,
-            bytes: b"beta component".to_vec()
-        })
-    );
-    assert_eq!(
-        replies.get(&33),
-        Some(&ReadArtifactResult::Found { digest: alpha_seed.empty, kind: OpaqueBytes::ID, bytes: vec![] })
-    );
-    assert_eq!(
-        replies.get(&44),
-        Some(&ReadArtifactResult::Found { digest: beta_seed.set, kind: ReactorSet::ID, bytes: beta_seed.set_bytes })
-    );
+    request(&registry, alpha, probe, 11, &read);
+    request(&registry, beta, probe, 22, &ReadArtifact { digest: beta_seed.blob });
+    request(&registry, alpha, probe, 33, &ReadArtifact { digest: alpha_seed.empty });
+    request(&registry, beta, probe, 44, &ReadArtifact { digest: beta_seed.set });
+    let replies = probed_by_correlation(&probe_rx, &[11, 22, 33, 44]);
+    assert_eq!(replies.get(&11), Some(&found(alpha_seed.blob, OpaqueBytes::ID, b"alpha component")));
+    assert_eq!(replies.get(&22), Some(&found(beta_seed.blob, OpaqueBytes::ID, b"beta component")));
+    assert_eq!(replies.get(&33), Some(&found(alpha_seed.empty, OpaqueBytes::ID, b"")));
+    assert_eq!(replies.get(&44), Some(&found(beta_seed.set, ReactorSet::ID, &beta_seed.set_bytes)));
 
     request(&registry, beta, caller_id, 55, &ReadArtifact { digest: alpha_seed.blob });
     request(&registry, alpha, caller_id, 66, &ReadArtifact { digest: beta_seed.blob });
     let missing = replies_by_correlation(&rx, &[55, 66]);
-    assert_eq!(missing.get(&55), Some(&ReadArtifactResult::Missing { digest: alpha_seed.blob }));
-    assert_eq!(missing.get(&66), Some(&ReadArtifactResult::Missing { digest: beta_seed.blob }));
+    assert!(matches!(missing.get(&55), Some(ReadArtifactResult::Missing { digest }) if *digest == alpha_seed.blob));
+    assert!(matches!(missing.get(&66), Some(ReadArtifactResult::Missing { digest }) if *digest == beta_seed.blob));
     assert_no_events(&alpha_path);
     assert_no_events(&beta_path);
 }
@@ -215,6 +162,9 @@ fn text_kind_and_absent_digest_are_distinct_from_opaque_or_empty_bytes() {
     let (registry, mailer) = bare_substrate();
     let (caller_id, rx) = caller(&registry, "test.journal_actor.text_caller");
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let (arrivals, probe_rx) = mpsc::channel();
+    let probe =
+        chassis.spawn_actor::<BlobProbe>(Subname::Named("text_probe"), (), arrivals).finish().expect("probe birth");
     let owner = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("artifact_text"),
@@ -224,16 +174,14 @@ fn text_kind_and_absent_digest_are_distinct_from_opaque_or_empty_bytes() {
         .finish()
         .expect("birth");
 
-    request(&registry, owner, caller_id, 71, &ReadArtifact { digest: seeded.text });
-    assert_eq!(
-        reply::<ReadArtifactResult>(&rx, 71),
-        ReadArtifactResult::Found { digest: seeded.text, kind: Utf8Text::ID, bytes: b"stored text".to_vec() }
-    );
+    request(&registry, owner, probe.erase(), 71, &ReadArtifact { digest: seeded.text });
+    let text = probed_by_correlation(&probe_rx, &[71]);
+    assert_eq!(text.get(&71), Some(&found(seeded.text, Utf8Text::ID, b"stored text")));
     assert_ne!(Utf8Text::ID, OpaqueBytes::ID);
     assert_eq!(artifact_digest(Utf8Text::ID, b"stored text"), seeded.text);
 
     request(&registry, owner, caller_id, 72, &ReadArtifact { digest: absent });
-    assert_eq!(reply::<ReadArtifactResult>(&rx, 72), ReadArtifactResult::Missing { digest: absent });
+    assert!(matches!(reply::<ReadArtifactResult>(&rx, 72), ReadArtifactResult::Missing { digest } if digest == absent));
     assert_no_events(&path);
 }
 

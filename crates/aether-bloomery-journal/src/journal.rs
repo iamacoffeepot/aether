@@ -12,7 +12,7 @@ use std::{fmt, slice, str};
 
 use aether_bloomery_kinds::{ClosureLimit, RecordedHeadMove};
 use aether_data::wire::WireDecode;
-use aether_data::{Citation, Kind, KindId, Storage, StorageError, storage_kind_id_from_name};
+use aether_data::{Blob, Citation, Kind, KindId, Storage, StorageError, storage_kind_id_from_name};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Statement, Transaction, TransactionBehavior, params, params_from_iter};
 
@@ -250,13 +250,21 @@ impl Journal {
     /// before the journal recorded citation edges have none, so their closure
     /// is the artifact alone.
     ///
+    /// Each member's payload is handed to `check_in` in the buffer it was
+    /// read into; the journal actor checks it into the engine blob store.
+    ///
     /// # Errors
     ///
     /// [`JournalError::ArtifactDigestMismatch`] when a member's stored kind
     /// and payload do not hash to its digest. [`JournalError`] on a backend or
     /// corrupt-blob failure.
-    pub fn read_closure(&self, root: &Digest, limit: ClosureLimit) -> Result<Closure, JournalError> {
-        walk_closure(&self.conn, &self.blobs, *root, limit)
+    pub fn read_closure(
+        &self,
+        root: &Digest,
+        limit: ClosureLimit,
+        check_in: impl FnMut(Box<[u8]>) -> Blob,
+    ) -> Result<Closure, JournalError> {
+        walk_closure(&self.conn, &self.blobs, *root, limit, check_in)
     }
 
     /// Entries with `seq > since`, ascending, at most `limit`.

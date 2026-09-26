@@ -7,8 +7,10 @@
 mod support;
 
 use aether_bloomery_driver::{CallerId, Command};
-use aether_bloomery_kinds::{Digest, OpaqueBytes, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_digest};
-use aether_data::Kind;
+use aether_bloomery_kinds::{
+    Digest, DigestMismatch, OpaqueBytes, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_digest,
+};
+use aether_data::{Kind, KindId};
 use support::{World, bundle_wasm, digest};
 
 /// Fetch `digest` the way a bundle root's fetch-on-miss reaches the core.
@@ -21,9 +23,36 @@ fn reads_of(world: &World, digest: Digest) -> usize {
     world.reads_seen.iter().filter(|seen| **seen == digest).count()
 }
 
+/// A fetch answer as plain values. A `Found` member is read through its one reader, against the
+/// digest it claims, so a comparison covers its variant, claim, kind, and payload.
+#[derive(Debug, PartialEq, Eq)]
+enum Answer {
+    Found { digest: Digest, kind: KindId, payload: Result<Vec<u8>, DigestMismatch> },
+    Missing(Digest),
+    Err(Digest),
+}
+
+impl From<&ReadArtifactResult> for Answer {
+    fn from(result: &ReadArtifactResult) -> Self {
+        match result {
+            ReadArtifactResult::Found { artifact } => {
+                let digest = artifact.claimed().unverified();
+                Self::Found { digest, kind: artifact.kind(), payload: artifact.load(digest) }
+            }
+            ReadArtifactResult::Missing { digest } => Self::Missing(*digest),
+            ReadArtifactResult::Err { digest, .. } => Self::Err(*digest),
+        }
+    }
+}
+
+/// Every fetch answer the world collected, as plain values, in arrival order.
+fn answers(world: &World) -> Vec<(CallerId, Answer)> {
+    world.fetched.iter().map(|(caller, result)| (*caller, Answer::from(result))).collect()
+}
+
 /// The `Found` answer for one stored text.
-fn found(digest: Digest, text: &[u8]) -> ReadArtifactResult {
-    ReadArtifactResult::Found { digest, kind: Utf8Text::ID, bytes: text.to_vec() }
+fn found(digest: Digest, text: &[u8]) -> Answer {
+    Answer::Found { digest, kind: Utf8Text::ID, payload: Ok(text.to_vec()) }
 }
 
 #[test]
@@ -45,18 +74,14 @@ fn concurrent_fetches_share_one_read_and_a_repeat_reads_nothing() {
     assert_eq!(reads_of(&world, text), 1, "concurrent fetches share one read");
     assert_eq!(reads_of(&world, unstored), 1, "another digest reads on its own");
     assert_eq!(
-        world.fetched,
-        [
-            (first, found(text, b"hello")),
-            (second, found(text, b"hello")),
-            (other, ReadArtifactResult::Missing { digest: unstored }),
-        ]
+        answers(&world),
+        [(first, found(text, b"hello")), (second, found(text, b"hello")), (other, Answer::Missing(unstored))]
     );
 
     let (third, commands) = fetch(&mut world, text);
     assert!(world.drive(commands).is_empty());
     assert_eq!(reads_of(&world, text), 1, "a repeat fetch is answered from the cache");
-    assert_eq!(world.fetched.last(), Some(&(third, found(text, b"hello"))));
+    assert_eq!(answers(&world).pop(), Some((third, found(text, b"hello"))));
 }
 
 #[test]
@@ -69,13 +94,13 @@ fn a_missing_fetch_is_not_cached() {
 
     let (first, commands) = fetch(&mut world, late);
     assert!(world.drive(commands).is_empty());
-    assert_eq!(world.fetched, [(first, ReadArtifactResult::Missing { digest: late })]);
+    assert_eq!(answers(&world), [(first, Answer::Missing(late))]);
 
     assert_eq!(world.store(Utf8Text::ID, b"late"), late);
     let (second, commands) = fetch(&mut world, late);
     assert!(world.drive(commands).is_empty());
     assert_eq!(reads_of(&world, late), 2, "a missing artifact is read again");
-    assert_eq!(world.fetched.last(), Some(&(second, found(late, b"late"))));
+    assert_eq!(answers(&world).pop(), Some((second, found(late, b"late"))));
 }
 
 #[test]
@@ -90,7 +115,7 @@ fn a_fetch_while_catching_up_is_answered() {
     let (caller, commands) = fetch(&mut world, text);
     assert!(world.drive(commands).is_empty());
     assert!(world.events_seen.is_empty(), "the startup read is still unfed");
-    assert_eq!(world.fetched, [(caller, found(text, b"hello"))]);
+    assert_eq!(answers(&world), [(caller, found(text, b"hello"))]);
 
     assert!(world.drive(startup).is_empty());
     assert!(world.abort.is_none());

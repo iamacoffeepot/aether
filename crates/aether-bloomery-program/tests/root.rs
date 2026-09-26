@@ -145,7 +145,12 @@ fn dispatch_runs_the_named_entry() {
     // Catches fall-through to the first entry or a missing rejection.
     let encoded = EncodedArtifact::new(&Count { n: 4 }).expect("encode input");
     let closure = ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec());
-    let invoke = Invoke::new(9, ProgramName::new(Second::NAME).expect("valid name"), closure.digest(), vec![closure]);
+    let invoke = Invoke::new(
+        9,
+        ProgramName::new(Second::NAME).expect("valid name"),
+        closure.claimed().unverified(),
+        vec![closure],
+    );
     match dispatch(&TABLE, invoke) {
         Invoked::Completed { seq: 9, result, .. } => {
             let expected = EncodedArtifact::new(&Count { n: 5 }).expect("encode result");

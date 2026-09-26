@@ -2,16 +2,16 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use aether_bloomery_kinds::{ClosureArtifact, ClosureLimit, artifact_digest};
+use aether_bloomery_kinds::{ClosureArtifact, ClosureLimit};
+use aether_data::Blob;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::Digest;
-use crate::artifact::split_artifact;
 use crate::blobs::BlobDir;
 use crate::journal::JournalError;
 
 /// Outcome of [`crate::Journal::read_closure`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Closure {
     /// Every distinct reachable artifact: the root first, then breadth-first
     /// levels, each member's children in ascending digest byte order.
@@ -25,11 +25,14 @@ pub enum Closure {
 /// Walk `root`'s closure in one read snapshot. Each digest is enqueued at
 /// most once; the running total, taken from each row's recorded size, is
 /// checked before the member's file is read, so the budget bounds the walk.
+/// Each member's payload is handed to `check_in` in the buffer it was read
+/// into, and the member is built over the [`Blob`] that returns.
 pub fn walk_closure(
     conn: &Connection,
     blobs: &BlobDir,
     root: Digest,
     limit: ClosureLimit,
+    mut check_in: impl FnMut(Box<[u8]>) -> Blob,
 ) -> Result<Closure, JournalError> {
     let tx = conn.unchecked_transaction()?;
     let mut length = tx.prepare("SELECT size_bytes FROM artifacts WHERE digest = ?1")?;
@@ -51,12 +54,12 @@ pub fn walk_closure(
             return Ok(Closure::TooLarge);
         }
 
-        let bytes = blobs.read(&digest, size)?;
-        let (kind, payload) = split_artifact(&bytes)?;
-        if artifact_digest(kind, payload) != digest {
+        let (kind, payload) = blobs.read_payload(&digest, size)?;
+        let artifact = ClosureArtifact::new(kind, check_in(payload));
+        if artifact.claimed().unverified() != digest {
             return Err(JournalError::ArtifactDigestMismatch(digest));
         }
-        artifacts.push(ClosureArtifact::new(kind, payload.to_vec()));
+        artifacts.push(artifact);
 
         let mut rows = children.query(params![key])?;
         while let Some(row) = rows.next()? {

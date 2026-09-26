@@ -4,13 +4,16 @@ mod actor_support;
 
 use std::error::Error;
 use std::path::Path;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use aether_bloomery_journal::{Batch, Clock, Digest, Journal, JournalActor, OpaqueBytes, Ref, Seq};
-use aether_bloomery_kinds::{ClosureArtifact, ClosureLimit, ReadClosure, ReadClosureResult};
+use aether_bloomery_kinds::{ClosureLimit, ReadClosure, ReadClosureResult};
+use aether_data::Kind;
 use aether_substrate::Subname;
 use aether_substrate::testing::{bare_substrate, boot_test_chassis_with};
 
-use actor_support::{TestAnchor, caller, reply, request};
+use actor_support::{BlobProbe, Member, Probed, TestAnchor, caller, reply, request};
 
 struct FixedClock;
 
@@ -26,28 +29,33 @@ struct Node {
     leaf: Ref<OpaqueBytes>,
 }
 
-/// Stage root → leaf and return the digests root-first plus their total blob length.
-fn seed(journal_root: &Path) -> Result<(Vec<Digest>, u64), Box<dyn Error>> {
+/// Stage root → leaf and return each member root-first, as a reader should find it, plus their
+/// total blob length.
+fn seed(journal_root: &Path) -> Result<(Vec<Member>, u64), Box<dyn Error>> {
     let mut batch = Batch::new();
     let leaf = batch.stage_bytes(b"closure leaf");
     let root = batch.stage_encoded(&Node { leaf })?;
-    let digests = vec![root.digest(), leaf.digest()];
+    let mut members = Vec::new();
     let mut total_bytes = 0;
-    for digest in &digests {
-        total_bytes += u64::try_from(batch.staged_blob(digest).ok_or("staged blob")?.len())?;
+    for (digest, kind) in [(root.digest(), Node::ID), (leaf.digest(), OpaqueBytes::ID)] {
+        let blob = batch.staged_blob(&digest).ok_or("staged blob")?;
+        total_bytes += u64::try_from(blob.len())?;
+        members.push(Member { digest, kind, payload: Ok(blob[8..].to_vec()) });
     }
 
     Journal::open_with_clock(journal_root, Box::new(FixedClock))?.append(Seq(0), &batch)?;
-    Ok((digests, total_bytes))
+    Ok((members, total_bytes))
 }
 
 #[test]
 fn read_closure_replies_found_too_large_and_missing() -> Result<(), Box<dyn Error>> {
-    // Catches a missing handler or a `Closure` outcome mapped to the wrong reply variant or root.
+    // Catches a missing handler, a `Closure` outcome mapped to the wrong reply variant or root, a
+    // `Found` whose members were never checked in beside the reply (the probe's decode refuses a
+    // detached blob), and a member checked in from the wrong slice (its payload or claim differs).
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("journal");
-    let (digests, total_bytes) = seed(&path)?;
-    let root = digests[0];
+    let (members, total_bytes) = seed(&path)?;
+    let root = members[0].digest;
 
     let (registry, mailer) = bare_substrate();
     let (reader, rx) = caller(&registry, "test.journal_actor.closure_reader");
@@ -60,21 +68,28 @@ fn read_closure_replies_found_too_large_and_missing() -> Result<(), Box<dyn Erro
         )
         .finish()
         .expect("journal birth");
+    let (arrivals, probe_rx) = mpsc::channel();
+    let probe =
+        chassis.spawn_actor::<BlobProbe>(Subname::Named("closure_probe"), (), arrivals).finish().expect("probe birth");
 
-    request(&registry, journal, reader, 1, &ReadClosure { root, limit_bytes: ClosureLimit::new(total_bytes)? });
-    let ReadClosureResult::Found { root: echoed, artifacts } = reply::<ReadClosureResult>(&rx, 1) else {
-        panic!("expected Found");
-    };
-    assert_eq!(echoed, root);
-    assert_eq!(artifacts.iter().map(ClosureArtifact::digest).collect::<Vec<_>>(), digests);
+    let found = ReadClosure { root, limit_bytes: ClosureLimit::new(total_bytes)? };
+    request(&registry, journal, probe.erase(), 1, &found);
+    let arrival = probe_rx.recv_timeout(Duration::from_secs(2)).expect("probe arrival within two seconds");
+    assert_eq!(arrival, (1, Probed::Closure { root, members }));
 
     let short = ClosureLimit::new(total_bytes - 1)?;
     request(&registry, journal, reader, 2, &ReadClosure { root, limit_bytes: short });
-    assert_eq!(reply::<ReadClosureResult>(&rx, 2), ReadClosureResult::TooLarge { root, limit_bytes: short });
+    assert!(matches!(
+        reply::<ReadClosureResult>(&rx, 2),
+        ReadClosureResult::TooLarge { root: echoed, limit_bytes } if echoed == root && limit_bytes == short
+    ));
 
     let absent = Digest::from_bytes([6; 32]);
     let generous = ClosureLimit::new(ClosureLimit::MAX_BYTES)?;
     request(&registry, journal, reader, 3, &ReadClosure { root: absent, limit_bytes: generous });
-    assert_eq!(reply::<ReadClosureResult>(&rx, 3), ReadClosureResult::Missing { root: absent, digest: absent });
+    assert!(matches!(
+        reply::<ReadClosureResult>(&rx, 3),
+        ReadClosureResult::Missing { root, digest } if root == absent && digest == absent
+    ));
     Ok(())
 }

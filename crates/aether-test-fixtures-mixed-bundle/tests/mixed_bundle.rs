@@ -93,7 +93,7 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
     let invoke = Invoke::new(
         1,
         ProgramName::new(SUMMARIZE_PROGRAM)?,
-        input_artifact.digest(),
+        input_artifact.claimed().unverified(),
         vec![text_artifact, input_artifact],
     );
     match reply::<Invoked>(&mut harness, root, &invoke, "invoke-one") {
@@ -132,7 +132,7 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
     let second = Invoke::new(
         2,
         ProgramName::new(SUMMARIZE_PROGRAM)?,
-        second_artifact.digest(),
+        second_artifact.claimed().unverified(),
         vec![ClosureArtifact::new(Utf8Text::ID, b"hello".to_vec()), second_artifact],
     );
     match reply::<Invoked>(&mut harness, root, &second, "invoke-two") {

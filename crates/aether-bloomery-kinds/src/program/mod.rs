@@ -20,7 +20,7 @@ use aether_data::KindId;
 
 pub use events::{ProgramHeadMoved, Transition};
 pub use fault::{Detail, DetailError, Fault, FaultReason};
-pub use invoke::{ClosureArtifact, Invoke, Invoked};
+pub use invoke::{ClaimedDigest, ClosureArtifact, DigestMismatch, Invoke, Invoked};
 pub use mode::Mode;
 pub use name::{
     NativeOrigin, NativeOriginError, ProgramName, ProgramNameError, ReactorName, ReactorNameError, RuleName,

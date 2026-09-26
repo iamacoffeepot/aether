@@ -89,12 +89,12 @@ impl AsyncSession {
     /// Apply a journal reply and make the next [`Self::poll`] see the digest.
     pub fn fulfill(&mut self, expected: PendingArtifact, result: ReadArtifactResult) {
         match &result {
-            ReadArtifactResult::Found { digest, kind, .. }
-                if *digest == expected.digest && *kind != expected.expected =>
+            ReadArtifactResult::Found { artifact }
+                if artifact.claimed().unverified() == expected.digest && artifact.kind() != expected.expected =>
             {
                 self.owner.env::<Async>().fail(expected.digest, Refusal::InputDecode);
             }
-            ReadArtifactResult::Found { digest, .. } if *digest != expected.digest => {
+            ReadArtifactResult::Found { artifact } if artifact.claimed().unverified() != expected.digest => {
                 self.owner.env::<Async>().fail(expected.digest, Refusal::InputDecode);
             }
             ReadArtifactResult::Missing { digest } if *digest != expected.digest => {

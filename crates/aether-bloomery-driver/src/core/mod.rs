@@ -142,8 +142,8 @@ impl ProgramCore {
             return (caller, out);
         }
         let digest = request.digest;
-        if let Some((kind, bytes)) = self.artifacts.get(digest) {
-            let result = ReadArtifactResult::Found { digest, kind, bytes: bytes.to_vec() };
+        if let Some(artifact) = self.artifacts.get(digest) {
+            let result = ReadArtifactResult::Found { artifact: artifact.clone() };
             out.push(Command::Fetched { caller, result });
             return (caller, out);
         }
@@ -244,8 +244,8 @@ impl ProgramCore {
         for caller in self.fetching.remove(&digest).unwrap_or_default() {
             out.push(Command::Fetched { caller, result: result.clone() });
         }
-        if let ReadArtifactResult::Found { kind, bytes, .. } = result {
-            self.artifacts.insert(digest, kind, bytes);
+        if let ReadArtifactResult::Found { artifact } = result {
+            self.artifacts.insert(digest, artifact);
         }
     }
 

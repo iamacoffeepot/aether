@@ -2,23 +2,25 @@
 //!
 //! Artifacts are content-addressed and immutable, so a `Found` read stays
 //! true for as long as the driver lives. The cache keeps each found
-//! artifact's kind and bytes keyed by digest and evicts the least recently
-//! used entry first once the budget is full. It never holds a missing
-//! artifact: one can be stored after a miss.
+//! [`ClosureArtifact`] keyed by the digest it was read under, and evicts the
+//! least recently used entry first once the budget is full. A member holds
+//! its payload as a `Blob`, so a hit answers with a cheap clone, and every
+//! reader of a cached member still verifies it through
+//! [`ClosureArtifact::load`]. It never holds a missing artifact: one can be
+//! stored after a miss.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use aether_bloomery_kinds::Digest;
+use aether_bloomery_kinds::{ClosureArtifact, Digest};
 use aether_data::KindId;
 
 /// Byte budget of the driver's artifact cache: 64 MiB of cached payloads.
 pub const ARTIFACT_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// One cached artifact: its kind, its payload, and its last-use tick.
+/// One cached artifact and its last-use tick.
 struct Cached {
-    kind: KindId,
-    bytes: Vec<u8>,
+    artifact: ClosureArtifact,
     tick: u64,
 }
 
@@ -38,10 +40,10 @@ impl ArtifactCache {
         Self { budget_bytes, held_bytes: 0, next_tick: 0, entries: HashMap::new(), order: BTreeMap::new() }
     }
 
-    /// The cached artifact's kind and payload, marked as just used.
-    pub(crate) fn get(&mut self, digest: Digest) -> Option<(KindId, &[u8])> {
+    /// The cached artifact, marked as just used.
+    pub(crate) fn get(&mut self, digest: Digest) -> Option<&ClosureArtifact> {
         self.touch(digest)?;
-        self.entries.get(&digest).map(|cached| (cached.kind, cached.bytes.as_slice()))
+        self.entries.get(&digest).map(|cached| &cached.artifact)
     }
 
     /// The cached artifact's kind, marked as just used.
@@ -54,11 +56,11 @@ impl ArtifactCache {
     ///
     /// An artifact already cached is only marked as used, and one larger
     /// than the whole budget is not cached.
-    pub(crate) fn insert(&mut self, digest: Digest, kind: KindId, bytes: Vec<u8>) {
+    pub(crate) fn insert(&mut self, digest: Digest, artifact: ClosureArtifact) {
         if self.touch(digest).is_some() {
             return;
         }
-        let size = byte_len(&bytes);
+        let size = artifact.len();
         if size > self.budget_bytes {
             return;
         }
@@ -67,12 +69,12 @@ impl ArtifactCache {
                 break;
             };
             if let Some(evicted) = self.entries.remove(&oldest) {
-                self.held_bytes -= byte_len(&evicted.bytes);
+                self.held_bytes -= evicted.artifact.len();
             }
         }
         let tick = self.next_tick();
         self.order.insert(tick, digest);
-        self.entries.insert(digest, Cached { kind, bytes, tick });
+        self.entries.insert(digest, Cached { artifact, tick });
         self.held_bytes += size;
     }
 
@@ -83,7 +85,7 @@ impl ArtifactCache {
         self.order.remove(&cached.tick);
         cached.tick = tick;
         self.order.insert(tick, digest);
-        Some(cached.kind)
+        Some(cached.artifact.kind())
     }
 
     fn next_tick(&mut self) -> u64 {
@@ -103,14 +105,9 @@ impl fmt::Debug for ArtifactCache {
     }
 }
 
-/// One payload's length in bytes.
-fn byte_len(bytes: &[u8]) -> u64 {
-    u64::try_from(bytes.len()).unwrap_or(u64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::Digest;
+    use aether_bloomery_kinds::{ClosureArtifact, Digest};
     use aether_data::KindId;
 
     use super::ArtifactCache;
@@ -119,18 +116,24 @@ mod tests {
         Digest::from_bytes([byte; 32])
     }
 
+    fn member(kind: u64, byte: u8, len: usize) -> ClosureArtifact {
+        ClosureArtifact::new(KindId(kind), vec![byte; len])
+    }
+
     #[test]
     fn eviction_is_least_recently_used_and_bytes_stay_within_budget() {
         // Catches byte-accounting drift that grows the cache past its budget,
         // or evicting the entry just used instead of the oldest.
         let mut cache = ArtifactCache::with_budget(100);
-        cache.insert(digest(1), KindId(1), vec![1; 40]);
-        cache.insert(digest(2), KindId(2), vec![2; 40]);
+        let first = member(1, 1, 40);
+        cache.insert(digest(1), first.clone());
+        cache.insert(digest(2), member(2, 2, 40));
         assert_eq!(cache.kind(digest(1)), Some(KindId(1)));
 
-        cache.insert(digest(3), KindId(3), vec![3; 40]);
+        cache.insert(digest(3), member(3, 3, 40));
         assert!(cache.get(digest(2)).is_none(), "the untouched entry is evicted");
-        assert_eq!(cache.get(digest(1)), Some((KindId(1), [1; 40].as_slice())), "the touched entry stays");
+        let kept = cache.get(digest(1)).expect("the touched entry stays");
+        assert_eq!(kept.load(first.claimed().unverified()), Ok(vec![1; 40]));
         assert_eq!(cache.kind(digest(3)), Some(KindId(3)));
         assert_eq!(cache.held_bytes, 80);
     }
@@ -140,8 +143,8 @@ mod tests {
         // Catches an oversized insert that evicts everything and then holds
         // more than the budget.
         let mut cache = ArtifactCache::with_budget(100);
-        cache.insert(digest(1), KindId(1), vec![1; 40]);
-        cache.insert(digest(2), KindId(2), vec![2; 101]);
+        cache.insert(digest(1), member(1, 1, 40));
+        cache.insert(digest(2), member(2, 2, 101));
         assert!(cache.get(digest(2)).is_none());
         assert_eq!(cache.kind(digest(1)), Some(KindId(1)), "the oversized insert evicts nothing");
         assert_eq!(cache.held_bytes, 40);

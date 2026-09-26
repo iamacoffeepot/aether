@@ -9,9 +9,11 @@ use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
+use aether_data::KindId;
 use tempfile::NamedTempFile;
 
 use crate::Digest;
+use crate::artifact::split_artifact;
 use crate::journal::JournalError;
 
 /// The `blobs` directory of one journal root.
@@ -103,6 +105,34 @@ impl BlobDir {
         } else {
             Err(JournalError::CorruptArtifact)
         }
+    }
+
+    /// The kind and payload of the file stored under `digest`, which must be
+    /// `size_bytes` long. The payload is read into a buffer of exactly
+    /// `size_bytes - 8` bytes, so it can be checked into the engine blob
+    /// store without another copy.
+    ///
+    /// A missing file is [`JournalError::MissingBlob`]; a file of any other
+    /// length, or one whose prefix is not a kind, is
+    /// [`JournalError::CorruptArtifact`].
+    pub fn read_payload(&self, digest: &Digest, size_bytes: u64) -> Result<(KindId, Box<[u8]>), JournalError> {
+        let (_, path) = self.locate(digest);
+        let mut file = File::open(&path).map_err(|error| read_error(digest, &path, error))?;
+        let stored = file.metadata().map_err(|error| JournalError::io(&path, error))?.len();
+        let payload_len =
+            size_bytes.checked_sub(8).filter(|_| stored == size_bytes).ok_or(JournalError::CorruptArtifact)?;
+        let payload_len = usize::try_from(payload_len).map_err(|_| JournalError::IntegerRange)?;
+
+        let mut prefix = [0; 8];
+        let mut payload = vec![0; payload_len].into_boxed_slice();
+        file.read_exact(&mut prefix).and_then(|()| file.read_exact(&mut payload)).map_err(|error| {
+            match error.kind() {
+                ErrorKind::UnexpectedEof => JournalError::CorruptArtifact,
+                _ => read_error(digest, &path, error),
+            }
+        })?;
+        let (kind, _) = split_artifact(&prefix)?;
+        Ok((kind, payload))
     }
 
     /// The first eight bytes of the file stored under `digest`: its kind prefix.

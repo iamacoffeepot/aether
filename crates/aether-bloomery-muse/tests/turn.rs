@@ -33,7 +33,7 @@ fn start_turn() -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
         texts.iter().map(|(_, text)| ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec())).collect();
     closure.push(input_artifact.clone());
 
-    let invoke = Invoke::new(7, ProgramName::new(MuseTurn::NAME)?, input_artifact.digest(), closure);
+    let invoke = Invoke::new(7, ProgramName::new(MuseTurn::NAME)?, input_artifact.claimed().unverified(), closure);
     match start_async::<MuseTurn>(invoke) {
         Started::Finished(other) => Err(format!("expected a parked fetch, got Finished {other:?}").into()),
         Started::Live { session, waiting: Some(Pending::Send(pending)) } => Ok((session, pending)),

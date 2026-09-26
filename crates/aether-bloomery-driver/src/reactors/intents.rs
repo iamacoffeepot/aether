@@ -125,15 +125,18 @@ impl ProgramCore {
     /// Continue the checked `SetHead`'s destination read.
     ///
     /// A found destination enters the artifact cache before it is planned,
-    /// so a later check of the same digest reads nothing.
+    /// so a later check of the same digest reads nothing. Only its existence
+    /// and kind are used, so its bytes are not read: the kind is what the
+    /// journal answered, as it always was.
     pub(crate) fn continue_destination_artifact(&mut self, result: ReadArtifactResult, out: &mut Vec<Command>) {
         let Some((order, pending)) = self.routing.current.as_mut().and_then(|work| work.checking.take()) else {
             self.abort("set_head destination arrived with none being checked".to_string(), out);
             return;
         };
         let stored = match result {
-            ReadArtifactResult::Found { kind, bytes, .. } => {
-                self.artifacts.insert(pending.set_head.to(), kind, bytes);
+            ReadArtifactResult::Found { artifact } => {
+                let kind = artifact.kind();
+                self.artifacts.insert(pending.set_head.to(), artifact);
                 Some(kind)
             }
             ReadArtifactResult::Missing { .. } => None,

@@ -43,6 +43,21 @@ struct ReadUncitedResult {
     text: Ref<Utf8Text>,
 }
 
+/// Local mirror of the fixture's `test.program.read_large.input`.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.read_large.input")]
+struct ReadLargeInput {
+    text: Ref<Utf8Text>,
+}
+
+/// Local mirror of the fixture's `test.program.read_large.result`.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.read_large.result")]
+struct ReadLargeResult {
+    len: u64,
+    tail: Ref<Utf8Text>,
+}
+
 /// Local mirror of `aether-test-fixtures-program-process`'s `test.program.exec.input`.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.exec.input")]
@@ -206,6 +221,34 @@ fn fetch_on_miss_reads_through_the_mounted_journal() -> Result<(), Box<dyn Error
         }
         other => panic!("expected a Transition outcome, got {other:?}"),
     }
+    Ok(())
+}
+
+#[test]
+fn a_closure_past_the_old_ceiling_reaches_the_program_whole() -> Result<(), Box<dyn Error>> {
+    // Catches the old 16 MiB closure ceiling (the call faults `ClosureTooLarge`), a member that never reaches the guest, and a guest `load` that stops short of the last byte or refuses true bytes (the call faults `InputDecode`).
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_program") else {
+        return Ok(());
+    };
+    let wasm = fs::read(&wasm_path)?;
+    let tail = "0123456789abcdef";
+    let len = 20 * 1024 * 1024 + 1;
+    let text = format!("{}{tail}", "a".repeat(len - tail.len()));
+    let mut seed = Batch::new();
+    let bundle = seed.stage_bytes(&wasm);
+    seed.push_event(&RecordedHeadMove::new(RecordedHead::from(&PROGRAM), bundle.digest()), None)?;
+    let text = seed.stage_text(&text);
+    let input = seed.stage_encoded(&ReadLargeInput { text })?.digest();
+
+    let mut harness = BloomeryHarness::start([seed]);
+    let origin = NativeOrigin::new("test.driver")?;
+    let read = Call { program: PROGRAM, name: ProgramName::new("test.program.read_large")?, input, origin, key: 1 };
+    let outcome = harness.call(&read);
+    let CallOutcome::Transition { key: 1, transition, .. } = outcome else {
+        panic!("expected a Transition outcome, got {outcome:?}");
+    };
+    let expected = Ref::of_encoded(&ReadLargeResult { len: u64::try_from(len)?, tail: Ref::of_text(tail) })?;
+    assert_eq!(transition.result, expected.digest(), "the program read and verified every byte");
     Ok(())
 }
 

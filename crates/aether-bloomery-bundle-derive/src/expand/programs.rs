@@ -320,8 +320,8 @@ fn expand_fetch_reply(program: &TokenStream2) -> TokenStream2 {
                 return;
             }
             let digest = match &result {
-                #program::kinds::ReadArtifactResult::Found { digest, .. }
-                | #program::kinds::ReadArtifactResult::Missing { digest }
+                #program::kinds::ReadArtifactResult::Found { artifact } => artifact.claimed().unverified(),
+                #program::kinds::ReadArtifactResult::Missing { digest }
                 | #program::kinds::ReadArtifactResult::Err { digest, .. } => *digest,
             };
             let Some(pending) = self.fetching.remove(&digest) else {
