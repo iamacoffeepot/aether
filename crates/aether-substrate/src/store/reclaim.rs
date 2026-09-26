@@ -9,7 +9,7 @@ use crate::runtime::infra_thread;
 
 /// Spawn the `aether-blob-reclaim` thread and return its sender. The thread
 /// frees each buffer it receives and exits once every sender has dropped,
-/// which is when the last store and the last entry are gone. The channel is
+/// which is when the last store, entry and slab are gone. The channel is
 /// unbounded: the store never blocks a dropping thread and never leaks a
 /// free, so under pressure the queue grows.
 pub(super) fn spawn() -> io::Result<Sender<Box<[u8]>>> {

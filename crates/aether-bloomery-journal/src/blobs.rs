@@ -112,27 +112,41 @@ impl BlobDir {
     /// `size_bytes - 8` bytes, so it can be checked into the engine blob
     /// store without another copy.
     ///
-    /// A missing file is [`JournalError::MissingBlob`]; a file of any other
-    /// length, or one whose prefix is not a kind, is
-    /// [`JournalError::CorruptArtifact`].
+    /// Fails as [`BlobDir::read_payload_into`] does, and a `size_bytes` under
+    /// eight is [`JournalError::CorruptArtifact`].
     pub fn read_payload(&self, digest: &Digest, size_bytes: u64) -> Result<(KindId, Box<[u8]>), JournalError> {
+        let mut payload = vec![0; payload_len(size_bytes)?].into_boxed_slice();
+        let kind = self.read_payload_into(digest, size_bytes, &mut payload)?;
+        Ok((kind, payload))
+    }
+
+    /// Read the file stored under `digest`, which must be `size_bytes` long,
+    /// returning its kind and reading its payload straight into `payload`,
+    /// which must be exactly `size_bytes - 8` bytes.
+    ///
+    /// A missing file is [`JournalError::MissingBlob`]; a file of any other
+    /// length, a `payload` of any other length, or a file whose prefix is not
+    /// a kind is [`JournalError::CorruptArtifact`].
+    pub fn read_payload_into(
+        &self,
+        digest: &Digest,
+        size_bytes: u64,
+        payload: &mut [u8],
+    ) -> Result<KindId, JournalError> {
         let (_, path) = self.locate(digest);
         let mut file = File::open(&path).map_err(|error| read_error(digest, &path, error))?;
         let stored = file.metadata().map_err(|error| JournalError::io(&path, error))?.len();
-        let payload_len =
-            size_bytes.checked_sub(8).filter(|_| stored == size_bytes).ok_or(JournalError::CorruptArtifact)?;
-        let payload_len = usize::try_from(payload_len).map_err(|_| JournalError::IntegerRange)?;
+        let expected = u64::try_from(payload.len()).ok().and_then(|len| len.checked_add(8));
+        if stored != size_bytes || expected != Some(size_bytes) {
+            return Err(JournalError::CorruptArtifact);
+        }
 
         let mut prefix = [0; 8];
-        let mut payload = vec![0; payload_len].into_boxed_slice();
-        file.read_exact(&mut prefix).and_then(|()| file.read_exact(&mut payload)).map_err(|error| {
-            match error.kind() {
-                ErrorKind::UnexpectedEof => JournalError::CorruptArtifact,
-                _ => read_error(digest, &path, error),
-            }
+        file.read_exact(&mut prefix).and_then(|()| file.read_exact(payload)).map_err(|error| match error.kind() {
+            ErrorKind::UnexpectedEof => JournalError::CorruptArtifact,
+            _ => read_error(digest, &path, error),
         })?;
-        let (kind, _) = split_artifact(&prefix)?;
-        Ok((kind, payload))
+        split_artifact(&prefix).map(|(kind, _)| kind)
     }
 
     /// The first eight bytes of the file stored under `digest`: its kind prefix.
@@ -165,6 +179,15 @@ impl BlobDir {
     fn tmp(&self) -> PathBuf {
         self.dir.join("tmp")
     }
+}
+
+/// The payload length of a stored artifact `size_bytes` long: everything
+/// after its eight-byte kind prefix. A `size_bytes` under eight is
+/// [`JournalError::CorruptArtifact`], and a payload length that does not fit
+/// a `usize` is [`JournalError::IntegerRange`].
+pub fn payload_len(size_bytes: u64) -> Result<usize, JournalError> {
+    let payload_len = size_bytes.checked_sub(8).ok_or(JournalError::CorruptArtifact)?;
+    usize::try_from(payload_len).map_err(|_| JournalError::IntegerRange)
 }
 
 fn read_error(digest: &Digest, path: &Path, error: io::Error) -> JournalError {

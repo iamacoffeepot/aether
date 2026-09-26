@@ -5,7 +5,7 @@ use aether_data::BlobReader;
 
 use super::entry::remove_if_current;
 use super::gauge::next_mark;
-use super::{BlobStore, Index};
+use super::{BlobEntry, BlobStore, Index};
 
 fn store() -> BlobStore {
     BlobStore::new().expect("spawn the reclaim thread")
@@ -105,4 +105,87 @@ fn a_shared_blob_reads_from_an_offset_and_stays_resident_until_the_last_clone_dr
     drop(blob);
 
     assert_eq!(store.resident_bytes(), 0);
+}
+
+/// A slab over `members`, each region filled with its member's bytes.
+fn slab_of(store: &BlobStore, members: &[&[u8]]) -> Vec<Arc<BlobEntry>> {
+    let lens: Vec<_> = members.iter().map(|member| member.len()).collect();
+    let mut slab = store.slab(&lens);
+    slab.regions().zip(members).for_each(|(region, member)| region.copy_from_slice(member));
+    slab.finish()
+}
+
+/// Catches range bookkeeping that hands a member its neighbour's bytes, an
+/// empty region that panics or shifts the ones after it, and a slab member
+/// that fails to reuse a resident entry.
+#[test]
+fn slab_members_read_their_own_regions_and_reuse_resident_entries() {
+    let store = store();
+    let resident = store.check_in(boxed(b"resident"));
+    let members: [&[u8]; 4] = [b"first", b"", b"resident", b"second"];
+
+    let entries = slab_of(&store, &members);
+
+    assert_eq!(entries.iter().map(|entry| entry.bytes()).collect::<Vec<_>>(), members);
+    assert!(Arc::ptr_eq(&entries[2], &resident));
+}
+
+/// Catches an owned check-in that adopts a slab entry, and a displaced slab
+/// entry whose drop removes the owned entry's slot.
+#[test]
+fn an_owned_check_in_takes_the_dedup_slot_from_a_slab_entry() {
+    let store = store();
+    let member = slab_of(&store, &[b"sharing".as_slice()]).pop().expect("one member");
+    let hash = member.hash();
+
+    let owned = store.check_in(boxed(b"sharing"));
+
+    assert!(!Arc::ptr_eq(&owned, &member));
+    assert!(Arc::ptr_eq(&store.check_in(boxed(b"sharing")), &owned));
+    assert_eq!(member.bytes(), b"sharing");
+
+    drop(member);
+
+    assert!(store.shared.lock_index().get(&hash).is_some_and(|slot| ptr::eq(slot.as_ptr(), Arc::as_ptr(&owned))));
+}
+
+/// Catches per-member subtraction from `resident_bytes` (a double count or an
+/// underflow), a dedup-hit region counted as a live member, and a leaked slab.
+#[test]
+fn slab_bytes_stay_resident_until_the_last_member_drops_and_retention_is_reported() {
+    let store = store();
+    let resident = store.check_in(boxed(b"resident"));
+    let counts = |store: &BlobStore| (store.resident_bytes(), store.slab_bytes(), store.slab_member_bytes());
+    let before = counts(&store);
+
+    let mut entries = slab_of(&store, &[b"resident".as_slice(), b"one", b"four"]).into_iter();
+    let (hit, one, four) = (entries.next(), entries.next(), entries.next());
+
+    assert!(hit.as_ref().is_some_and(|hit| Arc::ptr_eq(hit, &resident)));
+    assert_eq!(counts(&store), (8 + 15, 15, 7));
+
+    drop(hit);
+    drop(one);
+
+    assert_eq!(counts(&store), (8 + 15, 15, 4));
+
+    drop(four);
+
+    assert_eq!(counts(&store), before);
+}
+
+/// Catches a leak on the journal's mid-read error path: a builder dropped
+/// before `finish` must free its slab and leave no count or slot behind.
+#[test]
+fn an_unfinished_slab_is_freed_and_uncounted() {
+    let store = store();
+    let mut slab = store.slab(&[4, 6]);
+    slab.regions().next().expect("a first region").copy_from_slice(b"half");
+
+    assert_eq!((store.resident_bytes(), store.slab_bytes()), (10, 10));
+
+    drop(slab);
+
+    assert_eq!((store.resident_bytes(), store.slab_bytes(), store.slab_member_bytes()), (0, 0, 0));
+    assert!(store.shared.lock_index().is_empty());
 }
