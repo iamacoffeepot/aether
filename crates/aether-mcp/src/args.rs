@@ -1156,9 +1156,9 @@ pub struct MailNodeJson {
     /// Tagged kind id (`knd-…`) of the payload schema.
     pub kind: String,
     /// iamacoffeepot/aether#1158: the instant the producer's outbound
-    /// blob opened (the first buffered send of the flush window).
+    /// burst opened (the first buffered send of the flush window).
     /// `t_sent − t_construct_start` is the **construct** span (the
-    /// producer building the blob); on eager paths it equals `t_sent`.
+    /// producer building the burst); on eager paths it equals `t_sent`.
     /// Monotonic nanoseconds since substrate boot.
     pub t_construct_start: u64,
     /// Monotonic nanoseconds since substrate boot.

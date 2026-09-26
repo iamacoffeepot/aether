@@ -315,14 +315,14 @@ fn worker_loop(
 /// LIFO pop keeps the freshest hop warmest. By default the **local cascade**
 /// inlines on the own deque (`WakeSink::schedule` →
 /// `worker_deque::try_push_local_budgeted`, iamacoffeepot/aether#1174) —
-/// produced blobs are cascade descendants kept warm — until the per-cascade
+/// produced bursts are cascade descendants kept warm — until the per-cascade
 /// **time valve** (`worker_deque::time_budget`, default 12µs) trips and spills
 /// a heavy cascade to parallelise. The own deque is checked first so a pushed
 /// slot is never stranded.
 ///
 /// When the own deque is empty, this resets the local-drain cascade
 /// (iamacoffeepot/aether#1160) — one local cascade gets one budget, so the
-/// next cascade (this worker's freshly-produced blobs, or work it's about
+/// next cascade (this worker's freshly-produced bursts, or work it's about
 /// to steal) starts a fresh keep-local budget — then steals into the deque
 /// from the injector (off-worker producers + spilled fan-out + requeued
 /// yields) and, when `peer_steal` is set, its siblings' tails (owner-only

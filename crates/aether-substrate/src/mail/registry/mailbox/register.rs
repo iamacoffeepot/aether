@@ -241,7 +241,7 @@ impl Registry {
     }
 
     /// Install a `Pooled` actor's [`SeizeHandle`]
-    /// onto its `Inbox` entry's deferred [`SeizeCell`] so the blob
+    /// onto its `Inbox` entry's deferred [`SeizeCell`] so the burst
     /// demuxer can resolve recipient → slot and dispatch in place
     /// (ADR-0087 §4, iamacoffeepot/aether#1135). Called by the
     /// `Pooled`-branch wiring in `chassis/builder.rs` +

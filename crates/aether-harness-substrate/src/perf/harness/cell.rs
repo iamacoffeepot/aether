@@ -53,7 +53,7 @@ pub struct CellSamples {
     /// seed before each cell, so every cell of one trial starts here.
     pub boot_handoff_nanos: u64,
     /// iamacoffeepot/aether#1158: `t_sent − t_construct_start` (flush-begin
-    /// → blob open) — the producer building the blob.
+    /// → burst open) — the producer building the burst.
     pub construct: Vec<u64>,
     pub queued: Vec<u64>,
     pub drain: Vec<u64>,
@@ -107,17 +107,17 @@ pub struct CellResult {
     /// The scheduler handoff-cost estimate (nanos) this cell's chassis
     /// booted from — see [`CellSamples::boot_handoff_nanos`].
     pub boot_handoff_nanos: u64,
-    /// iamacoffeepot/aether#1158: `t_sent − t_construct_start` (blob open →
-    /// flush-begin) — the producer-side time spent building the blob, the
+    /// iamacoffeepot/aether#1158: `t_sent − t_construct_start` (burst open →
+    /// flush-begin) — the producer-side time spent building the burst, the
     /// first leg of the four-stage lifecycle. ~0 on eager (non-buffered)
     /// paths, where construct-start *is* `t_sent`.
     pub construct: Stats,
     /// iamacoffeepot/aether#1150: `t_enqueue − t_sent` (flush-begin → the
-    /// worker picks up the blob this mail rode in / the deposit lands) —
+    /// worker picks up the burst this mail rode in / the deposit lands) —
     /// wakeup + scheduling latency. ~0 on the producer's own warm worker.
     pub queued: Stats,
-    /// iamacoffeepot/aether#1150: `t_received − t_enqueue` (blob pickup →
-    /// this mail's handler entry) — where in the blob's drain the mail
+    /// iamacoffeepot/aether#1150: `t_received − t_enqueue` (burst pickup →
+    /// this mail's handler entry) — where in the burst's drain the mail
     /// landed. The only cardinality-sensitive span: a serial fan-out's
     /// late leaf waited behind its siblings here, so it reads high by
     /// design (the scheduler's serialize-vs-recruit choice, not per-mail
@@ -355,11 +355,11 @@ pub fn run_cell(
             if let Some(fin) = node.t_finished {
                 handler.push(fin.0.saturating_sub(recv.0));
             }
-            // iamacoffeepot/aether#1158: `t_construct_start` (blob
+            // iamacoffeepot/aether#1158: `t_construct_start` (burst
             // open) rides the `Sent` event, always present. The
             // four spans are non-overlapping and cover first-send →
-            // handler-done: `construct` = blob open → flush-begin;
-            // iamacoffeepot/aether#1150: `t_enqueue` (blob pickup)
+            // handler-done: `construct` = burst open → flush-begin;
+            // iamacoffeepot/aether#1150: `t_enqueue` (burst pickup)
             // lands with `Received`, so it is present exactly when
             // `t_received` is. `queued` = flush-begin → pickup;
             // `drain` = pickup → this mail's handler entry.

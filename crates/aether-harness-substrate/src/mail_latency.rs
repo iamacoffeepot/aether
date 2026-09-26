@@ -378,8 +378,8 @@ fn emit_settlement_settles_two_level_tree() {
 }
 
 /// ADR-0087 Phase 3b focused guard: a wide single-source fan-out — one
-/// handler emits to N free recipients in **one blob**, the exact shape
-/// the blob demux runs (claim-or-deposit per recipient, free ones inline
+/// handler emits to N free recipients in **one burst**, the exact shape
+/// the burst demux runs (claim-or-deposit per recipient, free ones inline
 /// on the demuxing worker). Every injected root must settle, proving the
 /// inline-demux path balances `Sent`/`Finished` for every fanned mail —
 /// a dropped or double-counted demux mail would wedge `in_flight` and
@@ -899,12 +899,12 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     // iamacoffeepot/aether#1158: the per-mail lifecycle decomposes into
     // four non-overlapping single-property spans covering first-send →
     // handler-done. CONSTRUCT + QUEUED + DRAIN sum to the producer→pickup
-    // span; each measures one thing (blob build vs wakeup vs in-blob
+    // span; each measures one thing (burst build vs wakeup vs in-burst
     // serialization vs handler work).
     for (label, pick) in [
-        ("CONSTRUCT    (t_sent - t_construct_start: blob open → flush-begin = producer builds the blob)", 0usize),
-        ("QUEUED       (t_enqueue - t_sent: flush-begin → worker picks up the blob = wakeup/schedule)", 1),
-        ("DRAIN        (t_received - t_enqueue: pickup → handler entry = where in the blob's drain it landed)", 2),
+        ("CONSTRUCT    (t_sent - t_construct_start: burst open → flush-begin = producer builds the burst)", 0usize),
+        ("QUEUED       (t_enqueue - t_sent: flush-begin → worker picks up the burst = wakeup/schedule)", 1),
+        ("DRAIN        (t_received - t_enqueue: pickup → handler entry = where in the burst's drain it landed)", 2),
         ("HANDLER DUR  (t_finished - t_received: relay forward work)", 3),
     ] {
         println!("-- {label} --");

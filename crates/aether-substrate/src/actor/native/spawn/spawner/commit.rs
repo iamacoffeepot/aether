@@ -303,7 +303,7 @@ impl Spawner {
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         // iamacoffeepot/aether#1135: surface the seize handle on this
-        // instanced actor's `Inbox` entry so the blob demuxer dispatches
+        // instanced actor's `Inbox` entry so the burst demuxer dispatches
         // its fan-out in place (ADR-0087 §4). The registry holds the
         // strong slot ref via `instanced_slots` below; the demuxer's
         // `Weak` upgrade fails cleanly once the actor is torn down.

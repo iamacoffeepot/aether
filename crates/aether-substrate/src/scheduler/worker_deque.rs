@@ -12,7 +12,7 @@
 //! a relay chain stays on one warm worker with no shared-queue round-trip
 //! and no parked-sibling wake (~4.3µs). By default a worker **inlines its
 //! local cascade** ([`try_push_local_budgeted`], iamacoffeepot/aether#1174):
-//! every blob a running handler produces is a descendant of the cascade
+//! every burst a running handler produces is a descendant of the cascade
 //! already on this worker, so keeping it warm costs no cross-worker handoff
 //! at *any* generation. Inlining holds until the per-cascade **time valve**
 //! ([`time_budget`]) trips — then the backlog spills so a *heavy* cascade
@@ -68,7 +68,7 @@ use crate::scheduler::slot::Drainable;
 use crate::scheduler::tuning;
 
 /// The unit on the deques: a chassis-registered dispatcher slot. (Phase
-/// 3b makes the blob the unit; 3a keeps the slot.)
+/// 3b makes the burst the unit; 3a keeps the slot.)
 type Slot = Arc<dyn Drainable>;
 
 thread_local! {
@@ -144,7 +144,7 @@ pub fn pending_depth() -> u32 {
 /// from the pre-#1160 stickiness cap); values `< 1` coerce to `256`. This is the
 /// deque-growth backstop, not the primary
 /// governor — the per-cascade time valve ([`time_budget`], default 12µs) is;
-/// for any realistic cascade (well under 256 blobs queued at once) `hard_cap`
+/// for any realistic cascade (well under 256 bursts queued at once) `hard_cap`
 /// never trips.
 #[must_use]
 pub fn hard_cap() -> usize {
@@ -154,7 +154,7 @@ pub fn hard_cap() -> usize {
 /// Adaptive keep-local budget: spend up to this many measured cross-worker
 /// **handoffs**' worth of time inlining a cascade before the valve spills
 /// (iamacoffeepot/aether#1182). The valve out-amortises the cost of *not*
-/// inlining — handing a blob to a parked sibling — so the budget should be
+/// inlining — handing a burst to a parked sibling — so the budget should be
 /// a small multiple of that handoff cost, not a fixed wall-clock figure.
 ///
 /// `6` reproduces the #1174-tuned default on the box it was tuned on: that
@@ -219,12 +219,12 @@ fn derive_budget(handoff: Duration) -> Duration {
 ///
 /// The default flipped to owner-only because peer-deque stealing stopped
 /// being load-bearing after seize-direct (iamacoffeepot/aether#1135),
-/// cursor-shared cooperative blob (iamacoffeepot/aether#1141), and the
-/// keep-local budget (iamacoffeepot/aether#1160): a blob on a worker's own
+/// cursor-shared cooperative burst (iamacoffeepot/aether#1141), and the
+/// keep-local budget (iamacoffeepot/aether#1160): a burst on a worker's own
 /// deque is there *because the budget judged it cheap* — it didn't spill.
 /// Raiding it pays a cache-cold cross-worker handoff for sub-threshold work,
 /// so the steal can cost more than the work is worth, and it contradicts the
-/// decision that kept the blob local. Worthwhile (wide / heavy) work
+/// decision that kept the burst local. Worthwhile (wide / heavy) work
 /// parallelises through the injector via spill + recruit, which the
 /// unconditional injector drain still serves. The cost of owner-only is the
 /// loss of the budget-misclassification safety net — heavy work the budget
@@ -295,9 +295,9 @@ pub fn cascade_note_mail(time_budget: Duration) {
 /// disables): `true` once the cascade has run past `time_budget` since its
 /// first mail — the discriminator that spills heavy cascades but leaves
 /// cheap ones inlined. The wall clock is read only when time budgeting is
-/// on — once per genuine keep-vs-spill decision on a multi-blob backlog.
+/// on — once per genuine keep-vs-spill decision on a multi-burst backlog.
 /// Called by [`try_push_local_budgeted`] only after the `depth > 0` guard,
-/// so a single-blob fan-out or a chain (depth 0) reads no clock at all.
+/// so a single-burst fan-out or a chain (depth 0) reads no clock at all.
 #[must_use]
 pub fn cascade_over_budget(time_budget: Duration) -> bool {
     if time_budget.is_zero() {
@@ -317,8 +317,8 @@ pub fn cascade_reset() {
     CHAIN_POPS.set(0);
 }
 
-/// Push of a just-produced blob onto this worker's own deque
-/// (iamacoffeepot/aether#1160, #1174). Every blob this sees was produced by a
+/// Push of a just-produced burst onto this worker's own deque
+/// (iamacoffeepot/aether#1160, #1174). Every burst this sees was produced by a
 /// handler running on this worker — a **descendant of the cascade already on
 /// this worker** — so it is kept local (inlined, warm) until the cascade trips
 /// the time valve or the deque-length backstop:
@@ -334,7 +334,7 @@ pub fn cascade_reset() {
 /// work — while a heavy cascade trips the valve after ~12µs and spills its
 /// backlog to parallelise (iamacoffeepot/aether#1174 matrix: heavy −15%
 /// end-to-end, trivial flat). The `len > 0` guard keeps a serial chain or
-/// single-blob fan-out local with no clock read. A pinned budget of `0`
+/// single-burst fan-out local with no clock read. A pinned budget of `0`
 /// disables the valve (pure inline-cascade).
 ///
 /// Returns `Ok(())` when kept local (the caller skips injector + notify),
@@ -397,7 +397,7 @@ pub fn push_local(slot: Slot) -> Result<(), Slot> {
 /// sibling raid only — the injector drain is unconditional and load-bearing.
 /// With it off, this worker is **owner-only** over its deque
 /// (iamacoffeepot/aether#1174): it never pulls a sibling's keep-local
-/// cascade, so a cheap blob the budget kept local isn't dragged
+/// cascade, so a cheap burst the budget kept local isn't dragged
 /// cross-worker.
 pub fn steal_into_local(
     my_idx: usize,
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn inline_cascade_valve_off_keeps_local_past_budget() {
         // #1174: with the valve off (`time_budget == 0`) a worker inlines its
-        // ENTIRE cascade — every blob is kept local even when the cascade is
+        // ENTIRE cascade — every burst is kept local even when the cascade is
         // long-running, because no spill term fires at any generation. Only
         // `hard_cap` bounds it. (The shipped default leaves the time valve on
         // at 12µs; this is the `time_budget_micros: Some(0)` pure-inline
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn budgeted_chain_never_spills_at_depth_zero() {
         // The load-bearing guard: a serial chain has an empty deque at
-        // schedule time (the current blob was popped), so it stays local
+        // schedule time (the current burst was popped), so it stays local
         // even when the cascade is well over the time budget — a chain has no
         // independent work to parallelize, so a spill would only buy a
         // wakeup.

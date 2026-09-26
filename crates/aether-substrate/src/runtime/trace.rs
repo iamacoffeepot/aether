@@ -240,7 +240,7 @@ impl TraceHandle {
     /// anchor (iamacoffeepot/aether#1150).
     ///
     /// iamacoffeepot/aether#1158: eager paths route immediately, so the
-    /// blob never lingered open — `t_construct_start` *is* the same `now`
+    /// burst never lingered open — `t_construct_start` *is* the same `now`
     /// the `Sent` timestamp takes, making the **construct** span ≈ 0.
     pub(crate) fn record_sent(
         &self,
@@ -275,7 +275,7 @@ impl TraceHandle {
     /// stamp; every mail in one flush shares it.
     ///
     /// iamacoffeepot/aether#1158: `t_construct_start` is the instant the
-    /// producer's outbound blob opened (the first buffered send of the
+    /// producer's outbound burst opened (the first buffered send of the
     /// flush window). `t − t_construct_start` is the **construct** span;
     /// on the eager path the caller passes `t_construct_start == t`.
     pub(crate) fn record_sent_event_at(&self, sent: SentRecord) {

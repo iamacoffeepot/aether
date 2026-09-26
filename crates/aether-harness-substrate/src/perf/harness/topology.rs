@@ -173,10 +173,10 @@ pub fn two_level_tree() -> Topology {
 
 /// [`two_level_tree`] with **every** node (A–F) burning `work_iters` of
 /// `busy_spin` CPU per `Ping` — a *uniform*-cost heavy cascade. This is the
-/// multi-blob workload that exercises the keep-local **time budget**
-/// (iamacoffeepot/aether#1160): the spill decision for the deepest blob
+/// multi-burst workload that exercises the keep-local **time budget**
+/// (iamacoffeepot/aether#1160): the spill decision for the deepest burst
 /// fires after the interior nodes (A/B/C) have run, so with heavy interiors
-/// the cascade's elapsed exceeds the time budget and the blob spills →
+/// the cascade's elapsed exceeds the time budget and the burst spills →
 /// parallelises, matching the `cap == 1` baseline. A *mail-count-only*
 /// budget keeps it local and serialises the heavy leaves — a regression the
 /// time budget exists to prevent.
@@ -199,9 +199,9 @@ pub fn two_level_tree_heavy(work_iters: u64) -> Topology {
 /// heavy worker" cascade. This is the time budget's **blind spot**
 /// (iamacoffeepot/aether#1160): the spill decision fires *before* the heavy
 /// leaves run, so the cascade's elapsed (only the trivial interiors) never
-/// exceeds the time budget, the deepest blob is kept local, and the heavy
+/// exceeds the time budget, the deepest burst is kept local, and the heavy
 /// leaves serialise — a regression that a *past-elapsed* budget structurally
-/// cannot catch (the cost is in the blob being scheduled, i.e. the future).
+/// cannot catch (the cost is in the burst being scheduled, i.e. the future).
 /// Only a cost-aware bound (per-handler EWMA, #1128) resolves it. Included
 /// so the sweep measures the blind spot honestly rather than hiding it.
 #[must_use]

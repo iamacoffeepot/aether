@@ -61,7 +61,7 @@ impl NativeBinding {
         let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
         assert!(!buffer.activation_held, "one staged activation owns the outbound hold");
         assert!(
-            !buffer.blob_open
+            !buffer.burst_open
                 && buffer.mails.is_empty()
                 && buffer.component_origins.is_empty()
                 && buffer.births.is_empty()
@@ -94,11 +94,11 @@ impl NativeBinding {
             assert!(buffer.activation_held, "only a staged activation can discard the outbound hold");
             buffer.activation_held = false;
             self.activation_held.store(false, Ordering::Release);
-            if buffer.blob_open {
+            if buffer.burst_open {
                 if let Some(ring) = buffer.ring.as_ref() {
                     ring.seal();
                 }
-                buffer.blob_open = false;
+                buffer.burst_open = false;
             }
             buffer.construct_start = None;
             buffer.component_origins.clear();
@@ -199,7 +199,7 @@ mod tests {
     ///
     /// The bug this catches is the flush collapsing the two into one route to
     /// shed the per-mail route tag (iamacoffeepot/aether#4178): folding the
-    /// window into the blob/mailer path alone still delivers every mail, so
+    /// window into the burst/mailer path alone still delivers every mail, so
     /// only the origin distinguishes a correct split from a lossy one. It
     /// equally catches the origin record being keyed to the wrong mail, which
     /// would attribute the component name to the native send.

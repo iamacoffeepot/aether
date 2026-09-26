@@ -11,16 +11,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Metric {
-    /// iamacoffeepot/aether#1158: `t_sent − t_construct_start`: blob open →
-    /// flush-begin — the producer-side time spent building the blob, the
+    /// iamacoffeepot/aether#1158: `t_sent − t_construct_start`: burst open →
+    /// flush-begin — the producer-side time spent building the burst, the
     /// first leg of the four-stage lifecycle. ~0 on eager (non-buffered)
     /// paths.
     Construct,
-    /// `t_enqueue − t_sent`: flush-begin → the worker picks up the blob —
+    /// `t_enqueue − t_sent`: flush-begin → the worker picks up the burst —
     /// wakeup / scheduling latency. Tight on a warm worker.
     Queued,
-    /// `t_received − t_enqueue`: blob pickup → this mail's handler entry —
-    /// where in the blob's drain it landed. The only cardinality-sensitive
+    /// `t_received − t_enqueue`: burst pickup → this mail's handler entry —
+    /// where in the burst's drain it landed. The only cardinality-sensitive
     /// span (a serial fan-out's late leaf waited behind its siblings), so
     /// high-variance by design.
     Drain,

@@ -302,8 +302,8 @@ mod tests {
         #[allow(clippy::unused_self)]
         fn on_emit(&mut self, ctx: &mut NativeCtx<'_>, _e: EmitReq) {
             // A non-reply peer send: buffered here, flushed at ctx drop
-            // through the binding's outbound blob → the pool `WakeSink`,
-            // exercising the pool-side blob demux from the pumping thread.
+            // through the binding's outbound burst → the pool `WakeSink`,
+            // exercising the pool-side burst demux from the pumping thread.
             ctx.send::<Peer>(&Poke { note: 7 });
         }
 
@@ -626,12 +626,12 @@ mod tests {
     }
 
     /// ADR-0160 §1: a non-reply flat `ctx.send::<Peer>(...)` from a pumped
-    /// handler routes through the binding's outbound blob → the pool
-    /// `WakeSink` (the pool-side blob demux) from the pumping thread, and the
+    /// handler routes through the binding's outbound burst → the pool
+    /// `WakeSink` (the pool-side burst demux) from the pumping thread, and the
     /// peer receives the mail. Dormant for the window driver, load-bearing
     /// for the render follow-up — so the path must be solid before that arc.
     #[test]
-    fn pumped_handler_send_reaches_peer_through_blob_demux() {
+    fn pumped_handler_send_reaches_peer_through_burst_demux() {
         let fx = fixtures();
         let self_id = MailboxId(0x_0DED_0006);
 

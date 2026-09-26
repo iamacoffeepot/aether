@@ -132,12 +132,12 @@ pub fn scheduler_tuning_from_env() -> SchedulerTuning {
             .filter(|&n| n > 0)
             .unwrap_or(defaults.local_chain_backstop),
         handoff_cost_nanos: parsed::<u64>("AETHER_HANDOFF_COST_NS").filter(|&n| n >= 1).or(defaults.handoff_cost_nanos),
-        blob_recruit_min: parsed::<usize>("AETHER_BLOB_RECRUIT_MIN")
+        burst_recruit_min: parsed::<usize>("AETHER_BURST_RECRUIT_MIN")
             .filter(|&n| n > 0)
-            .unwrap_or(defaults.blob_recruit_min),
-        blob_recruit_max: parsed::<usize>("AETHER_BLOB_RECRUIT_MAX")
+            .unwrap_or(defaults.burst_recruit_min),
+        burst_recruit_max: parsed::<usize>("AETHER_BURST_RECRUIT_MAX")
             .filter(|&n| n > 0)
-            .unwrap_or(defaults.blob_recruit_max),
+            .unwrap_or(defaults.burst_recruit_max),
         wake_cost_nanos: parsed::<u64>("AETHER_WAKE_COST_NANOS").filter(|&n| n >= 1).or(defaults.wake_cost_nanos),
     }
 }

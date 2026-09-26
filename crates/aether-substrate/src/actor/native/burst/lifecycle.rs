@@ -1,4 +1,4 @@
-//! Packed lifecycle word for the cursor-shared cooperative blob
+//! Packed lifecycle word for the cursor-shared cooperative burst
 //! (iamacoffeepot/aether#1137). One `AtomicU64` coordinates a single
 //! producer publishing recipient-groups and many workers cooperatively
 //! draining them:
@@ -15,7 +15,7 @@
 //! - `done`   — number of groups a worker has finished draining.
 //! - `seal`   — set by the worker whose `complete` brings `done == len`
 //!   (which implies `cursor == len`, all groups claimed and drained): the
-//!   blob is retired and accepts no further appends.
+//!   burst is retired and accepts no further appends.
 //!
 //! Each op is a CAS on the whole word and retries on contention. `len`
 //! moves only under the single producer, so a [`Lifecycle::publish`] CAS
@@ -47,9 +47,9 @@ const LEN_SHIFT: u32 = FIELD_BITS;
 const DONE_SHIFT: u32 = 2 * FIELD_BITS;
 const SEAL_BIT: u64 = 1 << 63;
 
-/// Max groups a single blob can hold — the 21-bit `len` ceiling. A blob
+/// Max groups a single burst can hold — the 21-bit `len` ceiling. A burst
 /// whose producer would publish past this seals and the producer rolls a
-/// fresh blob for the remainder. The shared group array is sized far
+/// fresh burst for the remainder. The shared group array is sized far
 /// below this in practice (to the flush width); this is the hard wire
 /// ceiling, not the typical cap.
 pub const MAX_GROUPS: usize = FIELD_MASK as usize;
@@ -87,11 +87,11 @@ fn pack(cursor: u64, len: u64, done: u64, seal: bool) -> u64 {
 pub enum Published {
     /// Groups published; `len` advanced by the requested count.
     Ok,
-    /// The blob already sealed (a worker retired it). The producer must
-    /// roll a fresh blob for these groups.
+    /// The burst already sealed (a worker retired it). The producer must
+    /// roll a fresh burst for these groups.
     Retired,
     /// Publishing would exceed [`MAX_GROUPS`]. The producer must roll a
-    /// fresh blob.
+    /// fresh burst.
     Full,
 }
 
@@ -102,7 +102,7 @@ pub struct Lifecycle {
 }
 
 impl Lifecycle {
-    /// A fresh blob with `initial_len` groups already published (the first
+    /// A fresh burst with `initial_len` groups already published (the first
     /// flush's groups, written into the array before construction).
     pub fn new(initial_len: usize) -> Self {
         assert!(initial_len <= MAX_GROUPS, "initial_len exceeds field ceiling");
@@ -138,9 +138,9 @@ impl Lifecycle {
 
     /// Producer (single writer): publish `count` newly-written groups by
     /// advancing `len`. Rejects with [`Published::Retired`] if a worker
-    /// already sealed the blob, or [`Published::Full`] if the bump would
+    /// already sealed the burst, or [`Published::Full`] if the bump would
     /// exceed [`MAX_GROUPS`]; in both cases the producer rolls a fresh
-    /// blob. The `AcqRel` CAS release-stores the new `len`, publishing the
+    /// burst. The `AcqRel` CAS release-stores the new `len`, publishing the
     /// array writes that preceded this call.
     pub fn publish(&self, count: usize) -> Published {
         if count == 0 {
@@ -165,14 +165,14 @@ impl Lifecycle {
 
     /// Worker: mark one claimed group finished. Sets the seal bit when this
     /// completion brings `done == len` (all groups drained), retiring the
-    /// blob. Returns `true` if this call retired the blob.
+    /// burst. Returns `true` if this call retired the burst.
     pub fn complete(&self) -> bool {
         let mut w = self.word.load(Ordering::Acquire);
         loop {
             // Invariant: each `complete` pairs with a claimed group, so
             // `done` can never reach `len` before this call bumps it. An
             // unpaired `complete` would push `done` past `len`, so the
-            // `done == len` seal test below never fires and the blob wedges
+            // `done == len` seal test below never fires and the burst wedges
             // (never retires). Guard the pairing in debug builds.
             debug_assert!(
                 done_of(w) < len_of(w),
@@ -190,8 +190,8 @@ impl Lifecycle {
         }
     }
 
-    /// `true` once the blob has sealed (retired). The producer reads this
-    /// to decide whether to append to this blob or roll a fresh one.
+    /// `true` once the burst has sealed (retired). The producer reads this
+    /// to decide whether to append to this burst or roll a fresh one.
     pub fn is_retired(&self) -> bool {
         sealed_of(self.word.load(Ordering::Acquire))
     }
@@ -263,7 +263,7 @@ mod tests {
 
     /// An unpaired `complete` (more completions than claimed groups) trips
     /// the `done < len` debug guard rather than silently pushing `done`
-    /// past `len` and wedging the blob (it would never seal). Debug-only:
+    /// past `len` and wedging the burst (it would never seal). Debug-only:
     /// `debug_assert!` is compiled out in release, so the panic only fires
     /// under `debug_assertions`.
     #[cfg(debug_assertions)]
@@ -272,7 +272,7 @@ mod tests {
     fn complete_past_len_trips_debug_guard() {
         let lc = Lifecycle::new(1);
         assert_eq!(lc.claim(), Some(0));
-        assert!(lc.complete(), "the one claimed group retires the blob");
+        assert!(lc.complete(), "the one claimed group retires the burst");
         // Second, unpaired completion: done (1) >= len (1) — guard fires.
         lc.complete();
     }
@@ -292,7 +292,7 @@ mod tests {
         let lc = Lifecycle::new(1);
         let _ = lc.claim();
         assert!(lc.complete(), "single group completes -> retire");
-        assert_eq!(lc.publish(1), Published::Retired, "no append onto a retired blob");
+        assert_eq!(lc.publish(1), Published::Retired, "no append onto a retired burst");
     }
 
     #[test]
@@ -338,9 +338,9 @@ mod tests {
     /// A single producer publishing concurrently with many claimers never
     /// loses or duplicates a group index: the published range `0..len` is
     /// partitioned across the claimers exactly once. (Completion / retire
-    /// is exercised single-threaded above and end-to-end by the blob's own
+    /// is exercised single-threaded above and end-to-end by the burst's own
     /// concurrency tests — this isolates the publish-vs-claim race, so the
-    /// workers here don't `complete` and the blob never seals mid-stream.)
+    /// workers here don't `complete` and the burst never seals mid-stream.)
     #[test]
     fn producer_publishes_while_workers_claim() {
         use std::sync::Mutex;
