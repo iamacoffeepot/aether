@@ -154,6 +154,30 @@ from `wire` always has a live recipient. That fixes the load order: receiver
 first, dependent second. `EditorRegion`'s own `# Agent` doc says the same:
 load the shell first, and a region loaded before it is refused.
 
+### Talking back to the actor that loaded you
+
+No door proves the actor that loaded a component, so the loader hands the
+component its reference. A guest's `ctx.parent()` answers only inside its own
+module: it finds an inline parent in the module's cluster, and the module's
+entry actor gets `None`. The entry actor's lineage parent is the component
+host, which spawned the component's trampoline, not the actor that sent
+`aether.component.load`, and no ctx proves either
+([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)
+§3).
+
+Two shapes reach the loader, and both reuse doors above:
+
+- **The loader mails first.** `LoadResult::Ok` is sent by the loaded actor
+  itself, so the loader keeps that reply's `ctx.sender()` as its proof of the
+  component and mails the component through it. The component keeps
+  `ctx.sender()` from that mail, as in the reverse direction above.
+- **The loader's path rides in config.** The loader puts its own `ActorPath`
+  in the component's config, and the component's `wire` proves it once with
+  `ctx.resolve_path` and keeps the `ErasedActorRef`.
+
+Either way the component holds an `ErasedActorRef`, so its sends to the loader
+are not kind-checked.
+
 ## Stored state holds proofs
 
 Keep `ActorRef<R>` or `ErasedActorRef` in actor state, never a `MailboxId`.
@@ -171,11 +195,15 @@ guest has the same verb, `WasmCtx::resolve_path`: an `ActorPath` from its
 config or a payload is proven once, at `wire` or at receipt, and kept as an
 `ErasedActorRef` (the environment bootstrap script in
 `crates/aether-bloomery-bootstrap` proves the journal owner and the bundle driver
-this way). A payload-borne position still has no guest door, so a guest keeps
-the envelope sender instead of a payload-borne id.
+this way). A guest has no door for a payload-borne position and will not get
+one, because no guest API takes a `MailboxId`; a guest is told where to send by
+an `ActorPath` or by the envelope sender.
 
 No door turns a foreign `Address<R>` (one that arrived in mail, config, or
-saved state) into a reference yet (ADR-0230 §3). The editor shell's
+saved state) into a reference yet (ADR-0230 §3). The door lands for guests
+first, as `WasmCtx::resolve::<R>`, with the Bloomery bootstrap as its consumer
+(ADR-0240 D8); the native twin, `NativeCtx::resolve::<R>`, lands with its
+first native caller. The editor shell's
 `RegionSpec.target` was the first site that would have needed one; issue
 #6306 dropped the field instead, and the region announces itself.
 

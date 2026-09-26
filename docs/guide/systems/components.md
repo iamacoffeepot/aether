@@ -455,6 +455,16 @@ the recipient. Any loaded component can reach any `Live` actor whose path it
 can spell, so a native actor that must not take guest mail cannot rely on its
 path being unknown.
 
+A guest can load a component itself. It proves the component host
+`aether.component` by path, sends it `aether.component.load`, and keeps the
+sender of `LoadResult::Ok`, which is the loaded actor, as its reference to the
+component, as
+[Loading, dropping, and the trampoline address](#loading-dropping-and-the-trampoline-address)
+describes. The loaded component
+has no door back to its loader;
+[Talking back to the actor that loaded you](../recipes/addressing-a-peer-you-cannot-depend-on.md#talking-back-to-the-actor-that-loaded-you)
+shows the two shapes that reach it.
+
 The worked example is the environment bootstrap script,
 `crates/aether-bloomery-bootstrap`: its `wire` proves the journal owner and the
 bundle driver from its config, logs one error and stops on a refusal, and

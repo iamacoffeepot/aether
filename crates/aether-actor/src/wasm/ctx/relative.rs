@@ -88,8 +88,11 @@ impl RelativeMailbox<'_> {
 impl<'a, A, M: ReplyMode> WasmCtx<'a, A, M> {
     /// ADR-0114 addressing amendment: a sendable handle to this actor's
     /// **parent** in the cluster, or `None` if this actor is the cluster
-    /// root (the instance itself — its parent is cross-cluster, addressed
-    /// through a chassis cap or the runtime-name escape hatch, not here).
+    /// root. The cluster root's lineage parent is outside the module (the
+    /// component host, for a loaded component), and no ctx proves it
+    /// (ADR-0230 §3). Reach the actor that loaded this one through the sender
+    /// of its mail ([`WasmCtx::sender`]) or through an `ActorPath` in config
+    /// ([`WasmCtx::resolve_path`]).
     ///
     /// Resolves by registry lookup over the per-component inline registry,
     /// never by folding (a [`MailboxId`] is a one-way hash chain, so the

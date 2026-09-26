@@ -14,6 +14,7 @@
 - **Amended:** 2026-09-24 — a guest host's receive surface is a declaration the substrate reads: a native actor that runs a guest implements `GuestHost`, and `NativeCtx::sync_guest` makes its accept set and cost rows match that declaration, so no actor reads its own position and no other actor writes a guest host's accept set. `NativeCtx::path`, bounded on `GuestHost`, reads a guest host's own canonical path as text only (issue 6350).
 - **Amended:** 2026-09-24 — §3: an `ActorPath` that arrived in a payload is proven through the ctx verb `resolve_path`: the host resolves the address and the published-route read proves it at once; a refusal names the path or its canonical path, never an id (#6324).
 - **Amended:** 2026-09-25 — §3: a guest proves an `ActorPath` that arrived in its config or mail through `WasmCtx::resolve_path`, the native verb's twin with the same resolution, proof, and refusals; its first consumer is the environment bootstrap script (#6786). Any loaded component can now reach any `Live` actor whose path it can spell, and its sends through the answer are unchecked by kind.
+- **Amended:** 2026-09-26 — §3: a guest's doors are settled against the native ones (#6796). No ctx proves an actor's parent outside a guest's inline cluster, and a loaded component's lineage parent is the component host, not its loader; a guest proves a component it loads from the load reply's sender; a guest's detached sibling spawn yields no reference; a guest has no `resolve_live`, because no guest API takes a `MailboxId`; and the `Address<R>` door lands guest-first, as `WasmCtx::resolve::<R>` for the Bloomery bootstrap, with the native twin waiting for a native caller ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D8).
 
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
 stays how a position is *derived*; a derived position stops being something
@@ -167,13 +168,13 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | Source | Proof | Runtime cost |
 |---|---|---|
 | A declared dependency of the actor | the `#[actor]` dependency list (`depends(A, B, …)`) is emitted to the wasm custom section; each entry folds to its position through its strategy — `One` at the root, `Embedded` beneath the placement's parent — and the host requires a `Live` route there before `init` (native: at chassis build, and at spawn for a spawned child). A missing dependency refuses the load and names it. | none for `One` — at depth 1 the fold is a `const`; one registry read per `Embedded` entry |
-| Self, parent, inline cluster members | structural; the host supplies them at `init` and the SDK mints them | none |
-| A child this actor spawned or loaded | A native staged spawn's completion, `TaskDone<SpawnOutcome<C>, _>`, carries `ActorRef<C>` on its `Ok` arm, minted by the registry when the birth's finalizer runs after the owner has published the child's `Live` route. A loaded component's successful `LoadResult` is delivered from the loaded actor itself: the component host hands its owed reply to the trampoline it spawned, which replies in its own name, so the requester keeps the reply's stamped sender — `ctx.sender()` for an actor, the reply event's sender for an embedder. `LoadResult::Ok` carries the canonical `ActorPath` and no position. A guest's inline spawn returns the typed `InlineChild<C>` handle; a parent keeping children of several types keeps the erased form instead — `InlineChild::erase`, or `spawn_inline_child_by_tag`'s `ErasedActorRef` — a proof without the type. Two embedder cases share the row: an embedder spawn's `finish` returns `ActorRef<A>` once its commit has published the route, and a chassis-composed actor's reference is recorded at boot, when the route goes `Live`, and read back by type through the chassis handle's `actor_ref::<R>()` | none for a spawn or a load; one published-route read when an embedder types a load reply's sender |
+| Self, parent, inline cluster members | structural; the host supplies them at `init` and the SDK mints them. On a guest the parent is the inline one, inside the module (`WasmCtx::parent`). No ctx has a verb that proves an actor's parent across a module boundary or on a native actor; a native child reaches its parent by declaring it, when the parent is a root singleton | none |
+| A child this actor spawned or loaded | A native staged spawn's completion, `TaskDone<SpawnOutcome<C>, _>`, carries `ActorRef<C>` on its `Ok` arm, minted by the registry when the birth's finalizer runs after the owner has published the child's `Live` route. A loaded component's successful `LoadResult` is delivered from the loaded actor itself: the component host hands its owed reply to the trampoline it spawned, which replies in its own name, so the requester keeps the reply's stamped sender — `ctx.sender()` for an actor, the reply event's sender for an embedder. `LoadResult::Ok` carries the canonical `ActorPath` and no position. A guest's inline spawn returns the typed `InlineChild<C>` handle; a parent keeping children of several types keeps the erased form instead — `InlineChild::erase`, or `spawn_inline_child_by_tag`'s `ErasedActorRef` — a proof without the type. A guest that loads a component takes the proof from the load reply's sender the same way, through `WasmCtx::sender`. A guest's detached sibling spawn (`WasmCtx::spawn_child`, ADR-0097) yields no reference, because the birth completes after the call returns. Two embedder cases share the row: an embedder spawn's `finish` returns `ActorRef<A>` once its commit has published the route, and a chassis-composed actor's reference is recorded at boot, when the route goes `Live`, and read back by type through the chassis handle's `actor_ref::<R>()` | none for a spawn or a load; one published-route read when an embedder types a load reply's sender |
 | A child beneath a reference an embedder already holds | the embedder builds the child's `Address<C>` from the parent's proof and the child's key — `child_address::<P, C>(parent, key)`, bounded `C: ChildOf<P> + Instanced` — and the chassis handle's `child::<P, C>` folds it with `C`'s resolver beneath the parent's position and proves the route with the published-route read `resolve_live` takes: only `Live` mints, and `Starting`, `Dropped`, and never-registered positions refuse with `ChildRefused`, which names the key and `C::NAMESPACE`, never a position. This is the first provider of the `Address<R>` form, fed by a held proof rather than a foreign address; its consumer is the substrate harness's `child`, which reaches a component's spawned child or a window capability's opened window without rendering an address | one published-route read per lookup |
 | The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value. A `MonitorNotice` is host-generated mail that carries one: the host stamps the departed actor, which `register_monitor` required to be `Live`, so the watcher's `ctx.sender()` is a reference to it. | one published-route read; no lock, no allocation |
-| A position that arrived in mail, config, saved state, or from another process | the ctx verb `resolve_live`, over the host's liveness read of the published route view: `Live` mints, `Dropped` and `Unknown` refuse by name, and `Starting` reads as unknown (section 1). Minted once, at receipt, in the handler that received the field — never at the send. The registry method behind it is crate-private, so the verb is the only spelling a capability has. | one published-route read per proof; no lock, no allocation |
+| A position that arrived in mail, config, saved state, or from another process | the ctx verb `resolve_live`, over the host's liveness read of the published route view: `Live` mints, `Dropped` and `Unknown` refuse by name, and `Starting` reads as unknown (section 1). Minted once, at receipt, in the handler that received the field — never at the send. The registry method behind it is crate-private, so the verb is the only spelling a capability has. Native only: a guest has no `resolve_live`, because no guest API takes a `MailboxId` (amendment 2026-09-26). | one published-route read per proof; no lock, no allocation |
 | An `ActorPath` that arrived in mail or config | the ctx verb `resolve_path`, on a native ctx (`NativeCtx`) and on a guest ctx (`WasmCtx`): `Unresolved` when the address names no `Starting` or `Live` route (a dropped route included), `NotLive` when its route is still `Starting` (or drops between the two reads). A guest's call crosses one host import, `resolve_path_p32`, and the host resolves and proves the path through the same crate-private path the native verb takes; the SDK mints the `ErasedActorRef` from the host's answer, as it mints the envelope sender. Native consumers are the component host's drop, replace, load-under, and describe receipts, and the trampoline's replacement dependency check; the guest consumer is the environment bootstrap script's `wire`, which proves the journal owner and the bundle driver from its config (#6786) | one address resolution plus one published-route read; for a guest, inside one host call |
-| An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands against the first migrated site that holds one. The first such site — the editor shell's `RegionSpec.target`, issue #6306 — dropped the field instead, so the region announces itself and the shell keeps the envelope sender; the door stays unprovided. | — |
+| An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands guest-first, as `WasmCtx::resolve::<R>`, whose consumer is the Bloomery bootstrap (ADR-0240 D8); the native twin, `NativeCtx::resolve::<R>`, lands with its first native caller (amendment 2026-09-26). The first such site — the editor shell's `RegionSpec.target`, issue #6306 — dropped the field instead, so the region announces itself and the shell keeps the envelope sender; the door stays unprovided. | — |
 
 **Amendment (2026-09-23): two births the declared-dependency check did not
 reach.** The first row checked dependencies only at component load and
@@ -229,6 +230,55 @@ The consequences:
   `wire` or at receipt, and stored; it is never re-derived at a send.
 
 The `Address<R>` row stays unprovided.
+
+**Amendment (2026-09-26): which doors a guest has.** A guest proves
+references through the doors above, and four rows answer differently for
+it (#6796). Two must not exist for a guest, one waits for a production
+consumer, and the `Address<R>` door lands for the guest first.
+
+- **A module's own parent.** No ctx proves its actor's parent outside a
+  guest's inline cluster. A native child whose parent is a root singleton
+  declares it, as `FleetProxy` declares `FleetServer`, and a guest has the
+  same door. The substrate hands a guest's entry actor its parent's
+  position at `init`, where it is the seed an `Embedded` dependency folds
+  beneath, and nothing sendable. For a loaded component that parent is the
+  component host, which spawned the component's trampoline, and never the
+  actor that asked for the load. A door to it would answer "who loaded me"
+  with the wrong actor, and would give every loaded component an undeclared
+  proof of the actor that loads, drops, and replaces components. A
+  component reaches its loader as any receiver reaches an announcer: the
+  loader mails it and it keeps the sender, or the loader's path arrives in
+  its config and `resolve_path` proves it. The one parent a door would
+  answer usefully is a detached sibling's (ADR-0097), the guest actor that
+  spawned it. Guest detached spawn has no consumer and #6818 removes it;
+  a consumer that brings it back brings this door with it, as an
+  `ErasedActorRef` minted from the position `init` receives, which the
+  trampoline proved `Live` before the birth. It is erased because a
+  `child_of` list may name more than one parent.
+- **A child it spawned or loaded.** A guest loads a component by sending
+  `aether.component.load` to the component host, proved by path, and
+  `LoadResult::Ok` arrives from the loaded actor, so `ctx.sender()` is the
+  proof, as for a native requester. A detached sibling spawn returns
+  nothing addressable, because the birth completes after the call, and no
+  completion notice is added.
+- **No `resolve_live`.** The verb takes a `MailboxId`, and no guest API
+  takes or returns one. A guest is told where to send by an `ActorPath`,
+  proved through `resolve_path`, or by the envelope sender. No guest on main
+  proves a position it received.
+- **`Address<R>`, guest first.** Neither ctx resolves a foreign
+  `Address<R>` yet. [ADR-0240](0240-several-bloomery-journal-units-per-engine.md)
+  D8 lands the door as the guest verb `WasmCtx::resolve::<R>`, whose
+  consumer is the Bloomery bootstrap: it folds the address with `R`'s
+  resolver, proves the route through the published-route read the
+  embedder's `child` already makes, and mints an `ActorRef<R>`.
+  `NativeCtx::resolve::<R>` lands with its first native caller, because a
+  door needs a named production consumer and no native code holds a
+  foreign `Address<R>`. A guest can resolve only a type it compiles, so a
+  kind-checked guest send to a native actor needs that actor's crate to
+  export an always-on identity half (ADR-0122), as `aether-workspace`
+  does for `WorkspaceCapability`. The journal owner and the bundle driver
+  gain theirs under the same decision (#6823), and the bootstrap's sends to them
+  then go through `send_to(ActorRef<R>, &K)`, checked by kind.
 
 An off-thread helper that only wakes its own actor — an accept loop, a socket
 reader, a timer — holds a `SelfWake<K>` from the ctx (`ctx.self_wake::<K>()`)
