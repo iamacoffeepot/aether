@@ -11,10 +11,12 @@ component, or operator addresses the daemon directly, and there is no general
 Docker actor.
 
 `Import` pulls a digest-pinned image and decodes its filesystem into a stored
-tree. An environment's base and toolchain layers enter the journal this way
-before any run can use them, and so does a source checkout, packed into a
-source image on the build host. `Run` runs steps over a stored tree in a stored
-environment, each in its own container, and stores what they produce.
+tree. Only an environment's base and toolchain layers enter the journal this
+way, before any run can use them: an image carries a bare, reusable layer and
+never a source tree, which the operator stages from a commit instead
+([Importing a source tree](#importing-a-source-tree)). `Run` runs steps over a
+stored tree in a stored environment, each in its own container, and stores what
+they produce.
 
 ## The contract
 
@@ -503,75 +505,68 @@ Pins are image digests; a tag beside one only names it for the reader.
 
 ## Importing a source tree
 
-A proof runs over a source tree, and a checkout enters the journal the same
-way the environment layers do: as a digest-pinned image the actor imports
-(ADR-0237 decision 3). The checkout is named only on the build host. A host
-path in mail would give an addressable actor a file-read door, so the image
-reference is the only thing that crosses into the engine. The checked-in
-recipe is in `scripts/bloomery/source/`, beside a `registry.sh` it shares with
-the environment recipe.
+A proof runs over a source tree, and a source tree enters the journal from a
+commit, never from an image (ADR-0237 decision 3). The operator command runs
+outside the engine, on a host that holds the repository:
 
-| File | What it holds |
+```text
+cargo xtask import-commit <commit> --rpc-port <port>
+```
+
+`<commit>` is any revision `git rev-parse` resolves to a commit, looked up in
+the repository around the working directory. `--rpc-port` is the Bloomery
+engine's RPC port on `127.0.0.1`: the port `list_engines` and
+`spawn_substrate` report for a hub-spawned engine, or the `--rpc-port` a
+standalone `aether-bloomery` was started with. The engine never reads Git, a
+repository, or a host path; only the tree crosses.
+
+What it reads is exactly the files the commit tracks, listed with
+`git ls-tree -r -t` and read through one `git cat-file --batch`. There is no
+allowlist: untracked files, build output, and ignored secrets are absent by
+construction, because the commit does not hold them. Git modes map onto tree
+entries one to one:
+
+| Git mode | Tree entry |
 |---|---|
-| `source.Dockerfile` | `FROM scratch` and `COPY . /source`: the checkout under `/source` and nothing else |
-| `source.Dockerfile.dockerignore` | the build context as a fail-closed allowlist of the checkout's roots |
-| `publish.sh` | builds the image over a checkout, pushes it to the loopback registry, and prints its reference |
+| `100644` | `Node::File`, the blob staged as opaque bytes |
+| `100755` | `Node::Executable`, the blob staged as opaque bytes |
+| `120000` | `Node::Symlink`, the target inline |
+| `040000` | `Node::Directory`, the subtree staged as a `Tree` |
 
-Run the steps on the host whose daemon the actor dials.
+Anything else stops the import and names the path, so nothing is dropped
+silently: any other mode (a `160000` gitlink included), a name `Name` refuses,
+or a symlink target `Path` refuses (absolute, not UTF-8, or longer than 1024
+bytes).
 
-1. **Publish.** `scripts/bloomery/source/publish.sh` packs the repository
-   holding the script, or `publish.sh <checkout>` another checkout directory.
-   It starts the registry the environment recipe uses unless it is already
-   running, builds, pushes, and prints:
+The command builds every blob and tree bottom-up, each distinct digest once and
+each artifact after everything it cites, with the root tree last. It stages
+them through the journal's fenced `aether.bloomery.journal.publish` in batches
+whose payload stays within half the RPC frame cap (`AETHER_MAX_FRAME_SIZE`,
+resolved as the engine and `aether-mcp` resolve it); one file over that budget
+stops the import and names its path. No batch moves a head, so the journal
+appends no event and the fence read once at the start holds across batches. A
+batch can land after the batches holding its tree's children, because the
+journal checks each citation against rows staged in the same batch or already
+stored.
 
-   ```text
-   source=localhost:5000/aether-source/checkout@sha256:<digest>
-   ```
+stdout carries exactly two lines; progress goes to stderr:
 
-   Repacking an unchanged checkout is a cache hit and prints the same
-   reference. Another checkout of the same content can print another
-   reference, because the image layer keeps file times, but it imports as the
-   same tree.
-2. **Import.** Mail `aether.workspace.import { image }` to `aether.workspace`
-   on a Bloomery engine. It answers `Ok { tree }`: the image's whole
-   filesystem, with the checkout under `source` beside Docker's placeholders
-   (`.dockerenv`, `dev`, `etc`, `proc`, `sys`). Importing the same checkout
-   content twice answers the same tree.
-3. **Select.** Stage a `source.select.input` (`SelectInput { image }`, the
-   imported tree) and send `aether.bloomery.driver.call` for the program
-   `source.select`, in the same bundle as `environment.merge`. The Pure
-   program answers a `Transition` whose result is the `source` entry's tree,
-   so the result digest is that subtree's digest and nothing new is built. It
-   refuses, naming `source`, when the image holds no `source` directory.
-4. **Cite.** Pass the transition's result as `source` in both
-   `vendor.cargo.input` and `proof.clippy.input`, so the vendor tree and the
-   proof share one `Cargo.lock`.
+```text
+commit=<40-hex sha>
+tree=<64-hex digest>
+```
 
-What the source tree holds:
+Importing the same commit again prints the same `tree=` line and adds no
+journal event: every artifact is already stored, so the journal writes no blob
+and no row. The journal records nothing about the commit either. The operator
+holds the commit, and a proof cites the tree.
 
-- The context starts from nothing and re-includes only the roots cargo and
-  the `cargo xtask` lanes read: `Cargo.toml`, `Cargo.lock`,
-  `rust-toolchain.toml`, `rustfmt.toml`, `clippy.toml`,
-  `approval-policy.toml`, `.cargo`, `.config`, `crates`, `docs`, `scripts`,
-  and `xtask`.
-- Inside those roots it drops the paths `.gitignore` ignores there:
-  `docs/book`, every `target`, and every `__pycache__`. It also drops every
-  environment file at any depth: each name that starts with `.env` (`.env`,
-  `.env.<suffix>`, `.envrc`) and each `<name>.env`.
-- Everything else never enters: `.git`, `target`, `dist`, `research`, the
-  agent and CI directories, `fuzz`, and the root prose files. A tree could not
-  hold `.git` anyway, because `Name` refuses it.
-
-The list is an allowlist because a content-addressed tree cannot forget: an
-ignore file that mirrored `.gitignore` would drift as `.gitignore` grew, and
-the first drift would store an ignored or secret file in the journal. A root
-the allowlist misses makes a proof fail loudly instead, for example as a
-missing workspace member. The ignore file is one BuildKit reads, so
-`publish.sh` forces BuildKit; a checkout's own `.dockerignore` cannot widen it.
-
-No head is published for a source tree. Each checkout is its own tree, and the
-proof's caller cites the transition's result directly, so a head would have
-no reader.
+To cite the tree, pass the printed digest as `source` in both
+`vendor.cargo.input` and `proof.clippy.input`, so the vendor tree and the proof
+share one `Cargo.lock`. The hex is the same 32 bytes a `Ref<Tree>` field
+carries, written two hex digits per byte in order. No head is published for a
+source tree: each commit is its own tree, and the proof's caller cites the
+digest directly, so a head would have no reader.
 
 ## Vendoring crate sources
 
@@ -586,7 +581,7 @@ Its input, `vendor.cargo.input`, cites two things:
 
 | Field | What it is | Where the run sees it |
 |---|---|---|
-| `source: Ref<Tree>` | the cargo workspace whose `Cargo.lock` is vendored, such as the result of `source.select` ([Importing a source tree](#importing-a-source-tree)) | `/source`, read-only |
+| `source: Ref<Tree>` | the cargo workspace whose `Cargo.lock` is vendored, such as the tree `import-commit` prints ([Importing a source tree](#importing-a-source-tree)) | `/source`, read-only |
 | `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` | the root |
 
 The program asks for one run, and every argument is fixed:
@@ -652,7 +647,7 @@ Its input, `proof.clippy.input`, cites three trees:
 
 | Field | What it is | Where the run sees it |
 |---|---|---|
-| `source: Ref<Tree>` | the cargo workspace under proof, such as the result of `source.select` ([Importing a source tree](#importing-a-source-tree)) | `/work` |
+| `source: Ref<Tree>` | the cargo workspace under proof, such as the tree `import-commit` prints ([Importing a source tree](#importing-a-source-tree)) | `/work` |
 | `environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (the head move in [What the bootstrap sends](#what-the-bootstrap-sends)) | the root |
 | `vendor: Ref<Tree>` | the `Vendored.tree` of a `vendor.cargo` run over a source with the same `Cargo.lock` (see [Vendoring crate sources](#vendoring-crate-sources)) | `/vendor`, read-only |
 

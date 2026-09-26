@@ -32,6 +32,7 @@ mod dev_component;
 mod dist;
 mod docs;
 mod git;
+mod import_commit;
 mod inventory;
 mod namespaces;
 mod package;
@@ -49,6 +50,7 @@ use crate::bump::BumpArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::docs::DocsArgs;
+use crate::import_commit::ImportCommitArgs;
 use crate::namespaces::NamespacesArgs;
 use crate::package::PackageArgs;
 use crate::symbols::SymbolsArgs;
@@ -108,6 +110,10 @@ enum Commands {
     /// script or workflow reads the shipped binary names instead of
     /// re-spelling them (issue 5707).
     Bins(BinsArgs),
+    /// Stage the files one commit tracks as a Bloomery journal tree through
+    /// the engine's fenced publish, moving no head, and print `commit=` and
+    /// `tree=` (ADR-0237 decision 3).
+    ImportCommit(ImportCommitArgs),
 }
 
 fn main() -> Result<()> {
@@ -124,5 +130,6 @@ fn main() -> Result<()> {
         Commands::Namespaces(args) => namespaces::run(&args),
         Commands::Bump(args) => bump::run(&args),
         Commands::Bins(args) => bins::run(&args),
+        Commands::ImportCommit(args) => import_commit::run(&args),
     }
 }
