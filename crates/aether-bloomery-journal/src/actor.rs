@@ -10,6 +10,7 @@ use aether_bloomery_kinds::{
     MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult,
     ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq, WatchHead, WatchHeadResult,
 };
+use aether_data::{Blob, KindId};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 use aether_substrate::chassis::error::BootError;
 
@@ -28,6 +29,13 @@ pub const MAX_HEAD_WATCHERS: usize = 64;
 /// read over the bound waits its turn in arrival order.
 const MAX_CLOSURE_READS_IN_FLIGHT: usize = 2;
 
+/// Maximum number of single-artifact reads running on worker threads at
+/// once, bounding worker threads and resident artifacts; a read over the
+/// bound waits its turn in arrival order. Separate from the closure queue so
+/// a small fetch never waits behind closure walks that can each pin
+/// [`ClosureLimit::MAX_BYTES`].
+const MAX_ARTIFACT_READS_IN_FLIGHT: usize = 4;
+
 /// One independently named journal owner over its own journal root.
 ///
 /// The composer opens the [`Journal`] and hands it over as the actor's params
@@ -37,6 +45,7 @@ pub struct JournalActor {
     journal: Journal,
     watchers: Watchers,
     closures: TaskQueue,
+    artifacts: TaskQueue,
 }
 
 #[actor(instanced, root)]
@@ -47,7 +56,12 @@ impl NativeActor for JournalActor {
     const NAMESPACE: &'static str = "aether.bloomery.journal";
 
     fn init((): (), journal: Journal, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { journal, watchers: Watchers::new(), closures: TaskQueue::new(MAX_CLOSURE_READS_IN_FLIGHT) })
+        Ok(Self {
+            journal,
+            watchers: Watchers::new(),
+            closures: TaskQueue::new(MAX_CLOSURE_READS_IN_FLIGHT),
+            artifacts: TaskQueue::new(MAX_ARTIFACT_READS_IN_FLIGHT),
+        })
     }
 
     #[handler::single]
@@ -79,26 +93,31 @@ impl NativeActor for JournalActor {
         }
     }
 
-    /// Read one stored artifact. Its payload is checked into the engine blob
-    /// store, so the reply carries it without copying.
+    /// Read one stored artifact. A plain read: writes nothing and wakes no
+    /// watcher.
+    ///
+    /// The read runs on a worker thread through the actor's artifact task
+    /// queue (ADR-0093), on its own read-only connection, and checks the
+    /// payload into the engine blob store there, read straight into one
+    /// buffer of its exact length, so the reply carries it without copying.
+    /// Every other request keeps being answered meanwhile, and the reply
+    /// lands when the read finishes. The connection opens after every write
+    /// this actor committed before the request was handled, so the read sees
+    /// them all.
     #[handler::single]
-    fn on_read_artifact(&self, ctx: &mut NativeCtx<'_>, request: ReadArtifact) -> ReadArtifactResult {
+    fn on_read_artifact(&mut self, ctx: &mut NativeCtx<'_>, request: ReadArtifact) -> Pending<ReadArtifactResult> {
         let digest = request.digest;
-        match self.journal.get_bytes(&digest) {
-            Ok(Some((kind, bytes))) => {
-                let artifact = ClosureArtifact::new(kind, ctx.check_in(bytes.into_boxed_slice()));
-                if artifact.claimed().unverified() == digest {
-                    ReadArtifactResult::Found { artifact }
-                } else {
-                    ReadArtifactResult::Err {
-                        digest,
-                        message: "stored artifact bytes do not match the requested digest".into(),
-                    }
-                }
-            }
-            Ok(None) => ReadArtifactResult::Missing { digest },
-            Err(error) => ReadArtifactResult::Err { digest, message: error.to_string() },
-        }
+        let reader = self.journal.worker_reader();
+        let check_in = ctx.blob_check_in();
+        self.artifacts.submit(ctx, move || artifact_reply(digest, reader.read_artifact(&digest, &check_in)))
+    }
+
+    /// ADR-0093 completion of an artifact read: reply to the request's own
+    /// caller, then free the read's slot for the next queued read.
+    #[handler(task)]
+    fn on_read_artifact_done(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<ReadArtifactResult>) {
+        done.resolve(ctx);
+        self.artifacts.on_complete(ctx);
     }
 
     /// Read an artifact's transitive closure under the requested byte limit.
@@ -114,9 +133,10 @@ impl NativeActor for JournalActor {
     #[handler::single]
     fn on_read_closure(&mut self, ctx: &mut NativeCtx<'_>, request: ReadClosure) -> Pending<ReadClosureResult> {
         let ReadClosure { root, limit_bytes } = request;
-        let reader = self.journal.closure_reader();
+        let reader = self.journal.worker_reader();
         let check_in = ctx.blob_check_in();
-        self.closures.submit(ctx, move || closure_reply(root, limit_bytes, reader.read(&root, limit_bytes, &check_in)))
+        self.closures
+            .submit(ctx, move || closure_reply(root, limit_bytes, reader.read_closure(&root, limit_bytes, &check_in)))
     }
 
     /// ADR-0093 completion of a closure walk: reply to the request's own
@@ -255,6 +275,25 @@ impl JournalActor {
         let range = self.journal.append(expected, batch)?;
         self.watchers.wake(ctx, range.end.0.saturating_sub(1));
         Ok(range)
+    }
+}
+
+/// The reply a finished artifact read answers with.
+fn artifact_reply(digest: Digest, outcome: Result<Option<(KindId, Blob)>, JournalError>) -> ReadArtifactResult {
+    match outcome {
+        Ok(Some((kind, blob))) => {
+            let artifact = ClosureArtifact::new(kind, blob);
+            if artifact.claimed().unverified() == digest {
+                ReadArtifactResult::Found { artifact }
+            } else {
+                ReadArtifactResult::Err {
+                    digest,
+                    message: "stored artifact bytes do not match the requested digest".into(),
+                }
+            }
+        }
+        Ok(None) => ReadArtifactResult::Missing { digest },
+        Err(error) => ReadArtifactResult::Err { digest, message: error.to_string() },
     }
 }
 
