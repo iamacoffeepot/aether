@@ -3,14 +3,14 @@
 use std::ops::Range;
 
 use crate::watch::Watchers;
-use crate::{AppendError, Batch, Closure, Journal};
+use crate::{AppendError, Batch, Closure, Digest, Journal, JournalError};
 use aether_actor::{Manual, actor};
 use aether_bloomery_kinds::{
-    AppendRecords, AppendRecordsResult, ClosureArtifact, DriverRecord, JournalEntry, MoveHead, MoveHeadResult, Publish,
-    PublishResult, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, ReadEvents, ReadEventsResult,
-    ReadHead, ReadHeadResult, RecordedHeadMove, Seq, WatchHead, WatchHeadResult,
+    AppendRecords, AppendRecordsResult, ClosureArtifact, ClosureLimit, DriverRecord, JournalEntry, MoveHead,
+    MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult,
+    ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq, WatchHead, WatchHeadResult,
 };
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 use aether_substrate::chassis::error::BootError;
 
 /// Maximum number of entries one read mail can return.
@@ -22,6 +22,12 @@ pub const MAX_READ_EVENTS: u32 = 128;
 /// anticipating real concurrent demand.
 pub const MAX_HEAD_WATCHERS: usize = 64;
 
+/// Maximum number of closure walks running on worker threads at once. Each
+/// walk can hold up to [`ClosureLimit::MAX_BYTES`] of checked-in members
+/// resident until its reply is sent, so this bounds that memory; a closure
+/// read over the bound waits its turn in arrival order.
+const MAX_CLOSURE_READS_IN_FLIGHT: usize = 2;
+
 /// One independently named journal owner over its own journal root.
 ///
 /// The composer opens the [`Journal`] and hands it over as the actor's params
@@ -30,6 +36,7 @@ pub const MAX_HEAD_WATCHERS: usize = 64;
 pub struct JournalActor {
     journal: Journal,
     watchers: Watchers,
+    closures: TaskQueue,
 }
 
 #[actor(instanced, root)]
@@ -40,7 +47,7 @@ impl NativeActor for JournalActor {
     const NAMESPACE: &'static str = "aether.bloomery.journal";
 
     fn init((): (), journal: Journal, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { journal, watchers: Watchers::new() })
+        Ok(Self { journal, watchers: Watchers::new(), closures: TaskQueue::new(MAX_CLOSURE_READS_IN_FLIGHT) })
     }
 
     #[handler::single]
@@ -94,18 +101,31 @@ impl NativeActor for JournalActor {
         }
     }
 
-    /// Read an artifact's transitive closure under the requested byte limit,
-    /// checking each member into the engine blob store. A plain read: writes
-    /// nothing and wakes no watcher.
+    /// Read an artifact's transitive closure under the requested byte limit.
+    /// A plain read: writes nothing and wakes no watcher.
+    ///
+    /// The walk runs on a worker thread through the actor's task queue
+    /// (ADR-0093), on its own read-only connection, and checks each member
+    /// into the engine blob store there. Every other request keeps being
+    /// answered meanwhile, and the reply lands when the walk finishes. The
+    /// connection opens after every write this actor committed before the
+    /// request was handled, so the walk sees them all.
     #[handler::single]
-    fn on_read_closure(&self, ctx: &mut NativeCtx<'_>, request: ReadClosure) -> ReadClosureResult {
+    fn on_read_closure(&mut self, ctx: &mut NativeCtx<'_>, request: ReadClosure) -> Pending<ReadClosureResult> {
         let ReadClosure { root, limit_bytes } = request;
-        match self.journal.read_closure(&root, limit_bytes, |payload| ctx.check_in(payload)) {
-            Ok(Closure::Found(artifacts)) => ReadClosureResult::Found { root, artifacts },
-            Ok(Closure::Missing(digest)) => ReadClosureResult::Missing { root, digest },
-            Ok(Closure::TooLarge) => ReadClosureResult::TooLarge { root, limit_bytes },
-            Err(error) => ReadClosureResult::Err { root, message: error.to_string() },
-        }
+        let reader = self.journal.closure_reader();
+        let check_in = ctx.blob_check_in();
+        self.closures.submit(ctx, move || {
+            closure_reply(root, limit_bytes, reader.read(&root, limit_bytes, |payload| check_in.check_in(payload)))
+        })
+    }
+
+    /// ADR-0093 completion of a closure walk: reply to the request's own
+    /// caller, then free the walk's slot for the next queued read.
+    #[handler(task)]
+    fn on_read_closure_done(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<ReadClosureResult>) {
+        done.resolve(ctx);
+        self.closures.on_complete(ctx);
     }
 
     #[handler::single]
@@ -236,5 +256,15 @@ impl JournalActor {
         let range = self.journal.append(expected, batch)?;
         self.watchers.wake(ctx, range.end.0.saturating_sub(1));
         Ok(range)
+    }
+}
+
+/// The reply a finished closure walk answers with.
+fn closure_reply(root: Digest, limit_bytes: ClosureLimit, outcome: Result<Closure, JournalError>) -> ReadClosureResult {
+    match outcome {
+        Ok(Closure::Found(artifacts)) => ReadClosureResult::Found { root, artifacts },
+        Ok(Closure::Missing(digest)) => ReadClosureResult::Missing { root, digest },
+        Ok(Closure::TooLarge) => ReadClosureResult::TooLarge { root, limit_bytes },
+        Err(error) => ReadClosureResult::Err { root, message: error.to_string() },
     }
 }
