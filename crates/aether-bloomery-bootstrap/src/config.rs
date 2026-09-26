@@ -18,7 +18,8 @@ pub struct BootstrapConfig {
     pub base: Option<ImageRef>,
     /// The Rust toolchain image, `toolchain=` in `publish.sh`'s output.
     pub toolchain: Option<ImageRef>,
-    /// The journal owner, `aether.bloomery.journal:journal` on a Bloomery engine.
+    /// The journal owner, `aether.bloomery.journal:<key>` on a Bloomery engine,
+    /// where `<key>` is the unit's key.
     pub journal: Option<ActorPath>,
     /// The bundle driver, `aether.bloomery.driver:driver` on a Bloomery engine.
     pub driver: Option<ActorPath>,

@@ -11,7 +11,7 @@ use aether_bloomery_kinds::{ClosureLimit, Head, RecordedHead, RecordedHeadMove, 
 use aether_chassis::boot::{ChassisBase, RuntimeConfig};
 use aether_chassis_bloomery::BloomeryConfig;
 use aether_chassis_bloomery::chassis::{BloomeryChassis, BloomeryEnv};
-use aether_harness_bloomery::{BloomeryHarness, SeededJournal};
+use aether_harness_bloomery::{BloomeryHarness, SeededJournal, UNIT};
 use aether_substrate::Chassis;
 use aether_substrate::config::ConfigSources;
 
@@ -52,21 +52,21 @@ fn populated_journal_is_recovered_through_its_head() {
 }
 
 #[test]
-fn unset_journal_refuses_boot() {
+fn unset_units_refuses_boot() {
     // Catches a silent default, for example `PathBuf::new()`: rusqlite opens
     // `""` as a throwaway temporary database, which silently loses every write.
     let env = BloomeryEnv::new(
         ChassisBase { sources: ConfigSources::new(None), ..Default::default() },
         RuntimeConfig::default(),
         BloomeryConfig {
-            journal: None,
+            units: None,
             closure_limit_bytes: ClosureLimit::MAX_BYTES,
             read_cache_bytes: ReadCacheBudget::DEFAULT_BYTES,
         },
     );
-    let error = BloomeryChassis::build(env).expect_err("boot without a journal root must fail");
+    let error = BloomeryChassis::build(env).expect_err("boot without a unit must fail");
     let message = error.to_string();
-    assert!(message.contains("AETHER_BLOOMERY_JOURNAL"), "the refusal names the env key: {message}");
+    assert!(message.contains("AETHER_BLOOMERY_UNITS"), "the refusal names the env key: {message}");
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn a_root_another_engine_holds_refuses_boot_naming_the_root() {
         ChassisBase { sources: ConfigSources::new(None), ..Default::default() },
         RuntimeConfig::default(),
         BloomeryConfig {
-            journal: Some(root.display().to_string()),
+            units: Some(format!("{UNIT}={}", root.display())),
             closure_limit_bytes: ClosureLimit::MAX_BYTES,
             read_cache_bytes: ReadCacheBudget::DEFAULT_BYTES,
         },

@@ -58,6 +58,12 @@ pub use drive::{Answer, Pending};
 pub use expect::Record;
 pub use seed::SeededJournal;
 
+/// The unit key every harness boot configures: the seeded journal is this
+/// unit's root, so the journal owner answers at
+/// `aether.bloomery.journal:primary` and each bundle root is named
+/// `UnitBundle::name` of this key and the bundle's digest (ADR-0240 D4).
+pub const UNIT: &str = "primary";
+
 /// A booted bloomery chassis over a seeded scratch journal, with one reply
 /// sink every request names as its reply target.
 ///

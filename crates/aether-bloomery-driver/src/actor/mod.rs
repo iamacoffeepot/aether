@@ -1,10 +1,11 @@
 //! The native bundle driver: the core's commands performed as mail.
 //!
 //! Native code spawns [`BundleDriver`] over a born journal owner, passing the
-//! journal's reference in [`DriverParams`]. `init` builds the [`ProgramCore`] and
-//! keeps its first commands; `wire` performs them once the mailbox is live.
-//! Commands go to the journal owner (reads, appends, and the watch), the
-//! component host (loads) and bundle roots. The core names a loaded bundle by
+//! unit's key and the journal's reference in [`DriverParams`]. `init` builds the
+//! [`ProgramCore`] and keeps its first commands; `wire` performs them once the
+//! mailbox is live. Commands go to the journal owner (reads, appends, and the
+//! watch), the component host (loads, each under the unit's bundle name) and
+//! bundle roots. The core names a loaded bundle by
 //! its digest; the shell keeps each root's proven reference, taken from its
 //! load reply's stamped sender (ADR-0230 §3), keyed by that digest, and sends
 //! to it with the command's ticket as the request context. Inbound [`Call`],
@@ -23,7 +24,7 @@ use aether_actor::{ActorRef, ErasedActorRef, Manual, actor};
 use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
     AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Digest, Evaluated, Invoked, ReadArtifact,
-    ReadArtifactResult, ReadClosureResult, ReadEventsResult, Status, Warmed, WatchHeadResult,
+    ReadArtifactResult, ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed, WatchHeadResult,
 };
 use aether_component::ComponentHostCapability;
 use aether_kinds::LoadResult;
@@ -40,13 +41,20 @@ use crate::{
 // must stay equal or every startup read fails with `Err`.
 const _: () = assert!(EVENTS_PAGE == MAX_READ_EVENTS);
 
-/// Composer-supplied construction input: the born journal owner's reference.
+/// Composer-supplied construction input: the unit's key and the born journal
+/// owner's reference.
 ///
 /// The reference is what the journal's own `spawn_actor(..).finish()` returns,
 /// so holding it proves the journal was born (ADR-0230); a driver cannot be
 /// built over a journal that does not exist. The driver sends through it,
 /// never by resolving a name.
 pub struct DriverParams {
+    /// The key of the unit this driver folds for. Every bundle root it loads
+    /// is named [`UnitBundle::name`] of this key and the bundle's digest
+    /// (ADR-0240 D4).
+    ///
+    /// [`UnitBundle::name`]: aether_bloomery_kinds::UnitBundle::name
+    pub unit: UnitKey,
     /// The journal owner's proven reference, handed over at spawn.
     pub journal: ActorRef<JournalActor>,
 }
@@ -57,9 +65,10 @@ pub struct DriverParams {
 /// call, once the outcome is recorded, and `aether.bloomery.driver.await_processed`
 /// with `Processed` once its bound is quiescent. It performs the core's commands
 /// as mail to the journal owner (including the watch), the component host,
-/// and bundle roots. One driver per engine; the type does not enforce it.
+/// and bundle roots. One driver per unit; the type does not enforce it.
 pub struct BundleDriver {
     core: ProgramCore,
+    unit: UnitKey,
     journal: ActorRef<JournalActor>,
     startup: Vec<Command>,
     callers: HashMap<CallerId, DeferredReply>,
@@ -76,9 +85,17 @@ impl NativeActor for BundleDriver {
     const NAMESPACE: &'static str = "aether.bloomery.driver";
 
     fn init(limit: ClosureLimit, params: DriverParams, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        let DriverParams { journal } = params;
+        let DriverParams { unit, journal } = params;
         let (core, startup) = ProgramCore::start(limit);
-        Ok(Self { core, journal, startup, callers: HashMap::new(), loading: BTreeMap::new(), roots: HashMap::new() })
+        Ok(Self {
+            core,
+            unit,
+            journal,
+            startup,
+            callers: HashMap::new(),
+            loading: BTreeMap::new(),
+            roots: HashMap::new(),
+        })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {

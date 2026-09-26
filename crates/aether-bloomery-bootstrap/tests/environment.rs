@@ -16,7 +16,7 @@ use aether_bloomery_kinds::{
 use aether_bloomery_view::Heads;
 use aether_chassis_bloomery::BloomeryCli;
 use aether_data::{ActorPath, Kind};
-use aether_harness_bloomery::{Record, SeededJournal};
+use aether_harness_bloomery::{Record, SeededJournal, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_workspace::testing::{StubDaemon, StubReply, StubRequest, TarWriter};
@@ -99,7 +99,7 @@ fn the_bootstrap_script_imports_merges_and_publishes_the_environment_head() -> R
     let config = BootstrapConfig {
         base: Some(ImageRef::new(BASE)?),
         toolchain: Some(ImageRef::new(TOOLCHAIN)?),
-        journal: Some(ActorPath::new("aether.bloomery.journal:journal")?),
+        journal: Some(ActorPath::new(&format!("aether.bloomery.journal:{UNIT}"))?),
         driver: Some(ActorPath::new("aether.bloomery.driver:driver")?),
     };
     let load =

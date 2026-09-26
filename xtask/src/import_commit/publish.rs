@@ -5,13 +5,10 @@
 //! the batch is resent at the actual sequence: staging is idempotent, so a
 //! resend can only store what the first attempt did not.
 
-use aether_bloomery_kinds::{Digest, EncodedArtifact, Publish, PublishResult, ReadHead, ReadHeadResult};
+use aether_bloomery_kinds::{Digest, EncodedArtifact, Publish, PublishResult, ReadHead, ReadHeadResult, UnitKey};
 use aether_data::{ActorPath, Kind};
 use aether_rpc::{MailEnvelope, PeerKind, Recipient, RpcClient, RpcConnection, WireFrame};
 use anyhow::{Context, Result, anyhow, bail};
-
-/// The journal owner's actor path in a Bloomery engine.
-const JOURNAL: &str = "aether.bloomery.journal:journal";
 
 /// Send one publish and return the journal's answer.
 ///
@@ -62,26 +59,29 @@ pub(super) fn publish(stage: &mut impl Stage, mut fence: u64, batches: Vec<Vec<E
     Ok(())
 }
 
-/// A connection to one Bloomery engine's journal owner over the engine's own
-/// RPC port.
+/// A connection to one unit's journal owner in a Bloomery engine, over the
+/// engine's own RPC port.
 pub(super) struct EngineJournal {
     connection: RpcConnection,
     recipient: Recipient,
 }
 
 impl EngineJournal {
-    /// Dial `127.0.0.1:<rpc_port>` as a client peer.
+    /// Dial `127.0.0.1:<rpc_port>` as a client peer, addressing the journal
+    /// owner of `unit` at its canonical path, `aether.bloomery.journal:<key>`
+    /// (ADR-0240 D8).
     ///
     /// # Errors
     /// The dial or the handshake failed.
-    pub(super) fn connect(rpc_port: u16) -> Result<Self> {
+    pub(super) fn connect(rpc_port: u16, unit: &UnitKey) -> Result<Self> {
         let peer = PeerKind::Client {
             client_name: "xtask import-commit".to_owned(),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         let connection = RpcClient::connect(&format!("127.0.0.1:{rpc_port}"), peer, || {})
             .with_context(|| format!("dialing the engine on port {rpc_port}"))?;
-        Ok(Self { connection, recipient: Recipient::local(ActorPath::new(JOURNAL)?) })
+        let journal = ActorPath::new(&format!("aether.bloomery.journal:{unit}"))?;
+        Ok(Self { connection, recipient: Recipient::local(journal) })
     }
 
     /// The journal's last stored sequence: the fence every batch starts at.
@@ -110,7 +110,7 @@ impl EngineJournal {
                     reply = Some(decoded.with_context(|| format!("decoding a {} reply", Reply::NAME))?);
                 }
                 WireFrame::ReplyEnd { cid: seen, result } if seen == cid => {
-                    result.map_err(|error| anyhow!("{} to {JOURNAL}: {error:?}", Request::NAME))?;
+                    result.map_err(|error| anyhow!("{} to {}: {error:?}", Request::NAME, self.recipient.path))?;
                     return reply.with_context(|| format!("{} settled with no {} reply", Request::NAME, Reply::NAME));
                 }
                 WireFrame::Bye { reason } => bail!("the engine closed the connection: {reason}"),

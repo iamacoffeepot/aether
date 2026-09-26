@@ -381,7 +381,8 @@ Run the steps on the host whose daemon the actor dials.
    `aether-bloomery-workspace-programs` bundle bound under the
    `Head<OpaqueBytes>` named `workspace-programs`, once per journal. Read the
    fence with `aether.bloomery.journal.read_head`, then send
-   `aether.bloomery.journal.publish` to `aether.bloomery.journal:journal` with
+   `aether.bloomery.journal.publish` to `aether.bloomery.journal:<key>`, the
+   journal owner of the unit whose key `--bloomery-units` names, with
    one artifact, the bundle's built wasm as an `OpaqueBytes` artifact (the
    `OpaqueBytes` kind id, the file's bytes, no citations), and no moves. The
    `Committed` reply lists the artifact's digest. A second publish at the new
@@ -392,13 +393,13 @@ Run the steps on the host whose daemon the actor dials.
 4. **Load the bootstrap.** `upload_component` the built
    `aether_bloomery_bootstrap.wasm` (`crates/aether-bloomery-bootstrap`), then
    `load_component` it with the two references `publish.sh` printed and the
-   two actors it mails as its config:
+   two actors it mails as its config, here for the unit keyed `primary`:
 
    ```json
    {
      "base": "localhost:5000/aether-env/base@sha256:<digest>",
      "toolchain": "localhost:5000/aether-env/toolchain@sha256:<digest>",
-     "journal": "aether.bloomery.journal:journal",
+     "journal": "aether.bloomery.journal:primary",
      "driver": "aether.bloomery.driver:driver"
    }
    ```
@@ -510,14 +511,17 @@ commit, never from an image (ADR-0237 decision 3). The operator command runs
 outside the engine, on a host that holds the repository:
 
 ```text
-cargo xtask import-commit <commit> --rpc-port <port>
+cargo xtask import-commit <commit> --rpc-port <port> --unit <key>
 ```
 
 `<commit>` is any revision `git rev-parse` resolves to a commit, looked up in
 the repository around the working directory. `--rpc-port` is the Bloomery
 engine's RPC port on `127.0.0.1`: the port `list_engines` and
 `spawn_substrate` report for a hub-spawned engine, or the `--rpc-port` a
-standalone `aether-bloomery` was started with. The engine never reads Git, a
+standalone `aether-bloomery` was started with. `--unit` is the key of the unit
+whose journal takes the tree, one of the keys `--bloomery-units` names; the
+command publishes to that unit's journal owner at
+`aether.bloomery.journal:<key>`. The engine never reads Git, a
 repository, or a host path; only the tree crosses.
 
 What it reads is exactly the files the commit tracks, listed with

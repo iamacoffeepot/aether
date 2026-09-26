@@ -173,7 +173,7 @@ fn reactor_set_move_activates_and_its_call_program_records_requested_then_transi
 
 #[test]
 fn a_mixed_bundle_serves_its_reactor_and_its_program_from_one_load() -> Result<(), Box<dyn Error>> {
-    // Catches a second `LoadComponent` for a digest one role already loaded: the component host refuses the digest name with `SubnameInUse`, which the driver records as a `BundleUnavailable` `Fault`, so one load is the only way both roles succeed.
+    // Catches a second `LoadComponent` for a digest one role already loaded: the component host refuses the unit's bundle name with `SubnameInUse`, which the driver records as a `BundleUnavailable` `Fault`, so one load is the only way both roles succeed.
     let Some(mixed_path) = require_wasm("aether_test_fixtures_mixed_bundle") else {
         return Ok(());
     };

@@ -87,8 +87,11 @@ namespaced extensions) and `exports` (the types the module will bind).
 Ordinary actors have no extra extension; `#[program]` adds
 `aether_bloomery_program` and `#[reactor]` adds `aether_bloomery_reactor`.
 `bundle` keeps ordinary actors in `exports` and replaces every program and
-reactor with one digest-named root at `aether.bloomery.bundle`
-(`BUNDLE_NAMESPACE`), at the first one's position. A module provides
+reactor with one root exported as `aether.bloomery.bundle`
+(`BUNDLE_NAMESPACE`), at the first one's position. The bundle driver loads
+that root as `aether.component/aether.embedded:<key>-<digest>` (short path
+`aether.component/:<key>-<digest>`), the name `UnitBundle::name` builds from
+the unit's key and the bundle digest (ADR-0240 D4). A module provides
 programs, reactors, or both; neither is a compile error. With programs, the
 root answers `Invoke` with `Invoked` through a per-seq inline child and
 writes `aether.bloomery.programs`. With reactors, it answers `Warm`, `Event`,
