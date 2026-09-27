@@ -443,12 +443,17 @@ mod tests {
         // Tripwire: the `Dependency` record keeps wire selector 5 with the
         // resolver tag as its first body byte, and the const-fn writer emits
         // byte-identical output to the runtime encoder. A drift here means the
-        // `#[actor(depends(R))]` manifest bytes no longer decode to the
+        // `export!`-written dependency bytes no longer decode to the
         // declared dependency, or an earlier variant's bytes moved.
         const RESOLVER: u8 = 1;
         const NS: &str = "test.dependency.target";
         const N: usize = inputs_dependency_len(RESOLVER, NS);
-        const BYTES: [u8; N] = write_inputs_dependency::<N>(RESOLVER, NS);
+        const BYTES: [u8; N] = {
+            let mut out = [0u8; N];
+            let end = write_inputs_dependency(RESOLVER, NS, &mut out, 0);
+            assert!(end == N, "the writer fills exactly the record's length");
+            out
+        };
         assert_eq!(&BYTES[0..4], &5u32.to_le_bytes(), "Dependency keeps wire selector 5");
         assert_eq!(BYTES[4], RESOLVER, "the resolver tag is the first body byte");
         let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");

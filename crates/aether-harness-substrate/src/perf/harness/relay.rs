@@ -74,6 +74,10 @@ impl aether_actor::Lifecycle<Self> for Relay {
         Ok(Self { downstreams: config.downstreams, work_iters: config.work_iters, received: 0, sent: 0 })
     }
 }
+impl aether_actor::Declared for Relay {
+    type Depends = ();
+    type Spawns = ();
+}
 impl NativeActor for Relay {
     type State = Self;
 }

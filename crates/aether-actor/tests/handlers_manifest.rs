@@ -21,10 +21,11 @@
 // `&mut self` to match the dispatch ABI but don't read state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::__macro_internals::WasmPlacementFacts;
+use aether_actor::__macro_internals::{WasmPlacementFacts, dependency_records_len, write_dependency_records};
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Addressable, Contract, Contracts, DependencyResolver, DependsOn, Embedded, Erased,
-    Manual, One, ReplyShape, Silent, Undeclared, WasmActor, WasmCtx, WasmInitCtx, actor, handler_set,
+    ActorInitError, ActorTypeTag, Addressable, Contract, Contracts, Declared, DependencyLink, DependencyList,
+    DependencyResolver, DependsOn, Embedded, Erased, Manual, One, ReplyShape, Silent, Undeclared, WasmActor, WasmCtx,
+    WasmInitCtx, actor, handler_set,
 };
 use aether_data::Kind;
 use aether_data::{
@@ -357,10 +358,11 @@ fn manifest_const_round_trips_to_expected_records() {
             InputsRecord::ActorBoundary { .. } => {
                 panic!("unexpected ActorBoundary record for a single-actor module")
             }
-            // ADR-0230: this fixture declares no `depends(...)`, so the
-            // macro emits no Dependency record.
+            // ADR-0231 §10: `#[actor]` writes no Dependency record into the
+            // inherent manifest; `export!` writes them from the
+            // `Declared::Depends` list.
             InputsRecord::Dependency { .. } => {
-                panic!("unexpected Dependency record for a dependency-free component")
+                panic!("unexpected Dependency record in an inherent inputs manifest")
             }
         }
     }
@@ -376,14 +378,23 @@ fn manifest_const_round_trips_to_expected_records() {
 
 #[test]
 fn depends_entries_emit_dependency_records() {
+    // The call `export!` makes: the records come off the `Declared::Depends`
+    // list, not the inherent manifest.
+    const FIRST: Option<&'static DependencyLink> = <<DependentProbe as Declared>::Depends as DependencyList>::FIRST;
+    const LEN: usize = dependency_records_len(FIRST);
+    const BYTES: [u8; LEN] = {
+        let mut out = [0u8; LEN];
+        let end = write_dependency_records(FIRST, &mut out, 0);
+        assert!(end == LEN, "the writer fills exactly the length the walk measured");
+        out
+    };
+
     fn assert_depends_on<T: DependsOn<FirstParent> + DependsOn<EmbeddedPeer>>() {}
+
     assert_depends_on::<DependentProbe>();
 
-    let records = parse_section(&DependentProbe::__AETHER_INPUTS_MANIFEST);
-    let dependencies: Vec<InputsRecord> =
-        records.into_iter().filter(|record| matches!(record, InputsRecord::Dependency { .. })).collect();
     assert_eq!(
-        dependencies,
+        parse_section(&BYTES),
         vec![
             InputsRecord::Dependency { resolver: One::TAG, namespace: FirstParent::NAMESPACE.into() },
             InputsRecord::Dependency { resolver: Embedded::TAG, namespace: EmbeddedPeer::NAMESPACE.into() },

@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-15
 - **Amended:** 2026-09-26 — `Rebuildable<M>` and `Spawns<C>` are safe traits whose impls name a position in `export!`'s module list and the spawner's `spawns(..)` list ([ADR-0231](0231-protocol-typed-references-and-reply-checks.md) §10).
+- **Amended:** 2026-09-26 — every `export!` checks coverage through each listed type's `Declared::Spawns` list, which must be `ListedIn` the module (every child on it `Rebuildable<M>`), so a hand-written `Declared` impl is checked as an emitted one is; the hidden `__aether_listed_children` is gone ([ADR-0231](0231-protocol-typed-references-and-reply-checks.md) §10).
 
 ## Context
 

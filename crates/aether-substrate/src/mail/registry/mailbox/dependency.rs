@@ -4,7 +4,7 @@
 //! The component host's check moved here so native births reuse it: one
 //! derivation of a dependency's position and one liveness read, whether the
 //! declaration arrived as a wasm `InputsRecord::Dependency` or a native
-//! link-time `DependencyEntry`.
+//! actor's `Declared::Depends` list.
 
 use aether_actor::{DependencyResolver, Embedded, One, Resolve};
 
