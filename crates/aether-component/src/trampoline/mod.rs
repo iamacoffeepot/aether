@@ -11,7 +11,8 @@
 //! / `HandlesKind<BootTeardown>` markers, and the `OnePer("component")` name-inventory entry — all emitted
 //! always-on by `#[actor]`. The state-bearing runtime
 //! (`WasmTrampolineState`, which owns the wasmtime `Component` plus the
-//! `Engine` / `Linker` / `HubOutbound` handles) and
+//! `Engine` / `Linker` / `HubOutbound` handles, the resident `Module` and the
+//! engine's module cache) and
 //! its init config ([`WasmTrampolineConfig`], substrate/wasmtime-typed) live
 //! behind the one `feature = "runtime"` gate (the `mod runtime` directory), so
 //! a transport-only build of the identity never names the state nor pulls
@@ -62,9 +63,11 @@
 //!   trampoline's reference, and `on_boot_teardown` unloads the guest the way
 //!   a drop does, with no reply.
 //! - **Replace**: `ReplaceComponent` mail lands on `on_replace_component`,
-//!   which instantiates a new `Component` against the same binding and swaps
-//!   `state.component`. ADR-0022 + ADR-0038 invariants hold because the inbox
-//!   channel is the trampoline's `NativeBinding` and outlives the swap.
+//!   which checks the new bytes in through the engine's module cache
+//!   (ADR-0241 §2), instantiates a new `Component` against the same binding
+//!   and swaps `state.component`. ADR-0022 + ADR-0038 invariants hold
+//!   because the inbox channel is the trampoline's `NativeBinding` and
+//!   outlives the swap.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated dispatch owns the

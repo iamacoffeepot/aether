@@ -80,21 +80,15 @@ impl NativeActor for WasmTrampoline {
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
         let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&config.outbound));
-        // ADR-0163 §3 (#3984): index an asset load window over the module's
-        // `aether.asset.*` sections and install it before instantiate, so
-        // the guest's `init` (run inside `instantiate`) and its later `wire`
-        // can pull assets through the `asset_fetch_p32` host fn. Closed once
-        // `wire` returns (below). The bytes are validated at load, so an
-        // index error here is a torn build rather than a user error.
-        let load_window = asset_manifest::LoadWindow::index(Arc::clone(&config.wasm_bytes))
-            .map_err(|e| BootError::Other(io::Error::other(format!("asset index failed: {e}")).into()))?;
-        substrate_ctx.install_load_window(load_window);
+        // ADR-0163 §3 (#3984): open an asset load window over the module's
+        // asset blobs and install it before instantiate, so the guest's
+        // `init` (run inside `instantiate`) and its later `wire` can pull
+        // assets through the `asset_fetch_p32` host fn. Closed once `wire`
+        // returns (below).
+        substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(&config.module));
         // ADR-0231 §4: an inline child the guest spawns publishes its own
         // type's rows, read from this module's exported and private groups.
-        substrate_ctx.install_inline_contracts(
-            contract::inline_contracts(&config.actor_caps, &config.wasm_bytes)
-                .map_err(|e| BootError::Other(io::Error::other(format!("inline contracts unreadable: {e}")).into()))?,
-        );
+        substrate_ctx.install_inline_contracts(contract::inline_contracts(config.module.manifest()));
         // ADR-0090 (issue 1257): thread the load mail's config bytes
         // into the guest's typed `init`. An empty slice ("no config")
         // is decoded uniformly by a `Config = ()` guest via
@@ -103,7 +97,7 @@ impl NativeActor for WasmTrampoline {
         let component = Component::instantiate(
             &config.engine,
             &config.linker,
-            &config.module,
+            config.module.compiled(),
             substrate_ctx,
             &config.config,
             config.type_tag,
@@ -142,8 +136,7 @@ impl NativeActor for WasmTrampoline {
             capabilities: config.capabilities,
             type_tag: config.type_tag,
             module: config.module,
-            actor_caps: config.actor_caps,
-            wasm_bytes: config.wasm_bytes,
+            modules: config.modules,
             retired_correlations: None,
             retired_replies: None,
         })
@@ -174,7 +167,7 @@ impl NativeActor for WasmTrampoline {
                 );
             }
             // ADR-0163 §3 (#3984): the asset load window closes when `wire`
-            // returns — drop the payload pin and byte ranges so
+            // returns — it lets go of the asset blobs so
             // `asset_fetch_p32` traps thereafter, retaining the catalog
             // metadata for the instance's life. Runs whether or not `wire`
             // errored; the window's job (init + wire) is done either way.

@@ -535,7 +535,6 @@ dependencies = [
  "aether-test-fixtures-stateful-typed",
  "inventory",
  "serde_json",
- "sha2",
  "tracing",
  "wasmtime",
 ]

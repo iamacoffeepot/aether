@@ -18,11 +18,10 @@
 //! A payload with no `Blob` field never reaches the hook, so it allocates no
 //! attachments.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use aether_data::wire::{Encoder, Error};
-use aether_data::{Blob, BlobBacking, BlobReader, Kind};
+use aether_data::{Blob, Kind};
 
 use super::Attachments;
 use crate::store::{BlobEntry, BlobStore};
@@ -44,10 +43,7 @@ impl Encoder for EnvelopeEncoder<'_> {
     }
 
     fn blob(&mut self, value: &Blob) -> Result<(), Error> {
-        let entry = match store_entry(value) {
-            Some(entry) => entry,
-            None => self.store.check_in(read_all(value)?),
-        };
+        let entry = self.store.entry_of(value)?;
 
         self.out.push(TAG_HASH);
         self.out.extend_from_slice(entry.hash().as_bytes());
@@ -75,29 +71,4 @@ pub fn encode_envelope<K: Kind>(store: &BlobStore, payload: &K) -> EncodedMail {
     payload.encode_with(&mut encoder).expect("wire encode to Vec fails only past the u32 length ceiling");
     let EnvelopeEncoder { out, attachments, .. } = encoder;
     EncodedMail { bytes: out, attachments: (!attachments.is_empty()).then(|| attachments.into_boxed_slice()) }
-}
-
-/// The store entry behind a `Shared` value, recovered by downcast (ADR-0238
-/// decision 4). `None` for `Owned` bytes, or a backing that is not a store
-/// entry.
-fn store_entry(value: &Blob) -> Option<Arc<BlobEntry>> {
-    let backing: Arc<dyn BlobBacking> = Arc::clone(aether_data::__shared_backing(value)?);
-    let backing: Arc<dyn Any + Send + Sync> = backing;
-    backing.downcast::<BlobEntry>().ok()
-}
-
-/// Every byte of `value`, streamed into a buffer of its exact length.
-fn read_all(value: &Blob) -> Result<Box<[u8]>, Error> {
-    let reader = BlobReader::open(value);
-    let len = usize::try_from(reader.len()).map_err(|_| Error::Length)?;
-    let mut bytes = vec![0; len].into_boxed_slice();
-    let mut filled = 0;
-    while filled < len {
-        let copied = reader.read_range(filled as u64, &mut bytes[filled..]);
-        if copied == 0 {
-            return Err(Error::UnexpectedEof);
-        }
-        filled += copied;
-    }
-    Ok(bytes)
 }

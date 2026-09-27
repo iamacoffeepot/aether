@@ -19,7 +19,7 @@ use std::fmt::Display;
 
 use aether_data::ActorId;
 use aether_kinds::ComponentCapabilities;
-use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs};
+use aether_substrate::actor::wasm::module::ModuleManifest;
 use aether_substrate::mail::KindId;
 use aether_substrate::mail::registry::{ContractBreak, RouteContract};
 
@@ -48,22 +48,21 @@ pub(super) fn contract_refusal(
     }
 }
 
-/// The contract every actor type `wasm` can spawn inline publishes, keyed by
-/// its actor-type tag (`ActorId::singleton(NAMESPACE)`): the exported groups
-/// `actors`, then the private children of `aether.kinds.inputs.private`. The
+/// The contract every actor type a module can spawn inline publishes, keyed
+/// by its actor-type tag (`ActorId::singleton(NAMESPACE)`): the exported
+/// groups, then the private children of `aether.kinds.inputs.private`. The
 /// implicit group of a single-actor module takes the module's namespace.
-pub(super) fn inline_contracts(actors: &[ActorInputs], wasm: &[u8]) -> Result<Vec<(u64, RouteContract)>, String> {
-    let module_namespace = kind_manifest::read_namespace_from_bytes(wasm)?;
-    let private = kind_manifest::read_private_actor_inputs_from_bytes(wasm)?;
-    Ok(actors
+pub(super) fn inline_contracts(manifest: &ModuleManifest) -> Vec<(u64, RouteContract)> {
+    manifest
+        .actors()
         .iter()
-        .chain(&private)
+        .chain(manifest.private_actors())
         .filter_map(|group| {
-            group.namespace.as_deref().or(module_namespace.as_deref()).map(|namespace| {
+            group.namespace.as_deref().or_else(|| manifest.namespace()).map(|namespace| {
                 (ActorId::singleton(namespace).0, RouteContract::from_capabilities(&group.capabilities))
             })
         })
-        .collect())
+        .collect()
 }
 
 /// The first carried context kind the predecessor module declares and the

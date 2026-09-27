@@ -4,16 +4,15 @@
 use std::sync::Arc;
 
 use aether_actor::{ErasedActorRef, MailSender, Manual, OutboundReply, ReplyMode, Single};
-use aether_data::{ErasedActorPath, Kind, KindDescriptor};
+use aether_data::{BlobHash, ErasedActorPath, Kind, KindDescriptor};
 use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult};
-use wasmtime::Module;
 
 use aether_substrate::actor::native::{
     DeferredReply, IntoDeferredReply, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
     spawn::Subname,
 };
-use aether_substrate::actor::wasm::asset_manifest;
-use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs, Dependency};
+use aether_substrate::actor::wasm::kind_manifest::Dependency;
+use aether_substrate::actor::wasm::module::Module;
 
 use super::LoadResult;
 use super::dependencies::{dependency_refusal, inline_dependency_refusal};
@@ -22,28 +21,13 @@ use crate::component::{ComponentHostCapability, LoadDelivered};
 use crate::kinds::BootTeardown;
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
-fn content_hash_hex(wasm: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
-    let digest = Sha256::digest(wasm);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
-}
-
 pub(super) struct PreparedLoad {
     capabilities: ComponentCapabilities,
     dependencies: Vec<Dependency>,
     type_tag: Option<u64>,
-    actors: Vec<ActorInputs>,
-    boot_namespace: Option<String>,
-    /// sha256 hex of `wasm_bytes` — the compiled-module cache key and, for a
-    /// module that declares a boot slot, the boot registry's key.
-    hash: String,
-    module: Arc<Module>,
-    wasm_bytes: Arc<[u8]>,
+    /// The checked-in module. Its hash is, for a module that declares a boot
+    /// slot, the boot registry's key.
+    module: Module,
     config: Vec<u8>,
     name: String,
     placement: LoadPlacement,
@@ -60,63 +44,54 @@ impl PreparedLoad {
         WasmTrampolineConfig {
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
-            module: Arc::clone(&self.module),
+            module: self.module.clone(),
+            modules: state.modules.clone(),
             outbound: Arc::clone(&state.outbound),
             capabilities: self.capabilities.clone(),
             config: self.config.clone(),
             type_tag: self.type_tag,
-            actor_caps: self.actors.clone(),
-            wasm_bytes: Arc::clone(&self.wasm_bytes),
         }
-    }
-
-    fn boot_plan(&self) -> Option<PreparedBoot> {
-        Some(PreparedBoot::new(
-            self.boot_namespace.clone()?,
-            self.hash.clone(),
-            Arc::clone(&self.module),
-            self.actors.clone(),
-            Arc::clone(&self.wasm_bytes),
-        ))
     }
 }
 
 #[derive(Clone)]
 pub(super) struct PreparedBoot {
-    hash: String,
     namespace: String,
     capabilities: ComponentCapabilities,
     dependencies: Vec<Dependency>,
-    module: Arc<Module>,
-    actors: Vec<ActorInputs>,
-    wasm_bytes: Arc<[u8]>,
+    module: Module,
 }
 
 impl PreparedBoot {
-    fn new(
-        namespace: String,
-        hash: String,
-        module: Arc<Module>,
-        actors: Vec<ActorInputs>,
-        wasm_bytes: Arc<[u8]>,
-    ) -> Self {
-        let group = actors.iter().find(|actor| actor.namespace.as_deref() == Some(namespace.as_str()));
-        let capabilities = group.map(|actor| actor.capabilities.clone()).unwrap_or_default();
-        let dependencies = group.map(|actor| actor.dependencies.clone()).unwrap_or_default();
-        Self { hash, namespace, capabilities, dependencies, module, actors, wasm_bytes }
+    /// The boot plan of `module`, or `None` when it declares no boot slot.
+    /// Reads the boot namespace and its group from the parsed manifest.
+    fn of(module: &Module) -> Option<Self> {
+        let manifest = module.manifest();
+        let namespace = manifest.boot()?;
+        let group = manifest.actors().iter().find(|actor| actor.namespace.as_deref() == Some(namespace));
+        Some(Self {
+            namespace: namespace.to_owned(),
+            capabilities: group.map(|actor| actor.capabilities.clone()).unwrap_or_default(),
+            dependencies: group.map(|actor| actor.dependencies.clone()).unwrap_or_default(),
+            module: module.clone(),
+        })
+    }
+
+    /// The module's content hash: the boot registry's key.
+    fn hash(&self) -> BlobHash {
+        self.module.hash()
     }
 
     fn config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
         WasmTrampolineConfig {
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
-            module: Arc::clone(&self.module),
+            module: self.module.clone(),
+            modules: state.modules.clone(),
             outbound: Arc::clone(&state.outbound),
             capabilities: self.capabilities.clone(),
             config: Vec::new(),
             type_tag: Some(aether_data::ActorId::singleton(&self.namespace).0),
-            actor_caps: self.actors.clone(),
-            wasm_bytes: Arc::clone(&self.wasm_bytes),
         }
     }
 }
@@ -164,7 +139,7 @@ impl Drop for PendingBoot {
 #[derive(Clone)]
 pub(super) enum SpawnContext {
     ModuleBoot { plan: Box<PreparedBoot>, first: Box<BootSuccessor> },
-    RequestedActor { load: Arc<PreparedLoad>, boot_hash: Option<String> },
+    RequestedActor { load: Arc<PreparedLoad>, boot_hash: Option<BlobHash> },
 }
 
 impl ComponentHostCapabilityState {
@@ -208,7 +183,6 @@ impl ComponentHostCapabilityState {
     }
 
     #[allow(
-        clippy::too_many_lines,
         clippy::result_large_err,
         reason = "cold synchronous preparation returns the exact public LoadResult error shape"
     )]
@@ -218,27 +192,27 @@ impl ComponentHostCapabilityState {
         payload: LoadComponent,
         placement: LoadPlacement,
     ) -> Result<(Vec<KindDescriptor>, Arc<PreparedLoad>), LoadResult> {
-        let descriptors = kind_manifest::read_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
-        let actors =
-            kind_manifest::read_actor_inputs_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
-        let private = kind_manifest::read_private_actor_inputs_from_bytes(&payload.wasm)
+        let LoadComponent { wasm, name, config, export } = payload;
+
+        // ADR-0241 §2: check the bytes in and take the module from the
+        // engine's one cache, which compiles and parses them once per content
+        // hash. The code blob is let go once the module is built.
+        let module = self
+            .modules
+            .check_in(&ctx.blob_check_in(), &ctx.check_in(wasm.into_boxed_slice()))
             .map_err(|error| LoadResult::Err { error })?;
-        let boot_namespace =
-            kind_manifest::read_boot_namespace_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
-        let lineage =
-            kind_manifest::read_actor_lineage_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
-        let module_namespace =
-            kind_manifest::read_namespace_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
+        let manifest = module.manifest();
+        let actors = manifest.actors();
 
         // ADR-0230 §3: an actor the module can spawn inline runs before the
         // host sees it, so its declared dependencies are checked here, before
         // kind registration, the module boot actor, or the requested actor.
-        if let Some(error) = inline_dependency_refusal(ctx, &actors, &private, &lineage, module_namespace.as_deref()) {
+        if let Some(error) = inline_dependency_refusal(ctx, manifest) {
             return Err(LoadResult::Err { error });
         }
 
-        if let Some(boot_ns) = &boot_namespace
-            && payload.export.as_deref() == Some(boot_ns.as_str())
+        if let Some(boot_ns) = manifest.boot()
+            && export.as_deref() == Some(boot_ns)
         {
             return Err(LoadResult::Err {
                 error: format!("export {boot_ns:?} names this module's boot actor, which is not selectable (ADR-0147)"),
@@ -250,8 +224,8 @@ impl ComponentHostCapabilityState {
         // by the namespace its `aether.namespace` section declares, and it is
         // instantiated exactly as the unselected default load would be.
         let sole_export = actors.iter().all(|actor| actor.namespace.is_none())
-            && payload.export.is_some()
-            && module_namespace == payload.export;
+            && export.is_some()
+            && manifest.namespace() == export.as_deref();
 
         let (mut capabilities, dependencies, type_tag, selected_namespace) = if sole_export {
             let sole = actors.first();
@@ -259,9 +233,9 @@ impl ComponentHostCapabilityState {
                 sole.map(|actor| actor.capabilities.clone()).unwrap_or_default(),
                 sole.map(|actor| actor.dependencies.clone()).unwrap_or_default(),
                 None,
-                payload.export.clone(),
+                export,
             )
-        } else if let Some(requested) = &payload.export {
+        } else if let Some(requested) = &export {
             let Some(group) = actors.iter().find(|actor| actor.namespace.as_deref() == Some(requested.as_str())) else {
                 let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
                 return Err(LoadResult::Err {
@@ -270,7 +244,7 @@ impl ComponentHostCapabilityState {
             };
             let tag = aether_data::ActorId::singleton(requested).0;
             (group.capabilities.clone(), group.dependencies.clone(), Some(tag), Some(requested.clone()))
-        } else if kind_manifest::read_no_default_marker(&payload.wasm) {
+        } else if manifest.no_default() {
             let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
             return Err(LoadResult::Err {
                 error: format!(
@@ -278,7 +252,7 @@ impl ComponentHostCapabilityState {
                 ),
             });
         } else {
-            let default_actor = boot_namespace.as_deref().map_or_else(
+            let default_actor = manifest.boot().map_or_else(
                 || actors.first(),
                 |boot_ns| actors.iter().find(|actor| actor.namespace.as_deref() != Some(boot_ns)),
             );
@@ -290,38 +264,18 @@ impl ComponentHostCapabilityState {
             )
         };
 
-        let wasm_bytes: Arc<[u8]> = Arc::from(payload.wasm.as_slice());
-        capabilities.assets = asset_manifest::read_assets_from_bytes(&wasm_bytes)
-            .map_err(|error| LoadResult::Err { error })?
-            .into_iter()
-            .map(|record| record.info)
-            .collect();
-        let hash = content_hash_hex(&wasm_bytes);
-        let module = self
-            .module_cache
-            .compile(&self.engine, &hash, &payload.wasm)
-            .map_err(|error| LoadResult::Err { error: format!("invalid wasm module: {error}") })?;
-        let name = payload.name.or(selected_namespace).or(module_namespace).unwrap_or_else(|| {
-            let counter = self.default_name_counter;
-            self.default_name_counter += 1;
-            format!("component_{counter}")
-        });
+        capabilities.assets = manifest.asset_catalog().to_vec();
+        let descriptors = manifest.kinds().to_vec();
+        let name =
+            name.or(selected_namespace).or_else(|| manifest.namespace().map(str::to_owned)).unwrap_or_else(|| {
+                let counter = self.default_name_counter;
+                self.default_name_counter += 1;
+                format!("component_{counter}")
+            });
 
         Ok((
             descriptors,
-            Arc::new(PreparedLoad {
-                capabilities,
-                dependencies,
-                type_tag,
-                actors,
-                boot_namespace,
-                hash,
-                module,
-                wasm_bytes,
-                config: payload.config,
-                name,
-                placement,
-            }),
+            Arc::new(PreparedLoad { capabilities, dependencies, type_tag, module, config, name, placement }),
         ))
     }
 
@@ -345,11 +299,11 @@ impl ComponentHostCapabilityState {
         owed: DeferredReply,
         load: Arc<PreparedLoad>,
     ) {
-        let Some(plan) = load.boot_plan() else {
+        let Some(plan) = PreparedBoot::of(&load.module) else {
             self.stage_requested_actor(ctx, owed, load, None);
             return;
         };
-        let hash = plan.hash.clone();
+        let hash = plan.hash();
         if self.boot_registry.contains_key(&hash) {
             self.stage_requested_actor(ctx, owed, load, Some(hash));
         } else if let Some(pending) = self.pending_boots.get_mut(&hash) {
@@ -384,7 +338,7 @@ impl ComponentHostCapabilityState {
             }
             return;
         }
-        let hash = plan.hash.clone();
+        let hash = plan.hash();
         let namespace = plan.namespace.clone();
         let config = plan.config(self);
         match ctx
@@ -406,7 +360,7 @@ impl ComponentHostCapabilityState {
         ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         owed: DeferredReply,
         load: Arc<PreparedLoad>,
-        boot_hash: Option<String>,
+        boot_hash: Option<BlobHash>,
     ) {
         let missing = match &load.placement {
             LoadPlacement::ComponentHost => ctx.missing_child_dependency(&load.dependencies),
@@ -417,7 +371,7 @@ impl ComponentHostCapabilityState {
             return;
         }
         let config = load.requested_config(self);
-        let context = SpawnContext::RequestedActor { load: Arc::clone(&load), boot_hash: boot_hash.clone() };
+        let context = SpawnContext::RequestedActor { load: Arc::clone(&load), boot_hash };
         let placement = load.placement.clone();
         let staged = match placement {
             LoadPlacement::ComponentHost => {
@@ -429,9 +383,9 @@ impl ComponentHostCapabilityState {
         };
         match staged {
             Ok(_) => {
-                if let Some(hash) = &boot_hash {
+                if let Some(hash) = boot_hash {
                     let entry =
-                        self.boot_registry.get_mut(hash).expect("requested actor starts only after its boot is Live");
+                        self.boot_registry.get_mut(&hash).expect("requested actor starts only after its boot is Live");
                     entry.pending_requests = entry
                         .pending_requests
                         .checked_add(1)
@@ -466,16 +420,16 @@ impl ComponentHostCapabilityState {
     ) {
         let outcome = done.output();
         let booted = outcome.result.as_ref().map(|actor| actor.erase()).map_err(|error| format!("{error:?}"));
-        let mut pending =
-            self.pending_boots.remove(&plan.hash).expect("module boot retains its actor-local reservation");
+        let hash = plan.hash();
+        let mut pending = self.pending_boots.remove(&hash).expect("module boot retains its actor-local reservation");
         match booted {
             Ok(boot) => {
-                self.register_boot(plan.hash.clone(), BootEntry { boot, refcount: 0, pending_requests: 0 });
-                self.finish_boot_successor(ctx, done.into_deferred_reply(), first, &plan.hash);
+                self.register_boot(hash, BootEntry { boot, refcount: 0, pending_requests: 0 });
+                self.finish_boot_successor(ctx, done.into_deferred_reply(), first, hash);
                 for waiter in pending.waiters.drain(..) {
-                    self.finish_boot_successor(ctx, waiter.owed, waiter.successor, &plan.hash);
+                    self.finish_boot_successor(ctx, waiter.owed, waiter.successor, hash);
                 }
-                self.drop_orphan_boot(ctx, &plan.hash);
+                self.drop_orphan_boot(ctx, hash);
             }
             Err(error) => {
                 Self::reply_boot_failure(ctx, done.into_deferred_reply(), first, error.clone());
@@ -491,14 +445,14 @@ impl ComponentHostCapabilityState {
         ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         owed: DeferredReply,
         successor: BootSuccessor,
-        hash: &str,
+        hash: BlobHash,
     ) {
         match successor {
             BootSuccessor::Load(load) => {
-                self.stage_requested_actor(ctx, owed, load, Some(hash.to_owned()));
+                self.stage_requested_actor(ctx, owed, load, Some(hash));
             }
             BootSuccessor::Replacement { pending, result } => {
-                self.commit_replacement_boot(ctx, pending.actor, pending.boot_operation, Some(hash.to_owned()));
+                self.commit_replacement_boot(ctx, pending.actor, pending.boot_operation, Some(hash));
                 owed.reply(ctx, &result);
             }
         }
@@ -534,13 +488,13 @@ impl ComponentHostCapabilityState {
         ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         done: TaskDone<SpawnOutcome<WasmTrampoline>, SpawnContext>,
         load: Arc<PreparedLoad>,
-        boot_hash: Option<String>,
+        boot_hash: Option<BlobHash>,
     ) {
         let child = match &done.output().result {
             Ok(child) => *child,
             Err(error) => {
                 let error = format!("trampoline spawn failed: {error:?}");
-                if let Some(hash) = &boot_hash {
+                if let Some(hash) = boot_hash {
                     self.settle_boot_request(ctx, hash, None);
                 }
                 done.resolve_with(ctx, move |_, _| LoadResult::Err { error });
@@ -548,7 +502,7 @@ impl ComponentHostCapabilityState {
             }
         };
 
-        if let Some(hash) = &boot_hash {
+        if let Some(hash) = boot_hash {
             self.settle_boot_request(ctx, hash, Some(child.erase()));
         }
         // ADR-0230 §3: the loaded trampoline answers the requester itself, so
@@ -561,22 +515,22 @@ impl ComponentHostCapabilityState {
 
     /// Record a module's Live boot under its content hash, indexing its
     /// reference for the drop guard.
-    fn register_boot(&mut self, hash: String, entry: BootEntry) {
+    fn register_boot(&mut self, hash: BlobHash, entry: BootEntry) {
         self.boot_actors.insert(entry.boot);
         self.boot_registry.insert(hash, entry);
     }
 
     /// Remove a module's boot and its reference index together, handing back
     /// the entry the teardown sends through.
-    fn unregister_boot(&mut self, hash: &str) -> Option<BootEntry> {
-        let entry = self.boot_registry.remove(hash)?;
+    fn unregister_boot(&mut self, hash: BlobHash) -> Option<BootEntry> {
+        let entry = self.boot_registry.remove(&hash)?;
         self.boot_actors.remove(&entry.boot);
         Some(entry)
     }
 
-    fn drop_orphan_boot<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, hash: &str) {
+    fn drop_orphan_boot<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, hash: BlobHash) {
         let removable =
-            self.boot_registry.get(hash).is_some_and(|entry| entry.refcount == 0 && entry.pending_requests == 0);
+            self.boot_registry.get(&hash).is_some_and(|entry| entry.refcount == 0 && entry.pending_requests == 0);
         if removable {
             let entry = self.unregister_boot(hash).expect("orphan boot remains present");
             ctx.send_detached_to(entry.boot, &BootTeardown {});
@@ -586,17 +540,17 @@ impl ComponentHostCapabilityState {
     fn settle_boot_request<M: ReplyMode, A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
-        hash: &str,
+        hash: BlobHash,
         live_actor: Option<ErasedActorRef>,
     ) {
-        let entry = self.boot_registry.get_mut(hash).expect("requested actor's Live boot remains registered");
+        let entry = self.boot_registry.get_mut(&hash).expect("requested actor's Live boot remains registered");
         entry.pending_requests = entry
             .pending_requests
             .checked_sub(1)
             .expect("each accepted requested actor settles its boot pending count exactly once");
         if let Some(actor) = live_actor {
             entry.refcount = entry.refcount.checked_add(1).expect("module boot reference count cannot overflow");
-            self.boot_hash_by_actor.insert(actor, hash.to_owned());
+            self.boot_hash_by_actor.insert(actor, hash);
         }
         self.drop_orphan_boot(ctx, hash);
     }
@@ -615,7 +569,7 @@ impl ComponentHostCapabilityState {
             false
         };
         if remove {
-            let entry = self.unregister_boot(&hash).expect("zero-ref boot remains present");
+            let entry = self.unregister_boot(hash).expect("zero-ref boot remains present");
             ctx.send_detached_to(entry.boot, &BootTeardown {});
         }
     }
@@ -634,31 +588,36 @@ impl ComponentHostCapabilityState {
                 return;
             }
         };
+        let bytes = payload.encode_into_bytes();
+
+        // ADR-0241 §2: the replacement module comes from the engine's one
+        // cache, checked in before forwarding, so its sections parse once and
+        // bytes that do not check in answer here, with the error the
+        // trampoline would give. `PendingReplace` holds the module across the
+        // hop, so the trampoline's own check-in of the forwarded bytes is a
+        // cache hit.
+        let module = match self.modules.check_in(&ctx.blob_check_in(), &ctx.check_in(payload.wasm.into_boxed_slice())) {
+            Ok(module) => module,
+            Err(error) => {
+                ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
+                return;
+            }
+        };
         // A replacement installs a module whose inline children are rebuilt
         // on rehydrate, so it is a module load for the ADR-0230 §3 check too.
         // The module-wide inline check runs here; the trampoline checks the
         // dependencies of the type the replacement will host.
-        if let Ok(actors) = kind_manifest::read_actor_inputs_from_bytes(&payload.wasm)
-            && let Ok(private) = kind_manifest::read_private_actor_inputs_from_bytes(&payload.wasm)
-            && let Ok(lineage) = kind_manifest::read_actor_lineage_from_bytes(&payload.wasm)
-            && let Ok(module_namespace) = kind_manifest::read_namespace_from_bytes(&payload.wasm)
-            && let Some(error) =
-                inline_dependency_refusal(ctx, &actors, &private, &lineage, module_namespace.as_deref())
-        {
+        if let Some(error) = inline_dependency_refusal(ctx, module.manifest()) {
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;
         }
         let boot_operation = self.next_boot_operation(actor);
-        let bytes = payload.encode_into_bytes();
         let Some(mail_id) = ctx.send_envelope_tracked_to(actor, ReplaceComponent::ID, &bytes) else {
             let error = "the replace request was refused as engine-only mail".to_owned();
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;
         };
-        self.pending_replace.insert(
-            mail_id.correlation_id,
-            PendingReplace { source, actor, new_wasm: Arc::from(payload.wasm), boot_operation },
-        );
+        self.pending_replace.insert(mail_id.correlation_id, PendingReplace { source, actor, module, boot_operation });
     }
 
     pub fn finish_replace(&mut self, ctx: &mut NativeCtx<'_, ComponentHostCapability, Manual>, result: ReplaceResult) {
@@ -677,15 +636,8 @@ impl ComponentHostCapabilityState {
             return;
         }
 
-        let plan = match self.prepare_replacement_boot(&pending.new_wasm) {
-            Ok(plan) => plan,
-            Err(error) => {
-                tracing::warn!(target: "aether_component", actor = %ctx.actor_path(pending.actor), %error, "replacement boot metadata could not be prepared");
-                ctx.reply_to(pending.source, &result);
-                return;
-            }
-        };
-        let new_hash = plan.as_ref().map(|plan| plan.hash.clone());
+        let plan = PreparedBoot::of(&pending.module);
+        let new_hash = plan.as_ref().map(PreparedBoot::hash);
         if self.boot_hash_by_actor.get(&pending.actor) == new_hash.as_ref() {
             ctx.reply_to(pending.source, &result);
             return;
@@ -695,32 +647,18 @@ impl ComponentHostCapabilityState {
             ctx.reply_to(pending.source, &result);
             return;
         };
-        if self.boot_registry.contains_key(&plan.hash) {
-            self.commit_replacement_boot(ctx, pending.actor, pending.boot_operation, Some(plan.hash));
+        if self.boot_registry.contains_key(&plan.hash()) {
+            self.commit_replacement_boot(ctx, pending.actor, pending.boot_operation, Some(plan.hash()));
             ctx.reply_to(pending.source, &result);
             return;
         }
 
         let owed = ctx.defer_reply_to(pending.source);
-        if let Some(inflight) = self.pending_boots.get_mut(&plan.hash) {
+        if let Some(inflight) = self.pending_boots.get_mut(&plan.hash()) {
             inflight.waiters.push(BootWaiter { owed, successor: BootSuccessor::Replacement { pending, result } });
         } else {
             self.stage_module_boot(ctx, owed, plan, BootSuccessor::Replacement { pending, result });
         }
-    }
-
-    fn prepare_replacement_boot(&mut self, wasm: &[u8]) -> Result<Option<PreparedBoot>, String> {
-        let Some(namespace) = kind_manifest::read_boot_namespace_from_bytes(wasm)? else {
-            return Ok(None);
-        };
-        let actors = kind_manifest::read_actor_inputs_from_bytes(wasm)?;
-
-        let hash = content_hash_hex(wasm);
-        let module = self
-            .module_cache
-            .compile(&self.engine, &hash, wasm)
-            .map_err(|error| format!("invalid wasm module: {error}"))?;
-        Ok(Some(PreparedBoot::new(namespace, hash, module, actors, Arc::from(wasm))))
     }
 
     fn commit_replacement_boot<M: ReplyMode, A>(
@@ -728,7 +666,7 @@ impl ComponentHostCapabilityState {
         ctx: &mut NativeCtx<'_, A, M>,
         actor: ErasedActorRef,
         boot_operation: u64,
-        new_hash: Option<String>,
+        new_hash: Option<BlobHash>,
     ) {
         if self.dominant_boot_operation_by_actor.get(&actor) != Some(&boot_operation) {
             return;
@@ -775,8 +713,9 @@ mod tests {
     use aether_substrate::testing::{registered_ref, unrouted_binding};
     use wasmtime::{Engine, Linker};
 
+    use aether_substrate::actor::wasm::module::ModuleCache;
+
     use super::*;
-    use crate::component::runtime::module_cache::ModuleCache;
 
     /// A host state beside the registry its tests register into and a binding
     /// over the mailer that routes through that registry.
@@ -787,12 +726,12 @@ mod tests {
         let engine = Arc::new(Engine::default());
         let state = ComponentHostCapabilityState {
             linker: Arc::new(Linker::new(&engine)),
+            modules: ModuleCache::new(Arc::clone(&engine)),
             engine,
             outbound,
             registry_subscription: None,
             last_egressed_inventory: None,
             default_name_counter: 0,
-            module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
             boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
@@ -821,19 +760,19 @@ mod tests {
     #[test]
     fn manual_interleaving_last_live_drop_then_pending_rejection_drops_boot() {
         let (mut state, registry, binding) = fixture();
-        let hash = "boot-with-one-pending-request".to_owned();
+        let hash = BlobHash::from_bytes([1; 32]);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let live_actor = proven_actor(&registry, "test.component.live-actor");
         let boot = boot_entry(&registry, "test.component.boot-pending", 1, 1);
-        state.register_boot(hash.clone(), boot);
-        state.boot_hash_by_actor.insert(live_actor, hash.clone());
+        state.register_boot(hash, boot);
+        state.boot_hash_by_actor.insert(live_actor, hash);
 
         // Manual state-machine proof: the last Live actor drops while another
         // requested actor is still pending, then that pending birth rejects.
         // This does not assert that a scheduler will choose this ordering.
         state.release_boot_ref(&mut ctx, live_actor);
         assert_eq!(state.boot_registry.get(&hash).map(|entry| (entry.refcount, entry.pending_requests)), Some((0, 1)));
-        state.settle_boot_request(&mut ctx, &hash, None);
+        state.settle_boot_request(&mut ctx, hash, None);
 
         assert!(!state.boot_registry.contains_key(&hash), "zero-ref/zero-pending boot must be removed after rejection");
     }
@@ -843,24 +782,24 @@ mod tests {
         let (mut state, registry, binding) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let actor = proven_actor(&registry, "test.component.reverse-replacement");
-        let old_hash = "replacement-n1".to_owned();
-        let new_hash = "replacement-n2".to_owned();
+        let old_hash = BlobHash::from_bytes([1; 32]);
+        let new_hash = BlobHash::from_bytes([2; 32]);
         let old_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, old_operation));
         let new_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, new_operation));
         let old_boot = boot_entry(&registry, "test.component.boot-n1", 0, 0);
         let new_boot = boot_entry(&registry, "test.component.boot-n2", 0, 0);
-        state.register_boot(old_hash.clone(), old_boot);
-        state.register_boot(new_hash.clone(), new_boot);
+        state.register_boot(old_hash, old_boot);
+        state.register_boot(new_hash, new_boot);
 
         // Manual state-machine proof: N2's absent boot promotes first, then
         // N1's different boot promotes late. This is not a scheduler-order
         // proof; it directly drives the two completion orders that matter.
-        state.commit_replacement_boot(&mut ctx, actor, new_operation, Some(new_hash.clone()));
-        state.drop_orphan_boot(&mut ctx, &new_hash);
-        state.commit_replacement_boot(&mut ctx, actor, old_operation, Some(old_hash.clone()));
-        state.drop_orphan_boot(&mut ctx, &old_hash);
+        state.commit_replacement_boot(&mut ctx, actor, new_operation, Some(new_hash));
+        state.drop_orphan_boot(&mut ctx, new_hash);
+        state.commit_replacement_boot(&mut ctx, actor, old_operation, Some(old_hash));
+        state.drop_orphan_boot(&mut ctx, old_hash);
 
         assert_eq!(state.boot_hash_by_actor.get(&actor), Some(&new_hash));
         assert_eq!(state.boot_registry.get(&new_hash).map(|entry| entry.refcount), Some(1));
@@ -887,18 +826,18 @@ mod tests {
         let (mut state, registry, binding) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let actor = proven_actor(&registry, "test.component.drop-before-completion");
-        let hash = "replacement-completes-after-drop".to_owned();
+        let hash = BlobHash::from_bytes([1; 32]);
         let replacement_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, replacement_operation));
         state.invalidate_replacement_boot_operation(actor);
         let boot = boot_entry(&registry, "test.component.boot-after-drop", 0, 0);
-        state.register_boot(hash.clone(), boot);
+        state.register_boot(hash, boot);
 
         // Manual state-machine proof: DropComponent invalidates the actor
         // before its boot completion arrives. This deliberately proves the
         // bookkeeping transition, not a particular scheduler ordering.
-        state.commit_replacement_boot(&mut ctx, actor, replacement_operation, Some(hash.clone()));
-        state.drop_orphan_boot(&mut ctx, &hash);
+        state.commit_replacement_boot(&mut ctx, actor, replacement_operation, Some(hash));
+        state.drop_orphan_boot(&mut ctx, hash);
 
         assert!(!state.boot_hash_by_actor.contains_key(&actor), "late completion cannot resurrect an actor boot ref");
         assert!(!state.boot_registry.contains_key(&hash), "a boot created solely for the stale completion is dropped");
