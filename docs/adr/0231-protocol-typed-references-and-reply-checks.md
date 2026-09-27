@@ -627,21 +627,14 @@ generic send remains for authors.
 #### Build skew
 
 `#[actor]` emits the same `CONTRACTS` list for an actor `R` that `#[protocol]`
-emits for a protocol, so the rows a peer was compiled against for `R` compare
-with a loaded target's published rows. That comparison never runs per send
-and never per resolve.
-
-- The doors that already consult the registry when they mint an
-  `ActorRef<R>` (the dependency check before `init`, the load mints, the
-  embedder's typed read of a load reply, `child::<P, C>`, and the chassis
-  handle's `actor_ref::<R>()`) compare the same rows in the read they
-  already make, once per mint.
-- `resolve` compares no rows. Within one engine a route's rows are fixed or
-  only grow: a native actor's are its binary's, and a component's are
-  republished only when §5 finds no dropped or changed row. So a received
-  path's rows never change under it. A native `R` and its caller are one
-  binary, and a protocol path's claim was proven against the engine's
-  published rows when it was decoded (§3).
+emits for a protocol. Within one engine those rows are never compared with a
+loaded target's published rows: not per send, not per resolve, and not when a
+door mints an `ActorRef<R>`. A route's rows are fixed or only grow. A native
+actor's are its binary's, and a native `R` and its caller are one binary; a
+component's are republished only when §5 finds no dropped or changed row. So
+the rows behind a reference or a path never change under it, and a protocol
+path's claim was proven against the engine's published rows when it was
+decoded (§3).
 
 ### 5. Replace preserves contracts
 
@@ -779,7 +772,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 
 | Reference or path | Outcome |
 |---|---|
-| typed `ActorRef<R>` | static check over `R`'s rows; the door that minted it checked those rows against the loaded build |
+| typed `ActorRef<R>` | static check over `R`'s rows; no row comparison at the door that minted it |
 | `ProtocolRef<P>` | static check over `P`'s rows; a kind outside `P` is a compile error even when the target handles it |
 | `ActorRef<R>` narrowed to `ProtocolRef<P>` | compiles if `P: CoveredBy<R>`, else compile error |
 | `ActorPath::<R>::instance(&key)`, `ActorPath::<C>::child(&parent, &key)` | compiles if `R: Root + Instanced`, or `C: ChildOf<P> + Instanced`, else compile error; `R`'s own canonical path, with no registry read and no position |
@@ -921,6 +914,10 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   published rows, with the answer kept per route and protocol. Redundant for
   a narrowed path, whose coverage the compiler proved, and paid per use; the
   claim is proven once, where a decoded value comes into existence.
+- **Compare `R`'s rows once per mint**, at each door that already consults
+  the registry when it mints an `ActorRef<R>`. Within one engine a route's
+  rows are fixed or only grow (§4, "Build skew"), so the comparison could
+  never fail for an actor the engine admitted.
 - **Check typed paths at the RPC door, with schema nodes for them.** A typed
   path is erased to its text at the RPC boundary, so the door would need a
   schema node per typed path to find the fields to check. The erasure is
@@ -994,8 +991,8 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   `send_envelope_tracked_to` / `send_envelope_detached_to` leave the public
   surface. §3's reserved `resolve` verb takes a `ProtocolPath<P>` as well as
   an `ActorPath<R>`, and proves liveness only; a `ProtocolPath<P>` decodes
-  only against the engine's context. The registry-consulting `ActorRef<R>`
-  mints compare `R`'s compiled rows in the read they already make.
+  only against the engine's context. No door compares `R`'s rows when it
+  mints an `ActorRef<R>`.
   `ctx.monitor` requires a silent `MonitorNotice` handler.
 - **ADR-0232.** `send_to` takes an `ActorRef<R>` or a `ProtocolRef<P>`; an
   `ErasedActorRef` is not a `Target`.
