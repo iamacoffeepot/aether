@@ -18,7 +18,8 @@ use crate::actor::wasm::asset_manifest;
 use crate::actor::wasm::kind_manifest::{self, ActorInputs};
 
 /// Everything the engine reads from a module's custom sections. Read-only:
-/// only [`ModuleManifest::parse`] builds one, when a module is checked in.
+/// only the section parse builds one, when
+/// [`ModuleCache::check_in`](super::ModuleCache::check_in) checks a module in.
 pub struct ModuleManifest {
     kinds: Vec<KindDescriptor>,
     kind_ids: HashSet<KindId>,

@@ -65,8 +65,9 @@
 //! - **Replace**: `ReplaceComponent` mail lands on `on_replace_component`,
 //!   which checks the new bytes in through the engine's module cache
 //!   (ADR-0241 §2), instantiates a new `Component` against the same binding
-//!   and swaps `state.component`. ADR-0022 + ADR-0038 invariants hold because the inbox
-//!   channel is the trampoline's `NativeBinding` and outlives the swap.
+//!   and swaps `state.component`. ADR-0022 + ADR-0038 invariants hold
+//!   because the inbox channel is the trampoline's `NativeBinding` and
+//!   outlives the swap.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated dispatch owns the

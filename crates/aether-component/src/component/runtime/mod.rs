@@ -103,8 +103,8 @@ pub struct ComponentHostCapabilityState {
     /// still holds its `Module`.
     pub modules: ModuleCache,
     /// ADR-0147 module-boot bookkeeping: content hash (the ADR-0238 BLAKE3
-    /// hash of the wasm bytes, [`Module::hash`]) → the module's boot singleton. A module that declares a `boot =`
-    /// slot instantiates exactly one boot actor per `(engine, content hash)`;
+    /// hash of the wasm bytes, [`Module::hash`]) → the module's boot
+    /// singleton. A module that declares a `boot =` slot instantiates exactly one boot actor per `(engine, content hash)`;
     /// this table is the per-engine half of that pairing (the state itself is
     /// the per-substrate-process singleton every load runs through). Refcounted
     /// against the module's non-boot actors and empty for every bootless module,
@@ -154,9 +154,10 @@ pub struct ComponentHostCapabilityState {
 /// the replace's receipt — and `module` are what `commit_replacement_boot`
 /// needs to commit the boot-refcount transfer once the swap is confirmed
 /// successful. Holding `module` across the hop also keeps its cache entry
-/// live, so the trampoline's own check-in of the forwarded bytes is a hit. `boot_operation` is
-/// reserved when the request is forwarded; it becomes dominant only if that
-/// request succeeds, so a later failed request cannot suppress this one.
+/// live, so the trampoline's own check-in of the forwarded bytes is a hit.
+/// `boot_operation` is reserved when the request is forwarded; it becomes
+/// dominant only if that request succeeds, so a later failed request cannot
+/// suppress this one.
 #[derive(Clone)]
 pub struct PendingReplace {
     pub source: Source,

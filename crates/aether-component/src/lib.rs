@@ -24,9 +24,8 @@
 //! `Arc<Engine>` / `Arc<Linker<ComponentCtx>>`. The host owns the engine's
 //! one module cache and hands each trampoline its checked-in `Module`, so a
 //! module is compiled and its sections parsed once per content hash
-//! (ADR-0241 §2). The identities and their
-//! addressing markers compile always-on, so a transport-only wasm guest can
-//! mail `ctx.send::<ComponentHostCapability>(..)` and resolve a loaded peer
+//! (ADR-0241 §2). The identities and their addressing markers compile
+//! always-on, so a transport-only wasm guest can mail `ctx.send::<ComponentHostCapability>(..)` and resolve a loaded peer
 //! without naming the substrate (ADR-0122).
 
 #![forbid(unsafe_code)]
