@@ -103,6 +103,7 @@
   - [Worktrees, safety, and ownership](contributing/worktrees-and-safety.md)
   - [Local checks and CI](local-verification.md)
   - [Architecture decisions](contributing/architecture-decisions.md)
+  - [Design rules](contributing/design-rules.md)
   - [Maintaining the guide](contributing/documentation.md)
 
 # Reference

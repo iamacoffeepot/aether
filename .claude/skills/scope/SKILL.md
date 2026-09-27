@@ -128,4 +128,4 @@ Without explicit numbers, enumerate open non-pull-request issues lacking a compl
 
 On confirmation refresh all snapshots, use live agent capacity, route one issue to one fresh-context read-only drafter, and require structured proposed managed sections, dependencies, surface, routing, ADR result, and grounding SHA. Validate each result and apply body writes serially. Drafting agents never mutate GitHub or implement.
 
-Report written sections, digest, surface, size/model, dependencies, ADR state, children, and Side-finding count. Point to `/approve <issue>`. Never write production code, create implementation artifacts, approve, or open a pull request.
+Report written sections, digest, surface, size/model, dependencies, ADR state, children, and Side-finding count. Point to `/settle <issue>` when the Plan leaves a decision for the owner, otherwise to `/approve <issue>`. Never write production code, create implementation artifacts, approve, or open a pull request.
