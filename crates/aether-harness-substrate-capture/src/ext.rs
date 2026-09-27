@@ -161,7 +161,7 @@ impl RenderHarnessBuilderExt for SubstrateHarnessBuilder {
 fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color: &str) -> SubstrateHarnessBuilder {
     let clear_color = clear_color.to_owned();
     builder.render_hook::<RenderCapability>(Box::new(move |passive, wiring, width, height| {
-        let RenderHookWiring { observed_kinds, assets_dir } = wiring;
+        let RenderHookWiring { assets_dir } = wiring;
         // The `FrameCheck` / similarity scorer lives in
         // `aether_substrate::render::visual` (below aether-render), so the
         // pumped runtime scores capture verdicts + similarity directly in
@@ -170,8 +170,7 @@ fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color
         // feature-unified build that enables aether-render/desktop — the
         // desktop-only `window: None`, so this literal is robust to feature
         // unification.
-        let params =
-            RenderParams { observed_kinds, assets_dir, offscreen_size: Some((width, height)), ..Default::default() };
+        let params = RenderParams { assets_dir, offscreen_size: Some((width, height)), ..Default::default() };
         let (slot, _wake_slot) = passive
             .boot_pumped_actor::<RenderCapability>(
                 RenderTuningConfig {

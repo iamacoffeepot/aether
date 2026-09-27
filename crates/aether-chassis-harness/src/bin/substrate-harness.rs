@@ -69,12 +69,7 @@ fn main() -> anyhow::Result<()> {
     let (passive, (render_slot, render_wake_slot)) = builder.build_passive_with_start(|passive| {
         passive.boot_pumped_actor::<RenderCapability>(
             render_config,
-            RenderParams {
-                observed_kinds: None,
-                assets_dir: Some(assets_dir),
-                offscreen_size: Some((width, height)),
-                ..Default::default()
-            },
+            RenderParams { assets_dir: Some(assets_dir), offscreen_size: Some((width, height)), ..Default::default() },
         )
     })?;
 

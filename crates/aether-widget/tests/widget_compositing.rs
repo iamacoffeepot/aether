@@ -12,11 +12,11 @@
 //!
 //! Two properties are pinned per frame:
 //!
-//! - **Unclipped one-batch baseline.**
-//!   `count_observed("aether.render.draw_shapes")` is exactly 1 after one
-//!   frame for an unclipped flat panel and two-level tree alike. Clipped runs
-//!   may emit multiple mails, but every batch still comes from the one root
-//!   sender — the #1852 fan-in fix regardless of widget count.
+//! - **Unclipped one-batch baseline.** The committed frame's shape batches
+//!   (`committed_shape_snapshot`, one per `DrawShapes` the frame recorded)
+//!   number exactly 1 for an unclipped flat panel and two-level tree alike.
+//!   Clipped runs may emit multiple batches, but every batch still comes from
+//!   the one root sender — the #1852 fan-in fix regardless of widget count.
 //! - **Structural draw order.** A background drawn as the root's own chrome
 //!   sits *under* its children, and a nested subtree draws its own chrome
 //!   under its own children — the depth-first order the tree structure
@@ -299,13 +299,8 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
 
-    assert_eq!(
-        harness.count_observed("aether.render.draw_shapes"),
-        1,
-        "the whole two-widget cluster must reach the render sink as exactly one \
-         DrawShapes; observed: {:?}",
-        harness.observed_kinds(),
-    );
+    let batches = harness.committed_shape_snapshot();
+    assert_eq!(batches.len(), 1, "the cluster reaches render as one DrawShapes batch; committed: {batches:?}");
 
     // The corner is outside the root chrome, so it stays the clear color —
     // the panel did not paint the whole frame.
@@ -398,13 +393,8 @@ fn nested_tree_draws_in_depth_first_order() {
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
 
-    assert_eq!(
-        harness.count_observed("aether.render.draw_shapes"),
-        1,
-        "the whole two-level tree must reach the render sink as exactly one \
-         DrawShapes; observed: {:?}",
-        harness.observed_kinds(),
-    );
+    let batches = harness.committed_shape_snapshot();
+    assert_eq!(batches.len(), 1, "the cluster reaches render as one DrawShapes batch; committed: {batches:?}");
 
     // Depth-first order, read by hue: root chrome (blue) under the interior
     // node's chrome (green) under the interior's leaf (white).
@@ -752,11 +742,7 @@ fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge
         vec![flat_fill(8.0, 1.0, 40.0, 32.0, RED), flat_fill(20.0, 13.0, 8.0, 8.0, GREEN)],
         "content_origin - initial_offset and panel placement agree exactly",
     );
-    assert_eq!(
-        harness.count_observed("aether.render.draw_shapes"),
-        2,
-        "the panel background and one equal-clip content run are the only shape batches",
-    );
+    assert_eq!(fills.len(), 2, "the panel background and one equal-clip content run are the only shape batches");
 
     let strong_primary = |pixel: [u8; 3], channel: usize| {
         (0..3).all(|other| other == channel || i16::from(pixel[channel]) > i16::from(pixel[other]) + 80)

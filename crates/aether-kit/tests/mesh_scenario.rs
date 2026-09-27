@@ -230,18 +230,6 @@ fn edge_on_outline_stays_visible_and_keeps_apparent_width() {
     );
 }
 
-/// Assert that `aether.draw_triangle` was observed at least once.
-/// Surfaces the observed-kinds list on failure so a typo or missing
-/// subscription is debuggable.
-fn assert_draw_triangle_observed(harness: &SubstrateHarness) {
-    let observed = harness.count_observed("aether.draw_triangle");
-    assert!(
-        observed >= 1,
-        "expected ≥1 aether.draw_triangle observed; got {observed}; observed kinds: {:?}",
-        harness.observed_kinds(),
-    );
-}
-
 /// Smoke test: load a `.dsl` box → triangles flow to the render sink
 /// every tick → the captured frame contains pixels that diverge from
 /// the chassis clear color. Validates the entire DSL load path: the
@@ -278,7 +266,6 @@ fn dsl_box_loads_and_renders() {
 
     let png = result.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
-    assert_draw_triangle_observed(&harness);
     differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
 }
 
@@ -313,14 +300,13 @@ fn obj_quad_loads_and_renders() {
 
     let png = result.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
-    assert_draw_triangle_observed(&harness);
     differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
 }
 
 /// Parse-failure resilience: a known-bad DSL after a known-good DSL
 /// must keep the previous mesh visible — the component's contract is
 /// "partial parse / mesh failure leaves the previous mesh intact."
-/// Loads a good box, advances until triangles flow, loads the bad
+/// Loads a good box, advances and captures it visible, loads the bad
 /// DSL, advances again, and verifies the frame still diverges from
 /// the clear color.
 #[test]
@@ -341,16 +327,18 @@ fn parse_failure_keeps_prior_mesh() {
         .expect("boot");
     let viewer = load_viewer(&mut harness, &wasm_path);
 
-    harness
+    let baseline = harness
         .execute(vec![
             ("prime", HarnessOp::advance(1)),
             ("load_good", HarnessOp::send_and_settle(&viewer, &LoadMesh { namespace: "save".to_owned(), path: good })),
             ("post_good", HarnessOp::advance(5)),
+            ("snap_good", HarnessOp::capture()),
         ])
-        .expect("prime + good load");
+        .expect("prime + good load + capture");
 
-    // Baseline: the good mesh is publishing.
-    assert_draw_triangle_observed(&harness);
+    // Baseline: the good mesh is visible before the bad load.
+    let good_img = decode_png(baseline.captured("snap_good").expect("snap_good step ran")).expect("decode capture png");
+    differs_from_background(&good_img, 5).expect("the good mesh should be visible before the bad load");
 
     // Now hand the viewer something it can't parse, then capture. The
     // cached triangle list should be intact — the frame still has

@@ -11,7 +11,7 @@
 //!
 //! Observation is the panel's per-actor log ring (ADR-0081): the transformed
 //! mail flows child → host → panel *inside the cluster*, never crossing the
-//! broadcast sink `count_observed` watches. Each phase reads the ring with a
+//! harness observer sink `count_observed` reads. Each phase reads the ring with a
 //! `since` cursor so one phase's entries never bleed into another's assertions.
 //!
 //! Minimal composition (issue #3764): the component host on the harness basics,

@@ -133,7 +133,8 @@ The contract is real only when the pinned value is computed.
 
 Once a test clears the bar, the harness follows from what it checks. Engine-internal
 correctness goes to **SubstrateHarness** (`aether-harness-substrate`) with a concrete
-assertion (`captured`, `reply`, `count_observed`); visual reductions and failure
+assertion (`captured`, `reply`, or `count_observed` over the reports a fixture mails to
+the harness observer); visual reductions and failure
 artifacts go through **SubstrateHarness Capture** (`aether-harness-substrate-capture`).
 Behavior over the wire — recipient-name resolution, fleet lifecycle, the RPC boundary — goes to
 **FleetHarness** (the `aether-harness-fleet` crate). FleetHarness is
@@ -165,6 +166,10 @@ invalid/empty clips, and an over-budget overlay pass cannot masquerade as render
 work. It localizes a malformed submission, while the rendered capture proves the
 pipeline actually produced the intended pixels.
 
+Assert what a capability's work produced — a reply, `committed_overlay_snapshot` /
+`committed_shape_snapshot`, or pixels — and never whether a kind was dispatched to it.
+A dispatch count re-tests the mail system, and it passes when the work was wrong.
+
 A test that drives neither harness and exercises none of our own pure logic is the
 case to look at hardest, because there may be no engine behavior under it at all. Our
 pure logic — the codec, `aether-math`, schema encode/decode, id and lineage hashing —
@@ -173,8 +178,8 @@ Re-running it from a consumer crate, on a consumer's derived type, is the junk c
 above, not a second copy worth keeping.
 
 Within a SubstrateHarness visual test, reach for the narrowest oracle first. A concrete typed
-observation (`reply::<R>`, `count_observed`) beats a pixel check whenever the mail
-already carries the answer. When the behavior is genuinely visual, the
+observation (`reply::<R>`, or `count_observed` over a report a fixture mails to the
+observer) beats a pixel check whenever the mail already carries the answer. When the behavior is genuinely visual, the
 `aether_harness_substrate_capture::visual` frame reductions (`not_all_black`, `differs_from_background`,
 `coverage`, `centroid`, `bounding_box`) turn a captured PNG into a scalar or coordinate
 assertion — pin a band, not an exact pixel, since GPU / anti-aliasing nondeterminism

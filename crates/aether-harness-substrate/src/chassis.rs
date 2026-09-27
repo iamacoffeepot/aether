@@ -22,7 +22,6 @@ use aether_lifecycle::LifecycleCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigSources;
-use aether_substrate::mail::MailboxId;
 use aether_substrate::{Chassis, RingCapacities, SchedulerTuning, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 use aether_window::SyntheticWindowCapability;
@@ -39,17 +38,16 @@ use crate::HookFactory;
 /// hub-protocol wire for compatibility).
 pub const WORKERS: usize = 2;
 
-/// Test-harness observability mailbox. Scenarios that want to assert
-/// on component-emitted kinds (the probe's
-/// `aether.test_fixture.tick_observed`, for example) target this
-/// mailbox through the typed
+/// Test-harness observability mailbox. Fixtures that report an outcome
+/// of their own (the probe's `aether.test_fixture.tick_observed`, for
+/// example) mail it here through the typed
 /// `aether_test_fixtures_kinds::SubstrateHarnessObserver` marker
-/// (`ctx.send::<SubstrateHarnessObserver>(&k)`); the pumped
-/// `aether.render` dispatch witnesses every kind it delivers here by mail
-/// (issue 5965); the substrate-harness chassis registers
-/// a synchronous-handler closure under this namespace via
-/// `Registry::register_inline` (see `build_passive`) and the
-/// closure records each kind name in `SubstrateHarnessEnv::observed_kinds`.
+/// (`ctx.send::<SubstrateHarnessObserver>(&k)`); the substrate-harness
+/// chassis registers a synchronous-handler closure under this namespace
+/// via `Registry::register_inline` (see `build_passive`) and the closure
+/// records each reported kind in `SubstrateHarnessEnv::observed_kinds`.
+/// No capability reports its dispatches here: a test asserts what a
+/// capability's work produced, not that a kind reached it.
 /// Only registered when `observed_kinds` is `Some` (binaries pass
 /// `None` for zero overhead — mail to this mailbox warn-drops in
 /// that mode).
@@ -66,21 +64,6 @@ pub const WORKERS: usize = 2;
 /// letting us retire the actor-shaped workaround — one fewer
 /// thread per `SubstrateHarness`.
 pub const SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_harness.observer";
-
-/// The observer inbox's [`MailboxId`].
-///
-/// The observer is a raw inline handler, not an actor type, so no typed
-/// resolver answers for it — the harness registers the name and therefore
-/// owns the derivation, the way the registry owns the depth-1 fixed point it
-/// assigns. Its one consumer is the render wiring below, whose
-/// [`RenderHookWiring::observed_kinds`] still takes a position. A scenario
-/// that subscribes a capability's events routes them to a fixture actor that
-/// handles them and forwards what it receives here.
-#[must_use]
-#[allow(clippy::disallowed_methods)] // aether-suppression-request: the harness registers this raw inbox by name, so there is no actor type for a typed resolver to answer from; one gated derivation beside the name it registers
-pub(crate) fn substrate_harness_observer_mailbox() -> MailboxId {
-    MailboxId::from_name(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME)
-}
 
 /// ADR-0071 marker type for the substrate-harness chassis. Carries no
 /// fields — the chassis instance is the [`PassiveChassis<SubstrateHarnessChassis>`]
@@ -182,11 +165,6 @@ pub trait FrameHook {
 /// — so the non-knob render wiring is handed straight to the hook factory,
 /// which threads it into the pumped actor's `RenderParams`.
 pub struct RenderHookWiring {
-    /// `SubstrateHarness` observer inbox, threaded into the render actor's
-    /// `RenderParams` so the pumped dispatch witnesses every kind it
-    /// delivers by mail (issue 5965) — no shared state crosses into the
-    /// cap. `None` disables render dispatch witnesses.
-    pub observed_kinds: Option<MailboxId>,
     /// Resolved `"assets"` root for `capture_frame` similarity references.
     pub assets_dir: Option<PathBuf>,
 }
@@ -219,11 +197,9 @@ pub struct SubstrateHarnessEnv {
     /// no process env.
     pub scheduler_tuning: SchedulerTuning,
     /// Optional observation log: when `Some`, the chassis registers the
-    /// observer inbox whose inline handler records every witnessed kind
-    /// id here — the pumped `aether.render` dispatch witnesses by mail
-    /// (issue 5965), fixtures witness component-emitted kinds the same
-    /// way. In-process API uses this to assert what the sinks have seen;
-    /// binary passes `None` for zero overhead.
+    /// observer inbox whose inline handler records the kind id of every
+    /// report a fixture mails it. In-process API uses this to assert what
+    /// the fixtures reported; binary passes `None` for zero overhead.
     pub observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
     /// Sender side of the chassis event channel. Cloned into the
     /// `SubstrateHarnessCapability` config; the matching receiver rides on
@@ -465,10 +441,7 @@ impl SubstrateHarnessChassis {
         let (passive, hook) = builder.build_passive_with_start(|passive| {
             render_hook
                 .map(|factory| {
-                    let wiring = RenderHookWiring {
-                        observed_kinds: Some(substrate_harness_observer_mailbox()),
-                        assets_dir: render_assets_dir,
-                    };
+                    let wiring = RenderHookWiring { assets_dir: render_assets_dir };
                     factory(passive, wiring, width, height)
                 })
                 .transpose()

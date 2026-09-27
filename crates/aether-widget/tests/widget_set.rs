@@ -10,7 +10,7 @@
 //! events back.
 //!
 //! Value-up events flow child → panel *inside the cluster*, so they never
-//! cross the observable render / broadcast sink `count_observed` watches — the
+//! cross the harness observer sink `count_observed` reads — the
 //! log ring is the correct observation surface here. The rendered-output gate
 //! (one root render sender per cluster) is issue 2659's `widget_compositing`
 //! scenario and is not duplicated.
