@@ -94,6 +94,9 @@ impl<K: Kind + 'static> Schema for Ref<K> {
     const LABEL_NODE: LabelNode = <[u8; 32] as Schema>::LABEL_NODE;
 }
 
+impl<K> aether_data::CrossesActors for Ref<K> {}
+impl<K> aether_data::CrossesWire for Ref<K> {}
+
 impl<K: Kind + 'static> StorageLeaves for Ref<K> {
     fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
         <[u8; 32] as StorageLeaves>::contribute(self.digest.as_bytes(), carry, depth, sink)

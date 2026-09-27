@@ -58,6 +58,12 @@ impl Schema for MailId {
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
+// Listed debt (ADR-0230 §1, ADR-0242): `MailId` names its sender by raw
+// position, so it keeps both reach markers only until #6889 and #6890 remove
+// that position from it.
+impl crate::CrossesActors for MailId {}
+impl crate::CrossesWire for MailId {}
+
 impl WireEncode for MailId {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         self.sender.encode(out)?;
@@ -100,6 +106,10 @@ impl MailId {
 /// reply paths (ADR-0041's io capability is the motivating case) can
 /// route the `*Result` back to the component via the mailer rather
 /// than the hub.
+///
+/// It has actor reach (ADR-0242): a raw sender route means something only to
+/// the actor that received it, so it implements neither reach marker, and a
+/// kind holding one is never mail.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceAddr {
     None,
@@ -188,6 +198,9 @@ impl<'de> WireDecode<'de> for SourceAddr {
 /// the origin, and it does persist, in the tracing layer (`root` /
 /// `parent_mail`, ADR-0080), not here. Addressing is deliberately
 /// one-hop; the chain origin is observable, not addressable.
+///
+/// Like its [`SourceAddr`], it has actor reach (ADR-0242): a context may hold
+/// one to answer later, and that context is never mail.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub addr: SourceAddr,

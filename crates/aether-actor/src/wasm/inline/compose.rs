@@ -710,6 +710,9 @@ mod tests {
         }
     }
 
+    impl aether_data::CrossesActors for TypedConfig {}
+    impl aether_data::CrossesWire for TypedConfig {}
+
     /// A typed-config inline child for step 5's reconstruct coverage.
     /// `init` copies the decoded config into `observed`; `erased_dispatch`
     /// returns it as the dispatch code so the test can read back the value

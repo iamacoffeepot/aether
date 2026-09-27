@@ -26,6 +26,9 @@ impl Schema for CiteKey {
     const LABEL_NODE: LabelNode = <[u8; 32] as Schema>::LABEL_NODE;
 }
 
+impl aether_data::CrossesActors for CiteKey {}
+impl aether_data::CrossesWire for CiteKey {}
+
 impl StorageLeaves for CiteKey {
     fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
         <[u8; 32] as StorageLeaves>::contribute(&self.0, carry, depth, sink)

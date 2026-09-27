@@ -77,6 +77,7 @@ impl Kind for CastOnly {
 }
 
 impl aether_data::ActorMail for CastOnly {}
+impl aether_data::CrossesActors for CastOnly {}
 
 impl HandlesKind<CastOnly> for StubActor {}
 

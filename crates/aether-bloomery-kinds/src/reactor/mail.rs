@@ -107,6 +107,9 @@ impl Schema for WarmEntries {
     const LABEL_NODE: LabelNode = <Vec<JournalEntry> as Schema>::LABEL_NODE;
 }
 
+impl aether_data::CrossesActors for WarmEntries {}
+impl aether_data::CrossesWire for WarmEntries {}
+
 impl CastEligible for WarmEntries {
     const ELIGIBLE: bool = false;
 }

@@ -66,10 +66,20 @@ pub enum Outcome {
 /// kind is refused with the ADR-0233 diagnostic, and the plain kind beside
 /// it still sends. Catches the derive emitting `ActorMail` despite
 /// `engine_only`, or never emitting it (the plain call would fail too).
+///
+/// A kind's reach is its narrowest field's (ADR-0242). A kind holding an
+/// actor-reach `Source` in a later field or variant is refused as
+/// `ActorMail`: catches a derive that emits `ActorMail` unconditionally, a
+/// container that does not forward its marker, or a fold that skips a field
+/// or variant. A kind holding an engine-reach leaf sends as `ActorMail` and
+/// is refused as `WireMail`: catches the `CrossesWire` fold or its supertrait
+/// going wrong.
 #[test]
 fn ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/rejects_engine_only_send.rs");
+    t.compile_fail("tests/ui/rejects_actor_reach_send.rs");
+    t.compile_fail("tests/ui/rejects_engine_reach_on_wire.rs");
 }
 
 /// Tripwire: `pod` must keep the cast wire shape, and the base stack

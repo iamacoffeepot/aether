@@ -29,6 +29,7 @@ macro_rules! pod_kind {
         }
 
         impl aether_data::ActorMail for $type {}
+        impl aether_data::CrossesActors for $type {}
     };
 }
 

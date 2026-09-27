@@ -1,0 +1,33 @@
+error[E0277]: `EngineLeaf` does not have wire reach: it does not leave the engine
+  --> tests/ui/rejects_engine_reach_on_wire.rs:44:10
+   |
+44 |     call(&notice);
+   |     ---- ^^^^^^^ has actor or engine reach, not wire reach
+   |     |
+   |     required by a bound introduced by this call
+   |
+help: the trait `CrossesWire` is not implemented for `EngineLeaf`
+  --> tests/ui/rejects_engine_reach_on_wire.rs:9:1
+   |
+ 9 | struct EngineLeaf(u32);
+   | ^^^^^^^^^^^^^^^^^
+   = note: a kind's reach is its narrowest field's (ADR-0242)
+   = help: the following other types implement trait `CrossesWire`:
+             ()
+             BTreeMap<K, V>
+             Box<T>
+             DagId
+             EngineId
+             ErasedActorPath
+             KindId
+             LoadName
+           and $N others
+   = note: required for `std::vec::Vec<EngineLeaf>` to implement `CrossesWire`
+   = note: 1 redundant requirement hidden
+   = note: required for `Notice` to implement `CrossesWire`
+   = note: required for `Notice` to implement `WireMail`
+note: required by a bound in `call`
+  --> tests/ui/rejects_engine_reach_on_wire.rs:39:12
+   |
+39 | fn call<K: aether_data::WireMail>(_: &K) {}
+   |            ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `call`

@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::ErasedActorPath;
-use aether_data::{EngineId, Kind, KindId, MailId, Uuid};
+use aether_data::{EngineId, Kind, KindId, MailId, Uuid, WireMail};
 use aether_fleet::{FleetConfig, FleetServer, RestartPolicy};
 use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
@@ -766,7 +766,7 @@ impl FleetHarness {
     /// path (`aether.component/:<name>`) the engine expands on arrival.
     pub fn send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Vec<ReplyEnvelope>
     where
-        K: Kind,
+        K: WireMail,
     {
         self.call(Some(engine), recipient, mail)
     }
@@ -778,7 +778,7 @@ impl FleetHarness {
     /// `RpcError::NotPresent`.
     pub fn try_send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Result<Vec<ReplyEnvelope>, RpcError>
     where
-        K: Kind,
+        K: WireMail,
     {
         self.try_call_with_budget(Some(engine), recipient, mail, reply_cap(), "reply")
     }
@@ -794,7 +794,7 @@ impl FleetHarness {
     /// gate (issue 2064).
     fn call<K>(&mut self, engine: Option<EngineId>, mailbox: &str, request: &K) -> Vec<ReplyEnvelope>
     where
-        K: Kind,
+        K: WireMail,
     {
         self.call_with_budget(engine, mailbox, request, reply_cap(), "reply")
     }
@@ -816,7 +816,7 @@ impl FleetHarness {
         gate: &str,
     ) -> Vec<ReplyEnvelope>
     where
-        K: Kind,
+        K: WireMail,
     {
         self.try_call_with_budget(engine, mailbox, request, budget, gate)
             .unwrap_or_else(|error| panic!("call to {mailbox:?} ended with error: {error:?}"))
@@ -834,7 +834,7 @@ impl FleetHarness {
         gate: &str,
     ) -> Result<Vec<ReplyEnvelope>, RpcError>
     where
-        K: Kind,
+        K: WireMail,
     {
         let cid = self.next_cid;
         self.next_cid += 1;
@@ -956,7 +956,7 @@ impl FleetHarness {
     /// carrier the empty-config [`load`](Self::load) sends.
     pub fn load_with_config<C>(&mut self, engine: EngineId, stem: &str, config: &C) -> String
     where
-        C: Kind,
+        C: WireMail,
     {
         let wasm = read_component_wasm(stem);
         let replies = self.call(
@@ -979,7 +979,7 @@ impl FleetHarness {
     /// module's entry type. Returns the registered ADR-0099 lineage address.
     pub fn load_with_config_export<C>(&mut self, engine: EngineId, stem: &str, config: &C, export: &str) -> String
     where
-        C: Kind,
+        C: WireMail,
     {
         let wasm = read_component_wasm(stem);
         let replies = self.call(
@@ -1015,7 +1015,7 @@ impl FleetHarness {
     /// `Err`/undecodable ack, mirroring `single_reply`.
     pub fn send_traced<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> (MailId, Vec<ReplyEnvelope>)
     where
-        K: Kind,
+        K: WireMail,
     {
         let batch = DispatchTraced {
             mails: vec![NamedMail {
