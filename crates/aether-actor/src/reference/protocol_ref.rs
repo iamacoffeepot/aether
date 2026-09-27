@@ -1,5 +1,4 @@
-//! [`ProtocolRef`]: proof that an actor covering a protocol reached `Live` at
-//! an id.
+//! [`ProtocolRef`]: proof that an actor reached `Live` at a protocol path.
 
 use core::any::type_name;
 use core::fmt;
@@ -9,8 +8,10 @@ use aether_data::MailboxId;
 
 use super::ErasedActorRef;
 
-/// Proof that an actor whose published rows cover the protocol `P` reached
-/// `Live` at an id, in this engine session (ADR-0231 §3).
+/// Proof that a route under a protocol path's canonical name reached `Live`,
+/// in this engine session (ADR-0231 §3). `P` is the path's claim:
+/// [`ActorPath::narrow`](crate::ActorPath::narrow) proves it at compile time,
+/// and for a decoded path it stays the writer's claim.
 ///
 /// The proven target plus a phantom protocol. A send through it compiles only
 /// for a kind `P` lists (see [`Target`](crate::Target)), whatever else the
@@ -18,10 +19,10 @@ use super::ErasedActorRef;
 /// [`ActorRef`](crate::ActorRef) costs: the check is the compiler's.
 ///
 /// Its door is the native `ctx.resolve` of a
-/// [`ProtocolPath<P>`](crate::ProtocolPath), which checks the route's
-/// published rows once, at receipt. Like every proven reference it is
-/// memory-only, with no codec of any kind: what crosses a boundary is the
-/// protocol path, and the receiver proves it again on its own side.
+/// [`ProtocolPath<P>`](crate::ProtocolPath), which proves liveness at receipt.
+/// Like every proven reference it is memory-only, with no codec of any kind:
+/// what crosses a boundary is the protocol path, and the receiver proves it
+/// again on its own side.
 ///
 /// ```compile_fail,E0277
 /// # use aether_actor::ProtocolRef;
@@ -52,8 +53,8 @@ pub struct ProtocolRef<P> {
 }
 
 impl<P> ProtocolRef<P> {
-    /// Mint a reference for a confirmed-`Live` id whose published rows cover
-    /// `P`. Native code goes through the gated mint.
+    /// Mint a reference for a confirmed-`Live` id. Native code goes through
+    /// the gated mint.
     pub(crate) const fn new(id: MailboxId) -> Self {
         Self { target: ErasedActorRef::new(id), _protocol: PhantomData }
     }

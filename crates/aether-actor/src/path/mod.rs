@@ -7,8 +7,9 @@
 //! written from actor types, by an actor that declares the link
 //! (`#[actor(links(R))]`), and narrowed only where the compiler proves
 //! coverage. It crosses the wire as the path text alone, so a decoded path
-//! carries the writer's claim and nothing more, and it is proven again on
-//! receipt by `resolve`. Neither type holds a position.
+//! carries the writer's claim and nothing more. On receipt, `resolve` proves
+//! that a live actor stands at the path; a decoded path's claim stays its
+//! writer's. Neither type holds a position.
 //!
 //! The paths sit beside [`reference`](crate::reference), which holds the
 //! proofs: a path names, a reference sends.

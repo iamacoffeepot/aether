@@ -2,8 +2,7 @@
 """Reject reference mints outside the gate's allowlist.
 
 The gated mints turn a confirmed-`Live` position into a proven reference
-(`__mint_actor_ref`, `__mint_erased_actor_ref`, and `__mint_protocol_ref`
-once the route's published rows cover the protocol, ADR-0231 section 4), or
+(`__mint_actor_ref`, `__mint_erased_actor_ref`, `__mint_protocol_ref`), or
 an engine backing into a `Shared` `Blob` (`__mint_shared_blob`, and the guest
 backing's `__mint_guest_blob`, ADR-0238 decision 4), so only the paths in
 `ALLOWED_PATHS` may name them. Every other mention in tracked Rust source

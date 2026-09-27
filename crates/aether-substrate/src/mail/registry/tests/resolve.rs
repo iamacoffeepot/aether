@@ -4,21 +4,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_actor::{Protocol, ProtocolPath, ResolveError, Row, Silent};
+use aether_actor::{Protocol, ProtocolPath, ResolveError, Row};
 use aether_data::tagged_id::{Tag, with_tag};
 use aether_data::wire::{WireEncode, decode_from_slice};
-use aether_data::{ActorId, ErasedActorPath, Kind, MAILBOX_DOMAIN, ReplyContract, fnv1a_64_prefixed, fold_lineage};
+use aether_data::{ActorId, ErasedActorPath, MAILBOX_DOMAIN, fnv1a_64_prefixed, fold_lineage};
 
 use crate::config::RegistryQueueCapacities;
+use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, RegistryEffect};
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::{AddressResolutionError, Registry, canonical_mailbox_id, lineage_mailbox_id, noop_handler};
-use crate::mail::{KindId, MailboxId};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority as auth;
 
-use super::support::{contract, starting_token};
+use super::support::starting_token;
 
 #[test]
 fn lookup_missing_returns_none() {
@@ -98,35 +98,18 @@ struct Loaded {
     seq: u32,
 }
 
-#[aether_data::kind(name = "test.resolve_protocol.set_mode", copy)]
-struct SetMode {
-    mode: u32,
-}
+/// One single row: the protocol a received path claims.
+struct Loading;
 
-#[aether_data::kind(name = "test.resolve_protocol.probe", copy)]
-struct Probe {
-    seq: u32,
-}
-
-/// One single row and one silent row.
-struct Covered;
-
-impl Protocol for Covered {
-    type Rows = (Row<Load, Loaded>, Row<SetMode, Silent>);
-}
-
-/// [`Covered`]'s rows plus a silent [`Probe`] row.
-struct Wider;
-
-impl Protocol for Wider {
-    type Rows = (Row<Load, Loaded>, Row<SetMode, Silent>, Row<Probe, Silent>);
+impl Protocol for Loading {
+    type Rows = (Row<Load, Loaded>,);
 }
 
 /// A protocol path as a native actor receives one: decoded from wire bytes,
 /// carrying only its writer's claim.
-fn received<P>(text: &str) -> ProtocolPath<P> {
+fn received(text: &str) -> ProtocolPath<Loading> {
     let mut wire = Vec::new();
-    ErasedActorPath::new(text).expect("fixture is an actor path").encode(&mut wire).expect("a path encodes");
+    path(text).encode(&mut wire).expect("a path encodes");
     decode_from_slice(&wire).expect("a canonical path decodes")
 }
 
@@ -134,29 +117,17 @@ fn path(text: &str) -> ErasedActorPath {
     ErasedActorPath::new(text).expect("fixture is an actor path")
 }
 
-/// A live closure route under `name` publishing `rows`.
-fn published(registry: &Registry, name: &str, rows: &[(KindId, ReplyContract)]) -> MailboxId {
-    let id = registry.try_register_inbox(&auth(), name, noop_handler()).expect("the route name is free");
-    registry.publish_contract(&auth(), id, contract(rows, false)).expect("an empty contract takes any rows");
-    id
-}
-
-/// ADR-0231 §3's receipt of a decoded protocol path. Each case names the bug
-/// it catches:
+/// ADR-0231 §3's receipt of a protocol path proves liveness at the path's
+/// canonical name. Each case names the bug it catches:
 ///
-/// - a superset of `Covered`'s rows mints: a check that demands equal row
-///   sets;
-/// - a single row replying another kind, or published `Manual`, refuses
-///   naming that kind: a check by kind alone, or a `Manual` row counted as
-///   covering;
-/// - `Wider` refuses after `Covered` minted on the same route: a coverage
-///   cache keyed by route alone;
+/// - a `Live` closure route that publishes no rows mints: a resolve that
+///   still reads or requires the route's published rows;
 /// - a `Starting` reservation and a dropped route refuse `NotLive`: a
 ///   liveness read that accepts any recorded route;
 /// - a route at the path's fold under another canonical name refuses
 ///   `NotLive`: a missing name check at a fold collision.
 #[test]
-fn resolve_protocol_proves_live_covered_routes_and_names_the_rest() {
+fn resolve_protocol_proves_live_routes_and_refuses_the_rest() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let owner = RegistryOwnerLease::attach(
@@ -166,41 +137,10 @@ fn resolve_protocol_proves_live_covered_routes_and_names_the_rest() {
         WakeSink::detached(),
         RegistryQueueCapacities::default(),
     );
-    let covering = [(Load::ID, ReplyContract::One(Loaded::ID)), (SetMode::ID, ReplyContract::None)];
 
-    let superset = "test.resolve_protocol.superset";
-    published(
-        &registry,
-        superset,
-        &[
-            (Load::ID, ReplyContract::One(Loaded::ID)),
-            (SetMode::ID, ReplyContract::None),
-            (Probe::ID, ReplyContract::One(Loaded::ID)),
-        ],
-    );
-    registry.resolve_protocol(&received::<Covered>(superset)).expect("a superset of the rows covers the protocol");
-    assert_eq!(
-        registry.resolve_protocol(&received::<Wider>(superset)).expect_err("the probe row replies"),
-        ResolveError::Uncovered { path: path(superset), kind: Probe::ID },
-        "a covered answer is kept per protocol, not per route",
-    );
-
-    let other_reply = "test.resolve_protocol.other_reply";
-    published(
-        &registry,
-        other_reply,
-        &[(Load::ID, ReplyContract::One(SetMode::ID)), (SetMode::ID, ReplyContract::None)],
-    );
-    assert_eq!(
-        registry.resolve_protocol(&received::<Covered>(other_reply)).expect_err("the load row replies another kind"),
-        ResolveError::Uncovered { path: path(other_reply), kind: Load::ID },
-    );
-    let manual = "test.resolve_protocol.manual";
-    published(&registry, manual, &[(Load::ID, ReplyContract::Manual), (SetMode::ID, ReplyContract::None)]);
-    assert_eq!(
-        registry.resolve_protocol(&received::<Covered>(manual)).expect_err("a manual row covers nothing"),
-        ResolveError::Uncovered { path: path(manual), kind: Load::ID },
-    );
+    let live = "test.resolve_protocol.live";
+    registry.try_register_inbox(&auth(), live, noop_handler()).expect("the route name is free");
+    registry.resolve_protocol(&received(live)).expect("a live route mints, with no rows published");
 
     let starting = "test.resolve_protocol.starting";
     let reserved =
@@ -210,18 +150,18 @@ fn resolve_protocol_proves_live_covered_routes_and_names_the_rest() {
         &reserved.wait_timeout(Duration::from_millis(100)).expect("reservation completes").expect("reserves"),
     );
     let dropped = "test.resolve_protocol.dropped";
-    let dropped_id = published(&registry, dropped, &covering);
+    let dropped_id = registry.try_register_inbox(&auth(), dropped, noop_handler()).expect("the route name is free");
     registry.drop_mailbox(&auth(), dropped_id).expect("the live route retires");
     for name in [starting, dropped] {
         assert_eq!(
-            registry.resolve_protocol(&received::<Covered>(name)).expect_err("no live route"),
+            registry.resolve_protocol(&received(name)).expect_err("no live route"),
             ResolveError::NotLive { path: path(name) },
             "{name}",
         );
     }
 
     let folded = "test.resolve_protocol.folded";
-    let impostor = registry
+    registry
         .try_register_inbox_with_id(
             &auth(),
             lineage_mailbox_id(folded),
@@ -229,9 +169,8 @@ fn resolve_protocol_proves_live_covered_routes_and_names_the_rest() {
             noop_handler(),
         )
         .expect("the fold is free");
-    registry.publish_contract(&auth(), impostor, contract(&covering, false)).expect("an empty contract takes any rows");
     assert_eq!(
-        registry.resolve_protocol(&received::<Covered>(folded)).expect_err("another name stands at the fold"),
+        registry.resolve_protocol(&received(folded)).expect_err("another name stands at the fold"),
         ResolveError::NotLive { path: path(folded) },
     );
 }

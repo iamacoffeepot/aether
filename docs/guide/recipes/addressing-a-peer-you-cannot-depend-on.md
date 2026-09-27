@@ -202,9 +202,8 @@ an `ErasedActorPath` or by the envelope sender.
 A typed path that arrives in mail is proven with `resolve`. A native actor
 proves a `ProtocolPath<P>` with `ctx.resolve(&path)`
 (`crates/aether-substrate/src/actor/native/ctx/address.rs`), which checks that
-the route under the path's canonical name is `Live` and that its published rows
-cover `P`, and returns a `ProtocolRef<P>` that sends only the kinds `P` lists
-(ADR-0231 §3). No door turns an `ActorPath<R>` (ADR-0230 §2) into a reference
+a `Live` route stands under the path's canonical name and returns a
+`ProtocolRef<P>` that sends only the kinds `P` lists (ADR-0231 §3). No door turns an `ActorPath<R>` (ADR-0230 §2) into a reference
 yet: the guest arm over one lands with the Bloomery bootstrap (#6829,
 ADR-0240 D8). The editor shell's `RegionSpec.target` was the first site that
 would have needed one; issue #6306 dropped the field instead, and the region

@@ -13,9 +13,9 @@ use crate::CoveredBy;
 ///
 /// Made only by [`ActorPath::narrow`], which compiles only when the
 /// compiler has proved `P: CoveredBy<R>`. Decoded, it claims only that the
-/// text is a well-formed canonical path, and `P` is the writer's claim until
-/// `resolve` proves it against the route's published rows. Nothing about
-/// existence either way, and it grants no send.
+/// text is a well-formed canonical path, and `P` stays the writer's claim.
+/// Nothing about existence either way, and it grants no send: a receiver's
+/// `resolve` proves that a live actor stands at the path.
 ///
 /// On the wire and through serde it is the path text alone, with
 /// [`ErasedActorPath`]'s schema and codec, so it may be a kind field, a

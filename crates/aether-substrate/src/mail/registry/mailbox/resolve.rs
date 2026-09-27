@@ -279,20 +279,20 @@ impl Registry {
         }
     }
 
-    /// The position and published contract of the `Live` route standing
-    /// under exactly the canonical `path`, from one read of the published
-    /// view (ADR-0231 §3's receipt of a typed path).
+    /// The position of the `Live` route standing under exactly the canonical
+    /// `path`, from one read of the published view (ADR-0231 §3's receipt of
+    /// a typed path).
     ///
     /// A typed path is canonical and within the depth and byte caps by
     /// construction, so it is folded as written, never expanded. The route at
     /// the fold must carry `path` as its canonical name, which refuses a fold
-    /// collision, and must resolve `Live`: an inline alias answers with its
-    /// own rows while its target parent is `Live`. Never registered,
-    /// `Starting`, `Dropped`, and a name mismatch all answer `None`.
+    /// collision, and must resolve `Live`: an inline alias answers `Live`
+    /// while its target parent is `Live`. Never registered, `Starting`,
+    /// `Dropped`, and a name mismatch all answer `None`.
     ///
     /// Consumer: `Registry::resolve_protocol`, the native receipt of a
     /// protocol path.
-    pub(crate) fn live_route(&self, path: &ErasedActorPath) -> Option<(MailboxId, RouteContract)> {
+    pub(crate) fn live_route(&self, path: &ErasedActorPath) -> Option<MailboxId> {
         let id = lineage_mailbox_id(path.as_str());
         let routes = self.routes.load();
         if routes.entry_for(&id)?.canonical_name != *path {
@@ -300,7 +300,7 @@ impl Registry {
         }
 
         match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
-            ResolvedRoute::Live { contract, .. } => Some((id, contract.clone())),
+            ResolvedRoute::Live { .. } => Some(id),
             ResolvedRoute::Starting { .. } | ResolvedRoute::Dropped | ResolvedRoute::Unknown => None,
         }
     }
