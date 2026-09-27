@@ -52,7 +52,6 @@
 // `self`; it keeps `&mut self` to match the `#[handler]` dispatch ABI.
 // `ProbeWithConfig::on_config_query` takes `&mut self` for the same reason.
 #![allow(clippy::unused_self)]
-#![allow(clippy::needless_pass_by_value)] // aether-suppression-request: the ADR-0033 dispatch ABI hands a handler its decoded mail by value, and the window input kinds stopped being `Copy` when their window field became an actor path — the same allow `http_handler`, `inline_child`, and `tcp_load_probe` already carry
 
 use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Key, TextInput, Tick};
@@ -111,8 +110,8 @@ impl WasmActor for Probe {
     /// every matching subscriber when a key is pressed.
     /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
     #[handler::single]
-    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-        ctx.send::<SubstrateHarnessObserver>(&KeyObserved { code: key.code });
+    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, Key { code, .. }: Key) {
+        ctx.send::<SubstrateHarnessObserver>(&KeyObserved { code });
     }
 
     /// Unsubscribe this probe from `Key` on every window, the self-addressed
