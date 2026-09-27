@@ -272,9 +272,9 @@ impl NativeActor for LifecycleCapability {
         ctx: &mut NativeCtx<'_>,
         payload: LifecycleSubscribe,
     ) -> LifecycleSubscribeResult {
-        let stage = StageSubscribers::stage_of(&payload.subscription);
-        if !state.declares(stage) {
-            return undeclared(stage);
+        let stage_kind = StageSubscribers::stage_of(&payload.subscription);
+        if !state.declares(stage_kind) {
+            return undeclared(stage_kind);
         }
 
         match state.subscribers.subscribe(ctx, &payload.subscription) {
@@ -282,7 +282,7 @@ impl NativeActor for LifecycleCapability {
                 state.watch(ctx, subscriber);
                 LifecycleSubscribeResult::Ok
             }
-            Err(error) => LifecycleSubscribeResult::Err { stage: stage.0, error: error.to_string() },
+            Err(error) => LifecycleSubscribeResult::Err { stage: stage_kind.0, error: error.to_string() },
         }
     }
 
@@ -311,7 +311,7 @@ impl NativeActor for LifecycleCapability {
         ctx: &mut NativeCtx<'_>,
         payload: LifecycleSubscribeSelf,
     ) -> LifecycleSubscribeResult {
-        let stage = KindId(payload.stage);
+        let stage_kind = KindId(payload.stage);
         let Some(sender) = ctx.sender() else {
             return LifecycleSubscribeResult::Err {
                 stage: payload.stage,
@@ -320,18 +320,18 @@ impl NativeActor for LifecycleCapability {
                     .to_string(),
             };
         };
-        if !state.declares(stage) {
-            return undeclared(stage);
+        if !state.declares(stage_kind) {
+            return undeclared(stage_kind);
         }
 
-        if state.subscribers.subscribe_sender(ctx, stage, sender) {
+        if state.subscribers.subscribe_sender(ctx, stage_kind, sender) {
             state.watch(ctx, sender);
             LifecycleSubscribeResult::Ok
         } else {
             LifecycleSubscribeResult::Err {
                 stage: payload.stage,
                 error: format!(
-                    "{} has no silent or manual handler for stage {stage:?}, so it cannot subscribe to it",
+                    "{} has no silent or manual handler for stage {stage_kind:?}, so it cannot subscribe to it",
                     ctx.actor_path(sender)
                 ),
             }
@@ -357,9 +357,9 @@ impl NativeActor for LifecycleCapability {
         ctx: &mut NativeCtx<'_>,
         payload: LifecycleUnsubscribe,
     ) -> LifecycleSubscribeResult {
-        let stage = StageSubscribers::stage_of(&payload.subscription);
-        if !state.declares(stage) {
-            return undeclared(stage);
+        let stage_kind = StageSubscribers::stage_of(&payload.subscription);
+        if !state.declares(stage_kind) {
+            return undeclared(stage_kind);
         }
 
         state.subscribers.unsubscribe(ctx, &payload.subscription);
@@ -381,7 +381,7 @@ impl NativeActor for LifecycleCapability {
         ctx: &mut NativeCtx<'_>,
         payload: LifecycleUnsubscribeSelf,
     ) -> LifecycleSubscribeResult {
-        let stage = KindId(payload.stage);
+        let stage_kind = KindId(payload.stage);
         let Some(sender) = ctx.sender() else {
             return LifecycleSubscribeResult::Err {
                 stage: payload.stage,
@@ -390,11 +390,11 @@ impl NativeActor for LifecycleCapability {
                     .to_string(),
             };
         };
-        if !state.declares(stage) {
-            return undeclared(stage);
+        if !state.declares(stage_kind) {
+            return undeclared(stage_kind);
         }
 
-        state.subscribers.unsubscribe_sender(stage, sender);
+        state.subscribers.unsubscribe_sender(stage_kind, sender);
         LifecycleSubscribeResult::Ok
     }
 
@@ -704,10 +704,10 @@ mod tests {
     fn stamped_by(
         binding: &Arc<NativeBinding>,
         sink: &mpsc::Receiver<(KindId, Source, Vec<u8>)>,
-        request: &LifecycleSubscribeSelf,
+        request: LifecycleSubscribeSelf,
     ) -> Source {
         NativeCtx::<'_, Listener>::new_for_actor(binding, Source::NONE, None, None)
-            .send::<LifecycleCapability>(request);
+            .send::<LifecycleCapability>(&request);
         binding.flush_outbound();
 
         sink.try_recv().expect("the request reached the lifecycle mailbox").1
@@ -759,7 +759,7 @@ mod tests {
             assert!(matches!(subscribe(&mut cap, &transport, subscription), LifecycleSubscribeResult::Ok));
         }
 
-        let departed = stamped_by(&departed_binding, &sink, &LifecycleSubscribeSelf { stage: Render::ID.0 });
+        let departed = stamped_by(&departed_binding, &sink, LifecycleSubscribeSelf { stage: Render::ID.0 });
         let mut ctx = NativeCtx::new_for_actor(&transport, departed, None, None);
         LifecycleCapability::on_monitor_notice(&mut cap, &mut ctx, MonitorNotice);
 

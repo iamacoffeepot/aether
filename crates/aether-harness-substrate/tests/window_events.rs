@@ -1,3 +1,7 @@
+// Handler methods take decoded payloads by value as part of the actor
+// dispatch ABI.
+#![allow(clippy::needless_pass_by_value)]
+
 use aether_actor::{ActorPath, ActorRef, actor};
 use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::{ExecutionResult, HarnessOp, SubstrateHarness};

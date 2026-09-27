@@ -222,7 +222,7 @@ impl<P: Protocol, R: CoversRows<P::Rows>> covered_sealed::Sealed<R> for P {}
 
 impl<P: Protocol, R: CoversRows<P::Rows>> CoveredBy<R> for P {}
 
-pub(crate) mod cast_sealed {
+pub(super) mod cast_sealed {
     /// Private supertrait sealing [`super::CastTarget`] to the protocols
     /// this crate lists: today, [`Subscriber<K>`](crate::Subscriber) alone.
     pub trait Sealed {}

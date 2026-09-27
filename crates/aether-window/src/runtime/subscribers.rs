@@ -59,22 +59,25 @@ impl<K> KindSubscribers<K> {
         }
     }
 
-    /// The subscribers of events from `window`: the all-window set united
-    /// with `window`'s own, one reference per key, so an actor subscribed
-    /// through both selectors receives one copy.
-    fn recipients(&self, window: &ErasedActorPath) -> Vec<ProtocolRef<Subscriber<K>>> {
-        let mut recipients = self.all.clone();
-        if let Some(specific) = self.specific.get(window) {
-            recipients.extend(specific);
-        }
-        recipients.into_values().collect()
+    /// The subscribers of events from `window`: the all-window set, then
+    /// the members of `window`'s own set the all-window set lacks, so an
+    /// actor subscribed through both selectors receives one copy. Borrowed
+    /// and copied out one reference at a time, with no allocation: it runs
+    /// on every published event.
+    fn recipients(&self, window: &ErasedActorPath) -> impl Iterator<Item = ProtocolRef<Subscriber<K>>> {
+        let specific = self.specific.get(window).into_iter().flatten();
+
+        self.all
+            .values()
+            .copied()
+            .chain(specific.filter(|(key, _)| !self.all.contains_key(key)).map(|(_, subscriber)| *subscriber))
     }
 }
 
 /// A kind the window manager publishes, with its typed set in
 /// [`WindowSubscribers`]. Implemented once per published kind from the one
 /// list, so a fan-out of any other kind does not compile.
-pub trait Published: ActorMail + Sized {
+pub trait Published: ActorMail + Sized + 'static {
     /// This kind's set.
     fn set(subscribers: &WindowSubscribers) -> &KindSubscribers<Self>;
 
@@ -295,7 +298,10 @@ impl WindowSubscribers {
     }
 
     /// The subscribers of `K` events from `window`, one per actor.
-    pub fn recipients<K: Published>(&self, window: &ErasedActorPath) -> Vec<ProtocolRef<Subscriber<K>>> {
+    pub fn recipients<K: Published>(
+        &self,
+        window: &ErasedActorPath,
+    ) -> impl Iterator<Item = ProtocolRef<Subscriber<K>>> {
         K::set(self).recipients(window)
     }
 
@@ -318,7 +324,7 @@ impl WindowSubscribers {
 /// narrow to a `Subscriber<K>` of each kind the tests publish, standing as a
 /// registered route the tests choose.
 #[cfg(test)]
-pub(crate) mod fixture {
+pub mod fixture {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
@@ -335,7 +341,7 @@ pub(crate) mod fixture {
     use crate::WindowSelector;
 
     /// Silent handlers for every kind a window test subscribes.
-    pub(crate) struct Watcher;
+    pub struct Watcher;
 
     #[aether_actor::actor(instanced, root)]
     impl NativeActor for Watcher {
@@ -373,19 +379,19 @@ pub(crate) mod fixture {
     }
 
     /// The watcher keyed `key`.
-    pub(crate) fn watcher(key: &str) -> ActorPath<Watcher> {
+    pub fn watcher(key: &str) -> ActorPath<Watcher> {
         ActorPath::instance(&LoadName::new(key).expect("a valid key"))
     }
 
     /// Stand a route with `handler` at `key`'s watcher path, answering its
     /// key.
-    pub(crate) fn stand(registry: &Registry, key: &str, handler: Arc<dyn InboxHandler>) -> ErasedActorRef {
+    pub fn stand(registry: &Registry, key: &str, handler: Arc<dyn InboxHandler>) -> ErasedActorRef {
         registered_ref(registry, watcher(key).as_erased().as_str(), handler)
     }
 
     /// Prove `key`'s watcher live as a subscriber to `K`, the way a subscribe
     /// receipt does.
-    pub(crate) fn subscriber<K: Published>(ctx: &NativeCtx<'_>, key: &str) -> ProtocolRef<Subscriber<K>>
+    pub fn subscriber<K: Published>(ctx: &NativeCtx<'_>, key: &str) -> ProtocolRef<Subscriber<K>>
     where
         Subscriber<K>: CoveredBy<Watcher>,
     {
@@ -393,7 +399,7 @@ pub(crate) mod fixture {
     }
 
     /// Hold `key`'s watcher as a subscriber to `K` under `selector`.
-    pub(crate) fn hold<K: Published>(
+    pub fn hold<K: Published>(
         subscribers: &mut WindowSubscribers,
         ctx: &mut NativeCtx<'_>,
         selector: WindowSelector,
@@ -406,11 +412,11 @@ pub(crate) mod fixture {
     }
 
     /// The keys of `K`'s recipients from `window`.
-    pub(crate) fn recipients<K: Published>(
+    pub fn recipients<K: Published>(
         subscribers: &WindowSubscribers,
         window: &ErasedActorPath,
     ) -> BTreeSet<ErasedActorRef> {
-        subscribers.recipients::<K>(window).into_iter().map(ProtocolRef::erase).collect()
+        subscribers.recipients::<K>(window).map(ProtocolRef::erase).collect()
     }
 }
 
@@ -496,7 +502,7 @@ mod tests {
         hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::One(window("g")), "union");
         hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::One(window("g")), "union-other");
 
-        assert_eq!(subscribers.recipients::<Key>(&window("g")).len(), 2, "one copy per subscriber");
+        assert_eq!(subscribers.recipients::<Key>(&window("g")).count(), 2, "one copy per subscriber");
         assert_eq!(recipients::<Key>(&subscribers, &window("g")), BTreeSet::from([key, other]));
     }
 
