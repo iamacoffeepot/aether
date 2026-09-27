@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-09
 - **Amended:** 2026-09-23 — the panel-side region announcement moved from `WidgetPanel` to a new `EditorRegion` actor, which declares `EditorShell` and relays the shell's input to its child panel (ADR-0232 §6: no optional peers). See _Amendment 2026-09-23_ below.
+- **Amended:** 2026-09-26 — the shell holds each routed region as a typed reference for its sends, and the erased reference stays only for identity: press ownership and focus compare it (#6895; the owner: "We ARE going to remove erased actor sending you do know that right").
 
 ## Context
 

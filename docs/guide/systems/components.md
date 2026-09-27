@@ -514,10 +514,16 @@ and keep the `ErasedActorRef` it returns; never re-resolve at a send. The verb
 is on the receive and `wire` ctx only, not on `WasmInitCtx`, so a refused path
 does not fail the load: the guest decides what a refusal means.
 
-Sends through the reference are unchecked by kind. It is an `ErasedActorRef`,
-because the guest cannot name the actor's type, so `ctx.send_to(journal, &kind)`
-compiles for any kind, and a kind the actor does not handle is caught only at
-the recipient. Any loaded component can reach any `Live` actor whose path it
+The answer is an `ErasedActorRef`, which names no actor type, so on `main`
+`ctx.send_to(journal, &kind)` compiles for any kind, and a kind the actor does
+not handle is caught only at the recipient. Sending through that answer is the
+erased send #6895 removes. A guest's typed door is `WasmCtx::resolve` over an
+`ActorPath<R>`, which yields an `ActorRef<R>` whose sends are checked by kind;
+ADR-0230 §3 decides it, it lands with the Bloomery bootstrap (#6829), and it
+is not built on `main`. A path the guest will send to then arrives as that
+typed path, not an `ErasedActorPath`
+([R-0040](../contributing/design-rules.md#r-0040)).
+Any loaded component can reach any `Live` actor whose path it
 can spell, so a native actor that must not take guest mail cannot rely on its
 path being unknown.
 

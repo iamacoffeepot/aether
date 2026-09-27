@@ -13,7 +13,7 @@
 - **Amended:** 2026-09-24 — an off-thread helper that must decide about a peer it holds a proof of reads an `ActorProbe` from the init ctx (`ctx.actor_probe()`); the probe answers whether that actor is `Live` now and whether it accepts a kind, takes proofs only, and sends, resolves, and enumerates nothing (#6324).
 - **Amended:** 2026-09-24 — a guest host's receive surface is a declaration the substrate reads: a native actor that runs a guest implements `GuestHost`, and `NativeCtx::sync_guest` makes its accept set and cost rows match that declaration, so no actor reads its own position and no other actor writes a guest host's accept set. `NativeCtx::path`, bounded on `GuestHost`, reads a guest host's own canonical path as text only (issue 6350).
 - **Amended:** 2026-09-24 — §3: an `ErasedActorPath` that arrived in a payload is proven through the ctx verb `resolve_path`: the host resolves the address and the published-route read proves it at once; a refusal names the path or its canonical path, never an id (#6324).
-- **Amended:** 2026-09-25 — §3: a guest proves an `ErasedActorPath` that arrived in its config or mail through `WasmCtx::resolve_path`, the native verb's twin with the same resolution, proof, and refusals; its first consumer is the environment bootstrap script (#6786). Any loaded component can now reach any `Live` actor whose path it can spell, and its sends through the answer are unchecked by kind.
+- **Amended:** 2026-09-25 — §3: a guest proves an `ErasedActorPath` that arrived in its config or mail through `WasmCtx::resolve_path`, the native verb's twin with the same resolution, proof, and refusals; its first consumer is the environment bootstrap script (#6786). Any loaded component can now reach any `Live` actor whose path it can spell.
 - **Amended:** 2026-09-26 — §3: a guest's doors are settled against the native ones (#6796). No ctx proves an actor's parent outside a guest's inline cluster, and a loaded component's lineage parent is the component host, not its loader; a guest proves a component it loads from the load reply's sender; a guest's detached sibling spawn yields no reference; a guest has no `resolve_live`, because no guest API takes a `MailboxId`; and a guest resolves an actor-typed path, an `ActorPath<R>`, through `WasmCtx::resolve`, whose consumer is the Bloomery bootstrap ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D8).
 
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
@@ -26,8 +26,8 @@ actor across a boundary),
 [ADR-0133](0133-reply-based-stream-handles-for-the-http-server-data-phase.md) (its
 `send_detached_to(MailboxId)` recipient and its
 `{ counterparty: MailboxId, stream_id }` handle shape become the proven
-forms — an `ErasedActorRef` constructed from `ctx.sender()`, so a stream
-handle cannot exist without the proof it sends to).
+forms — a typed reference cast from `ctx.sender()` (ADR-0231 §4), so a
+stream handle cannot exist without the proof it sends to).
 
 ## Context
 
@@ -202,7 +202,7 @@ The paths mirror the references:
 | `ErasedActorPath` | the text is a well-formed ADR-0166 address, canonical or short (with `:name` holes); nothing about existence or placement | its fallible constructor and fallible decode | be stored, mailed, configured, persisted: carried in a kind (`NamedMail.recipient`), name a wire `Call`'s recipient, compared, displayed; become a position only inside the engine, through the host's `resolve_address`. The only description of an actor with a wire format; it carries names only. |
 | `ActorPath<R>` | the text is a well-formed canonical path whose leaf namespace is `R::NAMESPACE`, whether it was written here or decoded; nothing about existence | the type constructors `ActorPath::<R>::instance` and `ActorPath::<C>::child` below, which write it from `R`'s namespace, placement, and key; decode, which refuses a short path and a leaf namespace other than `R::NAMESPACE` | everything an `ErasedActorPath` can; narrow to a `ProtocolPath<P>` (ADR-0231 §3); be resolved to an `ActorRef<R>`. It grants no send. |
 | `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, name its canonical path |
-| `ErasedActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload; an `ErasedActorPath` proven through `resolve_path`, on a native or a guest ctx | reply, monitor, be the target of an untyped send — inheriting, detached, or tracked, unchecked against a kind because the set it keys may be heterogeneous — be held in a capability's own table and keyed in an ordered set, name its canonical path |
+| `ErasedActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload; an `ErasedActorPath` proven through `resolve_path`, on a native or a guest ctx | reply, monitor, be held in a capability's own table and keyed in an ordered set, name its canonical path, be cast (ADR-0231 §4); no send goes through it |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key inside the engine, be printed; never be serialized (section 1) |
 
 `ActorRef::id()` is free and total. There is no function from a `MailboxId`
@@ -271,12 +271,14 @@ A loaded component's key is its load name, a validated `LoadName`; a
 window's is the name its spec gives it. There is one addressing system and
 `ErasedActorPath` is its value type.
 
-A capability keeps the envelope sender as an `ErasedActorRef`.
+A capability keeps the envelope sender as an `ErasedActorRef` for what
+needs no send: identity, table keys, and monitoring. To send to that actor,
+it holds a typed reference, cast from the sender at receipt (ADR-0231 §4).
 
 The per-handler handle keeps its job of carrying origin, now fed by a
-reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
-`actor_at::<R>(id)`, which is deleted; an erased reference sends through
-`ctx.send_to` or, with a request context, `ctx.send_with_context`.
+reference rather than a raw id: `actor_at::<R>(id)` is deleted, and a typed
+reference sends through `ctx.send_to` or, with a request context,
+`ctx.send_to_with_context` ([ADR-0232](0232-flat-ctx-send-verbs.md)).
 
 ### 3. The doors: where a reference comes from
 
@@ -349,10 +351,10 @@ The consequences:
   named on `send_mail_p32`; what changes is that the SDK now offers a
   proven door by path, where before only a disallowed hand fold reached
   such an actor.
-- Sends through the answer are unchecked by kind. The reference is an
-  `ErasedActorRef`, because a guest cannot name a native actor's type, so
-  a kind the recipient does not handle is caught only at the recipient,
-  never at compile time.
+- The answer is an `ErasedActorRef`, which sends nothing once erased
+  sends are removed (#6895). A guest reaches a typed actor through
+  `resolve` over an `ActorPath<R>` (#6829), or through a declared
+  dependency, and those sends are checked by kind.
 - The proof lives only in the guest's memory. It is minted once, at
   `wire` or at receipt, and stored; it is never re-derived at a send.
 
