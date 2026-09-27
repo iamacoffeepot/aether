@@ -1,6 +1,7 @@
 //! ADR-0086 Phase 3 per-actor trace storage. Every actor — native or
-//! wasm trampoline — owns an [`ActorTraceRing`] in its `ActorSlots`, the
-//! trace-side sibling of ADR-0081's `ActorLogRing`. The producer hooks
+//! wasm trampoline — owns an [`ActorTraceRing`] in its
+//! [`crate::local::ActorSlots`], the trace-side sibling of ADR-0081's
+//! [`crate::log::ActorLogRing`]. The producer hooks
 //! (`record_sent` / the dispatch loop's `Received` / `Finished` pushes)
 //! write the mail-graph records for the current actor into its ring; a
 //! coordinator reconstructs a trace tree on demand by fanning out
@@ -53,7 +54,7 @@ pub const DEFAULT_TRACE_RING_CAP: usize = 4096;
 /// back to drop-oldest (the floor is [`DEFAULT_TRACE_RING_CAP`]). 16× the
 /// floor — a busy actor that bursts can reach ~65536 × ~64 B = ~4 MiB,
 /// while a quiet one stays at the 256 KiB floor (it never grows). Growth
-/// is geometric (see `ActorTraceRing::push`), so the climb costs only
+/// is geometric (see [`ActorTraceRing::push`]), so the climb costs only
 /// ~`log2(max/floor)` reallocations.
 pub const DEFAULT_TRACE_RING_MAX_CAP: usize = 65536;
 
@@ -112,7 +113,7 @@ pub struct TailQuery {
 }
 
 /// Per-actor bounded ring of trace records (ADR-0086 Phase 3). The
-/// trace-side sibling of `ActorLogRing`, with one difference: a
+/// trace-side sibling of [`crate::log::ActorLogRing`], with one difference: a
 /// saturating trace ring grows toward `max_cap` rather than immediately
 /// dropping its oldest entry, because each evicted entry is a node the
 /// trace coordinator needs to stitch a causal tree — a mid-chain hole
