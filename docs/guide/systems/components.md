@@ -88,8 +88,11 @@ Ordinary actors have no extra extension; `#[program]` adds
 `aether_bloomery_program` and `#[reactor]` adds `aether_bloomery_reactor`.
 `bundle` keeps ordinary actors in `exports` and replaces every program and
 reactor with one root exported as `aether.bloomery.bundle`
-(`BUNDLE_NAMESPACE`), at the first one's position. The bundle driver loads
-that root as `aether.component/aether.embedded:<key>-<digest>` (short path
+(`BUNDLE_NAMESPACE`), at the first one's position. Every bundle is
+content-addressed (see [Publishing a module](#publishing-a-module)), so the
+root publishes as `aether.bloomery.bundle.<module hash>` while
+`export: Some("aether.bloomery.bundle")` still selects it. The bundle driver
+loads that root as `aether.component/aether.embedded:<key>-<digest>` (short path
 `aether.component/:<key>-<digest>`), the name `UnitBundle::name` builds from
 the unit's key and the bundle digest (ADR-0240 D4). A module provides
 programs, reactors, or both; neither is a compile error. With programs, the
@@ -201,6 +204,19 @@ manifests only and refuses the whole module at the first failing namespace:
   alias never advertises a row its code no longer handles.
 - **Same hash.** Publishing bytes whose hash already holds every one of its
   namespaces changes nothing; its kinds register again, which is idempotent.
+
+**Content-addressed modules.** A module carrying the `aether.content_addressed`
+custom section (`CONTENT_ADDRESSED_SECTION`, one version byte whose presence is
+the whole signal) publishes each namespace it exports as `NS.<hash>`, its
+BLAKE3 module hash in 64 lowercase hex. Every build is then its own publication,
+so no build is another's predecessor and the rules above never compare two
+builds; loading the same bytes again is the same-hash no-op. Inside the module
+each type keeps its declared `NS`, which the export selector names. A
+content-addressed module may export no namespace longer than 191 bytes, so
+`NS.<hash>` stays one 256-byte segment; a longer one fails check-in, naming it.
+The bundle generator marks every bundle content-addressed, so a bundle root
+publishes as `aether.bloomery.bundle.<module hash>`, and each built bundle adds
+one publication.
 
 A refusal answers `LoadResult::Err` or `ReplaceResult::Err` with
 `module publish refused: <namespace> … (<rule>)`, and nothing is spawned or

@@ -105,6 +105,24 @@ one implementation is published per namespace per engine.
 - **A module publishes as one set.** A publish admits every namespace the
   module exports, all or nothing. Its private and inline child types are not
   published: they belong to the module and cannot be spawned from outside it.
+- **A content-addressed module publishes per build.** A module marked with
+  the `aether.content_addressed` custom section publishes each namespace it
+  exports as `NS.<hash>`, its BLAKE3 hash (§2) in 64 lowercase hex, so every
+  build is its own publication and no build is another's predecessor or
+  successor.
+  - Inside the module each type keeps its declared `NS`: the export selector
+    and the type tag read it.
+  - The declared `NS` is at most 191 bytes, so the qualified name is one
+    ADR-0166 segment.
+  - Every Bloomery bundle is content-addressed. Its root publishes as
+    `aether.bloomery.bundle.<hash>` and is spawned per unit as
+    `aether.bloomery.bundle.<hash>:<unit key>`. Two units on one bundle share
+    its publication. A unit moving to a new bundle spawns the new root and
+    closes its old one; it never republishes.
+  - Publications accumulate one per build (see Unpublish).
+  - A content-addressed type has no typed path, because its `NAMESPACE` is
+    not its published name. It is reached through the reference its spawn or
+    load reply stamps.
 - **A guest never publishes over a native namespace.** A namespace the
   binary published is refused to every module.
 - **Republishing** points a module's namespaces at a new module. The set of
@@ -233,7 +251,8 @@ to an engine system, not an address parent.
 
 - `Publish { code: Blob }` checks the bytes in, builds the `Module`, and runs
   admission. Publishing a module whose namespaces already point at the same
-  hash is a no-op.
+  hash is a no-op. Its reply names each namespace it bound, so a caller of a
+  content-addressed module never recomputes the hash.
 - `Spawn { namespace, key, parent, config }` asks for an instance to exist,
   and the name decides the answer. A live name: the reply names it and
   nothing is re-initialised. An absent name: the engine stands the instance
@@ -275,7 +294,7 @@ links its code; the kind crates of ADR-0066 are where these markers live.
 | 0147 module boot | Accepted | §1: boot is spawned once, at the module's first publish, and is no longer refcounted or torn down with the module's other actors; if it closes, its name tombstones. §2, §4: the `default` slot is moot, since every spawn names its namespace |
 | 0166 lineage and short paths | Accepted | §5, §6: the component-host worked example retires; the index reads publications |
 | 0165 | Accepted | line 206: guests are hosted by the forwarding host, not `WasmTrampoline` |
-| 0224 / 0226 / 0240 | Proposed | a bundle's root is a published namespace; 0226 D9 adoption keys on a live `NS:key`, not `SubnameInUse`; 0240 D4, D5, D8 edited in place |
+| 0224 / 0225 / 0226 / 0240 | Proposed | every bundle is content-addressed: its root publishes as `aether.bloomery.bundle.<hash>` and is spawned per unit as `aether.bloomery.bundle.<hash>:<unit key>`; 0226 D2 a unit moving to a new bundle closes its old root; 0226 D9 adoption keys on a live `NS:key`, not `SubnameInUse`; 0224 §5, 0225 §1 and §8, and 0240 D4, D5, D8, and D9 edited in place |
 | 0230 / 0231 | Proposed | edited in place: no route actor-type tag; replace growth moves to admission |
 | 0238 blob store | Proposed | no decision changes: code arrives and leaves as a `Blob`; a module's assets are blobs |
 
@@ -308,7 +327,8 @@ links its code; the kind crates of ADR-0066 are where these markers live.
   picks a new key, and each tombstone costs one registry entry for the
   engine's lifetime (ADR-0079 §7).
 - A dead publication, one nothing will spawn again, stays resident, because
-  there is no unpublish (see Alternatives considered).
+  there is no unpublish (see Alternatives considered). Every built Bloomery
+  bundle adds one, because every bundle is content-addressed (§3).
 
 ### Neutral
 
@@ -324,7 +344,8 @@ Each step lands on its own:
 2. **Publication table and admission**: native publications at boot, by
    namespace; module publish with the namespace, contract-growth, and kind
    checks, in one registry-owner batch the component host stages on every load
-   and replace. Admission runs beside the per-site checks: the same-type rule
+   and replace; content-addressed modules. Admission runs beside the per-site
+   checks: the same-type rule
    lands, and the trampoline's `check_contract` and the `RepublishContract`
    guard retire, with step 4; the dependency row lands, and
    `try_claim_namespace` by `TypeId` retires, with step 3, when guests spawn
@@ -361,6 +382,9 @@ step 3.
 - **A despawn verb that frees a key for reuse.** Rejected: names tombstone
   on close and are never reused (ADR-0079 §7), so a path proven once cannot
   later name a different actor.
+- **One bundle namespace, exempt or per unit.** Rejected. Exempting bundle
+  roots from the one-implementation rule breaks it, and a per-unit namespace
+  refuses a rebuild that drops a program as a republish.
 - **Unpublish.** Deferred. Publications are content-addressed and a
   republish already points a namespace at new code, so the one thing an
   unpublish would add is reclaiming the memory of a dead publication, one
