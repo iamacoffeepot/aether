@@ -10,7 +10,9 @@ decode through `DecodeCtx`), [ADR-0233](0233-engine-only-mail.md) (the
 `ActorMail` marker), and
 [ADR-0139](0139-guest-reply-correlation-and-request-contexts.md) (the
 request-context table). Edits ADR-0230 §1 and §2, ADR-0231 §3, and ADR-0233
-in place, and amends ADR-0139 §4.
+in place, and amends ADR-0139 §4. It builds the reach that design rule
+[R-0042](../guide/contributing/design-rules.md#r-0042) states; which kinds may carry a `MailboxId` is
+[R-0041](../guide/contributing/design-rules.md#r-0041)'s question.
 
 ## Context
 
@@ -55,7 +57,7 @@ wire, and ruled that a kind's reach is the lowest reach among its fields.
 
 ### 1. Reach is a fact about a type, with three levels
 
-| Reach | Marker | May hold | Crosses | A narrower kind is refused at |
+| Reach | Marker | May hold | Crosses | A kind of this reach is refused at |
 |---|---|---|---|---|
 | Actor | neither | anything with a schema, including a `ReplyHandle`, a `Source`, or a `SourceAddr` | nothing: its bytes stay in their own actor's request-context table and replace snapshot | every typed send and reply (`ActorMail`), and every handler's kind |
 | Engine | `CrossesActors` | a typed proof, once its codec lands (section 6); a `MailboxId` or a `MailId` | in-process mail, the guest FFI included | the typed wire doors (`WireMail`) |
@@ -80,7 +82,7 @@ schema, or `describe_kinds`, so no id and no wire byte changes.
   `BTreeMap<K, V>` forward each marker from their element types.
 - **`CrossesActors` only (engine reach):** `MailboxId` and `MailId`. A position
   is a registry key inside its engine: a core-internal kind, such as an
-  engine-only notice or a trace record, may carry one, and a kind that does
+  engine-only notice, may carry one, and a kind that does
   never reaches a typed wire door. `ActorRef<R>` and `ProtocolRef<P>` join
   them when their codec lands.
 - **Neither (actor reach):** `ReplyHandle`, a per-instance host handle, and
@@ -218,17 +220,23 @@ The kinds on main that it will govern:
 | `aether.window.subscribe`, `aether.window.unsubscribe`, `aether.window.unsubscribe_all` | `crates/aether-window/src/kinds.rs` | `MailboxId` |
 | `aether.http.server.register_route`, `aether.http.server.unregister_route`, `aether.http.server.unregister_routes_all` | `crates/aether-http/src/kinds.rs` | `MailboxId`; #6899 replaces them with typed handler paths |
 
+One serialized position sits outside the kinds: `MailboxDescriptor.id`
+(`crates/aether-data/src/schema.rs`), the serde mailbox table the engine ships
+to the hub. It is not a kind and implements neither marker, so reach does not
+govern it.
+
 ## Consequences
 
 - An actor-reach context is never mail: no actor can send it and no handler
-  receives it, by type. A context that needs a reply route or a reference no
-  longer needs a side map beside the table.
+  receives it, by type. Once a typed proof's codec lands, a context holds the
+  reference itself rather than a side map beside the table.
 - A typed proof may become a field of an engine-reach kind once its codec
   lands, and is proven again at every decode; a wire-reach kind never carries
   one.
 - A position may ride a core-internal kind inside the engine, and a kind that
   carries one cannot reach a typed wire door. The public APIs other code is
-  written against still take and return no `MailboxId` (#6903).
+  written against still take and return no `MailboxId`
+  ([R-0041](../guide/contributing/design-rules.md#r-0041)).
 - A kind gains no attribute and no id change. A hand-written `Schema` impl
   must add its markers, or its type has actor reach; the compiler names the
   site the first time the type is sent or handled.

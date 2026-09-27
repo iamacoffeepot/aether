@@ -147,14 +147,14 @@ by `resolve` (section 3).
 
 **A `MailboxId` has engine reach** ([ADR-0242](0242-a-kinds-reach-is-its-narrowest-fields.md)).
 Inside the engine a position is a registry key and a routing input, and a
-core-internal kind, such as an engine-only notice or a trace record, may
-carry one; a kind that does has engine reach, so no typed wire door accepts
+core-internal kind, such as an engine-only notice, may carry one; a kind that does has engine reach, so no typed wire door accepts
 it. A description that crosses the wire (a config field, saved or dehydrated
 state, a journal record, an MCP or RPC payload) names an actor by its path,
 because outside the engine nothing can tell a registered position from a
 computed one (Context). The door rule is about the public APIs other code is
-written against: none takes or returns a `MailboxId` (#6903). A caller-relative reference, such as a peer in the
-caller's own module, is rendered absolute before it leaves the actor: the
+written against: none takes or returns a `MailboxId`
+([R-0041](../guide/contributing/design-rules.md#r-0041)). A caller-relative
+reference, such as a peer in the caller's own module, is rendered absolute before it leaves the actor: the
 ctx reads the actor's own canonical path and writes the peer's beneath it.
 Every actor therefore needs a ctx verb for its own path, and no self verb
 returns a `MailboxId` in its place. On main the only own-path read is
