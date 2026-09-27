@@ -239,37 +239,37 @@ on its side.
   and is re-proven); #6272 (ADR-0230's references made unexportable).
 - **Superseded by:** [R-0037](#r-0037)
 
-### R-0037: Make every kind's wire mode explicit and never serialize a raw mailbox id {#r-0037}
+### R-0037: Give every kind an explicit reach and never serialize a raw mailbox id {#r-0037}
 
 A kind is placed on two axes. The first is whether its decode needs a decode
-context: a kind is contextual or non-contextual. The second is its wire mode,
-one of three, narrowest reach first:
+context: a kind is contextual or non-contextual. The second is its reach,
+how far its bytes may travel, one of three levels, narrowest first:
 
-- **Local actor:** bytes the same actor encodes and decodes, such as a stored
+- **Actor:** bytes the same actor encodes and decodes, such as a stored
   request context.
-- **Cross-actor:** mail between actors in one engine session. Verified
-  references may travel here.
-- **Cross-wire:** another process, saved state, or the wire. Basic types and
-  some special types travel here.
+- **Engine:** mail between actors in one engine session. Verified references
+  may travel here.
+- **Wire:** another process, saved state, or the wire. Basic types and some
+  special types travel here.
 
-A kind's wire mode is the narrowest-reach mode among its fields, derived
-through marker traits its fields implement, with no per-kind flag or
-attribute. A raw `MailboxId` crosses in no mode. A description, an actor path,
-crosses where a reference cannot, and the receiver proves it again on its
-side.
+A kind's reach is the narrowest reach among its fields, derived through
+marker traits its fields implement, with no per-kind flag or attribute. A raw
+`MailboxId` has no reach: it crosses at no level. A description, an actor
+path, crosses where a reference cannot, and the receiver proves it again on
+its side.
 
 This rule records a direction that #6894 implements; it is not built on
-`main`. Until #6894 lands, no kind carries a wire-mode designation, so proven
-references keep no codec and a description is what crosses.
+`main`. Until #6894 lands, no kind carries a reach, so proven references keep
+no codec and a description is what crosses.
 
 - **Why:** whether a proof survives the trip depends on where the bytes go,
-  so the kind's fields state where they can go rather than every proof being
-  barred from every trip.
+  so the kind's fields state how far they can go rather than every proof
+  being barred from every trip.
 - **Settled:** ADR-0230 §1 (proven references have no codec; a path crosses
   and is re-proven); #6272 (ADR-0230's references made unexportable); #6894
-  (the two axes and the three wire modes, and a kind's mode the narrowest
-  among its fields: the direction is decided and the mechanism is pending
-  there).
+  (the decode-context axis, the three reach levels, and a kind's reach the
+  narrowest of its fields: the direction is decided and the mechanism is
+  pending there).
 
 ### R-0013: Model a closed set as a Rust enum {#r-0013}
 
