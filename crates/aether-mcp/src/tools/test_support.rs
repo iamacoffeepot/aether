@@ -333,8 +333,8 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
     }
     for d in extras {
         // Component-defined kinds enter the substrate's `Registry`
-        // via `ComponentHostCapability::handle_load` staging a
-        // `RegistryBatch::register_kinds` through the ADR-0165 owner;
+        // when the component host's load stages a
+        // `RegistryBatch::publish_module` through the ADR-0165 owner;
         // here we shortcut that with a direct register so the test
         // doesn't need a real wasm load lifecycle (the ADR-0091 surface
         // under test is the *projection*, not the loader).

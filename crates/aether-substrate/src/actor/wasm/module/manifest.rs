@@ -106,6 +106,24 @@ impl ModuleManifest {
         &self.private_actors
     }
 
+    /// Every exported group with its namespace resolved, in declaration
+    /// order. A multi-actor module names each group by its boundary record;
+    /// the implicit group of a single-actor module takes [`Self::namespace`],
+    /// and is skipped when the module declares none. The boot type's group is
+    /// exported.
+    pub fn exported_groups(&self) -> impl Iterator<Item = (&str, &ActorInputs)> {
+        self.actors.iter().filter_map(|group| {
+            group.namespace.as_deref().or_else(|| self.namespace()).map(|namespace| (namespace, group))
+        })
+    }
+
+    /// Every private inline child's group with its namespace, in declaration
+    /// order. Every private group is led by a boundary record, so one without
+    /// a namespace is malformed and skipped.
+    pub fn private_groups(&self) -> impl Iterator<Item = (&str, &ActorInputs)> {
+        self.private_actors.iter().filter_map(|group| group.namespace.as_deref().map(|namespace| (namespace, group)))
+    }
+
     /// The namespace of the module's boot type (ADR-0147), if it declares one.
     #[must_use]
     pub fn boot(&self) -> Option<&str> {
