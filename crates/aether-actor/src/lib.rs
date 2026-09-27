@@ -56,10 +56,10 @@ pub use model::ctx::{Erased, MailSender, Manual, OutboundReply, Persistence, Rep
 pub use model::slot::Slot;
 pub use model::{
     Actor, Addressable, At, CallerAddressable, CallerScope, CallerScoped, ChildOf, Contract, Contracts, CoveredBy,
-    CoversRows, DependencyResolver, DependsOn, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced,
-    Lifecycle, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol, Publisher, Publishes, Replies,
-    ReplyShape, Resolve, Root, Row, RowAt, RowReply, RowSet, SendableTo, Silent, SilentRow, Singleton, Subname,
-    Undeclared, root_mailbox, validate_namespace_segment,
+    CoversRows, Declared, DependencyResolver, DependsOn, EMBEDDED_SCOPE, Embedded, EmbeddedMany, Gap, HandlesKind,
+    Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol, Publisher,
+    Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex, RowReply, RowSet, SendableTo, Silent,
+    SilentRow, Singleton, Subname, There, Undeclared, root_mailbox, validate_namespace_segment,
 };
 pub use path::{ActorPath, ProtocolPath, ResolveError};
 #[doc(hidden)]

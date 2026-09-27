@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{Attribute, Type};
 
 use crate::handler_parse::{HandlerClass, HandlerReply};
@@ -65,11 +65,13 @@ pub fn contract_reply_ty(class: HandlerClass, reply: &HandlerReply) -> TokenStre
 }
 
 /// Emit one handler's `Contract<K>` row onto the site's impl header, gated by
-/// the site's `#[cfg]`s.
+/// the site's `#[cfg]`s, naming `index` as the row's position in the actor's
+/// `Contracts::Rows` list (ADR-0231 §10).
 pub fn contract_row_impl(
     class: HandlerClass,
     reply: &HandlerReply,
     kind_ty: &Type,
+    index: &TokenStream2,
     site: &ReplyMarkerSite<'_>,
 ) -> TokenStream2 {
     let ReplyMarkerSite { impl_generics, self_ty, where_clause, cfgs } = site;
@@ -78,8 +80,94 @@ pub fn contract_row_impl(
         #(#cfgs)*
         impl #impl_generics ::aether_actor::Contract<#kind_ty> for #self_ty #where_clause {
             type Reply = #reply_ty;
+            type Index = #index;
         }
     }
+}
+
+/// The position `steps` entries past `base` in a declaration list (ADR-0231
+/// §10): `base` wrapped in one `There` per step.
+pub fn position_past(base: TokenStream2, steps: usize) -> TokenStream2 {
+    (0..steps).fold(base, |inner, _| quote! { ::aether_actor::There<#inner> })
+}
+
+/// The position of entry `index` in a declaration list: `Here` for the head,
+/// `There<…>` past it.
+pub fn position(index: usize) -> TokenStream2 {
+    position_past(quote! { ::aether_actor::Here }, index)
+}
+
+/// A type-level declaration list `(E1, (E2, (…, tail)))` over `entries`.
+pub fn declaration_list(entries: impl DoubleEndedIterator<Item = TokenStream2>, tail: TokenStream2) -> TokenStream2 {
+    entries.rev().fold(tail, |rest, entry| quote! { (#entry, #rest) })
+}
+
+/// The `Row<K, O>` entry one handler contributes to its actor's
+/// `Contracts::Rows` list: the kind and the reply its `Contract<K>` row names.
+pub fn row_entry(class: HandlerClass, reply: &HandlerReply, kind_ty: &Type) -> TokenStream2 {
+    let reply_ty = contract_reply_ty(class, reply);
+    quote! { ::aether_actor::Row<#kind_ty, #reply_ty> }
+}
+
+/// One handler as its contract row list sees it: class, reply, kind, and the
+/// `#[cfg]`s that decide whether its slot holds its row or `Gap`.
+pub struct RowSpec<'a> {
+    pub class: HandlerClass,
+    pub reply: &'a HandlerReply,
+    pub kind_ty: &'a Type,
+    pub cfgs: &'a [Attribute],
+}
+
+/// An actor's contract row list (ADR-0231 §10): the `Contracts::Rows` type,
+/// plus the type aliases that pick a gated handler's slot.
+pub struct RowsList {
+    /// One `#[cfg]`-ed alias pair per gated handler: its `Row<K, O>` when the
+    /// handler's predicates hold and `Gap` when they do not. Emitted beside
+    /// the `Contracts` impl that names them.
+    pub aliases: TokenStream2,
+    /// `(E1, (E2, (…, tail)))`, one entry per handler in declaration order.
+    pub list: TokenStream2,
+}
+
+/// Build the contract row list over `rows`, ending in `tail`. A handler with
+/// no `#[cfg]` contributes its `Row<K, O>` inline; a gated one contributes an
+/// alias that resolves to its row or to `Gap` in this configuration, so it
+/// keeps its slot and every later handler keeps its position.
+pub fn rows_list(rows: &[RowSpec<'_>], tail: TokenStream2) -> syn::Result<RowsList> {
+    let mut aliases = Vec::new();
+    let mut entries = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let entry = row_entry(row.class, row.reply, row.kind_ty);
+        if row.cfgs.is_empty() {
+            entries.push(entry);
+            continue;
+        }
+
+        let alias = format_ident!("__AetherRow{}", index);
+        let predicate = conjoined_cfg_predicate(row.cfgs)?;
+        aliases.push(quote! {
+            #[cfg(#predicate)]
+            type #alias = #entry;
+            #[cfg(not(#predicate))]
+            type #alias = ::aether_actor::Gap;
+        });
+        entries.push(quote! { #alias });
+    }
+    Ok(RowsList { aliases: quote! { #(#aliases)* }, list: declaration_list(entries.into_iter(), tail) })
+}
+
+/// The conjunction of a handler's `#[cfg]` predicates, as `all(P1, …, Pn)`.
+///
+/// Purely syntactic: the macro reads the predicate tokens the author wrote and
+/// never evaluates them, so any predicate rustc accepts — including a custom
+/// `--cfg` flag from a build script — rides through unexamined, and an
+/// ill-formed one is diagnosed by rustc at the author's own span. Stacking the
+/// attributes would express the conjunction on the positive arm, but the
+/// negative arm needs the predicate as a term, so it is built once here.
+pub fn conjoined_cfg_predicate(cfgs: &[Attribute]) -> syn::Result<TokenStream2> {
+    let predicates =
+        cfgs.iter().map(|attr| Ok(attr.meta.require_list()?.tokens.clone())).collect::<syn::Result<Vec<_>>>()?;
+    Ok(quote! { all(#(#predicates),*) })
 }
 
 /// One `CONTRACTS` element for a handler, carrying the handler's `#[cfg]`s.
@@ -157,20 +245,56 @@ pub fn concat_contract_rows(parts: &[TokenStream2]) -> TokenStream2 {
     }
 }
 
-/// Emit an actor's `Contracts` impl: its `local` rows (a slice expression),
-/// followed by an adopted handler set's rows when `set` carries an expression
-/// for them (ADR-0169). The set's rows are already `#[cfg]`-resolved in the
-/// crate that defines the set (ADR-0183).
-pub fn contracts_impl(site: &ReplyMarkerSite<'_>, local: &TokenStream2, set: Option<&TokenStream2>) -> TokenStream2 {
+/// Emit an actor's `Contracts` impl: its `rows` list type (ADR-0231 §10) and
+/// its `local` rows (a slice expression), followed by an adopted handler set's
+/// rows when `set` carries an expression for them (ADR-0169). The set's rows
+/// are already `#[cfg]`-resolved in the crate that defines the set
+/// (ADR-0183).
+///
+/// `aliases` are the gated slots' alias pairs the `rows` type names. When
+/// there are any, they and the impl share an anonymous `const _` block, so the
+/// aliases need no name unique beyond this one actor.
+pub fn contracts_impl(
+    site: &ReplyMarkerSite<'_>,
+    aliases: &TokenStream2,
+    rows: &TokenStream2,
+    local: &TokenStream2,
+    set: Option<&TokenStream2>,
+) -> TokenStream2 {
     let ReplyMarkerSite { impl_generics, self_ty, where_clause, .. } = site;
     let element_ty = contract_element_ty();
     let value = match set {
         None => quote! { #local },
         Some(set_rows) => concat_contract_rows(&[local.clone(), set_rows.clone()]),
     };
-    quote! {
+    let contracts = quote! {
         impl #impl_generics ::aether_actor::Contracts for #self_ty #where_clause {
+            type Rows = #rows;
             const CONTRACTS: &'static [#element_ty] = #value;
+        }
+    };
+    if aliases.is_empty() {
+        return contracts;
+    }
+
+    quote! {
+        const _: () = {
+            #aliases
+            #contracts
+        };
+    }
+}
+
+/// Emit an actor's one `Declared` impl (ADR-0231 §10): its `depends(..)` and
+/// `spawns(..)` lists, each a type-level list in declaration order.
+pub fn declared_impl(site: &ReplyMarkerSite<'_>, depends: &[syn::TypePath], spawns: &[syn::TypePath]) -> TokenStream2 {
+    let ReplyMarkerSite { impl_generics, self_ty, where_clause, .. } = site;
+    let depends_list = declaration_list(depends.iter().map(|target| quote! { #target }), quote! { () });
+    let spawns_list = declaration_list(spawns.iter().map(|child| quote! { #child }), quote! { () });
+    quote! {
+        impl #impl_generics ::aether_actor::Declared for #self_ty #where_clause {
+            type Depends = #depends_list;
+            type Spawns = #spawns_list;
         }
     }
 }

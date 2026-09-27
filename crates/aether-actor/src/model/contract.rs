@@ -7,8 +7,15 @@
 //! deferred `-> O` handler's row is `O`, a `-> ()` handler's row is
 //! [`Silent`], and a manual handler's row is [`Undeclared`]. A `#[fallback]`
 //! contributes no row.
+//!
+//! The one [`Contracts`] impl carries the rows as a type-level list,
+//! [`Contracts::Rows`], and each [`Contract<K>`] impl names its row's position
+//! in it ([`Contract::Index`]), so a row exists only at a position of that list
+//! (ADR-0231 §10).
 
 use aether_data::{ActorMail, Kind, KindId, ReplyContract};
+
+use super::declared::RowIndex;
 
 /// The row of a handler that sends no reply (`-> ()`).
 ///
@@ -86,20 +93,43 @@ impl SilentRow for Undeclared {}
 /// A protocol (ADR-0231 §2) has no `Contract` rows: it declares its rows as
 /// [`Protocol::Rows`](crate::Protocol::Rows), and a target covers them through
 /// these rows ([`CoveredBy`](crate::CoveredBy)).
+///
+/// A row exists only at a position of the target's one
+/// [`Contracts::Rows`] list (ADR-0231 §10): [`Index`](Contract::Index) names
+/// that position, and its bound holds only when the list holds a
+/// [`Row<K, Reply>`](crate::Row) there. `#[actor]` writes the list and each
+/// row's position from the handlers it parses, so a hand-written row for a
+/// kind the actor has no handler for either repeats an emitted impl (`E0119`)
+/// or names a position that holds another kind or none (`E0277`).
 #[diagnostic::on_unimplemented(
     message = "`{Self}` has no contract row for `{K}`",
     label = "no handler for `{K}` on this target",
     note = "a `#[fallback]` does not count as handling a kind"
 )]
-pub trait Contract<K: Kind> {
+pub trait Contract<K: Kind>: Contracts {
     /// The reply kind, [`Silent`], or [`Undeclared`].
     type Reply: ReplyShape;
+
+    /// The row's position in [`Contracts::Rows`]: [`Here`](crate::Here) for
+    /// the first handler, [`There<I>`](crate::There) past it. Written by the
+    /// expansion that declared the handler.
+    #[doc(hidden)]
+    type Index: RowIndex<<Self as Contracts>::Rows, K, Reply = Self::Reply>;
 }
 
-/// Every contract row of a target as `(kind, reply)` pairs, in the
-/// manifest's [`ReplyContract`] vocabulary, so the list compares directly
-/// with a loaded target's handler rows (ADR-0231 §4).
+/// Every contract row of a target, as the type-level list its
+/// [`Contract<K>`] rows index into ([`Rows`](Contracts::Rows)) and as
+/// `(kind, reply)` pairs in the manifest's [`ReplyContract`] vocabulary, so
+/// the list compares directly with a loaded target's handler rows
+/// (ADR-0231 §4).
 pub trait Contracts {
+    /// `(Row<K1, O1>, (Row<K2, O2>, (…, ())))`: one entry per handler, in
+    /// declaration order, then an adopted native handler set's rows. A
+    /// `#[cfg]`-gated handler whose predicates are off keeps its slot as
+    /// [`Gap`](crate::Gap), so every other row's position is the same in every
+    /// configuration (ADR-0231 §10).
+    type Rows;
+
     /// One entry per [`Contract`] row, handler-set rows included.
     const CONTRACTS: &'static [(KindId, ReplyContract)];
 }

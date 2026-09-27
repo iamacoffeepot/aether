@@ -15,7 +15,8 @@ use crate::manifest::{
 };
 use crate::opts::{ActorCardinality, ActorOpts};
 use crate::reply_markers::{
-    ReplyMarkerSite, contract_element, contract_row_impl, contract_rows_expr, contracts_impl, reply_marker_impl,
+    ReplyMarkerSite, RowSpec, contract_element, contract_row_impl, contract_rows_expr, contracts_impl, declared_impl,
+    position, reply_marker_impl, rows_list,
 };
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
@@ -414,32 +415,52 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 for #self_ty #where_clause {}
         }
     });
-    // ADR-0230: each `unsafe impl DependsOn<R>` pairs with the
+    // ADR-0231 §10: the actor's one `Declared` impl lists its `depends(..)` and
+    // `spawns(..)` entries, and each `DependsOn` / `Spawns` impl below names
+    // its entry's position there, so none compiles without its declaration.
+    let impl_generics_ts = quote! { #impl_generics };
+    let self_ty_ts = quote! { #self_ty };
+    let where_clause_ts = quote! { #where_clause };
+    let declared = declared_impl(
+        &ReplyMarkerSite {
+            impl_generics: &impl_generics_ts,
+            self_ty: &self_ty_ts,
+            where_clause: &where_clause_ts,
+            cfgs: &[],
+        },
+        &opts.depends,
+        &opts.spawns,
+    );
+    // ADR-0230: each `DependsOn<R>` impl pairs with the
     // `InputsRecord::Dependency` record `manifest.rs` emits for the same `R`.
-    let depends_impls = opts.depends.iter().map(|target| {
+    let depends_impls = opts.depends.iter().enumerate().map(|(index, target)| {
+        let index = position(index);
         quote! {
-            unsafe impl #impl_generics ::aether_actor::DependsOn<#target>
-                for #self_ty #where_clause {}
+            impl #impl_generics ::aether_actor::DependsOn<#target> for #self_ty #where_clause {
+                type Index = #index;
+            }
         }
     });
     // ADR-0114 (issue 6583): one `Spawns<C>` impl per declared inline child,
     // which the typed spawn verbs require, and the matching bound on the
     // hidden `__aether_listed_children::<M>`, which every `export!` that lists
     // this actor calls with its own module type, so that `export!` must list
-    // every declared child. Emitted together here and nowhere else: a
-    // hand-written `Spawns` impl would let a spawn skip the `export!` check.
+    // every declared child. Emitted together here and nowhere else, from the
+    // same `spawns(..)` list the `Declared` impl carries.
     let spawns = &opts.spawns;
-    let spawns_impls = spawns.iter().map(|child| {
+    let spawns_impls = spawns.iter().enumerate().map(|(index, child)| {
+        let index = position(index);
         quote! {
-            unsafe impl #impl_generics ::aether_actor::Spawns<#child>
-                for #self_ty #where_clause {}
+            impl #impl_generics ::aether_actor::Spawns<#child> for #self_ty #where_clause {
+                type Index = #index;
+            }
         }
     });
     let listed_children = quote! {
         impl #impl_generics #self_ty #where_clause {
             #[doc(hidden)]
             #[allow(private_bounds)] // aether-suppression-request: a pub actor may declare a private child, and the check's bound names it; the fn is hidden and never called
-            pub fn __aether_listed_children<__AetherM>()
+            pub fn __aether_listed_children<__AetherM: ::aether_actor::wasm::ListedModule>()
             where
                 #(#spawns: ::aether_actor::Rebuildable<__AetherM>,)*
             {
@@ -480,18 +501,17 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         )
     });
 
-    // ADR-0231 §1 / §4: one `Contract<K>` row per handler and the actor's
+    // ADR-0231 §1 / §4 / §10: one `Contract<K>` row per handler, each at its
+    // handler's position in the actor's `Rows` list, and the actor's
     // `CONTRACTS` list, derived from the same row types. An adopted set's rows
-    // join the list; a wasm set emits no marker bridge, so its kinds get list
-    // entries but no per-kind row (ADR-0169).
-    let impl_generics_ts = quote! { #impl_generics };
-    let self_ty_ts = quote! { #self_ty };
-    let where_clause_ts = quote! { #where_clause };
-    let contract_rows = handlers.iter().map(|h| {
+    // join `CONTRACTS`; a wasm set emits no marker bridge, so its kinds get
+    // list entries but no per-kind row and no `Rows` entry (ADR-0169).
+    let contract_rows = handlers.iter().enumerate().map(|(index, h)| {
         contract_row_impl(
             h.class,
             &h.reply,
             &h.kind_ty,
+            &position(index),
             &ReplyMarkerSite {
                 impl_generics: &impl_generics_ts,
                 self_ty: &self_ty_ts,
@@ -504,6 +524,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         handlers.iter().map(|h| contract_element(h.class, &h.reply, &h.kind_ty, &h.cfgs)).collect();
     let set_contract_rows =
         opts.handler_set.as_ref().map(|set| quote! { <#self_ty as #set>::__AETHER_HANDLER_SET_CONTRACTS });
+    let row_specs: Vec<RowSpec<'_>> = handlers
+        .iter()
+        .map(|h| RowSpec { class: h.class, reply: &h.reply, kind_ty: &h.kind_ty, cfgs: &h.cfgs })
+        .collect();
+    let rows = rows_list(&row_specs, quote! { () })?;
     let contracts_list = contracts_impl(
         &ReplyMarkerSite {
             impl_generics: &impl_generics_ts,
@@ -511,6 +536,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             where_clause: &where_clause_ts,
             cfgs: &[],
         },
+        &rows.aliases,
+        &rows.list,
         &contract_rows_expr(&contract_elements),
         set_contract_rows.as_ref(),
     );
@@ -674,6 +701,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #root_impl
         #module_child_impl
         #(#child_impls)*
+        #declared
         #(#depends_impls)*
         #(#spawns_impls)*
         #listed_children
