@@ -234,12 +234,6 @@ pub const INLINE_WHO_CHILD: u32 = 2;
 #[aether_data::kind(name = "aether.test_fixtures.despawn_child", default)]
 pub struct DespawnChild;
 
-/// Issue 4490 nested-lineage fixture trigger. Sent to an inline actor so it
-/// spawns a detached wasm child from inside its shared component instance;
-/// the child's registered lineage must extend that executing inline actor.
-#[aether_data::kind(name = "aether.test_fixtures.spawn_nested_detached", default)]
-pub struct SpawnNestedDetached;
-
 /// Issue 2690 typed config for the config-carrying inline-child reload
 /// fixture: the durable counter's starting value. Distinct from the
 /// `()`-config `InlineStatefulChild` — this is the config-bytes case the

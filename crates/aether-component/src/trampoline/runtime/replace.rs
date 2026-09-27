@@ -7,10 +7,9 @@ use std::sync::Arc;
 use aether_actor::Single;
 use aether_data::ErasedActorPath;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
-use aether_substrate::actor::native::spawn::Subname;
-use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone};
+use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, TaskDone};
 use aether_substrate::actor::wasm::asset_manifest;
-use aether_substrate::actor::wasm::component::{Component, PendingSpawn, StateBundle};
+use aether_substrate::actor::wasm::component::{Component, StateBundle};
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::KindId;
 use aether_substrate::mail::registry::{PreparedAliasRetirement, PreparedAliasRoute};
@@ -18,7 +17,6 @@ use aether_substrate::mail::registry::{PreparedAliasRetirement, PreparedAliasRou
 use crate::component::replacement_refusal;
 use crate::trampoline::WasmTrampoline;
 
-use super::config::WasmTrampolineConfig;
 use super::contract;
 use super::state::WasmTrampolineState;
 
@@ -55,90 +53,6 @@ impl WasmTrampolineState {
                 target: "aether_component",
                 alias = %done.context().alias,
                 "inline-child alias registry batch failed after owner staging: {error}",
-            );
-        }
-        done.release_no_reply();
-    }
-
-    /// ADR-0097: perform the sibling spawn the guest staged via the
-    /// `spawn_sibling` host fn during `Component::deliver`. The
-    /// trampoline runs the typed `spawn_child::<WasmTrampoline>` (the
-    /// identity ZST) the substrate host fn couldn't (it can't name this
-    /// type), reusing
-    /// the resident `Module` and handing the spawned sibling its
-    /// own capability group (looked up by actor-type tag), which the
-    /// sibling's `wire` registers from its declaration. A
-    /// spawn-time failure surfaces here, asynchronously to the guest
-    /// (which already received the `MailboxId`): logged, not fatal.
-    ///
-    /// The parent is the guest's request, so it is proven here (ADR-0230)
-    /// before anything is staged. A parent that is not yet live — an inline
-    /// alias the same guest call staged, whose publication has not landed —
-    /// or one that never will be — a retired alias, or one whose publication
-    /// failed — refuses the spawn with a warning, and no birth is staged.
-    pub fn spawn_sibling(&self, ctx: &mut NativeCtx<'_, WasmTrampoline, Single>, pending: PendingSpawn) {
-        // The guest named this parent; prove it before anything is staged. An
-        // inline alias the same guest call staged is not published until this
-        // turn flushes, and a retired or failed alias never will be, so neither
-        // proves and the spawn is refused.
-        let parent = match ctx.resolve_live(pending.parent) {
-            Ok(parent) => parent,
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_component",
-                    subname = %pending.subname,
-                    "sibling spawn refused: parent not yet live ({error}); nothing staged",
-                );
-                return;
-            }
-        };
-        let capabilities = self
-            .module
-            .manifest()
-            .actors()
-            .iter()
-            .find(|actor| {
-                // Runtime-name match: compute each loaded actor's declared
-                // namespace's (from module metadata) actor-type identity to
-                // find the one whose tag the spawn requested — not a
-                // hardcoded sibling.
-                actor.namespace.as_deref().is_some_and(|ns| aether_data::ActorId::singleton(ns).0 == pending.tag)
-            })
-            .map(|actor| actor.capabilities.clone())
-            .unwrap_or_default();
-        let config = WasmTrampolineConfig {
-            engine: Arc::clone(&self.engine),
-            linker: Arc::clone(&self.linker),
-            // ADR-0163 §3 (#3984): the sibling shares this module, so it
-            // opens its own asset load window over the same asset blobs.
-            module: self.module.clone(),
-            modules: self.modules.clone(),
-            outbound: Arc::clone(&self.outbound),
-            capabilities,
-            config: pending.config,
-            type_tag: Some(pending.tag),
-        };
-        let parent_path = ctx.actor_path(parent);
-        let staged = ctx
-            .spawn_child_scoped::<WasmTrampoline>(parent, Subname::Named(&pending.subname), config, ())
-            .stage_with(SiblingSpawnContext { parent: parent_path.clone(), subname: pending.subname.clone() });
-        if let Err(error) = staged {
-            tracing::warn!(
-                target: "aether_component",
-                parent = %parent_path,
-                subname = %pending.subname,
-                "sibling spawn failed: {error:?}",
-            );
-        }
-    }
-
-    pub(super) fn finish_sibling_spawn(done: TaskDone<SpawnOutcome<WasmTrampoline>, SiblingSpawnContext>) {
-        if let Err(error) = &done.output().result {
-            tracing::warn!(
-                target: "aether_component",
-                parent = %done.context().parent,
-                subname = %done.context().subname,
-                "sibling spawn failed after owner staging: {error:?}",
             );
         }
         done.release_no_reply();
@@ -439,10 +353,9 @@ impl WasmTrampolineState {
             return ReplaceResult::Err { error: format!("on_rehydrate failed: {e}") };
         }
 
-        // ADR-0097: the new module is now resident — retain it so sibling
-        // spawns after this replace re-instantiate the new code and read the
-        // new manifest's groups, and (ADR-0163 §3, #3984) open their load
-        // windows over the new module's assets, not the replaced module's.
+        // The new module is now resident — retain it so a later replace
+        // checks its replacement against the new manifest, not the replaced
+        // module's.
         self.module = module;
         // ADR-0096: track the actor type this trampoline now hosts, so
         // a later bare (`export: None`) replace reuses the *current*
@@ -472,12 +385,6 @@ impl WasmTrampolineState {
 
         ReplaceResult::Ok { capabilities }
     }
-}
-
-#[derive(Clone)]
-pub(super) struct SiblingSpawnContext {
-    parent: ErasedActorPath,
-    subname: String,
 }
 
 #[derive(Clone)]

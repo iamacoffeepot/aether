@@ -94,8 +94,8 @@ pub struct ComponentHostCapabilityState {
     pub default_name_counter: u64,
     /// The engine's one module cache (ADR-0240 D5, ADR-0241 §2), built here
     /// on the engine every load instantiates against and handed to every
-    /// trampoline, so a load, a boot, a sibling spawn and a replace of the
-    /// same bytes all share one compiled, parsed entry per content hash — a
+    /// trampoline, so a load, a boot and a replace of the same bytes all
+    /// share one compiled, parsed entry per content hash — a
     /// burst of loads of one artifact (`replicas: N`, a boot manifest naming
     /// several of its exports) pays cranelift once instead of once per load.
     /// Nothing is evicted by count or capacity — an entry lives only as long

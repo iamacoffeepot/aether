@@ -43,10 +43,9 @@ pub struct WasmTrampolineState {
     /// re-instantiates the same exported type from the new wasm
     /// and re-reads that type's capability group.
     pub(crate) type_tag: Option<u64>,
-    /// The resident [`Module`], retained so a sibling spawn re-instantiates
-    /// its compiled code and reads its own capability group from the
-    /// manifest (ADR-0097) and opens its own asset load window over the
-    /// module's asset blobs (ADR-0163 §3), and refreshed on replace. A cheap
+    /// The resident [`Module`], retained so a replace checks its replacement
+    /// against the resident manifest (ADR-0231 §5), and refreshed on
+    /// replace. A cheap
     /// clone of the engine module cache's entry, which it keeps alive
     /// (ADR-0240 D5, ADR-0241 §2).
     pub(crate) module: Module,

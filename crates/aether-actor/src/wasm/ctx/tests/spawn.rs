@@ -21,7 +21,7 @@ use alloc::string::String;
 
 /// Step 3: a synchronous `init` `Err` surfaces as
 /// [`SpawnError::InitFailed`] (the inline child runs `init` in-process,
-/// unlike the detached `spawn_child` whose init failure logs async).
+/// so its failure comes back synchronously).
 /// Exercises [`install_inline_child`] directly so the host build runs
 /// it without the panicking `spawn_inline_child` host-fn stub.
 #[test]

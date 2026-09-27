@@ -173,13 +173,11 @@ impl Spawner {
             .insert(id, InstancedSlotEntry { slot, wake });
     }
 
-    /// ADR-0097: allocate the next monotonic discriminator from the same
-    /// per-chassis sequence [`Subname::Counter`](super::Subname::Counter) draws on. The
-    /// `spawn_sibling` host fn calls this to resolve a wasm
-    /// `Subname::Counter` synchronously — it bakes the value into a
-    /// `Named` subname so the spawned trampoline's `MailboxId` is known
-    /// before the spawn completes (ADR-0097 §4), without double-drawing
-    /// the counter at spawn time.
+    /// Allocate the next monotonic discriminator from the same per-chassis
+    /// sequence [`Subname::Counter`](super::Subname::Counter) draws on. The
+    /// inline-child spawn host fns (ADR-0114) call this to resolve a wasm
+    /// `Subname::Counter` synchronously — they bake the value into the
+    /// alias's subname so its `MailboxId` is known within the guest call.
     pub fn next_counter(&self) -> u64 {
         self.counter.fetch_add(1, Ordering::Relaxed)
     }

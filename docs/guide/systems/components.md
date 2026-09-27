@@ -4,7 +4,7 @@
 > dual-target FFI convention), [ADR-0028](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0028-component-embedded-kind-manifest.md) / [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the kind + handler
 > manifests in the wasm), [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md) (boot config), [ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md) / [ADR-0101](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0101-replace-hooks-on-ffiactor.md)
 > (binding-stable hot-swap; the earlier drain design in [ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md) is superseded), [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (several actor types per module,
-> selected at load), and [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) / [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (sibling spawn and its
+> selected at load), and [ADR-0114](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0114-inline-child-actors.md) / [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (inline children and their
 > lineage-correct addressing). The authoring and loading surface here is **stable** — it's
 > what the reference component `aether-kit` (a multi-actor module: camera,
 > camera-controller, and mesh viewer) is built on, and the signatures were read from the
@@ -75,7 +75,7 @@ manifest grows to one handler group per exported type, each tagged with its
 namespace, so the loader and `describe_component` read each type's surface
 separately. Grouping actors that belong together — a subsystem's coordinator and the
 panels it manages, say — into one module is the intended use: it ships and versions
-them as a unit, and lets a running instance spawn its siblings ([below](#spawning-siblings)).
+them as a unit, and lets a running instance spawn its module's actors as inline children ([below](#spawning-children-inline)).
 
 The `generators = [aether_bloomery_bundle::bundle]` key names
 the one bloomery export generator. `export!` stays the only author entry;
@@ -152,7 +152,7 @@ receipt, and an address with no live component answers `Err` naming it.
 
 The engine compiles each distinct module, and parses its custom sections, once
 per content hash (the BLAKE3 hash of its wasm bytes). Every load, module boot,
-sibling spawn, and replace of the same bytes shares that one entry, which lives
+and replace of the same bytes shares that one entry, which lives
 while its publication or any of them holds it. The wasm bytes are not kept once
 the module is built, and each `aether.asset.*` section is checked in as its own
 blob ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §2).
@@ -239,20 +239,21 @@ Omit `type Config` and the macro synthesizes `()` and injects the unused argumen
 so a no-config `init` stays terse. A declared config kind shows up in the
 component's advertised capabilities, so `describe_kinds` can resolve its schema.
 
-## Spawning siblings
+## Spawning children inline
 
-A running instance can stand up another actor from its **own module** — a *sibling*
-type — without a fresh load ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)). Where a native capability spawns
-any permitted `Instanced` actor with `ctx.spawn_child`, a component spawns one
-of the `Instanced` types its `export!` listed. The child declares either an
-exact `child_of(Parent)` edge or `composable` module-local placement, and the
-call names both identities:
+A running instance can stand up another actor from its **own module** without a
+fresh load, as an **inline child** ([ADR-0114](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0114-inline-child-actors.md)). The child shares the
+parent's wasm instance, slot, and run-token, yet is addressed and mailed like any
+actor. Where a native capability spawns any permitted `Instanced` actor with
+`ctx.spawn_child`, a component spawns one of the `Instanced` types its `export!`
+lists. The child declares either an exact `child_of(Parent)` edge or `composable`
+module-local placement:
 
 ```rust
 #[handler::single]
 fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
-    // -> Result<(), SpawnError>: the birth completes after this call, so no reference comes back
-    let _ = ctx.spawn_child::<RootManager, Panel>(
+    // -> Result<InlineChild<Panel>, SpawnError>: the child's `init` has run by the time this returns
+    let _ = ctx.spawn_inline_child::<RootManager, Panel>(
         Subname::Counter,
         &PanelConfig { /* … */ },
     );
@@ -266,9 +267,12 @@ with `depends(R)`. The actor is the first parameter, the reply mode the second
 
 The `ChildOf<RootManager>` bound rejects a missing placement at compile time.
 At runtime the ctx also verifies that its actual registry actor tag is
-`RootManager` before config encoding or the sibling-spawn host call.
+`RootManager` before it allocates the child's alias. The child's `init` runs
+in-process during the call, so an `init` failure comes back as
+`SpawnError::InitFailed`, and the returned `InlineChild<Panel>` checks later
+sends against `Panel`'s handlers.
 
-Inline composition spells it `ctx.spawn_inline::<Panel>(subname, &config)` —
+The composable form spells it `ctx.spawn_inline::<Panel>(subname, &config)` —
 the child type and nothing else, because a `composable` module child may sit
 beneath any parent its module exports, and the ctx already knows which one is
 running. Use `spawn_inline_child::<RootManager, Panel>(...)` for the
@@ -301,7 +305,7 @@ for another crate's actors too: a re-exported actor is an ordinary `public`
 entry, and the `export!` must list every child it declares.
 
 `Subname::Counter` has the host assign a bare monotonic counter — `0`, `1`, … —
-for when you'll track it by the returned `MailboxId`; `Subname::Named("inventory")`
+for when you'll track it by the returned handle; `Subname::Named("inventory")`
 gives it a stable discriminator you can render and address. A spawned actor nests
 under the spawner's registered lineage ([ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)): if a loaded root is
 `aether.component/aether.embedded:root`, its named child is
@@ -312,8 +316,8 @@ The text after each `:` is that node's discriminator; `/` carries the ancestry.
 Spawn stays within the module the instance runs from; a different binary comes in
 through `load_component`, which carries its own code and kind vocabulary. This is
 what lets a wasm crate be a *library* of actors: a UI root spawns its panels, a zone
-manager spawns a per-entity actor for each thing in range — all from one resident
-module, its compiled code shared across the instances while each keeps its own state.
+manager spawns a per-entity actor for each thing in range — all inside the one
+resident instance, while each child keeps its own state.
 
 ### Explicit logical parents in `SubstrateHarness`
 

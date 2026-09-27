@@ -1,7 +1,6 @@
 //! Child creation — [`ActorTypeTag`] and [`SpawnError`], the [`WasmCtx`]
-//! verbs that spawn a detached sibling (ADR-0097) or an inline child
-//! (ADR-0114) and tear one down, and the subname resolution plus
-//! `init`-and-insert core both spawn paths share.
+//! verbs that spawn an inline child (ADR-0114) and tear one down, and the
+//! subname resolution plus `init`-and-insert core the spawn paths share.
 
 use aether_data::{ActorId, Kind, MailboxId};
 
@@ -41,13 +40,10 @@ impl ActorTypeTag {
 
 /// Why a synchronous spawn verb failed.
 ///
-/// Both typed spawn verbs validate the ctx's registry-derived parent actor
-/// identity before doing spawn work. For detached [`WasmCtx::spawn_child`]
-/// (ADR-0097), a later spawn-time failure (a retired / in-use subname, or the
-/// sibling's `init` returning `Err`) surfaces asynchronously on the
-/// trampoline, not through this `Result`. For the
-/// inline [`WasmCtx::spawn_inline_child`] (ADR-0114) the child's `init`
-/// runs in-process, synchronously, so its failure is reported here as
+/// The typed spawn verbs validate the ctx's registry-derived parent actor
+/// identity before doing spawn work. An inline child's `init`
+/// ([`WasmCtx::spawn_inline_child`], ADR-0114) runs in-process,
+/// synchronously, so its failure is reported here as
 /// [`SpawnError::InitFailed`].
 #[derive(Debug, Clone)]
 pub enum SpawnError {
@@ -72,10 +68,9 @@ pub enum SpawnError {
     SubnameInvalid(NamespaceError),
     /// ADR-0114: an inline child's synchronous `init` returned `Err`. The
     /// wrapped [`ActorInitError`] carries the actor's own failure message.
-    /// Unlike the detached `spawn_child` — whose `init` runs later on the
-    /// trampoline and logs asynchronously — an inline child's `init` runs
-    /// in-guest during [`WasmCtx::spawn_inline_child`], so the boot failure
-    /// comes back through this `Result`.
+    /// An inline child's `init` runs in-guest during
+    /// [`WasmCtx::spawn_inline_child`], so the boot failure comes back
+    /// through this `Result`.
     InitFailed(ActorInitError),
     /// Issue 2692: [`WasmCtx::spawn_inline_child_by_tag`] was handed an
     /// [`ActorTypeTag`] that matched none of the module's `export!`ed actor
@@ -88,47 +83,15 @@ pub enum SpawnError {
 }
 
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
-    /// ADR-0097: spawn a sibling actor type from the same resident
-    /// module — the wasm analogue of native `ctx.spawn_child::<P, C>`.
-    /// `C` is one of this module's exported `Instanced` types and must
-    /// declare `ChildOf<P>`; the SDK verifies that this ctx's actual actor
-    /// tag is `P`, resolves `C`'s tag, and encodes `C::Config`. Nothing
-    /// addressable comes back: the birth completes after this call (ADR-0097
-    /// §4), so there is no live route to prove at return. The instance
-    /// becomes addressable at `aether.embedded:<name>`.
-    ///
-    /// Parent identity and subname validation can `Err` synchronously. A
-    /// later spawn-time failure (a retired / in-use subname, or the sibling's
-    /// `init` returning `Err`) is logged on the trampoline and does not come
-    /// back through this `Result` (ADR-0097 §4). The spawned sibling's Source
-    /// is this actor's mailbox, so its replies route here.
-    pub fn spawn_child<P, C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<(), SpawnError>
-    where
-        P: WasmActor,
-        C: ChildOf<P> + Instanced + WasmActor,
-    {
-        self.validate_spawn_parent::<P>()?;
-        // Compile-time actor-type tag for the spawned sibling (hash(NAMESPACE),
-        // ADR-0029) — this is the id definition for the new instance, computed
-        // before any lineage carry exists.
-        let type_tag = ActorTypeTag::of::<C>().0;
-        let (is_counter, full_subname) = resolve_subname(subname)?;
-        let config_bytes = config.encode_into_bytes();
-        let _ = mail::spawn_sibling_scoped(self.mailbox, type_tag, is_counter, &full_subname, &config_bytes);
-        Ok(())
-    }
-
     /// ADR-0114: spawn an **inline child** — a co-located child actor that
     /// shares this component's WASM instance, slot, and run-token, while
-    /// being addressed and mailed like any actor. The signature mirrors
-    /// [`Self::spawn_child`] (a `Subname`-discriminated `Instanced` type);
-    /// the only difference is co-residency.
+    /// being addressed and mailed like any actor. `C` is a
+    /// `Subname`-discriminated `Instanced` type declaring `ChildOf<P>`.
     ///
     /// The host folds the child's alias [`MailboxId`]
     /// (`{parent}/aether.embedded:<subname>`) and registers a route to
     /// this trampoline's own slot; the SDK then runs `A::init`
-    /// **synchronously** (unlike the detached `spawn_child`, whose `init`
-    /// runs later on a fresh trampoline) and inserts the boxed child into
+    /// **synchronously** and inserts the boxed child into
     /// this ctx's per-component [`Registry`] keyed by the alias. Mail
     /// addressed to the alias lands in this slot and the `export!`
     /// membrane demuxes it to the child; the child's own sends stamp the
@@ -392,8 +355,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
 }
 
 /// Resolve a [`Subname`] into the `(is_counter, discriminator)` pair the
-/// spawn host fns take, shared by [`WasmCtx::spawn_child`] and
-/// [`WasmCtx::spawn_inline_child`]. `Counter` passes an empty discriminator
+/// inline spawn host fns take, used by [`WasmCtx::spawn_inline_child`].
+/// `Counter` passes an empty discriminator
 /// the host ignores (it assigns a bare monotonic counter and produces just
 /// `n.to_string()`); `Named` validates the caller-supplied segment (no `:`,
 /// no control/whitespace, not empty) then passes it bare as the flat

@@ -1,6 +1,6 @@
 # ADR-0097: Wasm sibling spawn
 
-- **Status:** Accepted (hosted-actor addressing later revised by [ADR-0099](0099-actor-identity-and-addressing.md) — the spawn *mechanism* stands)
+- **Status:** Superseded (2026-09-27, #6818) — the guest detached-sibling spawn (WasmCtx::spawn_child, the spawn_sibling_p32 / spawn_sibling_scoped_p32 imports, PendingSpawn staging) was removed for lack of a production consumer; runtime child creation in a component is ADR-0114 inline children.
 - **Date:** 2026-06-06
 
 ## Context

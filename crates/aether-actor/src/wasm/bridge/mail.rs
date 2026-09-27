@@ -123,67 +123,10 @@ pub fn reply_correlation() -> u64 {
     unsafe { raw::reply_correlation() }
 }
 
-/// ADR-0097: stage a sibling-spawn request and return the new
-/// instance's `MailboxId`. `tag` is the sibling type's actor-type
-/// tag (`ActorTypeTag::of::<A>()`); `is_counter` selects
-/// `Subname::Counter` (the host appends a monotonic discriminator)
-/// vs a caller-supplied name; `subname` is the full prefixed subname
-/// for `Named` or the type-namespace prefix for `Counter`; `config`
-/// is the encoded `Config` kind. The returned id is the spawned
-/// sibling's ADR-0099 §3 lineage fold (the component root folded
-/// with the sibling's node), known synchronously — one fold step on a
-/// carry the host already holds; the spawn itself completes just
-/// after this call (ADR-0097 §4), so a spawn-time failure surfaces
-/// asynchronously rather than here.
-#[allow(dead_code, reason = "legacy guest ABI bridge retained during the scoped-spawn migration")]
-#[must_use]
-pub fn spawn_sibling(tag: u64, is_counter: bool, subname: &str, config: &[u8]) -> u64 {
-    let subname_bytes = subname.as_bytes();
-    // SAFETY: forwards to `raw::spawn_sibling`, whose ABI is
-    // documented at the import site in `ffi/raw.rs`. Both `(ptr,
-    // len)` pairs are derived from references valid for `len` bytes
-    // for the call's duration; the host copies before returning.
-    unsafe {
-        raw::spawn_sibling(
-            tag,
-            u32::from(is_counter),
-            subname_bytes.as_ptr().addr() as u32,
-            subname_bytes.len() as u32,
-            config.as_ptr().addr() as u32,
-            config.len() as u32,
-        )
-    }
-}
-
-/// Issue 4490: stage a sibling beneath the executing actor rather than the
-/// component root. `parent` is the caller's current mailbox; the host accepts
-/// it only when it belongs to this component cluster. The legacy
-/// [`spawn_sibling`] bridge remains for already-built guest compatibility.
-#[must_use]
-pub fn spawn_sibling_scoped(parent: u64, tag: u64, is_counter: bool, subname: &str, config: &[u8]) -> u64 {
-    let subname_bytes = subname.as_bytes();
-    // SAFETY: both pointer/length pairs are borrowed for this call and the
-    // host copies them before returning; the scalar parent is guest-carried
-    // identity that the host validates before use.
-    unsafe {
-        raw::spawn_sibling_scoped(
-            parent,
-            tag,
-            u32::from(is_counter),
-            subname_bytes.as_ptr().addr() as u32,
-            subname_bytes.len() as u32,
-            config.as_ptr().addr() as u32,
-            config.len() as u32,
-        )
-    }
-}
-
 /// ADR-0114: register an inline child's alias route and return its
-/// `MailboxId`. The inline analogue of `spawn_sibling`: the
-/// legacy host folds the alias id onto the component root and registers a
-/// route to that trampoline's own slot, so the
-/// co-located child is addressable like any actor with no new
-/// trampoline. `is_counter` selects `Subname::Counter` (the host
+/// `MailboxId`. The legacy host folds the alias id onto the component root
+/// and registers a route to that trampoline's own slot, so the co-located
+/// child is addressable like any actor with no new trampoline. `is_counter` selects `Subname::Counter` (the host
 /// appends a monotonic discriminator) vs a caller-supplied name;
 /// `subname` is the bare `Named` segment (empty for `Counter`). No
 /// config crosses here — the guest runs the child's `init` in-process

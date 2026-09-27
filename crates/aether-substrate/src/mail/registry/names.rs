@@ -55,9 +55,9 @@ pub(super) fn categorise_mailbox_name(name: &str) -> Option<MailboxCategory> {
     //
     // ADR-0099 §4: the name is now the `/`-rendered lineage
     // (`aether.component/aether.embedded:NAME`, and one more
-    // `/...trampoline:CHILD` segment per nested sibling spawn), so the
-    // trampoline node is the *leaf* segment rather than the whole-string
-    // prefix — match on the last `/`-segment.
+    // `/...trampoline:CHILD` segment per trampoline loaded beneath another
+    // by `load_under`), so the trampoline node is the *leaf* segment rather
+    // than the whole-string prefix — match on the last `/`-segment.
     } else if name.rsplit('/').next().is_some_and(|leaf| leaf.starts_with("aether.embedded:")) {
         Some(MailboxCategory::Trampoline)
     } else if name.starts_with("aether.") {

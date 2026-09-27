@@ -1206,19 +1206,15 @@ fn instantiate_with_ctx(wat: &str, ctx: ComponentCtx) -> Component {
     Component::instantiate(&engine, &linker, &module, ctx, &[], None).unwrap()
 }
 
-fn wat_scoped_spawns(parent: MailboxId) -> String {
+fn wat_scoped_inline_spawn(parent: MailboxId) -> String {
     format!(
         r#"
         (module
-            (import "aether" "spawn_sibling_scoped_p32"
-                (func $spawn_sibling (param i64 i64 i32 i32 i32 i32 i32) (result i64)))
             (import "aether" "spawn_inline_child_scoped_p32"
                 (func $spawn_inline (param i64 i64 i32 i32 i32) (result i64)))
             (memory (export "memory") 1)
             {WAT_REALLOC}
             (data (i32.const 32) "leaf")
-            (data (i32.const 48) "worker")
-            (data (i32.const 64) "cfg")
             (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 200
                 i64.const {parent}
@@ -1227,16 +1223,6 @@ fn wat_scoped_spawns(parent: MailboxId) -> String {
                 i32.const 32
                 i32.const 4
                 call $spawn_inline
-                i64.store
-                i32.const 208
-                i64.const {parent}
-                i64.const 4660
-                i32.const 0
-                i32.const 48
-                i32.const 6
-                i32.const 64
-                i32.const 3
-                call $spawn_sibling
                 i64.store
                 i32.const 0))
         "#,
@@ -1584,12 +1570,11 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
     assert_eq!(folded, from_path, "the host-fn alias fold matches the rendered-name parse → fold");
 }
 
-/// Issue 4490: both scoped spawn imports accept a freshly prepared inline
-/// actor as the executing parent and extend that actor's lineage. With the
-/// parent alias still owner-unpublished, the host function records the
-/// detached request under that alias and returns the predicted id; whether the
-/// birth happens is the trampoline's decision when it proves the parent at
-/// drain, which nothing here drains into (issue 6672).
+/// Issue 4490: the scoped inline spawn import accepts a freshly prepared
+/// inline actor as the executing parent and extends that actor's lineage.
+/// With the parent alias still owner-unpublished, the host function stages
+/// the child alias beneath it, routed to the physical trampoline root, and
+/// returns the predicted id.
 #[test]
 fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
     let registry = Arc::new(Registry::new());
@@ -1605,7 +1590,7 @@ fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
     let parent = lineage_mailbox_id(&parent_name);
     let mut ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), root, None);
     ctx.stage_alias(PreparedAliasRoute::new(parent, parent_name.clone(), root, RouteContract::empty()));
-    let mut component = instantiate_with_ctx(&wat_scoped_spawns(parent), ctx);
+    let mut component = instantiate_with_ctx(&wat_scoped_inline_spawn(parent), ctx);
 
     component
         .deliver(&inbound(parent, aether_data::KindId(0), Vec::new(), Source::NONE))
@@ -1617,23 +1602,12 @@ fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
     let inline = aliases.iter().find(|alias| alias.alias == expected_inline).expect("nested inline alias staged");
     assert_eq!(&*inline.rendered_name, expected_inline_name);
     assert_eq!(inline.target_parent, root, "nested aliases still route to the physical trampoline root");
-
-    let expected_detached_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:worker");
-    let expected_detached = lineage_mailbox_id(&expected_detached_name);
-    let spawns = component.drain_pending_spawns();
-    assert_eq!(spawns.len(), 1);
-    assert_eq!(spawns[0].parent, parent);
-    assert_eq!(spawns[0].subname, "worker");
-    assert_eq!(spawns[0].config, b"cfg");
     let returned_inline = u64::from(component.read_u32(200)) | (u64::from(component.read_u32(204)) << 32);
-    let returned_detached = u64::from(component.read_u32(208)) | (u64::from(component.read_u32(212)) << 32);
     assert_eq!(returned_inline, expected_inline.0, "guest receives the nested inline id");
-    assert_eq!(returned_detached, expected_detached.0, "guest receives the nested detached id");
 }
 
 /// The new scalar is guest-controlled input, not authority. A foreign
-/// mailbox must allocate neither an alias nor a detached birth and both
-/// imports return the zero sentinel.
+/// mailbox must allocate no alias, and the import returns the zero sentinel.
 #[test]
 fn scoped_wasm_spawns_reject_a_foreign_parent() {
     let registry = Arc::new(Registry::new());
@@ -1646,18 +1620,15 @@ fn scoped_wasm_spawns_reject_a_foreign_parent() {
         .expect("register component root");
     let foreign = lineage_mailbox_id("aether.component/aether.embedded:foreign");
     let ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), root, None);
-    let mut component = instantiate_with_ctx(&wat_scoped_spawns(foreign), ctx);
+    let mut component = instantiate_with_ctx(&wat_scoped_inline_spawn(foreign), ctx);
 
     component
         .deliver(&inbound(root, aether_data::KindId(0), Vec::new(), Source::NONE))
         .expect("deliver rejected spawn turn");
 
     assert!(component.drain_pending_aliases().is_empty());
-    assert!(component.drain_pending_spawns().is_empty());
     assert_eq!(component.read_u32(200), 0);
     assert_eq!(component.read_u32(204), 0);
-    assert_eq!(component.read_u32(208), 0);
-    assert_eq!(component.read_u32(212), 0);
 }
 
 /// ADR-0114 + ADR-0165: a logical alias route follows the parent's `Inbox`

@@ -28,7 +28,7 @@
 //! The trampoline sits next to [`crate::component::ComponentHostCapability`] —
 //! its only consumer — and the namespace is whatever
 //! `WasmTrampoline::NAMESPACE` says it is. Single declaration, cap-owned,
-//! reachable on every target via the `Addressable` trait const. ADR-0097: the
+//! reachable on every target via the `Addressable` trait const. The
 //! substrate's `TRAMPOLINE_NAMESPACE` forward-feeds the same
 //! [`EMBEDDED_SCOPE`] const, collapsing the
 //! former two-literal mirror into one source; the
@@ -79,8 +79,8 @@ use aether_actor::{EMBEDDED_SCOPE, actor};
 use crate::component::ComponentHostCapability;
 
 // The runtime half — the whole `aether_substrate` / `wasmtime`-typed surface
-// (imports, `WasmTrampolineState`, `WasmTrampolineConfig`, the replace /
-// sibling-spawn helpers) — lives in the `runtime` directory, gated once here.
+// (imports, `WasmTrampolineState`, `WasmTrampolineConfig`, the replace
+// helpers) — lives in the `runtime` directory, gated once here.
 // The `#[runtime] impl` sits beside its state there.
 #[cfg(feature = "runtime")]
 mod runtime;

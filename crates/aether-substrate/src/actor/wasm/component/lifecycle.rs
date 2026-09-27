@@ -1,11 +1,9 @@
-use std::mem;
-
 use wasmtime::Store;
 
 use super::instantiate::Placement;
 use super::{
-    Component, ComponentCtx, CorrelationCursor, MAX_DELIVERABLE_MAIL_BYTES, PendingReplies, PendingSpawn,
-    SMALL_REGION_BYTES, StateBundle,
+    Component, ComponentCtx, CorrelationCursor, MAX_DELIVERABLE_MAIL_BYTES, PendingReplies, SMALL_REGION_BYTES,
+    StateBundle,
 };
 use crate::mail::registry::{PreparedAliasRetirement, PreparedAliasRoute};
 
@@ -105,15 +103,6 @@ impl Component {
     /// store.
     pub fn take_saved_state(&mut self) -> Option<StateBundle> {
         self.store.data_mut().saved_state.take()
-    }
-
-    /// ADR-0097: drain every sibling-spawn request the guest staged via
-    /// the `spawn_sibling` host fn during the just-returned `receive`.
-    /// The trampoline calls this after `deliver` and performs one
-    /// `spawn_child::<WasmTrampoline>` per request. Destructive — empty
-    /// once drained, and empty when the guest didn't spawn.
-    pub fn drain_pending_spawns(&mut self) -> Vec<PendingSpawn> {
-        mem::take(&mut self.store.data_mut().pending_spawns)
     }
 
     /// Drain logical inline-child aliases staged during the just-returned
