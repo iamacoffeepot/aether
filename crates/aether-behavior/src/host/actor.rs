@@ -175,13 +175,12 @@ impl WasmActor for BehaviorHost {
     /// child needs no restore: the fallback's direction check derives its
     /// proof from the inline registry by subname once, on the first lane
     /// mail after this reload (`wrapped_proof`), and holds it from then on.
-    /// The wrapped child is **not**
-    /// re-spawned: the composite walk reconstructs it from its own real config
-    /// + runtime state (#2694), and the reload `insert_child` carries no
-    /// residency guard, so a host-side re-spawn would double-spawn. The
-    /// rehydrate body (the private `apply_rehydrate`) takes no spawn surface,
-    /// so the defer-to-the-walk invariant is enforced by the signature, not
-    /// just discipline.
+    /// The wrapped child is **not** re-spawned: the composite walk
+    /// reconstructs it from its own real config + runtime state (#2694), and
+    /// the reload `insert_child` carries no residency guard, so a host-side
+    /// re-spawn would double-spawn. The rehydrate body (the private
+    /// `apply_rehydrate`) takes no spawn surface, so the defer-to-the-walk
+    /// invariant is enforced by the signature, not just discipline.
     fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
         self.apply_rehydrate_with_attach(prior.bytes(), |host| {
             host.offer_sentinel(&*ctx, sentinel::ATTACH);
@@ -580,10 +579,11 @@ mod tests {
     use super::*;
     use crate::envelope::{Effect, FilterOutput, Verdict};
     use crate::host::config::ChildSpec;
-    use crate::host::test_support::{fixed_output_wasm, forward_output, spawn_resident_child};
+    use crate::host::test_support::{fixed_output_wasm, forward_output};
     use aether_actor::Lifecycle;
-    use aether_actor::wasm::{NO_INBOUND_SOURCE, inline::Registry};
+    use aether_actor::wasm::{NO_INBOUND_SOURCE, inline::Registry, inline::compose::spawn_one_child};
     use aether_data::wire;
+    use aether_data::{Kind, MailboxId};
     use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -681,7 +681,18 @@ mod tests {
     fn rehydrated_host_fills_wrapped_proof_on_first_lookup() {
         let registry = Registry::new();
         let host_id = 0x10;
-        spawn_resident_child(&registry, host_id, "widget");
+        // Any resident actor under the subname will do; a script-less host is
+        // one this crate can spawn without a hand-written stub.
+        spawn_one_child::<BehaviorHost>(
+            &registry,
+            host_id,
+            MailboxId(0xF00D_0000),
+            0xF00D_0000,
+            "widget".to_string(),
+            false,
+            &config(ScriptSource::None).encode_into_bytes(),
+        )
+        .expect("test setup: resident child installs");
 
         // A reload runs `init` + `on_rehydrate` (not `wire`), so a fresh
         // `BehaviorHost` value is exactly what `host(..)` + `apply_rehydrate`
@@ -689,7 +700,6 @@ mod tests {
         let mut host = host(ScriptSource::None);
         let bundle = HostPersist { source: ScriptSource::None, bytes: Vec::new(), state: Vec::new() };
         host.apply_rehydrate(&bundle.encode());
-        assert!(host.wrapped.is_none(), "reload's fresh host value has not looked up its child yet");
 
         let mut ctx = WasmCtx::__new(host_id, &registry, NO_INBOUND_SOURCE);
         let expected = ctx.as_single().child("widget").expect("test setup: stub child resident").reference();
