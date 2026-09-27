@@ -27,6 +27,7 @@ use aether_actor::OutboundReply;
 use aether_actor::log::ActorLogRing;
 
 use crate::mail::cost::CostCells;
+use aether_actor::trace::ActorTraceRing;
 use aether_data::Kind;
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult};
@@ -35,7 +36,7 @@ use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::mail::KindId;
-use crate::runtime::trace::{ActorTraceRing, TailQuery};
+use crate::runtime::trace::{prove_tail, render_entry};
 
 /// Kinds this actor has already warned a dispatch miss for. `Local`, so it
 /// lives in the slot's own `ActorSlots` rather than a process-wide table —
@@ -169,9 +170,9 @@ pub fn dispatch_log_tail_if_matching<A>(
 /// ADR-0086 Phase 3 framework-built-in dispatch arm for
 /// `aether.trace.tail` — the trace-side sibling of
 /// [`dispatch_log_tail_if_matching`]. Reads the receiving actor's
-/// trace ring via the currently-stamped `ActorSlots` and replies inline;
-/// the dispatcher then skips the user's typed/fallback dispatch for this
-/// envelope. The trace-tree coordinator fans this out across the actors
+/// [`ActorTraceRing`] via the currently-stamped `ActorSlots` and replies
+/// inline; the dispatcher then skips the user's typed/fallback dispatch
+/// for this envelope. The trace-tree coordinator fans this out across the actors
 /// in a tree and stitches the per-ring slices.
 ///
 /// The request's root is proven once here, through the registry, into
@@ -196,10 +197,11 @@ pub fn dispatch_trace_tail_if_matching<A>(
     };
 
     let registry = binding.mailer().registry();
-    let reply = match TailQuery::prove(&request, registry) {
-        Ok(query) => ActorTraceRing::try_with(|ring| ring.tail(&query, registry)).unwrap_or_else(|| {
-            TraceTailResult::Err { error: "aether.trace.tail: actor has no stamped slots".to_owned() }
-        }),
+    let reply = match prove_tail(&request, registry) {
+        Ok(query) => ActorTraceRing::try_with(|ring| ring.tail(&query, |entry| render_entry(registry, entry)))
+            .unwrap_or_else(|| TraceTailResult::Err {
+                error: "aether.trace.tail: actor has no stamped slots".to_owned(),
+            }),
         Err(error) => TraceTailResult::Err { error },
     };
     ctx.reply(&reply);

@@ -11,7 +11,7 @@ use crate::mail::mailer::Mailer;
 #[cfg(test)]
 use crate::mail::registry::effect::RegistryInventory;
 use crate::mail::registry::effect::{ChangeSubscriber, RegistrySubscription, subscriber};
-use crate::mail::registry::names::{CHASSIS_SENTINEL_NAME, categorise_mailbox_name};
+use crate::mail::registry::names::categorise_mailbox_name;
 use crate::mail::{KindId, MailboxId};
 
 use super::Registry;
@@ -34,7 +34,7 @@ pub(super) fn live_inventory(mailboxes: &FxHashMap<MailboxId, RouteRecord>) -> V
         })
         .collect::<Vec<_>>();
     inventory.push(MailboxDescriptor {
-        name: CHASSIS_SENTINEL_NAME.to_owned(),
+        name: Registry::CHASSIS_SENTINEL_NAME.to_owned(),
         category: Some(MailboxCategory::ChassisSentinel),
     });
     inventory.sort_by(|left, right| left.name.cmp(&right.name));
@@ -48,6 +48,13 @@ pub(super) fn kind_inventory(kinds: &FxHashMap<KindId, KindSlot>) -> Vec<KindDes
 }
 
 impl Registry {
+    /// The name of the chassis-router sentinel,
+    /// [`MailboxId::CHASSIS_MAILBOX_ID`]: the sender every
+    /// chassis-originated root names. It holds no route record, so the
+    /// inventory lists it synthetically under this name, and a trace export
+    /// renders it by this name.
+    pub(crate) const CHASSIS_SENTINEL_NAME: &'static str = "aether.chassis";
+
     pub(crate) fn subscribe_inventory(&self, target: MailboxId, mailer: Arc<Mailer>) -> RegistrySubscription {
         let mut subscribers =
             self.subscribers.lock().expect("registry subscriber lock poisoned; fail-fast per ADR-0063");

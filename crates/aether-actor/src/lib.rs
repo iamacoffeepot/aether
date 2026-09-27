@@ -44,6 +44,7 @@ pub mod model;
 mod path;
 pub mod reference;
 pub mod request_context;
+pub mod trace;
 pub mod wasm;
 
 pub use asset::{AssetCatalog, AssetInfo, AssetWindow};

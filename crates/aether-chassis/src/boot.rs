@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aether_actor::log::DEFAULT_RING_CAP;
+use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use aether_codec::frame::install_max_frame_size;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_fs::{FsCapability, NamespaceRoots};
@@ -42,7 +43,6 @@ use aether_substrate::config::{
     SchedulerTuning, SecretsDir, validate_env,
 };
 use aether_substrate::runtime::log_install::apply_filter;
-use aether_substrate::runtime::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 
 use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
@@ -1213,10 +1213,10 @@ mod tests {
         RegistryQueueConfig, RegistryQueueConfigLayer, SchedulerTuningConfigLayer,
     };
     use aether_actor::log::DEFAULT_RING_CAP;
+    use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
     use aether_lifecycle::{LifecycleConfig, LifecycleConfigLayer};
     use aether_substrate::SchedulerTuning;
     use aether_substrate::config::ConfigError;
-    use aether_substrate::runtime::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
     use std::env;
     use std::fs;
     use std::path::PathBuf;

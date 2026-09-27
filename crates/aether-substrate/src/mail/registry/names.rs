@@ -3,11 +3,7 @@ use aether_data::{ActorId, MailboxCategory, fold_lineage};
 
 use crate::mail::MailboxId;
 
-/// The name of the chassis-router sentinel, [`MailboxId::CHASSIS_MAILBOX_ID`]:
-/// the sender every chassis-originated root names. It holds no route record,
-/// so the inventory lists it synthetically and a trace export renders it by
-/// this name.
-pub const CHASSIS_SENTINEL_NAME: &str = "aether.chassis";
+use super::Registry;
 
 /// The id a depth-1 registration takes from its canonical `name` — the fixed
 /// point of the ADR-0099 lineage fold (§3).
@@ -45,7 +41,7 @@ pub fn lineage_mailbox_id(path: &str) -> MailboxId {
 /// Pure function of the name string, round-tripped through
 /// `MailboxDescriptor.category`.
 pub(super) fn categorise_mailbox_name(name: &str) -> Option<MailboxCategory> {
-    if name == CHASSIS_SENTINEL_NAME {
+    if name == Registry::CHASSIS_SENTINEL_NAME {
         // Reachable via [`MailboxId::CHASSIS_MAILBOX_ID`] short-circuit;
         // never registered with a real handler. The synthetic entry in
         // [`Registry::list_mailbox_descriptors`] uses the same

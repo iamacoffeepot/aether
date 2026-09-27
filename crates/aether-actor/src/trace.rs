@@ -18,10 +18,10 @@
 //!
 //! A record holds the same `Copy` positions the producer hooks already
 //! have — mail ids and `Sent` endpoints as mailbox positions — so a push
-//! costs nothing beyond the copy. The positions never leave the ring:
-//! [`ActorTraceRing::tail`] renders each returned record through the
-//! registry into the wire [`TraceRingEntry`], naming every actor by its
-//! canonical path (ADR-0230 §1).
+//! costs nothing beyond the copy. The positions never leave the engine:
+//! [`ActorTraceRing::tail`] hands each returned record to the caller's
+//! render, which the substrate backs with its registry so every exported
+//! [`TraceRingEntry`] names actors by canonical path (ADR-0230 §1).
 //!
 //! Single-writer: the actor's dispatcher thread is the sole producer
 //! (one OS thread per actor at a time), so the `sequence` counter and
@@ -33,16 +33,15 @@
 //! in; the chassis trace handle keeps a separate locked chassis-host ring
 //! for those (ADR-0086 Phase 3 §B).
 
-use std::collections::VecDeque;
+extern crate alloc;
 
-use aether_actor::Local;
-use aether_data::{MailId, ThreadId};
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+
+use aether_data::{KindId, MailId, MailboxId, ThreadId};
 use aether_kinds::trace::{Nanos, TraceRingEntry, TraceTailResult};
 
-use crate::mail::registry::Registry;
-
-use super::SentRecord;
-use super::export::{TailQuery, render_entry};
+use crate::Local;
 
 /// Default per-actor trace-ring capacity. Larger than the log ring's
 /// 1024 because a busy actor records up to three trace entries per mail
@@ -68,8 +67,22 @@ pub const DEFAULT_TAIL_MAX: u32 = 256;
 /// upper bound — one ring can never reply with more than it holds.
 pub const MAX_TAIL_MAX: u32 = 4096;
 
+/// One `Sent` trace record's fields, stamped at flush (issue 1150). The
+/// ring stores it as written: positions, rendered only at export.
+#[derive(Clone, Copy, Debug)]
+pub struct SentRecord {
+    pub mail_id: MailId,
+    pub root: MailId,
+    pub parent_mail: Option<MailId>,
+    pub sender: MailboxId,
+    pub recipient: MailboxId,
+    pub kind: KindId,
+    pub t_construct_start: Nanos,
+    pub t: Nanos,
+}
+
 /// One mail-graph record as a ring holds it: positions, never paths.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum TraceRecord {
     /// The producer's `Sent`, pushed into the sender's ring.
     Sent(SentRecord),
@@ -81,11 +94,21 @@ pub enum TraceRecord {
 
 /// One ring slot: the record, its causal `root`, and the ring's
 /// monotonic `sequence` stamp.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct RingEntry {
-    pub(crate) sequence: u64,
-    pub(crate) root: MailId,
-    pub(crate) record: TraceRecord,
+    pub sequence: u64,
+    pub root: MailId,
+    pub record: TraceRecord,
+}
+
+/// An `aether.trace.tail` request as a ring reads it: the root filter is the
+/// ring's own [`MailId`], proven from the request's exported root where the
+/// request arrived, so filtering is one id comparison per entry.
+#[derive(Clone, Copy, Debug)]
+pub struct TailQuery {
+    pub max: u32,
+    pub since: Option<u64>,
+    pub root: Option<MailId>,
 }
 
 /// Per-actor bounded ring of trace records (ADR-0086 Phase 3). The
@@ -135,7 +158,7 @@ impl ActorTraceRing {
     /// `max(1, _)` — a zero-cap ring would drop every entry. Equivalent
     /// to [`Self::with_growth(ring_cap, ring_cap)`](Self::with_growth).
     #[must_use]
-    pub(crate) fn with_capacity(ring_cap: usize) -> Self {
+    pub fn with_capacity(ring_cap: usize) -> Self {
         Self::with_growth(ring_cap, ring_cap)
     }
 
@@ -147,7 +170,7 @@ impl ActorTraceRing {
     /// one asked to hold fewer than it started with. The floor is
     /// preallocated; the growth steps reallocate geometrically.
     #[must_use]
-    pub(crate) fn with_growth(floor: usize, max: usize) -> Self {
+    pub fn with_growth(floor: usize, max: usize) -> Self {
         let floor = floor.max(1);
         let max_cap = max.max(floor);
         Self { ring: VecDeque::with_capacity(floor), cap: floor, max_cap, sequence: 1 }
@@ -174,7 +197,7 @@ impl ActorTraceRing {
     /// ceiling costs only ~`log2(max_cap/floor)` reallocations. The
     /// predicate is invoked at most once per push, and only on a
     /// growable full ring.
-    pub(crate) fn push(&mut self, root: MailId, record: TraceRecord, front_still_live: impl FnOnce(MailId) -> bool) {
+    pub fn push(&mut self, root: MailId, record: TraceRecord, front_still_live: impl FnOnce(MailId) -> bool) {
         let sequence = self.sequence;
         self.sequence += 1;
         if self.ring.len() == self.cap {
@@ -191,10 +214,10 @@ impl ActorTraceRing {
     /// Read-side: filter on `since` (and the proven `root`, when set),
     /// cap at `max` (with `0 → DEFAULT_TAIL_MAX` and `> MAX_TAIL_MAX →
     /// ceiling` clamping), compute the `truncated_before` cursor, and
-    /// render each returned record through `registry` into its wire
-    /// shape. Ordered oldest-to-newest.
+    /// turn each returned record into its wire shape through `render`.
+    /// Ordered oldest-to-newest.
     #[must_use]
-    pub(crate) fn tail(&self, query: &TailQuery, registry: &Registry) -> TraceTailResult {
+    pub fn tail(&self, query: &TailQuery, render: impl FnMut(&RingEntry) -> TraceRingEntry) -> TraceTailResult {
         let max = resolve_max(query.max) as usize;
         let since = query.since.unwrap_or(0);
 
@@ -210,7 +233,7 @@ impl ActorTraceRing {
             .filter(|e| e.sequence > since)
             .filter(|e| query.root.is_none_or(|r| e.root == r))
             .take(max)
-            .map(|e| render_entry(registry, e))
+            .map(render)
             .collect();
 
         let next_since = entries.last().map_or(since, |e| e.sequence);
@@ -219,19 +242,22 @@ impl ActorTraceRing {
     }
 
     /// Snapshot every entry currently in the ring, oldest-to-newest, no
-    /// filter and no render. For tests that read the positions a
-    /// producer recorded.
-    #[cfg(test)]
+    /// filter and no render. For the panic-hook dump path and tests.
     #[must_use]
-    pub(crate) fn snapshot(&self) -> Vec<RingEntry> {
+    pub fn snapshot(&self) -> Vec<RingEntry> {
         self.ring.iter().copied().collect()
     }
 
     /// Number of entries currently in the ring.
-    #[cfg(test)]
     #[must_use]
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.ring.len()
+    }
+
+    /// Is the ring empty?
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ring.is_empty()
     }
 }
 
@@ -248,8 +274,7 @@ fn resolve_max(max: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_data::{KindId, MailboxId};
-    use aether_kinds::trace::TraceEvent;
+    use aether_kinds::trace::{TraceEvent, TraceMailId};
 
     fn mid(sender: u64, cid: u64) -> MailId {
         MailId { sender: MailboxId(sender), correlation_id: cid }
@@ -280,8 +305,18 @@ mod tests {
         query(0, None, None)
     }
 
+    /// A stand-in render: the ring tests read only each entry's sequence.
+    fn render(entry: &RingEntry) -> TraceRingEntry {
+        let id = TraceMailId { sender: None, correlation_id: entry.root.correlation_id };
+        TraceRingEntry {
+            sequence: entry.sequence,
+            root: id.clone(),
+            event: TraceEvent::Finished { mail_id: id, t: Nanos(0) },
+        }
+    }
+
     fn ok(ring: &ActorTraceRing, query: &TailQuery) -> (Vec<TraceRingEntry>, u64, Option<u64>) {
-        match ring.tail(query, &Registry::new()) {
+        match ring.tail(query, render) {
             TraceTailResult::Ok { entries, next_since, truncated_before } => (entries, next_since, truncated_before),
             TraceTailResult::Err { error } => panic!("expected Ok, got Err: {error}"),
         }
@@ -297,8 +332,6 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].sequence, 1);
         assert_eq!(entries[1].sequence, 2);
-        assert!(matches!(entries[0].event, TraceEvent::Sent { .. }));
-        assert!(matches!(entries[1].event, TraceEvent::Finished { .. }));
         assert_eq!(next_since, 2);
         assert_eq!(truncated_before, None);
     }

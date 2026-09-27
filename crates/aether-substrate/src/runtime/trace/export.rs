@@ -12,12 +12,11 @@
 //!
 //! Both read the registry's route table; neither adds a table of its own.
 
+use aether_actor::trace::{RingEntry, TailQuery, TraceRecord};
 use aether_data::{ErasedActorPath, MailId, MailboxId};
 use aether_kinds::trace::{TraceEvent, TraceMailId, TraceRingEntry, TraceTail};
 
-use crate::mail::registry::{CHASSIS_SENTINEL_NAME, Registry};
-
-use super::ring::{RingEntry, TraceRecord};
+use crate::mail::registry::Registry;
 
 /// The chassis sentinel's path, `aether.chassis`: the sender every
 /// chassis-originated root names, and the ring the walk reads for it. The
@@ -28,29 +27,20 @@ use super::ring::{RingEntry, TraceRecord};
 /// Never: the sentinel name is a one-segment actor path.
 #[must_use]
 pub fn chassis_host_path() -> ErasedActorPath {
-    ErasedActorPath::new(CHASSIS_SENTINEL_NAME).expect("the chassis sentinel name is a one-segment actor path")
+    ErasedActorPath::new(Registry::CHASSIS_SENTINEL_NAME)
+        .expect("the chassis sentinel name is a one-segment actor path")
 }
 
-/// A `TraceTail` request whose root filter has been proven into the ring's
-/// own [`MailId`]. Built only by [`Self::prove`].
-pub struct TailQuery {
-    pub(crate) max: u32,
-    pub(crate) since: Option<u64>,
-    pub(crate) root: Option<MailId>,
-}
-
-impl TailQuery {
-    /// Prove `request`'s root once, on receipt. A root whose sender path
-    /// names no route this engine ever registered is refused with text
-    /// naming it; no root is no filter.
-    pub(crate) fn prove(request: &TraceTail, registry: &Registry) -> Result<Self, String> {
-        let root = request
-            .root
-            .as_ref()
-            .map(|root| prove_mail_id(registry, root).ok_or_else(|| unproven_root(root)))
-            .transpose()?;
-        Ok(Self { max: request.max, since: request.since, root })
-    }
+/// Prove `request`'s root once, on receipt, into the ring's own
+/// [`MailId`]. A root whose sender path names no route this engine ever
+/// registered is refused with text naming it; no root is no filter.
+pub fn prove_tail(request: &TraceTail, registry: &Registry) -> Result<TailQuery, String> {
+    let root = request
+        .root
+        .as_ref()
+        .map(|root| prove_mail_id(registry, root).ok_or_else(|| unproven_root(root)))
+        .transpose()?;
+    Ok(TailQuery { max: request.max, since: request.since, root })
 }
 
 fn unproven_root(root: &TraceMailId) -> String {
@@ -79,7 +69,7 @@ pub fn render_mail_id(registry: &Registry, id: MailId) -> TraceMailId {
 /// `aether.chassis`. `None` when the sender is absent or names no route.
 pub fn prove_mail_id(registry: &Registry, id: &TraceMailId) -> Option<MailId> {
     let sender = id.sender.as_ref()?;
-    let position = if sender.as_str() == CHASSIS_SENTINEL_NAME {
+    let position = if sender.as_str() == Registry::CHASSIS_SENTINEL_NAME {
         MailboxId::CHASSIS_MAILBOX_ID
     } else {
         registry.route_position(sender)?
@@ -174,7 +164,7 @@ mod tests {
             since: None,
             root: Some(TraceMailId { sender: Some(path("aether.test.never")), correlation_id: 1 }),
         };
-        let refusal = TailQuery::prove(&request, &registry).err().expect("an unregistered root is refused");
+        let refusal = prove_tail(&request, &registry).expect_err("an unregistered root is refused");
         assert!(refusal.contains("aether.test.never"), "the refusal names the root: {refusal}");
     }
 }

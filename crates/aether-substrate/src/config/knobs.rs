@@ -6,8 +6,7 @@
 //! spawner seams as an ordinary argument.
 
 use aether_actor::log::DEFAULT_RING_CAP;
-
-use crate::runtime::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
+use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 
 /// Default admission bound for the ADR-0165 registry owner queue, in
 /// commands. Sized so a legitimate spike never touches it — a birth storm
@@ -78,8 +77,9 @@ pub struct RingCapacities {
     /// capacity (chassis-boot key `AETHER_ACTOR_LOG_RING_SIZE`; default
     /// [`DEFAULT_RING_CAP`]).
     pub log: usize,
-    /// Per-actor `ActorTraceRing` and chassis-host-ring *floor* capacity —
-    /// the size each ring starts at (chassis-boot key `AETHER_ACTOR_TRACE_RING_SIZE`; default
+    /// Per-actor [`ActorTraceRing`](aether_actor::trace::ActorTraceRing)
+    /// and chassis-host-ring *floor* capacity — the size each ring starts
+    /// at (chassis-boot key `AETHER_ACTOR_TRACE_RING_SIZE`; default
     /// [`DEFAULT_TRACE_RING_CAP`]).
     pub trace: usize,
     /// Ceiling a saturating trace ring grows to before it resumes

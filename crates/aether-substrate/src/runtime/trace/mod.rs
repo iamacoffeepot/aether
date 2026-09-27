@@ -35,36 +35,20 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use aether_actor::Local;
+use aether_actor::trace::{ActorTraceRing, TraceRecord};
 use aether_data::{KindId, MailId, MailboxId};
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
-
-use aether_actor::Local;
 
 use crate::chassis::settlement::SettlementRegistry;
 use crate::chassis::settlement_table::SettlementTable;
 use crate::mail::registry::Registry;
 
 mod export;
-mod ring;
 
+pub(crate) use aether_actor::trace::SentRecord;
 pub use export::chassis_host_path;
-pub(crate) use export::{TailQuery, render_mail_id};
-pub(crate) use ring::{ActorTraceRing, TraceRecord};
-pub use ring::{DEFAULT_TAIL_MAX, DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP, MAX_TAIL_MAX};
-
-/// One `Sent` trace record's fields, stamped at flush (issue 1150). The
-/// ring stores it as written: positions, rendered only at export.
-#[derive(Clone, Copy)]
-pub(crate) struct SentRecord {
-    pub(crate) mail_id: MailId,
-    pub(crate) root: MailId,
-    pub(crate) parent_mail: Option<MailId>,
-    pub(crate) sender: MailboxId,
-    pub(crate) recipient: MailboxId,
-    pub(crate) kind: KindId,
-    pub(crate) t_construct_start: Nanos,
-    pub(crate) t: Nanos,
-}
+pub(crate) use export::{prove_tail, render_entry, render_mail_id};
 
 /// Per-chassis trace-pipeline handle. Owned by the chassis `Mailer`;
 /// producer-side hooks reach it via `mailer.trace_handle()` or the
@@ -217,12 +201,12 @@ impl TraceHandle {
     /// ADR-0063).
     #[must_use]
     pub(crate) fn chassis_host_tail(&self, request: &TraceTail, registry: &Registry) -> TraceTailResult {
-        match TailQuery::prove(request, registry) {
+        match prove_tail(request, registry) {
             Ok(query) => self
                 .chassis_host_ring
                 .lock()
                 .expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063")
-                .tail(&query, registry),
+                .tail(&query, |entry| render_entry(registry, entry)),
             Err(error) => TraceTailResult::Err { error },
         }
     }

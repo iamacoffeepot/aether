@@ -6,6 +6,7 @@ use std::sync::{Arc, Weak};
 use aether_actor::Root;
 use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
+use aether_actor::trace::ActorTraceRing;
 use aether_data::ErasedActorPath;
 
 use super::passive_boot::{DynShutdown, PassiveBoot};
@@ -21,7 +22,6 @@ use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
 use crate::mail::registry::{Registry, RouteContract};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
-use crate::runtime::trace::ActorTraceRing;
 use crate::scheduler::{Drainable, SeizeHandle, WakeHandle};
 
 struct ClaimResources {

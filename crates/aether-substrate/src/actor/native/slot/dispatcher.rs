@@ -52,7 +52,7 @@ use crate::runtime::thread_name;
 use aether_actor::local::ActorSlots;
 
 use crate::actor::native::local;
-use crate::runtime::trace::TraceRecord;
+use aether_actor::trace::TraceRecord;
 use std::ops::Deref;
 use std::sync::PoisonError;
 

@@ -196,6 +196,7 @@ mod tests {
 
     use aether_actor::local::ActorSlots;
     use aether_actor::log::ActorLogRing;
+    use aether_actor::trace::{ActorTraceRing, TraceRecord};
     use aether_actor::{Addressable, HandlesKind, Local as _, MailSender, Manual, One};
     use aether_data::{ErasedActorPath, Kind, KindId, MailId, MailboxId, Source, SourceAddr};
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
@@ -215,7 +216,6 @@ mod tests {
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::{InboxHandler, Registry};
     use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
-    use crate::runtime::trace::{ActorTraceRing, TraceRecord};
     use crate::scheduler::{Pool, PoolConfig, PoolHandle};
     use crate::{BootError, NativeInitCtx};
 

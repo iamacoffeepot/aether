@@ -6,8 +6,8 @@ use std::env;
 use std::str::FromStr;
 use std::thread;
 
+use aether_actor::trace::DEFAULT_TRACE_RING_CAP;
 use aether_substrate::SchedulerTuning;
-use aether_substrate::runtime::trace::DEFAULT_TRACE_RING_CAP;
 
 use super::{Drive, Tier};
 
