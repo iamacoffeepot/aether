@@ -12,6 +12,7 @@ use aether_data::{KindDescriptor, MailboxDescriptor, SchemaType};
 
 use crate::actor::native::offload::blocking::DeferredCompletion;
 
+use super::authority::BootAuthority;
 use super::mailbox::MailboxEntry;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
@@ -331,6 +332,21 @@ impl PreparedActivation {
     }
 }
 
+/// Proof that a [`BootAuthority`] holder authorized withdrawing a still-`Live`
+/// claim (ADR-0230 §1). Only pre-seal code holds the authority, so only
+/// pre-seal code can mint one; the field is private, so no other path can.
+pub struct ClaimWithdrawal(MailboxId);
+
+impl ClaimWithdrawal {
+    pub(super) fn new(_authority: &BootAuthority, id: MailboxId) -> Self {
+        Self(id)
+    }
+
+    pub(super) fn id(&self) -> MailboxId {
+        self.0
+    }
+}
+
 pub enum RegistryEffect {
     PreparedSpawn(PreparedSpawnCommit),
     PublishAlias(PreparedAliasRoute),
@@ -386,10 +402,10 @@ pub enum RegistryEffect {
     /// Remove a `Live` route record outright, so its name can be claimed
     /// again. The edge for a claim whose birth unwound before any actor
     /// could observe it (ADR-0079 §5: registration happens iff init
-    /// succeeds). Constructed only by `Registry::withdraw_claim`, which
-    /// takes a `BootAuthority`, so only pre-seal code reaches it; any other
-    /// route state refuses.
-    WithdrawClaim(MailboxId),
+    /// succeeds). The [`ClaimWithdrawal`] payload is the gate: minting one
+    /// takes a `BootAuthority`, so only pre-seal code can build this effect.
+    /// Any other route state refuses.
+    WithdrawClaim(ClaimWithdrawal),
     InstallSeize {
         id: MailboxId,
         handle: SeizeHandle,

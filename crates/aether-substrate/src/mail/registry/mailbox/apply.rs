@@ -359,11 +359,12 @@ impl Registry {
                     publication.inventory_dirty |= inventory_live;
                     applied.push(RegistryApplied::Dropped(name));
                 }
-                RegistryEffect::WithdrawClaim(id) => {
+                RegistryEffect::WithdrawClaim(withdrawal) => {
                     // Only a `Live` claim withdraws; see the effect's own doc
                     // for why nothing can still name it. A retired route keeps
                     // its tombstone, so a withdrawal never frees a name that
                     // ended.
+                    let id = withdrawal.id();
                     let Some(record) = staged_route(&staged_routes, inner, id) else {
                         return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
                     };

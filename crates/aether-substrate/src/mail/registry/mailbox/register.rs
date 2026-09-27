@@ -8,7 +8,7 @@ use aether_actor::ErasedActorRef;
 
 use crate::mail::MailboxId;
 use crate::mail::registry::authority::BootAuthority;
-use crate::mail::registry::effect::{RegistryApplied, RegistryEffect, RegistryEffectError};
+use crate::mail::registry::effect::{ClaimWithdrawal, RegistryApplied, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::errors::{DropError, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::{RouteContract, canonical_mailbox_id};
@@ -122,7 +122,7 @@ impl Registry {
     /// Panics if the inner routing lock is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn withdraw_claim(&self, authority: &BootAuthority, id: MailboxId) -> Result<(), DropError> {
-        match self.apply_one(authority, RegistryEffect::WithdrawClaim(id)) {
+        match self.apply_one(authority, RegistryEffect::WithdrawClaim(ClaimWithdrawal::new(authority, id))) {
             Ok(RegistryApplied::ClaimWithdrawn(_)) => Ok(()),
             Err(RegistryEffectError::Drop(error)) => Err(error),
             Ok(_) | Err(_) => unreachable!("withdraw effect returns the withdrawn id or a drop error"),
