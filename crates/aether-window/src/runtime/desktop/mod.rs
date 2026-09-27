@@ -16,8 +16,8 @@ mod menu;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, Addressable, ErasedActorRef, Manual, Single, runtime};
-use aether_data::ActorMail;
+use aether_actor::{ActorRef, ErasedActorRef, Manual, Single, runtime};
+use aether_data::{ActorMail, ErasedActorPath};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
     TextInput, WindowMode, WindowSize,
@@ -50,8 +50,7 @@ use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
     DesktopWindowCapability, DesktopWindowInstance, FocusWindowResult, ListWindows, ListWindowsResult,
     RequestWindowRedrawResult, RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult,
-    SetWindowTitleResult, WindowCapability, WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance,
-    WindowMenuActivated, WindowOpened, WindowSpec,
+    SetWindowTitleResult, WindowClosed, WindowCommand, WindowInfo, WindowMenuActivated, WindowOpened, WindowSpec,
 };
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
@@ -126,17 +125,17 @@ impl Default for DesktopWindowParams {
 /// `ActiveEventLoop`.
 #[derive(Clone, Debug)]
 pub enum WindowHostAction {
-    Create { id: WindowId, spec: WindowSpec },
-    Close { id: WindowId },
+    Create { path: ErasedActorPath, spec: WindowSpec },
+    Close { path: ErasedActorPath },
 }
 
 /// Owned semantic changes produced by a window host turn.
 #[derive(Clone, Debug)]
 pub enum WindowHostEffect {
-    Created { id: WindowId, window: Arc<Window> },
-    Closing { id: WindowId },
-    Dirty { id: WindowId },
-    Occluded { id: WindowId, occluded: bool },
+    Created { path: ErasedActorPath, window: Arc<Window> },
+    Closing { path: ErasedActorPath },
+    Dirty { path: ErasedActorPath },
+    Occluded { path: ErasedActorPath, occluded: bool },
     LastWindowClosed,
 }
 
@@ -187,9 +186,9 @@ struct DesktopWindowState {
 }
 
 impl DesktopWindowState {
-    fn info(&self, id: WindowId) -> WindowInfo {
+    fn info(&self, path: &ErasedActorPath) -> WindowInfo {
         WindowInfo {
-            id,
+            path: path.clone(),
             name: self.name.clone(),
             title: self.title.clone(),
             mode: self.mode.clone(),
@@ -203,23 +202,24 @@ impl DesktopWindowState {
 
 /// Application-scoped `aether.window` state.
 ///
-/// Engine identities are the mailbox ids of supervised named children. The
-/// `BTreeMap` makes `ListWindows` naturally ordered; the hash maps provide
-/// constant-time native lookup without exposing winit identities on the wire.
+/// Engine identities are the canonical paths of supervised named children.
+/// The `BTreeMap` makes `ListWindows` naturally ordered by path, which is
+/// window-name order; the hash maps provide constant-time native lookup
+/// without exposing winit identities on the wire.
 pub struct DesktopWindowCapabilityState {
     /// The product name the platform application menu is titled with. Boot
     /// input rather than window-local state: macOS has one application menu
     /// for the whole process, whichever window installs it.
     app_name: String,
-    windows: BTreeMap<WindowId, DesktopWindowState>,
-    native_windows: HashMap<WindowId, Arc<Window>>,
-    winit_windows: HashMap<WinitWindowId, WindowId>,
-    children: HashMap<WindowId, WindowChild>,
+    windows: BTreeMap<ErasedActorPath, DesktopWindowState>,
+    native_windows: HashMap<ErasedActorPath, Arc<Window>>,
+    winit_windows: HashMap<WinitWindowId, ErasedActorPath>,
+    children: HashMap<ErasedActorPath, WindowChild>,
     /// Each supervised child's window, keyed by the child's reference: the
     /// `MonitorNotice` sender a departing child is found by (ADR-0230).
-    child_windows: HashMap<ErasedActorRef, WindowId>,
+    child_windows: HashMap<ErasedActorRef, ErasedActorPath>,
     subscribers: WindowSubscribers,
-    pending_creates: HashMap<WindowId, PendingCreate>,
+    pending_creates: HashMap<ErasedActorPath, PendingCreate>,
     pending_host_actions: VecDeque<WindowHostAction>,
     pending_host_effects: Vec<WindowHostEffect>,
     initial_window_reserved: bool,
@@ -248,15 +248,19 @@ impl DesktopWindowCapabilityState {
     ///
     /// The window is addressable internally but remains absent from
     /// `ListWindows` until [`Self::finish_window_attachment`] succeeds.
-    pub fn stage_created_window(&mut self, id: WindowId, window: Arc<Window>) -> Result<WindowHostEffect, String> {
+    pub fn stage_created_window(
+        &mut self,
+        path: ErasedActorPath,
+        window: Arc<Window>,
+    ) -> Result<WindowHostEffect, String> {
         let pending =
-            self.pending_creates.get(&id).ok_or_else(|| format!("window {id:?} has no pending create action"))?;
+            self.pending_creates.get(&path).ok_or_else(|| format!("window {path} has no pending create action"))?;
         if self.winit_windows.contains_key(&window.id()) {
             return Err(format!("native window {:?} is already registered", window.id()));
         }
         let size = window.inner_size();
         self.windows.insert(
-            id,
+            path.clone(),
             DesktopWindowState {
                 name: pending.spec.name.clone(),
                 title: pending.spec.title.clone(),
@@ -266,16 +270,16 @@ impl DesktopWindowCapabilityState {
                 scale_factor: narrow_scale_factor(window.scale_factor()),
                 cursor: (0.0, 0.0),
                 composing: false,
-                modifiers: Modifiers { window: id, ..Modifiers::default() },
+                modifiers: Modifiers { window: path.clone(), shift: false, ctrl: false, alt: false, meta: false },
                 focused: window.has_focus(),
                 occluded: size.width == 0 || size.height == 0,
                 lifecycle: DesktopWindowLifecycle::Attaching,
                 close_reply: None,
             },
         );
-        self.winit_windows.insert(window.id(), id);
-        self.native_windows.insert(id, Arc::clone(&window));
-        Ok(WindowHostEffect::Created { id, window })
+        self.winit_windows.insert(window.id(), path.clone());
+        self.native_windows.insert(path.clone(), Arc::clone(&window));
+        Ok(WindowHostEffect::Created { path, window })
     }
 
     /// Complete render attachment for a staged create by staging the window's
@@ -284,11 +288,11 @@ impl DesktopWindowCapabilityState {
     /// [`SpawnOutcome`]; a render failure still rolls back and replies here.
     pub fn finish_window_attachment(
         &mut self,
-        id: WindowId,
+        path: &ErasedActorPath,
         attachment: Result<(), String>,
         ctx: &mut NativeCtx<'_, DesktopWindowCapability, Single>,
     ) -> Vec<WindowHostEffect> {
-        let Some(mut pending) = self.pending_creates.remove(&id) else {
+        let Some(mut pending) = self.pending_creates.remove(path) else {
             return Vec::new();
         };
         match attachment {
@@ -301,25 +305,25 @@ impl DesktopWindowCapabilityState {
                 // stays un-recorded across the birth and its chain cannot
                 // settle through it. Declared here because that reasoning is
                 // three call frames away from this line. The birth carries the
-                // predicted id as its completion context, since that id is what
-                // the reservation is keyed by.
+                // window's path as its completion context, since that path is
+                // what the reservation is keyed by.
                 if let Err(error) = ctx
                     .spawn_child::<DesktopWindowInstance>(Subname::Named(&pending.spec.name), (), ())
                     .ordered_by(OrderingDevice::RetainedReplyDebt)
-                    .stage_with(id)
+                    .stage_with(path.clone())
                 {
                     return self.rollback_attached_create(
-                        id,
+                        path,
                         &mut pending,
                         format!("failed to spawn window child: {error:?}"),
                     );
                 }
 
-                self.pending_creates.insert(id, pending);
+                self.pending_creates.insert(path.clone(), pending);
                 Vec::new()
             }
             Err(error) => {
-                self.remove_window(id);
+                self.remove_window(path);
                 if let Some(reply) = pending.reply.take() {
                     reply.reply(&CreateWindowResult::Err { error });
                 }
@@ -336,10 +340,10 @@ impl DesktopWindowCapabilityState {
     fn finish_window_child_spawn<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
-        id: WindowId,
+        path: &ErasedActorPath,
         outcome: &SpawnOutcome<DesktopWindowInstance>,
     ) {
-        let Some(mut pending) = self.pending_creates.remove(&id) else {
+        let Some(mut pending) = self.pending_creates.remove(path) else {
             if let Ok(child) = &outcome.result {
                 ctx.send_to(child, &RetireWindow);
             }
@@ -347,26 +351,26 @@ impl DesktopWindowCapabilityState {
         };
         let effects = match &outcome.result {
             Err(error) => {
-                self.rollback_attached_create(id, &mut pending, format!("failed to spawn window child: {error:?}"))
+                self.rollback_attached_create(path, &mut pending, format!("failed to spawn window child: {error:?}"))
             }
-            // The reservation is keyed by the id consumers address, so a
-            // divergent deterministic id dooms it rather than publishing a
-            // window nobody can reach: retire the child and roll back before
-            // anything answers the caller.
-            Ok(child) if WindowId(child.id().0) != id => {
+            // The reservation is keyed by the path consumers address, so a
+            // child that path does not prove dooms it rather than publishing
+            // a window nobody can reach: retire the child and roll back
+            // before anything answers the caller.
+            Ok(child) if ctx.resolve_path(path).ok() != Some(child.erase()) => {
                 ctx.send_to(child, &RetireWindow);
                 self.rollback_attached_create(
-                    id,
+                    path,
                     &mut pending,
-                    format!("spawned window child {child:?} did not match predicted window {id:?}"),
+                    format!("spawned window child {child:?} is not the window at {path}"),
                 )
             }
             Ok(child) => match ctx.monitor(child.erase()) {
-                Ok(monitor) => self.promote_attached_window(ctx, id, *child, monitor, &mut pending),
+                Ok(monitor) => self.promote_attached_window(ctx, path, *child, monitor, &mut pending),
                 Err(error) => {
                     ctx.send_to(child, &RetireWindow);
                     self.rollback_attached_create(
-                        id,
+                        path,
                         &mut pending,
                         format!("failed to monitor window child: {error:?}"),
                     )
@@ -379,49 +383,49 @@ impl DesktopWindowCapabilityState {
     fn promote_attached_window<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
-        id: WindowId,
+        path: &ErasedActorPath,
         child: ActorRef<DesktopWindowInstance>,
         monitor: ActorMonitorHandle,
         pending: &mut PendingCreate,
     ) -> Vec<WindowHostEffect> {
-        let Some(state) = self.windows.get_mut(&id) else {
-            let error = format!("window {id:?} disappeared during attachment");
+        let Some(state) = self.windows.get_mut(path) else {
+            let error = format!("window {path} disappeared during attachment");
             ctx.send_to(child, &RetireWindow);
-            return self.rollback_attached_create(id, pending, error);
+            return self.rollback_attached_create(path, pending, error);
         };
-        self.children.insert(id, WindowChild { reference: child, _monitor: monitor });
-        self.child_windows.insert(child.erase(), id);
+        self.children.insert(path.clone(), WindowChild { reference: child, _monitor: monitor });
+        self.child_windows.insert(child.erase(), path.clone());
         state.lifecycle = DesktopWindowLifecycle::Live;
         self.shutdown_when_idle = false;
-        let info = state.info(id);
+        let info = state.info(path);
         if let Some(reply) = pending.reply.take() {
             reply.reply(&CreateWindowResult::Ok { window: info.clone() });
         }
-        self.publish(ctx, id, &WindowOpened { window: info.clone() });
+        self.publish(ctx, path, &WindowOpened { window: info.clone() });
         if info.width != 0 && info.height != 0 {
-            self.publish(ctx, id, &self.window_size(id, info.width, info.height));
+            self.publish(ctx, path, &self.window_size(path, info.width, info.height));
         }
         Vec::new()
     }
 
     fn rollback_attached_create(
         &mut self,
-        id: WindowId,
+        path: &ErasedActorPath,
         pending: &mut PendingCreate,
         error: String,
     ) -> Vec<WindowHostEffect> {
-        self.remove_window(id);
+        self.remove_window(path);
         if let Some(reply) = pending.reply.take() {
             reply.reply(&CreateWindowResult::Err { error });
         }
-        let mut effects = vec![WindowHostEffect::Closing { id }];
+        let mut effects = vec![WindowHostEffect::Closing { path: path.clone() }];
         effects.extend(self.failed_create_effects(pending.shutdown_on_failure));
         effects
     }
 
     /// Fail a queued create before a native window could be staged.
-    pub fn fail_window_creation(&mut self, id: WindowId, error: String) -> Vec<WindowHostEffect> {
-        let Some(mut pending) = self.pending_creates.remove(&id) else {
+    pub fn fail_window_creation(&mut self, path: &ErasedActorPath, error: String) -> Vec<WindowHostEffect> {
+        let Some(mut pending) = self.pending_creates.remove(path) else {
             return Vec::new();
         };
         if let Some(reply) = pending.reply.take() {
@@ -433,15 +437,15 @@ impl DesktopWindowCapabilityState {
     /// Finish a close after the integration detached native resources.
     pub fn finish_window_close<A>(
         &mut self,
-        id: WindowId,
+        path: &ErasedActorPath,
         ctx: &mut NativeCtx<'_, A, Single>,
     ) -> Vec<WindowHostEffect> {
-        let close_reply = self.windows.get_mut(&id).and_then(|state| state.close_reply.take());
-        let existed = self.remove_window(id);
+        let close_reply = self.windows.get_mut(path).and_then(|state| state.close_reply.take());
+        let existed = self.remove_window(path);
         if !existed {
             if let Some(reply) = close_reply {
                 reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Err {
-                    error: format!("unknown window {id:?}"),
+                    error: format!("unknown window {path}"),
                 }));
             }
             return Vec::new();
@@ -451,10 +455,10 @@ impl DesktopWindowCapabilityState {
         // entry has nothing left to retire.
         if let Some(reply) = close_reply {
             reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Ok));
-        } else if let Some(child) = self.children.get(&id) {
+        } else if let Some(child) = self.children.get(path) {
             ctx.send_to(child.reference, &RetireWindow);
         }
-        self.publish(ctx, id, &WindowClosed { window: id });
+        self.publish(ctx, path, &WindowClosed { window: path.clone() });
         if self.windows.values().any(|window| window.lifecycle != DesktopWindowLifecycle::Attaching) {
             return Vec::new();
         }
@@ -471,24 +475,24 @@ impl DesktopWindowCapabilityState {
     /// or not yet live comes back as that command's own `Err` rather than a
     /// generic one, because the forwarding child matches the reply variant
     /// against the request it retained.
-    fn apply_at_window(&mut self, id: WindowId, command: WindowCommand) -> ApplyWindowCommandResult {
-        let window = match self.live_window(id) {
+    fn apply_at_window(&mut self, path: &ErasedActorPath, command: WindowCommand) -> ApplyWindowCommandResult {
+        let window = match self.live_window(path) {
             Ok(window) => window,
             Err(error) => return command.refused(error),
         };
         match command {
             // Answered from the close queue, never here.
-            WindowCommand::Close => command.refused(format!("close for {id:?} did not reach the close queue")),
-            WindowCommand::SetMode { mode, width, height } => self.apply_mode(id, &window, mode, width, height),
+            WindowCommand::Close => command.refused(format!("close for {path} did not reach the close queue")),
+            WindowCommand::SetMode { mode, width, height } => self.apply_mode(path, &window, mode, width, height),
             WindowCommand::SetTitle { title } => {
                 window.set_title(&title);
-                if let Some(state) = self.windows.get_mut(&id) {
+                if let Some(state) = self.windows.get_mut(path) {
                     state.title.clone_from(&title);
                 }
                 ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { title })
             }
             WindowCommand::SetMenu { menus } => {
-                ApplyWindowCommandResult::SetMenu(match apply_menu(&self.app_name, &window, id, &menus) {
+                ApplyWindowCommandResult::SetMenu(match apply_menu(&self.app_name, &window, path, &menus) {
                     Ok(()) => SetWindowMenuResult::Ok,
                     Err(error) => SetWindowMenuResult::Err { error },
                 })
@@ -516,7 +520,7 @@ impl DesktopWindowCapabilityState {
     /// resolved rather than the one requested.
     fn apply_mode(
         &mut self,
-        id: WindowId,
+        path: &ErasedActorPath,
         window: &Window,
         mode: WindowMode,
         width: Option<u32>,
@@ -535,7 +539,7 @@ impl DesktopWindowCapabilityState {
         window.request_redraw();
 
         let size = window.inner_size();
-        if let Some(state) = self.windows.get_mut(&id) {
+        if let Some(state) = self.windows.get_mut(path) {
             state.mode = mode.clone();
             state.width = size.width;
             state.height = size.height;
@@ -558,27 +562,27 @@ impl DesktopWindowCapabilityState {
         if self.windows.get(&window).is_none_or(|state| state.lifecycle != DesktopWindowLifecycle::Live) {
             return;
         }
-        self.publish(ctx, window, &WindowMenuActivated { window, id: item });
+        self.publish(ctx, &window, &WindowMenuActivated { window: window.clone(), id: item });
     }
 
     /// Translate one native window event and publish typed input directly to
     /// selector-aware subscribers.
     #[allow(clippy::too_many_lines)]
     pub fn window_event<A>(&mut self, winit_id: WinitWindowId, event: WindowEvent, ctx: &mut NativeCtx<'_, A, Single>) {
-        let Some(id) = self.winit_windows.get(&winit_id).copied() else {
+        let Some(path) = self.winit_windows.get(&winit_id).cloned() else {
             return;
         };
-        if self.windows.get(&id).is_none_or(|state| state.lifecycle != DesktopWindowLifecycle::Live) {
+        if self.windows.get(&path).is_none_or(|state| state.lifecycle != DesktopWindowLifecycle::Live) {
             return;
         }
 
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
-                let _ = self.queue_close(id, None);
+                let _ = self.queue_close(&path, None);
             }
             WindowEvent::Resized(size) => {
                 let mut occlusion = None;
-                if let Some(state) = self.windows.get_mut(&id) {
+                if let Some(state) = self.windows.get_mut(&path) {
                     state.width = size.width;
                     state.height = size.height;
                     let next = size.width == 0 || size.height == 0;
@@ -588,11 +592,11 @@ impl DesktopWindowCapabilityState {
                     }
                 }
                 if let Some(occluded) = occlusion {
-                    self.pending_host_effects.push(WindowHostEffect::Occluded { id, occluded });
+                    self.pending_host_effects.push(WindowHostEffect::Occluded { path: path.clone(), occluded });
                 }
                 if size.width != 0 && size.height != 0 {
-                    self.publish(ctx, id, &self.window_size(id, size.width, size.height));
-                    if let Some(window) = self.native_windows.get(&id) {
+                    self.publish(ctx, &path, &self.window_size(&path, size.width, size.height));
+                    if let Some(window) = self.native_windows.get(&path) {
                         window.request_redraw();
                     }
                 }
@@ -604,46 +608,46 @@ impl DesktopWindowCapabilityState {
             // winit follows this with its own `Resized`; republishing here
             // costs one duplicate mail and closes the gap when it doesn't.
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                let Some(state) = self.windows.get_mut(&id) else {
+                let Some(state) = self.windows.get_mut(&path) else {
                     return;
                 };
                 state.scale_factor = narrow_scale_factor(scale_factor);
                 let (width, height) = (state.width, state.height);
 
                 if width != 0 && height != 0 {
-                    self.publish(ctx, id, &self.window_size(id, width, height));
+                    self.publish(ctx, &path, &self.window_size(&path, width, height));
                 }
             }
             WindowEvent::Occluded(occluded) => {
-                if let Some(state) = self.windows.get_mut(&id)
+                if let Some(state) = self.windows.get_mut(&path)
                     && state.occluded != occluded
                 {
                     state.occluded = occluded;
-                    self.pending_host_effects.push(WindowHostEffect::Occluded { id, occluded });
+                    self.pending_host_effects.push(WindowHostEffect::Occluded { path: path.clone(), occluded });
                 }
             }
             WindowEvent::Focused(focused) => {
-                if let Some(state) = self.windows.get_mut(&id) {
+                if let Some(state) = self.windows.get_mut(&path) {
                     state.focused = focused;
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(window) = self.native_windows.get(&id) {
+                if let Some(window) = self.native_windows.get(&path) {
                     let size = window.inner_size();
-                    if let Some(state) = self.windows.get_mut(&id) {
+                    if let Some(state) = self.windows.get_mut(&path) {
                         state.width = size.width;
                         state.height = size.height;
                     }
                     if size.width != 0 && size.height != 0 {
-                        self.publish(ctx, id, &self.window_size(id, size.width, size.height));
+                        self.publish(ctx, &path, &self.window_size(&path, size.width, size.height));
                     }
                 }
-                self.pending_host_effects.push(WindowHostEffect::Dirty { id });
+                self.pending_host_effects.push(WindowHostEffect::Dirty { path: path.clone() });
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let committed = if event.state == ElementState::Pressed {
                     event.text.as_ref().and_then(|text| {
-                        self.windows.get_mut(&id).and_then(|state| {
+                        self.windows.get_mut(&path).and_then(|state| {
                             text_input_gate(&mut state.composing, TextSource::KeyText(text.to_string()))
                         })
                     })
@@ -651,38 +655,38 @@ impl DesktopWindowCapabilityState {
                     None
                 };
                 if let Some(text) = committed {
-                    self.publish(ctx, id, &TextInput { window: id, text });
+                    self.publish(ctx, &path, &TextInput { window: path.clone(), text });
                 }
                 if let Some(code) = match event.physical_key {
                     PhysicalKey::Code(code) => map_winit_keycode(code),
                     PhysicalKey::Unidentified(_) => None,
                 } {
                     match key_edge(event.state, event.repeat) {
-                        Some(KeyEdge::Press) => self.publish(ctx, id, &Key { window: id, code }),
-                        Some(KeyEdge::Release) => self.publish(ctx, id, &KeyRelease { window: id, code }),
+                        Some(KeyEdge::Press) => self.publish(ctx, &path, &Key { window: path.clone(), code }),
+                        Some(KeyEdge::Release) => self.publish(ctx, &path, &KeyRelease { window: path.clone(), code }),
                         None => {}
                     }
                 }
             }
             WindowEvent::Ime(ime) => match ime {
                 Ime::Preedit(text, cursor) => {
-                    if let Some(state) = self.windows.get_mut(&id) {
+                    if let Some(state) = self.windows.get_mut(&path) {
                         text_input_gate(&mut state.composing, TextSource::Preedit { active: !text.is_empty() });
                     }
                     let (cursor_begin, cursor_end) = ime_cursor_span(cursor);
-                    self.publish(ctx, id, &ImePreedit { window: id, text, cursor_begin, cursor_end });
+                    self.publish(ctx, &path, &ImePreedit { window: path.clone(), text, cursor_begin, cursor_end });
                 }
                 Ime::Commit(text) => {
                     let committed = self
                         .windows
-                        .get_mut(&id)
+                        .get_mut(&path)
                         .and_then(|state| text_input_gate(&mut state.composing, TextSource::Commit(text)));
                     if let Some(text) = committed {
-                        self.publish(ctx, id, &TextInput { window: id, text });
+                        self.publish(ctx, &path, &TextInput { window: path.clone(), text });
                     }
                 }
                 Ime::Disabled => {
-                    if let Some(state) = self.windows.get_mut(&id) {
+                    if let Some(state) = self.windows.get_mut(&path) {
                         text_input_gate(&mut state.composing, TextSource::Disabled);
                     }
                 }
@@ -691,42 +695,42 @@ impl DesktopWindowCapabilityState {
             WindowEvent::ModifiersChanged(modifiers) => {
                 let state = modifiers.state();
                 let modifiers = Modifiers {
-                    window: id,
+                    window: path.clone(),
                     shift: state.shift_key(),
                     ctrl: state.control_key(),
                     alt: state.alt_key(),
                     meta: state.super_key(),
                 };
-                if let Some(window) = self.windows.get_mut(&id) {
+                self.publish(ctx, &path, &modifiers);
+                if let Some(window) = self.windows.get_mut(&path) {
                     window.modifiers = modifiers;
                 }
-                self.publish(ctx, id, &modifiers);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(button) = map_mouse_button(button) {
-                    let (x, y) = self.windows.get(&id).map_or((0.0, 0.0), |window| window.cursor);
+                    let (x, y) = self.windows.get(&path).map_or((0.0, 0.0), |window| window.cursor);
                     match state {
                         ElementState::Pressed => {
-                            self.publish(ctx, id, &MouseButton { window: id, button, x, y });
+                            self.publish(ctx, &path, &MouseButton { window: path.clone(), button, x, y });
                         }
                         ElementState::Released => {
-                            self.publish(ctx, id, &MouseButtonRelease { window: id, button, x, y });
+                            self.publish(ctx, &path, &MouseButtonRelease { window: path.clone(), button, x, y });
                         }
                     }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (delta_x, delta_y) = normalize_wheel(delta);
-                let (x, y) = self.windows.get(&id).map_or((0.0, 0.0), |window| window.cursor);
-                self.publish(ctx, id, &MouseWheel { window: id, delta_x, delta_y, x, y });
+                let (x, y) = self.windows.get(&path).map_or((0.0, 0.0), |window| window.cursor);
+                self.publish(ctx, &path, &MouseWheel { window: path.clone(), delta_x, delta_y, x, y });
             }
             WindowEvent::CursorMoved { position, .. } => {
                 #[allow(clippy::cast_possible_truncation)]
                 let (x, y) = (position.x as f32, position.y as f32);
-                if let Some(state) = self.windows.get_mut(&id) {
+                if let Some(state) = self.windows.get_mut(&path) {
                     state.cursor = (x, y);
                 }
-                self.publish(ctx, id, &MouseMove { window: id, x, y });
+                self.publish(ctx, &path, &MouseMove { window: path.clone(), x, y });
             }
             _ => {}
         }
@@ -751,55 +755,55 @@ impl DesktopWindowCapabilityState {
         spec: WindowSpec,
         reply: Option<Box<InboundMail>>,
         shutdown_on_failure: bool,
-    ) -> Result<WindowId, (String, Option<Box<InboundMail>>)> {
-        if let Err(error) = crate::validate_window_name(&spec.name) {
-            return Err((error, reply));
-        }
+    ) -> Result<ErasedActorPath, (String, Option<Box<InboundMail>>)> {
+        let path = match crate::window_name(&spec.name) {
+            Ok(name) => crate::window_path(&name),
+            Err(error) => return Err((error, reply)),
+        };
         if self.pending_creates.values().any(|pending| pending.spec.name == spec.name)
             || self.windows.values().any(|window| window.name == spec.name)
         {
             return Err((format!("window name `{}` is already in use", spec.name), reply));
         }
-        let id = predicted_window_id(&spec.name);
-        self.pending_host_actions.push_back(WindowHostAction::Create { id, spec: spec.clone() });
-        self.pending_creates.insert(id, PendingCreate { spec, reply, shutdown_on_failure });
-        Ok(id)
+        self.pending_host_actions.push_back(WindowHostAction::Create { path: path.clone(), spec: spec.clone() });
+        self.pending_creates.insert(path.clone(), PendingCreate { spec, reply, shutdown_on_failure });
+        Ok(path)
     }
 
     fn queue_close(
         &mut self,
-        id: WindowId,
+        path: &ErasedActorPath,
         reply: Option<Box<InboundMail>>,
     ) -> Result<(), (String, Option<Box<InboundMail>>)> {
-        let Some(state) = self.windows.get_mut(&id) else {
-            return Err((format!("unknown window {id:?}"), reply));
+        let Some(state) = self.windows.get_mut(path) else {
+            return Err((format!("unknown window {path}"), reply));
         };
         if state.lifecycle != DesktopWindowLifecycle::Live {
-            return Err((format!("window {id:?} is not live"), reply));
+            return Err((format!("window {path} is not live"), reply));
         }
         state.lifecycle = DesktopWindowLifecycle::Closing;
         state.close_reply = reply;
-        self.pending_host_actions.push_back(WindowHostAction::Close { id });
+        self.pending_host_actions.push_back(WindowHostAction::Close { path: path.clone() });
         Ok(())
     }
 
-    fn remove_window(&mut self, id: WindowId) -> bool {
-        if let Some(window) = self.native_windows.remove(&id) {
+    fn remove_window(&mut self, path: &ErasedActorPath) -> bool {
+        if let Some(window) = self.native_windows.remove(path) {
             self.winit_windows.remove(&window.id());
         } else {
-            self.winit_windows.retain(|_, mapped| *mapped != id);
+            self.winit_windows.retain(|_, mapped| mapped != path);
         }
-        self.windows.remove(&id).is_some()
+        self.windows.remove(path).is_some()
     }
 
-    fn live_window(&self, id: WindowId) -> Result<Arc<Window>, String> {
-        match self.windows.get(&id) {
-            None => Err(format!("unknown window {id:?}")),
+    fn live_window(&self, path: &ErasedActorPath) -> Result<Arc<Window>, String> {
+        match self.windows.get(path) {
+            None => Err(format!("unknown window {path}")),
             Some(window) if window.lifecycle != DesktopWindowLifecycle::Live => {
-                Err(format!("window {id:?} is not live"))
+                Err(format!("window {path} is not live"))
             }
             Some(_) => {
-                self.native_windows.get(&id).cloned().ok_or_else(|| format!("window {id:?} has no native handle"))
+                self.native_windows.get(path).cloned().ok_or_else(|| format!("window {path} has no native handle"))
             }
         }
     }
@@ -808,18 +812,14 @@ impl DesktopWindowCapabilityState {
     /// factor the window last reported. A window that has already left the
     /// map reports `1.0` rather than suppressing the publish, so the two
     /// pixel spaces still coincide for whoever reads it.
-    fn window_size(&self, id: WindowId, width: u32, height: u32) -> WindowSize {
-        let scale_factor = self.windows.get(&id).map_or(1.0, |state| state.scale_factor);
-        WindowSize { window: id, width, height, scale_factor }
+    fn window_size(&self, path: &ErasedActorPath, width: u32, height: u32) -> WindowSize {
+        let scale_factor = self.windows.get(path).map_or(1.0, |state| state.scale_factor);
+        WindowSize { window: path.clone(), width, height, scale_factor }
     }
 
-    fn publish<K: ActorMail, A>(&self, ctx: &mut NativeCtx<'_, A, Single>, window: WindowId, event: &K) {
+    fn publish<K: ActorMail, A>(&self, ctx: &mut NativeCtx<'_, A, Single>, window: &ErasedActorPath, event: &K) {
         ctx.fanout(self.subscribers.recipients(window, K::ID), event);
     }
-}
-
-fn predicted_window_id(name: &str) -> WindowId {
-    WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, name).0)
 }
 
 /// winit reports the scale factor as `f64`; `WindowSize` carries `f32`,
@@ -872,10 +872,10 @@ impl NativeActor for DesktopWindowCapability {
                 reply.reply(&CreateWindowResult::Err { error: "window manager shutting down".to_owned() });
             }
         }
-        for (id, window) in &mut state.windows {
+        for (path, window) in &mut state.windows {
             if let Some(reply) = window.close_reply.take() {
                 reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Err {
-                    error: format!("window manager shutting down before closing {id:?}"),
+                    error: format!("window manager shutting down before closing {path}"),
                 }));
             }
         }
@@ -888,7 +888,7 @@ impl NativeActor for DesktopWindowCapability {
                 .windows
                 .iter()
                 .filter(|(_, window)| window.lifecycle != DesktopWindowLifecycle::Attaching)
-                .map(|(id, window)| window.info(*id))
+                .map(|(path, window)| window.info(path))
                 .collect(),
         }
     }
@@ -897,9 +897,9 @@ impl NativeActor for DesktopWindowCapability {
     fn on_window_child_spawn_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<DesktopWindowInstance>, WindowId>,
+        done: TaskDone<SpawnOutcome<DesktopWindowInstance>, ErasedActorPath>,
     ) {
-        state.finish_window_child_spawn(ctx, *done.context(), done.output());
+        state.finish_window_child_spawn(ctx, done.context(), done.output());
         done.release_no_reply();
     }
 
@@ -925,21 +925,21 @@ impl NativeActor for DesktopWindowCapability {
     #[handler::manual]
     fn on_apply_command(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: ApplyWindowCommand) {
         let reply = ctx.take_inbound();
-        let Some(id) = ctx.sender().and_then(|sender| state.child_windows.get(&sender).copied()) else {
+        let Some(path) = ctx.sender().and_then(|sender| state.child_windows.get(&sender).cloned()) else {
             reply.reply(
                 &mail.command.refused("window command from an actor that is not a live window child".to_owned()),
             );
             return;
         };
         if matches!(mail.command, WindowCommand::Close) {
-            if let Err((error, reply)) = state.queue_close(id, Some(Box::new(reply)))
+            if let Err((error, reply)) = state.queue_close(&path, Some(Box::new(reply)))
                 && let Some(reply) = reply
             {
                 reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }));
             }
             return;
         }
-        reply.reply(&state.apply_at_window(id, mail.command));
+        reply.reply(&state.apply_at_window(&path, mail.command));
     }
 
     #[handler::single]
@@ -947,10 +947,10 @@ impl NativeActor for DesktopWindowCapability {
         let Some(departed) = ctx.sender() else {
             return;
         };
-        if let Some(id) = state.child_windows.remove(&departed)
-            && state.children.remove(&id).is_some()
+        if let Some(path) = state.child_windows.remove(&departed)
+            && state.children.remove(&path).is_some()
         {
-            let _ = state.queue_close(id, None);
+            let _ = state.queue_close(&path, None);
         }
         state.subscribers.unsubscribe_all(departed);
     }
@@ -967,12 +967,12 @@ impl WindowManagerSurface for DesktopWindowCapability {
     /// anyone's to address, and a closing one still is — its endpoint answers
     /// `window … is not live` for itself rather than being hidden from the
     /// count the caller was just shown.
-    fn routable_windows(state: &Self::State) -> Vec<WindowId> {
+    fn routable_windows(state: &Self::State) -> Vec<ErasedActorPath> {
         state
             .windows
             .iter()
             .filter(|(_, window)| window.lifecycle != DesktopWindowLifecycle::Attaching)
-            .map(|(id, _)| *id)
+            .map(|(path, _)| path.clone())
             .collect()
     }
 }
@@ -1030,7 +1030,7 @@ mod tests {
     use super::*;
     // The subscription request kinds moved to the `WindowSubscriptions` set,
     // so the manager module no longer imports them for `use super::*` to carry.
-    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow};
+    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow, WindowCapability};
 
     fn test_state() -> DesktopWindowCapabilityState {
         DesktopWindowCapabilityState {
@@ -1058,19 +1058,25 @@ mod tests {
         WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
     }
 
-    fn insert_window(state: &mut DesktopWindowCapabilityState, id: WindowId, name: &str, closing: bool) {
+    fn path(name: &str) -> ErasedActorPath {
+        crate::window_path(&aether_data::LoadName::new(name).expect("fixture window name"))
+    }
+
+    /// Insert a live (or closing) window named `name`, answering its path.
+    fn insert_window(state: &mut DesktopWindowCapabilityState, name: &str, closing: bool) -> ErasedActorPath {
+        let window = path(name);
         state.windows.insert(
-            id,
+            window.clone(),
             DesktopWindowState {
                 name: name.to_owned(),
-                title: format!("window-{}", id.0),
+                title: format!("window-{name}"),
                 mode: WindowMode::Windowed,
                 width: 640,
                 height: 480,
                 scale_factor: 1.0,
                 cursor: (0.0, 0.0),
                 composing: false,
-                modifiers: Modifiers { window: id, ..Modifiers::default() },
+                modifiers: Modifiers { window: window.clone(), shift: false, ctrl: false, alt: false, meta: false },
                 focused: false,
                 occluded: false,
                 lifecycle: if closing {
@@ -1081,6 +1087,7 @@ mod tests {
                 close_reply: None,
             },
         );
+        window
     }
 
     #[test]
@@ -1099,7 +1106,7 @@ mod tests {
             ),
             SubscribeWindowResult::Err { error } if error == "unknown mailbox id 0x0000000000000bad"
         ));
-        assert!(state.subscribers.recipients(WindowId(1), Key::ID).is_empty());
+        assert!(state.subscribers.recipients(&path("main"), Key::ID).is_empty());
 
         let subscriber = registry.register_inline(
             &boot_authority(),
@@ -1125,19 +1132,18 @@ mod tests {
             ),
             SubscribeWindowResult::Err { error } if error == format!("mailbox {dropped:?} already dropped")
         ));
-        assert_eq!(state.subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([subscriber]));
+        assert_eq!(state.subscribers.recipients(&path("main"), Key::ID), BTreeSet::from([subscriber]));
     }
 
     #[test]
-    fn window_ids_derive_from_named_child_mailboxes_and_actions_remain_ordered() {
+    fn window_paths_name_the_named_children_and_actions_remain_ordered() {
         let mut state = test_state();
         assert!(state.queue_create(spec("first", "First"), None, false).is_ok());
         assert!(state.queue_create(spec("second", "Second"), None, false).is_ok());
 
         let (actions, _) = state.take_host_work();
-        assert!(matches!(actions[0], WindowHostAction::Create { id, .. } if id == predicted_window_id("first")));
-        assert!(matches!(actions[1], WindowHostAction::Create { id, .. } if id == predicted_window_id("second")));
-        assert_ne!(predicted_window_id("first"), predicted_window_id("second"));
+        assert!(matches!(&actions[0], WindowHostAction::Create { path: created, .. } if *created == path("first")));
+        assert!(matches!(&actions[1], WindowHostAction::Create { path: created, .. } if *created == path("second")));
     }
 
     #[test]
@@ -1159,7 +1165,7 @@ mod tests {
         assert!(pending.queue_create(spec("tools", "Other title"), None, false).is_err());
 
         let mut live = test_state();
-        insert_window(&mut live, WindowId(7), "tools", false);
+        insert_window(&mut live, "tools", false);
         assert!(live.queue_create(spec("tools", "Other title"), None, false).is_err());
         assert!(live.pending_host_actions.is_empty());
     }
@@ -1179,20 +1185,20 @@ mod tests {
     #[test]
     fn window_name_is_stable_when_title_changes() {
         let mut state = test_state();
-        insert_window(&mut state, WindowId(1), "main", false);
+        let main = insert_window(&mut state, "main", false);
 
-        state.windows.get_mut(&WindowId(1)).expect("live window").title = "Renamed".to_owned();
-        let info = state.windows[&WindowId(1)].info(WindowId(1));
+        state.windows.get_mut(&main).expect("live window").title = "Renamed".to_owned();
+        let info = state.windows[&main].info(&main);
 
         assert_eq!(info.name, "main");
         assert_eq!(info.title, "Renamed");
     }
 
     #[test]
-    fn list_windows_is_sorted_by_engine_identity() {
+    fn list_windows_is_sorted_by_window_path() {
         let mut state = test_state();
-        insert_window(&mut state, WindowId(9), "nine", false);
-        insert_window(&mut state, WindowId(2), "two", false);
+        insert_window(&mut state, "two", false);
+        insert_window(&mut state, "nine", false);
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
 
@@ -1201,7 +1207,7 @@ mod tests {
             panic!("desktop manager list succeeds");
         };
 
-        assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [WindowId(2), WindowId(9)]);
+        assert_eq!(windows.into_iter().map(|window| window.path).collect::<Vec<_>>(), [path("nine"), path("two")]);
     }
 
     /// Reducer-only: staging a real child needs a chassis-built binding this
@@ -1214,11 +1220,9 @@ mod tests {
         let mut state = test_state();
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-        let id = predicted_window_id("tools");
-
         assert!(state.queue_create(spec("tools", "Tools"), None, true).is_ok(), "reserve the create");
-        insert_window(&mut state, id, "tools", false);
-        state.windows.get_mut(&id).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
+        let tools = insert_window(&mut state, "tools", false);
+        state.windows.get_mut(&tools).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
 
         let ListWindowsResult::Ok { windows } = DesktopWindowCapability::on_list(&mut state, &mut ctx, ListWindows)
         else {
@@ -1228,7 +1232,7 @@ mod tests {
 
         state.finish_window_child_spawn(
             &mut ctx,
-            id,
+            &tools,
             &SpawnOutcome::<DesktopWindowInstance> {
                 canonical_name: ErasedActorPath::new("aether.window/aether.window.instance:tools")
                     .expect("fixture is an actor path"),
@@ -1236,19 +1240,19 @@ mod tests {
             },
         );
 
-        assert!(!state.windows.contains_key(&id), "a rejected birth rolls its window back");
+        assert!(!state.windows.contains_key(&tools), "a rejected birth rolls its window back");
         assert!(state.pending_creates.is_empty(), "a rejected birth clears its reservation");
         assert!(
             state
                 .pending_host_effects
                 .iter()
-                .any(|effect| matches!(effect, WindowHostEffect::Closing { id: closing } if *closing == id)),
+                .any(|effect| matches!(effect, WindowHostEffect::Closing { path: closing } if *closing == tools)),
             "rollback detaches the native window through the host-effect queue",
         );
     }
 
-    /// The divergence guard runs when the birth completes: a Live child whose
-    /// reference does not name the predicted window is never promoted, and the
+    /// The divergence guard runs when the birth completes: a Live child the
+    /// reserved window's path does not prove is never promoted, and the
     /// caller's reply names the divergence. The child is placed flat at the
     /// chassis root under another name, so its reference is real but names a
     /// window nobody reserved.
@@ -1263,18 +1267,17 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let binding = unrouted_binding(&mailer);
         let mut state = test_state();
-        let id = predicted_window_id("tools");
 
         DesktopWindowCapability::on_create(
             &mut state,
             &mut manual_dispatch_ctx(&binding, session_sender()),
             CreateWindow { spec: spec("tools", "Tools") },
         );
-        insert_window(&mut state, id, "tools", false);
-        state.windows.get_mut(&id).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
+        let tools = insert_window(&mut state, "tools", false);
+        state.windows.get_mut(&tools).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
         state.finish_window_child_spawn(
             &mut NativeCtx::<'_, Erased>::new_for_actor(&binding, Source::NONE, None, None),
-            id,
+            &tools,
             &SpawnOutcome::<DesktopWindowInstance> {
                 canonical_name: ErasedActorPath::new("aether.window/aether.window.instance:tools")
                     .expect("fixture is an actor path"),
@@ -1285,15 +1288,15 @@ mod tests {
         let CreateWindowResult::Err { error } = decode_session_reply::<CreateWindowResult>(&rx) else {
             panic!("a divergent child fails the create");
         };
-        assert!(error.contains("did not match predicted window"), "the reply names the divergence: {error}");
+        assert!(error.contains("is not the window at"), "the reply names the divergence: {error}");
         assert!(state.children.is_empty(), "a divergent child is never supervised");
-        assert!(!state.windows.contains_key(&id), "a divergent child rolls its window back");
+        assert!(!state.windows.contains_key(&tools), "a divergent child rolls its window back");
         assert!(state.pending_creates.is_empty(), "a divergent child clears its reservation");
         assert!(
             state
                 .pending_host_effects
                 .iter()
-                .any(|effect| matches!(effect, WindowHostEffect::Closing { id: closing } if *closing == id)),
+                .any(|effect| matches!(effect, WindowHostEffect::Closing { path: closing } if *closing == tools)),
             "rollback detaches the native window through the host-effect queue",
         );
     }
@@ -1312,25 +1315,25 @@ mod tests {
     #[test]
     fn closing_one_window_does_not_request_global_shutdown() {
         let mut state = test_state();
-        insert_window(&mut state, WindowId(1), "first", true);
-        insert_window(&mut state, WindowId(2), "second", false);
+        let first = insert_window(&mut state, "first", true);
+        let second = insert_window(&mut state, "second", false);
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
-        let effects = state.finish_window_close(WindowId(1), &mut ctx);
+        let effects = state.finish_window_close(&first, &mut ctx);
 
         assert!(effects.is_empty());
-        assert!(state.windows.contains_key(&WindowId(2)));
+        assert!(state.windows.contains_key(&second));
     }
 
     #[test]
     fn closing_the_last_window_requests_shutdown_after_removal() {
         let mut state = test_state();
-        insert_window(&mut state, WindowId(1), "first", true);
+        let first = insert_window(&mut state, "first", true);
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
-        let effects = state.finish_window_close(WindowId(1), &mut ctx);
+        let effects = state.finish_window_close(&first, &mut ctx);
 
         assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
         assert!(state.windows.is_empty());
@@ -1339,15 +1342,14 @@ mod tests {
     #[test]
     fn pending_replacement_defers_last_window_shutdown_until_create_resolves() {
         let mut state = test_state();
-        insert_window(&mut state, WindowId(1), "first", true);
+        let first = insert_window(&mut state, "first", true);
         assert!(state.queue_create(spec("replacement", "Replacement"), None, false).is_ok());
-        let replacement = predicted_window_id("replacement");
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
-        assert!(state.finish_window_close(WindowId(1), &mut ctx).is_empty());
+        assert!(state.finish_window_close(&first, &mut ctx).is_empty());
         assert!(state.shutdown_when_idle);
-        let effects = state.fail_window_creation(replacement, "native create failed".to_owned());
+        let effects = state.fail_window_creation(&path("replacement"), "native create failed".to_owned());
 
         assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
     }
@@ -1356,7 +1358,7 @@ mod tests {
     fn failed_initial_create_rolls_back_and_requests_shutdown() {
         let mut state = test_state();
         state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
-        let effects = state.fail_window_creation(predicted_window_id("main"), "native create failed".to_owned());
+        let effects = state.fail_window_creation(&path("main"), "native create failed".to_owned());
 
         assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
         assert!(state.pending_creates.is_empty());
@@ -1366,19 +1368,18 @@ mod tests {
     fn failed_attachment_removes_the_staged_initial_window_before_shutdown() {
         let mut state = test_state();
         state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
-        let id = predicted_window_id("main");
-        insert_window(&mut state, id, "main", false);
-        state.windows.get_mut(&id).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
+        let main = insert_window(&mut state, "main", false);
+        state.windows.get_mut(&main).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
         let (binding, _mailer) = test_ctx();
         // Attachment stages the window's child birth, so the ctx names the cap
         // it would parent under — the same one the pumped host turn supplies.
         let mut ctx =
             NativeCtx::<'_, DesktopWindowCapability, Single>::new_for_actor(&binding, Source::NONE, None, None);
 
-        let effects = state.finish_window_attachment(id, Err("render attach failed".to_owned()), &mut ctx);
+        let effects = state.finish_window_attachment(&main, Err("render attach failed".to_owned()), &mut ctx);
 
         assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
-        assert!(!state.windows.contains_key(&id));
+        assert!(!state.windows.contains_key(&main));
         assert!(state.pending_creates.is_empty());
     }
 
@@ -1402,14 +1403,15 @@ mod tests {
         let mut ctx = NativeCtx::new(&binding, Source::NONE, Some(parent), Some(root));
         state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, subscriber);
 
-        state.publish(&mut ctx, WindowId(5), &Key { window: WindowId(5), code: 41 });
+        let main = path("main");
+        state.publish(&mut ctx, &main, &Key { window: main.clone(), code: 41 });
         drop(ctx);
 
         let dispatch = rx.recv().expect("direct subscriber receives the event");
         assert_eq!(dispatch.root, Some(root));
         assert_eq!(dispatch.parent_mail, Some(parent));
         assert_eq!(NativeCtx::new(&binding, dispatch.sender, None, None).sender(), Some(manager));
-        assert_eq!(Key::decode_from_bytes(dispatch.payload.bytes()), Some(Key { window: WindowId(5), code: 41 }),);
+        assert_eq!(Key::decode_from_bytes(dispatch.payload.bytes()), Some(Key { window: main, code: 41 }));
     }
 
     /// A live window at a chosen display density, registered under winit's
@@ -1417,14 +1419,13 @@ mod tests {
     /// event in, published kind out — can be driven without an event loop.
     fn insert_scaled_window(
         state: &mut DesktopWindowCapabilityState,
-        id: WindowId,
         scale_factor: f32,
-    ) -> WinitWindowId {
-        insert_window(state, id, "main", false);
-        state.windows.get_mut(&id).expect("live window").scale_factor = scale_factor;
+    ) -> (ErasedActorPath, WinitWindowId) {
+        let main = insert_window(state, "main", false);
+        state.windows.get_mut(&main).expect("live window").scale_factor = scale_factor;
         let winit_id = WinitWindowId::dummy();
-        state.winit_windows.insert(winit_id, id);
-        winit_id
+        state.winit_windows.insert(winit_id, main.clone());
+        (main, winit_id)
     }
 
     /// The sole recorded publication of kind `K`, decoded.
@@ -1469,8 +1470,7 @@ mod tests {
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
         let mut state = test_state();
-        let id = WindowId(1);
-        let winit_id = insert_scaled_window(&mut state, id, 2.0);
+        let (window, winit_id) = insert_scaled_window(&mut state, 2.0);
         for kind in [MouseMove::ID, MouseButton::ID, MouseWheel::ID, WindowSize::ID] {
             state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, kind, subscriber);
         }
@@ -1502,22 +1502,22 @@ mod tests {
 
         assert_eq!(
             sole_published::<MouseMove>(&recorded),
-            MouseMove { window: id, x: 400.0, y: 300.0 },
+            MouseMove { window: window.clone(), x: 400.0, y: 300.0 },
             "the cursor reaches the wire at winit's physical position, unscaled",
         );
         assert_eq!(
             sole_published::<MouseButton>(&recorded),
-            MouseButton { window: id, button: mouse_button::LEFT, x: 400.0, y: 300.0 },
+            MouseButton { window: window.clone(), button: mouse_button::LEFT, x: 400.0, y: 300.0 },
             "a click reports the same physical position the move published",
         );
         assert_eq!(
             sole_published::<MouseWheel>(&recorded),
-            MouseWheel { window: id, delta_x: 0.0, delta_y: -120.0, x: 400.0, y: 300.0 },
+            MouseWheel { window: window.clone(), delta_x: 0.0, delta_y: -120.0, x: 400.0, y: 300.0 },
             "a wheel event's pixel delta and cursor position share that space",
         );
         assert_eq!(
             sole_published::<WindowSize>(&recorded),
-            WindowSize { window: id, width: 1280, height: 960, scale_factor: 2.0 },
+            WindowSize { window, width: 1280, height: 960, scale_factor: 2.0 },
             "the size is the physical one winit reported and the factor rides beside it",
         );
     }

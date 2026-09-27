@@ -136,13 +136,13 @@ a reference image, and/or persist the original full-resolution PNG with an
 absolute `save_path`. Checks operate on full-resolution RGBA even when the
 inline image is reduced or omitted.
 
-`window_id` is required and has no default: desktop capture never guesses a
+`window` is required and has no default: desktop capture never guesses a
 primary, focused, or current window, so omitting the field is a deserialize
-error rather than a fallback. Pass the tagged `mbx-…` string
-`aether.window.list` reports, or the id a window-create reply returned. It is a
-string because a real window id is an ADR-0099 lineage fold near 2^60, which a
-JSON number cannot carry to a client that parses numbers as doubles; a decimal
-`u64` is still accepted for a synthetic or harness-scale id.
+error rather than a fallback. Pass the window's actor path as
+`aether.window.list` or a window-create reply reports it
+(`aether.window/aether.window.instance:main`), or its short form
+(`aether.window/:main`); the engine proves the path when the capture arrives
+and answers an error naming a path that names no live window.
 
 Each `checks` entry may carry a `region` (`{min_x, min_y, max_x, max_y}`) that
 restricts the reduction to the frame-clamped intersection of that rect, so a
@@ -184,7 +184,7 @@ selectors before observing anything, sorts and deduplicates them, then records:
 - full descriptions for up to eight component lineage names;
 - a log tail capped at 100 entries and the complete cost table for each of up
   to eight actor lineage names;
-- optionally, one bounded inline PNG for an exact `window_id`.
+- optionally, one bounded inline PNG for one `window`, named by its actor path.
 
 Each observation has a three-second cap and reports `ok`, `error`, `timeout`, or
 `budget_exhausted` in place. One failure does not discard the primary error or

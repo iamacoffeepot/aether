@@ -252,12 +252,13 @@ fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
         RegistryQueueCapacities::default(),
     );
     let id = canonical_mailbox_id("ordered");
+    let second = canonical_mailbox_id("ordered-second");
     let endpoint = || MailboxEntry::Inbox { handler: noop_handler(), seize: Arc::default() };
     let first = registry
         .submit(EffectBatch::new(vec![
             RegistryEffect::publish_named("ordered".to_owned(), endpoint()),
             RegistryEffect::DropMailbox(id),
-            RegistryEffect::publish_named("ordered".to_owned(), endpoint()),
+            RegistryEffect::publish_named("ordered-second".to_owned(), endpoint()),
         ]))
         .expect("attached owner accepts effects");
     let rejected = registry
@@ -276,7 +277,11 @@ fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
 
     assert_eq!(
         first.wait_timeout(Duration::from_millis(100)).expect("completion arrives").expect("batch applies"),
-        [RegistryApplied::Mailbox(id), RegistryApplied::Dropped("ordered".to_owned()), RegistryApplied::Mailbox(id),]
+        [
+            RegistryApplied::Mailbox(id),
+            RegistryApplied::Dropped("ordered".to_owned()),
+            RegistryApplied::Mailbox(second),
+        ]
     );
     assert!(matches!(
         rejected.wait_timeout(Duration::from_millis(100)).expect("rejection arrives"),
@@ -289,7 +294,8 @@ fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
     assert!(registry.lookup("must-rollback").is_none(), "a rejected batch commits none of its staged keys");
     assert_eq!(registry.route_generation(), 1, "one self-sized drain publishes the keyed view once");
     assert_eq!(registry.mailbox_generation(), 1, "one self-sized drain publishes inventory once");
-    assert_eq!(registry.lookup("ordered"), Some(id));
+    assert!(registry.lookup("ordered").is_none(), "the dropped name stays retired");
+    assert_eq!(registry.lookup("ordered-second"), Some(second));
 }
 
 #[test]

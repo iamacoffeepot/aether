@@ -289,7 +289,8 @@ use a separate generic convenience constructor, sent through the synthetic
 window capability's reference:
 
 ```rust
-HarnessOp::window_event(&synthetic, WindowId(2), &Key { window: WindowId(2), code: keycode });
+let window = window_path(&LoadName::new("main")?);
+HarnessOp::window_event(&synthetic, window.clone(), &Key { window, code: keycode });
 ```
 
 `window_event` accepts any `K: Kind`, encodes it once, and hands the runtime its

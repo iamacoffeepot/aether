@@ -135,7 +135,7 @@ frame *stages* — they fire in declared order, paced by the chassis, on
 `aether.lifecycle`. Both reach an actor as ordinary mail in arrival order on
 its single dispatcher thread, and both use typed subscription helpers, but
 they have different owners: lifecycle owns the frame graph; window owns events
-originating from each `WindowId`.
+originating from each window.
 
 ## How to use it
 

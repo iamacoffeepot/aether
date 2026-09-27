@@ -33,10 +33,10 @@ pub mod transforms;
 
 pub use text_metrics::{CachedFontMetrics, scale_units};
 
-pub use diagnostics::{MonitorNotice, UnresolvedMail};
+pub use diagnostics::MonitorNotice;
 pub use input::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-    WindowId, WindowSize,
+    WindowSize,
 };
 pub use lifecycle::{
     InitCaps, InitComponents, LifecycleAdvance, LifecycleAdvanceComplete, LifecycleSubscribe, LifecycleSubscribeResult,
@@ -960,11 +960,14 @@ mod control_plane {
     /// Reply: `CaptureFrameResult`.
     #[aether_data::kind(name = "aether.render.capture_frame")]
     pub struct CaptureFrame {
-        /// Explicit desktop render target. `None` is reserved for a
-        /// surfaceless runtime such as `SubstrateHarness`; a windowed
-        /// runtime rejects an omitted target instead of guessing a primary,
-        /// focused, or current window.
-        pub window: Option<crate::WindowId>,
+        /// Explicit desktop render target: the window's actor path, as
+        /// `aether.window.list` reports it or in short form
+        /// (`aether.window/:main`). The render capability proves it at
+        /// receipt and answers `Err` naming a path that does not prove.
+        /// `None` is reserved for a surfaceless runtime such as
+        /// `SubstrateHarness`; a windowed runtime rejects an omitted target
+        /// instead of guessing a primary, focused, or current window.
+        pub window: Option<aether_data::ErasedActorPath>,
         pub mails: Vec<NamedMail>,
         pub after_mails: Vec<NamedMail>,
         pub checks: Vec<FrameCheck>,
@@ -1362,11 +1365,7 @@ mod control_plane {
     /// queries an actor's ring via [`LogTail`] / [`LogTailResult`].
     ///
     /// `level` follows the same `0 = trace .. 4 = error` mapping the
-    /// rest of `aether.log.*` uses. `origin` is the `MailboxId` of
-    /// the actor whose ring buffered the entry: `None` from the
-    /// per-actor framework reply (the responder IS the origin —
-    /// stamped at client side if the caller is merging across
-    /// actors).
+    /// rest of `aether.log.*` uses.
     ///
     /// `sequence` is monotonic *per actor's ring*, starting at 1.
     /// Callers walk a single actor's ring via `LogTail::since`; the
@@ -1381,7 +1380,6 @@ mod control_plane {
         pub target: String,
         pub message: String,
         pub sequence: u64,
-        pub origin: Option<aether_data::MailboxId>,
     }
 
     /// `aether.log.tail` — query one actor's `ActorLogRing`.
@@ -1416,9 +1414,7 @@ mod control_plane {
     /// stable per-actor cursor. `truncated_before` is set when the
     /// ring evicted entries the caller hadn't seen yet (the lowest
     /// `sequence` still in the ring): callers either accept the gap
-    /// or poll more often. `entries[i].origin` is `None` — the
-    /// responder IS the origin; client-side merge code stamps it if
-    /// aggregating across actors.
+    /// or poll more often.
     #[aether_data::kind(name = "aether.log.tail_result")]
     pub enum LogTailResult {
         Ok { entries: Vec<LogEntry>, next_since: u64, truncated_before: Option<u64> },

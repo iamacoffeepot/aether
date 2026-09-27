@@ -10,16 +10,16 @@
 //! `aether.kinds`: [`read_assets_from_bytes`] walks the raw bytes with
 //! `wasmparser` and records, per asset, its catalog entry ([`AssetInfo`]:
 //! name, length, sha256) plus the byte range of its payload within the
-//! module file.
+//! module file. The module cache runs it once per content hash and checks
+//! each payload in as its own blob (ADR-0241 §2, [`super::module`]).
 //!
 //! The catalog is metadata — a few hundred bytes — so it is kept for the
 //! instance's life and surfaces through `describe_component`
 //! ([`aether_kinds::ComponentCapabilities::assets`]). Payload access is
-//! the [`LoadWindow`]: it pins the module bytes and serves `asset(name)`
-//! by slicing the recorded range, and [`LoadWindow::close`] releases both
-//! the pin and the ranges when the load window ends (`init` + `wire`), so
-//! nothing payload-sized outlives the window and store eviction can never
-//! strand a live actor (ADR-0163 §3/§4).
+//! the [`LoadWindow`]: it holds the module's asset blobs and serves
+//! `asset(name)` by streaming the named blob, and [`LoadWindow::close`]
+//! lets go of them when the load window ends (`init` + `wire`), so the
+//! guest's payload access ends with the window (ADR-0163 §3/§4).
 //!
 //! This reads the custom sections only and never looks at linear memory.
 //! `export_asset!` keeps the payload out of linear memory on its own (it
@@ -28,22 +28,24 @@
 //! would be correct either way. Do not read a "not in linear memory"
 //! property out of this module; it makes no such claim.
 
-use std::ops::Range;
 use std::sync::Arc;
 
 use aether_actor::{AssetCatalog, AssetWindow};
+use aether_data::Blob;
 use aether_kinds::AssetInfo;
 use sha2::{Digest, Sha256};
 use wasmparser::{Parser, Payload};
+
+use super::module::{AssetName, Module};
+use crate::store::read_all;
 
 /// The prefix every asset custom section's name carries (ADR-0163 §2). An
 /// asset's catalog name is its section name with this prefix stripped.
 pub const ASSET_SECTION_PREFIX: &str = "aether.asset.";
 
 /// One indexed asset: its catalog entry ([`AssetInfo`]) plus the byte
-/// range of its payload within the module file. The range lets the
-/// [`LoadWindow`] read the bytes straight from the module without staging
-/// a second copy (ADR-0163 §3).
+/// range of its payload within the module file. The range is what the
+/// module cache copies into the asset's own blob at check-in (ADR-0241 §2).
 #[derive(Debug, Clone)]
 pub struct AssetRecord {
     /// Catalog metadata: name, length, sha256.
@@ -99,35 +101,26 @@ pub fn read_assets_from_bytes(wasm: &[u8]) -> Result<Vec<AssetRecord>, String> {
 }
 
 /// The ADR-0163 §3 load window: payload access to a component's assets,
-/// live only for the load window (`init` + `wire`). It pins the module
-/// bytes and serves [`asset`](AssetWindow::asset) by slicing the recorded
-/// range; [`close`](Self::close) drops the pin and the ranges so the
-/// payload path ends with the window, while the catalog metadata is
-/// retained for the instance's life (the ADR's "catalog for life, payload
-/// for the window" split). Serving from the already-in-hand module bytes
-/// is this slice's v1 of the ADR's "read the recorded range from the store
-/// file": nothing payload-sized outlives the window either way.
+/// live only for the load window (`init` + `wire`). It holds the module's
+/// asset blobs and serves [`asset`](AssetWindow::asset) by streaming the
+/// named one; [`close`](Self::close) lets go of them so the payload path ends
+/// with the window, while the catalog metadata is retained for the
+/// instance's life (the ADR's "catalog for life, payload for the window"
+/// split).
 pub struct LoadWindow {
-    /// Module bytes, pinned only while the window is open; `None` once
-    /// [`close`](Self::close)d.
-    wasm: Option<Arc<[u8]>>,
+    /// The module's asset blobs, held only while the window is open; `None`
+    /// once [`close`](Self::close)d.
+    assets: Option<Arc<[(AssetName, Blob)]>>,
     /// Catalog metadata — retained for the instance's life, survives close.
     catalog: Vec<AssetInfo>,
-    /// Payload byte range per catalog entry (parallel to `catalog`),
-    /// emptied on close so payload access ends with the window.
-    ranges: Vec<Range<usize>>,
 }
 
 impl LoadWindow {
-    /// Index `wasm`'s asset sections and open the window over them. Errors
-    /// exactly as [`read_assets_from_bytes`] (duplicate / empty asset
-    /// path). A module with no asset sections opens an empty window whose
-    /// `asset` always returns `None`.
-    pub fn index(wasm: Arc<[u8]>) -> Result<Self, String> {
-        let records = read_assets_from_bytes(&wasm)?;
-        let catalog = records.iter().map(|r| r.info.clone()).collect();
-        let ranges = records.iter().map(|r| r.offset..r.offset + r.len).collect();
-        Ok(Self { wasm: Some(wasm), catalog, ranges })
+    /// Open the window over `module`'s assets. A module with no asset
+    /// sections opens an empty window whose `asset` always returns `None`.
+    #[must_use]
+    pub fn open(module: &Module) -> Self {
+        Self { assets: Some(module.shared_assets()), catalog: module.manifest().asset_catalog().to_vec() }
     }
 
     /// The asset catalog (metadata) as owned entries — for handing into
@@ -138,20 +131,19 @@ impl LoadWindow {
         self.catalog.clone()
     }
 
-    /// Close the window (ADR-0163 §3): drop the module-bytes pin and the
-    /// payload ranges so [`asset`](AssetWindow::asset) no longer serves —
-    /// the substrate calls this when `wire` returns. The catalog metadata
-    /// is retained. Idempotent.
+    /// Close the window (ADR-0163 §3): let go of the asset blobs so
+    /// [`asset`](AssetWindow::asset) no longer serves — the substrate calls
+    /// this when `wire` returns. The catalog metadata is retained.
+    /// Idempotent.
     pub fn close(&mut self) {
-        self.wasm = None;
-        self.ranges.clear();
+        self.assets = None;
     }
 
     /// Whether the payload window is still open (`false` after
     /// [`close`](Self::close)).
     #[must_use]
     pub fn is_open(&self) -> bool {
-        self.wasm.is_some()
+        self.assets.is_some()
     }
 }
 
@@ -163,10 +155,8 @@ impl AssetCatalog for LoadWindow {
 
 impl AssetWindow for LoadWindow {
     fn asset(&mut self, name: &str) -> Option<Vec<u8>> {
-        let wasm = self.wasm.as_ref()?;
-        let idx = self.catalog.iter().position(|entry| entry.name == name)?;
-        let range = self.ranges.get(idx)?.clone();
-        wasm.get(range).map(<[u8]>::to_vec)
+        let (_, blob) = self.assets.as_ref()?.iter().find(|(asset, _)| asset.as_str() == name)?;
+        read_all(blob).ok().map(<[u8]>::into_vec)
     }
 }
 
@@ -176,7 +166,12 @@ impl AssetWindow for LoadWindow {
     reason = "test-setup unwraps: fixture construction and decode panic on failure is the assertion"
 )]
 mod tests {
+    use wasmtime::Engine;
+
     use super::*;
+    use crate::actor::native::BlobCheckIn;
+    use crate::actor::wasm::module::ModuleCache;
+    use crate::store::BlobStore;
 
     /// Build a module carrying `sections` as `(name, bytes)` custom
     /// sections, via WAT `@custom` (the `kind_manifest` idiom).
@@ -191,6 +186,14 @@ mod tests {
             write!(&mut customs, r#"(@custom "{name}" "{escaped}")"#).expect("write to String");
         }
         wat::parse_str(format!(r#"(module {customs} (func (export "noop")))"#)).unwrap()
+    }
+
+    /// Check `wasm` in as a module on a fresh engine and store.
+    fn checked_in(wasm: Vec<u8>) -> Module {
+        let blobs = BlobCheckIn::new(BlobStore::new().unwrap());
+        ModuleCache::new(Arc::new(Engine::default()))
+            .check_in(&blobs, &blobs.check_in(wasm.into_boxed_slice()))
+            .unwrap()
     }
 
     #[test]
@@ -249,7 +252,7 @@ mod tests {
         let one: &[u8] = b"one";
         let two: &[u8] = b"two-longer";
         let wasm = wasm_with_sections(&[("aether.asset.a", one), ("aether.asset.b", two)]);
-        let mut window = LoadWindow::index(Arc::from(wasm.into_boxed_slice())).unwrap();
+        let mut window = LoadWindow::open(&checked_in(wasm));
 
         assert!(window.is_open());
         assert_eq!(window.asset("a").as_deref(), Some(one));
@@ -271,7 +274,7 @@ mod tests {
     #[test]
     fn assetless_module_opens_an_empty_window() {
         let bare = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
-        let mut window = LoadWindow::index(Arc::from(bare.into_boxed_slice())).unwrap();
+        let mut window = LoadWindow::open(&checked_in(bare));
         assert!(window.assets().is_empty());
         assert_eq!(window.asset("anything"), None);
     }

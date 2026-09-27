@@ -18,10 +18,9 @@ use super::{MailboxEntry, Registry, SeizeCell};
 
 impl Registry {
     /// Insert a mailbox, allocating its id from the name hash (ADR-0029).
-    /// On a `Dropped` entry at the same id (same name re-registered
-    /// after a drop), the entry transitions back to live. Any other
-    /// occupied entry is a collision. The route publishes `contract` as it
-    /// goes `Live` (ADR-0231 §4).
+    /// Any occupied entry is a collision, a `Dropped` one included: a
+    /// retired name is never registered again (ADR-0079 §7). The route
+    /// publishes `contract` as it goes `Live` (ADR-0231 §4).
     fn insert(
         &self,
         authority: &BootAuthority,
@@ -58,31 +57,32 @@ impl Registry {
 
     /// Invalidate a live mailbox (ADR-0010). Transitions the entry
     /// to `Dropped` so dispatch-path readers can distinguish an
-    /// intentional drop from an unknown id; the id itself (a function
-    /// of the name per ADR-0029) stays addressable and a subsequent
-    /// `try_register_inbox` / `register_inline` with the same
-    /// name reuses it. Returns the released name on success.
+    /// intentional drop from an unknown id. The record keeps its proven
+    /// name, so a reference minted while the route was `Live` still names
+    /// its path (ADR-0230), and the name is spent: a later
+    /// `try_register_inbox` / `register_inline` of the same name is a
+    /// collision (ADR-0079 §7). Returns the retired name on success.
     ///
     /// Issue 634 Phase 4 retired the dedicated `Component` variant,
     /// so this now drops any live `Inbox` or `Inline` mailbox.
     ///
-    /// The production callers are the boot and eager-spawn unwinds:
-    /// `ChassisCtx::unclaim_mailbox`, reached when a capability or pumped
-    /// boot fails after its claim, and the eager spawn's actor-registry
-    /// collision arm. Each retires a route that reached `Live` rather than
-    /// deleting it, so a reference minted while it was `Live` still names
-    /// its path (ADR-0230), and the name stays free for a later boot of the
-    /// same actor. They ignore the `Err`: an unknown, `Starting`, or
-    /// already-dropped id leaves nothing to retire. The `WasmTrampoline`
-    /// shutdown path this comment once named reaches
+    /// The production caller is `ChassisCtx::retire_claim`, the boot
+    /// unwind for a claim some actor may already have observed: a
+    /// capability boot that fails after its `wire` ran, or a pumped boot
+    /// that fails while the passives are dispatching. A claim nothing could
+    /// have observed is withdrawn instead ([`Self::withdraw_claim`]). A
+    /// closed actor's route reaches `Dropped` through the same effect,
+    /// staged by the close tail through the ADR-0165 owner. Callers ignore
+    /// the `Err`: an unknown, `Starting`, or already-dropped id leaves
+    /// nothing to retire. The `WasmTrampoline` shutdown path this comment
+    /// once named reaches
     /// [`CostTable::drop_mailbox`](crate::mail::cost::CostTable::drop_mailbox)
     /// instead, which clears the per-handler cost cells and never touches a
     /// registry route.
     ///
     /// Direct write path — takes a [`BootAuthority`] like every other
-    /// eager mutator (iamacoffeepot/aether#4161), so only the boot unwind,
-    /// the boot / embedder eager spawn, and tests (which use it to retire a
-    /// deliberately-installed collision route) can name it.
+    /// eager mutator (iamacoffeepot/aether#4161), so only the boot unwind
+    /// and tests (which use it to stand for a departed actor) can name it.
     ///
     /// # Panics
     /// Panics if the inner routing lock is poisoned — fail-fast per
@@ -93,6 +93,39 @@ impl Registry {
             Ok(RegistryApplied::Dropped(name)) => Ok(name),
             Err(RegistryEffectError::Drop(error)) => Err(error),
             Ok(_) | Err(_) => unreachable!("drop effect returns a name or drop error"),
+        }
+    }
+
+    /// Withdraw a `Live` claim whose birth unwound, removing its route
+    /// record so the name can be claimed again (ADR-0079 §5, ADR-0230 §1:
+    /// a failed init can be retried under the same name). Unlike
+    /// [`Self::drop_mailbox`], nothing of the route survives, so an
+    /// `actor_path` read of a reference minted against it would panic.
+    ///
+    /// Precondition: no reference to the claim can outlive the withdrawal.
+    /// The callers hold it structurally — the eager spawn's actor-registry
+    /// collision arm mints nothing between its registration and its
+    /// withdrawal, and a chassis boot that fails before its spawn pass
+    /// aborts the whole boot before any dispatcher runs or any `wire` mail
+    /// carries the id.
+    ///
+    /// Direct write path — takes a [`BootAuthority`], so only pre-seal code
+    /// can name it (iamacoffeepot/aether#4161).
+    ///
+    /// # Errors
+    ///
+    /// [`DropError::AlreadyDropped`] for a retired route, whose name stays
+    /// spent, and [`DropError::UnknownId`] for an absent, `Starting`, or
+    /// alias route.
+    ///
+    /// # Panics
+    /// Panics if the inner routing lock is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn withdraw_claim(&self, authority: &BootAuthority, id: MailboxId) -> Result<(), DropError> {
+        match self.apply_one(authority, RegistryEffect::WithdrawClaim(id)) {
+            Ok(RegistryApplied::ClaimWithdrawn(_)) => Ok(()),
+            Err(RegistryEffectError::Drop(error)) => Err(error),
+            Ok(_) | Err(_) => unreachable!("withdraw effect returns the withdrawn id or a drop error"),
         }
     }
 

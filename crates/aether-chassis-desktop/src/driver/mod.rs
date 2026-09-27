@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
-use aether_data::Kind;
-use aether_kinds::{LifecycleAdvance, Quit, Tick, WindowId as EngineWindowId};
+use aether_data::{ErasedActorPath, Kind};
+use aether_kinds::{LifecycleAdvance, Quit, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_render::{Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
 use aether_substrate::actor::native::PumpedSlot;
@@ -227,10 +227,10 @@ impl DesktopRenderIntegration {
 }
 
 impl DesktopWindowIntegration for DesktopRenderIntegration {
-    fn attach_window(&mut self, id: EngineWindowId, window: Arc<Window>) -> Result<(), String> {
+    fn attach_window(&mut self, path: ErasedActorPath, window: Arc<Window>) -> Result<(), String> {
         let attachment = self
             .render_slot
-            .host_turn(|state, _ctx| state.attach_window(id, window))
+            .host_turn(|state, _ctx| state.attach_window(path, window))
             .ok_or_else(|| "render actor is unavailable during window attachment".to_owned())?;
         attachment?;
         let attached = Instant::now();
@@ -239,17 +239,17 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
         Ok(())
     }
 
-    fn detach_window(&mut self, id: EngineWindowId) {
-        if self.render_slot.host_turn(|state, _ctx| state.detach_window(id)) == Some(false) {
+    fn detach_window(&mut self, path: &ErasedActorPath) {
+        if self.render_slot.host_turn(|state, _ctx| state.detach_window(path)) == Some(false) {
             tracing::warn!(
                 target: "aether_substrate::render",
-                window_id = id.0,
+                window = %path,
                 "window manager detached an unknown render target",
             );
         }
     }
 
-    fn windows_dirty(&mut self, windows: &[EngineWindowId]) {
+    fn windows_dirty(&mut self, windows: &[ErasedActorPath]) {
         if self.terminal_reached {
             return;
         }
@@ -263,8 +263,8 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
         self.frame += 1;
     }
 
-    fn window_occluded(&mut self, id: EngineWindowId, occluded: bool) {
-        self.send_render_and_drain(&Occluded { window: id, occluded });
+    fn window_occluded(&mut self, path: &ErasedActorPath, occluded: bool) {
+        self.send_render_and_drain(&Occluded { window: path.clone(), occluded });
     }
 
     fn request_shutdown(&mut self) {

@@ -96,6 +96,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::effect::{EffectBatch, RegistryEffect};
 use crate::mail::{MailboxId, Source};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::scheduler::{
@@ -652,17 +653,27 @@ where
 /// externally-pumped
 /// [`PumpedSlot`](super::pumped::PumpedSlot) run
 /// (ADR-0160 §1): drain `monitors_of[self_id]`, prune `monitoring[id]`
-/// from each target, mark the slot Dead, release this actor's parent-local
-/// live child key, and fan one
+/// from each target, mark the slot Dead, retire the route to `Dropped`,
+/// release this actor's parent-local live child key, and fan one
 /// [`MonitorNotice`](aether_kinds::MonitorNotice) out to every watcher via
 /// the binding's mailer. A free function for the same reason as
 /// [`dispatch_envelope`]: one home, no drift.
+///
+/// The actor registry's tombstone is the synchronous authority spawn
+/// admission and `register_monitor` read. The route's `Dropped` record is
+/// its published mirror for route readers — `resolve_live` refuses it and
+/// the live inventory drops it — staged through the ADR-0165 owner, so it
+/// lands at the owner's next apply. The route keeps its proven name, so a
+/// held reference still names its path, and the name is never registered
+/// again (ADR-0079 §7). An owner that closed first is chassis shutdown, and
+/// the logged sink stays quiet about it.
 ///
 /// The closing actor's inline-child aliases (ADR-0114 §2) depart with it, so
 /// each of those addresses fans out under its own name too — see
 /// `notify_alias_departures`. Only `self_id` is tombstoned: an alias is
 /// served by this slot rather than owning one, and the retired name is the
-/// actor's.
+/// actor's. An alias resolves through its target, so it reads `Dropped`
+/// with it.
 ///
 /// The key release sits between the registry close and the fan-out on
 /// purpose. A watcher that re-stages the dead child's subname the moment its
@@ -686,6 +697,7 @@ pub fn finalize_close_and_fan_out(
 ) {
     debug_assert!(chain.held_root().is_none(), "the close tail runs past its chain's Finished, so it can hold nothing");
     let watchers = actor_registry.close_actor(self_id);
+    binding.mailer().registry().submit_logged(EffectBatch::new(vec![RegistryEffect::DropMailbox(self_id)]));
     binding.release_parent_child_reservation();
     notify_departure(binding, self_id, watchers);
     notify_alias_departures(actor_registry, binding, self_id);

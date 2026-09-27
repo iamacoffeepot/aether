@@ -28,9 +28,8 @@ fn route_generations_advance_only_for_successful_mutations() {
     assert!(r.drop_mailbox(&auth(), id).is_err());
     assert_eq!(r.route_lookup(kind, id).generation(), dropped);
 
-    r.try_register_inbox(&auth(), "generation", noop_handler()).expect("dropped route re-registers");
-    let reregistered = r.route_lookup(kind, id).generation();
-    assert!(reregistered > dropped);
+    assert!(r.try_register_inbox(&auth(), "generation", noop_handler()).is_err(), "a dropped name stays spent");
+    assert_eq!(r.route_lookup(kind, id).generation(), dropped);
 }
 
 #[test]

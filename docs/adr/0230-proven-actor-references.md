@@ -9,7 +9,7 @@
 - **Amended:** 2026-09-24 — §3's module-load check reaches private inline children: the types `export!` lists under `private = [..]` are read from the module's `aether.kinds.inputs.private` section and checked like the exported inline-spawnable actors (#6590).
 - **Amended:** 2026-09-24 — §3's declared-dependency proof `DependsOn<R>` is a safe trait whose impl names `R`'s position in the actor's one `Declared::Depends` list, which `#[actor(depends(..))]` writes from the same list as the dependency entry the pre-`init` check reads; a hand-written impl for an undeclared `R` repeats an emitted impl (`E0119`) or names a position that holds another dependency or none (`E0277`) ([ADR-0231](0231-protocol-typed-references-and-reply-checks.md) §10; #6614, #6842).
 - **Amended:** 2026-09-24 — §2: a proven reference's canonical `ErasedActorPath` is readable through the host registry (`NativeCtx::actor_path`) for diagnostics, as text only, never a position or anything sendable; the registry proves each route's name against the ADR-0166 grammar when the route is first published, so the read cannot fail for a reference it minted (#6635).
-- **Amended:** 2026-09-24 — every `ErasedActorRef` is route-backed: an unwound boot or eager spawn retires its `Live` route to `Dropped` (name kept, re-registrable) instead of removing it, so `CancelStarting` is the only edge that removes a route; and the envelope sender mints through one published-route read, `None` for a stamped position with no route (the chassis sentinel) (#6656).
+- **Amended:** 2026-09-24 — every `ErasedActorRef` is route-backed: an unwound eager spawn, or a chassis boot that fails before its spawn pass, withdraws its `Live` claim, because no reference to the claim can outlive that unwind; any other unwind retires its route to `Dropped`, which keeps its name and is never registered again. So `CancelStarting` and that withdrawal are the only edges that remove a route; and the envelope sender mints through one published-route read, `None` for a stamped position with no route (the chassis sentinel) (#6656).
 - **Amended:** 2026-09-24 — an off-thread helper that must decide about a peer it holds a proof of reads an `ActorProbe` from the init ctx (`ctx.actor_probe()`); the probe answers whether that actor is `Live` now and whether it accepts a kind, takes proofs only, and sends, resolves, and enumerates nothing (#6324).
 - **Amended:** 2026-09-24 — a guest host's receive surface is a declaration the substrate reads: a native actor that runs a guest implements `GuestHost`, and `NativeCtx::sync_guest` makes its accept set and cost rows match that declaration, so no actor reads its own position and no other actor writes a guest host's accept set. `NativeCtx::path`, bounded on `GuestHost`, reads a guest host's own canonical path as text only (issue 6350).
 - **Amended:** 2026-09-24 — §3: an `ErasedActorPath` that arrived in a payload is proven through the ctx verb `resolve_path`: the host resolves the address and the published-route read proves it at once; a refusal names the path or its canonical path, never an id (#6324).
@@ -82,9 +82,13 @@ Four further facts shape the decision:
    record (`RouteLifecycle::{Starting, Live, Alias, Dropped}`) is created at
    reservation. Retiring an actor leaves its route in place and records the
    id in `ActorRegistry::tombstones`
-   ([ADR-0079](0079-instanced-actors-as-a-first-class-category.md): names are never reused). The one
-   backwards edge is `RegistryEffect::CancelStarting`, which removes the
-   route of a birth whose `init` failed.
+   ([ADR-0079](0079-instanced-actors-as-a-first-class-category.md): names are never reused). The
+   backwards edges are `RegistryEffect::CancelStarting`, which removes the
+   route of a birth whose `init` failed, and `RegistryEffect::WithdrawClaim`,
+   which removes the `Live` claim of an eager spawn or a chassis boot that
+   unwound before any actor could have observed it. Every other unwind
+   retires its route to `Dropped`, and a `Dropped` route is never registered
+   again.
 
 `NAMESPACE` is the other raw string in the flow. Outside the SDK it is
 consumed as path assembly (`format!("{}/{}:{name}", Host::NAMESPACE,

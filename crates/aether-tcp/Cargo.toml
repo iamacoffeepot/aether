@@ -66,6 +66,9 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # real-process hub → RPC → forked-headless stack through `FleetHarness`,
 # resolved via `dist/manifest.json` (`cargo xtask dist` first).
 aether-harness-fleet = { path = "../aether-harness-fleet" }
+# The load test matches a closed session's refusal as
+# `aether_rpc::RpcError::NotPresent`.
+aether-rpc = { path = "../aether-rpc" }
 # The load probe's driver/snapshot kinds (`ConfigureTcpLoadProbe`,
 # `TcpLoadSnapshot`, …) the test sends and decodes.
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }

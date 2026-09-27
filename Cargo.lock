@@ -535,7 +535,6 @@ dependencies = [
  "aether-test-fixtures-stateful-typed",
  "inventory",
  "serde_json",
- "sha2",
  "tracing",
  "wasmtime",
 ]
@@ -777,13 +776,11 @@ dependencies = [
 name = "aether-kinds"
 version = "0.3.0-alpha"
 dependencies = [
- "aether-codec",
  "aether-data",
  "aether-math",
  "bytemuck",
  "inventory",
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1011,6 +1008,7 @@ dependencies = [
  "aether-data",
  "aether-harness-fleet",
  "aether-kinds",
+ "aether-rpc",
  "aether-substrate",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",

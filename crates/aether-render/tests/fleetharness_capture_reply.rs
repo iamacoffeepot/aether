@@ -14,8 +14,8 @@
 //! that anything renders.
 
 mod tests {
-    use aether_data::Kind;
-    use aether_kinds::{CaptureFrame, CaptureFrameResult, WindowId};
+    use aether_data::{ErasedActorPath, Kind};
+    use aether_kinds::{CaptureFrame, CaptureFrameResult};
 
     use aether_harness_fleet::FleetHarness;
 
@@ -33,7 +33,7 @@ mod tests {
             engine,
             "aether.render",
             &CaptureFrame {
-                window: Some(WindowId(42)),
+                window: Some(ErasedActorPath::new("aether.window/:main").expect("a well-formed window path")),
                 mails: Vec::new(),
                 after_mails: Vec::new(),
                 checks: Vec::new(),

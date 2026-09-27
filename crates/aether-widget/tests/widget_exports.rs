@@ -32,7 +32,7 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_RIGHT};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, ReplaceComponent,
-    ReplaceResult, Tick, WindowId,
+    ReplaceResult, Tick,
 };
 use aether_render::HeadlessRenderCapability;
 use aether_widget::set::{DropdownWidget, MenuBarWidget, TabStripWidget};
@@ -45,7 +45,11 @@ use support::widget_caps;
 
 const DEFAULT_STEM: &str = "aether_widget";
 const BEHAVIOR_STEM: &str = "aether_widget_behavior";
-const TEST_WINDOW_ID: WindowId = WindowId(1);
+
+/// The window the injected input events name.
+fn test_window() -> aether_data::ErasedActorPath {
+    aether_window::window_path(&LoadName::new("main").expect("a valid window name"))
+}
 
 /// A GPU-free bench with the component host and everything the widget module
 /// declares: the headless render stub, text (its fs from the sandbox roots) and
@@ -90,11 +94,11 @@ fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPane
 }
 
 fn press(x: f32, y: f32) -> MouseButton {
-    MouseButton { window: TEST_WINDOW_ID, button: LEFT, x, y }
+    MouseButton { window: test_window(), button: LEFT, x, y }
 }
 
 fn release(x: f32, y: f32) -> MouseButtonRelease {
-    MouseButtonRelease { window: TEST_WINDOW_ID, button: LEFT, x, y }
+    MouseButtonRelease { window: test_window(), button: LEFT, x, y }
 }
 
 fn dropdown_config() -> DropdownConfig {
@@ -316,17 +320,14 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
     let menu = harness.child::<WidgetPanel, MenuBarWidget>(&panel, key("menu")).expect("menu reconstructed");
     harness
         .execute(vec![
-            ("tabs_right", HarnessOp::send_and_settle(&tabs, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
-            ("dropdown_enter", HarnessOp::send_and_settle(&dropdown, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("tabs_right", HarnessOp::send_and_settle(&tabs, &Key { window: test_window(), code: KEY_RIGHT })),
+            ("dropdown_enter", HarnessOp::send_and_settle(&dropdown, &Key { window: test_window(), code: KEY_ENTER })),
             (
                 "dropdown_enter_up",
-                HarnessOp::send_and_settle(&dropdown, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_ENTER }),
+                HarnessOp::send_and_settle(&dropdown, &KeyRelease { window: test_window(), code: KEY_ENTER }),
             ),
-            ("dropdown_down", HarnessOp::send_and_settle(&dropdown, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
-            (
-                "dropdown_commit",
-                HarnessOp::send_and_settle(&dropdown, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER }),
-            ),
+            ("dropdown_down", HarnessOp::send_and_settle(&dropdown, &Key { window: test_window(), code: KEY_DOWN })),
+            ("dropdown_commit", HarnessOp::send_and_settle(&dropdown, &Key { window: test_window(), code: KEY_ENTER })),
             (
                 "menu_frame",
                 // The frame kind rides the adopted widget handler set, which
@@ -335,7 +336,7 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
             ),
             ("menu_press", HarnessOp::send_and_settle(&menu, &press(20.0, 20.0))),
             ("menu_release", HarnessOp::send_and_settle(&menu, &release(20.0, 20.0))),
-            ("menu_enter", HarnessOp::send_and_settle(&menu, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("menu_enter", HarnessOp::send_and_settle(&menu, &Key { window: test_window(), code: KEY_ENTER })),
         ])
         .unwrap_or_else(|error| panic!("{stem}: post-replace mail to original child aliases must dispatch: {error}"));
 

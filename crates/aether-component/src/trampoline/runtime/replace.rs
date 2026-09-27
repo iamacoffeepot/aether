@@ -6,17 +6,14 @@ use std::sync::Arc;
 
 use aether_actor::Single;
 use aether_data::ErasedActorPath;
-use aether_data::canonical::kind_id_from_parts;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone};
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, PendingSpawn, StateBundle};
-use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::KindId;
 use aether_substrate::mail::registry::{PreparedAliasRetirement, PreparedAliasRoute};
-use wasmtime::Module;
 
 use crate::component::replacement_refusal;
 use crate::trampoline::WasmTrampoline;
@@ -96,7 +93,9 @@ impl WasmTrampolineState {
             }
         };
         let capabilities = self
-            .actor_caps
+            .module
+            .manifest()
+            .actors()
             .iter()
             .find(|actor| {
                 // Runtime-name match: compute each loaded actor's declared
@@ -110,15 +109,14 @@ impl WasmTrampolineState {
         let config = WasmTrampolineConfig {
             engine: Arc::clone(&self.engine),
             linker: Arc::clone(&self.linker),
-            module: Arc::clone(&self.module),
+            // ADR-0163 §3 (#3984): the sibling shares this module, so it
+            // opens its own asset load window over the same asset blobs.
+            module: self.module.clone(),
+            modules: self.modules.clone(),
             outbound: Arc::clone(&self.outbound),
             capabilities,
             config: pending.config,
             type_tag: Some(pending.tag),
-            actor_caps: self.actor_caps.clone(),
-            // ADR-0163 §3 (#3984): the sibling shares this module's bytes, so
-            // it indexes its own asset load window from the same content.
-            wasm_bytes: Arc::clone(&self.wasm_bytes),
         };
         let parent_path = ctx.actor_path(parent);
         let staged = ctx
@@ -223,17 +221,17 @@ impl WasmTrampolineState {
     /// ADR-0231 §5: the replacement's hosted type must keep every handler
     /// row, and the `#[fallback]` if it has one, of the type this slot hosts
     /// now — the live guest, or the dropped one a refill takes over from —
-    /// and may add rows. The predecessor resolves from the retained module
-    /// the way the replacement does, and a failure to resolve it refuses the
-    /// replace.
+    /// and may add rows. The predecessor resolves from the resident module's
+    /// manifest the way the replacement does, and a failure to resolve it
+    /// refuses the replace.
     fn check_contract(
         &self,
         ctx: &NativeCtx<'_, WasmTrampoline>,
         target: &impl Display,
         replacement: &ComponentCapabilities,
     ) -> Result<(), String> {
-        let old_boot = kind_manifest::read_boot_namespace_from_bytes(&self.wasm_bytes)?;
-        let (predecessor, _) = self.resolve_replace_target(None, &self.actor_caps, old_boot.as_deref())?;
+        let resident = self.module.manifest();
+        let (predecessor, _) = self.resolve_replace_target(None, resident.actors(), resident.boot())?;
         let predecessor = predecessor.map(|group| group.capabilities.clone()).unwrap_or_default();
         contract::contract_break(&predecessor, replacement).map_or(Ok(()), |contract_break| {
             Err(contract::contract_refusal(target, contract_break, |kind| ctx.kind_label(kind)))
@@ -260,8 +258,7 @@ impl WasmTrampolineState {
             return Ok(());
         }
 
-        let predecessor = declared_kinds(&self.wasm_bytes)?;
-        contract::undeclared_context(table.kinds(), &predecessor, replacement)
+        contract::undeclared_context(table.kinds(), self.module.manifest().kind_ids(), replacement)
             .map_or(Ok(()), |kind| Err(contract::context_refusal(target, &ctx.kind_label(kind))))
     }
 
@@ -317,35 +314,29 @@ impl WasmTrampolineState {
         ctx: &mut NativeCtx<'_, WasmTrampoline>,
         payload: ReplaceComponent,
     ) -> ReplaceResult {
-        // `payload.wasm` is the new module bytes; `target` named this
-        // trampoline and the host proved it before forwarding, so the field
-        // only names the actor in a contract or carried-context refusal.
-        let module = match Module::new(&self.engine, &payload.wasm) {
-            Ok(m) => m,
-            Err(e) => {
-                return ReplaceResult::Err { error: format!("invalid wasm module: {e}") };
-            }
-        };
+        // `wasm` is the new module bytes; `target` named this trampoline and
+        // the host proved it before forwarding, so the field only names the
+        // actor in a contract or carried-context refusal.
+        let ReplaceComponent { target, wasm, config, export, .. } = payload;
 
-        // ADR-0033 / ADR-0096 / ADR-0097: parse every exported type's
-        // capability group from the new wasm. The full `actors` set
-        // refreshes `self.actor_caps` below so post-replace sibling
-        // spawns see the new module's types.
-        let actors = match kind_manifest::read_actor_inputs_from_bytes(&payload.wasm) {
-            Ok(a) => a,
+        // ADR-0241 §2: the candidate comes from the engine's one module
+        // cache, so its code compiles and its sections parse once per content
+        // hash. The host checked the same bytes in before forwarding and
+        // holds that module until this replace settles, so this is a cache
+        // hit rather than a second compile. The code blob is let go once the
+        // module is built.
+        let module = match self.modules.check_in(&ctx.blob_check_in(), &ctx.check_in(wasm.into_boxed_slice())) {
+            Ok(module) => module,
             Err(error) => return ReplaceResult::Err { error },
         };
+        let manifest = module.manifest();
 
         // ADR-0096: resolve the effective tag the replacement
         // instantiates plus the capability group to advertise —
         // export-named, or the trampoline's current hosted type for a
         // bare replace. See [`Self::resolve_replace_target`].
-        let new_boot = match kind_manifest::read_boot_namespace_from_bytes(&payload.wasm) {
-            Ok(boot) => boot,
-            Err(error) => return ReplaceResult::Err { error },
-        };
         let (group, effective_tag) =
-            match self.resolve_replace_target(payload.export.as_deref(), &actors, new_boot.as_deref()) {
+            match self.resolve_replace_target(export.as_deref(), manifest.actors(), manifest.boot()) {
                 Ok(resolved) => resolved,
                 Err(error) => return ReplaceResult::Err { error },
             };
@@ -357,32 +348,16 @@ impl WasmTrampolineState {
             return ReplaceResult::Err { error };
         }
         let mut capabilities = group.map(|group| group.capabilities.clone()).unwrap_or_default();
-        if let Err(error) = self.check_contract(ctx, &payload.target, &capabilities) {
+        if let Err(error) = self.check_contract(ctx, &target, &capabilities) {
             return ReplaceResult::Err { error };
         }
 
-        // #6429: the replacement's kind vocabulary, parsed before the old
-        // guest is touched so a malformed manifest refuses cleanly. The
-        // carried contexts it is checked against surface only after the old
-        // guest's `on_dehydrate`, below.
-        let replacement_kinds = match declared_kinds(&payload.wasm) {
-            Ok(kinds) => kinds,
-            Err(error) => return ReplaceResult::Err { error },
-        };
-
-        // ADR-0163 §3 (#3984): re-index the replacement module's assets into
-        // a load window. Its catalog feeds the post-swap
-        // `describe_component` / `ReplaceResult`; the window itself is
-        // installed on the new instance's ctx below so the replacement's
-        // `init` can pull asset bytes (replace re-runs `init`, not `wire`,
-        // so the window closes after instantiate). A malformed asset section
-        // fails the replace loudly, before the swap runs.
-        let new_wasm_bytes: Arc<[u8]> = Arc::from(payload.wasm.as_slice());
-        let load_window = match asset_manifest::LoadWindow::index(Arc::clone(&new_wasm_bytes)) {
-            Ok(window) => window,
-            Err(error) => return ReplaceResult::Err { error },
-        };
-        capabilities.assets = load_window.catalog();
+        // ADR-0163 §3 (#3984): the replacement's asset catalog feeds the
+        // post-swap `describe_component` / `ReplaceResult`; a load window over
+        // its asset blobs is installed on the new instance's ctx below so the
+        // replacement's `init` can pull asset bytes (replace re-runs `init`,
+        // not `wire`, so the window closes after instantiate).
+        capabilities.assets = manifest.asset_catalog().to_vec();
 
         // Build a fresh `ComponentCtx` for the new instance — same
         // binding + outbound reference. The binding
@@ -394,13 +369,10 @@ impl WasmTrampolineState {
         // ADR-0163 §3 (#3984): install the load window before instantiate so
         // the replacement's `init` can pull assets; closed after instantiate
         // (replace re-runs `init`, not `wire`).
-        substrate_ctx.install_load_window(load_window);
+        substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(&module));
         // ADR-0231 §4: an inline child the replacement spawns publishes its
         // own type's rows, read from the replacement module.
-        match contract::inline_contracts(&actors, &payload.wasm) {
-            Ok(contracts) => substrate_ctx.install_inline_contracts(contracts),
-            Err(error) => return ReplaceResult::Err { error },
-        }
+        substrate_ctx.install_inline_contracts(contract::inline_contracts(manifest));
 
         // #6134: instantiate the candidate while the old guest is still
         // installed and wired. `init` cannot send mail, so starting it early
@@ -414,9 +386,9 @@ impl WasmTrampolineState {
         let mut new_component = match Component::instantiate(
             &self.engine,
             &self.linker,
-            &module,
+            module.compiled(),
             substrate_ctx,
-            &payload.config,
+            &config,
             effective_tag,
         ) {
             Ok(c) => c,
@@ -425,7 +397,9 @@ impl WasmTrampolineState {
             }
         };
 
-        let predecessor = match self.retire_guest(ctx, &payload.target, &replacement_kinds) {
+        // #6429: the carried contexts are checked against the replacement's
+        // kind vocabulary once the old guest's `on_dehydrate` surfaced them.
+        let predecessor = match self.retire_guest(ctx, &target, manifest.kind_ids()) {
             Ok(predecessor) => predecessor,
             Err(error) => return ReplaceResult::Err { error },
         };
@@ -465,17 +439,11 @@ impl WasmTrampolineState {
             return ReplaceResult::Err { error: format!("on_rehydrate failed: {e}") };
         }
 
-        // ADR-0097: the new module is now resident — retain it (and
-        // the refreshed per-type cap map) so sibling spawns after this
-        // replace re-instantiate the new code, not the old. This compile
-        // stays outside the host's `ModuleCache` (ADR-0240 D5), which the
-        // component host owns and no trampoline can reach; the fresh `Arc`
-        // makes this trampoline the new module's holder.
-        self.module = Arc::new(module);
-        self.actor_caps = actors;
-        // ADR-0163 §3 (#3984): future sibling spawns index the new module's
-        // assets, not the replaced module's.
-        self.wasm_bytes = new_wasm_bytes;
+        // ADR-0097: the new module is now resident — retain it so sibling
+        // spawns after this replace re-instantiate the new code and read the
+        // new manifest's groups, and (ADR-0163 §3, #3984) open their load
+        // windows over the new module's assets, not the replaced module's.
+        self.module = module;
         // ADR-0096: track the actor type this trampoline now hosts, so
         // a later bare (`export: None`) replace reuses the *current*
         // type rather than reverting to the original load's. A bare
@@ -504,16 +472,6 @@ impl WasmTrampolineState {
 
         ReplaceResult::Ok { capabilities }
     }
-}
-
-/// Every kind a module's `aether.kinds` section declares, by the id the
-/// registry derives from its name and schema, so a reshaped kind reads as a
-/// different kind.
-fn declared_kinds(wasm: &[u8]) -> Result<HashSet<KindId>, String> {
-    Ok(kind_manifest::read_from_bytes(wasm)?
-        .iter()
-        .map(|descriptor| KindId(kind_id_from_parts(&descriptor.name, &descriptor.schema)))
-        .collect())
 }
 
 #[derive(Clone)]

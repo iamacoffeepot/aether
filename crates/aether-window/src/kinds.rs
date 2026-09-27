@@ -1,16 +1,17 @@
 //! Public wire vocabulary for the `aether.window` manager.
 
-use aether_data::{KindId, MailboxId};
-use aether_kinds::{WindowId, WindowMode};
+use aether_data::{ErasedActorPath, KindId, MailboxId};
+use aether_kinds::WindowMode;
 use serde::{Deserialize, Serialize};
 
-/// Select one window or every current and future window.
+/// Select one window, by its canonical actor path, or every current and
+/// future window.
 ///
 /// `All` is prospective: a subscription using it also observes matching
 /// events from windows created after the subscription is installed.
-#[derive(aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum WindowSelector {
-    One(WindowId),
+    One(ErasedActorPath),
     All,
 }
 
@@ -30,10 +31,12 @@ pub struct WindowSpec {
     pub size: Option<WindowSizeRequest>,
 }
 
-/// Public state for one live window.
+/// Public state for one live window. `path` is the window's canonical actor
+/// path (`aether.window/aether.window.instance:main`), the text every
+/// window-originated event carries and `capture_frame` takes.
 #[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WindowInfo {
-    pub id: WindowId,
+    pub path: ErasedActorPath,
     pub name: String,
     pub title: String,
     pub mode: WindowMode,
@@ -43,7 +46,8 @@ pub struct WindowInfo {
     pub occluded: bool,
 }
 
-/// List every live window in ascending [`WindowId`] order.
+/// List every live window in ascending path order, which is ascending window
+/// name.
 #[aether_data::kind(name = "aether.window.list", copy, default, eq)]
 pub struct ListWindows;
 
@@ -153,9 +157,9 @@ pub enum SetWindowMenuResult {
 /// menu owns the item and the caller's own [`WindowMenuItem::id`].
 ///
 /// Routed by the same selector-aware subscription family as [`aether_kinds::Key`].
-#[aether_data::kind(name = "aether.window.menu_activated", copy, eq)]
+#[aether_data::kind(name = "aether.window.menu_activated", eq)]
 pub struct WindowMenuActivated {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub id: u32,
 }
 
@@ -313,7 +317,7 @@ mod internal {
 pub(crate) use internal::RetireWindow;
 
 /// Subscribe an explicit mailbox to a kind for a window selector.
-#[aether_data::kind(name = "aether.window.subscribe", copy, eq)]
+#[aether_data::kind(name = "aether.window.subscribe", eq)]
 pub struct SubscribeWindow {
     pub selector: WindowSelector,
     pub kind: KindId,
@@ -321,14 +325,14 @@ pub struct SubscribeWindow {
 }
 
 /// Subscribe the sending actor to a kind for a window selector.
-#[aether_data::kind(name = "aether.window.subscribe_self", copy, eq)]
+#[aether_data::kind(name = "aether.window.subscribe_self", eq)]
 pub struct SubscribeWindowSelf {
     pub selector: WindowSelector,
     pub kind: KindId,
 }
 
 /// Remove an explicit mailbox's subscription for a selector and kind.
-#[aether_data::kind(name = "aether.window.unsubscribe", copy, eq)]
+#[aether_data::kind(name = "aether.window.unsubscribe", eq)]
 pub struct UnsubscribeWindow {
     pub selector: WindowSelector,
     pub kind: KindId,
@@ -336,7 +340,7 @@ pub struct UnsubscribeWindow {
 }
 
 /// Remove the sending actor's subscription for a selector and kind.
-#[aether_data::kind(name = "aether.window.unsubscribe_self", copy, eq)]
+#[aether_data::kind(name = "aether.window.unsubscribe_self", eq)]
 pub struct UnsubscribeWindowSelf {
     pub selector: WindowSelector,
     pub kind: KindId,
@@ -365,7 +369,7 @@ pub struct UnsubscribeAllWindows {
 #[cfg(feature = "synthetic")]
 #[aether_data::kind(name = "aether.window.inject_event", eq)]
 pub struct InjectWindowEvent {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub kind: KindId,
     #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
@@ -378,7 +382,7 @@ pub struct WindowOpened {
 }
 
 /// Published after a window and its native resources are detached.
-#[aether_data::kind(name = "aether.window.closed", copy, eq)]
+#[aether_data::kind(name = "aether.window.closed", eq)]
 pub struct WindowClosed {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
 }

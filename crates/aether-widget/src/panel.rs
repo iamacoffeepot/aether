@@ -194,8 +194,9 @@ pub struct WidgetPanel {
     /// The total stack height, for the background chrome; set at spawn.
     panel_height: f32,
     /// Latest modifier state: Tab direction, and the chord fanned to a child
-    /// that just gained focus.
-    modifiers: Modifiers,
+    /// that just gained focus. `None` until the first `Modifiers` arrives,
+    /// which reads as no modifier held.
+    modifiers: Option<Modifiers>,
 }
 
 impl WidgetPanel {
@@ -909,15 +910,24 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
 /// Send a focus transition down: `FocusLost` to the child that lost focus,
 /// then `FocusGained` and the panel's latest [`Modifiers`] to the one that
 /// gained it. Lost still goes first. `keyboard` rides on the gain so the
-/// child knows whether to draw its ring (see [`FocusGained`]).
-fn apply_focus<A>(sends: &mut Sends<'_, A>, transition: FocusTransition, keyboard: bool, modifiers: Modifiers) {
+/// child knows whether to draw its ring (see [`FocusGained`]). Before the
+/// first `Modifiers` arrives there is none to send, and a child that has none
+/// reads the same no-modifier state.
+fn apply_focus<A>(
+    sends: &mut Sends<'_, A>,
+    transition: FocusTransition,
+    keyboard: bool,
+    modifiers: Option<&Modifiers>,
+) {
     let FocusTransition { previous, next } = transition;
     if let Some(prev) = previous {
         sends.send_to(prev, &FocusLost);
     }
     if let Some(gained) = next {
         sends.send_to(gained, &FocusGained { keyboard });
-        sends.send_to(gained, &modifiers);
+        if let Some(modifiers) = modifiers {
+            sends.send_to(gained, modifiers);
+        }
     }
 }
 
@@ -933,7 +943,7 @@ fn apply_hover<A>(sends: &mut Sends<'_, A>, transition: HoverTransition) {
     }
 }
 
-fn apply_availability<A>(sends: &mut Sends<'_, A>, effects: AvailabilityEffects, modifiers: Modifiers) {
+fn apply_availability<A>(sends: &mut Sends<'_, A>, effects: AvailabilityEffects, modifiers: Option<&Modifiers>) {
     if let Some(hover) = effects.hover {
         apply_hover(sends, hover);
     }
@@ -1254,7 +1264,7 @@ impl WasmActor for WidgetPanel {
             spawned: false,
             pending_style: false,
             panel_height: 0.0,
-            modifiers: Modifiers::default(),
+            modifiers: None,
         })
     }
 
@@ -1344,7 +1354,7 @@ impl WasmActor for WidgetPanel {
             }
             let focusable = self.focus.focus_hit_test(press.x, press.y);
             if let Some(transition) = self.focus.set_focus(focusable) {
-                apply_focus(&mut ctx.sends(), transition, false, self.modifiers);
+                apply_focus(&mut ctx.sends(), transition, false, self.modifiers.as_ref());
             }
             hit
         } else {
@@ -1404,13 +1414,13 @@ impl WasmActor for WidgetPanel {
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if key.code == KEY_TAB {
-            let direction = if self.modifiers.shift {
+            let direction = if self.modifiers.as_ref().is_some_and(|held| held.shift) {
                 FocusDirection::Backward
             } else {
                 FocusDirection::Forward
             };
             if let Some(transition) = self.focus.move_focus(direction) {
-                apply_focus(&mut ctx.sends(), transition, true, self.modifiers);
+                apply_focus(&mut ctx.sends(), transition, true, self.modifiers.as_ref());
             }
             return;
         }
@@ -1448,10 +1458,10 @@ impl WasmActor for WidgetPanel {
     /// it).
     #[handler::single]
     fn on_modifiers(&mut self, ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
-        self.modifiers = modifiers;
         if let Some(child) = self.focus.keyboard_target() {
             ctx.send_to(child, &modifiers);
         }
+        self.modifiers = Some(modifiers);
     }
 
     /// Keep dynamic routing availability synchronized with the external state
@@ -1462,7 +1472,7 @@ impl WasmActor for WidgetPanel {
             return;
         };
         let effects = self.focus.update_availability(source, &changed.state);
-        apply_availability(&mut ctx.sends(), effects, self.modifiers);
+        apply_availability(&mut ctx.sends(), effects, self.modifiers.as_ref());
     }
 
     /// Keep content-derived pointer/keyboard eligibility synchronized. Source
@@ -1480,7 +1490,7 @@ impl WasmActor for WidgetPanel {
         let effects = self
             .focus
             .update_eligibility(source, FocusEligibility { pointer: changed.pointer, keyboard: changed.keyboard });
-        apply_availability(&mut ctx.sends(), effects, self.modifiers);
+        apply_availability(&mut ctx.sends(), effects, self.modifiers.as_ref());
     }
 
     /// Observe one descendant scroll container's exact typed outcome. The

@@ -15,7 +15,7 @@ use crate::args::{
 };
 
 use super::Mcp;
-use super::ids::parse_window_id;
+use super::ids::parse_window_path;
 use super::render::internal_msg;
 
 pub(super) const MAX_FAILURE_EVIDENCE_ACTORS: usize = 8;
@@ -37,7 +37,7 @@ pub(super) enum FailureEvidenceQuery {
     Component { engine_id: String, address: String },
     ActorLogs { engine_id: String, address: String, max: u32 },
     ActorCost { engine_id: String, address: String },
-    Frame { engine_id: String, window_id: String, scale: Option<f32>, max_dimension: Option<u32> },
+    Frame { engine_id: String, window: String, scale: Option<f32>, max_dimension: Option<u32> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -127,10 +127,10 @@ impl FailureEvidenceSource for McpFailureEvidenceSource<'_> {
                     .map_err(mcp_error_message)?;
                     parse_tool_json("actor_cost", &body).map(FailureEvidenceValue::Json)
                 }
-                FailureEvidenceQuery::Frame { engine_id, window_id, scale, max_dimension } => {
+                FailureEvidenceQuery::Frame { engine_id, window, scale, max_dimension } => {
                     super::capture::capture_frame(
                         self.mcp,
-                        failure_evidence_capture_args(engine_id, window_id, scale, max_dimension),
+                        failure_evidence_capture_args(engine_id, window, scale, max_dimension),
                     )
                     .await
                     .map_err(mcp_error_message)
@@ -151,13 +151,13 @@ fn parse_tool_json(tool: &str, body: &str) -> Result<Value, String> {
 
 pub(super) fn failure_evidence_capture_args(
     engine_id: String,
-    window_id: String,
+    window: String,
     scale: Option<f32>,
     max_dimension: Option<u32>,
 ) -> CaptureFrameArgs {
     CaptureFrameArgs {
         engine_id: Some(engine_id),
-        window_id,
+        window,
         mails: Vec::new(),
         after_mails: Vec::new(),
         checks: Vec::new(),
@@ -250,7 +250,7 @@ pub(super) fn validate_failure_evidence_args(args: &mut CollectFailureEvidenceAr
     )?;
     validate_selectors(&mut args.kinds, "kinds", MAX_FAILURE_EVIDENCE_KINDS, MAX_KIND_NAME_BYTES)?;
     if let Some(frame) = &args.frame {
-        parse_window_id(&frame.window_id)?;
+        parse_window_path(&frame.window)?;
         super::capture::resolve_capture_image_options(frame.scale, frame.max_dimension, Some(true), false)?;
     }
     Ok(())
@@ -363,12 +363,12 @@ pub(super) async fn collect_failure_evidence_with_source<S: FailureEvidenceSourc
     }
 
     let frame = if let Some(frame) = args.frame {
-        let window_id = frame.window_id;
+        let window = frame.window;
         let (observation, frame_images) = run_observation(
             source,
             FailureEvidenceQuery::Frame {
                 engine_id: engine_id.clone(),
-                window_id: window_id.clone(),
+                window: window.clone(),
                 scale: frame.scale,
                 max_dimension: frame.max_dimension,
             },
@@ -377,7 +377,7 @@ pub(super) async fn collect_failure_evidence_with_source<S: FailureEvidenceSourc
         )
         .await;
         images.extend(frame_images);
-        Some(FrameFailureEvidence { window_id, observation })
+        Some(FrameFailureEvidence { window, observation })
     } else {
         None
     };

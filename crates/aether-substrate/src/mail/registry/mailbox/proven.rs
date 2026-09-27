@@ -91,8 +91,9 @@ impl Error for ChildRefused {}
 pub enum ResolveLiveError {
     /// A route was published under this id and has since been dropped.
     Dropped(MailboxId),
-    /// No live route stands under this id: it was never registered, or its
-    /// birth is still `Starting` and so not yet provable.
+    /// No live route stands under this id: it was never registered, its
+    /// unborn claim was withdrawn, or its birth is still `Starting` and so
+    /// not yet provable.
     Unknown(MailboxId),
 }
 
@@ -180,8 +181,10 @@ impl Registry {
     /// `Mail`, `Source`, and the mailer's push and reply entries are public,
     /// so a stamp alone does not show the position was ever registered. The
     /// one read settles it: a reference minted here names a record
-    /// [`Self::actor_path`] reads through the same view, and no path removes a
-    /// record that has emitted mail, so its path answers for the session.
+    /// [`Self::actor_path`] reads through the same view, and a record leaves
+    /// the table only when a `Starting` reservation is cancelled, or a claim
+    /// is withdrawn before any actor could have observed it — never after it
+    /// has emitted mail — so its path answers for the session.
     ///
     /// Every lifecycle counts. A `Dropped` or retired-alias record is the
     /// departed actor a [`MonitorNotice`](aether_kinds::MonitorNotice) is

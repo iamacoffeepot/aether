@@ -1,7 +1,7 @@
 //! The mail surface every concrete window manager carries (ADR-0169).
 
 use aether_actor::{Manual, OutboundReply, handler_set};
-use aether_data::{ActorMail, MailboxId};
+use aether_data::{ActorMail, ErasedActorPath};
 use aether_substrate::actor::native::{Erased, NativeCtx};
 
 use super::subscribers::WindowSubscribers;
@@ -9,7 +9,7 @@ use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, RequestWindowRedraw, RequestWindowRedrawResult,
     SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult,
     SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
-    UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowId,
+    UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf,
 };
 
 /// Re-dispatch one root-addressed per-window command at the sole live window,
@@ -28,24 +28,24 @@ use crate::{
 /// window that is no longer live, which the caller receives as the command's
 /// own `Err` variant rather than as silence or a forward into a dead mailbox.
 fn route_to_sole_window<K: ActorMail, A>(
-    windows: &[WindowId],
+    windows: &[ErasedActorPath],
     ctx: &mut NativeCtx<'_, A, Manual>,
     mail: &K,
 ) -> Result<(), String> {
     let window = match windows {
-        [window] => *window,
+        [window] => window,
         [] => return Err(format!("{} reached the aether.window root, which has no live window", K::NAME)),
         several => {
             return Err(format!(
                 "{} reached the aether.window root, but {} windows are live — address one window's own mailbox \
-                 instead (aether.window.list reports each window's id)",
+                 instead (aether.window.list reports each window's path)",
                 K::NAME,
                 several.len(),
             ));
         }
     };
-    let target = ctx.resolve_live(MailboxId(window.0)).map_err(|error| {
-        format!("{} reached the aether.window root, but window {} is not live: {error}", K::NAME, window.0)
+    let target = ctx.resolve_path(window).map_err(|error| {
+        format!("{} reached the aether.window root, but window {window} is not live: {error}", K::NAME)
     })?;
     ctx.forward_to(&target, mail);
     Ok(())
@@ -78,7 +78,7 @@ pub trait WindowManagerSurface {
     /// `aether.window.list` enumerates, so the count a refusal reports is the
     /// count the caller can see. Per-window liveness stays the endpoint's
     /// answer, not a reason to hide a window from the root's arithmetic.
-    fn routable_windows(state: &Self::State) -> Vec<WindowId>;
+    fn routable_windows(state: &Self::State) -> Vec<ErasedActorPath>;
 
     /// Subscribe an explicit mailbox to one kind for one selector.
     #[handler::single]

@@ -33,7 +33,7 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 use aether_kinds::keycode::KEY_D;
-use aether_kinds::{Key, KeyRelease, LoadComponent, NamedMail, Render, WindowId, WindowSize};
+use aether_kinds::{Key, KeyRelease, LoadComponent, NamedMail, Render, WindowSize};
 use aether_kit::camera::CameraComponent;
 use aether_kit::camera::controller::{CameraController, ControllerConfig};
 use aether_math::Rgb;
@@ -43,7 +43,9 @@ use aether_render::{DrawTriangle, Vertex};
 /// `WindowSize` below lands.
 const WINDOW_WIDTH: u32 = 128;
 const WINDOW_HEIGHT: u32 = 96;
-const TEST_WINDOW_ID: WindowId = WindowId(1);
+fn test_window() -> ErasedActorPath {
+    aether_window::window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
+}
 
 /// Load-time name for the controller instance.
 const CONTROLLER_NAME: &str = "controller";
@@ -155,7 +157,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
                 HarnessOp::send_and_settle(
                     &camera,
                     &WindowSize {
-                        window: TEST_WINDOW_ID,
+                        window: test_window(),
                         width: WINDOW_WIDTH,
                         height: WINDOW_HEIGHT,
                         scale_factor: 1.0,
@@ -173,7 +175,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     // default 0.15 m/tick pan walks the target ~7 m — nearly two stripe widths.
     harness
         .execute(vec![
-            ("press_d", HarnessOp::send_and_settle(&controller, &Key { window: TEST_WINDOW_ID, code: KEY_D })),
+            ("press_d", HarnessOp::send_and_settle(&controller, &Key { window: test_window(), code: KEY_D })),
             ("pan", HarnessOp::advance(48)),
         ])
         .expect("hold D + pan");
@@ -184,7 +186,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     // the camera pose is frozen and the view stops moving.
     harness
         .execute(vec![
-            ("release_d", HarnessOp::send_and_settle(&controller, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_D })),
+            ("release_d", HarnessOp::send_and_settle(&controller, &KeyRelease { window: test_window(), code: KEY_D })),
             ("idle", HarnessOp::advance(48)),
         ])
         .expect("release D + idle");

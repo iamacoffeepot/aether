@@ -38,46 +38,42 @@ impl WasmActor for EditorRegionProbe {
     }
 
     #[handler::single]
-    fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
-        self.inputs.push(ObservedEditorInput::PointerPress {
-            button: press.button,
-            x_pixels: press.x,
-            y_pixels: press.y,
-        });
+    fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, MouseButton { button, x, y, .. }: MouseButton) {
+        self.inputs.push(ObservedEditorInput::PointerPress { button, x_pixels: x, y_pixels: y });
     }
 
     #[handler::single]
-    fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        self.inputs.push(ObservedEditorInput::PointerRelease {
-            button: release.button,
-            x_pixels: release.x,
-            y_pixels: release.y,
-        });
+    fn on_mouse_button_release(
+        &mut self,
+        _ctx: &mut WasmCtx<'_>,
+        MouseButtonRelease { button, x, y, .. }: MouseButtonRelease,
+    ) {
+        self.inputs.push(ObservedEditorInput::PointerRelease { button, x_pixels: x, y_pixels: y });
     }
 
     #[handler::single]
-    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
-        self.inputs.push(ObservedEditorInput::PointerMotion { x_pixels: moved.x, y_pixels: moved.y });
+    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, MouseMove { x, y, .. }: MouseMove) {
+        self.inputs.push(ObservedEditorInput::PointerMotion { x_pixels: x, y_pixels: y });
     }
 
     #[handler::single]
-    fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
+    fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_>, MouseWheel { delta_x, delta_y, x, y, .. }: MouseWheel) {
         self.inputs.push(ObservedEditorInput::Wheel {
-            delta_x_pixels: wheel.delta_x,
-            delta_y_pixels: wheel.delta_y,
-            x_pixels: wheel.x,
-            y_pixels: wheel.y,
+            delta_x_pixels: delta_x,
+            delta_y_pixels: delta_y,
+            x_pixels: x,
+            y_pixels: y,
         });
     }
 
     #[handler::single]
-    fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, key: Key) {
-        self.inputs.push(ObservedEditorInput::KeyPress { code: key.code });
+    fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, Key { code, .. }: Key) {
+        self.inputs.push(ObservedEditorInput::KeyPress { code });
     }
 
     #[handler::single]
-    fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_>, release: KeyRelease) {
-        self.inputs.push(ObservedEditorInput::KeyRelease { code: release.code });
+    fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_>, KeyRelease { code, .. }: KeyRelease) {
+        self.inputs.push(ObservedEditorInput::KeyRelease { code });
     }
 
     #[handler::single]
@@ -95,13 +91,8 @@ impl WasmActor for EditorRegionProbe {
     }
 
     #[handler::single]
-    fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
-        self.inputs.push(ObservedEditorInput::Modifiers {
-            shift: modifiers.shift,
-            ctrl: modifiers.ctrl,
-            alt: modifiers.alt,
-            meta: modifiers.meta,
-        });
+    fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, Modifiers { shift, ctrl, alt, meta, .. }: Modifiers) {
+        self.inputs.push(ObservedEditorInput::Modifiers { shift, ctrl, alt, meta });
     }
 
     #[handler::manual]

@@ -1,22 +1,5 @@
 //! Diagnostic and actor-monitoring kind vocabulary.
 
-/// Diagnostic the hub emits back to an originating engine when mail
-/// that engine bubbled up (ADR-0037) doesn't resolve at the hub
-/// either. Lands on the engine's `aether.diagnostics` sink, which
-/// re-warns locally so the unresolved address surfaces in that
-/// engine's `engine_logs` rather than only in the hub's. Closes the
-/// "typo diagnostics" follow-up from ADR-0037 (issue #185).
-///
-/// `recipient_mailbox_id` is the hashed mailbox id the originator
-/// sent to — the id space is cross-process-stable (ADR-0029 /
-/// ADR-0030 / issue #186) so agents can map it back to a name in
-/// tooling. `kind_id` is the kind the original mail carried.
-#[aether_data::kind(name = "aether.mail.unresolved", copy, eq)]
-pub struct UnresolvedMail {
-    pub recipient_mailbox_id: aether_data::MailboxId,
-    pub kind_id: aether_data::KindId,
-}
-
 /// Issue 607 Phase 4b (ADR-0079): framework-emitted close
 /// notification. Sent to every monitor a closing actor accumulated via
 /// `NativeCtx::monitor` — the substrate drains `monitors_of[target]`

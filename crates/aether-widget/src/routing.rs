@@ -51,14 +51,13 @@ impl RegionInputLanes {
 }
 
 impl EditorKeyChord {
+    /// Whether `key` under `modifiers` is this chord. `None` is the state
+    /// before any `Modifiers` arrived: no modifier held.
     #[must_use]
-    pub const fn matches(self, key: Key, modifiers: Modifiers) -> bool {
-        let key_code = key.code;
-        self.key_code == key_code
-            && self.shift == modifiers.shift
-            && self.ctrl == modifiers.ctrl
-            && self.alt == modifiers.alt
-            && self.meta == modifiers.meta
+    pub fn matches(self, key: &Key, modifiers: Option<&Modifiers>) -> bool {
+        let (shift, ctrl, alt, meta) =
+            modifiers.map_or((false, false, false, false), |held| (held.shift, held.ctrl, held.alt, held.meta));
+        self.key_code == key.code && self.shift == shift && self.ctrl == ctrl && self.alt == alt && self.meta == meta
     }
 }
 
@@ -164,7 +163,9 @@ fn valid_rect(rect: EditorRegionRect) -> bool {
 pub struct Routing {
     entries: Vec<RegionEntry>,
     focused: Option<ErasedActorRef>,
-    modifiers: Modifiers,
+    /// The latest `Modifiers`, `None` until the first arrives, which reads as
+    /// no modifier held.
+    modifiers: Option<Modifiers>,
     cycle_armed: bool,
     press_owner: Option<RegionPressOwner>,
     /// The region the last motion was routed to, so the next one that routes
@@ -197,8 +198,8 @@ impl Routing {
     }
 
     #[must_use]
-    pub const fn cached_modifiers(&self) -> Modifiers {
-        self.modifiers
+    pub const fn cached_modifiers(&self) -> Option<&Modifiers> {
+        self.modifiers.as_ref()
     }
 
     #[must_use]
@@ -220,7 +221,7 @@ impl Routing {
         self.entries.iter().rev().find(|entry| entry.rect.contains_point(point)).and_then(|entry| entry.target)
     }
 
-    pub fn pointer_press(&mut self, press: MouseButton) -> RegionPointerRoute {
+    pub fn pointer_press(&mut self, press: &MouseButton) -> RegionPointerRoute {
         if let Some(owner) = self.press_owner {
             return RegionPointerRoute {
                 target: self.accepting_target(owner.target, RegionInputLane::PointerPress),
@@ -237,7 +238,7 @@ impl Routing {
         RegionPointerRoute { target, focus }
     }
 
-    pub fn pointer_release(&mut self, release: MouseButtonRelease) -> Option<ErasedActorRef> {
+    pub fn pointer_release(&mut self, release: &MouseButtonRelease) -> Option<ErasedActorRef> {
         if let Some(owner) = self.press_owner {
             if release.button == owner.button {
                 self.press_owner = None;
@@ -248,7 +249,7 @@ impl Routing {
             .and_then(|target| self.accepting_target(target, RegionInputLane::PointerRelease))
     }
 
-    pub fn pointer_motion(&mut self, moved: MouseMove) -> RegionPointerMotionRoute {
+    pub fn pointer_motion(&mut self, moved: &MouseMove) -> RegionPointerMotionRoute {
         let target = self
             .press_owner
             .map(|owner| owner.target)
@@ -260,14 +261,14 @@ impl Routing {
     }
 
     #[must_use]
-    pub fn wheel(&self, wheel: MouseWheel) -> Option<ErasedActorRef> {
+    pub fn wheel(&self, wheel: &MouseWheel) -> Option<ErasedActorRef> {
         self.hit_test(wheel.x, wheel.y).and_then(|target| self.accepting_target(target, RegionInputLane::Wheel))
     }
 
-    pub fn key_press(&mut self, key: Key) -> RegionKeyRoute {
-        if key.code == KEY_TAB && self.modifiers.ctrl {
+    pub fn key_press(&mut self, key: &Key) -> RegionKeyRoute {
+        if key.code == KEY_TAB && self.modifiers.as_ref().is_some_and(|held| held.ctrl) {
             self.cycle_armed = true;
-            let direction = if self.modifiers.shift {
+            let direction = if self.modifiers.as_ref().is_some_and(|held| held.shift) {
                 RegionFocusDirection::Backward
             } else {
                 RegionFocusDirection::Forward
@@ -287,7 +288,7 @@ impl Routing {
         RegionKeyRoute { target: self.focused_target(RegionInputLane::KeyPress), focus: None, consumed: false }
     }
 
-    pub fn key_release(&mut self, release: KeyRelease) -> RegionKeyRoute {
+    pub fn key_release(&mut self, release: &KeyRelease) -> RegionKeyRoute {
         if release.code == KEY_TAB && self.cycle_armed {
             self.cycle_armed = false;
             return RegionKeyRoute { target: None, focus: None, consumed: true };
@@ -295,8 +296,8 @@ impl Routing {
         RegionKeyRoute { target: self.focused_target(RegionInputLane::KeyRelease), focus: None, consumed: false }
     }
 
-    pub fn modifiers(&mut self, modifiers: Modifiers) -> Option<ErasedActorRef> {
-        self.modifiers = modifiers;
+    pub fn modifiers(&mut self, modifiers: &Modifiers) -> Option<ErasedActorRef> {
+        self.modifiers = Some(modifiers.clone());
         self.focused_target(RegionInputLane::Modifiers)
     }
 
@@ -310,12 +311,12 @@ impl Routing {
         self.focused_target(RegionInputLane::ImePreedit)
     }
 
-    fn activation_target(&self, key: Key) -> Option<ErasedActorRef> {
+    fn activation_target(&self, key: &Key) -> Option<ErasedActorRef> {
         self.entries
             .iter()
             .find(|entry| {
                 entry.keyboard_focus_eligible
-                    && entry.activation_chord.is_some_and(|chord| chord.matches(key, self.modifiers))
+                    && entry.activation_chord.is_some_and(|chord| chord.matches(key, self.modifiers.as_ref()))
             })
             .and_then(|entry| entry.target)
     }
@@ -368,12 +369,12 @@ impl Routing {
 
 #[cfg(test)]
 mod tests {
-    use aether_kinds::WindowId;
-
     use super::*;
-    use crate::test_support::proven;
+    use crate::test_support::{proven, test_window};
 
-    const TEST_WINDOW_ID: WindowId = WindowId(1);
+    fn modifiers(shift: bool, ctrl: bool) -> Modifiers {
+        Modifiers { window: test_window(), shift, ctrl, alt: false, meta: false }
+    }
 
     fn rect(x_pixels: f32, y_pixels: f32, width_pixels: f32, height_pixels: f32) -> EditorRegionRect {
         EditorRegionRect { x_pixels, y_pixels, width_pixels, height_pixels }
@@ -403,15 +404,15 @@ mod tests {
     }
 
     fn press(button: u32, x: f32, y: f32) -> MouseButton {
-        MouseButton { window: TEST_WINDOW_ID, button, x, y }
+        MouseButton { window: test_window(), button, x, y }
     }
 
     fn release(button: u32, x: f32, y: f32) -> MouseButtonRelease {
-        MouseButtonRelease { window: TEST_WINDOW_ID, button, x, y }
+        MouseButtonRelease { window: test_window(), button, x, y }
     }
 
     fn moved(x: f32, y: f32) -> MouseMove {
-        MouseMove { window: TEST_WINDOW_ID, x, y }
+        MouseMove { window: test_window(), x, y }
     }
 
     #[test]
@@ -421,9 +422,9 @@ mod tests {
         let mut routing = announced(&[lower, upper], &[1, 2]);
 
         assert_eq!(routing.hit_test(15.0, 15.0), Some(proven(2)));
-        assert_eq!(routing.pointer_press(press(0, 15.0, 15.0)).target, None);
+        assert_eq!(routing.pointer_press(&press(0, 15.0, 15.0)).target, None);
         assert_eq!(routing.press_owner(), None);
-        assert_eq!(routing.pointer_press(press(0, 5.0, 5.0)).target, Some(proven(1)));
+        assert_eq!(routing.pointer_press(&press(0, 5.0, 5.0)).target, Some(proven(1)));
     }
 
     #[test]
@@ -436,22 +437,22 @@ mod tests {
             &[1, 2],
         );
 
-        let route = routing.pointer_press(press(0, 5.0, 5.0));
+        let route = routing.pointer_press(&press(0, 5.0, 5.0));
         assert_eq!(route.target, Some(proven(1)));
         assert_eq!(route.focus, Some(RegionFocusTransition { previous: None, next: Some(proven(1)) }));
-        assert_eq!(routing.pointer_press(press(1, 25.0, 5.0)).target, Some(proven(1)));
+        assert_eq!(routing.pointer_press(&press(1, 25.0, 5.0)).target, Some(proven(1)));
         assert_eq!(
-            routing.pointer_motion(moved(25.0, 5.0)),
+            routing.pointer_motion(&moved(25.0, 5.0)),
             RegionPointerMotionRoute { exited: None, target: Some(proven(1)) },
             "a drag over the peer exits nothing: the owner is still the target",
         );
 
-        assert_eq!(routing.pointer_release(release(1, 25.0, 5.0)), Some(proven(1)));
+        assert_eq!(routing.pointer_release(&release(1, 25.0, 5.0)), Some(proven(1)));
         assert_eq!(routing.press_owner(), Some(RegionPressOwner { target: proven(1), button: 0 }));
-        assert_eq!(routing.pointer_release(release(0, 25.0, 5.0)), Some(proven(1)));
+        assert_eq!(routing.pointer_release(&release(0, 25.0, 5.0)), Some(proven(1)));
         assert_eq!(routing.press_owner(), None);
         assert_eq!(
-            routing.pointer_motion(moved(25.0, 5.0)),
+            routing.pointer_motion(&moved(25.0, 5.0)),
             RegionPointerMotionRoute { exited: Some(proven(1)), target: Some(proven(2)) },
         );
     }
@@ -470,22 +471,22 @@ mod tests {
         );
 
         assert_eq!(
-            routing.pointer_motion(moved(150.0, 100.0)),
+            routing.pointer_motion(&moved(150.0, 100.0)),
             RegionPointerMotionRoute { exited: None, target: Some(proven(1)) },
         );
-        assert_eq!(routing.pointer_motion(moved(160.0, 110.0)).exited, None, "moving within a region exits nothing");
+        assert_eq!(routing.pointer_motion(&moved(160.0, 110.0)).exited, None, "moving within a region exits nothing");
 
         assert_eq!(
-            routing.pointer_motion(moved(500.0, 100.0)),
+            routing.pointer_motion(&moved(500.0, 100.0)),
             RegionPointerMotionRoute { exited: Some(proven(1)), target: Some(proven(2)) },
             "the pane the pointer left is named so it can go unlit",
         );
         assert_eq!(
-            routing.pointer_motion(moved(500.0, 900.0)),
+            routing.pointer_motion(&moved(500.0, 900.0)),
             RegionPointerMotionRoute { exited: Some(proven(2)), target: None },
             "leaving every region is the same edge",
         );
-        assert_eq!(routing.pointer_motion(moved(500.0, 950.0)).exited, None, "and a region is let go exactly once");
+        assert_eq!(routing.pointer_motion(&moved(500.0, 950.0)).exited, None, "and a region is let go exactly once");
     }
 
     #[test]
@@ -500,13 +501,13 @@ mod tests {
             &[1, 2],
         );
 
-        assert_eq!(routing.pointer_release(release(0, 25.0, 5.0)), Some(proven(2)));
+        assert_eq!(routing.pointer_release(&release(0, 25.0, 5.0)), Some(proven(2)));
         assert_eq!(
-            routing.wheel(MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: 2.0, x: 25.0, y: 5.0 }),
+            routing.wheel(&MouseWheel { window: test_window(), delta_x: 0.0, delta_y: 2.0, x: 25.0, y: 5.0 }),
             None
         );
         assert_eq!(
-            routing.wheel(MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: 2.0, x: 5.0, y: 5.0 }),
+            routing.wheel(&MouseWheel { window: test_window(), delta_x: 0.0, delta_y: 2.0, x: 5.0, y: 5.0 }),
             Some(proven(1))
         );
     }
@@ -521,25 +522,25 @@ mod tests {
             ],
             &[1, 2, 3],
         );
-        routing.pointer_press(press(0, 5.0, 5.0));
-        routing.pointer_release(release(0, 5.0, 5.0));
+        routing.pointer_press(&press(0, 5.0, 5.0));
+        routing.pointer_release(&release(0, 5.0, 5.0));
 
-        routing.modifiers(Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() });
-        let forward = routing.key_press(Key { window: TEST_WINDOW_ID, code: KEY_TAB });
+        routing.modifiers(&modifiers(false, true));
+        let forward = routing.key_press(&Key { window: test_window(), code: KEY_TAB });
         assert!(forward.consumed);
         assert_eq!(forward.target, None);
         assert_eq!(forward.focus, Some(RegionFocusTransition { previous: Some(proven(1)), next: Some(proven(3)) }));
-        assert!(routing.key_release(KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB }).consumed);
+        assert!(routing.key_release(&KeyRelease { window: test_window(), code: KEY_TAB }).consumed);
 
-        routing.modifiers(Modifiers { window: TEST_WINDOW_ID, ctrl: true, shift: true, ..Modifiers::default() });
+        routing.modifiers(&modifiers(true, true));
         assert_eq!(
-            routing.key_press(Key { window: TEST_WINDOW_ID, code: KEY_TAB }).focus,
+            routing.key_press(&Key { window: test_window(), code: KEY_TAB }).focus,
             Some(RegionFocusTransition { previous: Some(proven(3)), next: Some(proven(1)) })
         );
-        routing.key_release(KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB });
+        routing.key_release(&KeyRelease { window: test_window(), code: KEY_TAB });
 
-        routing.modifiers(Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() });
-        let plain = routing.key_press(Key { window: TEST_WINDOW_ID, code: KEY_TAB });
+        routing.modifiers(&modifiers(false, false));
+        let plain = routing.key_press(&Key { window: test_window(), code: KEY_TAB });
         assert!(!plain.consumed);
         assert_eq!(plain.target, Some(proven(1)));
         assert_eq!(plain.focus, None);
@@ -555,31 +556,31 @@ mod tests {
         second.activation_chord = Some(EditorKeyChord { key_code: 96, ..EditorKeyChord::default() });
         let mut routing = announced(&[first, second], &[1, 2]);
 
-        routing.pointer_press(press(0, 5.0, 5.0));
-        routing.pointer_release(release(0, 5.0, 5.0));
-        let activation = routing.key_press(Key { window: TEST_WINDOW_ID, code: 96 });
+        routing.pointer_press(&press(0, 5.0, 5.0));
+        routing.pointer_release(&release(0, 5.0, 5.0));
+        let activation = routing.key_press(&Key { window: test_window(), code: 96 });
         assert_eq!(activation.target, Some(proven(2)));
         assert_eq!(activation.focus, Some(RegionFocusTransition { previous: Some(proven(1)), next: Some(proven(2)) }));
         assert_eq!(routing.text_input_target(), None);
         assert_eq!(routing.ime_preedit_target(), None);
-        assert_eq!(routing.key_release(KeyRelease { window: TEST_WINDOW_ID, code: 96 }).target, Some(proven(2)));
+        assert_eq!(routing.key_release(&KeyRelease { window: test_window(), code: 96 }).target, Some(proven(2)));
     }
 
     #[test]
     fn empty_invalid_and_all_unfocusable_tables_stay_unrouted() {
         let mut empty = Routing::new(&[]);
-        assert_eq!(empty.pointer_press(press(0, 1.0, 1.0)).target, None);
-        empty.modifiers(Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() });
-        assert_eq!(empty.key_press(Key { window: TEST_WINDOW_ID, code: KEY_TAB }).focus, None);
+        assert_eq!(empty.pointer_press(&press(0, 1.0, 1.0)).target, None);
+        empty.modifiers(&modifiers(false, true));
+        assert_eq!(empty.key_press(&Key { window: test_window(), code: KEY_TAB }).focus, None);
 
         let invalid = region("region-1", rect(0.0, 0.0, f32::NAN, 10.0), true, RegionInputLanes::ALL);
         let overflowing = region("region-3", rect(f32::MAX, 0.0, f32::MAX, 10.0), true, RegionInputLanes::ALL);
         let static_region = region("region-2", rect(20.0, 0.0, 10.0, 10.0), false, RegionInputLanes::ALL);
         let mut routing = announced(&[invalid, overflowing, static_region], &[2]);
         assert_eq!(routing.hit_test(1.0, 1.0), None);
-        assert_eq!(routing.pointer_press(press(0, 25.0, 5.0)).focus, None);
-        routing.modifiers(Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() });
-        assert_eq!(routing.key_press(Key { window: TEST_WINDOW_ID, code: KEY_TAB }).focus, None);
+        assert_eq!(routing.pointer_press(&press(0, 25.0, 5.0)).focus, None);
+        routing.modifiers(&modifiers(false, true));
+        assert_eq!(routing.key_press(&Key { window: test_window(), code: KEY_TAB }).focus, None);
     }
 
     #[test]
@@ -587,7 +588,7 @@ mod tests {
         let mut routing = Routing::new(&[region("region-1", rect(0.0, 0.0, 20.0, 20.0), true, RegionInputLanes::ALL)]);
 
         assert_eq!(routing.hit_test(5.0, 5.0), None, "a region with no announced address is nobody's hit target");
-        assert_eq!(routing.pointer_press(press(0, 5.0, 5.0)).target, None);
+        assert_eq!(routing.pointer_press(&press(0, 5.0, 5.0)).target, None);
         assert_eq!(routing.press_owner(), None, "an unrouted press establishes no capture");
         assert_eq!(routing.text_input_target(), None, "and no focus lane has anywhere to go");
     }

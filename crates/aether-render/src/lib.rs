@@ -9,7 +9,7 @@
 //! advance chain has settled. Capture is a mail-driven state machine inside
 //! the actor ([`Frame`], [`PreSettled`], and [`Occluded`] complete it), so
 //! every capture transition is a handler with trace brackets and a cost row.
-//! Desktop surfaces attach explicitly by `WindowId`; the surfaceless harness
+//! Desktop surfaces attach explicitly by window path; the surfaceless harness
 //! GPU boots lazily from `offscreen_size`.
 //!
 //! The drawing and texture kinds, plus the three chassis-internal driver

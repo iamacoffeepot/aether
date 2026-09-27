@@ -1,5 +1,5 @@
 use super::super::capture::capture_envelope;
-use super::super::ids::parse_window_id;
+use super::super::ids::parse_window_path;
 #[allow(clippy::wildcard_imports)]
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
@@ -7,7 +7,7 @@ use super::super::*;
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
-use aether_kinds::{CaptureFrame, FrameVerdict, WindowId};
+use aether_kinds::{CaptureFrame, FrameVerdict};
 use base64::engine::general_purpose::STANDARD;
 
 fn image_dimensions(width: u32, height: u32) -> CaptureImageDimensions {
@@ -47,53 +47,33 @@ fn decode_synthetic_png(png: &[u8]) -> DecodedSyntheticPng {
     DecodedSyntheticPng { dimensions, rgba }
 }
 
-/// Tripwire: a real window id survives the tool boundary.
-///
-/// A window id is an ADR-0099 lineage fold near 2^60, and `f64` spacing up
-/// there is 256 — so the `u64` this argument used to be could not be
-/// carried by a client that parses JSON numbers as doubles. The id an
-/// agent read from `aether.window.list` came back quantised and
-/// `capture_frame` rejected it as unknown, which made desktop capture
-/// unaddressable (iamacoffeepot/aether#4344).
-///
-/// The pinned value is computed rather than chosen — it is the encoding of
-/// the id, so it moves if the encoding does — and it is deliberately one
-/// that is *not* a multiple of 256, so a round trip through a double
-/// cannot come back equal.
+/// A window is named by its actor path, as `aether.window.list` reports it or
+/// in short form, and by nothing else. A tagged `mbx-…` id and a decimal are
+/// the positions this argument used to take; each parses as a one-step path,
+/// so a parser that only checked the grammar would send one to the engine as
+/// a window it can never name.
 #[test]
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the double round-trip is the assertion — the lints here are naming the exact loss the fixture has to exhibit"
-)]
-fn a_lineage_scale_window_id_survives_the_tool_boundary() {
-    let real = 1_473_705_000_037_674_430u64;
-    assert_ne!(real, real as f64 as u64, "the fixture must be a value a double cannot carry, or it proves nothing");
+fn a_window_is_an_actor_path_and_never_a_position() {
+    for path in ["aether.window/aether.window.instance:main", "aether.window/:main"] {
+        assert_eq!(parse_window_path(path).expect("a window path parses").as_str(), path);
+    }
 
-    let tagged = tagged_id::encode(real).expect("a lineage fold carries valid tag bits");
-    let parsed = parse_window_id(&tagged).expect("the tagged form parses");
-
-    assert_eq!(parsed, WindowId(real), "every bit of the id reaches the engine");
-}
-
-/// The decimal form stays open for a synthetic or harness-scale id, and a
-/// token that is neither is a named error rather than a silent zero.
-#[test]
-fn a_window_id_is_a_tagged_string_or_a_decimal_and_nothing_else() {
-    assert_eq!(parse_window_id("73").expect("a decimal id parses"), WindowId(73));
-    assert!(parse_window_id("not-an-id").is_err(), "an unparseable token is refused");
+    for position in ["mbx-q3lr-bv2x-mtdr", "73", "not a path"] {
+        let error = parse_window_path(position).expect_err("a position is refused");
+        assert!(error.message.starts_with("window:"), "the refusal names the argument: {}", error.message);
+    }
 }
 
 #[test]
-fn capture_frame_window_id_reaches_the_engine_envelope() {
+fn capture_frame_window_reaches_the_engine_envelope() {
     let engine = EngineId(Uuid::from_u128(0x3990));
-    for window_id in [0, 73] {
-        let envelope = capture_envelope(engine, WindowId(window_id), Vec::new(), Vec::new(), Vec::new(), None);
+    for window in ["aether.window/aether.window.instance:main", "aether.window/:main"] {
+        let window = parse_window_path(window).expect("a window path parses");
+        let envelope = capture_envelope(engine, window.clone(), Vec::new(), Vec::new(), Vec::new(), None);
         let request = CaptureFrame::decode_from_bytes(&envelope.payload).expect("capture request decodes");
 
         assert_eq!(envelope.to.engine, Some(engine));
-        assert_eq!(request.window, Some(WindowId(window_id)), "the tool never converts a selected id to offscreen");
+        assert_eq!(request.window, Some(window), "the tool never converts a selected window to offscreen");
     }
 }
 
@@ -106,7 +86,7 @@ async fn capture_frame_bad_bundle_is_tool_error() {
     let result = mcp
         .capture_frame(Parameters(CaptureFrameArgs {
             engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
-            window_id: "1".to_owned(),
+            window: "aether.window/:main".to_owned(),
             mails: vec![EngineMailSpec {
                 address: "aether.render".to_owned(),
                 kind_name: "not.a.real.kind".to_owned(),
@@ -134,7 +114,7 @@ async fn capture_frame_relative_save_path_is_tool_error() {
     let result = mcp
         .capture_frame(Parameters(CaptureFrameArgs {
             engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
-            window_id: "1".to_owned(),
+            window: "aether.window/:main".to_owned(),
             mails: vec![],
             after_mails: vec![],
             checks: vec![],
@@ -311,10 +291,10 @@ fn save_capture_png_unwritable_path_errors() {
 /// Tripwire: the schema clients discover must require exactly the fields the
 /// server refuses to default.
 ///
-/// A live pilot session lost its first capture to this drift — `window_id`
-/// became required (multi-window desktop) while the advertised schema and the
-/// tool description still described the single-window shape, so the call came
-/// back `missing field window_id` and the field had to be guessed
+/// A live pilot session lost its first capture to this drift — the window
+/// field became required (multi-window desktop) while the advertised schema and
+/// the tool description still described the single-window shape, so the call
+/// came back with a missing-field error and the field had to be guessed
 /// (iamacoffeepot/aether#4040). The pinned value is *computed* on both sides:
 /// `required` is derived by schemars from the type, and the expected set is
 /// the type's own non-`#[serde(default)]` fields. Adding a field without a
@@ -331,12 +311,12 @@ fn capture_frame_schema_requires_exactly_the_non_defaulted_fields() {
         .map(|items| items.iter().filter_map(|i| i.as_str().map(str::to_owned)).collect())
         .unwrap_or_default();
 
-    // `window_id` is the one field `CaptureFrameArgs` declares without
+    // `window` is the one field `CaptureFrameArgs` declares without
     // `#[serde(default)]`; every other field defaults, so a caller may omit
     // it. `engine_id` defaults too — the shared engine resolver supplies the
     // sole supervised engine and errors when that is ambiguous, so capture
     // never guesses a window's engine any more than it guesses a window.
-    let expected = BTreeSet::from(["window_id".to_owned()]);
+    let expected = BTreeSet::from(["window".to_owned()]);
 
     assert_eq!(
         required, expected,
@@ -347,5 +327,5 @@ fn capture_frame_schema_requires_exactly_the_non_defaulted_fields() {
     // The description is the other half clients read, and it is free text no
     // derive can keep honest.
     let properties = value.get("properties").and_then(serde_json::Value::as_object).expect("object schema");
-    assert!(properties.contains_key("window_id"), "window_id must appear in the advertised properties");
+    assert!(properties.contains_key("window"), "window must appear in the advertised properties");
 }

@@ -25,7 +25,7 @@ use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::{DispatchParts, OwnedDispatch};
 use aether_substrate::mail::registry::{MailboxEntry, Registry};
 use aether_substrate::mail::{MailRef, Source, SourceAddr};
-use aether_substrate::testing::{TestChassis, boot_authority, drop_ref, registered_ref};
+use aether_substrate::testing::{TestChassis, boot_authority, registered_ref, withdraw_ref};
 
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());
@@ -325,7 +325,7 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
     let rebound =
         TcpListener::bind(socket_addr).expect("the prepared listener socket is dropped before failure completion");
     drop(rebound);
-    drop_ref(&registry, collision);
+    withdraw_ref(&registry, collision);
 
     let retried: BindListenerResult = drive_and_decode(
         &registry,

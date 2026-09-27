@@ -90,10 +90,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// # Panics
     ///
     /// When the route table holds no record for `reference`. The registry
-    /// mints a reference only for a route that holds a record, and removes a
-    /// route only when a `Starting` reservation is cancelled — a boot or spawn
-    /// that unwinds retires its route to `Dropped` instead — so this is a
-    /// broken invariant, not an answer (ADR-0063).
+    /// mints a reference only for a route that holds a record. A route leaves
+    /// the table only when a `Starting` reservation is cancelled, or a claim
+    /// is withdrawn before any actor could have observed it; neither follows
+    /// a mint that survives, and every other unwind retires its route to
+    /// `Dropped` instead. So this is a broken invariant, not an answer
+    /// (ADR-0063).
     ///
     /// Consumers: the http server's unmonitorable route-holder warning, the
     /// component host's replacement-boot warnings and its load-under parent,

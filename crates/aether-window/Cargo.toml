@@ -11,7 +11,7 @@ publish = false
 # `Err`-replying default runtime (`runtime/mod.rs`), with desktop and synthetic
 # alternatives under keyed runtime children. The crate also owns the public multi-window request,
 # reply, lifecycle, and selector surface; only the shared
-# `WindowId` and `WindowMode` values live in `aether-kinds`.
+# `WindowMode` value lives in `aether-kinds`.
 #
 # Unlike the pure-leaf `aether-clipboard`, this crate has an inbound
 # consumer: `aether-rpc`'s server test addresses `HeadlessWindowCapability` to

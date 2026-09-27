@@ -26,7 +26,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// transitions from `Live` to `Dead` in the chassis's
     /// [`ActorRegistry`](crate::ActorRegistry) and is added to `tombstones` —
     /// `spawn_child` rejects reuse of the retired full name with
-    /// `SpawnError::SubnameRetired`.
+    /// `SpawnError::SubnameRetired`. Its route goes `Dropped` as well, at the
+    /// registry owner's next apply: `resolve_live` refuses it, the live
+    /// inventory drops it, and its name is never registered again
+    /// (ADR-0079 §7).
     ///
     /// Idempotent — flipping the flag twice is the same as flipping
     /// it once. Singletons booted through `with_actor` rely on the

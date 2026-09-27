@@ -35,7 +35,7 @@ publish = false
 
 [features]
 default = ["runtime"]
-runtime = ["dep:aether-substrate", "dep:wasmtime", "dep:sha2", "dep:tracing"]
+runtime = ["dep:aether-substrate", "dep:wasmtime", "dep:tracing"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
@@ -49,9 +49,6 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 # trampoline owns the instantiated guest `Component`. Rides the `runtime`
 # feature — the identity half never names it.
 wasmtime = { workspace = true, optional = true }
-# ADR-0147 module-boot dedup keys the loaded wasm by its sha256 content
-# hash. Rides the `runtime` feature; the hashing happens on the load path.
-sha2 = { workspace = true, optional = true }
 # The load path and the trampoline's replace / forward sites log lifecycle
 # transitions and warn-drop unroutable mail. Rides the `runtime` feature —
 # those log sites are native-only.

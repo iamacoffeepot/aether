@@ -235,11 +235,11 @@ return `Err`, while fire-and-forget draw, update, dispatch, and destroy mail is
 warning-dropped. It does not retry or spin.
 
 The surfaceless `SubstrateHarness` replaces its fixed offscreen target. A
-desktop runtime instead walks every retained window in ascending `WindowId`
+desktop runtime instead walks every retained window in ascending window path
 order. The first canonical window selects the replacement adapter, device, and
 surface format; every later window must attach to that same context and format.
 Only after all surfaces succeed does the runtime replace the full target map,
-preserving each `WindowId` and occlusion flag together with the shared GPU and
+preserving each window path and occlusion flag together with the shared GPU and
 wireframe overlay. If any later surface fails, none of the staged surfaces or
 device state becomes live and the whole render capability becomes unusable.
 
@@ -303,9 +303,9 @@ wire time, and the actor simply never submits — a no-op where there's no GPU
 anyway.
 
 **From an agent over MCP — stage, then capture.** Use `capture_frame`: its
-required `window_id` names the render target (the tagged `mbx-…` string
-`aether.window.list` reports; the tool never guesses a primary or focused
-window), its `mails` bundle dispatches before the readback (the state that should
+required `window` names the render target (the window's actor path as
+`aether.window.list` reports it, or its short form `aether.window/:main`; the
+tool never guesses a primary or focused window), its `mails` bundle dispatches before the readback (the state that should
 appear) and `after_mails` after (cleanup), all around one synchronous PNG read.
 So to see a
 camera change, stage the `aether.kit.camera.*` driver mail (or a `DrawTriangle`

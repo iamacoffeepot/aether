@@ -13,7 +13,7 @@
 `WindowCapability` manager owns global lifecycle and event routing, while each
 live named window has an addressable `WindowInstance` child for control mail.
 Callers use those platform-neutral identities, stable window names, and
-`WindowId` values; they never hold a native window handle or address a
+window paths; they never hold a native window handle or address a
 desktop-, headless-, or test-specific implementation.
 
 The desktop chassis still owns the application thread and the call to winit's
@@ -25,7 +25,7 @@ aether-chassis-desktop
         └── DesktopWindowApplication       // aether-window
               ├── winit ApplicationHandler
               ├── PumpedSlot<DesktopWindowCapability>
-              ├── WindowId ↔ winit WindowId maps
+              ├── window path ↔ winit WindowId maps
               ├── monitored pooled DesktopWindowInstance children
               └── DesktopWindowIntegration // semantic chassis seam
                     ├── attach/detach render target
@@ -42,9 +42,9 @@ callbacks enter its state synchronously through same-thread host ingress, while
 actor requests arrive through the normal mailbox and settlement graph.
 
 Keeping the whole native application in `aether-window` also gives
-multi-window behavior one owner. The manager uses each child's raw mailbox
-identity as its stable engine `WindowId`, maps it to a platform id, retains
-per-window cursor/IME/focus state, publishes events with their source id, and
+multi-window behavior one owner. The manager uses each child's canonical actor
+path as its stable engine identity, maps it to a platform id, retains
+per-window cursor/IME/focus state, publishes events with their source path, and
 coordinates the matching render target. The chassis composes this application
 with render, lifecycle, and shutdown; it does not interpret raw winit events.
 
@@ -97,7 +97,7 @@ The request/reply families are:
 
 | Operation | Recipient and input | Successful reply |
 |---|---|---|
-| `list` | manager; no input | every live `WindowInfo`, ordered by `WindowId` |
+| `list` | manager; no input | every live `WindowInfo`, ordered by path (window name order) |
 | `create` | manager; `WindowSpec` | the attached window's `WindowInfo` |
 | subscribe/unsubscribe | manager; selector, kind, and optional explicit mailbox | acknowledgement |
 | `unsubscribe_all` | manager; explicit mailbox | normal no-reply settlement |
@@ -136,16 +136,19 @@ sit beside it:
 {"mode": "Windowed", "width": 1600, "height": 1200}
 ```
 
-`WindowId` is the raw mailbox identity of the named child, wrapped as a
-wire-safe `u64` newtype. That same value keys manager state, render targets,
-input events, and `WindowSelector::One`; callers do not maintain a separate
-name-to-id mapping for control.
+A window is named by the canonical actor path of its child,
+`aether.window/aether.window.instance:<name>`, an `ErasedActorPath` that
+`aether_window::window_path` writes from the actor types. That same path keys
+manager state, render targets, input events, and `WindowSelector::One`; no
+field carries the child's mailbox position (ADR-0230). `capture_frame` also
+accepts the short form `aether.window/:<name>`, which the render capability
+proves and canonicalizes when the request arrives.
 
 `WindowInfo` reports:
 
 ```rust
 pub struct WindowInfo {
-    pub id: WindowId,
+    pub path: ErasedActorPath,
     pub name: String,
     pub title: String,
     pub mode: WindowMode,
@@ -165,8 +168,8 @@ video mode exactly and fails instead of silently choosing another one.
 
 The window actor is also the source and router for keyboard, pointer,
 resize, text, IME, focus, redraw, opened, and closed events. Every per-window
-kind carries a `WindowId`. A subscriber chooses one window or all current and
-future windows:
+kind carries its window's path in `window`. A subscriber chooses one window or
+all current and future windows:
 
 ```rust
 // In an `#[actor(depends(WindowCapability))]` block.
@@ -210,7 +213,7 @@ need winit's `ActiveEventLoop`, such as window creation, are returned as host
 actions and applied after the actor turn.
 
 Render receives only semantic attachment and dirty-window calls. It owns one
-surface/configuration bundle per `WindowId`; the window manager owns native
+surface/configuration bundle per window path; the window manager owns native
 window lifecycle and asks the integration to attach or detach the
 corresponding render target. The native `Arc<Window>` remains same-thread host
 state and never becomes a wire payload.
@@ -410,7 +413,8 @@ Synthetic injection is not a headless production API. The headless runtime
 stays fail-fast so tests cannot accidentally turn unsupported production
 behavior into an implicit mock.
 
-To add a window-originated event, define the kind with a `WindowId`, emit it
+To add a window-originated event, define the kind with a `window:
+ErasedActorPath` field, emit it
 from window state, and let selector routing publish `K::ID`. Do not add a
 chassis kind cache or a generic input relay. A future non-window device such
 as a gamepad or raw HID source should have its own concrete source actor.

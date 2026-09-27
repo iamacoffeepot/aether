@@ -1,71 +1,21 @@
 //! Input and window event kind vocabulary.
 //!
-//! Every window-originated event starts with the engine-owned [`WindowId`]
-//! that produced it. The family uses the structured wire path uniformly:
-//! placing a `u64` identity before several of the legacy `u32` payloads would
-//! otherwise introduce architecture-dependent `#[repr(C)]` padding.
+//! Every window-originated event starts with the canonical actor path of the
+//! window that produced it (`aether.window/aether.window.instance:main`), the
+//! same text `aether.window.list` reports. A path is heap text, so the family
+//! rides the structured wire path and none of its kinds is `Copy` or has a
+//! default.
 
+use aether_data::ErasedActorPath;
 use alloc::string::String;
-
-use alloc::vec::Vec;
-
-use aether_data::schema::{LabelNode, SchemaType};
-use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
-use aether_data::{MailboxId, Schema};
-use bytemuck::{Pod, Zeroable};
-use serde::{Deserialize, Serialize};
-
-/// Stable engine-owned identity for one window.
-///
-/// This is deliberately distinct from platform window identifiers such as
-/// `winit::window::WindowId`: it is portable across native and guest code and
-/// remains meaningful in traces and replay data.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable, Serialize, Deserialize)]
-pub struct WindowId(pub u64);
-
-/// A window id *is* a [`MailboxId`] — ADR-0164 addresses window-originated
-/// input through the window's own actor identity, and the desktop window
-/// manager mints this from that actor's ADR-0099 lineage fold. Declaring it
-/// as one is what gives it the ADR-0064 tagged-string form
-/// (`mbx-q3lr-bv2x-mtdr`) at the JSON boundary.
-///
-/// Which is not cosmetic. A lineage fold occupies the top of the `u64`
-/// range — around 2^60 — and the derived `Scalar(U64)` schema this replaces
-/// rendered it as a bare JSON number, where a consumer parsing numbers as
-/// doubles quantises it to the nearest multiple of 256. So the id an agent
-/// read back from `aether.window.list` could not be handed to
-/// `capture_frame`: `1473705000037674430` returned as `...674500`, and
-/// desktop capture was unaddressable (iamacoffeepot/aether#4344).
-///
-/// The wire encoding is unchanged — `TypeId` is a fixed 8-byte
-/// little-endian field exactly as `Scalar(U64)` was, and the codec still
-/// accepts a plain number on the way in.
-impl Schema for WindowId {
-    const SCHEMA: SchemaType = SchemaType::TypeId(MailboxId::TYPE_ID);
-    const LABEL: Option<&'static str> = Some(MailboxId::TYPE_NAME);
-    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
-}
-
-impl WireEncode for WindowId {
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
-        self.0.encode(out)
-    }
-}
-
-impl<'de> WireDecode<'de> for WindowId {
-    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
-        u64::decode(cursor).map(Self)
-    }
-}
 
 /// A single keyboard keypress, identified by the stable codes in
 /// `keycode`. Dispatched on press only (no repeat). Released keys
 /// arrive as `KeyRelease`. Unmapped winit keys (any `KeyCode` variant
 /// the substrate doesn't translate) produce no mail.
-#[aether_data::kind(name = "aether.key", copy, default, eq)]
+#[aether_data::kind(name = "aether.key", eq)]
 pub struct Key {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub code: u32,
 }
 
@@ -73,9 +23,9 @@ pub struct Key {
 /// the same `code` value the press carried. Components tracking
 /// hold-to-act semantics (e.g. WASD movement) pair subscription to
 /// both kinds so they can clear state on release.
-#[aether_data::kind(name = "aether.key_release", copy, default, eq)]
+#[aether_data::kind(name = "aether.key_release", eq)]
 pub struct KeyRelease {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub code: u32,
 }
 
@@ -88,9 +38,9 @@ pub struct KeyRelease {
 /// coordinates are physical pixels, the same space `WindowSize` and
 /// `QuadSpace::Screen` speak, so hit-testing a click against screen-space
 /// geometry needs no scale conversion.
-#[aether_data::kind(name = "aether.mouse_button", copy, default, partial_eq)]
+#[aether_data::kind(name = "aether.mouse_button", partial_eq)]
 pub struct MouseButton {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub button: u32,
     pub x: f32,
     pub y: f32,
@@ -102,9 +52,9 @@ pub struct MouseButton {
 /// drag pair subscription to both kinds so they can commit on release.
 /// `x` / `y` are physical pixels, the same space `WindowSize` and
 /// `QuadSpace::Screen` speak.
-#[aether_data::kind(name = "aether.mouse_button_release", copy, default, partial_eq)]
+#[aether_data::kind(name = "aether.mouse_button_release", partial_eq)]
 pub struct MouseButtonRelease {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub button: u32,
     pub x: f32,
     pub y: f32,
@@ -116,9 +66,9 @@ pub struct MouseButtonRelease {
 /// cursor needs no external cursor correlation. `x` / `y` — and a
 /// touchpad's pixel-precise deltas — are physical pixels, the same space
 /// `WindowSize` and `QuadSpace::Screen` speak.
-#[aether_data::kind(name = "aether.mouse_wheel", copy, default, partial_eq)]
+#[aether_data::kind(name = "aether.mouse_wheel", partial_eq)]
 pub struct MouseWheel {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub delta_x: f32,
     pub delta_y: f32,
     pub x: f32,
@@ -133,9 +83,9 @@ pub struct MouseWheel {
 /// `scale_factor` anywhere in it. A consumer that genuinely wants logical
 /// pixels divides by `WindowSize.scale_factor`; the conversion runs away
 /// from this kind, never toward it.
-#[aether_data::kind(name = "aether.mouse_move", copy, default, partial_eq)]
+#[aether_data::kind(name = "aether.mouse_move", partial_eq)]
 pub struct MouseMove {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub x: f32,
     pub y: f32,
 }
@@ -173,9 +123,9 @@ pub struct MouseMove {
 /// subscribes to this kind and caches the latest value; the initial value
 /// arrives right after the component's auto-subscribe fires, without any
 /// request/reply dance.
-#[aether_data::kind(name = "aether.window_size", copy, default, partial_eq)]
+#[aether_data::kind(name = "aether.window_size", partial_eq)]
 pub struct WindowSize {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub width: u32,
     pub height: u32,
     /// Physical pixels per logical pixel, as the display reports it
@@ -202,9 +152,9 @@ pub struct WindowSize {
 ///
 /// Carries a `String`, so it rides the structured wire path shared by the
 /// window-tagged input family (`Kind::encode_into_bytes` → `encode_wire`).
-#[aether_data::kind(name = "aether.text_input", default, eq)]
+#[aether_data::kind(name = "aether.text_input", eq)]
 pub struct TextInput {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub text: String,
 }
 
@@ -216,9 +166,9 @@ pub struct TextInput {
 /// the IME gives no span). Empty `text` means the composition was
 /// cleared — the widget drops any preedit it was showing. Published by
 /// the desktop chassis only. Rides the structured wire path.
-#[aether_data::kind(name = "aether.ime_preedit", default, eq)]
+#[aether_data::kind(name = "aether.ime_preedit", eq)]
 pub struct ImePreedit {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub text: String,
     pub cursor_begin: Option<u32>,
     pub cursor_end: Option<u32>,
@@ -232,16 +182,16 @@ pub struct ImePreedit {
 /// from a bare C). Named bool fields rather than a packed bit mask so a
 /// machine consumer reading the JSON schema sees `{ "shift": true }`
 /// directly. `meta` is the platform "super" key — Command on macOS, the
-/// Windows key elsewhere. A late subscriber holds the all-false default
-/// until the first `ModifiersChanged` arrives — the same warm-up every
-/// stream has. Carries `bool`s, so it rides the structured wire path.
-#[aether_data::kind(name = "aether.modifiers", copy, default, eq)]
+/// Windows key elsewhere. A late subscriber has no value until the first
+/// `ModifiersChanged` arrives — the same warm-up every stream has — and
+/// reads that absence as no modifier held.
+#[aether_data::kind(name = "aether.modifiers", eq)]
 // Four named bool fields are the wire contract: a machine consumer reads
 // `{ "shift": true }` off the JSON schema directly rather than decoding a
 // packed bit mask. A two-variant-enum refactor would defeat that.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Modifiers {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,

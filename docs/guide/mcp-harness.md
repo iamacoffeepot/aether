@@ -258,8 +258,9 @@ lineage of a boot spec, for `describe_component`.
 
 **Observation.** `capture_frame` returns one window's current frame as an
 optional inline PNG, bounded by a 768-pixel long-edge ceiling by default (never
-upscaled). `window_id` is required: pass the tagged `mbx-…` string
-`aether.window.list` reports, since capture never guesses a window.
+upscaled). `window` is required: pass the window's actor path as
+`aether.window.list` reports it, or its short form `aether.window/:main`, since
+capture never guesses a window.
 Pass a finite `scale` in `(0, 1]` for proportional reduction, then
 `max_dimension` to clamp the scaled long edge; those controls compose in that
 order. A capture with `checks` returns the verdict and omits the image by default,
