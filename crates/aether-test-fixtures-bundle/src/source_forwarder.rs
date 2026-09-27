@@ -8,9 +8,10 @@
 //! address in the mail, which is why [`SendSourceQuery`] is fieldless.
 //!
 //! The forward makes this actor the component origin, so the observer's
-//! `ctx.sender()` proves the forwarder, and the observer's report sent through
-//! that reference lands back here, where it is logged — the property
-//! `aether-component`'s source-attribution scenario asserts.
+//! `ctx.sender()` proves the forwarder, and the observer's reply, routed to
+//! that same stamped origin, lands back here, where it is logged with the
+//! report's `had_sender` verdict — the property `aether-component`'s
+//! source-attribution scenario asserts.
 //!
 //! A second actor rather than a self-dependency: the observer is loaded twice
 //! in that scenario (a "reader" and, before this split, a "sender"), and a
@@ -44,11 +45,12 @@ impl WasmActor for SourceForwarder {
         ctx.send_to(observer, &SourceQuery);
     }
 
-    /// Log the observer's report, which it sent through the reference its
-    /// `ctx.sender()` proved: the arrival here is what shows that sender was
-    /// this forwarder.
+    /// Log the observer's reply with its `had_sender` verdict. The reply goes
+    /// to the origin the host stamped on the query, the one the observer's
+    /// `ctx.sender()` read, so the arrival here shows that origin was this
+    /// forwarder.
     #[handler::single]
-    fn on_source_report(&mut self, _ctx: &mut WasmCtx<'_>, _report: SourceReport) {
-        tracing::info!(target: "test.source_forwarder", "source_report_received");
+    fn on_source_report(&mut self, _ctx: &mut WasmCtx<'_>, report: SourceReport) {
+        tracing::info!(target: "test.source_forwarder", "source_report_received had_sender={}", report.had_sender);
     }
 }
