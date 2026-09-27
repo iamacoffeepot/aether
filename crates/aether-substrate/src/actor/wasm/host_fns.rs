@@ -162,8 +162,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // crosses: the guest owns construction.
     //
     // ADR-0114: register an inline child's alias route. The guest passes
-    // an `is_counter` flag and the bare subname (empty for `Counter`). The
-    // alias id is `with_tag(Mailbox, fold_lineage(parent_carry,
+    // the parent actor's mailbox, the child's actor-type tag, an
+    // `is_counter` flag, and the bare subname (empty for `Counter`). The
+    // alias id is `with_tag(Mailbox, fold_lineage(parent,
     // instanced(aether.embedded, subname)))`, so the synchronous prediction
     // matches a `Call`-by-name resolution. On any host-side error (no memory, OOB,
     // bad UTF-8, no spawner, missing parent name, or an undeclared tag) it

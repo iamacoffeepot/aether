@@ -1206,11 +1206,9 @@ fn instantiate_with_ctx(wat: &str, ctx: ComponentCtx) -> Component {
     Component::instantiate(&engine, &linker, &module, ctx, &[], None).unwrap()
 }
 
-/// A declared inline-child actor-type tag these tests install through
-/// [`ComponentCtx::install_inline_children`], distinct from `0` (the
-/// undeclared-tag sentinel every lookup miss must still return via the
-/// host fn) so a test can tell "the module declares this type" apart from
-/// "the host found nothing".
+/// The inline-child actor-type tag these tests declare through
+/// [`ComponentCtx::install_inline_children`]; a test that installs nothing
+/// passes it as an undeclared tag.
 const TEST_INLINE_TAG: u64 = 0xF00D_CAFE;
 
 fn wat_inline_spawn(parent: MailboxId, tag: u64) -> String {

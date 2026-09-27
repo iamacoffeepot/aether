@@ -142,8 +142,8 @@ impl NativeBinding {
     ) -> Self {
         Self {
             mailer,
-            // Untyped tests still use relative actor resolution. Preserve the
-            // historical depth-1 carry without inventing a logical identity.
+            // Untyped tests carry no logical identity: only the mailbox and
+            // the optional parent metadata.
             identity: BindingIdentity::Untyped { mailbox: self_mailbox, parent: parent_mailbox },
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
