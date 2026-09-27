@@ -156,6 +156,7 @@ mod tests {
     }
 
     impl aether_data::ActorMail for Answer {}
+    impl aether_data::CrossesActors for Answer {}
 
     /// A synthetic chain root for a request — the value the cap handler
     /// would read from `ctx.in_flight_root()`. Distinct per `cid` so a

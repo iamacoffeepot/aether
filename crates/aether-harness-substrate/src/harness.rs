@@ -1972,6 +1972,7 @@ mod tests {
             aether_data::pod_kind_codec!();
         }
         impl aether_data::ActorMail for Bump {}
+        impl aether_data::CrossesActors for Bump {}
 
         struct Child {
             received: Arc<AtomicU32>,

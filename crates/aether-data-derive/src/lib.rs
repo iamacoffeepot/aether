@@ -31,7 +31,8 @@
 //! must implement `Schema` too.
 //!
 //! `Kind` also emits `impl ActorMail`, the bound every typed send and reply
-//! requires, unless the kind declares `engine_only` (ADR-0233). An
+//! requires, under a where-clause that the kind crosses actors (ADR-0242),
+//! unless the kind declares `engine_only` (ADR-0233). An
 //! engine-only kind instead submits an `EngineOnlyKind` entry on native
 //! targets, the link-time list the substrate's raw-`KindId` doors refuse.
 //!
@@ -39,7 +40,9 @@
 //! `LABEL` (the Rust type path from `module_path!()`), and `LABEL_NODE` (the
 //! parallel labels tree the sidecar record embeds), plus `CastEligible` so a
 //! `repr_c` flag propagates to field types used as cast-shaped payloads, plus
-//! the `WireEncode` / `WireDecode` impls that walk the same field list: a
+//! the two reach markers `CrossesActors` and `CrossesWire`, each implemented
+//! when every field implements it, so a type's reach is its narrowest field's
+//! (ADR-0242), plus the `WireEncode` / `WireDecode` impls that walk the same field list: a
 //! schema change is a codec change. Field types resolve through
 //! `<FieldT as Schema>::SCHEMA`, except `Vec<u8>`, which stable Rust cannot
 //! specialize against `Vec<T>`; the derive matches that field syntactically
@@ -71,8 +74,8 @@
 use core::iter;
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use proc_macro2::{Group, Span, TokenStream as TokenStream2, TokenTree};
+use quote::{ToTokens, format_ident, quote};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
@@ -105,6 +108,9 @@ const MAX_TRANSFORM_INPUTS: usize = 8;
 /// #[aether_data::kind(name = "…", engine_only)]                 // no ActorMail: the engine sends it
 /// #[aether_data::kind(name = "…", derive(Hash, PartialOrd))]    // escape hatch
 /// ```
+///
+/// No option names a reach: a kind's reach is its narrowest field's, and
+/// only a kind that crosses actors is `ActorMail` (ADR-0242).
 ///
 /// `pod` drops serde because a POD kind is cast-encoded (ADR-0005): the
 /// serde impls on one are inert weight. `#[repr(C)]` stays written at
@@ -170,8 +176,10 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         return Err(syn::Error::new_spanned(u.union_token, "Kind derive does not support unions"));
     }
 
-    // ADR-0233: every kind is actor mail unless it declares `engine_only`,
-    // in which case it joins the link-time list the raw-`KindId` doors read.
+    // ADR-0233 / ADR-0242: a kind is actor mail when it crosses actors, which
+    // its fields decide, unless it declares `engine_only`, in which case it
+    // joins the link-time list the raw-`KindId` doors read. The binder defers
+    // the reach bound to the send sites, as in `reach_impls`.
     let mail_class = if engine_only {
         quote! {
             #[cfg(not(target_family = "wasm"))]
@@ -183,7 +191,12 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
     } else {
-        quote! { impl ::aether_data::ActorMail for #name {} }
+        quote! {
+            impl ::aether_data::ActorMail for #name
+            where
+                for<'__reach> #name: ::aether_data::CrossesActors,
+            {}
+        }
     };
 
     // ADR-0033 wire-shape autodetect: `#[repr(C)]` on the type means
@@ -429,6 +442,7 @@ pub(crate) fn expand_schema_core(input: &DeriveInput) -> syn::Result<TokenStream
         }
     };
     let wire_codec = expand_wire_codec(name, &input.data);
+    let reach = reach_impls(input, &data_field_types(&input.data));
     Ok(quote! {
         impl ::aether_data::Schema for #name {
             const SCHEMA: ::aether_data::__derive_runtime::SchemaType = #body;
@@ -442,8 +456,68 @@ pub(crate) fn expand_schema_core(input: &DeriveInput) -> syn::Result<TokenStream
             const ELIGIBLE: bool = #cast_eligible_expr;
         }
 
+        #reach
+
         #wire_codec
     })
+}
+
+/// Every field type of every variant, in declaration order.
+fn data_field_types(data: &Data) -> Vec<&Type> {
+    match data {
+        Data::Struct(s) => s.fields.iter().map(|f| &f.ty).collect(),
+        Data::Enum(e) => e.variants.iter().flat_map(|v| v.fields.iter().map(|f| &f.ty)).collect(),
+        Data::Union(_) => Vec::new(),
+    }
+}
+
+/// The two reach markers (ADR-0242), each implemented exactly when every
+/// field type implements it: a type's reach is its narrowest field's.
+///
+/// Each field predicate sits under a `for<'__reach>` binder. Without one,
+/// stable rustc refuses an unsatisfied bound over a concrete type in an
+/// impl's where-clause (E0277), so a type holding an actor-reach field would
+/// fail to compile rather than have actor reach. The binder defers the check
+/// to the use sites, where rustc's note chain names this type beside the
+/// leaf that narrows it.
+pub(crate) fn reach_impls(input: &DeriveInput, field_types: &[&Type]) -> TokenStream2 {
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let own = where_clause.map(|w| w.predicates.iter().collect::<Vec<_>>()).unwrap_or_default();
+    let markers = [quote! { ::aether_data::CrossesActors }, quote! { ::aether_data::CrossesWire }];
+    // The predicates echo each field type, spanned at the derive, so a
+    // qualified spelling the author wrote on a field is linted there and not
+    // again in this impl.
+    let field_types: Vec<TokenStream2> = field_types.iter().map(|ty| call_site_tokens(ty.to_token_stream())).collect();
+    let impls = markers.iter().map(|marker| {
+        quote! {
+            impl #impl_generics #marker for #name #ty_generics
+            where
+                #( #own, )*
+                #( for<'__reach> #field_types: #marker, )*
+            {}
+        }
+    });
+    quote! { #( #impls )* }
+}
+
+/// `tokens` with every span, groups included, moved to the derive's call site.
+/// A type's nesting is bounded by its source, so the recursion is too.
+fn call_site_tokens(tokens: TokenStream2) -> TokenStream2 {
+    tokens
+        .into_iter()
+        .map(|tree| match tree {
+            TokenTree::Group(group) => {
+                let mut respanned = Group::new(group.delimiter(), call_site_tokens(group.stream()));
+                respanned.set_span(Span::call_site());
+                TokenTree::Group(respanned)
+            }
+            mut other => {
+                other.set_span(Span::call_site());
+                other
+            }
+        })
+        .collect()
 }
 
 /// Emit the `LabelNode::Struct` literal for the type's `LABEL_NODE`
@@ -1076,7 +1150,7 @@ pub(crate) fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
         }
     }
     Err(syn::Error::new(
-        attrs.first().map_or_else(proc_macro2::Span::call_site, Spanned::span),
+        attrs.first().map_or_else(Span::call_site, Spanned::span),
         "missing `#[kind(name = \"...\")]` attribute",
     ))
 }
@@ -1415,7 +1489,7 @@ const DENY_LIST: &[DeniedPath] = &[
 /// Body-path collector + matcher. Records the span of the first path
 /// whose trailing segments match a deny-list entry.
 struct PurityScanner {
-    violation: Option<proc_macro2::Span>,
+    violation: Option<Span>,
 }
 
 impl PurityScanner {

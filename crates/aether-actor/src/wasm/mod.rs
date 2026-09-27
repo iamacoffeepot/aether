@@ -155,7 +155,9 @@ pub trait WasmActor:
     + for<'a> crate::Lifecycle<
         Self::State,
         InitError = ActorInitError,
-        Config: aether_data::Kind + Default,
+        // The MCP `load_component` encodes it from JSON, so it has wire
+        // reach (ADR-0242).
+        Config: aether_data::WireMail + Default,
         Params: aether_data::Kind + Default,
         InitCtx<'a> = WasmInitCtx<'a>,
         Ctx<'a> = WasmCtx<'a, Self>,

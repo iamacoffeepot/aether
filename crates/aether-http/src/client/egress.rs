@@ -248,6 +248,7 @@ mod tests {
     }
 
     impl aether_data::ActorMail for Answer {}
+    impl aether_data::CrossesActors for Answer {}
 
     /// A distinct chain root per request so a multi-request test keeps each
     /// chain's hold accounting separate — the value a cap handler reads from

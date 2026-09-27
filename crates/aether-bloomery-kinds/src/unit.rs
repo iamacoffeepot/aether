@@ -84,6 +84,9 @@ impl Schema for UnitKey {
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
+impl aether_data::CrossesActors for UnitKey {}
+impl aether_data::CrossesWire for UnitKey {}
+
 impl WireEncode for UnitKey {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         self.as_str().encode(out)

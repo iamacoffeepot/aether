@@ -86,6 +86,9 @@ impl Schema for Node {
     };
 }
 
+impl aether_data::CrossesActors for Node {}
+impl aether_data::CrossesWire for Node {}
+
 impl CastEligible for Node {
     const ELIGIBLE: bool = false;
 }

@@ -768,6 +768,9 @@ impl crate::Schema for ReplyContract {
     };
 }
 
+impl crate::CrossesActors for ReplyContract {}
+impl crate::CrossesWire for ReplyContract {}
+
 /// One record in the `aether.kinds.inputs` section (ADR-0033). The
 /// enum tag discriminates handler vs fallback vs component-level doc
 /// so the reader can classify before decoding further. `id` on a

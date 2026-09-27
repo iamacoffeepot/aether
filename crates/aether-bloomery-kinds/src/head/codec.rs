@@ -97,11 +97,17 @@ impl Schema for RecordedHead {
     const LABEL_NODE: LabelNode = <FlatHead as Schema>::LABEL_NODE;
 }
 
+impl aether_data::CrossesActors for RecordedHead {}
+impl aether_data::CrossesWire for RecordedHead {}
+
 impl<K> Schema for Head<K> {
     const SCHEMA: SchemaType = <FlatHead as Schema>::SCHEMA;
     const LABEL: Option<&'static str> = Some(concat!(module_path!(), "::Head"));
     const LABEL_NODE: LabelNode = <FlatHead as Schema>::LABEL_NODE;
 }
+
+impl<K> aether_data::CrossesActors for Head<K> {}
+impl<K> aether_data::CrossesWire for Head<K> {}
 
 impl StorageLeaves for RecordedHead {
     fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
@@ -193,11 +199,17 @@ impl Schema for RecordedHeadMove {
     const LABEL_NODE: LabelNode = <FlatHeadMoved as Schema>::LABEL_NODE;
 }
 
+impl aether_data::CrossesActors for RecordedHeadMove {}
+impl aether_data::CrossesWire for RecordedHeadMove {}
+
 impl<K> Schema for HeadMoved<K> {
     const SCHEMA: SchemaType = <FlatHeadMoved as Schema>::SCHEMA;
     const LABEL: Option<&'static str> = Some(concat!(module_path!(), "::HeadMoved"));
     const LABEL_NODE: LabelNode = <FlatHeadMoved as Schema>::LABEL_NODE;
 }
+
+impl<K> aether_data::CrossesActors for HeadMoved<K> {}
+impl<K> aether_data::CrossesWire for HeadMoved<K> {}
 
 impl Kind for RecordedHeadMove {
     const NAME: &'static str = HEAD_MOVED_NAME;
