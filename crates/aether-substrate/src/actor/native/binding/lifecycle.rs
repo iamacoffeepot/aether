@@ -144,7 +144,7 @@ impl NativeBinding {
             mailer,
             // Untyped tests still use relative actor resolution. Preserve the
             // historical depth-1 carry without inventing a logical identity.
-            identity: BindingIdentity::Untyped { mailbox: self_mailbox, parent: parent_mailbox, carry: self_mailbox.0 },
+            identity: BindingIdentity::Untyped { mailbox: self_mailbox, parent: parent_mailbox },
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
             reply_lineage: ReplyLineage::new(),
@@ -227,14 +227,6 @@ impl NativeBinding {
     /// behind [`NativeCtx::subscribe_inventory`](crate::actor::native::ctx::NativeCtx::subscribe_inventory).
     pub(crate) fn subscribe_inventory(&self) -> RegistrySubscription {
         self.mailer.subscribe_inventory_for(self.self_mailbox())
-    }
-
-    /// This actor's lineage carry (ADR-0099 §3) — the rolling fold
-    /// state `spawn_child` extends to derive a child's id. Surfaced so
-    /// [`super::ctx::NativeCtx::spawn_child`](crate::actor::native::ctx::NativeCtx::spawn_child) can pass it as the parent
-    /// carry the spawn machinery folds the new node's `ActorId` onto.
-    pub(crate) fn carry(&self) -> u64 {
-        self.identity.carry()
     }
 
     /// The mailbox of this actor's logical parent, or `None` for a chassis

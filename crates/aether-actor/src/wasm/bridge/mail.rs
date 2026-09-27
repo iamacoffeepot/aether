@@ -123,42 +123,25 @@ pub fn reply_correlation() -> u64 {
     unsafe { raw::reply_correlation() }
 }
 
-/// ADR-0114: register an inline child's alias route and return its
-/// `MailboxId`. The legacy host folds the alias id onto the component root
-/// and registers a route to that trampoline's own slot, so the co-located
-/// child is addressable like any actor with no new trampoline.
-/// `is_counter` selects `Subname::Counter` (the host appends a monotonic
-/// discriminator) vs a caller-supplied name;
-/// `subname` is the bare `Named` segment (empty for `Counter`). No
-/// config crosses here — the guest runs the child's `init` in-process
-/// (see [`crate::WasmCtx::spawn_inline_child`]). The returned id is the
-/// ADR-0099 §3 lineage fold, known synchronously; `0` on a host-side
+/// ADR-0114 + issue 4490: allocate an inline-child alias beneath `parent`
+/// and return its `MailboxId`. The host validates `parent` as this
+/// component's root or inline alias before folding or rendering the new
+/// address, and publishes the namespace and contract rows of the child's
+/// actor type `tag` on the alias (ADR-0231 §4); a tag the resident module
+/// does not declare allocates no alias. `is_counter` selects
+/// `Subname::Counter` (the host appends a monotonic discriminator) vs a
+/// caller-supplied name; `subname` is the bare `Named` segment (empty for
+/// `Counter`). No config crosses here — the guest runs the child's `init`
+/// in-process (see [`crate::WasmCtx::spawn_inline_child`]). The returned id
+/// is the ADR-0099 §3 lineage fold, known synchronously; `0` on a host-side
 /// error.
-#[allow(dead_code, reason = "legacy guest ABI bridge retained during the scoped-spawn migration")]
 #[must_use]
-pub fn spawn_inline_child(is_counter: bool, subname: &str) -> u64 {
-    let subname_bytes = subname.as_bytes();
-    // SAFETY: forwards to `raw::spawn_inline_child`, whose ABI is
-    // documented at the import site in `ffi/raw.rs`. The `(ptr, len)`
-    // pair is derived from a reference valid for `len` bytes for the
-    // call's duration; the host copies before returning.
-    unsafe {
-        raw::spawn_inline_child(u32::from(is_counter), subname_bytes.as_ptr().addr() as u32, subname_bytes.len() as u32)
-    }
-}
-
-/// Issue 4490: allocate an inline alias beneath the executing actor. The
-/// host validates `parent` as this component's root or inline alias before
-/// folding or rendering the new address, and publishes the contract rows of
-/// the child's actor type `tag` on the alias (ADR-0231 §4). The unscoped
-/// bridge remains only for staged compatibility with legacy guests.
-#[must_use]
-pub fn spawn_inline_child_scoped(parent: u64, tag: u64, is_counter: bool, subname: &str) -> u64 {
+pub fn spawn_inline_child(parent: u64, tag: u64, is_counter: bool, subname: &str) -> u64 {
     let subname_bytes = subname.as_bytes();
     // SAFETY: the slice remains valid for the call and is copied host-side;
     // the scalar parent is validated against the active component cluster.
     unsafe {
-        raw::spawn_inline_child_scoped(
+        raw::spawn_inline_child(
             parent,
             tag,
             u32::from(is_counter),

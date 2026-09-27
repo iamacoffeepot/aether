@@ -15,7 +15,7 @@ use crate::actor::native::ResolvePathError;
 use crate::actor::wasm::component::{ComponentCtx, StateBundle, TRAMPOLINE_NAMESPACE};
 use crate::mail::attachments::{EncodedMail, inline_payload};
 use crate::mail::boundary::is_engine_only;
-use crate::mail::registry::{PreparedAliasRoute, RouteContract};
+use crate::mail::registry::PreparedAliasRoute;
 use crate::mail::{KindId, MailboxId, SourceAddr};
 use crate::runtime::log_install;
 
@@ -166,32 +166,62 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // alias id is `with_tag(Mailbox, fold_lineage(parent_carry,
     // instanced(aether.embedded, subname)))`, so the synchronous prediction
     // matches a `Call`-by-name resolution. On any host-side error (no memory, OOB,
-    // bad UTF-8, no spawner, or missing parent name) it warn-logs and
-    // returns 0 without staging — the child simply never becomes addressable.
+    // bad UTF-8, no spawner, missing parent name, or an undeclared tag) it
+    // warn-logs and returns 0 without staging — the child simply never
+    // becomes addressable.
+    //
+    // Issue 4490: nested inline births use the executing actor mailbox as
+    // their routing seed and rendered-name parent. The target endpoint stays
+    // the physical trampoline root; only logical route identity nests.
+    // ADR-0231 §4: `tag` is the child's actor-type tag, which selects the
+    // namespace and contract the alias publishes from the resident module's
+    // inline map; a tag the module does not declare allocates no alias.
     linker.func_wrap(
         "aether",
         "spawn_inline_child_p32",
         |mut caller: Caller<'_, ComponentCtx>,
+         parent: u64,
+         tag: u64,
          is_counter: u32,
          subname_ptr: u32,
          subname_len: u32|
          -> u64 {
-            // Copy the subname out of guest memory (empty for `Counter`),
-            // ending the immutable memory borrow before the reads below.
+            let parent = MailboxId(parent);
+            if parent != caller.data().sender && !is_own_cluster_alias(caller.data(), parent) {
+                tracing::warn!(
+                    target: "aether_substrate::component",
+                    %parent,
+                    component = %caller.data().actor_name(),
+                    "spawn_inline_child: parent is not an actor in this component cluster",
+                );
+                return 0;
+            }
+            let Some(parent_name) = caller.data().cluster_actor_name(parent) else {
+                tracing::warn!(
+                    target: "aether_substrate::component",
+                    %parent,
+                    "spawn_inline_child: parent has no registered or prepared name",
+                );
+                return 0;
+            };
+            let Some(contract) = caller.data().inline_child(tag).map(|child| child.contract.clone()) else {
+                tracing::warn!(
+                    target: "aether_substrate::component",
+                    %tag,
+                    component = %caller.data().actor_name(),
+                    "spawn_inline_child: tag is not a declared inline-child type",
+                );
+                return 0;
+            };
+
             let subname_prefix = {
-                let Some(memory) = caller
-                    .get_export("memory")
-                    .and_then(wasmtime::Extern::into_memory)
-                else {
+                let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                     tracing::warn!(target: "aether_substrate::component", "spawn_inline_child: guest exports no memory");
                     return 0;
                 };
                 let data = memory.data(&caller);
                 let start = subname_ptr as usize;
-                let Some(end) = start
-                    .checked_add(subname_len as usize)
-                    .filter(|e| *e <= data.len())
-                else {
+                let Some(end) = start.checked_add(subname_len as usize).filter(|end| *end <= data.len()) else {
                     tracing::warn!(target: "aether_substrate::component", "spawn_inline_child: subname pointer out of bounds");
                     return 0;
                 };
@@ -201,10 +231,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 };
                 subname.to_owned()
             };
-
-            // `Counter`: the discriminator is the bare counter value drawn
-            // from the binding's spawner, so counter-named children never
-            // collide under one parent (ADR-0099 §4).
             let full_subname = if is_counter == 0 {
                 subname_prefix
             } else {
@@ -220,105 +246,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 n.to_string()
             };
 
-            let ctx = caller.data();
-            // ADR-0099 §3: fold the alias id onto the parent trampoline's
-            // lineage carry, so the id matches a written-name `Call`
-            // resolution.
-            let parent_carry = ctx.binding.carry();
-            let child_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
-            let alias_id = MailboxId(aether_data::with_tag(
-                aether_data::Tag::Mailbox,
-                aether_data::fold_lineage(parent_carry, child_node),
-            ));
-
-            // The parent may still be `Starting` while its `wire` hook runs,
-            // so retain only its logical id + rendered name here. The owner
-            // resolves the target lifecycle when the staged batch lands.
-            let Some(parent_name) = ctx.registry.mailbox_name(ctx.sender) else {
-                tracing::warn!(target: "aether_substrate::component", "spawn_inline_child: parent has no registered name (cannot render alias)");
-                return 0;
-            };
-            let target_parent = ctx.sender;
-            let alias_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:{full_subname}");
-            // The unscoped import names no actor type, so its alias publishes
-            // no contract rows (ADR-0231 §4).
-            caller.data_mut().stage_alias(PreparedAliasRoute::new(
-                alias_id,
-                alias_name,
-                target_parent,
-                RouteContract::empty(),
-            ));
-            alias_id.0
-        },
-    )?;
-
-    // Issue 4490: nested inline births use the executing actor mailbox as
-    // their routing seed and rendered-name parent. The target endpoint stays
-    // the physical trampoline root; only logical route identity nests.
-    // ADR-0231 §4: `tag` is the child's actor-type tag, which selects the
-    // contract the alias publishes from the resident module's inline map; a
-    // tag the module does not declare publishes no rows.
-    linker.func_wrap(
-        "aether",
-        "spawn_inline_child_scoped_p32",
-        |mut caller: Caller<'_, ComponentCtx>,
-         parent: u64,
-         tag: u64,
-         is_counter: u32,
-         subname_ptr: u32,
-         subname_len: u32|
-         -> u64 {
-            let parent = MailboxId(parent);
-            if parent != caller.data().sender && !is_own_cluster_alias(caller.data(), parent) {
-                tracing::warn!(
-                    target: "aether_substrate::component",
-                    %parent,
-                    component = %caller.data().actor_name(),
-                    "spawn_inline_child_scoped: parent is not an actor in this component cluster",
-                );
-                return 0;
-            }
-            let Some(parent_name) = caller.data().cluster_actor_name(parent) else {
-                tracing::warn!(
-                    target: "aether_substrate::component",
-                    %parent,
-                    "spawn_inline_child_scoped: parent has no registered or prepared name",
-                );
-                return 0;
-            };
-
-            let subname_prefix = {
-                let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_inline_child_scoped: guest exports no memory");
-                    return 0;
-                };
-                let data = memory.data(&caller);
-                let start = subname_ptr as usize;
-                let Some(end) = start.checked_add(subname_len as usize).filter(|end| *end <= data.len()) else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_inline_child_scoped: subname pointer out of bounds");
-                    return 0;
-                };
-                let Ok(subname) = from_utf8(&data[start..end]) else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_inline_child_scoped: subname is not valid UTF-8");
-                    return 0;
-                };
-                subname.to_owned()
-            };
-            let full_subname = if is_counter == 0 {
-                subname_prefix
-            } else {
-                let Some(n) = caller
-                    .data()
-                    .binding
-                    .spawner()
-                    .map(|spawner| spawner.next_counter())
-                else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_inline_child_scoped: no spawner on the binding (counter subname unresolvable)");
-                    return 0;
-                };
-                n.to_string()
-            };
-
             let child_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
             let alias_id = MailboxId(aether_data::with_tag(
                 aether_data::Tag::Mailbox,
@@ -326,7 +253,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             ));
             let target_parent = caller.data().sender;
             let alias_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:{full_subname}");
-            let contract = caller.data().inline_contract(tag);
             caller.data_mut().stage_alias(PreparedAliasRoute::new(alias_id, alias_name, target_parent, contract));
             alias_id.0
         },

@@ -170,12 +170,13 @@ pub struct ComponentCtx {
     /// through the registry owner and fans a departure notice out to its
     /// watchers — the teardown mirror of the publish path.
     pending_alias_retirements: Vec<PreparedAliasRetirement>,
-    /// ADR-0231 §4: the contract each inline-child actor type of the resident
-    /// module publishes, keyed by actor-type tag, so an alias staged by the
-    /// `spawn_inline_child_scoped_p32` host fn carries its child type's rows.
-    /// Installed before `Component::instantiate`; empty on the test paths
-    /// that build a bare ctx, where every alias publishes no rows.
-    inline_contracts: FxHashMap<u64, RouteContract>,
+    /// ADR-0231 §4: the namespace and contract each inline-child actor type
+    /// of the resident module publishes, keyed by actor-type tag, so an alias
+    /// staged by the `spawn_inline_child_p32` host fn carries its child
+    /// type's declared namespace and rows. Installed before
+    /// `Component::instantiate`; empty on the test paths that build a bare
+    /// ctx, where a tag lookup always misses and no alias is staged.
+    inline_children: FxHashMap<u64, InlineChildType>,
     /// ADR-0163 §3 asset load window. `Some` for a component loaded
     /// through the trampoline (installed before `Component::instantiate`,
     /// so the guest's `init` and `wire` can pull assets); the
@@ -186,6 +187,18 @@ pub struct ComponentCtx {
     /// retained for the instance's life so `asset_catalog` still answers.
     /// `None` on the test paths that build a bare ctx.
     pub load_window: Option<LoadWindow>,
+}
+
+/// The declared type of one inline-child actor the resident module can
+/// spawn (ADR-0231 §4): its declared `NAMESPACE` and the contract it
+/// publishes on its alias. Built by the trampoline from the module's
+/// exported and private input groups, keyed by actor-type tag
+/// (`ActorId::singleton(namespace)`), and installed on `ComponentCtx`
+/// before `Component::instantiate` and again on every replace.
+#[derive(Clone)]
+pub struct InlineChildType {
+    pub namespace: Arc<str>,
+    pub contract: RouteContract,
 }
 
 /// The mailbox-name prefix every wasm component (loaded or spawned)
@@ -262,7 +275,7 @@ impl ComponentCtx {
             reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
             pending_aliases: Vec::new(),
             pending_alias_retirements: Vec::new(),
-            inline_contracts: FxHashMap::default(),
+            inline_children: FxHashMap::default(),
             load_window: None,
         }
     }
@@ -332,20 +345,20 @@ impl ComponentCtx {
         self.load_window = Some(window);
     }
 
-    /// Install the contract of every inline-child actor type the resident
-    /// module can spawn, keyed by actor-type tag (ADR-0231 §4), before
+    /// Install the type of every inline-child actor the resident module can
+    /// spawn, keyed by actor-type tag (ADR-0231 §4), before
     /// `Component::instantiate`, so an alias the guest stages from its
-    /// `init` onward publishes its child type's rows. Called by the wasm
-    /// trampoline's `init` and its replace, which build the map from the
-    /// module's exported and private input groups.
-    pub fn install_inline_contracts(&mut self, contracts: impl IntoIterator<Item = (u64, RouteContract)>) {
-        self.inline_contracts = contracts.into_iter().collect();
+    /// `init` onward carries its child type's declared namespace and rows.
+    /// Called by the wasm trampoline's `init` and its replace, which build
+    /// the map from the module's exported and private input groups.
+    pub fn install_inline_children(&mut self, children: impl IntoIterator<Item = (u64, InlineChildType)>) {
+        self.inline_children = children.into_iter().collect();
     }
 
-    /// The contract an inline child of actor type `tag` publishes, or the
-    /// empty contract for a tag the resident module does not declare.
-    pub(crate) fn inline_contract(&self, tag: u64) -> RouteContract {
-        self.inline_contracts.get(&tag).cloned().unwrap_or_else(RouteContract::empty)
+    /// The declared type of an inline child of actor-type `tag`, or `None`
+    /// for a tag the resident module does not declare.
+    pub(crate) fn inline_child(&self, tag: u64) -> Option<&InlineChildType> {
+        self.inline_children.get(&tag)
     }
 
     /// Close the asset load window when the guest's `wire` returns
