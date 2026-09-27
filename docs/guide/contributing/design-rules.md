@@ -819,6 +819,25 @@ option that sends mail at boot is not added.
   demo component brings up the release demo); #6802 (a bootstrap script
   component builds the workspace environment).
 
+### R-0046: Fail the whole bootstrap when a declared step of the engine's structure fails {#r-0046}
+
+Bootstrapping is all or nothing. A step that builds structure the chassis or
+its link set declares (the registry and its tables built from linked
+declarations, a declared capability's boot) must succeed. When one fails, or
+when the declarations contradict one another, the engine refuses to start and
+names every defect it found. A bootstrap step degrades only where the
+possibility was declared beforehand as part of that structure, as with
+companion singletons that one binary links on purpose. Once the engine is
+running, how an operation's failure is handled is decided per operation.
+
+- **Why:** an engine that boots with a hole in its declared structure runs a
+  shape no one declared, and the defect surfaces at runtime, far from the
+  declaration that caused it, as a decision the owner has to make.
+- **Settled:** #6920 (a namespace the linked native inventory contests fails
+  the publication table's build, rather than being recorded and refused per
+  birth); ADR-0232 §6 (the declared possibility: headless stubs claim their
+  capability's mailbox).
+
 ## Rulings
 
 Each ruling made after a rule lands is appended here, oldest first, and no
