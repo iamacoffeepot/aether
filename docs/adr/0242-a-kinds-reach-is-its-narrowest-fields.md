@@ -141,9 +141,11 @@ row. The request-context table keeps taking any `Kind`.
 `WasmActor`'s `Config`, which the MCP `load_component` encodes from JSON
 (`crates/aether-actor/src/wasm/mod.rs`), and the FleetHarness typed sends,
 which cross the real RPC wire (`crates/aether-harness-fleet/src/lib.rs`).
-Journal records are `Storage` values, whose leaf lists name no proof and no
-reply route, and typed saved state is serde, which neither a proof nor a
-reply route implements, so both stay closed by type.
+Journal records are `Storage` values, whose leaf lists name no proof, and
+typed saved state is serde, which no typed proof implements, so both stay
+closed to proofs by type. `Source` and `SourceAddr` do implement serde, so
+saved state is not closed to a raw sender route by type; reach does not
+change that.
 
 The raw doors carry only a `KindId`: the RPC `Call`, `boundary::accept`
 (`crates/aether-substrate/src/mail/boundary.rs`), session and hub egress, and
