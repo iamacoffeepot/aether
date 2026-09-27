@@ -131,6 +131,24 @@ class ScannerTests(unittest.TestCase):
         status, _ = self.repo.run()
         self.assertEqual(status, 1)
 
+    def test_ingress_ref_mint_outside_the_allowlist_fails(self) -> None:
+        self.repo.write(
+            "crates/aether-http/src/server/runtime/state.rs",
+            "fn sneak(id: MailboxId) -> IngressRef {\n    super::ingress::__mint_ingress_ref(id)\n}\n",
+        )
+        self.repo.commit("sneaky ingress mint")
+
+        findings = self.repo.scan()
+
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(
+            findings[0].startswith("crates/aether-http/src/server/runtime/state.rs:2: "),
+            findings[0],
+        )
+        self.assertIn("__mint_ingress_ref", findings[0])
+        status, _ = self.repo.run()
+        self.assertEqual(status, 1)
+
     def test_attribute_and_suppression_comment_do_not_relax(self) -> None:
         self.repo.write(
             "crates/aether-substrate/src/sneaky.rs",
