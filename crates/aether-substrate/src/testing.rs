@@ -193,14 +193,26 @@ pub fn try_registered_ref(
 }
 
 /// Retire the route `reference` proves the way `Registry::drop_mailbox`
-/// retires one: it goes `Dropped` and keeps its name. A test that stood a
-/// collision route with [`registered_ref`] removes it through this, so none
+/// retires one: it goes `Dropped` and keeps its name, which stays spent — a
+/// later registration of the same name is refused (ADR-0079 §7). A test that
+/// models a departed actor retires its fixture route through this, so none
 /// of them spells the position it reads.
 ///
 /// # Panics
 /// Panics if the route is not live.
 pub fn drop_ref(registry: &Registry, reference: ErasedActorRef) {
     registry.drop_mailbox(&boot_authority(), reference.id()).expect("a live registered route drops");
+}
+
+/// Withdraw the route `reference` proves the way `Registry::withdraw_claim`
+/// withdraws an unborn claim: the record goes and the name is free again. For
+/// a fixture route that stood as a collision and was never an actor, so a
+/// test can retry under its name.
+///
+/// # Panics
+/// Panics if the route is not live.
+pub fn withdraw_ref(registry: &Registry, reference: ErasedActorRef) {
+    registry.withdraw_claim(&boot_authority(), reference.id()).expect("a live registered route withdraws");
 }
 
 /// Boot a `TestChassis` carrying exactly one cap `A` with `config`. The

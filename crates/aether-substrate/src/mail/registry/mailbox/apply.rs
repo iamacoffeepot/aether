@@ -94,30 +94,18 @@ impl Registry {
                         drop(commit.reject_at_home(PreparedSpawnFailure::SubnameInUse { full_name: name.clone() }));
                         return Err(RegistryEffectError::Name(NameConflict { name }));
                     }
-                    match staged_route(&staged_routes, inner, id) {
-                        // Same-name reuse of a `Dropped` route. The boot and
-                        // eager-spawn unwinds produce one through
-                        // `Registry::drop_mailbox`: they retire a route that
-                        // reached `Live` and keep its name, so a later birth of
-                        // the same actor reuses it here. Retiring a live actor
-                        // leaves its route in place and tombstones the id in
-                        // the `ActorRegistry` instead, which is what the
-                        // conflict arm below reads.
-                        Some(existing)
-                            if matches!(existing.lifecycle, RouteLifecycle::Dropped)
-                                && existing.canonical_name == commit.canonical_name => {}
-                        // A route already occupies this id. `reserve` — where
-                        // the authoritative retired-name answer lives — is
-                        // still two steps away and will never run for this
-                        // birth, so classify the conflict here instead of
-                        // reporting every one of them as a live occupant.
-                        Some(_) => {
-                            let name = commit.canonical_name.to_string();
-                            let failure = commit.route_conflict_failure();
-                            drop(commit.reject_at_home(failure));
-                            return Err(RegistryEffectError::Name(NameConflict { name }));
-                        }
-                        None => {}
+                    // A route already occupies this id, and a `Dropped` one is
+                    // no exception: a name is never registered again once it
+                    // is retired (ADR-0079 §7). `reserve` — where the
+                    // authoritative retired-name answer lives — is still two
+                    // steps away and will never run for this birth, so
+                    // classify the conflict here instead of reporting every
+                    // one of them as a live occupant.
+                    if staged_route(&staged_routes, inner, id).is_some() {
+                        let name = commit.canonical_name.to_string();
+                        let failure = commit.route_conflict_failure();
+                        drop(commit.reject_at_home(failure));
+                        return Err(RegistryEffectError::Name(NameConflict { name }));
                     }
                     let token = ActivationToken::next(&mut next_activation_token);
                     let activation = match commit.take_activation().reserve(token) {
@@ -196,9 +184,6 @@ impl Registry {
                             applied.push(RegistryApplied::Mailbox(alias.alias));
                             continue;
                         }
-                        Some(existing)
-                            if matches!(existing.lifecycle, RouteLifecycle::Dropped)
-                                && existing.canonical_name == canonical_name => {}
                         Some(_) => {
                             return Err(RegistryEffectError::Name(NameConflict { name: canonical_name.to_string() }));
                         }
@@ -250,14 +235,8 @@ impl Registry {
                     else {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                     };
-                    match staged_route(&staged_routes, inner, route.id) {
-                        Some(existing)
-                            if matches!(existing.lifecycle, RouteLifecycle::Dropped)
-                                && existing.canonical_name == canonical_name => {}
-                        Some(_) => {
-                            return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
-                        }
-                        None => {}
+                    if staged_route(&staged_routes, inner, route.id).is_some() {
+                        return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                     }
                     let token = ActivationToken::next(&mut next_activation_token);
                     let record = RouteRecord { canonical_name, lifecycle: RouteLifecycle::Starting { token } };
@@ -329,14 +308,8 @@ impl Registry {
                             contract,
                         },
                     };
-                    match staged_route(&staged_routes, inner, route.id) {
-                        Some(existing)
-                            if matches!(existing.lifecycle, RouteLifecycle::Dropped)
-                                && existing.canonical_name == record.canonical_name => {}
-                        Some(_) => {
-                            return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
-                        }
-                        None => {}
+                    if staged_route(&staged_routes, inner, route.id).is_some() {
+                        return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                     }
                     staged_routes.insert(route.id, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(route.id, record));
@@ -385,6 +358,28 @@ impl Registry {
                     publication.route_updates.push(Update::Insert(id, record.clone()));
                     publication.inventory_dirty |= inventory_live;
                     applied.push(RegistryApplied::Dropped(name));
+                }
+                RegistryEffect::WithdrawClaim(id) => {
+                    // Only a `Live` claim withdraws; see the effect's own doc
+                    // for why nothing can still name it. A retired route keeps
+                    // its tombstone, so a withdrawal never frees a name that
+                    // ended.
+                    let Some(record) = staged_route(&staged_routes, inner, id) else {
+                        return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
+                    };
+                    match record.lifecycle {
+                        RouteLifecycle::Live { .. } => {}
+                        RouteLifecycle::Dropped => {
+                            return Err(RegistryEffectError::Drop(DropError::AlreadyDropped(id)));
+                        }
+                        RouteLifecycle::Starting { .. } | RouteLifecycle::Alias { .. } => {
+                            return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
+                        }
+                    }
+                    staged_routes.insert(id, None);
+                    publication.route_updates.push(Update::Remove(id));
+                    publication.inventory_dirty = true;
+                    applied.push(RegistryApplied::ClaimWithdrawn(id));
                 }
                 RegistryEffect::InstallSeize { id, handle } => {
                     let Some(mut record) = staged_route(&staged_routes, inner, id).cloned() else {

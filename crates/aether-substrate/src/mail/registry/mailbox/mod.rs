@@ -119,11 +119,11 @@ pub enum MailboxEntry {
     /// [`MailDispatch<'_>`](crate::mail::registry::MailDispatch) — zero-copy
     /// reads; see [`InlineHandler`] for the full contract.
     Inline(Arc<dyn InlineHandler>),
-    /// Mailbox has been explicitly dropped (ADR-0010). Mail addressed
-    /// to a `Dropped` slot is discarded by the scheduler / ctx dispatch
-    /// until the same name is re-registered, at which point the slot
-    /// transitions back to `Inbox` under the same id (ADR-0029 ids
-    /// are a function of name, so they're stable across drop/reload).
+    /// Mailbox has been explicitly dropped (ADR-0010): the route's
+    /// tombstone. Mail addressed to a `Dropped` slot is discarded by the
+    /// scheduler / ctx dispatch, and the name is never registered again
+    /// (ADR-0079 §7), so the id (a function of the name per ADR-0029)
+    /// never comes to name a different actor.
     Dropped,
 }
 
@@ -140,7 +140,9 @@ pub struct Registry {
 struct Inner {
     /// Sparse, keyed on the deterministic `MailboxId` (ADR-0029).
     /// Registration inserts; `drop_mailbox` transitions the entry to
-    /// `Dropped` so the id stays addressable until re-registered.
+    /// `Dropped`, which keeps the id addressable for good and its name
+    /// spent. Only a cancelled `Starting` reservation or a withdrawn
+    /// unborn claim removes an entry.
     mailboxes: FxHashMap<MailboxId, RouteRecord>,
     pending_births: FxHashMap<MailboxId, PendingBirth>,
     next_activation_token: u64,

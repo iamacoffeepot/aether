@@ -637,18 +637,36 @@ impl<'a> ChassisCtx<'a> {
         Ok(DropOnShutdownClaim { id, receiver: rx, mailbox_sender: MailboxSender::new(tx), wake_slot })
     }
 
-    /// Issue 607 Phase 7: undo a previous `claim_*_mailbox` call.
-    /// Retires the sink's route in the chassis registry and removes the
-    /// id from `claimed_actor_mailboxes`. Idempotent: calling on an id
-    /// that wasn't claimed, or was already unclaimed, is a no-op.
+    /// Issue 607 Phase 7: undo a previous `claim_*_mailbox` call whose
+    /// claim no actor could have observed. Removes the sink's route record
+    /// from the chassis registry, so the name can be claimed again
+    /// (ADR-0079 §5, ADR-0230 §1: a failed init can be retried under the
+    /// same name), and removes the id from `claimed_actor_mailboxes`.
+    /// Idempotent: calling on an id that wasn't claimed, or was already
+    /// unclaimed, is a no-op.
     ///
-    /// Used in the singleton-boot unwind path when `init` fails after
-    /// the cap mailbox was claimed. Without this, the failed cap leaves
-    /// a live sink registered against its namespace. The route goes
-    /// `Dropped` rather than leaving the table: its name stays free for
-    /// a later claim of the same namespace, and a reference minted while
-    /// it was `Live` still names its path (ADR-0230).
-    pub(crate) fn unclaim_mailbox(&mut self, id: MailboxId) {
+    /// Used by a chassis boot that fails before its spawn pass: the claim
+    /// or init pass failed, so the whole boot aborts before any dispatcher
+    /// runs, and no `wire` mail carries the id. A claim some actor may
+    /// have observed is retired instead ([`Self::retire_claim`]).
+    pub(crate) fn withdraw_claim(&mut self, id: MailboxId) {
+        let _ = self.registry.withdraw_claim(&self.authority, id);
+        self.claimed_actor_mailboxes.retain(|i| *i != id);
+    }
+
+    /// Undo a previous `claim_*_mailbox` call whose claim some actor may
+    /// already have observed. Retires the sink's route to `Dropped` and
+    /// removes the id from `claimed_actor_mailboxes`. Idempotent: calling
+    /// on an id that wasn't claimed, or was already unclaimed, is a no-op.
+    ///
+    /// Used by a capability boot that fails after its `wire` ran, whose
+    /// `wire` mail stamped with the id may already sit in a draining
+    /// peer's inbox, and by a pumped boot that fails while the passives
+    /// are dispatching and may hold a `depends` reference to the claim.
+    /// The route keeps its proven name, so such a reference still names
+    /// its path (ADR-0230), and the name is never registered again
+    /// (ADR-0079 §7).
+    pub(crate) fn retire_claim(&mut self, id: MailboxId) {
         let _ = self.registry.drop_mailbox(&self.authority, id);
         self.claimed_actor_mailboxes.retain(|i| *i != id);
     }
@@ -791,38 +809,69 @@ mod tests {
         assert_eq!(other_read, 0, "fresh slots see the Local at its default");
     }
 
-    /// A boot unwind retires the claimed route instead of deleting it: a
-    /// reference minted while the claim was `Live` still answers its actor
-    /// path afterwards, and the namespace is free for the next claim. A
-    /// regression to deletion loses the path (`actor_path` would panic on the
-    /// reference); a regression to burning the name refuses the re-claim.
+    /// A boot that fails before any actor could observe its claim withdraws
+    /// it: no record stays behind, and the namespace claims again, so a
+    /// corrected retry boots under the same name (ADR-0079 §5). A regression
+    /// that retires instead refuses the re-claim.
     #[test]
-    fn unclaim_retires_the_route_keeping_its_path_and_freeing_its_name() {
+    fn withdraw_claim_leaves_no_record_and_frees_its_name() {
         let (registry, mailer, spawner, aborter, _pool) = test_infra();
+        let name = "test.unclaim.withdraw";
+
+        with_test_ctx(&registry, &mailer, &spawner, &aborter, |ctx| {
+            let claim = ctx.claim_mailbox_with_override(name).expect("first claim succeeds");
+            ctx.withdraw_claim(claim.id);
+
+            assert!(registry.entry_at(claim.id).is_none(), "the withdrawn claim leaves no record");
+            assert!(ctx.claim_mailbox_with_override(name).is_ok(), "the withdrawn name claims again");
+        });
+    }
+
+    /// A boot unwind some actor may have observed retires the claimed route
+    /// instead of deleting it: a reference minted while the claim was `Live`
+    /// still answers its actor path afterwards, and the name is spent. A
+    /// regression to deletion loses the path (`actor_path` would answer
+    /// `None`); a regression to reuse accepts the re-claim.
+    #[test]
+    fn retire_claim_keeps_its_path_and_spends_its_name() {
+        let (registry, mailer, spawner, aborter, _pool) = test_infra();
+        let name = "test.unclaim.retire";
+        let expected = ErasedActorPath::new(name).expect("the claimed name is a canonical path");
+
+        with_test_ctx(&registry, &mailer, &spawner, &aborter, |ctx| {
+            let claim = ctx.claim_mailbox_with_override(name).expect("first claim succeeds");
+            let reference = registry.resolve_live(claim.id).expect("the claimed route is live");
+            ctx.retire_claim(claim.id);
+
+            assert_eq!(registry.actor_path(reference), Some(expected));
+            assert!(!registry.is_live(reference), "the unwound route is no longer live");
+            assert!(ctx.claim_mailbox_with_override(name).is_err(), "the retired name never claims again");
+        });
+    }
+
+    /// Run `body` against a fresh `ChassisCtx` over the test infra.
+    fn with_test_ctx(
+        registry: &Arc<Registry>,
+        mailer: &Arc<Mailer>,
+        spawner: &Arc<crate::Spawner>,
+        aborter: &Arc<dyn FatalAborter>,
+        body: impl FnOnce(&mut ChassisCtx<'_>),
+    ) {
         let mut fallback: Option<FallbackRouter> = None;
         let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
         let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
         let references = ComposedReferences::default();
-        let mut ctx = ChassisCtx::new(ChassisCtxParts {
-            registry: &registry,
-            mailer: &mailer,
+
+        body(&mut ChassisCtx::new(ChassisCtxParts {
+            registry,
+            mailer,
             fallback: &mut fallback,
-            aborter: &aborter,
+            aborter,
             claimed_actor_mailboxes: &mut claimed_actor_mailboxes,
-            spawner: &spawner,
+            spawner,
             reserved_driver_mailboxes: &mut reserved_driver_mailboxes,
             references: &references,
-        });
-        let name = "test.unclaim.retire";
-        let expected = ErasedActorPath::new(name).expect("the claimed name is a canonical path");
-
-        let claim = ctx.claim_mailbox_with_override(name).expect("first claim succeeds");
-        let reference = registry.resolve_live(claim.id).expect("the claimed route is live");
-        ctx.unclaim_mailbox(claim.id);
-
-        assert_eq!(registry.actor_path(reference), Some(expected));
-        assert!(!registry.is_live(reference), "the unwound route is no longer live");
-        assert!(ctx.claim_mailbox_with_override(name).is_ok(), "the retired name claims again");
+        }));
     }
 
     /// The long-lived owned infra a `ChassisCtx` borrows from. Held by

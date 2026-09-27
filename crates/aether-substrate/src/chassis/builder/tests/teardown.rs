@@ -76,6 +76,15 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
     assert!(!chassis.actor_registry().is_live_at(id), "registry slot should transition Live → Dead after unwire runs");
     assert!(chassis.actor_registry().is_tombstoned(id), "tombstone insertion forbids reuse of the retired full name");
 
+    // The close tail stages the route's retirement through the registry
+    // owner, so it lands at the owner's next apply: the route reads
+    // `Dropped`, and route readers stop proving the closed actor.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !matches!(registry.entry_at(id), Some(MailboxEntry::Dropped)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(matches!(registry.entry_at(id), Some(MailboxEntry::Dropped)), "a closed actor's route retires to Dropped");
+
     // Spawning again under the same `Subname::Counter` would
     // increment the per-Spawner counter (so it'd target a fresh
     // id, not collide); reuse the same `Named` subname to land

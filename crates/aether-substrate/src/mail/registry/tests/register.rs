@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::mail::MailboxId;
-use crate::mail::registry::{DropError, MailboxEntry, Registry, noop_handler};
+use crate::mail::registry::{DropError, MailboxEntry, Registry, ResolveLiveError, noop_handler};
 use crate::scheduler::SeizeHandle;
 use crate::testing::boot_authority as auth;
 
@@ -150,29 +150,41 @@ fn try_register_inbox_rejects_a_name_outside_the_path_grammar() {
     assert_eq!(r.len(), 0);
 }
 
+/// A retired name is spent for good (ADR-0079 §7): a regression that
+/// restores the same-name `Dropped` reuse arm lets the re-register through.
 #[test]
-fn drop_mailbox_frees_name_and_marks_entry_dropped() {
+fn drop_mailbox_retires_the_name_for_good() {
     let r = Registry::new();
     let id = r.try_register_inbox(&auth(), "loaded", noop_handler()).unwrap();
     let name = r.drop_mailbox(&auth(), id).expect("drop");
     assert_eq!(name, "loaded");
-    assert!(r.lookup("loaded").is_none(), "name should be reusable");
-    assert!(matches!(r.entry_at(id), Some(MailboxEntry::Dropped)), "entry must mark id as dropped");
+
+    assert!(r.try_register_inbox(&auth(), "loaded", noop_handler()).is_err(), "a retired name never registers again");
+    assert!(matches!(r.entry_at(id), Some(MailboxEntry::Dropped)), "the refused re-register leaves the tombstone");
     assert!(
         r.list_mailbox_descriptors().iter().all(|descriptor| descriptor.id != id),
         "a retained Dropped route is absent from public live inventory"
     );
-    // Under ADR-0029 the id is a function of the name, so a
-    // re-register produces the *same* id and flips the entry back
-    // to `Component`.
-    let reloaded = r.try_register_inbox(&auth(), "loaded", noop_handler()).unwrap();
-    assert_eq!(reloaded, id);
-    assert_eq!(r.lookup("loaded"), Some(reloaded));
-    assert!(matches!(r.entry_at(reloaded), Some(MailboxEntry::Inbox { .. })));
-    assert!(
-        r.list_mailbox_descriptors().iter().any(|descriptor| descriptor.id == id),
-        "re-registration restores the route to public live inventory"
-    );
+}
+
+/// An unborn claim's withdrawal leaves no record, so its name registers
+/// again, and it refuses anything but a `Live` claim. A regression that
+/// tombstones on withdrawal refuses the re-register; one that removes a
+/// retired route frees a spent name.
+#[test]
+fn withdraw_claim_frees_an_unborn_name() {
+    let r = Registry::new();
+    let id = r.try_register_inbox(&auth(), "unborn", noop_handler()).unwrap();
+    r.withdraw_claim(&auth(), id).expect("a live claim withdraws");
+
+    assert!(r.entry_at(id).is_none(), "the withdrawn claim leaves no record");
+    assert_eq!(r.resolve_live(id), Err(ResolveLiveError::Unknown(id)));
+    assert!(matches!(r.withdraw_claim(&auth(), id), Err(DropError::UnknownId(_))), "a second withdraw is refused");
+    assert_eq!(r.try_register_inbox(&auth(), "unborn", noop_handler()), Ok(id), "the name registers again");
+
+    r.drop_mailbox(&auth(), id).expect("the re-registered route retires");
+    assert!(matches!(r.withdraw_claim(&auth(), id), Err(DropError::AlreadyDropped(_))), "a retired route stays");
+    assert!(matches!(r.entry_at(id), Some(MailboxEntry::Dropped)));
 }
 
 #[test]

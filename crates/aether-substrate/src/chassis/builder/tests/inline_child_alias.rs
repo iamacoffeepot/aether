@@ -386,7 +386,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     let published = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
             alias_id,
-            alias_name,
+            alias_name.clone(),
             host_id,
             RouteContract::empty(),
         ))]))
@@ -484,6 +484,22 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         "mail to a despawned alias must report the address as retired, not as never-registered",
     );
     assert!(chassis.actor_registry().is_live_at(host_id), "retiring one alias leaves its host live and addressable");
+
+    // The retired alias name is spent (ADR-0079 §7): re-publishing it under
+    // the same parent is refused rather than reviving the address.
+    let republished = registry
+        .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
+            alias_id,
+            alias_name,
+            host_id,
+            RouteContract::empty(),
+        ))]))
+        .expect("registry accepts the re-publish batch");
+    assert!(
+        republished.wait_timeout(Duration::from_secs(5)).expect("re-publish batch retires").is_err(),
+        "a retired alias name must never publish again",
+    );
+    assert!(matches!(registry.entry_at(alias_id), Some(MailboxEntry::Dropped)), "the retired alias stays Dropped");
 
     // Idempotent, so a re-despawn of an already-gone alias is a clean no-op —
     // the guest contract `despawn_inline_child` promises.
