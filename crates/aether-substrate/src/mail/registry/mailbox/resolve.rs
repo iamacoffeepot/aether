@@ -6,6 +6,7 @@ use std::sync::Arc;
 use aether_actor::ErasedActorRef;
 use aether_data::wire::PublishedRoutes;
 use aether_data::{ActorPathError, ActorPathForm, ErasedActorPath, ReplyContract, ScopePathError, validate_scope_path};
+use rustc_hash::FxHashMap;
 
 use crate::mail::registry::{AddressResolutionError, ResolvedAddress, RouteContract, lineage_mailbox_id};
 use crate::mail::{KindId, MailboxId};
@@ -13,6 +14,16 @@ use crate::scheduler::SeizeHandle;
 
 use super::route::{RouteEndpoint, RouteLifecycle, RouteRecord};
 use super::{CapturedDisposition, MailboxEntry, Registry};
+
+/// The position whose route stands under exactly the canonical `path` in
+/// one snapshot of the route table, in any lifecycle: the fold of `path` as
+/// written, kept only when the route there carries `path` as its canonical
+/// name. The one check behind [`Registry::route_position`] and
+/// [`Registry::live_route`].
+fn standing_position(routes: &FxHashMap<MailboxId, RouteRecord>, path: &ErasedActorPath) -> Option<MailboxId> {
+    let id = lineage_mailbox_id(path.as_str());
+    (routes.get(&id)?.canonical_name == *path).then_some(id)
+}
 
 pub(super) enum ResolvedRoute<'a> {
     Starting {
@@ -297,26 +308,27 @@ impl Registry {
     /// `TraceTail` root, which must accept a retired minter so the roots it
     /// minted stay queryable.
     pub(crate) fn route_position(&self, path: &ErasedActorPath) -> Option<MailboxId> {
-        let id = lineage_mailbox_id(path.as_str());
-        (self.routes.load().entry_for(&id)?.canonical_name == *path).then_some(id)
+        standing_position(self.routes.load().table(), path)
     }
 
     /// The position of the `Live` route standing under exactly the canonical
-    /// `path` (ADR-0231 §3's receipt of a typed path).
+    /// `path`, from one read of the published view (ADR-0231 §3's receipt of
+    /// a typed path).
     ///
     /// A typed path is canonical and within the depth and byte caps by
-    /// construction, so [`Self::route_position`] folds it as written and
-    /// refuses a fold collision; the route it names must then resolve
-    /// `Live`: an inline alias answers `Live` while its target parent is
-    /// `Live`. Never registered, `Starting`, `Dropped`, and a name mismatch
-    /// all answer `None`.
+    /// construction, so it is folded as written, never expanded, and the
+    /// route at the fold must carry `path` as its canonical name, which
+    /// refuses a fold collision: the check [`Self::route_position`] makes.
+    /// The route it names must then resolve `Live`: an inline alias answers
+    /// `Live` while its target parent is `Live`. Never registered,
+    /// `Starting`, `Dropped`, and a name mismatch all answer `None`.
     ///
     /// Consumers: `Registry::resolve_protocol`, the native receipt of a
     /// protocol path, and the registry's [`PublishedRoutes`] impl, which a
     /// `ProtocolPath` decode reads.
     pub(crate) fn live_route(&self, path: &ErasedActorPath) -> Option<MailboxId> {
-        let id = self.route_position(path)?;
         let routes = self.routes.load();
+        let id = standing_position(routes.table(), path)?;
 
         match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
             ResolvedRoute::Live { .. } => Some(id),

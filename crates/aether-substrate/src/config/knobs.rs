@@ -78,9 +78,8 @@ pub struct RingCapacities {
     /// capacity (chassis-boot key `AETHER_ACTOR_LOG_RING_SIZE`; default
     /// [`DEFAULT_RING_CAP`]).
     pub log: usize,
-    /// Per-actor `ActorTraceRing`
-    /// and chassis-host-ring *floor* capacity — the size each ring starts
-    /// at (chassis-boot key `AETHER_ACTOR_TRACE_RING_SIZE`; default
+    /// Per-actor `ActorTraceRing` and chassis-host-ring *floor* capacity —
+    /// the size each ring starts at (chassis-boot key `AETHER_ACTOR_TRACE_RING_SIZE`; default
     /// [`DEFAULT_TRACE_RING_CAP`]).
     pub trace: usize,
     /// Ceiling a saturating trace ring grows to before it resumes

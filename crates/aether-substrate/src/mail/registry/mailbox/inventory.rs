@@ -88,10 +88,9 @@ impl Registry {
 
     /// Snapshot of every mailbox descriptor currently registered, plus
     /// a synthetic entry for the chassis-router sentinel
-    /// (`aether.chassis`). Sorted
-    /// by name. Used by the hub-client handshake to ship the
-    /// authoritative inventory in `Hello.mailboxes`, and by the
-    /// component cap to re-ship via `MailboxesChanged` after a load
+    /// (`aether.chassis`). Sorted by name. Used by the hub-client
+    /// handshake to ship the authoritative inventory in `Hello.mailboxes`,
+    /// and by the component cap to re-ship via `MailboxesChanged` after a load
     /// registers a new trampoline mailbox (issue iamacoffeepot/aether#730).
     ///
     /// Only live entries are included. Keyed routes retain `Dropped`

@@ -347,10 +347,9 @@ pub struct DispatchTraced {
 /// the root [`TraceMailId`] every dispatched envelope inherited. Its
 /// `sender` names the actor that minted the root, whose ring holds the
 /// root's `Sent`, so the caller can walk the per-actor trace rings from
-/// that root once
-/// the wire `ReplyEnd` signals chain settlement. `Err` aborts the batch
-/// before any mail moved — typically a bad recipient or kind name in
-/// the batch (matches `CaptureFrameResult::Err`'s bundle-resolution
+/// that root once the wire `ReplyEnd` signals chain settlement. `Err`
+/// aborts the batch before any mail moved — typically a bad recipient or
+/// kind name in the batch (matches `CaptureFrameResult::Err`'s bundle-resolution
 /// failure shape).
 #[aether_data::kind(name = "aether.trace.dispatch_traced_ack")]
 pub enum DispatchTracedAck {

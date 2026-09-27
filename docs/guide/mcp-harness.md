@@ -181,9 +181,10 @@ compact one-line-per-node `tree`, a matching `node_count`, and `mails: null`;
 each line names `sender → recipient` by canonical actor path, then the kind and
 handler duration, with indentation for causal depth. A retired actor keeps its
 path, and `(no route)` marks an endpoint the engine held no route record for;
-the root and every node's mail ids name their minting actor by path too. Pass `trace: "nodes"` to restore the complete `mails` node values;
-that form omits `tree` and carries the same `node_count`. Both forms also carry
-the complete flat reply list and rely on the generic response spill rather than
+the root and every node's mail ids name their minting actor by path too. Pass
+`trace: "nodes"` to restore the complete `mails` node values; that form omits
+`tree` and carries the same `node_count`. Both forms also carry the complete
+flat reply list and rely on the generic response spill rather than
 truncating. Its `format` is the same reply mask as `send_mail`'s, applied to
 that reply list and validated before the batch is encoded; a string `format`,
 such as the retired `"nodes"`, is refused. Reach for it when you

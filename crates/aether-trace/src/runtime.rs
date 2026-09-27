@@ -35,10 +35,10 @@ impl NativeActor for TraceDispatchCapability {
     /// replies synchronously with [`DispatchTracedAck`] carrying the
     /// root rendered with its minter's path — the actor whose ring holds
     /// the root's `Sent`, where the walk seeds. The caller waits for the
-    /// wire `ReplyEnd` (chain
-    /// settled), then reconstructs the populated tree by walking the
-    /// per-actor trace rings from this root (`aether.trace.tail`,
-    /// stitched client-side — ADR-0086 Phase 3b). Issue 749.
+    /// wire `ReplyEnd` (chain settled), then reconstructs the populated
+    /// tree by walking the per-actor trace rings from this root
+    /// (`aether.trace.tail`, stitched client-side — ADR-0086 Phase 3b).
+    /// Issue 749.
     ///
     /// **Reply forwarding (issue 1265).** Each child is delivered
     /// through `ctx.deliver_forwarded`, which pins its reply target to
