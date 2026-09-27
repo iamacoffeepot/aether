@@ -54,7 +54,7 @@ pub struct MailboxDescriptor {
 pub enum MailboxCategory {
     /// A chassis cap or framework-level actor (`aether.window`,
     /// `aether.render`, `aether.audio`, `aether.fs`, `aether.log`,
-    /// `aether.component`, `aether.diagnostics`, etc.). Renders as
+    /// `aether.component`, etc.). Renders as
     /// `actor:NAME`.
     Actor,
     /// A wasm-component trampoline. Full name has the form

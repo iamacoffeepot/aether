@@ -620,7 +620,7 @@ impl WasmActor for VirtualListWidget {
             Self::emit_action(ctx, armed);
         }
 
-        release_left(&mut self.pressed, false, release);
+        release_left(&mut self.pressed, false, release.clone());
         release_left(&mut self.thumb_grab_pixels, None, release);
     }
 

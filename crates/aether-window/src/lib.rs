@@ -14,7 +14,7 @@
 
 pub mod kinds;
 
-pub use aether_kinds::{WindowId, WindowMode};
+pub use aether_kinds::WindowMode;
 // The forwarding command, its reply, and the command vocabulary they carry
 // arrive through the glob: the manager identity's always-on `#[actor]` markers
 // declare all three, so they cannot ride a runtime gate. The two below can —
@@ -23,10 +23,8 @@ pub use kinds::*;
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 pub(crate) use kinds::{RetireWindow, WindowForwardContext};
 
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_actor::validate_namespace_segment;
-use aether_actor::{Publisher, Publishes, actor};
-use aether_data::Kind;
+use aether_actor::{ActorPath, Publisher, Publishes, actor};
+use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
     WindowSize,
@@ -136,9 +134,27 @@ impl Publisher for WindowCapability {
     }
 }
 
+/// The canonical actor path of the window named `name`:
+/// `aether.window/aether.window.instance:<name>`, written from the
+/// [`WindowCapability`] and [`WindowInstance`] types. It is the identity every
+/// window-originated event, `aether.window.list`, and `capture_frame` carry.
+///
+/// # Panics
+///
+/// Never: the path is two steps of valid segments, under the depth and byte
+/// caps.
+#[must_use]
+pub fn window_path(name: &LoadName) -> ErasedActorPath {
+    ActorPath::<WindowInstance>::child(&ActorPath::<WindowCapability>::root(), name)
+        .expect("a window path is two valid steps, under both caps")
+        .as_erased()
+        .clone()
+}
+
+/// The validated load name of a window spec's `name`.
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-fn validate_window_name(name: &str) -> Result<(), String> {
-    validate_namespace_segment(name).map_err(|reason| format!("invalid window name `{name}`: {reason:?}"))
+fn window_name(name: &str) -> Result<LoadName, String> {
+    LoadName::new(name).map_err(|error| format!("invalid window name `{name}`: {error}"))
 }
 
 #[cfg(feature = "runtime")]
@@ -194,6 +210,13 @@ mod tests {
         let registry = Registry::new();
         let live = registered_ref(&registry, canonical, noop_handler());
         assert_eq!(live.id(), typed, "the fixture stands the route at the typed resolver's position");
+
+        // Tripwire: `window_path` writes the window's path from actor types;
+        // its text must be the name the registry gives the spawned child, or
+        // every event, list row, and capture names a window nothing resolves.
+        let written = super::window_path(&aether_data::LoadName::new("main").expect("a valid window name"));
+        assert_eq!(written.as_str(), canonical);
+        assert_eq!(registry.resolve_address(&written).expect("the written path resolves").mailbox_id, typed);
 
         for address in [canonical, "aether.window/:main"] {
             let address = aether_data::ErasedActorPath::new(address).expect("fixture is a well-formed actor path");

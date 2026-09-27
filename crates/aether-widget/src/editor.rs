@@ -22,7 +22,7 @@ pub struct EditorShell {
 
 impl EditorShell {
     /// The shell's only send: prime a newly focused region with the cached
-    /// modifiers, then hand `payload` to `target`.
+    /// modifiers, once any have arrived, then hand `payload` to `target`.
     ///
     /// The reference [`Routing`] returned is handed to the send whole: no
     /// position is opened anywhere in the shell.
@@ -38,8 +38,9 @@ impl EditorShell {
     ) {
         if let Some(next) = focus.and_then(|transition| transition.next)
             && self.routing.target_accepts(next, RegionInputLane::Modifiers)
+            && let Some(modifiers) = self.routing.cached_modifiers()
         {
-            self.forward(ctx, None, Some(next), &self.routing.cached_modifiers());
+            self.forward(ctx, None, Some(next), modifiers);
         }
 
         if let Some(reference) = target {
@@ -105,13 +106,13 @@ impl WasmActor for EditorShell {
 
     #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
-        let route = self.routing.pointer_press(press);
+        let route = self.routing.pointer_press(&press);
         self.forward(ctx, route.focus, route.target, &press);
     }
 
     #[handler::single]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        let target = self.routing.pointer_release(release);
+        let target = self.routing.pointer_release(&release);
         self.forward(ctx, None, target, &release);
     }
 
@@ -122,25 +123,25 @@ impl WasmActor for EditorShell {
     /// that is in another pane entirely.
     #[handler::single]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
-        let route = self.routing.pointer_motion(moved);
+        let route = self.routing.pointer_motion(&moved);
         self.forward(ctx, None, route.exited, &moved);
         self.forward(ctx, None, route.target, &moved);
     }
 
     #[handler::single]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
-        self.forward(ctx, None, self.routing.wheel(wheel), &wheel);
+        self.forward(ctx, None, self.routing.wheel(&wheel), &wheel);
     }
 
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-        let route = self.routing.key_press(key);
+        let route = self.routing.key_press(&key);
         self.forward(ctx, route.focus, route.target, &key);
     }
 
     #[handler::single]
     fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
-        let route = self.routing.key_release(release);
+        let route = self.routing.key_release(&release);
         self.forward(ctx, route.focus, route.target, &release);
     }
 
@@ -156,7 +157,7 @@ impl WasmActor for EditorShell {
 
     #[handler::single]
     fn on_modifiers(&mut self, ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
-        let target = self.routing.modifiers(modifiers);
+        let target = self.routing.modifiers(&modifiers);
         self.forward(ctx, None, target, &modifiers);
     }
 }

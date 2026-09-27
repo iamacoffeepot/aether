@@ -117,7 +117,7 @@ impl<R> ActorPath<R> {
     /// is canonical too. Reads no registry, folds nothing, and cannot fail.
     #[must_use]
     pub fn narrow<P: CoveredBy<R>>(&self) -> ProtocolPath<P> {
-        ProtocolPath::from_erased(self.erased().clone())
+        ProtocolPath::from_erased(self.as_erased().clone())
     }
 }
 

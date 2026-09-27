@@ -23,13 +23,19 @@ use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, TextInput, WindowId};
+use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, TextInput};
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved, UnsubscribeKeys};
-use aether_window::SyntheticWindowCapability;
+use aether_window::{SyntheticWindowCapability, window_path};
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
-const TEST_WINDOW_ID: WindowId = WindowId(1);
+
+/// The window the injected events claim to come from. The synthetic runtime
+/// fans an injection out by selector without checking the window is live, so
+/// no window is created for it.
+fn test_window() -> ErasedActorPath {
+    window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
+}
 
 fn boot_bench() -> SubstrateHarness {
     SubstrateHarness::builder().with_component_host().build().expect("boot")
@@ -51,8 +57,8 @@ fn send_keys(harness: &mut SubstrateHarness, count: usize) {
     let steps: Vec<(&str, HarnessOp)> = labels
         .iter()
         .map(|label| {
-            let key = Key { window: TEST_WINDOW_ID, code: KEY_CODE };
-            (label.as_str(), HarnessOp::window_event(&synthetic, TEST_WINDOW_ID, &key))
+            let key = Key { window: test_window(), code: KEY_CODE };
+            (label.as_str(), HarnessOp::window_event(&synthetic, test_window(), &key))
         })
         .collect();
     harness.execute(steps).expect("key send sequence");
@@ -118,8 +124,8 @@ fn subscribed_component_receives_published_text_input() {
             "text",
             HarnessOp::window_event(
                 &harness.actor_ref::<SyntheticWindowCapability>(),
-                TEST_WINDOW_ID,
-                &TextInput { window: TEST_WINDOW_ID, text: "hi".to_owned() },
+                test_window(),
+                &TextInput { window: test_window(), text: "hi".to_owned() },
             ),
         )])
         .expect("text send sequence");

@@ -255,9 +255,10 @@ pub struct ListEnginesArgs {
 /// send mail, run checks, compare a host reference, or write a host file.
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 pub struct FailureEvidenceFrameArgs {
-    /// Exact engine window id, as the tagged `mbx-…` string returned by the
-    /// window inventory (or a decimal `u64` accepted by `capture_frame`).
-    pub window_id: String,
+    /// The window to capture: its actor path as `aether.window.list`
+    /// reports it (`aether.window/aether.window.instance:main`), or its
+    /// short form (`aether.window/:main`).
+    pub window: String,
     /// Optional proportional inline-image reduction in `(0.0, 1.0]`.
     #[serde(default)]
     pub scale: Option<f32>,
@@ -554,7 +555,7 @@ pub struct ActorFailureEvidence {
 /// than being duplicated inside the JSON bundle.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct FrameFailureEvidence {
-    pub window_id: String,
+    pub window: String,
     pub observation: FailureEvidenceObservation,
 }
 
@@ -1307,16 +1308,11 @@ pub struct CaptureFrameArgs {
     /// is an error naming the situation, never a guess.
     #[serde(default)]
     pub engine_id: Option<String>,
-    /// Engine window id to capture, as the tagged `mbx-…` string
-    /// `aether.window.list` reports. Desktop capture never guesses a
-    /// primary, focused, or current window.
-    ///
-    /// A string rather than a number because a real window id is an
-    /// ADR-0099 lineage fold near 2^60, which a JSON number cannot carry
-    /// to a consumer that parses it as a double (iamacoffeepot/aether#4344).
-    /// A decimal `u64` is still accepted for a synthetic or harness-scale
-    /// id small enough to be exact.
-    pub window_id: String,
+    /// The window to capture: its actor path as `aether.window.list`
+    /// reports it (`aether.window/aether.window.instance:main`), or its
+    /// short form (`aether.window/:main`), which the engine canonicalizes.
+    /// Desktop capture never guesses a primary, focused, or current window.
+    pub window: String,
     /// Mail dispatched *before* the frame is read back — state changes
     /// whose effects should appear in the image. Resolved atomically:
     /// any bad entry aborts the whole capture.

@@ -9,15 +9,16 @@ use aether_data::{ActorPathError, ErasedActorPath, LoadName, Namespace};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer};
 
-use crate::{Addressable, ChildOf, Instanced, Root};
+use crate::{Addressable, ChildOf, Instanced, Root, Singleton};
 
 /// The canonical path of an `R`: an [`ErasedActorPath`] whose leaf names an
 /// `R` (ADR-0230 §2).
 ///
 /// Written, the text is `R`'s canonical path, each step a type's `NAMESPACE`
-/// and its key, by one of two constructors whose bounds are the topology
-/// check: [`ActorPath::<R>::instance(&key)`](Self::instance) for a root
-/// instance and [`ActorPath::<C>::child(&parent, &key)`](Self::child) for an
+/// and its key, by one of three constructors whose bounds are the topology
+/// check: [`ActorPath::<R>::root()`](Self::root) for a root singleton,
+/// [`ActorPath::<R>::instance(&key)`](Self::instance) for a root instance,
+/// and [`ActorPath::<C>::child(&parent, &key)`](Self::child) for an
 /// instanced child. Decoded, it is a well-formed canonical path whose leaf
 /// namespace is `R::NAMESPACE`, so an `ActorPath<R>` that exists names an
 /// `R`. Existence and liveness are `resolve`'s to prove, and it grants no
@@ -39,9 +40,30 @@ impl<R> ActorPath<R> {
         Self { path, _actor: PhantomData }
     }
 
-    /// The text, for [`narrow`](Self::narrow), which keeps it.
-    pub(crate) const fn erased(&self) -> &ErasedActorPath {
+    /// The path text, for a field or table that names actors of more than
+    /// one type, and for [`narrow`](Self::narrow), which keeps it. Grants
+    /// nothing: the text is already public through
+    /// `Display`, and a typed path cannot be built from it.
+    #[must_use]
+    pub const fn as_erased(&self) -> &ErasedActorPath {
         &self.path
+    }
+}
+
+impl<R: Root + Singleton> ActorPath<R> {
+    /// `R::NAMESPACE`, the name the registry gives the root singleton.
+    /// Reads no registry and folds nothing.
+    ///
+    /// # Panics
+    ///
+    /// Never: the inline `const` makes an invalid `NAMESPACE` a compile error
+    /// where this is monomorphized, and one valid segment is at most 256
+    /// bytes at depth 1, under both caps.
+    #[must_use]
+    pub fn root() -> Self {
+        let _ = const { Namespace::new(R::NAMESPACE) };
+
+        Self::from_erased(ErasedActorPath::new(R::NAMESPACE).expect("one namespace step is a valid path"))
     }
 }
 

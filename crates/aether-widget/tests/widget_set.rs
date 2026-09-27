@@ -41,7 +41,7 @@ use aether_kinds::keycode::{
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     Key, KeyRelease, LoadComponent, LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput,
-    Tick, WindowId,
+    Tick,
 };
 use aether_render::HeadlessRenderCapability;
 use aether_widget::set::{ButtonWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, VirtualListWidget};
@@ -51,7 +51,10 @@ use aether_widget::{
 };
 use support::widget_caps;
 
-const TEST_WINDOW_ID: WindowId = WindowId(1);
+/// The window the injected input events name.
+fn test_window() -> aether_data::ErasedActorPath {
+    aether_window::window_path(&LoadName::new("main").expect("a valid window name"))
+}
 
 /// A GPU-free bench with the component host and everything the widget module
 /// declares: the headless render stub, text (its fs from the sandbox roots) and
@@ -122,12 +125,12 @@ fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPane
 
 /// A left mouse-button press at `(x, y)`.
 fn press(x: f32, y: f32) -> MouseButton {
-    MouseButton { window: TEST_WINDOW_ID, button: LEFT, x, y }
+    MouseButton { window: test_window(), button: LEFT, x, y }
 }
 
 /// A left mouse-button release at `(x, y)`.
 fn release(x: f32, y: f32) -> MouseButtonRelease {
-    MouseButtonRelease { window: TEST_WINDOW_ID, button: LEFT, x, y }
+    MouseButtonRelease { window: test_window(), button: LEFT, x, y }
 }
 
 /// Drive the reference panel through a full input session — a slider drag, a
@@ -160,20 +163,20 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
             // commits at the dragged value (x=160 → 75% of 0..255 ≈ 191). The
             // press also focuses the slider.
             ("drag_press", HarnessOp::send_and_settle(&panel, &press(110.0, 52.0))),
-            ("drag_move", HarnessOp::send_and_settle(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 })),
+            ("drag_move", HarnessOp::send_and_settle(&panel, &MouseMove { window: test_window(), x: 160.0, y: 52.0 })),
             ("drag_release", HarnessOp::send_and_settle(&panel, &release(160.0, 52.0))),
             // Tab moves focus off the slider to the radio group; Down then
             // routes to the focused radio, moving its selection to index 1.
-            ("tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("radio_key", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("tab", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("radio_key", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
             // A click on the third radio row (y 118..142) selects index 2.
             ("radio_press", HarnessOp::send_and_settle(&panel, &press(30.0, 125.0))),
             ("radio_release", HarnessOp::send_and_settle(&panel, &release(30.0, 125.0))),
             // Focus the text field (y 148..172), type into it, and commit.
             ("text_focus", HarnessOp::send_and_settle(&panel, &press(50.0, 160.0))),
             ("text_focus_up", HarnessOp::send_and_settle(&panel, &release(50.0, 160.0))),
-            ("type", HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "hi".to_owned() })),
-            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("type", HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "hi".to_owned() })),
+            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
         ])
         .expect("input session");
 
@@ -478,11 +481,11 @@ fn panel_stacks_declared_children_in_order() {
             ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             // Tab from no focus lands on the first focusable child (index 0);
             // an arrow nudge on the focused slider commits + logs it.
-            ("tab_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("nudge_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("tab_first", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("nudge_first", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
             // Tab again advances to the second child; nudge + log it.
-            ("tab_second", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("nudge_second", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("tab_second", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("nudge_second", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
         ])
         .expect("declared-children session");
 
@@ -523,10 +526,10 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
 
     harness
         .execute(vec![
-            ("focus_read_only", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("focus_read_only", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
             (
                 "blocked_read_only_page",
-                HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN }),
+                HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_PAGE_DOWN }),
             ),
             ("blocked_read_only_press", HarnessOp::send_and_settle(&panel, &press(30.0, 118.0))),
             ("blocked_read_only_release", HarnessOp::send_and_settle(&panel, &release(30.0, 118.0))),
@@ -534,20 +537,20 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
                 "make_mutable",
                 HarnessOp::send_and_settle(&list, &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            ("page_to_five", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
-            ("down_to_six", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("page_to_five", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_PAGE_DOWN })),
+            ("down_to_six", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
             ("click_realized_top", HarnessOp::send_and_settle(&panel, &press(30.0, 22.0))),
             ("release_realized_top", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
             ("disable", HarnessOp::send_and_settle(&list, &SetWidgetState { state: disabled })),
             (
                 "blocked_disabled_page",
-                HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN }),
+                HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_PAGE_DOWN }),
             ),
             ("blocked_disabled_press", HarnessOp::send_and_settle(&panel, &press(30.0, 94.0))),
             ("blocked_disabled_release", HarnessOp::send_and_settle(&panel, &release(30.0, 94.0))),
             ("enable", HarnessOp::send_and_settle(&list, &SetWidgetState { state: WidgetControlState::default() })),
-            ("refocus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("page_to_seven", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
+            ("refocus", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("page_to_seven", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_PAGE_DOWN })),
         ])
         .expect("virtual-list state and selection session");
 
@@ -579,36 +582,36 @@ fn drive_state_and_keyboard_session(harness: &mut SubstrateHarness, panel: Actor
         .execute(vec![
             // Forward Tab skips the disabled first slider and focuses the
             // read-only value. Its arrow input must not mutate.
-            ("tab_value", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("blocked_nudge", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("tab_value", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("blocked_nudge", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
             // Runtime state changes preserve the value while enabling mutation.
             (
                 "make_mutable",
                 HarnessOp::send_and_settle(&value, &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            ("allowed_nudge", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("allowed_nudge", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
             // Shift+Tab wraps backward to the Button, skipping the disabled
             // first entry. Space fires on release.
             (
                 "shift",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &Modifiers { window: TEST_WINDOW_ID, shift: true, ..Modifiers::default() },
+                    &Modifiers { window: test_window(), shift: true, ctrl: false, alt: false, meta: false },
                 ),
             ),
-            ("reverse_tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("space", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_SPACE })),
+            ("reverse_tab", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("space", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_SPACE })),
             (
                 "space_release",
-                HarnessOp::send_and_settle(&panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_SPACE }),
+                HarnessOp::send_and_settle(&panel, &KeyRelease { window: test_window(), code: KEY_SPACE }),
             ),
             // Enter fires immediately and suppresses repeated key-down mail
             // until its matching release.
-            ("enter", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
-            ("enter_repeat", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("enter", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
+            ("enter_repeat", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
             (
                 "enter_release",
-                HarnessOp::send_and_settle(&panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_ENTER }),
+                HarnessOp::send_and_settle(&panel, &KeyRelease { window: test_window(), code: KEY_ENTER }),
             ),
             // Hiding the focused button moves focus forward to the live slider;
             // no stale keyboard arm or focus remains on the button.
@@ -619,7 +622,7 @@ fn drive_state_and_keyboard_session(harness: &mut SubstrateHarness, panel: Actor
                     &SetWidgetState { state: WidgetControlState { visible: false, ..WidgetControlState::default() } },
                 ),
             ),
-            ("nudge_after_hide", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("nudge_after_hide", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
         ])
         .expect("state and keyboard session");
 }
@@ -690,8 +693,8 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
 
     harness
         .execute(vec![
-            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("blocked_key", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("blocked_key", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
             ("blocked_pointer", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
             ("blocked_pointer_release", HarnessOp::send_and_settle(&panel, &release(30.0, 70.0))),
             (
@@ -701,7 +704,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
                     &SetWidgetState { state: WidgetControlState::default() },
                 ),
             ),
-            ("allowed_key", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("allowed_key", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
             ("allowed_pointer", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
             ("allowed_pointer_release", HarnessOp::send_and_settle(&panel, &release(30.0, 70.0))),
         ])
@@ -750,8 +753,8 @@ fn radio_up_down_clamps_at_the_ends_without_endpoint_events() {
     harness
         .execute(vec![
             ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
-            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("up_at_top", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("up_at_top", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
         ])
         .expect("radio focus and top-end Up");
 
@@ -760,9 +763,9 @@ fn radio_up_down_clamps_at_the_ends_without_endpoint_events() {
 
     harness
         .execute(vec![
-            ("down_to_1", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
-            ("down_to_2", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
-            ("down_at_bottom", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("down_to_1", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
+            ("down_to_2", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
+            ("down_at_bottom", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
         ])
         .expect("radio Down through the last option");
 
@@ -775,9 +778,9 @@ fn radio_up_down_clamps_at_the_ends_without_endpoint_events() {
 
     harness
         .execute(vec![
-            ("up_to_1", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
-            ("up_to_0", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
-            ("up_at_top", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("up_to_1", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
+            ("up_to_0", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
+            ("up_at_top", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
         ])
         .expect("radio Up through the first option");
 
@@ -825,13 +828,13 @@ fn drive_slider_cancellation_session(harness: &mut SubstrateHarness, panel: Acto
             ),
             (
                 "stale_drag_move",
-                HarnessOp::send_and_settle(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 }),
+                HarnessOp::send_and_settle(&panel, &MouseMove { window: test_window(), x: 160.0, y: 52.0 }),
             ),
             ("stale_drag_release", HarnessOp::send_and_settle(&panel, &release(160.0, 52.0))),
             ("live_drag_press", HarnessOp::send_and_settle(&panel, &press(110.0, 52.0))),
             (
                 "live_drag_move",
-                HarnessOp::send_and_settle(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 }),
+                HarnessOp::send_and_settle(&panel, &MouseMove { window: test_window(), x: 160.0, y: 52.0 }),
             ),
             ("live_drag_release", HarnessOp::send_and_settle(&panel, &release(160.0, 52.0))),
         ])
@@ -901,12 +904,12 @@ fn read_only_text_field_blocks_activation_until_enabled() {
 
     harness
         .execute(vec![
-            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
             (
                 "blocked_text",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: " mutation".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: " mutation".to_owned() }),
             ),
-            ("blocked_enter", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("blocked_enter", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
             (
                 "enable",
                 HarnessOp::send_and_settle(
@@ -914,7 +917,7 @@ fn read_only_text_field_blocks_activation_until_enabled() {
                     &SetWidgetState { state: WidgetControlState::default() },
                 ),
             ),
-            ("allowed_enter", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("allowed_enter", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
         ])
         .expect("read-only text activation session");
 
@@ -958,24 +961,27 @@ fn tab_cycle_does_not_leave_stale_shift_on_refocused_field() {
     harness
         .execute(vec![
             ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
-            ("focus_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("home", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_HOME })),
+            ("focus_first", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("home", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_HOME })),
             (
                 "shift_down",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &Modifiers { window: TEST_WINDOW_ID, shift: true, ..Modifiers::default() },
+                    &Modifiers { window: test_window(), shift: true, ctrl: false, alt: false, meta: false },
                 ),
             ),
-            ("reverse_tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("reverse_tab", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
             (
                 "shift_up",
-                HarnessOp::send_and_settle(&panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+                HarnessOp::send_and_settle(
+                    &panel,
+                    &Modifiers { window: test_window(), shift: false, ctrl: false, alt: false, meta: false },
+                ),
             ),
-            ("refocus_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("right", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
-            ("type", HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "x".to_owned() })),
-            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("refocus_first", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("right", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_RIGHT })),
+            ("type", HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "x".to_owned() })),
+            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
         ])
         .expect("stale-shift tab cycle session");
 
@@ -1009,17 +1015,17 @@ fn pointer_focus_inherits_already_held_ctrl() {
                 "ctrl_down",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
+                    &Modifiers { window: test_window(), shift: false, ctrl: true, alt: false, meta: false },
                 ),
             ),
             ("focus_press", HarnessOp::send_and_settle(&panel, &press(50.0, 22.0))),
             ("focus_release", HarnessOp::send_and_settle(&panel, &release(50.0, 22.0))),
-            ("select_all", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            ("select_all", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_A })),
             (
                 "replace",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "new".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "new".to_owned() }),
             ),
-            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
         ])
         .expect("pointer-gain ctrl session");
 
@@ -1058,12 +1064,12 @@ fn availability_focus_move_inherits_already_held_ctrl() {
 
     harness
         .execute(vec![
-            ("focus_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("focus_first", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
             (
                 "ctrl_down",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
+                    &Modifiers { window: test_window(), shift: false, ctrl: true, alt: false, meta: false },
                 ),
             ),
             (
@@ -1073,12 +1079,12 @@ fn availability_focus_move_inherits_already_held_ctrl() {
                     &SetWidgetState { state: WidgetControlState { visible: false, ..WidgetControlState::default() } },
                 ),
             ),
-            ("select_all", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            ("select_all", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_A })),
             (
                 "replace",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "new".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "new".to_owned() }),
             ),
-            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
         ])
         .expect("availability-gain ctrl session");
 
@@ -1094,23 +1100,23 @@ fn availability_focus_move_inherits_already_held_ctrl() {
 }
 
 fn space() -> Key {
-    Key { window: TEST_WINDOW_ID, code: KEY_SPACE }
+    Key { window: test_window(), code: KEY_SPACE }
 }
 
 fn space_up() -> KeyRelease {
-    KeyRelease { window: TEST_WINDOW_ID, code: KEY_SPACE }
+    KeyRelease { window: test_window(), code: KEY_SPACE }
 }
 
 fn tab() -> Key {
-    Key { window: TEST_WINDOW_ID, code: KEY_TAB }
+    Key { window: test_window(), code: KEY_TAB }
 }
 
 fn down() -> Key {
-    Key { window: TEST_WINDOW_ID, code: KEY_DOWN }
+    Key { window: test_window(), code: KEY_DOWN }
 }
 
 fn hover_at(x: f32, y: f32) -> MouseMove {
-    MouseMove { window: TEST_WINDOW_ID, x, y }
+    MouseMove { window: test_window(), x, y }
 }
 
 fn hover_row_zero() -> MouseMove {

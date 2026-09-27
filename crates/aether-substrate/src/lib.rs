@@ -106,11 +106,3 @@ pub use mail::registry::{
 };
 pub use mail::{KindId, MailKind, MailRef, MailboxId, RequestId, Source, SourceAddr};
 pub use runtime::panic_hook::init_panic_hook;
-
-/// Well-known mailbox name for substrate-level diagnostic events
-/// delivered back to this engine. Today the only kind delivered here
-/// is `aether.mail.unresolved` (issue #185), pushed by the hub when
-/// an engine's bubbled-up mail (ADR-0037) can't be resolved at the
-/// hub either. The sink handler re-warns via `tracing::warn!` so the
-/// diagnostic surfaces in this engine's own `engine_logs`.
-pub const AETHER_DIAGNOSTICS: &str = "aether.diagnostics";

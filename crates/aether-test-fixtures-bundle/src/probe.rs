@@ -110,8 +110,8 @@ impl WasmActor for Probe {
     /// every matching subscriber when a key is pressed.
     /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
     #[handler::single]
-    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-        ctx.send::<SubstrateHarnessObserver>(&KeyObserved { code: key.code });
+    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, Key { code, .. }: Key) {
+        ctx.send::<SubstrateHarnessObserver>(&KeyObserved { code });
     }
 
     /// Unsubscribe this probe from `Key` on every window, the self-addressed

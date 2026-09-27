@@ -393,9 +393,9 @@ pub struct ChassisCtx<'a> {
     /// Issue #601: every actor-mailbox claim appends its `MailboxId`
     /// here. The chassis builder reads the list after `boot_passives`.
     ///
-    /// Synchronous-handler registrations (e.g. `AETHER_DIAGNOSTICS`)
-    /// go through `Registry::register_inline` directly and do *not*
-    /// land here — they're not actors.
+    /// Synchronous-handler registrations go through
+    /// `Registry::register_inline` directly and do *not* land here —
+    /// they're not actors.
     claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
     /// ADR-0155 §4: driver-as-actor mailboxes reserved at the Claim stage
     /// by [`crate::chassis::builder::DriverCapability::claim`] (via

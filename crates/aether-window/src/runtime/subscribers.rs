@@ -5,11 +5,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use aether_actor::{ErasedActorRef, ReplyMode};
-use aether_data::KindId;
+use aether_data::{ErasedActorPath, KindId};
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::NativeCtx;
 
-use crate::{WindowId, WindowSelector};
+use crate::WindowSelector;
 
 /// Selector-aware subscriptions for events originating at windows.
 ///
@@ -23,7 +23,7 @@ use crate::{WindowId, WindowSelector};
 /// without scanning anyone else's.
 pub struct WindowSubscribers {
     all: HashMap<KindId, BTreeSet<ErasedActorRef>>,
-    specific: HashMap<(WindowId, KindId), BTreeSet<ErasedActorRef>>,
+    specific: HashMap<(ErasedActorPath, KindId), BTreeSet<ErasedActorRef>>,
     holders: HashMap<ErasedActorRef, Holder>,
 }
 
@@ -35,14 +35,14 @@ struct Holder {
 }
 
 /// One row of a subscriber's, named by the selector map key it sits under.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum Row {
     All(KindId),
-    One(WindowId, KindId),
+    One(ErasedActorPath, KindId),
 }
 
 impl Row {
-    const fn new(selector: WindowSelector, kind: KindId) -> Self {
+    fn new(selector: WindowSelector, kind: KindId) -> Self {
         match selector {
             WindowSelector::All => Self::All(kind),
             WindowSelector::One(window) => Self::One(window, kind),
@@ -117,24 +117,25 @@ impl WindowSubscribers {
         }
     }
 
-    pub fn recipients(&self, window: WindowId, kind: KindId) -> BTreeSet<ErasedActorRef> {
+    pub fn recipients(&self, window: &ErasedActorPath, kind: KindId) -> BTreeSet<ErasedActorRef> {
         let mut recipients = self.all.get(&kind).cloned().unwrap_or_default();
-        if let Some(specific) = self.specific.get(&(window, kind)) {
+        if let Some(specific) = self.specific.get(&(window.clone(), kind)) {
             recipients.extend(specific);
         }
         recipients
     }
 
     fn insert(&mut self, selector: WindowSelector, kind: KindId, subscriber: ErasedActorRef) {
-        match selector {
-            WindowSelector::All => {
-                self.all.entry(kind).or_default().insert(subscriber);
+        let row = Row::new(selector, kind);
+        match &row {
+            Row::All(kind) => {
+                self.all.entry(*kind).or_default().insert(subscriber);
             }
-            WindowSelector::One(window) => {
-                self.specific.entry((window, kind)).or_default().insert(subscriber);
+            Row::One(window, kind) => {
+                self.specific.entry((window.clone(), *kind)).or_default().insert(subscriber);
             }
         }
-        self.holders.entry(subscriber).or_default().rows.insert(Row::new(selector, kind));
+        self.holders.entry(subscriber).or_default().rows.insert(row);
     }
 
     fn remove(&mut self, selector: WindowSelector, kind: KindId, subscriber: ErasedActorRef) {
@@ -158,11 +159,12 @@ impl WindowSubscribers {
                 }
             }
             Row::One(window, kind) => {
-                if self.specific.get_mut(&(window, kind)).is_some_and(|recipients| {
+                let key = (window, kind);
+                if self.specific.get_mut(&key).is_some_and(|recipients| {
                     recipients.remove(&subscriber);
                     recipients.is_empty()
                 }) {
-                    self.specific.remove(&(window, kind));
+                    self.specific.remove(&key);
                 }
             }
         }
@@ -190,6 +192,10 @@ mod tests {
     use aether_substrate::testing::{registered_ref, unrouted_binding};
 
     use super::*;
+
+    fn window(name: &str) -> ErasedActorPath {
+        crate::window_path(&aether_data::LoadName::new(name).expect("fixture window name"))
+    }
 
     fn fixture() -> (WindowSubscribers, Arc<NativeBinding>, Arc<Registry>) {
         let registry = Arc::new(Registry::new());
@@ -221,7 +227,7 @@ mod tests {
         assert!(subscribers.subscribe_self(&mut ctx, WindowSelector::All, Key::ID).is_err());
         assert!(subscribers.unsubscribe_self(&ctx, WindowSelector::All, Key::ID).is_err());
 
-        assert!(subscribers.recipients(WindowId(1), Key::ID).is_empty(), "a rejected subscribe inserts no route");
+        assert!(subscribers.recipients(&window("a"), Key::ID).is_empty(), "a rejected subscribe inserts no route");
     }
 
     #[test]
@@ -230,10 +236,10 @@ mod tests {
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let subscriber = proven(&registry, "test.subscribers.one");
 
-        subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(1)), Key::ID, subscriber);
+        subscribers.subscribe(&mut ctx, WindowSelector::One(window("a")), Key::ID, subscriber);
 
-        assert_eq!(subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([subscriber]));
-        assert!(subscribers.recipients(WindowId(2), Key::ID).is_empty());
+        assert_eq!(subscribers.recipients(&window("a"), Key::ID), BTreeSet::from([subscriber]));
+        assert!(subscribers.recipients(&window("b"), Key::ID).is_empty());
     }
 
     #[test]
@@ -244,8 +250,8 @@ mod tests {
 
         subscribers.subscribe(&mut ctx, WindowSelector::All, MouseMove::ID, subscriber);
 
-        assert_eq!(subscribers.recipients(WindowId(1), MouseMove::ID), BTreeSet::from([subscriber]));
-        assert_eq!(subscribers.recipients(WindowId(99), MouseMove::ID), BTreeSet::from([subscriber]));
+        assert_eq!(subscribers.recipients(&window("a"), MouseMove::ID), BTreeSet::from([subscriber]));
+        assert_eq!(subscribers.recipients(&window("late"), MouseMove::ID), BTreeSet::from([subscriber]));
     }
 
     #[test]
@@ -256,10 +262,10 @@ mod tests {
         let other = proven(&registry, "test.subscribers.union.other");
 
         subscribers.subscribe(&mut ctx, WindowSelector::All, Key::ID, subscriber);
-        subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(7)), Key::ID, subscriber);
-        subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(7)), Key::ID, other);
+        subscribers.subscribe(&mut ctx, WindowSelector::One(window("g")), Key::ID, subscriber);
+        subscribers.subscribe(&mut ctx, WindowSelector::One(window("g")), Key::ID, other);
 
-        assert_eq!(subscribers.recipients(WindowId(7), Key::ID), BTreeSet::from([subscriber, other]));
+        assert_eq!(subscribers.recipients(&window("g"), Key::ID), BTreeSet::from([subscriber, other]));
     }
 
     #[test]
@@ -270,14 +276,14 @@ mod tests {
         let other = proven(&registry, "test.subscribers.cleanup.other");
 
         subscribers.subscribe(&mut ctx, WindowSelector::All, Key::ID, subscriber);
-        subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(3)), Key::ID, subscriber);
-        subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(3)), Key::ID, other);
+        subscribers.subscribe(&mut ctx, WindowSelector::One(window("c")), Key::ID, subscriber);
+        subscribers.subscribe(&mut ctx, WindowSelector::One(window("c")), Key::ID, other);
 
         subscribers.unsubscribe(WindowSelector::All, Key::ID, subscriber);
-        assert_eq!(subscribers.recipients(WindowId(3), Key::ID), BTreeSet::from([subscriber, other]));
+        assert_eq!(subscribers.recipients(&window("c"), Key::ID), BTreeSet::from([subscriber, other]));
 
         subscribers.unsubscribe_all(subscriber);
-        assert_eq!(subscribers.recipients(WindowId(3), Key::ID), BTreeSet::from([other]));
+        assert_eq!(subscribers.recipients(&window("c"), Key::ID), BTreeSet::from([other]));
     }
 
     #[test]
@@ -289,11 +295,11 @@ mod tests {
 
         subscribers.subscribe(&mut ctx, WindowSelector::All, Key::ID, departed);
         subscribers.subscribe(&mut ctx, WindowSelector::All, Key::ID, survivor);
-        subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(3)), MouseMove::ID, departed);
+        subscribers.subscribe(&mut ctx, WindowSelector::One(window("c")), MouseMove::ID, departed);
 
         subscribers.unsubscribe_all(departed);
 
-        assert_eq!(subscribers.recipients(WindowId(3), Key::ID), BTreeSet::from([survivor]));
-        assert!(subscribers.recipients(WindowId(3), MouseMove::ID).is_empty());
+        assert_eq!(subscribers.recipients(&window("c"), Key::ID), BTreeSet::from([survivor]));
+        assert!(subscribers.recipients(&window("c"), MouseMove::ID).is_empty());
     }
 }

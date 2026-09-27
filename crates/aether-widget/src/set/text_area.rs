@@ -84,7 +84,8 @@ pub struct TextAreaWidget {
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
-    modifiers: Modifiers,
+    /// The latest `Modifiers`, `None` until the first arrives.
+    modifiers: Option<Modifiers>,
     dragging: bool,
     /// Whether a clipboard read is outstanding; a second paste chord while one
     /// is in flight is dropped rather than queued.
@@ -135,7 +136,7 @@ impl TextAreaWidget {
     fn enter_action(&self) -> EnterAction {
         if !self.state.can_mutate() {
             EnterAction::Ignore
-        } else if self.modifiers.ctrl || self.modifiers.meta {
+        } else if self.modifiers.as_ref().is_some_and(|held| held.ctrl || held.meta) {
             EnterAction::Commit
         } else {
             EnterAction::InsertNewline
@@ -386,7 +387,7 @@ impl WasmActor for TextAreaWidget {
             theme: config.theme,
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             state: InteractionState::new(config.state),
-            modifiers: Modifiers::default(),
+            modifiers: None,
             dragging: false,
             paste_pending: false,
             preferred_x_pixels: None,
@@ -450,7 +451,7 @@ impl WasmActor for TextAreaWidget {
         if !self.state.is_available() {
             return;
         }
-        let extend = self.modifiers.shift;
+        let extend = self.modifiers.as_ref().is_some_and(|held| held.shift);
         match key.code {
             KEY_UP => self.move_vertical(VerticalDirection::Up, extend),
             KEY_DOWN => self.move_vertical(VerticalDirection::Down, extend),
@@ -468,7 +469,7 @@ impl WasmActor for TextAreaWidget {
                 }
             },
             code => {
-                if let Some(command) = edit_command(code, self.modifiers) {
+                if let Some(command) = edit_command(code, self.modifiers.as_ref()) {
                     run_edit_key(ctx, &mut self.edit, &mut self.paste_pending, command, self.state.can_mutate());
                     self.after_horizontal_or_edit();
                 }
@@ -552,6 +553,7 @@ mod tests {
     use aether_kinds::{CachedFontMetrics, FontMetrics, GlyphAdvance};
 
     use crate::set::APPROX_ADVANCE_RATIO;
+    use crate::test_support::test_window;
 
     fn variable_metrics() -> CachedFontMetrics {
         CachedFontMetrics::new(&FontMetrics {
@@ -595,7 +597,7 @@ mod tests {
                 height: Theme::DEFAULT.row_height * rows.max(1) as f32,
             },
             state: InteractionState::new(WidgetControlState::default()),
-            modifiers: Modifiers::default(),
+            modifiers: None,
             dragging: false,
             paste_pending: false,
             preferred_x_pixels: None,
@@ -626,7 +628,7 @@ mod tests {
         assert!(area.edit.insert("\n", area.policy()));
         assert_eq!(area.edit.value(), "terrain\n");
 
-        area.modifiers.ctrl = true;
+        area.modifiers = Some(Modifiers { window: test_window(), shift: false, ctrl: true, alt: false, meta: false });
         assert_eq!(area.enter_action(), EnterAction::Commit);
 
         let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };

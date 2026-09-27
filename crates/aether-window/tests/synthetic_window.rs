@@ -9,14 +9,13 @@
 
 use std::collections::BTreeMap;
 
-use aether_actor::Addressable;
 use aether_data::LoadName;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_window::{
     ApplyWindowCommand, ApplyWindowCommandResult, CreateWindow, CreateWindowResult, CursorIcon, ListWindows,
     ListWindowsResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowTitle,
-    SetWindowTitleResult, SyntheticWindowCapability, SyntheticWindowInstance, WindowCapability, WindowCommand,
-    WindowId, WindowInstance, WindowMenu, WindowMode, WindowSpec,
+    SetWindowTitleResult, SyntheticWindowCapability, SyntheticWindowInstance, WindowCommand, WindowMenu, WindowMode,
+    WindowSpec, window_path,
 };
 
 /// Local twin of the runtime's crate-private `RetireWindow`
@@ -69,12 +68,12 @@ fn create_replies_only_after_the_staged_child_is_live() {
     let Ok(CreateWindowResult::Ok { window }) = report.reply::<CreateWindowResult>("created") else {
         panic!("staged create succeeds");
     };
-    assert_eq!(window.id, WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "main").0));
+    assert_eq!(window.path, window_path(&window_key("main")));
 
     let Ok(ListWindowsResult::Ok { windows }) = report.reply::<ListWindowsResult>("listed") else {
         panic!("synthetic list succeeds");
     };
-    assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [window.id]);
+    assert_eq!(windows.into_iter().map(|listed| listed.path).collect::<Vec<_>>(), [window.path]);
 
     assert!(matches!(report.reply::<CreateWindowResult>("duplicate"), Ok(CreateWindowResult::Err { .. })));
 }
@@ -249,7 +248,7 @@ fn unexpected_child_departure_closes_only_its_window() {
         ])
         .expect("unexpected child departure settles");
 
-    let second = WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "second").0);
+    let second = window_path(&window_key("second"));
 
     // The departure's own chain settles with `RetireWindow`, but the
     // `MonitorNotice` that prunes the capability's list (ADR-0079 §8)
@@ -259,6 +258,7 @@ fn unexpected_child_departure_closes_only_its_window() {
     // wall-clock budget rather than a round-trip count, so the test
     // measures the outcome rather than the runner, and a timeout names
     // the list it actually last saw.
+    let survivor = second.clone();
     let listed = harness
         .execute(vec![(
             "listed",
@@ -267,7 +267,7 @@ fn unexpected_child_departure_closes_only_its_window() {
                 &ListWindows,
                 move |reply: &ListWindowsResult| {
                     matches!(reply, ListWindowsResult::Ok { windows }
-                    if windows.iter().map(|window| window.id).eq([second]))
+                    if windows.iter().map(|window| &window.path).eq([&survivor]))
                 },
             ),
         )])
@@ -276,5 +276,5 @@ fn unexpected_child_departure_closes_only_its_window() {
     let Ok(ListWindowsResult::Ok { windows }) = listed.reply::<ListWindowsResult>("listed") else {
         panic!("synthetic list succeeds");
     };
-    assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [second]);
+    assert_eq!(windows.into_iter().map(|window| window.path).collect::<Vec<_>>(), [second]);
 }

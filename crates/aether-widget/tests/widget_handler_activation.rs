@@ -19,7 +19,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseMove, TextInput, Tick, WindowId};
+use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseMove, TextInput, Tick};
 use aether_render::HeadlessRenderCapability;
 use aether_widget::set::{NumericWidget, VirtualListWidget};
 use aether_widget::{
@@ -28,7 +28,10 @@ use aether_widget::{
 };
 use support::widget_caps;
 
-const TEST_WINDOW_ID: WindowId = WindowId(1);
+/// The window the injected input events name.
+fn test_window() -> aether_data::ErasedActorPath {
+    aether_window::window_path(&LoadName::new("main").expect("a valid window name"))
+}
 const WASM_STEMS: [&str; 2] = ["aether_widget", "aether_widget_behavior"];
 
 /// A GPU-free bench with the component host and everything the widget module
@@ -262,7 +265,7 @@ fn numeric_focus_lost_commits_the_typed_buffer() {
         harness
             .execute(vec![(
                 "type",
-                HarnessOp::send_and_settle(&numeric, &TextInput { window: TEST_WINDOW_ID, text: "7".to_owned() }),
+                HarnessOp::send_and_settle(&numeric, &TextInput { window: test_window(), text: "7".to_owned() }),
             )])
             .expect("numeric type session");
         let before = panel_log_messages(&mut harness, panel);
@@ -328,7 +331,7 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
         harness
             .execute(vec![(
                 "hover_row",
-                HarnessOp::send_and_settle(&list, &MouseMove { window: TEST_WINDOW_ID, x: 30.0, y: 22.0 }),
+                HarnessOp::send_and_settle(&list, &MouseMove { window: test_window(), x: 30.0, y: 22.0 }),
             )])
             .expect("virtual-list hover session");
         let before = panel_log_messages(&mut harness, panel);
