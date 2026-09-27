@@ -39,6 +39,7 @@
 !.claude/skills/sweep/
 !.claude/skills/land/
 !.claude/skills/resolve/
+!.claude/skills/settle/
 # Wish-pass reports — themed use-case ideation runs of `/wish`. Per-run
 # markdown, not part of the source tree. Read locally, file the wishes you
 # like as issues, discard the file.

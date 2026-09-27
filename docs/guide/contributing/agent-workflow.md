@@ -85,6 +85,7 @@ its own documented workflow and nothing adjacent.
 | Capture a rough single idea | `sketch` | An open unscoped issue |
 | Ground the problem, design, Plan, surface, and route | `scope` | Complete managed issue-body artifacts |
 | File selected unrelated scope observations | `scope-spinoff` | Linked unscoped issues |
+| Answer open questions from the design rulebook | `settle` | Settled answers applied; Leaning and Open ones for the owner |
 | Authorize a complete Plan | `approve` | A trusted hidden digest/base-bound record |
 | Implement approved work | `implement` | A reviewed, green draft PR with priced overflow reported |
 | Audit existing code or a non-PR change | `review` | A read-only findings rollup |
