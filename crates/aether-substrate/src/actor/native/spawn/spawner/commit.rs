@@ -273,6 +273,12 @@ impl Spawner {
         //
         // This is the pre-seal direct route, reachable only while the boot
         // authority is unspent, so its caller is boot itself.
+        //
+        // `wire`'s mail is held until the contract below is published
+        // (ADR-0165's hold): a publisher that casts a `wire`-time subscribe
+        // request's sender reads the rows (ADR-0231 §4), and they are
+        // published only once `wire` has recorded a guest host's guest.
+        transport.hold_outbound_for_activation();
         local::with_stamped(&slots, || {
             let mut wire_ctx = NativeCtx::for_wire(&transport, EffectChain::Uncaused(Uncaused::ChassisBoot));
             A::wire(actor.as_mut(), &mut wire_ctx);
@@ -284,6 +290,7 @@ impl Spawner {
                 "spawned actor's contract was not published: {error}",
             );
         }
+        transport.release_outbound_after_activation();
 
         // Pre-load bootstrap mail. tx is alive (rx is held by the
         // transport; nobody's polling yet), so these sends always

@@ -324,6 +324,7 @@ impl<'a> DriverCtx<'a> {
                 // before the seal and the actor is now wired, so record its
                 // reference for the chassis handle's `actor_ref`.
                 self.inner.record_reference(Registry::activated::<A>(mailbox_id));
+                slot.release_outbound_after_activation();
                 slot
             }
             Err(e) => {
@@ -431,6 +432,11 @@ where
     });
 
     // `wire` under `with_stamped` — mail-allowed, so subscriptions land.
+    // Its mail is held (ADR-0165's hold) until the caller has published the
+    // route's contract and releases it through the slot: a publisher that
+    // casts a `wire`-time subscribe request's sender reads those rows
+    // (ADR-0231 §4).
+    transport.hold_outbound_for_activation();
     local::with_stamped(&slots, || {
         let mut wire_ctx = NativeCtx::for_wire(&transport, EffectChain::Uncaused(born));
         A::wire(actor.as_mut(), &mut wire_ctx);

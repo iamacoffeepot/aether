@@ -349,12 +349,14 @@ impl<C: Chassis> PassiveChassis<C> {
                     assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall)?;
                 // ADR-0231 §4: the reservation went `Live` at the Claim stage,
                 // before `A` was known, so its route publishes `A`'s contract
-                // now, through the owner.
-                spawner
-                    .mailer()
-                    .registry()
-                    .publish_contract_through_owner(mailbox_id, RouteContract::of::<A>())
-                    .map_err(|error| owner_boot_error(&error))?;
+                // now, through the owner, and only then releases `wire`'s mail.
+                if let Err(error) =
+                    spawner.mailer().registry().publish_contract_through_owner(mailbox_id, RouteContract::of::<A>())
+                {
+                    slot.discard_outbound_after_activation();
+                    return Err(owner_boot_error(&error));
+                }
+                slot.release_outbound_after_activation();
                 // ADR-0230: the Claim-stage reservation published the route
                 // before the seal and the actor is now wired.
                 self.booted.references.record(Registry::activated::<A>(mailbox_id));
@@ -370,14 +372,24 @@ impl<C: Chassis> PassiveChassis<C> {
                     let inbox = SettlingInbox::new_at(mailbox_id, receiver, Arc::clone(mailer));
                     match assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall)
                     {
-                        Ok(slot) => registry
-                            .promote_starting_through_owner(mailbox_id, token, handler, RouteContract::of::<A>())
-                            .map(|()| {
-                                // ADR-0230: the owner has published the route `Live`.
+                        Ok(slot) => match registry.promote_starting_through_owner(
+                            mailbox_id,
+                            token,
+                            handler,
+                            RouteContract::of::<A>(),
+                        ) {
+                            // ADR-0230: the owner has published the route
+                            // `Live` with its contract, so `wire`'s mail goes.
+                            Ok(()) => {
+                                slot.release_outbound_after_activation();
                                 self.booted.references.record(Registry::activated::<A>(mailbox_id));
-                                (slot, wake_slot)
-                            })
-                            .map_err(|error| owner_boot_error(&error)),
+                                Ok((slot, wake_slot))
+                            }
+                            Err(error) => {
+                                slot.discard_outbound_after_activation();
+                                Err(owner_boot_error(&error))
+                            }
+                        },
                         Err(e) => {
                             registry.cancel_starting_through_owner(mailbox_id, token);
                             Err(e)

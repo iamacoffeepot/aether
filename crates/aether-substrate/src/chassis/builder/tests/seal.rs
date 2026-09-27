@@ -10,16 +10,18 @@ use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
 use crate::chassis::builder::{Builder, DriverCapability, DriverCtx, DriverRunning, RunError};
 use crate::chassis::ctx::ChassisCtx;
-use crate::mail::KindId;
-use crate::mail::Mail;
-use crate::testing::{TestChassis, bare_substrate};
+use crate::mail::registry::{MailDispatch, RouteContract};
+use crate::mail::{KindId, Mail, SourceAddr};
+use crate::testing::{TestChassis, bare_substrate, boot_authority};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, HandlesKind};
+use aether_data::ReplyContract;
 use std::cell::RefCell;
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 thread_local! {
     static PROBED_SPAWNER: RefCell<Option<Arc<crate::Spawner>>> = const { RefCell::new(None) };
@@ -230,6 +232,84 @@ fn post_seal_pumped_boot_publishes_the_endpoint_the_caller_wired() {
     ));
     slot.drain_available();
     assert_eq!(seen.load(AtomicOrdering::SeqCst), 7, "mail routed to the endpoint the caller thread wired");
+}
+
+#[aether_data::kind(name = "test.chassis_builder.seal.announce", copy, default)]
+struct Announce {
+    seq: u32,
+}
+
+/// The route an [`Announcer`] mails from its `wire`: a closure standing at
+/// this name, which only an `Addressable` can declare as a dependency.
+struct Witness;
+
+impl Addressable for Witness {
+    const NAMESPACE: &'static str = "test.chassis_builder.seal.witness";
+    type Resolver = aether_actor::One;
+}
+
+impl HandlesKind<Announce> for Witness {}
+
+/// A pumped actor that mails the [`Witness`] from `wire`, as an actor
+/// subscribing from `wire` mails its publisher.
+struct Announcer;
+
+#[aether_actor::actor(singleton, root, depends(Witness))]
+impl NativeActor for Announcer {
+    const NAMESPACE: &'static str = "test.chassis_builder.seal.announcer";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    fn wire(_state: &mut Self, ctx: &mut NativeCtx<'_>) {
+        ctx.send::<Witness>(&Announce { seq: 1 });
+    }
+
+    #[handler::single]
+    fn on_announce(&mut self, _ctx: &mut NativeCtx<'_>, _announce: Announce) {
+        let _ = self;
+    }
+}
+
+/// A pumped actor's `wire` mail is held until its route is `Live` with its
+/// contract published (ADR-0165's hold). A receiver that reads the sender's
+/// published rows on receipt, as a publisher's guard cast does for a
+/// `wire`-time subscribe (ADR-0231 §4), would otherwise see a `Starting`
+/// route with no rows and refuse a sender that handles the kind. The witness
+/// reads the rows synchronously in its handler, so the order is
+/// deterministic.
+#[test]
+fn post_seal_pumped_boot_holds_wire_mail_until_its_contract_is_published() {
+    let (registry, mailer) = bare_substrate();
+    let (tx, rx) = mpsc::channel();
+    let rows_reader = Arc::downgrade(&registry);
+    registry.register_inline(
+        &boot_authority(),
+        Witness::NAMESPACE,
+        Arc::new(move |dispatch: MailDispatch<'_>| {
+            let SourceAddr::Component(sender) = dispatch.sender.addr else {
+                return;
+            };
+            let registry = rows_reader.upgrade().expect("the registry outlives its routes");
+            let _ = tx.send(registry.published_contract(sender).map(RouteContract::into_parts));
+        }),
+    );
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .build_passive()
+        .expect("empty chassis boots");
+
+    let _slot = chassis.boot_pumped_actor::<Announcer>((), ()).expect("post-seal pumped boot succeeds");
+
+    let (rows, _fallback) = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the wire mail reached the witness")
+        .expect("the sender's route was Live with a contract when its wire mail arrived");
+    assert!(
+        rows.contains(&(<Announce as aether_data::Kind>::ID, ReplyContract::None)),
+        "the published rows were the announcer's own: {rows:?}",
+    );
 }
 
 /// A built chassis seals after its driver's `Start` returns `Ok`.

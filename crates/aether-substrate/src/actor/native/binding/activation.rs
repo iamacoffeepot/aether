@@ -56,8 +56,13 @@ impl NativeBinding {
     }
 
     /// Quarantine lifecycle-authored buffered work while a prepared actor is
-    /// wired but not yet authoritatively `Live`.
-    pub(in crate::actor::native) fn hold_outbound_for_activation(&self) {
+    /// wired but not yet authoritatively `Live`, or `Live` without its
+    /// contract published: a peer that reads the actor's published rows on
+    /// receipt, such as a publisher's guard cast on a `wire`-time subscribe
+    /// (ADR-0231 §4), must not see its mail before them. The staged
+    /// activation holds here, and so do the boots that publish the contract
+    /// after `wire`: the pre-seal direct spawn and both pumped boots.
+    pub(crate) fn hold_outbound_for_activation(&self) {
         let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
         assert!(!buffer.activation_held, "one staged activation owns the outbound hold");
         assert!(
@@ -75,7 +80,7 @@ impl NativeBinding {
     /// Publish the quarantined lifecycle suffix after the registry owner has
     /// installed the `Live` route. The actor remains unwakeable while this
     /// runs, preserving one logical producer for the ring.
-    pub(in crate::actor::native) fn release_outbound_after_activation(&self) {
+    pub(crate) fn release_outbound_after_activation(&self) {
         let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
         assert!(buffer.activation_held, "only a staged activation can release the outbound hold");
         buffer.activation_held = false;
@@ -88,7 +93,7 @@ impl NativeBinding {
     /// staged activation never reaches `Live`. Mail settlement bumps are
     /// balanced locally, prepared births reject at their execution homes, and
     /// deferred owner completions abandon their held actor work.
-    pub(in crate::actor::native) fn discard_outbound_after_activation(&self) {
+    pub(crate) fn discard_outbound_after_activation(&self) {
         let (ring, mails, births, owner_batches) = {
             let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
             assert!(buffer.activation_held, "only a staged activation can discard the outbound hold");
