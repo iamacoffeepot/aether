@@ -284,18 +284,13 @@ pub struct SubstrateHarness {
     /// late-arriving frame) doesn't get silently dropped.
     stashed_replies: HashMap<u64, EgressEvent>,
 
-    /// Kind ids of mail witnessed to the harness observer inbox
-    /// (`aether.substrate_harness.observer`): the pumped `aether.render`
-    /// dispatch witnesses every kind it delivers there by mail (issue
-    /// 5965) — both `aether.draw_triangle` and `aether.view_projection`
-    /// flow here post-ADR-0074 §Decision 7 — and fixtures witness
-    /// component-emitted kinds the same way.
-    /// Read back via [`Self::count_observed`] / [`Self::observed_kinds`]
-    /// for scenario assertions.
-    /// Limitation (v1): mail addressed to other sinks
-    /// (`aether.fs`, `aether.log`) and direct
-    /// component-to-component mail does not show up here — those
-    /// flows witness nothing to the observer inbox.
+    /// Kind ids of the reports fixtures mail to the harness observer
+    /// inbox (`aether.substrate_harness.observer`), such as
+    /// `aether.test_fixture.boot_observed`. Read back via
+    /// [`Self::count_observed`] / [`Self::observed_kinds`] for scenario
+    /// assertions. Only mail addressed to the observer lands here; a
+    /// capability's own dispatches do not, so a test asserts what its work
+    /// produced (a reply, a committed-frame snapshot, pixels) instead.
     observed_kinds: Arc<Mutex<Vec<KindId>>>,
 
     /// Lifetime guard. Boot owns the scheduler; dropping the
@@ -668,8 +663,8 @@ impl SubstrateHarness {
         let observed_kinds = Arc::new(Mutex::new(Vec::<KindId>::new()));
 
         // ADR-0161 slice R4: the pumped render slot is booted in the build's
-        // start by the hook factory, so the non-knob render wiring (observer
-        // inbox, similarity assets root) is handed to the factory rather than
+        // start by the hook factory, so the non-knob render wiring (the
+        // similarity assets root) is handed to the factory rather than
         // composed through `RenderParams`. Resolve the assets root before
         // `namespace_roots` moves into the env, mirroring the chassis's own
         // capture-similarity wiring.
@@ -741,14 +736,6 @@ impl SubstrateHarness {
         })
     }
 
-    /// Count how many mail observations match `kind_name`. Includes
-    /// every kind the pumped `aether.render` dispatch witnessed to the
-    /// observer inbox (which receives both `aether.draw_triangle` and
-    /// `aether.view_projection` post-ADR-0074 §Decision 7) plus any
-    /// fixture-mailed observations. Mail to
-    /// other sinks and direct component-to-component flows are not
-    /// observed (v1).
-    ///
     /// Read and reset where the pump slept (issue 4453). An instrument
     /// brackets one op by calling this on either side of it; the returned
     /// [`PumpStats::overshoot_bound`] states how much of the op's wall
@@ -757,6 +744,11 @@ impl SubstrateHarness {
         self.pump_stats.take()
     }
 
+    /// Count how many reports matching `kind_name` fixtures have mailed
+    /// to the observer inbox. Only mail addressed to the observer is
+    /// counted; a capability's dispatches, mail to other sinks, and direct
+    /// component-to-component flows are not.
+    ///
     /// # Panics
     /// Panics if the `observed_kinds` mutex is poisoned — fail-fast
     /// per ADR-0063: a poisoned mutex means a prior holder panicked

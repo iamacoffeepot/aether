@@ -692,8 +692,9 @@ config and read from outside is not a channel.
 
 - **Why:** a mutex side channel is invisible to tracing and settlement and is
   unordered against mail.
-- **Settled:** #5965 (render observes dispatched kinds through the harness
-  hook, not a mutex in params).
+- **Settled:** #5965 (render's harness dispatch count moved from a params
+  mutex to mail); #6915 (the witness deleted: render tests assert the
+  committed frame, pixels, or reply instead).
 
 ## Mechanisms and simplicity
 

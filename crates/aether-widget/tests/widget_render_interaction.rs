@@ -687,8 +687,8 @@ fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[Dr
 /// paints no surface of its own — the owner's note was that the field and
 /// its arrows read as two elements fighting, and a second fill at the right
 /// end is what that looks like. The arrows are triangles now, which the
-/// overlay observation does not carry; the scenario counts their batch at
-/// the render cap instead.
+/// overlay observation does not carry; the scenario finds each one in its
+/// button's pixels instead.
 fn assert_stepper_column(chrome: &[&Shape]) {
     let column_left = PANEL_X + PANEL_WIDTH - ROW_HEIGHT;
     let (plates, dividers): (Vec<&Shape>, Vec<&Shape>) =
@@ -2679,12 +2679,23 @@ fn assert_advanced_control_raster(harness: &mut SubstrateHarness) {
         segment_top + ROW_HEIGHT - 2.0,
     );
     let numeric_text = rect(PANEL_X + PAD, numeric_top + 2.0, PANEL_X + 70.0, numeric_top + ROW_HEIGHT - 2.0);
+    // The stepper column is one row square at the numeric's right end, split
+    // into two buttons; each arrow is centred in its button at 45% of it on
+    // each axis. The bands sit inside each button, clear of the hairline at
+    // the column's left edge and of the control's border.
+    let stepper_left = PANEL_X + PANEL_WIDTH - ROW_HEIGHT;
+    let split = numeric_top + ROW_HEIGHT * 0.5;
+    let stepper_right = PANEL_X + PANEL_WIDTH - BORDER - 1.0;
+    let up_button = rect(stepper_left + 2.0, numeric_top + BORDER + 1.0, stepper_right, split - 1.0);
+    let down_button = rect(stepper_left + 2.0, split + 1.0, stepper_right, numeric_top + ROW_HEIGHT - BORDER - 1.0);
     let verdict = capture(
         harness,
         vec![
             check(FrameReduction::Coverage, selected_band, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
             check(FrameReduction::Coverage, unselected_band, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
             check(FrameReduction::BoundingBox, numeric_text, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
+            check(FrameReduction::BoundingBox, up_button, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
+            check(FrameReduction::BoundingBox, down_button, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
         ],
     );
     let selected_coverage = coverage(&verdict.results[0]);
@@ -2698,10 +2709,18 @@ fn assert_advanced_control_raster(harness: &mut SubstrateHarness) {
 
     let snapshot = harness.committed_overlay_snapshot();
     assert_advanced_control_snapshot(&snapshot, &harness.committed_shape_snapshot());
-    assert!(
-        harness.count_observed("aether.render.draw_screen_triangles") >= 1,
-        "the numeric's arrows reach the render cap as screen triangles",
-    );
+    // A lit box inside each button is the arrow itself: the text caret, the
+    // other screen-triangle source, sits in the value area. An arrow is 45%
+    // of the column wide, so a box spanning most of the button would be a
+    // hover or pressed overlay rather than the arrow.
+    for (label, result) in [("up", &verdict.results[3]), ("down", &verdict.results[4])] {
+        let arrow = bounding_box(result).unwrap_or_else(|| panic!("the numeric's {label} arrow must rasterize"));
+        let arrow_width = (arrow.max_x - arrow.min_x + 1) as f32;
+        assert!(
+            arrow_width < ROW_HEIGHT * 0.6,
+            "the {label} button's lit box must be the arrow, not a filled button; box={arrow:?}",
+        );
+    }
     // The value's glyphs carry the numeric's own content clip (round-4
     // note 6) intersected with its slot row: the box less the stepper column
     // and one pad, so nothing the reader typed can reach the arrows.

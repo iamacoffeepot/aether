@@ -40,9 +40,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aether_actor::{ErasedActorRef, ReplyMode, runtime};
-use aether_data::{ErasedActorPath, MailboxId};
-pub use aether_data::{Kind, KindId};
+use aether_actor::{ReplyMode, runtime};
+use aether_data::ErasedActorPath;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult};
 
@@ -205,14 +204,6 @@ pub struct RenderCapabilityState {
     pending_capture: Option<PendingCapture>,
 
     assets_dir: Option<PathBuf>,
-    /// The observer position `RenderParams::observed_kinds` handed over,
-    /// held from `init` until `wire` proves it (ADR-0230 §3's receipt door)
-    /// and takes it. `None` after `wire`, and always in production chassis.
-    observer_position: Option<MailboxId>,
-    /// Proof of the harness observer inbox for dispatch witnesses (issue
-    /// 5965), proven once from `observer_position` in `wire`. `Some` in the
-    /// substrate harness, `None` in production chassis.
-    observer: Option<ErasedActorRef>,
 }
 
 struct BuiltReplacement {
@@ -302,21 +293,6 @@ impl RenderCapabilityState {
     #[must_use]
     pub fn committed_shape_snapshot(&self) -> Vec<DrawShapes> {
         self.shape_observation.lock().expect("mutex poisoned; fail-fast per ADR-0063").clone()
-    }
-
-    /// Witness a dispatched kind to the `SubstrateHarness` observer inbox,
-    /// when one is installed. Production chassis leave it `None` (no send,
-    /// zero overhead). The witness is an empty same-kind envelope sent
-    /// through the handler's ctx, so it inherits the dispatched mail's
-    /// causal chain — visible to tracing and settlement and ordered
-    /// against the mail it describes (issue 5965). The payload is empty
-    /// because the harness's inline observer records only the kind id;
-    /// nothing downstream decodes a witness. Engine-only kinds (ADR-0233)
-    /// get no witness: the raw verb refuses them from an actor.
-    fn observe<M: ReplyMode, A>(&self, ctx: &NativeCtx<'_, A, M>, kind: KindId) {
-        if let Some(observer) = self.observer {
-            let _ = ctx.send_envelope_tracked_to(observer, kind, &[]);
-        }
     }
 
     /// Attach one native window as a render target. The first attachment
@@ -823,37 +799,13 @@ impl NativeActor for RenderCapability {
             shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
             assets_dir: params.assets_dir,
-            observer_position: params.observed_kinds,
-            observer: None,
         })
-    }
-
-    /// Prove the observer position the params handed over, once, and keep
-    /// only the proof (ADR-0230 §3). The observer is a raw inline inbox the
-    /// harness registers by name before the cap boots, so no spawn or
-    /// dependency door proves it; a position that arrived in config is the
-    /// receipt door's case. `wire` runs before the route goes `Live`, so no
-    /// handler witnesses before the proof. A position that does not prove
-    /// leaves the witness off.
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-        let Some(position) = state.observer_position.take() else {
-            return;
-        };
-        match ctx.resolve_live(position) {
-            Ok(observer) => state.observer = Some(observer),
-            Err(error) => tracing::warn!(
-                target: "aether_substrate::render",
-                %error,
-                "render cap observer position did not prove; dispatch witnesses are off",
-            ),
-        }
     }
 
     /// `DrawTriangle` accumulator, on the owned `frame_vertices` buffer.
     /// Truncates at the cap boundary, rounding to whole triangles.
     #[handler::single]
-    fn on_draw_triangle(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mails: &[DrawTriangle]) {
-        state.observe(ctx, <DrawTriangle as Kind>::ID);
+    fn on_draw_triangle(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mails: &[DrawTriangle]) {
         if state.warn_drop_if_unusable("draw_triangle") {
             return;
         }
@@ -879,8 +831,7 @@ impl NativeActor for RenderCapability {
 
     /// `ViewProjection` latest-value-wins, on the owned `camera_state`.
     #[handler::single]
-    fn on_camera(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ViewProjection) {
-        state.observe(ctx, <ViewProjection as Kind>::ID);
+    fn on_camera(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ViewProjection) {
         if state.warn_drop_if_unusable("view_projection") {
             return;
         }
@@ -889,8 +840,11 @@ impl NativeActor for RenderCapability {
 
     /// `CreateTexture` (ADR-0105), on the owned texture registry.
     #[handler::single]
-    fn on_create_texture(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: CreateTexture) -> CreateTextureResult {
-        state.observe(ctx, <CreateTexture as Kind>::ID);
+    fn on_create_texture(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: CreateTexture,
+    ) -> CreateTextureResult {
         if let Err(error) = state.service_device_for_request() {
             return CreateTextureResult::Err { error };
         }
@@ -899,8 +853,7 @@ impl NativeActor for RenderCapability {
 
     /// `UpdateTexture` (ADR-0105), on the owned texture registry.
     #[handler::single]
-    fn on_update_texture(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: UpdateTexture) {
-        state.observe(ctx, <UpdateTexture as Kind>::ID);
+    fn on_update_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateTexture) {
         if state.warn_drop_if_unusable("update_texture") {
             return;
         }
@@ -909,8 +862,7 @@ impl NativeActor for RenderCapability {
 
     /// `DestroyTexture`, on the owned texture registry.
     #[handler::single]
-    fn on_destroy_texture(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
-        state.observe(ctx, <DestroyTexture as Kind>::ID);
+    fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
         if state.warn_drop_if_unusable("destroy_texture") {
             return;
         }
@@ -923,10 +875,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_create_geometry(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
+        _ctx: &mut NativeCtx<'_>,
         mail: CreateGeometry,
     ) -> CreateGeometryResult {
-        state.observe(ctx, <CreateGeometry as Kind>::ID);
         if let Err(error) = state.service_device_for_request() {
             return CreateGeometryResult::Err { error };
         }
@@ -935,8 +886,7 @@ impl NativeActor for RenderCapability {
 
     /// `UpdateGeometry` (ADR-0171), on the owned geometry registry.
     #[handler::single]
-    fn on_update_geometry(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: UpdateGeometry) {
-        state.observe(ctx, <UpdateGeometry as Kind>::ID);
+    fn on_update_geometry(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateGeometry) {
         if state.warn_drop_if_unusable("update_geometry") {
             return;
         }
@@ -946,8 +896,7 @@ impl NativeActor for RenderCapability {
     /// `DestroyGeometry` (ADR-0171), on the owned geometry registry —
     /// mirrors `destroy_texture`.
     #[handler::single]
-    fn on_destroy_geometry(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DestroyGeometry) {
-        state.observe(ctx, <DestroyGeometry as Kind>::ID);
+    fn on_destroy_geometry(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyGeometry) {
         if state.warn_drop_if_unusable("destroy_geometry") {
             return;
         }
@@ -964,10 +913,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_program_register(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
+        _ctx: &mut NativeCtx<'_>,
         mail: ProgramRegister,
     ) -> ProgramRegisterResult {
-        state.observe(ctx, <ProgramRegister as Kind>::ID);
         state.ensure_offscreen_gpu_booted();
         if let Err(error) = state.service_device_for_request() {
             return ProgramRegisterResult::Err { error };
@@ -985,8 +933,7 @@ impl NativeActor for RenderCapability {
     /// writable registry texture, so nothing replays. Runtime mismatches
     /// warn-drop at record time, naming program, pass, and binding.
     #[handler::single]
-    fn on_program_dispatch(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ProgramDispatch) {
-        state.observe(ctx, <ProgramDispatch as Kind>::ID);
+    fn on_program_dispatch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ProgramDispatch) {
         if state.warn_drop_if_unusable("program_dispatch") {
             return;
         }
@@ -996,8 +943,7 @@ impl NativeActor for RenderCapability {
     /// `ProgramDestroy` (ADR-0170), on the owned program registry —
     /// mirrors `destroy_texture`.
     #[handler::single]
-    fn on_program_destroy(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ProgramDestroy) {
-        state.observe(ctx, <ProgramDestroy as Kind>::ID);
+    fn on_program_destroy(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ProgramDestroy) {
         if state.warn_drop_if_unusable("program_destroy") {
             return;
         }
@@ -1012,10 +958,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_program_timings(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
+        _ctx: &mut NativeCtx<'_>,
         mail: ProgramTimings,
     ) -> ProgramTimingsResult {
-        state.observe(ctx, <ProgramTimings as Kind>::ID);
         if let Err(error) = state.service_device_for_request() {
             return ProgramTimingsResult::Err { error };
         }
@@ -1024,8 +969,7 @@ impl NativeActor for RenderCapability {
 
     /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `overlay_frame`.
     #[handler::single]
-    fn on_draw_textured_quads(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
-        state.observe(ctx, <DrawTexturedQuads as Kind>::ID);
+    fn on_draw_textured_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
         if state.warn_drop_if_unusable("draw_textured_quads") {
             return;
         }
@@ -1037,8 +981,7 @@ impl NativeActor for RenderCapability {
     /// so flat 2D content keeps its proportions on a non-square window
     /// without a camera publishing a projection for it.
     #[handler::single]
-    fn on_draw_screen_triangles(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawScreenTriangles) {
-        state.observe(ctx, <DrawScreenTriangles as Kind>::ID);
+    fn on_draw_screen_triangles(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawScreenTriangles) {
         if state.warn_drop_if_unusable("draw_screen_triangles") {
             return;
         }
@@ -1050,8 +993,7 @@ impl NativeActor for RenderCapability {
     /// stroked, shadowed boxes evaluated as a distance field on the overlay
     /// pass, at the same painter position as the quad batches.
     #[handler::single]
-    fn on_draw_shapes(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawShapes) {
-        state.observe(ctx, <DrawShapes as Kind>::ID);
+    fn on_draw_shapes(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawShapes) {
         if state.warn_drop_if_unusable("draw_shapes") {
             return;
         }
@@ -1060,8 +1002,7 @@ impl NativeActor for RenderCapability {
 
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
     #[handler::single]
-    fn on_draw_material_textured(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
-        state.observe(ctx, <DrawMaterialTextured as Kind>::ID);
+    fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
         if state.warn_drop_if_unusable("draw_material_textured") {
             return;
         }
@@ -1070,8 +1011,7 @@ impl NativeActor for RenderCapability {
 
     /// `DrawMaterialCoverage` (ADR-0140), on the owned material stream.
     #[handler::single]
-    fn on_draw_material_coverage(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawMaterialCoverage) {
-        state.observe(ctx, <DrawMaterialCoverage as Kind>::ID);
+    fn on_draw_material_coverage(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialCoverage) {
         if state.warn_drop_if_unusable("draw_material_coverage") {
             return;
         }
@@ -1080,8 +1020,7 @@ impl NativeActor for RenderCapability {
 
     /// `PreSettled` (ADR-0161) — decrement the pending capture's
     /// `pre_remaining`. A stray notice with no pending capture is ignored.
-    /// Engine-only mail (ADR-0233), so the harness observer is not sent a
-    /// witness of it.
+    /// Engine-only mail (ADR-0233).
     #[handler::single]
     fn on_pre_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: PreSettled) {
         if let Some(pending) = &mut state.pending_capture {
@@ -1090,8 +1029,7 @@ impl NativeActor for RenderCapability {
     }
 
     /// `Occluded` — update only the named target and fail only a capture
-    /// selected for that target. Engine-only mail (ADR-0233), so the harness
-    /// observer is not sent a witness of it.
+    /// selected for that target. Engine-only mail (ADR-0233).
     #[handler::single]
     fn on_occluded(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Occluded) {
         #[cfg(feature = "desktop")]
@@ -1117,7 +1055,7 @@ impl NativeActor for RenderCapability {
     /// fails drops that target's frame and nothing else — the fan-out still
     /// owes every window behind it its turn. An empty target list is
     /// reserved for the explicitly surfaceless harness. Engine-only mail
-    /// (ADR-0233), so the harness observer is not sent a witness of it.
+    /// (ADR-0233).
     #[handler::single]
     fn on_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Frame) {
         let Frame { replay_cache_when_idle, windows } = mail;
@@ -1239,7 +1177,6 @@ impl NativeActor for RenderCapability {
     /// no timeout (iamacoffeepot/aether#4341).
     #[handler::manual]
     fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: CaptureFrame) {
-        state.observe(ctx, <CaptureFrame as Kind>::ID);
         let reply = ctx.take_inbound();
 
         state.device_recovery.refresh();
@@ -1334,16 +1271,14 @@ mod tests {
     use super::super::{ScreenTriangle, ScreenVertex, Shape, TextureFormat, TextureSampling, TextureUsage};
     use super::texture::StagedTexture;
     use super::*;
-    use aether_data::{KindId, Source};
+    use aether_data::Source;
     use aether_kinds::QuadSpace;
     use aether_math::Rgba;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::EgressEvent;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
     use aether_substrate::testing::{
-        decode_reply, fresh_substrate_and_rx, manual_dispatch_ctx, registered_ref, session_sender, test_mailer_and_rx,
-        token_root, unrouted_binding,
+        decode_reply, manual_dispatch_ctx, session_sender, test_mailer_and_rx, token_root, unrouted_binding,
     };
     use std::sync::mpsc;
 
@@ -1420,26 +1355,7 @@ mod tests {
             shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
             assets_dir: None,
-            observer_position: None,
-            observer: None,
         }
-    }
-
-    /// Point the state's witness channel at a fresh recorder, returning the
-    /// kinds it has recorded. The witness is mail (issue 5965), so the test
-    /// stages a recorder inbox under a fresh name rather than sharing a mutex
-    /// with the cap: the inbox is registered through `testing::registered_ref`,
-    /// and the cap sends its witness through the stored proof.
-    fn observe_via_mail(registry: &Registry, state: &mut RenderCapabilityState) -> Arc<Mutex<Vec<KindId>>> {
-        let kinds = Arc::new(Mutex::new(Vec::<KindId>::new()));
-        let kinds_for_handler = Arc::clone(&kinds);
-        let recorder: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
-            kinds_for_handler.lock().expect("observer recorder is never poisoned").push(dispatch.kind);
-            dispatch.discharge();
-        });
-
-        state.observer = Some(registered_ref(registry, "test.render.observer", recorder));
-        kinds
     }
 
     fn ctx_binding(mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
@@ -1682,30 +1598,21 @@ mod tests {
     }
 
     /// Issue #2831: `destroy_texture` removes a user-owned registry entry,
-    /// dropping its staged pixels and witnessing the dispatched kind by
-    /// mail to the observer inbox (issue 5965).
+    /// dropping its staged pixels.
     #[test]
     fn destroy_texture_removes_registry_entry() {
-        let (registry, mailer, _rx) = fresh_substrate_and_rx();
+        let (mailer, _rx) = test_mailer_and_rx();
         let mut state = headless_state();
-        let observed = observe_via_mail(&registry, &mut state);
         let texture_id = 7;
         state.textures.entries.insert(texture_id, test_staged_texture(vec![0xAB; 16]));
         let binding = ctx_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
 
         RenderCapability::on_destroy_texture(&mut state, &mut ctx, DestroyTexture { texture_id });
-        // The witness buffers in the ctx and routes on handler-end flush.
-        drop(ctx);
 
         assert!(
             !state.textures.entries.contains_key(&texture_id),
             "destroy_texture should remove the staged registry entry",
-        );
-        let seen = observed.lock().expect("observer recorder is never poisoned").clone();
-        assert!(
-            seen.contains(&<DestroyTexture as Kind>::ID),
-            "destroy_texture handler should witness its kind by mail; observed: {seen:?}",
         );
     }
 
@@ -1759,16 +1666,13 @@ mod tests {
 
     /// ADR-0213: `draw_shapes` accumulates into `overlay_frame` as shape
     /// geometry — the one accumulator, so painter order interleaves with
-    /// the batches of the other overlay verbs — and witnesses its kind by
-    /// mail to the observer inbox (issue 5965), which is what a harness's
-    /// `count_observed` reads. The triangle batch sent before it also
-    /// proves the reserved white texture is inserted lazily on first use.
-    /// Without a GPU.
+    /// the batches of the other overlay verbs. The triangle batch sent
+    /// before it also proves the reserved white texture is inserted lazily
+    /// on first use. Without a GPU.
     #[test]
-    fn draw_shapes_accumulates_in_painter_order_and_observed() {
-        let (registry, mailer, _rx) = fresh_substrate_and_rx();
+    fn draw_shapes_accumulates_in_painter_order() {
+        let (mailer, _rx) = test_mailer_and_rx();
         let mut state = headless_state();
-        let observed = observe_via_mail(&registry, &mut state);
         let binding = ctx_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
         let corner = |x: f32, y: f32| ScreenVertex { x, y, color: Rgba::WHITE };
@@ -1799,16 +1703,6 @@ mod tests {
             DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![shape.clone()] },
         );
 
-        // Both witnesses buffer in the ctx and route on handler-end flush,
-        // in dispatch order — the ordering the mutex transport never owed
-        // and mail does.
-        drop(ctx);
-        let seen = observed.lock().expect("observer recorder is never poisoned").clone();
-        assert_eq!(
-            seen,
-            [<DrawScreenTriangles as Kind>::ID, <DrawShapes as Kind>::ID],
-            "each handler witnesses its own kind, in dispatch order",
-        );
         assert_eq!(state.overlay_frame.len(), 2, "both batches share the one overlay accumulator");
         let OverlayBatch::Shapes { shapes, .. } = &state.overlay_frame[1] else {
             panic!("a shape submission must accumulate as a shape batch, after the triangles sent before it");

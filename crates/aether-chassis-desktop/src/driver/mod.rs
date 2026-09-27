@@ -413,7 +413,7 @@ impl DriverCapability for DesktopDriverCapability {
         // ingress as the window manager realizes them.
         let (render_slot, render_wake_slot) = ctx.boot_pumped_actor::<RenderCapability>(
             render_config,
-            RenderParams { observed_kinds: None, assets_dir: Some(assets_dir), offscreen_size: None, wireframe },
+            RenderParams { assets_dir: Some(assets_dir), offscreen_size: None, wireframe },
         )?;
 
         // ADR-0161 §Decision 2: the unified `PumpWake` channel. The render

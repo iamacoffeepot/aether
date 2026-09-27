@@ -5,15 +5,16 @@
 //! lifecycle the reference actor bakes in:
 //!
 //! - `wire` pulls the embedded tile through the load window and uploads
-//!   it as a texture (`aether.render.create_texture`);
-//! - the tick handler draws the resident every frame
-//!   (`aether.render.draw_textured_quads`) — which fires only after the
-//!   `create_texture` reply landed and the `texture_id` was stored, so
-//!   observing it proves the whole warm→hot chain closed;
+//!   it as a texture, and the tick handler draws the resident every frame
+//!   — which it can only do after the `create_texture` reply landed and the
+//!   `texture_id` was stored. A committed overlay batch over a non-white
+//!   texture (`committed_overlay_snapshot`) proves the whole warm→hot chain
+//!   closed;
 //! - dropping the component runs `unwire`, which destroys exactly the
-//!   texture `wire` created (`aether.render.destroy_texture`) — the
-//!   symmetric-teardown convention the reference actor enforces by
-//!   example.
+//!   texture `wire` created — the symmetric-teardown convention the
+//!   reference actor enforces by example. Texture ids are never reused, so
+//!   a probe draw naming the resident's id that no longer records proves
+//!   that id's registry entry is gone.
 //!
 //! These assert THIS actor's lifecycle logic — the pull→upload→store→draw
 //! chain and the create/destroy symmetry — not the render cap or the load
@@ -28,10 +29,11 @@
 use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{decode_png, differs_from_background};
+use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult};
+use aether_render::{RenderCapability, WHITE_TEXTURE_ID};
 
 // Force linkage of `aether-kit`'s `inventory::submit!`
 // `KindDescriptor` entries into this test binary — cargo links the test
@@ -74,10 +76,11 @@ fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorP
 }
 
 /// `wire` makes the tile resident and the tick handler draws it. Loading
-/// the bundle and advancing a few ticks must produce the
-/// `create_texture` upload (the load-window transform) and the
-/// `draw_textured_quads` batch (steady state) — and the drawn resident
-/// must diverge from the clear color in the captured frame.
+/// the bundle and advancing a few ticks must commit a frame whose overlay
+/// holds a batch over the uploaded tile — reachable only once the
+/// `create_texture` upload (the load-window transform) replied `Ok` — and
+/// the drawn resident must diverge from the clear color in the captured
+/// frame.
 #[test]
 fn bundle_wire_uploads_and_draws_the_resident_tile() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
@@ -100,32 +103,28 @@ fn bundle_wire_uploads_and_draws_the_resident_tile() {
         ])
         .expect("advance + capture");
 
-    let created = harness.count_observed("aether.render.create_texture");
-    assert!(
-        created >= 1,
-        "wire must upload the embedded tile via create_texture; got {created}; observed: {:?}",
-        harness.observed_kinds(),
-    );
-    // The tick handler draws only when the `texture_id` is stored, which
-    // happens only after `create_texture` replied `Ok` — so an observed
-    // draw batch proves the full pull→upload→store→draw residency chain.
-    let drawn = harness.count_observed("aether.render.draw_textured_quads");
-    assert!(
-        drawn >= 1,
-        "the resident tile must be drawn every tick once uploaded; got {drawn}; observed: {:?}",
-        harness.observed_kinds(),
-    );
-
     let png = result.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     differs_from_background(&img, 5).expect("the drawn resident tile should diverge from the clear color");
+
+    // The tick handler draws only when the `texture_id` is stored, which
+    // happens only after `create_texture` replied `Ok`, and the record keeps
+    // only a batch whose texture is realized — so a committed batch over a
+    // non-white texture proves the full pull→upload→store→draw chain.
+    let overlay = harness.committed_overlay_snapshot();
+    assert!(
+        overlay.iter().any(|batch| batch.texture_id != WHITE_TEXTURE_ID),
+        "the committed frame must draw the uploaded tile; committed overlay: {overlay:?}",
+    );
 }
 
 /// `unwire` symmetry (ADR-0163 §4): dropping the component destroys
-/// exactly the texture `wire` created. Establishes residency, asserts no
-/// teardown has happened yet, drops the component, and verifies the
-/// `destroy_texture` counterpart went out — the invariant that keeps the
-/// loaded-component census an exact census of resident tiles.
+/// exactly the texture `wire` created. Establishes residency (the tile's
+/// batch is in the committed frame, so no teardown has happened yet), drops
+/// the component, then probes with a draw naming the resident's texture id:
+/// ids are never reused, so the probe records only if that id's registry
+/// entry survived — the invariant that keeps the loaded-component census an
+/// exact census of resident tiles.
 #[test]
 fn bundle_unwire_destroys_the_resident_tile() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
@@ -137,16 +136,11 @@ fn bundle_unwire_destroys_the_resident_tile() {
     let path = load_bundle(&mut harness, &wasm_path);
 
     harness.execute(vec![("establish", HarnessOp::advance(6))]).expect("advance to residency");
-    assert!(
-        harness.count_observed("aether.render.create_texture") >= 1,
-        "the tile must be resident before the drop; observed: {:?}",
-        harness.observed_kinds(),
-    );
-    assert_eq!(
-        harness.count_observed("aether.render.destroy_texture"),
-        0,
-        "no teardown should have happened before the component is dropped",
-    );
+    let resident = harness
+        .committed_overlay_snapshot()
+        .into_iter()
+        .find(|batch| batch.texture_id != WHITE_TEXTURE_ID)
+        .expect("the tile is resident and drawn before the drop");
 
     let dropped = harness
         .execute(vec![
@@ -165,10 +159,12 @@ fn bundle_unwire_destroys_the_resident_tile() {
         DropResult::Err { error } => panic!("drop_component: {error}"),
     }
 
-    let destroyed = harness.count_observed("aether.render.destroy_texture");
+    let render = harness.actor_ref::<RenderCapability>();
+    harness
+        .execute(vec![("probe", HarnessOp::send_and_settle(&render, &resident)), ("frame", HarnessOp::advance(1))])
+        .expect("probe the dropped tile's texture id");
     assert!(
-        destroyed >= 1,
-        "unwire must destroy the resident tile it created; got {destroyed}; observed: {:?}",
-        harness.observed_kinds(),
+        !harness.committed_overlay_snapshot().iter().any(|batch| batch.texture_id == resident.texture_id),
+        "unwire must destroy exactly the texture wire created",
     );
 }
