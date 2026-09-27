@@ -23,7 +23,10 @@ mod routed;
 mod shared;
 mod streaming;
 
-pub(super) use basic::{EchoHttpHandler, FixedBodyHttpHandler, SilentHttpHandler};
+// `EchoHttpHandler` is also the `HttpRoute`-covering fixture the runtime's
+// own unit tests narrow a handler path from, so the basic fixtures reach the
+// whole `server` module rather than this test tree alone.
+pub(in crate::server) use basic::{EchoHttpHandler, FixedBodyHttpHandler, SilentHttpHandler};
 pub(super) use routed::{
     ApiRouteHandler, ApiV2Handler, BookRouteHandler, DeferRouteHandler, EchoPeer, ExtractRouteHandler,
     MethodAnyHandler, MethodPostHandler, SilentPeer, TmpRouteHandler, WiredRouteHandler,

@@ -50,9 +50,7 @@ pub use crate::kinds::{
     HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse,
     HttpStreamCredit, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
-use crate::kinds::{
-    RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
-};
+use crate::kinds::{RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf};
 use aether_kinds::MonitorNotice;
 pub use aether_kinds::trace::Settled;
 // `state.rs` reaches `MonitorHandle` through the module-root glob like the
@@ -300,13 +298,22 @@ impl NativeActor for HttpServerCapability {
         state.apply_shard_settlement(ctx, settlement);
     }
 
-    /// Claim a route for an explicitly named mailbox (ADR-0130).
+    /// Claim a route for an explicitly named handler (ADR-0130).
+    ///
+    /// The handler arrives as a `ProtocolPath<HttpRoute>`, so the contextual
+    /// decode already proved that the live route at the path answers
+    /// `aether.http.server.request` with `aether.http.server.response`
+    /// (ADR-0231 §3); `resolve` proves it still stands there, and the route
+    /// holds the erased twin of that proof — the identity the table, the
+    /// monitors, and a departure are keyed by, and what the reader's
+    /// pre-encoded dispatch sends through.
     ///
     /// # Agent
-    /// `RegisterRoute { prefix, method, kind, mailbox }`. The external
-    /// form — an MCP session or test names the handler mailbox
-    /// explicitly; it is proven live at receipt (ADR-0230). An in-process
-    /// actor registering itself sends `register_route_self` instead.
+    /// `RegisterRoute { prefix, method, handler, shared }`. The external
+    /// form — an MCP session or test names the handler by its canonical
+    /// path, and its requests dispatch as `aether.http.server.request`. An
+    /// in-process actor registering itself sends `register_route_self`
+    /// instead, which is also the form for a handler that answers by hand.
     #[handler::single]
     fn on_register_route(
         state: &mut Self::State,
@@ -316,11 +323,17 @@ impl NativeActor for HttpServerCapability {
         if !state.config.enabled {
             return disabled_route_result();
         }
-        let handler = match ctx.resolve_live(payload.mailbox) {
-            Ok(handler) => handler,
+        let handler = match ctx.resolve(&payload.handler) {
+            Ok(handler) => handler.erase(),
             Err(error) => return RegisterRouteResult::Err { error: error.to_string() },
         };
-        let result = state.register_route(&payload.prefix, payload.method, payload.kind, handler, payload.shared);
+        let result = state.register_route(
+            &payload.prefix,
+            payload.method,
+            <HttpServerRequest as Kind>::ID,
+            handler,
+            payload.shared,
+        );
         if matches!(result, RegisterRouteResult::Ok) {
             state.watch(ctx, handler);
         }
@@ -336,7 +349,7 @@ impl NativeActor for HttpServerCapability {
     /// `RegisterRouteSelf { prefix, method, kind }`, typically sent
     /// from a component's `wire` hook. An external session or remote
     /// engine has no local mailbox and gets an `Err` reply — use
-    /// `register_route` with an explicit mailbox instead.
+    /// `register_route` with an explicit handler path instead.
     #[handler::single]
     fn on_register_route_self(
         state: &mut Self::State,
@@ -358,20 +371,23 @@ impl NativeActor for HttpServerCapability {
             None => RegisterRouteResult::Err {
                 error: "aether.http.server.register_route_self requires a local sender; an \
                         external session or remote engine must use \
-                        aether.http.server.register_route with an explicit mailbox"
+                        aether.http.server.register_route with an explicit handler path"
                     .to_string(),
             },
         }
     }
 
-    /// Release an explicitly named mailbox's route (ADR-0130).
-    /// Idempotent. The mailbox is proven at receipt (ADR-0230); one that
-    /// no longer proves holds nothing to release — a monitored holder's
-    /// routes already went with its `MonitorNotice` — so the refusal is
-    /// the same `Ok` an unheld route gets.
+    /// Release an explicitly named handler's route (ADR-0130). Idempotent.
+    /// Release needs only the identity the route table is keyed by, and the
+    /// server never sends to a holder it is releasing, so the handler is
+    /// named by a plain path and proven with `resolve_path` (ADR-0231 §3).
+    /// A path that no longer proves holds nothing to release — a monitored
+    /// holder's routes already went with its `MonitorNotice` — so the
+    /// refusal is the same `Ok` an unheld route gets.
     ///
     /// # Agent
-    /// `UnregisterRoute { prefix, method, mailbox }`.
+    /// `UnregisterRoute { prefix, method, handler }`. The path may be short;
+    /// `resolve_path` expands it.
     #[handler::single]
     fn on_unregister_route(
         state: &mut Self::State,
@@ -381,7 +397,7 @@ impl NativeActor for HttpServerCapability {
         if !state.config.enabled {
             return disabled_route_result();
         }
-        match ctx.resolve_live(payload.mailbox) {
+        match ctx.resolve_path(&payload.handler) {
             Ok(holder) => state.unregister_route(&payload.prefix, payload.method, holder),
             Err(_) => RegisterRouteResult::Ok,
         }
@@ -407,26 +423,9 @@ impl NativeActor for HttpServerCapability {
             None => RegisterRouteResult::Err {
                 error: "aether.http.server.unregister_route_self requires a local sender; an \
                         external session or remote engine must use \
-                        aether.http.server.unregister_route with an explicit mailbox"
+                        aether.http.server.unregister_route with an explicit handler path"
                     .to_string(),
             },
-        }
-    }
-
-    /// Release every route held by a mailbox (ADR-0130) in one shot.
-    /// The externally sendable bulk form — drop-time cleanup happens
-    /// through [`Self::on_monitor_notice`] instead, so nothing mails
-    /// this on the component path anymore. Idempotent;
-    /// fire-and-forget. The mailbox is proven at receipt (ADR-0230); one
-    /// that no longer proves is a no-op, its monitored routes having
-    /// already gone with its `MonitorNotice`.
-    ///
-    /// # Agent
-    /// `UnregisterRoutesAll { mailbox }`.
-    #[handler::single]
-    fn on_unregister_routes_all(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: UnregisterRoutesAll) {
-        if let Ok(holder) = ctx.resolve_live(payload.mailbox) {
-            state.unregister_routes_all(holder);
         }
     }
 

@@ -220,7 +220,6 @@ The kinds on main that it will govern:
 | `aether.trace.settled` (engine-only) | `crates/aether-kinds/src/trace.rs` | `MailId` |
 | `aether.render.pre_settled` (engine-only) | `crates/aether-render/src/kinds.rs` | `MailId` |
 | `aether.window.subscribe`, `aether.window.unsubscribe`, `aether.window.unsubscribe_all` | `crates/aether-window/src/kinds.rs` | `MailboxId` |
-| `aether.http.server.register_route`, `aether.http.server.unregister_route`, `aether.http.server.unregister_routes_all` | `crates/aether-http/src/kinds.rs` | `MailboxId`; #6899 replaces them with typed handler paths |
 
 One serialized position sits outside the kinds: `MailboxDescriptor.id`
 (`crates/aether-data/src/schema.rs`), the serde mailbox table the engine ships

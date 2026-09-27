@@ -224,11 +224,12 @@ When prefixes overlap, the longest match wins, and a route filtered to one
 method beats a method-agnostic route at the same prefix. A prefix already
 claimed by another component is answered
 `aether.http.server.register_route_result::Err` — first claimant keeps it.
-Routes follow the component: they survive `replace_component` (the mailbox id
-is stable) and are released automatically when the component drops, or
-explicitly via `aether.http.server.unregister_route_self`. External callers
-(an MCP session, a test) use the `register_route` / `unregister_route` forms,
-which name the handler mailbox explicitly.
+Routes follow the component: the route holds a proof of the registrant that
+survives `replace_component`, and it is released automatically when the
+component drops, or explicitly via
+`aether.http.server.unregister_route_self`. External callers (an MCP session,
+a test) use the `register_route` / `unregister_route` forms, which name the
+handler by its canonical path.
 
 The `kind` field names the kind the route's requests dispatch as.
 `HttpServerRequest::ID` keeps the generic shape. Registering a route-specific
@@ -237,35 +238,42 @@ kind — a struct with `aether.http.server.request`'s fields under its own
 `describe_component` entry and `actor_cost` row; the payload bytes are always
 request-shaped, so the route kind decodes them directly.
 
-### Registering a route for another mailbox
+### Registering a route for another actor
 
 `register_route_self` resolves the registrant from the sender's in-process
 `Source`; an MCP session or a test has no such source, so it uses the named
-form instead — `register_route` / `unregister_route`, which take the target
-`mailbox` explicitly. `RegisterRoute` carries `prefix`
-(`String`), `method` (`Option<HttpMethod>` — a bare variant string like
-`"Get"`, or `null` to match every method; the seven variants are `Get`,
-`Post`, `Put`, `Delete`, `Patch`, `Head`, `Options`), `kind` (the route's
-request `KindId`), `mailbox` (the handler's `MailboxId`), and `shared` (the
+form instead — `register_route` / `unregister_route`, which name the handler
+by its canonical actor path. `RegisterRoute` carries `prefix` (`String`),
+`method` (`Option<HttpMethod>` — a bare variant string like `"Get"`, or `null`
+to match every method; the seven variants are `Get`, `Post`, `Put`, `Delete`,
+`Patch`, `Head`, `Options`), `handler` (the path text), and `shared` (the
 ADR-0136 member-set flag — `false` claims the prefix exclusively, `true` joins
-the round-robin set on it). Over the MCP
-wire both tagged ids render as ADR-0064 strings — `knd-…` and `mbx-…`. The
-`kind` comes from `describe_kinds` (the `kind` for
-`aether.http.server.request`, or a route-specific kind's own id). The
-`mailbox` has no documented operator source today: `load_component` returns
-the handler's lineage address and no mailbox id, and the field is an id, so
-hashing the address yourself lands on a mailbox that was never registered. A
-component registers its own routes with `register_route_self` (or the typed
-surface below); the named form remains for a caller that already holds the
-handler's tagged id:
+the round-robin set on it). There is no `kind` field: a route registered by
+path always dispatches as `aether.http.server.request`.
+
+The `handler` path must be canonical — the `path` a `load_component` reply
+returns, `aether.component/aether.embedded:api` for a component loaded as
+`api`. The named actor has to answer `aether.http.server.request` with
+`aether.http.server.response` from a `#[handler::single]`: the path is
+`ProtocolPath<HttpRoute>`, so a path whose live route does not publish that
+row is refused when the mail is decoded — logged at warn, with no
+`register_route_result` reply at all, rather than accepted and then answering
+`502` on every request. In Rust the same path is written
+`ActorPath::<Handler>::root().narrow::<HttpRoute>()`, which will not compile
+unless `Handler` has the row.
+
+A handler that answers by hand cannot be named this way, because a manual row
+covers no protocol (ADR-0231 §6): a streaming handler replying
+`HttpResponseStreamOpen`, a websocket handler replying `WebSocketAccept`, a
+deferred route, and every `#[http::router]` group register themselves with
+`register_route_self`, whose `kind` names whatever they minted.
 
 ```jsonc
 // send_mail → aether.http.server  (kind: aether.http.server.register_route)
 {
   "prefix": "/api",
   "method": "Get",
-  "kind": "knd-…",     // aether.http.server.request's id, from describe_kinds
-  "mailbox": "mbx-…",  // the handler's tagged mailbox id
+  "handler": "aether.component/aether.embedded:api",
   "shared": false
 }
 ```
@@ -276,16 +284,19 @@ which is *why* the named form exists: an external caller (an MCP session, a
 test) has no in-process `Source` to resolve, so `register_route_self` always
 answers it `Err`.
 
-Releasing the route mirrors the registration, dropping `kind` (a release
-doesn't need it) and keeping `method` so a method-specific route and a
-method-agnostic route at the same prefix release independently:
+Releasing the route mirrors the registration, keeping `method` so a
+method-specific route and a method-agnostic route at the same prefix release
+independently. Its `handler` is a plain actor path rather than a protocol one
+— a release needs only the identity the route table is keyed by, and it must
+be able to name a holder that claimed the route through `register_route_self`
+with a minted kind — so a short path like `aether.component/:api` works too:
 
 ```jsonc
 // send_mail → aether.http.server  (kind: aether.http.server.unregister_route)
 {
   "prefix": "/api",
   "method": "Get",
-  "mailbox": "mbx-…"
+  "handler": "aether.component/aether.embedded:api"
 }
 ```
 
@@ -538,7 +549,7 @@ This recipe names the env keys and kind names live in the source. Before
 following it, confirm `AETHER_HTTP_SERVER_ENABLED`, `HttpServerRequest`,
 `HttpServerResponse`, `HttpServerConfig`, the `--http-server-*` argv flags
 (`cli_prefix = "http-server"` on `HttpServerConfig`), `RegisterRoute` /
-`UnregisterRoute` / `HttpMethod`, the `http::{router, route, FromRequest,
-Ctx}` authoring surface, and `http::ResponseStream` still exist where named —
-grep the crates, and if a name has drifted, fix the recipe as part of your
-work.
+`UnregisterRoute` / `HttpRoute` / `HttpMethod`, the `http::{router, route,
+FromRequest, Ctx}` authoring surface, and `http::ResponseStream` still exist
+where named — grep the crates, and if a name has drifted, fix the recipe as
+part of your work.

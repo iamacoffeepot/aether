@@ -48,6 +48,13 @@ Handlers declare interest by mail during wiring and unregister during teardown.
 A route key includes the method and path pattern. Registration results surface
 invalid patterns and ownership conflicts explicitly.
 
+An actor registers itself with `register_route_self`, naming the kind its
+requests dispatch as — whatever `#[http::router]` minted for the group, or the
+generic `aether.http.server.request`. Another actor is registered by its
+canonical path, which must answer `aether.http.server.request` with
+`aether.http.server.response`; that route dispatches as
+`aether.http.server.request` and names no kind of its own.
+
 Two target modes exist:
 
 - **exclusive** (default): one live claimant owns the route;

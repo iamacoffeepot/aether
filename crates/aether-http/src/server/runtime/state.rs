@@ -564,9 +564,9 @@ impl HttpSupervisorState {
         unregister_route(&self.routes, prefix, method, holder)
     }
 
-    /// Release every route membership held by `holder` (ADR-0130's
-    /// `UnregisterRoutesAll`, ADR-0136 set semantics); sets it empties
-    /// drop entirely.
+    /// Release every route membership held by `holder` (ADR-0136 set
+    /// semantics); sets it empties drop entirely. Its one caller is the
+    /// departure purge in `on_monitor_notice`, so no mail reaches it.
     ///
     /// # Panics
     /// Panics if the route-table `RwLock` is poisoned — fail-fast per

@@ -839,8 +839,9 @@ mod tests {
 
     /// ADR-0130 drop-purge, end to end over real wasm: a guest claims
     /// `/routed` via `register_route_self` in `wire`; dropping the
-    /// component (`aether.component.drop` → the component cap's
-    /// `unregister_routes_all` fan-out) purges the route, so the same
+    /// component (`aether.component.drop` → the departing trampoline's
+    /// ADR-0079 `MonitorNotice`, which the server watches per route
+    /// holder) purges the route, so the same
     /// request falls back to the `test.web` fixture's `/` catch-all. The
     /// drop is injected through the routed guest itself — the request
     /// body names the component's address to drop — since the built

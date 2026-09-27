@@ -116,7 +116,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// position.
     ///
     /// Its consumers are the component host's drop, replace, load-under, and
-    /// describe receipts, and the trampoline's replacement dependency check.
+    /// describe receipts, the trampoline's replacement dependency check, and
+    /// the HTTP server's `unregister_route` receipt, which needs only the
+    /// identity its route table is keyed by.
     pub fn resolve_path(&self, address: &ErasedActorPath) -> Result<ErasedActorRef, ResolvePathError> {
         self.binding.resolve_path(address)
     }
@@ -135,9 +137,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// under its canonical name. It never names a position.
     ///
     /// Its consumers are the Bloomery workspace's receipt of `Run.source` and
-    /// `Import.source` (#6841), and the window manager's and the lifecycle
+    /// `Import.source` (#6841), the window manager's and the lifecycle
     /// capability's explicit subscribe and unsubscribe receipts, whose
-    /// subscriber is a `ProtocolPath<Subscriber<K>>`.
+    /// subscriber is a `ProtocolPath<Subscriber<K>>`, and the HTTP server's
+    /// `register_route` receipt, whose handler is a `ProtocolPath<HttpRoute>`.
     pub fn resolve<P: Protocol>(&self, path: &ProtocolPath<P>) -> Result<ProtocolRef<P>, ResolveError> {
         self.binding.mailer().registry().resolve_protocol(path)
     }

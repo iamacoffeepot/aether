@@ -145,10 +145,11 @@ pub fn unregister_route(
     }
 }
 
-/// Release every route membership held by `holder` (ADR-0130's
-/// `UnregisterRoutesAll`, ADR-0136 set semantics); sets it empties drop
-/// entirely. The reverse index names exactly the routes `holder` is in,
-/// so no other route is visited.
+/// Release every route membership held by `holder` (ADR-0136 set
+/// semantics); sets it empties drop entirely. The reverse index names
+/// exactly the routes `holder` is in, so no other route is visited. It
+/// serves the departure purge a `MonitorNotice` fires, which is its only
+/// caller in the runtime — no kind carries a bulk release.
 ///
 /// # Panics
 /// Panics if the route-table `RwLock` is poisoned — fail-fast per
