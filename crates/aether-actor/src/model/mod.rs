@@ -444,12 +444,12 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 /// A hand-written impl does not compile (ADR-0231 §10). The actor's one
 /// [`Declared`] impl lists its dependencies as [`Declared::Depends`], and the
 /// pre-`init` check reads that list: the native birth check walks it, and on
-/// wasm `export!` writes an `InputsRecord::Dependency` from each entry into
-/// the inputs section the host reads. Each impl names `R`'s position in that list as [`Index`](DependsOn::Index),
-/// so an impl for an undeclared `R` either repeats an emitted impl (`E0119`)
-/// or names a position that holds another dependency or none (`E0277`), and no
-/// [`ActorRef<R>`](crate::ActorRef) proof is minted for an actor whose birth
-/// never checked that `R` was `Live`.
+/// wasm `export!` writes an `InputsRecord::Dependency` from each entry into the
+/// inputs section the host reads. Each impl names `R`'s position in that list
+/// as [`Index`](DependsOn::Index), so an impl for an undeclared `R` either
+/// repeats an emitted impl (`E0119`) or names a position that holds another
+/// dependency or none (`E0277`), and no [`ActorRef<R>`](crate::ActorRef) proof
+/// is minted for an actor whose birth never checked that `R` was `Live`.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not declare a dependency on `{R}`",
     note = "add `{R}` to the `depends(...)` list on the actor's `#[actor(...)]` attribute"

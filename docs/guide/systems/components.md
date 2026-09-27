@@ -402,9 +402,10 @@ list. That list is what the checks read: `export!` writes the inputs section's
 `Dependency` records from the actor's `Declared::Depends`, so the host reads the
 declaration without running the guest, and a native actor's birth check walks
 the same list. An actor written without `#[actor]` writes its own `Declared`
-impl and is checked by what it lists. A hand-written `DependsOn<R>` for an undeclared `R` repeats an
-emitted impl (`E0119`) or names a position that holds another dependency or
-none (`E0277`), so no proof is minted for a dependency the host never checks
+impl and is checked by what it lists. A hand-written `DependsOn<R>` for an
+undeclared `R` repeats an emitted impl (`E0119`) or names a position that holds
+another dependency or none (`E0277`), so no proof is minted for a dependency the
+host never checks
 ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
 §10). An entry of a public actor is declared `pub`, in a private module if it
 must stay out of other crates' reach. A second `depends(...)` in the same
