@@ -219,7 +219,6 @@ The kinds on main that it will govern:
 | `aether.trace.tail`, `aether.trace.tail_result`, `aether.trace.describe_tree_result`, `aether.trace.dispatch_traced_ack` | `crates/aether-kinds/src/trace.rs` | `MailId`, and `TraceEvent`'s and `MailNodeWire`'s `MailboxId` `sender` and `recipient` |
 | `aether.trace.settled` (engine-only) | `crates/aether-kinds/src/trace.rs` | `MailId` |
 | `aether.render.pre_settled` (engine-only) | `crates/aether-render/src/kinds.rs` | `MailId` |
-| `aether.window.subscribe`, `aether.window.unsubscribe`, `aether.window.unsubscribe_all` | `crates/aether-window/src/kinds.rs` | `MailboxId` |
 
 One serialized position sits outside the kinds: `MailboxDescriptor.id`
 (`crates/aether-data/src/schema.rs`), the serde mailbox table the engine ships
