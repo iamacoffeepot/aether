@@ -152,8 +152,7 @@ per content hash (the BLAKE3 hash of its wasm bytes). Every load, module boot,
 sibling spawn, and replace of the same bytes shares that one entry, which lives
 while its publication or any of them holds it. The wasm bytes are not kept once
 the module is built, and each `aether.asset.*` section is checked in as its own
-blob
-([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §2).
+blob ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §2).
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the

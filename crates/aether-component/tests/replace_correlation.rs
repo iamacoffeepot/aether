@@ -38,11 +38,11 @@ const RESHAPED_REQUESTER: &str = "test.carry.reshaped_requester";
 
 /// Load the holder and the requester, send request 1, replace the `swapped`
 /// export in place with the `export` of the module `replacement_crate`
-/// builds, send request 2, then release both parked replies. With `release_before_swap`, the holder
-/// also releases between request 1 and the swap, so the pre-swap instance
-/// answers the tag-1 handle itself. Returns the harness to count matched
-/// replies on, the holder's reference and the swap's result, or `None` when a
-/// fixture wasm is not built.
+/// builds, send request 2, then release both parked replies. With
+/// `release_before_swap`, the holder also releases between request 1 and the
+/// swap, so the pre-swap instance answers the tag-1 handle itself. Returns the
+/// harness to count matched replies on, the holder's reference and the swap's
+/// result, or `None` when a fixture wasm is not built.
 fn release_across_swap(
     replacement_crate: &str,
     swapped: &str,
