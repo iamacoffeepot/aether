@@ -35,7 +35,7 @@ that split:
 | Namespace ownership | claimed per Rust `TypeId` (`prepare.rs:116`), so every guest shares `WasmTrampoline` and no load can choose its namespace (ADR-0240 D4) |
 | Checks on code | the contract check runs in the trampoline and again in the registry; the dependency check runs at load, boot, replace, and the module-wide inline check |
 | Replace | may change the hosted type (`export: Some(other)`), targets one instance, and compiles outside `ModuleCache` |
-| Drop | vacates the slot but keeps the route `Live` and the name taken forever (`SubnameInUse`) |
+| Drop | unloads the guest and vacates the mailbox (`NativeCtx::vacate`) without closing the trampoline, so the name never tombstones, a new load of it answers `SubnameInUse`, and a replace can refill the empty slot |
 | Short paths | `aether.component/:NAME` works only because `WasmTrampoline` is the sole instanced child of the host; guest lineage never feeds the address index |
 
 Meanwhile the engine already has the machinery code needs. ADR-0238's `Blob`
@@ -120,7 +120,7 @@ one admission step when a module is published:
 
 | Check | Rule | Replaces |
 |---|---|---|
-| Namespace | each exported NS is unpublished, or published by this module's predecessor; never native | `try_claim_namespace` by `TypeId`; ADR-0240 D4 |
+| Namespace | each exported NS is not yet published, or published by this module's predecessor; never native | `try_claim_namespace` by `TypeId`; ADR-0240 D4 |
 | Contract growth | for a republish, each NS's rows only grow and a fallback is kept (`first_contract_break`) | trampoline `check_contract` and the registry `RepublishContract` guard (ADR-0231 §5) |
 | Same type | a namespace's implementation is replaced only by the same namespace | `ReplaceComponent.export: Some(other)`; #6850's replace refusal |
 | Dependencies | every `depends(R)` names a published `R` | the load, boot, replace, and module-wide inline checks |
@@ -178,20 +178,45 @@ before touching the old, `unwire`, `on_dehydrate`, carry the correlation
 cursor and reply table, `on_rehydrate`. Routes, names, and mailbox ids never
 change, and the hosted type cannot change because the namespace is the type.
 
-A rehydrate failure in one instance restarts that instance on the new module
-from `init`, with its state dropped and a `MonitorNotice`, so that every
-instance of a namespace always runs the published module.
+A rehydrate failure in one instance restarts that instance in place on the
+new module from `init`, with its state dropped and a `MonitorNotice`, so that
+every instance of a namespace always runs the published module. The instance
+does not close, so its name stays live.
 
-### 8. Despawn and unpublish are separate
+### 8. An instance ends by closing, and its name tombstones
 
-- **Despawn** ends one instance: its route goes `Dropped` and its key may be
-  spawned again. The permanent `SubnameInUse` / vacate-but-keep-`Live`
-  behaviour of today's drop retires.
-- **Unpublish** removes a module's publications. It is refused while any
-  instance of its namespaces is live.
-- A boot actor (ADR-0147) is a root singleton the module declares. It is
-  spawned when the module is first published and despawned when the module
-  is unpublished (open question 1).
+An instance ends one way: it closes, and its name tombstones for the
+engine's lifetime (ADR-0079 §7). There is no verb that frees a name for
+reuse.
+
+This is how a native actor ends today. `NativeCtx::shutdown` flags the
+actor; its dispatcher runs `unwire` and the close tail
+(`finalize_close_and_fan_out`), where `ActorRegistry::close_actor` moves the
+slot `Live` → `Dead`, adds the id to the tombstones, and sends each watcher a
+`MonitorNotice`. Mail to the name then drops, and a later spawn of it is
+refused with `SubnameRetired`. A guest is a native actor (§1), so a guest
+instance ends the same way.
+
+Today's `DropComponent` closes nothing. The trampoline runs the guest's
+`unwire`, drops the wasm instance, and calls `NativeCtx::vacate`, which sends
+the same `MonitorNotice`s but leaves the trampoline `Live`: an empty slot
+that `ReplaceComponent` can refill, whose name a new load cannot take
+(`SubnameInUse`), and which tombstones only when the substrate stops. Under
+this ADR, `DropComponent` becomes a request that the named instance close:
+it runs `unwire`, closes, and its name tombstones. The empty refillable slot
+and refill by replace retire with the trampoline, and `vacate` loses its one
+production caller.
+
+An inline child (ADR-0114) is an actor with a native name (§5), so it ends by
+closing too and its name tombstones. Today `despawn_inline_child` retires the
+child's alias route to `Dropped`, which lets the same alias be published
+again; that reuse retires.
+
+A boot actor (ADR-0147) is a root singleton the module declares. The engine
+spawns it once, when the module is first published, and a republish swaps it
+like any other instance (§7). It is not refcounted against the module's other
+actors and is never torn down with them. If it closes, its name tombstones
+and it does not return.
 
 ### 9. The mail surface
 
@@ -202,17 +227,18 @@ to an engine system, not an address parent.
 - `Publish { code: Blob }` checks the bytes in, builds the `Module`, and runs
   admission. Publishing a module whose namespaces already point at the same
   hash is a no-op.
-- `Spawn { namespace, key, parent, config }` asks for an instance to exist.
-  If it is already live, the reply names it and nothing is re-initialised;
-  if it is not, that is the signal to stand it up. It covers native and guest
-  types alike: a native type is spawned from its boot-time publication, which
-  gives outside callers a way to start a native instance by mail that they
-  lack today.
-- `Despawn { path }` ends one instance.
+- `Spawn { namespace, key, parent, config }` asks for an instance to exist,
+  and the name decides the answer. A live name: the reply names it and
+  nothing is re-initialised. An absent name: the engine stands the instance
+  up. A tombstoned name: the spawn is refused, because the name is spent
+  (§8). It covers native and guest types alike: a native type is spawned
+  from its boot-time publication, which gives outside callers a way to start
+  a native instance by mail that they lack today.
 
 `LoadComponent` becomes a convenience that publishes and spawns in one call.
 `ReplaceComponent` becomes `Publish` of a successor. `DropComponent` becomes
-`Despawn`. `LoadResult.path` is the spawned actor's own canonical path.
+the close request: it asks the named instance to close, and its name
+tombstones (§8). `LoadResult.path` is the spawned actor's own canonical path.
 Bloomery restart adoption (ADR-0226 D9) becomes a `Spawn` that finds its
 instance live.
 
@@ -229,16 +255,17 @@ links its code; the kind crates of ADR-0066 are where these markers live.
 
 | ADR | Status | What changes |
 |---|---|---|
-| 0010 runtime component loading | Accepted | §1, §3, §5: load, replace, and drop become publish, spawn, republish, despawn |
-| 0038 actor per component | Accepted | §4 drop becomes despawn; §5 replace splices every live instance of a namespace |
+| 0010 runtime component loading | Accepted | §1, §3, §5: load and replace become publish, spawn, and republish; drop becomes a close request, and the closed name tombstones |
+| 0038 actor per component | Accepted | §4 drop becomes a close request and the name tombstones; §5 replace splices every live instance of a namespace |
+| 0079 instanced actors | Accepted | §7 now governs guests and inline children: a closed name tombstones; the §8 vacate amendment loses the component drop, its one production caller |
 | 0096 multi-actor modules | Accepted | §1, §3: a module publishes its export set; no export selector at load |
 | 0097 sibling spawn | Accepted | §3, §4: a sibling is an ordinary spawn of a published or module-private type |
 | 0099 identity and addressing | Accepted | §5 the `Embedded` fold and §6 `aether.embedded` superseded; the 2026-08-05 runtime-parent amendment superseded |
 | 0101 / 0016 / 0113 hooks | Accepted | hooks run per instance on a republish; a failed rehydrate restarts the instance |
-| 0114 inline children | Accepted | D2 the child is `parent/<child NS>:key`; D5 rebuilt from the republished module |
+| 0114 inline children | Accepted | D2 the child is `parent/<child NS>:key`; D5 rebuilt from the republished module; the 2026-07-08 `despawn_inline_child` becomes a close, and the name tombstones |
 | 0119 resolver strategies | Accepted | `Embedded` and `EmbeddedMany` retire |
 | 0138 opt-in default entry | Accepted | moot: every spawn names its namespace; `aether.no_default` retires |
-| 0147 module boot | Accepted | §1, §2, §4: boot is spawned at first publish and despawned at unpublish |
+| 0147 module boot | Accepted | §1: boot is spawned once, at the module's first publish, and is no longer refcounted or torn down with the module's other actors; if it closes, its name tombstones. §2, §4: the `default` slot is moot, since every spawn names its namespace |
 | 0166 lineage and short paths | Accepted | §5, §6: the component-host worked example retires; the index reads publications |
 | 0165 | Accepted | line 206: guests are hosted by the forwarding host, not `WasmTrampoline` |
 | 0224 / 0226 / 0240 | Proposed | a bundle's root is a published namespace; 0226 D9 adoption keys on a live `NS:key`, not `SubnameInUse`; 0240 D4, D5, D8 edited in place |
@@ -270,6 +297,11 @@ links its code; the kind crates of ADR-0066 are where these markers live.
   ADR-0122's (§10).
 - A republish touches every live instance of a namespace, so its cost grows
   with the instance count.
+- A closed name is spent. A caller that wants a fresh instance after a close
+  picks a new key, and each tombstone costs one registry entry for the
+  engine's lifetime (ADR-0079 §7).
+- A dead publication, one nothing will spawn again, stays resident, because
+  there is no unpublish (see Alternatives considered).
 
 ### Neutral
 
@@ -286,21 +318,18 @@ Each step lands on its own:
    publish with the §4 checks.
 3. **Forwarding host and native naming for guests**: guests spawn as
    `NS` / `NS:key` / `parent/NS:key`; `Embedded` retires.
-4. **Republish replaces replace**; despawn and unpublish replace drop.
+4. **Republish replaces replace**; `DropComponent` closes the instance and
+   its name tombstones; `despawn_inline_child` closes the child the same way;
+   the boot refcount and teardown retire.
 5. **Surface**: MCP, RPC kinds, SubstrateHarness `load::<R>`, FleetHarness,
    CLAUDE.md, the guide.
 6. **Deletion**: `ComponentHostCapability` as an address parent,
    `WasmTrampoline`'s namespace, `aether.embedded`, `categorise_mailbox_name`'s
    component category, and the component short path.
 
-In-flight work: #6852 has landed; #6837, #6857, and #6858 are independent of
-this ADR; #6850 and #6851 are withdrawn; #6829 is re-planned on step 3.
-
-## Open questions
-
-1. **Boot actors.** Spawn at first publish and despawn at unpublish
-   (recommended), or fold boot into ordinary root singletons the module
-   declares and let callers `Spawn` them?
+In-flight work: #6852, #6837 (#6856), and #6857 (#6860) have landed; #6858
+is being re-scoped; #6850 and #6851 are withdrawn; #6829 is re-planned on
+step 3.
 
 ## Alternatives considered
 
@@ -314,3 +343,11 @@ this ADR; #6850 and #6851 are withdrawn; #6829 is re-planned on step 3.
   reader, an identity the name should carry by construction.
 - **Keep per-load and per-replace checks.** Rejected: the same rules would
   run in four places on every load, instead of once at publish.
+- **A despawn verb that frees a key for reuse.** Rejected: names tombstone
+  on close and are never reused (ADR-0079 §7), so a path proven once cannot
+  later name a different actor.
+- **Unpublish.** Deferred. Publications are content-addressed and a
+  republish already points a namespace at new code, so the one thing an
+  unpublish would add is reclaiming the memory of a dead publication, one
+  nothing will spawn again. Revisit when memory held by dead publications
+  becomes a measured cost.
