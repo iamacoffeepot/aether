@@ -301,6 +301,10 @@ def _splice(
 
     output = ""
     for slot in range(len(existing_sorted) + 1):
+        # A segment after a managed span always opens with an unmanaged H2,
+        # which needs the same blank line a managed heading gets.
+        if segments[slot]:
+            output += _pad_to_blank_line(output)
         output += segments[slot]
         for name in insertions_by_slot.get(slot, []):
             output += _pad_to_blank_line(output)

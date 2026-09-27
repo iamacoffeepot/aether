@@ -249,6 +249,17 @@ class FinishScopeTests(unittest.TestCase):
         self.assertEqual(dropped, [])
         self.assertIn("\n\n## Notes\n\nuser trailing\n\n## Design notes\n\nnew design text.\n", proposed_body)
 
+    def test_splice_keeps_the_blank_line_before_a_trailing_unmanaged_heading(self) -> None:
+        # Catches the last managed section being closed with a single newline,
+        # gluing the unmanaged H2 that follows it onto the section's last line.
+        fresh_body = "## Problem statement\n\nold\n\n## Notes\n\nuser trailing"
+        fresh_bounds = finish_scope.plan_digest.managed_span_bounds(fresh_body)
+        sections = finish_scope._parse_sections_file(render_sections({"Problem statement": "new problem text."}))
+
+        proposed_body, _ = finish_scope._splice(fresh_body, fresh_bounds, sections)
+
+        self.assertEqual(proposed_body, "## Problem statement\n\nnew problem text.\n\n## Notes\n\nuser trailing")
+
     def test_concurrent_managed_edit_aborts_instead_of_overwriting(self) -> None:
         # Catches the script silently overwriting someone else's concurrent
         # managed-section edit instead of aborting.
