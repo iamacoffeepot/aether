@@ -69,6 +69,10 @@ fn spawn_actor_runs_wire_once_after_init() {
             state.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
         }
     }
+    impl aether_actor::Declared for WireSpawnProbe {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for WireSpawnProbe {
         type State = Self;
     }
@@ -127,6 +131,10 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
         fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_, Self>) {
             state.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
         }
+    }
+    impl aether_actor::Declared for WireProbe {
+        type Depends = ();
+        type Spawns = ();
     }
     impl NativeActor for WireProbe {
         type State = Self;
@@ -207,6 +215,10 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { received: params })
         }
+    }
+    impl aether_actor::Declared for Ponger {
+        type Depends = ();
+        type Spawns = ();
     }
     impl NativeActor for Ponger {
         type State = Self;

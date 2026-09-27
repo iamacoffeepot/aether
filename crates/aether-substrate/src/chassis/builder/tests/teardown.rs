@@ -228,6 +228,10 @@ fn teardown_reports_the_handler_panic_that_aborted_the_chassis() {
         }
     }
 
+    impl aether_actor::Declared for Exploder {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for Exploder {
         type State = Self;
     }

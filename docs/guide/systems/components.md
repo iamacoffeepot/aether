@@ -395,11 +395,14 @@ impl WasmActor for MeshViewer {
 Each entry names a keyless actor — a root singleton (`One`, like a chassis
 capability) or a co-hosted peer under the same parent (`Embedded`). A keyed
 (`Instanced`) entry is a compile error: which instance is meant is run-time
-data, and that instance is reached through the reference its spawn returned. The declaration travels in the
-wasm inputs section, so the host reads it without running the guest, and the
-macro also emits the actor's one `Declared` impl, whose `Depends` lists the
-entries, and an `impl DependsOn<R>` for each entry that names `R`'s position in
-that list. A hand-written `DependsOn<R>` for an undeclared `R` repeats an
+data, and that instance is reached through the reference its spawn returned. The
+macro emits the actor's one `Declared` impl, whose `Depends` lists the entries,
+and an `impl DependsOn<R>` for each entry that names `R`'s position in that
+list. That list is what the checks read: `export!` writes the inputs section's
+`Dependency` records from the actor's `Declared::Depends`, so the host reads the
+declaration without running the guest, and a native actor's birth check walks
+the same list. An actor written without `#[actor]` writes its own `Declared`
+impl and is checked by what it lists. A hand-written `DependsOn<R>` for an undeclared `R` repeats an
 emitted impl (`E0119`) or names a position that holds another dependency or
 none (`E0277`), so no proof is minted for a dependency the host never checks
 ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)

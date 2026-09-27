@@ -1,8 +1,8 @@
 error[E0277]: `Exact` is spawned inline by an actor this `export!` lists, but this `export!` does not list it
-  --> tests/ui/rejects_unlisted_inline_child.rs:64:5
+  --> tests/ui/rejects_unlisted_inline_child.rs:64:37
    |
 64 |     aether_actor::export!(public = [super::Parent]);
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not listed by this module's `export!`
+   |                                     ^^^^^^^^^^^^^ not listed by this module's `export!`
    |
 help: the trait `Rebuildable<__AetherModule>` is not implemented for `Exact`
   --> tests/ui/rejects_unlisted_inline_child.rs:23:1
@@ -15,18 +15,22 @@ help: the trait `Rebuildable<__AetherModule>` is implemented for `Parent`
    |
 64 |     aether_actor::export!(public = [super::Parent]);
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `Parent::__aether_listed_children`
-  --> tests/ui/rejects_unlisted_inline_child.rs:11:1
-   |
-11 | #[actor(spawns(Exact, Composable))]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Parent::__aether_listed_children`
-   = note: this error originates in the macro `$crate::__export_internal` which comes from the expansion of the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0277]: `Composable` is spawned inline by an actor this `export!` lists, but this `export!` does not list it
+   = note: required for `(Exact, (Composable, ()))` to implement `aether_actor::wasm::ListedIn<__AetherModule>`
+note: required by a bound in `__aether_lists_children`
   --> tests/ui/rejects_unlisted_inline_child.rs:64:5
    |
 64 |     aether_actor::export!(public = [super::Parent]);
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not listed by this module's `export!`
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     required by a bound in this function
+   |     required by this bound in `__aether_lists_children`
+   = note: this error originates in the macro `$crate::__export_internal` which comes from the expansion of the macro `aether_actor::export` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Composable` is spawned inline by an actor this `export!` lists, but this `export!` does not list it
+  --> tests/ui/rejects_unlisted_inline_child.rs:64:37
+   |
+64 |     aether_actor::export!(public = [super::Parent]);
+   |                                     ^^^^^^^^^^^^^ not listed by this module's `export!`
    |
 help: the trait `Rebuildable<__AetherModule>` is not implemented for `Composable`
   --> tests/ui/rejects_unlisted_inline_child.rs:37:1
@@ -39,9 +43,15 @@ help: the trait `Rebuildable<__AetherModule>` is implemented for `Parent`
    |
 64 |     aether_actor::export!(public = [super::Parent]);
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `Parent::__aether_listed_children`
-  --> tests/ui/rejects_unlisted_inline_child.rs:11:1
+   = note: required for `(Composable, ())` to implement `aether_actor::wasm::ListedIn<__AetherModule>`
+   = note: 1 redundant requirement hidden
+   = note: required for `(Exact, (Composable, ()))` to implement `aether_actor::wasm::ListedIn<__AetherModule>`
+note: required by a bound in `__aether_lists_children`
+  --> tests/ui/rejects_unlisted_inline_child.rs:64:5
    |
-11 | #[actor(spawns(Exact, Composable))]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Parent::__aether_listed_children`
-   = note: this error originates in the macro `$crate::__export_internal` which comes from the expansion of the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
+64 |     aether_actor::export!(public = [super::Parent]);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     required by a bound in this function
+   |     required by this bound in `__aether_lists_children`
+   = note: this error originates in the macro `$crate::__export_internal` which comes from the expansion of the macro `aether_actor::export` (in Nightly builds, run with -Z macro-backtrace for more info)

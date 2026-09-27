@@ -36,14 +36,14 @@ pub enum NativeEmit {
 }
 
 fn reject_generic_native_lineage(generics: &syn::Generics, opts: &ActorOpts) -> syn::Result<()> {
-    if generics.params.is_empty() || (!opts.root && opts.child_of.is_empty() && opts.depends.is_empty()) {
+    if generics.params.is_empty() || (!opts.root && opts.child_of.is_empty()) {
         return Ok(());
     }
 
     Err(syn::Error::new_spanned(
         &generics.params,
-        "#[actor] `root`, `child_of(...)` and `depends(...)` require a concrete native actor identity; \
-         generic native actors cannot emit monomorphic RootEntry/ChildEntry/DependencyEntry inventory facts",
+        "#[actor] `root` and `child_of(...)` require a concrete native actor identity; \
+         generic native actors cannot emit monomorphic RootEntry/ChildEntry inventory facts",
     ))
 }
 
@@ -1103,10 +1103,9 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
         }
     });
     // ADR-0230 / ADR-0231 §10: the one `Declared` impl lists the dependencies,
-    // and each `DependsOn<R>` impl names `R`'s position in it, emitted together
-    // with the link-time `DependencyEntry` for the same `R` below, which the
-    // birth sites check before `init`. A native actor declares no inline
-    // children, so its `Spawns` list is empty.
+    // which the birth sites check before `init`, and each `DependsOn<R>` impl
+    // names `R`'s position in it. A native actor declares no inline children,
+    // so its `Spawns` list is empty.
     let impl_generics_ts = quote! { #impl_generics };
     let self_ty_ts = quote! { #self_ty };
     let where_clause_ts = quote! { #where_clause };
@@ -1161,23 +1160,9 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
             }
         }
     });
-    let dependency_entries = opts.depends.iter().map(|target| {
-        quote! {
-            #[cfg(not(target_family = "wasm"))]
-            ::aether_data::name_inventory::inventory::submit! {
-                ::aether_data::name_inventory::DependencyEntry {
-                    actor: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
-                    resolver: <<#target as ::aether_actor::Addressable>::Resolver
-                        as ::aether_actor::DependencyResolver>::TAG,
-                    namespace: <#target as ::aether_actor::Addressable>::NAMESPACE,
-                }
-            }
-        }
-    });
     let inventory = quote! {
         #root_entry
         #(#child_entries)*
-        #(#dependency_entries)*
     };
 
     quote! {

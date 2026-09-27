@@ -56,10 +56,11 @@ pub use model::ctx::{Erased, MailSender, Manual, OutboundReply, Persistence, Rep
 pub use model::slot::Slot;
 pub use model::{
     Actor, Addressable, At, CallerAddressable, CallerScope, CallerScoped, ChildOf, Contract, Contracts, CoveredBy,
-    CoversRows, Declared, DependencyResolver, DependsOn, EMBEDDED_SCOPE, Embedded, EmbeddedMany, Gap, HandlesKind,
-    Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol, Publisher,
-    Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex, RowReply, RowSet, SendableTo, Silent,
-    SilentRow, Singleton, Subname, There, Undeclared, root_mailbox, validate_namespace_segment,
+    CoversRows, Declared, DependencyLink, DependencyList, DependencyResolver, DependsOn, EMBEDDED_SCOPE, Embedded,
+    EmbeddedMany, Gap, HandlesKind, Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN,
+    NamespaceError, One, Protocol, Publisher, Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex,
+    RowReply, RowSet, SendableTo, Silent, SilentRow, Singleton, Subname, There, Undeclared, declared_dependencies,
+    root_mailbox, validate_namespace_segment,
 };
 pub use path::{ActorPath, ProtocolPath, ResolveError};
 #[doc(hidden)]
@@ -123,6 +124,9 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 /// Not part of the public API; the macro is the only intended caller.
 #[doc(hidden)]
 pub mod __macro_internals {
+    // ADR-0231 §10: `export!` writes a type's `Dependency` records from its
+    // `Declared::Depends` list with these.
+    pub use crate::model::{dependency_records_len, write_dependency_records};
     pub use crate::wasm::{ActorTypeTag, WasmPlacementFacts};
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{ActorId, Kind, KindId, ReplyContract, Schema};

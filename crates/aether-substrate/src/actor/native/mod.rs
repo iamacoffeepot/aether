@@ -207,8 +207,14 @@ pub trait Dispatch<S> {
 ///
 /// The dispatcher owns the actor as `Box<Self::State>` and drives it through the
 /// composed traits: `<A as Lifecycle<_>>::init` / `<A as Dispatch<_>>::dispatch`.
+///
+/// Every native actor states its declaration lists ([`aether_actor::Declared`],
+/// ADR-0231 §10), which `#[actor]` emits and a hand-written actor writes itself.
+/// The birth check reads its [`Declared::Depends`](aether_actor::Declared::Depends)
+/// and refuses the birth while a listed dependency is not `Live`.
 pub trait NativeActor:
     Addressable
+    + aether_actor::Declared
     + for<'a> Lifecycle<
         Self::State,
         InitError = BootError,

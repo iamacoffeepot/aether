@@ -31,7 +31,11 @@ pub mod slot;
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
 pub use self::contract::{Contract, Contracts, ReplyShape, Silent, SilentRow, Undeclared};
-pub use self::declared::{Declared, Gap, Here, ListIndex, RowIndex, There};
+pub use self::declared::{
+    Declared, DependencyLink, DependencyList, Gap, Here, ListIndex, RowIndex, There, declared_dependencies,
+};
+#[doc(hidden)]
+pub use self::declared::{dependency_records_len, write_dependency_records};
 pub use self::protocol::{At, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet};
 pub use self::publish::{Publisher, Publishes};
 pub use self::sendable::SendableTo;
@@ -235,8 +239,10 @@ mod sealed {
 /// run-time data, so its actor is reached through the reference its spawn
 /// returned rather than a declaration.
 pub trait DependencyResolver: Resolve + sealed::Sealed {
-    /// The wire tag the `#[actor]` macro writes into the
-    /// `InputsRecord::Dependency` record and the host reader matches on.
+    /// The wire tag `export!` writes, from the actor's
+    /// [`Declared::Depends`] list, into the `InputsRecord::Dependency` record
+    /// the host reader matches on, and the tag the native birth check folds
+    /// by.
     /// Tags are stable: a new declarable strategy takes the next tag,
     /// never a reused one.
     const TAG: u8;
@@ -435,12 +441,11 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 /// }
 /// ```
 ///
-/// A hand-written impl does not compile (ADR-0231 §10). The one
-/// [`Declared`] impl `#[actor]` emits lists the actor's dependencies as
-/// [`Declared::Depends`], from the same parsed `depends(..)` list as the
-/// dependency entry the pre-`init` check reads (a link-time `DependencyEntry`
-/// on native, an `InputsRecord::Dependency` in the inputs manifest on wasm).
-/// Each impl names `R`'s position in that list as [`Index`](DependsOn::Index),
+/// A hand-written impl does not compile (ADR-0231 §10). The actor's one
+/// [`Declared`] impl lists its dependencies as [`Declared::Depends`], and the
+/// pre-`init` check reads that list: the native birth check walks it, and on
+/// wasm `export!` writes an `InputsRecord::Dependency` from each entry into
+/// the inputs section the host reads. Each impl names `R`'s position in that list as [`Index`](DependsOn::Index),
 /// so an impl for an undeclared `R` either repeats an emitted impl (`E0119`)
 /// or names a position that holds another dependency or none (`E0277`), and no
 /// [`ActorRef<R>`](crate::ActorRef) proof is minted for an actor whose birth

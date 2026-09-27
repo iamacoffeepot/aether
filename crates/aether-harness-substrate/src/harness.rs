@@ -535,6 +535,10 @@ impl SubstrateHarnessBuilder {
     ///         None
     ///     }
     /// }
+    /// impl aether_actor::Declared for ChildOnly {
+    ///     type Depends = ();
+    ///     type Spawns = ();
+    /// }
     /// impl NativeActor for ChildOnly {
     ///     type State = Self;
     /// }
@@ -1987,6 +1991,10 @@ mod tests {
             fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { received: config })
             }
+        }
+        impl aether_actor::Declared for Child {
+            type Depends = ();
+            type Spawns = ();
         }
         impl NativeActor for Child {
             type State = Self;
