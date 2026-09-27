@@ -56,20 +56,36 @@ class PlanDigest:
         }
 
 
-def _section_spans(body: str) -> dict[str, str]:
+def managed_span_bounds(body: str) -> dict[str, tuple[int, int]]:
+    """Map each managed heading present in ``body`` to its ``(start, end)`` bound.
+
+    ``start`` is the heading's own start; ``end`` is the start of the next H2
+    heading of any kind, managed or not, or ``len(body)`` when none follows.
+    """
+
     matches = list(H2.finditer(body))
-    spans: dict[str, str] = {}
-    positions: dict[str, int] = {}
+    bounds: dict[str, tuple[int, int]] = {}
 
     for index, match in enumerate(matches):
         name = match.group(1)
         if name not in MANAGED_ORDER:
             continue
-        if name in spans:
+        if name in bounds:
             raise PlanDigestError(f"duplicate managed heading: ## {name}")
-        followed_by_h2 = index + 1 < len(matches)
-        end = matches[index + 1].start() if followed_by_h2 else len(body)
-        span = body[match.start() : end]
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        bounds[name] = (match.start(), end)
+
+    return bounds
+
+
+def _section_spans(body: str) -> dict[str, str]:
+    bounds = managed_span_bounds(body)
+    spans: dict[str, str] = {}
+    positions: dict[str, int] = {}
+
+    for name, (start, end) in bounds.items():
+        followed_by_h2 = end != len(body)
+        span = body[start:end]
         # One empty line before a following H2 is Markdown layout rather than
         # managed content. Exclude exactly that separator and preserve every
         # other byte, including the managed content's own line ending, extra
@@ -79,7 +95,7 @@ def _section_spans(body: str) -> dict[str, str]:
         elif followed_by_h2 and span.endswith("\n\n"):
             span = span[:-1]
         spans[name] = span
-        positions[name] = match.start()
+        positions[name] = start
 
     missing = sorted(REQUIRED.difference(spans))
     if missing:
