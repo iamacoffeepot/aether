@@ -74,8 +74,8 @@
 use core::iter;
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use proc_macro2::{Group, Span, TokenStream as TokenStream2, TokenTree};
+use quote::{ToTokens, format_ident, quote};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
@@ -485,11 +485,12 @@ pub(crate) fn reach_impls(input: &DeriveInput, field_types: &[&Type]) -> TokenSt
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let own = where_clause.map(|w| w.predicates.iter().collect::<Vec<_>>()).unwrap_or_default();
     let markers = [quote! { ::aether_data::CrossesActors }, quote! { ::aether_data::CrossesWire }];
+    // The predicates echo each field type, spanned at the derive, so a
+    // qualified spelling the author wrote on a field is linted there and not
+    // again in this impl.
+    let field_types: Vec<TokenStream2> = field_types.iter().map(|ty| call_site_tokens(ty.to_token_stream())).collect();
     let impls = markers.iter().map(|marker| {
-        // The predicates echo each field type as written, so a qualified
-        // spelling the author allowed on the item is allowed here too.
         quote! {
-            #[allow(unused_qualifications, clippy::absolute_paths)]
             impl #impl_generics #marker for #name #ty_generics
             where
                 #( #own, )*
@@ -498,6 +499,25 @@ pub(crate) fn reach_impls(input: &DeriveInput, field_types: &[&Type]) -> TokenSt
         }
     });
     quote! { #( #impls )* }
+}
+
+/// `tokens` with every span, groups included, moved to the derive's call site.
+/// A type's nesting is bounded by its source, so the recursion is too.
+fn call_site_tokens(tokens: TokenStream2) -> TokenStream2 {
+    tokens
+        .into_iter()
+        .map(|tree| match tree {
+            TokenTree::Group(group) => {
+                let mut respanned = Group::new(group.delimiter(), call_site_tokens(group.stream()));
+                respanned.set_span(Span::call_site());
+                TokenTree::Group(respanned)
+            }
+            mut other => {
+                other.set_span(Span::call_site());
+                other
+            }
+        })
+        .collect()
 }
 
 /// Emit the `LabelNode::Struct` literal for the type's `LABEL_NODE`
@@ -1130,7 +1150,7 @@ pub(crate) fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
         }
     }
     Err(syn::Error::new(
-        attrs.first().map_or_else(proc_macro2::Span::call_site, Spanned::span),
+        attrs.first().map_or_else(Span::call_site, Spanned::span),
         "missing `#[kind(name = \"...\")]` attribute",
     ))
 }
@@ -1469,7 +1489,7 @@ const DENY_LIST: &[DeniedPath] = &[
 /// Body-path collector + matcher. Records the span of the first path
 /// whose trailing segments match a deny-list entry.
 struct PurityScanner {
-    violation: Option<proc_macro2::Span>,
+    violation: Option<Span>,
 }
 
 impl PurityScanner {

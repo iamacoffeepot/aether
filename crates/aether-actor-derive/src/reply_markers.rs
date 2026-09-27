@@ -38,7 +38,7 @@ pub fn reply_marker_impl(
         },
         (HandlerClass::Single, HandlerReply::None) | (HandlerClass::Manual, _) => quote! {},
     };
-    quote! { #crosses #marker }
+    quote! { #marker #crosses }
 }
 
 /// Require a handler's kind to cross actors (ADR-0242), so no handler receives
@@ -55,7 +55,6 @@ fn crosses_actors_requirement(kind_ty: &Type, site: &ReplyMarkerSite<'_>) -> Tok
     quote! {
         #(#cfgs)*
         const _: () = {
-            #[allow(dead_code)]
             fn __aether_handler_kind_crosses_actors #impl_generics () #where_clause {
                 fn __aether_crosses<K: ?::core::marker::Sized + ::aether_actor::__macro_internals::CrossesActors>() {}
                 #call

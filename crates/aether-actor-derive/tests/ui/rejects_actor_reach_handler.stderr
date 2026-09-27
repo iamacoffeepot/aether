@@ -1,7 +1,7 @@
 error[E0277]: `ReplyHandle` has actor reach: it does not cross actors
-  --> tests/ui/rejects_actor_reach_handler.rs:26:78
+  --> tests/ui/rejects_actor_reach_handler.rs:25:78
    |
-26 |     fn on_context(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _context: LoadContext) {}
+25 |     fn on_context(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _context: LoadContext) {}
    |                                                                              ^^^^^^^^^^^ has actor reach: its bytes stay in their own actor
    |
    = help: the trait `CrossesActors` is not implemented for `ReplyHandle`
@@ -26,8 +26,8 @@ note: required for `LoadContext` to implement `CrossesActors`
    |        ^^^^^^^^^^^
    = help: consider manually implementing `CrossesActors` to avoid undesired bounds
 note: required by a bound in `__aether_crosses`
-  --> tests/ui/rejects_actor_reach_handler.rs:17:1
+  --> tests/ui/rejects_actor_reach_handler.rs:16:1
    |
-17 | #[actor]
+16 | #[actor]
    | ^^^^^^^^ required by this bound in `__aether_crosses`
    = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

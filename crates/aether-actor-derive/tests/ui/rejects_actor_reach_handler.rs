@@ -11,7 +11,6 @@ struct LoadContext {
     label: String,
 }
 
-#[allow(dead_code)]
 struct Loader;
 
 #[actor]
