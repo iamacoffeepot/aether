@@ -5,12 +5,17 @@
 //! plain `cargo test`.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use aether_data::KindId;
+use aether_actor::wasm::inline::{Registry, compose::spawn_one_child};
+use aether_actor::{
+    ActorInitError, Addressable, Declared, Erased, ErasedWasmActor, Lifecycle, Mail, Manual, Many, PriorState,
+    WasmActor, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx,
+};
+use aether_data::{KindId, MailboxId};
 
 use crate::envelope::{self, FilterOutput, Verdict};
 use crate::manifest;
@@ -168,4 +173,80 @@ fn byte_string(bytes: &[u8]) -> String {
         write!(out, "\\{b:02x}").expect("test setup: writing to a String cannot fail");
         out
     })
+}
+
+/// A no-op inline-child actor with no behavior of its own — installed into a
+/// test's [`Registry`] only so a resident-child lookup (`ctx.child(subname)`)
+/// resolves to something real, mirroring the shape a `spawn_inline_child_by_tag`
+/// installs in the running module.
+struct ResidentStub;
+
+impl Addressable for ResidentStub {
+    const NAMESPACE: &'static str = "test.behavior.resident_stub";
+    type Resolver = Many;
+}
+
+impl Declared for ResidentStub {
+    type Depends = ();
+    type Spawns = ();
+}
+
+impl Lifecycle<Self> for ResidentStub {
+    type Config = ();
+    type Params = ();
+    type InitError = ActorInitError;
+    type InitCtx<'a> = WasmInitCtx<'a>;
+    type Ctx<'a> = WasmCtx<'a, Self>;
+
+    fn init(_config: (), _params: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self)
+    }
+}
+
+impl WasmActor for ResidentStub {
+    type State = Self;
+    type Persist = ();
+}
+
+impl WasmDispatch<Self> for ResidentStub {
+    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
+        0
+    }
+}
+
+impl ErasedWasmActor for ResidentStub {
+    fn erased_namespace(&self) -> &'static str {
+        Self::NAMESPACE
+    }
+
+    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
+        0
+    }
+
+    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
+
+    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
+
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+
+    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _prior: PriorState<'_>) {}
+}
+
+/// Spawn a resident [`ResidentStub`] child of `parent` under `subname`,
+/// through the same public `spawn_one_child` core a by-tag inline spawn
+/// resolves through (`aether_actor::wasm::inline::compose`) — so a test's
+/// registry holds a real resident child a `ctx.child(subname)` lookup
+/// resolves, not a hand-built record reaching past the crate's `pub(crate)`
+/// registry internals.
+pub fn spawn_resident_child(registry: &Registry, parent: u64, subname: &str) {
+    spawn_one_child::<ResidentStub>(
+        registry,
+        parent,
+        MailboxId(0xF00D_0000),
+        0xF00D_0000,
+        subname.to_string(),
+        false,
+        &[],
+    )
+    .expect("test setup: resident stub child installs");
 }

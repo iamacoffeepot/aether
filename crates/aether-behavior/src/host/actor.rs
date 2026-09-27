@@ -49,6 +49,15 @@ pub struct BehaviorHost {
     /// The current script source (may diverge from `config.script` after a
     /// swap); persisted so a reload records where the script came from.
     script_source: ScriptSource,
+    /// The resident wrapped child's proof, filled at spawn (`wire`'s
+    /// `spawn_inline_child_by_tag` `Ok`) or on the first lane mail after a
+    /// reload (`wrapped_proof`'s registry lookup). `None` until either fills
+    /// it — a reload's fresh `BehaviorHost` value starts here, and a wrapped
+    /// child that is not yet resident stays a miss until the next mail
+    /// retries the lookup. Never persisted: a child rebuilt under the same
+    /// subname folds to the same proof (R-0044), and the resident registry,
+    /// not this cache, is the source of truth.
+    wrapped: Option<ErasedActorRef>,
 }
 
 /// Whether an in-flight script fetch originated from boot wiring or a runtime
@@ -86,35 +95,42 @@ impl WasmActor for BehaviorHost {
             ScriptSource::FsRef { .. } | ScriptSource::None => None,
         };
         let script_source = config.script.clone();
-        Ok(BehaviorHost { config, engine, slot, prime_pending: false, echo: EchoGuard::default(), script_source })
+        Ok(BehaviorHost {
+            config,
+            engine,
+            slot,
+            prime_pending: false,
+            echo: EchoGuard::default(),
+            script_source,
+            wrapped: None,
+        })
     }
 
     /// Genuine first attach only (reload runs `init` + `on_rehydrate`, not
     /// `wire`): spawn the wrapped child by tag, kick an `FsRef` boot fetch,
     /// prime the widget with a re-emit request, and offer the ATTACH sentinel.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        if let Err(error) = ctx.spawn_inline_child_by_tag(
+        match ctx.spawn_inline_child_by_tag(
             ActorTypeTag(self.config.child.type_tag),
             Subname::Named(&self.config.child.subname),
             &self.config.child.config,
         ) {
-            match error {
-                SpawnError::UnknownActorTag(tag) => {
-                    tracing::warn!(
-                        target: "aether_behavior",
-                        type_tag = tag.0,
-                        subname = %self.config.child.subname,
-                        "wrapped child tag unknown to the module; running wrapper-less (fail-open)",
-                    );
-                }
-                error => {
-                    tracing::warn!(
-                        target: "aether_behavior",
-                        subname = %self.config.child.subname,
-                        ?error,
-                        "wrapped child spawn failed; running wrapper-less (fail-open)",
-                    );
-                }
+            Ok(wrapped) => self.wrapped = Some(wrapped),
+            Err(SpawnError::UnknownActorTag(tag)) => {
+                tracing::warn!(
+                    target: "aether_behavior",
+                    type_tag = tag.0,
+                    subname = %self.config.child.subname,
+                    "wrapped child tag unknown to the module; running wrapper-less (fail-open)",
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_behavior",
+                    subname = %self.config.child.subname,
+                    ?error,
+                    "wrapped child spawn failed; running wrapper-less (fail-open)",
+                );
             }
         }
 
@@ -156,8 +172,10 @@ impl WasmActor for BehaviorHost {
     /// Restore from the host bundle — re-instantiate the script from its
     /// resident bytes (no fs re-fetch), offer the saved state to the fresh
     /// script, then offer `ATTACH` when a script was restored. The wrapped
-    /// child needs no restore: the fallback's direction check derives it from
-    /// the inline registry by subname on each mail. The wrapped child is **not**
+    /// child needs no restore: the fallback's direction check derives its
+    /// proof from the inline registry by subname once, on the first lane
+    /// mail after this reload (`wrapped_proof`), and holds it from then on.
+    /// The wrapped child is **not**
     /// re-spawned: the composite walk reconstructs it from its own real config
     /// + runtime state (#2694), and the reload `insert_child` carries no
     /// residency guard, so a host-side re-spawn would double-spawn. The
@@ -223,8 +241,7 @@ impl WasmActor for BehaviorHost {
     fn on_lane(&mut self, ctx: &mut WasmCtx<'_>, mail: Mail<'_>) {
         self.try_prime(&*ctx);
         let kind = mail.kind();
-        let is_up =
-            lane_is_up(ctx.sender(), ctx.child(&self.config.child.subname).as_ref().map(RelativeMailbox::reference));
+        let is_up = lane_is_up(ctx.sender(), self.wrapped_proof(&*ctx));
         let bytes = mail.bytes();
 
         // A configured down-lane frame trigger offers FRAME to the script
@@ -253,7 +270,24 @@ impl WasmActor for BehaviorHost {
 }
 
 impl BehaviorHost {
+    /// The resident wrapped child's proof, cached after its first resolution.
+    /// Returns the held proof when one is already cached; otherwise looks the
+    /// child up in the inline registry by the config's subname, caching and
+    /// returning a hit. A miss (the child is not resident yet) caches nothing,
+    /// so the next lane mail retries the lookup.
+    fn wrapped_proof<A>(&mut self, ctx: &WasmCtx<'_, A>) -> Option<ErasedActorRef> {
+        if self.wrapped.is_some() {
+            return self.wrapped;
+        }
+        let proof = ctx.child(&self.config.child.subname).as_ref().map(RelativeMailbox::reference)?;
+        self.wrapped = Some(proof);
+        self.wrapped
+    }
+
     fn try_prime<A>(&mut self, ctx: &WasmCtx<'_, A>) {
+        if !self.prime_pending {
+            return;
+        }
         let Some(child) = ctx.child(&self.config.child.subname) else {
             return;
         };
@@ -546,7 +580,7 @@ mod tests {
     use super::*;
     use crate::envelope::{Effect, FilterOutput, Verdict};
     use crate::host::config::ChildSpec;
-    use crate::host::test_support::{fixed_output_wasm, forward_output};
+    use crate::host::test_support::{fixed_output_wasm, forward_output, spawn_resident_child};
     use aether_actor::Lifecycle;
     use aether_actor::wasm::{NO_INBOUND_SOURCE, inline::Registry};
     use aether_data::wire;
@@ -637,6 +671,36 @@ mod tests {
         assert!(!lane_is_up(None, Some(wrapped)));
         // With no resident wrapped child every source reads down-lane.
         assert!(!lane_is_up(Some(wrapped), None));
+    }
+
+    // Tripwire: a reloaded host's wrapped-child proof fills from the registry
+    // on the first lane-mail lookup, not before. A reloaded host that never
+    // fills it would misread every up-lane mail as down-lane and bounce it
+    // straight back to the child instead of forwarding it up.
+    #[test]
+    fn rehydrated_host_fills_wrapped_proof_on_first_lookup() {
+        let registry = Registry::new();
+        let host_id = 0x10;
+        spawn_resident_child(&registry, host_id, "widget");
+
+        // A reload runs `init` + `on_rehydrate` (not `wire`), so a fresh
+        // `BehaviorHost` value is exactly what `host(..)` + `apply_rehydrate`
+        // builds here.
+        let mut host = host(ScriptSource::None);
+        let bundle = HostPersist { source: ScriptSource::None, bytes: Vec::new(), state: Vec::new() };
+        host.apply_rehydrate(&bundle.encode());
+        assert!(host.wrapped.is_none(), "reload's fresh host value has not looked up its child yet");
+
+        let mut ctx = WasmCtx::__new(host_id, &registry, NO_INBOUND_SOURCE);
+        let expected = ctx.as_single().child("widget").expect("test setup: stub child resident").reference();
+
+        assert_eq!(
+            host.wrapped_proof(ctx.as_single()),
+            Some(expected),
+            "the first lookup resolves the resident child's proof"
+        );
+        assert_eq!(host.wrapped, Some(expected), "the proof is cached on the host after the first lookup");
+        assert_eq!(host.wrapped_proof(ctx.as_single()), Some(expected), "a second lookup returns the cached proof");
     }
 
     // Tripwire: low-rate mirror kinds are still offered to SDK dispatch even
