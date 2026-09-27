@@ -142,7 +142,10 @@ That row receives the kind only from that window; `WindowSelector::All` matches
 every window, as the flat verb does. If one mailbox matches both selectors, it
 receives one copy. `UnsubscribeWindowSelf` with the same selector removes the
 row. The kind send carries a bare `KindId`, so it skips the `Publishes<K>`
-check the flat verb makes.
+check the flat verb makes. The window checks the handler bound at run time
+instead: the subscriber, of either form, must handle the kind silently or
+manually, and the window refuses a sender whose published rows lack that
+handler, since its events could never be handled (ADR-0231 §4).
 
 Then handle the event as ordinary mail and inspect its source id:
 

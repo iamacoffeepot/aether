@@ -99,8 +99,7 @@ The request/reply families are:
 |---|---|---|
 | `list` | manager; no input | every live `WindowInfo`, ordered by path (window name order) |
 | `create` | manager; `WindowSpec` | the attached window's `WindowInfo` |
-| subscribe/unsubscribe | manager; selector, kind, and optional explicit mailbox | acknowledgement |
-| `unsubscribe_all` | manager; explicit mailbox | normal no-reply settlement |
+| subscribe/unsubscribe | manager; selector and subscription (event kind and subscriber path), or selector and kind for the `_self` forms | acknowledgement |
 | `close` | named child; no input | acknowledgement |
 | `set_mode` | named child; mode and optional windowed size | resolved mode and size |
 | `set_title` | named child; title | applied title |
@@ -184,14 +183,23 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
 ```
 
 The flat verb selects `WindowSelector::All`, which is prospective. If the same
-mailbox subscribes through both `All` and `One(id)`, recipient lookup unions the
-sets and sends one copy. Both forms subscribe the sending actor; the manager
-monitors it and removes all of its rows when it departs.
+actor subscribes through both `All` and `One(id)`, recipient lookup unions the
+sets and sends one copy. Both forms subscribe the sending actor, which must
+handle the kind silently or manually; the manager types it as a
+`Subscriber<K>` with the guard cast (ADR-0231 §4), refuses a sender whose
+published rows lack that handler, monitors it, and removes all of its rows
+when it departs.
 
-Publication uses each kind's compile-time `K::ID`. There is no registry lookup,
-central input-kind list, or relay actor to update when a window event kind is
-added. See [Input streams](input.md) for the event vocabulary and text/IME
-semantics.
+An operator or a test subscribes another actor with `aether.window.subscribe`,
+whose `subscription` names the kind and the subscriber's canonical path, as in
+`{"Key": "aether.component/aether.embedded:ui"}`: the path `load_component`
+returns. The path decodes only when the live actor there handles the kind
+silently (ADR-0231 §3), and the manager proves it live at receipt.
+
+Publication sends each event through the kind's typed subscriber set, which
+holds a `ProtocolRef<Subscriber<K>>` per subscriber, so a fan-out of any other
+kind does not compile. There is no registry lookup or relay actor. See
+[Input streams](input.md) for the event vocabulary and text/IME semantics.
 
 ## Desktop threading
 
@@ -389,8 +397,7 @@ let subscribe = HarnessOp::send_and_settle(
     &synthetic,
     &SubscribeWindow {
         selector: WindowSelector::One(window),
-        kind: Key::ID,
-        mailbox: observer,
+        subscription: WindowSubscription::Key(ActorPath::<Relay>::root().narrow()),
     },
 );
 
@@ -414,9 +421,11 @@ stays fail-fast so tests cannot accidentally turn unsupported production
 behavior into an implicit mock.
 
 To add a window-originated event, define the kind with a `window:
-ErasedActorPath` field, emit it
-from window state, and let selector routing publish `K::ID`. Do not add a
-chassis kind cache or a generic input relay. A future non-window device such
+ErasedActorPath` field, add it to the `published_window_kinds!` list in
+`crates/aether-window/src/lib.rs`, which writes its `Publishes` impl,
+`WindowSubscription` variant, typed subscriber set, and dispatch arms, and emit
+it from window state. Do not add a chassis kind cache or a generic input
+relay. A future non-window device such
 as a gamepad or raw HID source should have its own concrete source actor.
 
 ## Where to read more

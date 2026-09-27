@@ -45,7 +45,8 @@ straight up to `aether.lifecycle`'s broadcast of the stage.
 
 **One mailbox, a graph of stages.** Everything addresses `aether.lifecycle`, owned
 by the `LifecycleCapability` actor — the sole owner of the compiled graph, the
-subscriber table (`KindId → set of proven subscriber references`), the fan-out,
+subscriber table (one typed set per stage `K`, holding each subscriber as a
+`ProtocolRef<Subscriber<K>>`), the fan-out,
 and the settlement gating. The cap is a bridged singleton, so a wasm guest that
 declares `depends(LifecycleCapability)` names it by type:
 `ctx.subscribe::<LifecycleCapability, Tick>()`.
@@ -171,9 +172,17 @@ publish `K` (`LifecycleCapability` publishes the stage kinds), the actor must
 declare `depends(P)`, and the actor's handler for `K` must not declare a reply (a
 `-> ()` handler, or a manual one), because a broadcast stage has no one waiting
 for a reply. Any one of them missing
-is an error at the call. `ctx.unsubscribe::<P, K>()` is the teardown twin, with
+is an error at the call. The cap checks the last one again at run time: it
+refuses a sender whose published rows lack a silent or manual handler for the
+stage. `ctx.unsubscribe::<P, K>()` is the teardown twin, with
 the first two checks. You don't unsubscribe on the way out — the host clears your
 subscriptions when the component drops.
+
+To subscribe another actor — an operator over MCP, or a test — send
+`aether.lifecycle.subscribe` with a `subscription` naming the stage and the
+subscriber's canonical path, as in `{"Tick": "aether.component/aether.embedded:camera"}`.
+The path decodes only when the live actor there handles the stage silently, and
+the cap proves it live at receipt.
 
 Then handle each stage as its kind, like any other mail:
 

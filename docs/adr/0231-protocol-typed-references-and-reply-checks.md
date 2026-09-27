@@ -150,11 +150,11 @@ The rules:
 | 1 | Static reply check on typed sends | not built |
 | 2 | `#[protocol]` and `CoveredBy` | built: `Row`, `RowReply`, `RowSet`, `CoversRows`, `Protocol`, `CoveredBy` (`crates/aether-actor/src/model/protocol.rs`) and `#[protocol]` (`crates/aether-actor-derive/src/protocol.rs`), over the per-handler `Contract<K>` rows and per-actor `Contracts::CONTRACTS`; `includes` and protocol-to-protocol coverage are not built |
 | 3 | `ProtocolRef<P>`, `ProtocolPath<P>`, contextual decode, `resolve` | `ProtocolPath<P>` and `ActorPath::narrow` built (`crates/aether-actor/src/path/`), with the path text as their only wire form. `ProtocolPath<P>`'s decode proves coverage against the live route at its path through `Kind::decode_with` and `DecodeCtx` (`crates/aether-data/src/wire/context.rs`, over the registry's `PublishedRoutes` answer in `crates/aether-substrate/src/mail/registry/mailbox/resolve.rs`), and it has no `Deserialize`; `ActorPath<R>`'s decode checks its leaf namespace, and the type constructors `ActorPath::<R>::instance` and `ActorPath::<C>::child` replace the declared links. `ProtocolRef<P>` built (`crates/aether-actor/src/reference/protocol_ref.rs`), a `Target` for each kind `P` lists through a row index the compiler infers (`RowAt`, `crates/aether-actor/src/model/protocol.rs`), with the native liveness-only `resolve` over a `ProtocolPath<P>` (`Registry::resolve_protocol`, `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). Not built: the guest's published-routes answer (ADR-0241), so a guest refuses a `ProtocolPath<P>` at decode; reference narrowing |
-| 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the erased send verb's removal (#6895) and the cast are not |
+| 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the native cast built for its `Subscriber<K>` arm (`ctx.cast`, `CastTarget`; `Registry::cast` in `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`), with the window's and the lifecycle capability's typed subscriber fan-out; the erased send verb's removal (#6895), the cast's protocol and `AnyKind` arms, and a guest cast are not |
 | 5 | Replace preserves contracts | built, the fallback rule included: `crates/aether-data/src/contract.rs`, `crates/aether-substrate/src/mail/registry/contract.rs`, `crates/aether-component/src/trampoline/runtime/contract.rs` |
 | 6 | Manual rows | built: `Undeclared` row, `ReplyContract::Manual` on both manifests |
 | 7 | Ctx typed by its actor | built, every ctx on both transports |
-| 8 | Silent subscribers and watchers | built for the wasm `subscribe` (`crates/aether-actor/src/wasm/ctx/subscribe.rs`); the `monitor` bound and subscriber references are not |
+| 8 | Silent subscribers and watchers | built for the wasm `subscribe` (`crates/aether-actor/src/wasm/ctx/subscribe.rs`) and for the window's and the lifecycle capability's subscriber references (`ProtocolRef<Subscriber<K>>`, `crates/aether-window/src/runtime/subscribers.rs`, `crates/aether-lifecycle/src/subscribers.rs`); the `monitor` bound is not |
 | 9 | Relays | `forward_to` and `DeferredReply::hand_off` exist; the typed target is not built |
 | 10 | Markers exist only at a declared position | built: `Here`, `There<I>`, `Gap`, `ListIndex`, `RowIndex`, `Declared` (`crates/aether-actor/src/model/declared.rs`), `Contracts::Rows` and the `Index` of `Contract<K>`, `DependsOn<R>`, `Spawns<C>`, and `Rebuildable<M>`, emitted by `#[actor]` (`crates/aether-actor-derive/src/reply_markers.rs`, `wasm_expand.rs`, `native_expand.rs`, `handler_set.rs`) and `export!` (`crates/aether-actor/src/wasm/mod.rs`). The checks read the declaration lists: the native birth check (`crates/aether-substrate/src/actor/native/dependencies.rs`) and `export!`'s guest `Dependency` records read `Declared::Depends` through `DependencyList`, and `export!`'s inline-child coverage check reads `Declared::Spawns` through `ListedIn`, so a hand-written `Declared` is checked as an emitted one is. A type no `#[actor]` built still writes its own `Contracts` and dispatch (#6887, #6888) |
 
@@ -523,8 +523,9 @@ declarations, a static inventory rather than the live tree; the
 nothing.
 
 Each arm lands with its consumer. The native arm over a `ProtocolPath<P>`
-serves the Bloomery workspace's receipt of a request's storage source, and
-the guest arm over an `ActorPath<R>` serves the Bloomery bootstrap resolving
+serves the Bloomery workspace's receipt of a request's storage source and
+the window's and the lifecycle capability's explicit subscribe and
+unsubscribe receipts, and the guest arm over an `ActorPath<R>` serves the Bloomery bootstrap resolving
 its unit's journal and driver
 ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D7, D8). The
 other two arms come with their first callers. A guest's call is one host
@@ -537,7 +538,13 @@ from its journal's actor path,
 `Run` and `Import` are therefore contextual kinds: the workspace's dispatch
 decodes each against the engine, which proves the journal's rows cover
 `ArtifactStorage`, and the workspace resolves the source on receipt
-(ADR-0240 D7).
+(ADR-0240 D7). The window's `aether.window.subscribe` and `unsubscribe` and
+the lifecycle capability's `aether.lifecycle.subscribe` and `unsubscribe`
+carry their subscriber as a `ProtocolPath<Subscriber<K>>` (§8), inside a
+subscription enum with one variant per published kind (`WindowSubscription`,
+`LifecycleSubscription`), so the sender chooses the event and the path's
+protocol is fixed by the variant. Each publisher decodes the request against
+the engine and resolves the path on receipt.
 
 ### 4. Published rows, typed sends, and the guard cast
 
@@ -589,15 +596,21 @@ handle answer the requester, whose own call site was checked (§1).
 #### The guard cast
 
 ```rust
-impl ErasedActorRef {
-    pub fn cast<T: CastTarget>(&self, ctx: &impl ProveCtx) -> Option<ProtocolRef<T>>;
-}
+ctx.cast::<T>(reference) // ErasedActorRef -> Option<ProtocolRef<T>>, T: CastTarget
 ```
 
 The cast is the fallback for references that arrive untyped: the envelope
 sender (`ctx.sender()`) and a native `resolve_live` answer. It runs once,
 at receipt, in the handler that received the reference,
 and reads the same published rows the contextual decode reads.
+
+It is a native ctx verb over a sealed `CastTarget`, beside `resolve`, and the
+rule each target admits is a method of that sealed trait. It is not a method
+on `ErasedActorRef` over a public `ProveCtx` trait: any crate could implement
+such a trait and hand the mint rows of its own choosing, so the cast reads
+the registry's published rows through the ctx and nothing else (R-0005).
+`Subscriber<K>` is today's only `CastTarget`; the protocol and `AnyKind`
+arms land with their consumers, as does a guest cast.
 
 | `T` | Succeeds when the published rows show |
 |---|---|
@@ -650,7 +663,7 @@ kinds fixed at compile time (`HttpRequestStreamOpen`, `HttpRequestChunk`,
 
 | Group | Sites | Becomes |
 |---|---|---|
-| Subscriber fan-out | `fanout` in `crates/aether-window/src/runtime/desktop/mod.rs`, `synthetic/mod.rs`, and to the one consumer in `crates/aether-tcp/src/session/runtime.rs`; `send_envelope_tracked_to` in `crates/aether-lifecycle/src/subscribers.rs` and the synthetic window's `InjectWindowEvent` | each subscriber held as `ProtocolRef<Subscriber<K>>`, cast at the subscribe request (§8); a table keyed by a runtime `KindId` dispatches the id to the typed table of the published kind it names and refuses any other |
+| Subscriber fan-out | `fanout` to the one consumer in `crates/aether-tcp/src/session/runtime.rs`; the window (`crates/aether-window/src/runtime/subscribers.rs`) and the lifecycle capability (`crates/aether-lifecycle/src/subscribers.rs`) already fan out through typed references | each subscriber held as `ProtocolRef<Subscriber<K>>` (§8): an explicit request carries a `ProtocolPath<Subscriber<K>>`, which decodes against the exact silent row and is resolved at receipt, and a reflexive request's sender is cast at receipt, which also admits a manual row, so a manual-row subscriber subscribes through the reflexive form; a runtime `KindId`, from a reflexive request or the synthetic window's `InjectWindowEvent`, dispatches to the typed table of the published kind it names and any other is refused |
 | Relays | `forward_to` in `crates/aether-window/src/runtime/manager.rs` and `crates/aether-component/src/component/runtime/mod.rs` | a typed target for the forwarded kind (§9) |
 | Ingress bridges | above | the private stand-in |
 | A witness that takes every kind | the render harness observer (`observe`, `crates/aether-render/src/runtime/mod.rs`) | `ProtocolRef<AnyKind>`, cast at `wire`; the observer's route publishes a fallback |
@@ -764,7 +777,10 @@ silent or manual.
   the `subscribe` bound, for a request from a non-actor or an erased sender,
   and fan-out sends through those references. A subscriber named explicitly
   in a request, rather than by its sender, is a typed path (§3), never an
-  `ErasedActorPath`.
+  `ErasedActorPath`: a `ProtocolPath<Subscriber<K>>`, whose decode requires
+  the exact silent row `(K, None)`. A manual row covers no protocol (§6), so
+  a manual-row subscriber, such as a widget root's manual `on_tick`,
+  subscribes through the reflexive form, whose cast admits it.
 
 ### 9. Relays
 
@@ -950,7 +966,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | `ProtocolPath<P>` decoded from mail, config, or saved state | a contextual decode (`decode_with`) against the engine: refused unless the rows the live route at the path published cover `P`; a decode without a context is refused at decode |
 | `ProtocolPath<P>` held or received, narrowed or decoded | `ctx.resolve`: `NotLive` refuses, else a `ProtocolRef<P>`; no row comparison |
 | `ErasedActorPath` received untyped (config, MCP, RPC) | a field its receiver sends to is never one: it is a typed path (§3); at the MCP/RPC boundary, delivered through the stand-in (§4); otherwise `resolve_path` to an `ErasedActorRef` for naming, identity, or monitoring |
-| `ErasedActorRef` (`ctx.sender()`, `resolve_path`, `resolve_live`) | no send; reply, monitor, key, or `cast::<T>()` first |
+| `ErasedActorRef` (`ctx.sender()`, `resolve_path`, `resolve_live`) | no send; reply, monitor, key, or `ctx.cast::<T>(reference)` first |
 | by path over the wire (MCP, RPC `Call`, `NamedMail` bundles) | exempt from §1; the boundary proves the path (ADR-0230 §3) and delivers through its stand-in |
 
 ### C. Sender
