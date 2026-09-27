@@ -7,7 +7,7 @@ Builds on [ADR-0238](0238-engine-blob-store.md) (`Blob`, a value of
 immutable bytes shared in process and written as bytes everywhere else),
 [ADR-0230](0230-proven-actor-references.md) (actor paths name actors;
 references prove them), and [ADR-0231](0231-protocol-typed-references-and-reply-checks.md)
-(published contract rows, declared links, rows only grow). Supersedes the
+(published contract rows, rows only grow). Supersedes the
 hosting and naming half of [ADR-0099](0099-actor-identity-and-addressing.md)
 and the decisions listed under [Superseded and amended](#superseded-and-amended).
 
@@ -29,11 +29,11 @@ that split:
 
 | Mechanism | Workaround the split forced |
 |---|---|
-| `ActorPath<R>` / `link_child` (#6853) | writes `parent/C::NAMESPACE:key`, which never names a guest child |
+| `ActorPath<R>` child paths (#6853) | written as `parent/C::NAMESPACE:key`, which never names a guest child |
 | Route actor type (#6850, stopped) | a `Native` / `Guest` / `Untyped` tag on every route, to recover the identity a guest's name does not carry |
 | `Embedded` / `EmbeddedMany` resolvers | fold `aether.embedded:<NS>` beneath the runtime parent so a bare-type send reaches a component; replica 0 keeps the bare load name for this alone (`aether-kinds/src/lib.rs:607-617`) |
 | Namespace ownership | claimed per Rust `TypeId` (`prepare.rs:116`), so every guest shares `WasmTrampoline` and no load can choose its namespace (ADR-0240 D4) |
-| Checks on code | the contract check runs in the trampoline and again in the registry; the dependency check runs at load, boot, replace, and the module-wide inline check; #6851 adds the link check at load and replace |
+| Checks on code | the contract check runs in the trampoline and again in the registry; the dependency check runs at load, boot, replace, and the module-wide inline check |
 | Replace | may change the hosted type (`export: Some(other)`), targets one instance, and compiles outside `ModuleCache` |
 | Drop | vacates the slot but keeps the route `Live` and the name taken forever (`SubnameInUse`) |
 | Short paths | `aether.component/:NAME` works only because `WasmTrampoline` is the sole instanced child of the host; guest lineage never feeds the address index |
@@ -50,7 +50,7 @@ the engine holds, not a child that a host actor spawns.
 ### 1. A guest is a native actor whose handlers run wasm
 
 A wasm actor behaves exactly as a native actor does. Its name, spawn,
-placement, `depends`, `links`, contract rows, lifecycle hooks, replace, and
+placement, `depends`, contract rows, lifecycle hooks, replace, and
 refusals are the native ones. The only difference is where a handler body
 runs: a guest's host forwards each dispatch into a wasm instance instead of
 calling Rust. Nothing outside the host can observe which one runs.
@@ -69,7 +69,7 @@ needs from it once, and then lets the bytes go:
 pub struct Module {
     hash: BlobHash,                   // identity: the hash of the wasm bytes it was made from
     compiled: Arc<wasmtime::Module>,  // compiled once per hash per engine
-    manifest: Arc<ModuleManifest>,    // parsed once: exports, rows, depends, links, lineage, boot, kinds
+    manifest: Arc<ModuleManifest>,    // parsed once: exports, rows, depends, lineage, boot, kinds
     assets: Arc<[(AssetName, Blob)]>, // each `aether.asset.*` section, checked in as its own blob
 }
 ```
@@ -124,7 +124,6 @@ one admission step when a module is published:
 | Contract growth | for a republish, each NS's rows only grow and a fallback is kept (`first_contract_break`) | trampoline `check_contract` and the registry `RepublishContract` guard (ADR-0231 §5) |
 | Same type | a namespace's implementation is replaced only by the same namespace | `ReplaceComponent.export: Some(other)`; #6850's replace refusal |
 | Dependencies | every `depends(R)` names a published `R` | the load, boot, replace, and module-wide inline checks |
-| Links | every `links(R)` record's rows are covered by `R`'s published rows | #6851's load and replace checks |
 | Kinds | the module's kinds register in the same owner batch | `RegistryBatch::register_kinds` at load |
 
 Admission is static: it reads manifests, never a live instance. It refuses
@@ -152,8 +151,8 @@ its derive.
 - Several instances of one component are `NS:key1`, `NS:key2`. MCP and
   package `replicas` become N spawns of one namespace; the `base-i` load
   names retire.
-- `link_child::<P, C>` (#6853) is correct for every child, because every
-  child is `parent/C::NAMESPACE:key`.
+- A typed child path, `ActorPath::<C>::child(&parent, &key)`, is correct for
+  every child, because every child is `parent/C::NAMESPACE:key`.
 - The short-path index (ADR-0166) reads the publication table, so a hole
   covers guest children once their parent's module is published.
   `aether.component/:NAME` has no successor; a guest is addressed by its own
@@ -243,7 +242,7 @@ links its code; the kind crates of ADR-0066 are where these markers live.
 | 0166 lineage and short paths | Accepted | §5, §6: the component-host worked example retires; the index reads publications |
 | 0165 | Accepted | line 206: guests are hosted by the forwarding host, not `WasmTrampoline` |
 | 0224 / 0226 / 0240 | Proposed | a bundle's root is a published namespace; 0226 D9 adoption keys on a live `NS:key`, not `SubnameInUse`; 0240 D4, D5, D8 edited in place |
-| 0230 / 0231 | Proposed | edited in place: no route actor-type tag; the link check and replace growth move to admission |
+| 0230 / 0231 | Proposed | edited in place: no route actor-type tag; replace growth moves to admission |
 | 0238 blob store | Proposed | no decision changes: code arrives and leaves as a `Blob`; a module's assets are blobs |
 
 ## Consequences
@@ -251,7 +250,7 @@ links its code; the kind crates of ADR-0066 are where these markers live.
 ### Positive
 
 - One actor model. A path names what an actor is on either runtime, and
-  every typed verb (`link`, `link_child`, `resolve`, `depends`, `send`) works
+  every typed path and verb (`ActorPath`, `resolve`, `depends`, `send`) works
   the same for both.
 - One admission check replaces checks spread over the component host, the
   trampoline, and the registry, and it runs once per publish instead of per
@@ -284,8 +283,7 @@ Each step lands on its own:
 1. **Module cache**: `Module` built from a `Blob`, compiled and parsed once
    per hash, assets checked in as blobs; `ModuleCache` and every section re-parse move onto it.
 2. **Publication table and admission**: native publications at boot; module
-   publish with the §4 checks; #6851's link record becomes the manifest's
-   links section.
+   publish with the §4 checks.
 3. **Forwarding host and native naming for guests**: guests spawn as
    `NS` / `NS:key` / `parent/NS:key`; `Embedded` retires.
 4. **Republish replaces replace**; despawn and unpublish replace drop.
@@ -295,9 +293,8 @@ Each step lands on its own:
    `WasmTrampoline`'s namespace, `aether.embedded`, `categorise_mailbox_name`'s
    component category, and the component short path.
 
-In-flight work: #6852 and #6837 land unchanged; #6851 lands its record and
-moves its check into step 2; #6850 is withdrawn; #6829 is re-planned on
-step 3.
+In-flight work: #6852 has landed; #6837, #6857, and #6858 are independent of
+this ADR; #6850 and #6851 are withdrawn; #6829 is re-planned on step 3.
 
 ## Open questions
 
