@@ -132,8 +132,9 @@ mailbox id. A native capability that holds a proven reference records
 `actor = %ctx.actor_path(reference)`, which answers the actor's canonical path
 (`aether.component/aether.embedded:camera`) even after the actor has departed;
 a typed `ActorRef<R>` passes `reference.erase()`. An id that belongs to no
-route has no path, so it prints as its tagged `mbx-…` text, which
-`aether.inventory`'s `Resolve` can look up. Guest code names the members of its
+route has no path, so it prints as its tagged `mbx-…` text, and
+`aether.inventory`'s `Resolve` answers `None` for it: `Resolve` reads a
+route's name. Guest code names the members of its
 own inline cluster by their subnames, which it already holds.
 
 ## How to extend or reuse it

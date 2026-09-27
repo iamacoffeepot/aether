@@ -169,9 +169,8 @@ After a hub restart reuses an `engine_id`, a boot-loaded component at the same
 lineage can collide with an earlier capability entry. Use live probes or
 reset/reconnect `aether-mcp` when an exact clean-epoch description is required.
 
-A `mbx-…` argument is refused by `describe_component` and `replace_component`,
-with a pointer to the lineage address. Keep the lineage address as the durable
-observation handle for the life of the engine.
+An address is a lineage or a short path. Keep the lineage address as the
+durable observation handle for the life of the engine.
 
 The live kind vocabulary is also substrate-owned. Loading registers the wasm's
 kind descriptors into the same registry served by `aether.inventory`.
@@ -190,9 +189,8 @@ engine reachability matters.
 Use `replace_component` with the current engine id, the component's `address`,
 and a previously uploaded selector. The address is the same spelling every other
 tool takes: a canonical ADR-0099 lineage or an unambiguous ADR-0166 short path
-(`aether.component/:NAME`); a tagged `mbx-…` id is refused. Prefer a content
-hash for the
-selector so the replacement is unambiguous.
+(`aether.component/:NAME`). Prefer a content hash for the selector so the
+replacement is unambiguous.
 
 On success the trampoline mailbox stays stable and the returned capabilities
 describe the replacement actor type. An omitted export reuses the actor type the

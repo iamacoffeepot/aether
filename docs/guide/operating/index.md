@@ -114,7 +114,8 @@ same lineage address. Only terminating the substrate tombstones that slot.
   later hub can mint the same text for a different engine.
 - Treat `rpc_port` as observation, not identity. Never route a tool call by
   substituting a port for an `engine_id`.
-- Hand tagged ids such as `mbx-…` and `knd-…` back verbatim.
+- Hand tagged ids such as `knd-…` and `hdl-…` back verbatim. Address an actor
+  by its path; a mailbox id in output is for reading.
 - Address a loaded component by the full lineage `name` returned by the load,
   normally `aether.component/aether.embedded:NAME`.
 - Prefer a content hash when a rollout or rollback must select exact bytes.

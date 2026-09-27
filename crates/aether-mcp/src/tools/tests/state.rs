@@ -2,7 +2,6 @@
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
-use std::collections::VecDeque;
 
 /// One-field `{ button: String }` struct schema — the widened shape a
 /// kind gains in place (issue 2672); the narrow shape is the empty
@@ -215,35 +214,28 @@ async fn engine_path_resolver_returns_the_engine_canonical_path() {
     assert_eq!(request.address, supplied);
 }
 
-/// Issue 6570: a tagged `mbx-…` address is sent to the engine's
-/// `aether.inventory.resolve`, and the canonical path it answers is what the
-/// client then sends by. Fails if the tagged text is used as the path
-/// itself: it parses as a one-segment `ErasedActorPath`, so nothing else would
-/// catch it.
+/// A tagged `mbx-…` address is text like any other: it reaches the engine as
+/// exactly one `aether.inventory.resolve_address` carrying the text verbatim,
+/// and never as an `aether.inventory.resolve` reverse lookup. Fails if the
+/// client still intercepts the prefix instead of leaving the one check to
+/// the engine.
 #[tokio::test]
-async fn a_tagged_id_resolves_to_the_engine_canonical_path() {
+async fn a_tagged_id_address_goes_to_the_engine_as_text() {
     let tagged = tagged_id::encode(with_tag(Tag::Mailbox, 0x4057)).expect("a mailbox-tagged id encodes");
-    let canonical = "aether.test/aether.test.child:tagged";
     let engine = EngineId(Uuid::from_u128(0x4057));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let (_chassis, port) = boot_hub_with_address_route(AddressRouteLoopbackParams {
-        engine,
-        canonical_path: String::new(),
-        names: HashMap::from([(tagged.clone(), canonical.to_owned())]),
-        calls: Arc::clone(&calls),
-        replies: Arc::new(Mutex::new(VecDeque::new())),
-    });
+    let (_chassis, port) =
+        boot_hub_with_address_route_loopback(engine, "aether.test/aether.test.child:tagged", Arc::clone(&calls));
     let mcp = connect_mcp(port);
 
-    let resolved = mcp.resolve_engine_path(engine, &tagged).await.expect("the engine names the tagged id");
-    assert_eq!(resolved, ErasedActorPath::new(canonical).expect("fixture is an actor path"));
+    mcp.resolve_engine_path(engine, &tagged).await.expect("the loopback answers any textual address");
 
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
-    assert_eq!(calls.len(), 1, "one resolve RPC names the id");
-    assert_eq!(calls[0].kind, Resolve::ID);
-    let request = Resolve::decode_from_bytes(&calls[0].payload).expect("resolve request decodes");
+    assert_eq!(calls.len(), 1, "one resolver RPC carries the address");
+    assert_eq!(calls[0].kind, ResolveAddress::ID, "the address is never reverse-looked-up through Resolve");
+    let request = ResolveAddress::decode_from_bytes(&calls[0].payload).expect("resolver request decodes");
     drop(calls);
-    assert_eq!(request.ids, vec![tagged]);
+    assert_eq!(request.address, tagged);
 }
 
 /// The shared engine resolver canonicalizes an explicit `engine_id`, so an

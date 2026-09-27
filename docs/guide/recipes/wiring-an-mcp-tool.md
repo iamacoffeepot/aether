@@ -62,7 +62,7 @@ pub struct ActorCostArgs {
     #[serde(default)]
     pub engine_id: Option<String>,
     /// Address of the actor to query (e.g. `"aether.audio"`,
-    /// `"aether.component/aether.embedded:camera"`, or a tagged `mbx-…` id).
+    /// `"aether.component/aether.embedded:camera"`, or an ADR-0166 short path).
     pub address: String,
     /// Optional kind-id filter (tagged `knd-XXXX-XXXX-XXXX` or raw
     /// decimal). Omitted dumps every handler row the actor declares.
@@ -89,8 +89,7 @@ What the conventions buy you here:
   Every engine-taking tool resolves it the same way, so an auto-resolved answer
   says which engine produced it.
 - **The recipient argument is `address`.** One spelling across the whole tool
-  surface, accepting a canonical lineage, an ADR-0166 short path, or a tagged
-  `mbx-…` id.
+  surface, accepting a canonical lineage or an ADR-0166 short path.
 - **`Option` + `#[serde(default)]` for every optional field**, with the doc
   comment stating what omitting it means. The agent reads the schema; spell the
   default behavior out rather than leaving it implicit.
@@ -159,17 +158,15 @@ The skeleton every tool follows:
 
 1. **Resolve the engine and parse the string ids up front** —
    `mcp.resolve_engine(args.engine_id.as_deref())` returns the wire id plus the
-   string to echo, and `parse_kind_id` / `parse_mailbox_id` return
-   `McpError::invalid_params` on a malformed id, so a bad id is rejected before
-   any mail moves.
+   string to echo, and `parse_kind_id` returns `McpError::invalid_params` on a
+   malformed id, so a bad id is rejected before any mail moves.
 2. **Build the typed request kind, then resolve the recipient before you
    address it.** An address the agent typed is often a rendered lineage —
    `aether.component/aether.embedded:web`, the form `load_component`
-   hands back — or an ADR-0166 short path, or a tagged `mbx-…` id.
-   `mcp.resolve_engine_path(engine, address)` takes whichever form arrives and
-   asks the selected engine for the canonical `ErasedActorPath`: text goes to the
-   inventory cap's `resolve_address`, and a tagged id to its `resolve`, which
-   names the id's registered path. Pass that path to `engine_envelope_to(engine,
+   hands back — or an ADR-0166 short path.
+   `mcp.resolve_engine_path(engine, address)` takes either form and asks the
+   selected engine for the canonical `ErasedActorPath` through the inventory
+   cap's `resolve_address`. Pass that path to `engine_envelope_to(engine,
    path, &request)`, which stamps `K::ID` and encodes the payload;
    `mcp.session.call_one(...)` relays it as a wire `Call` naming the path, the
    engine resolves it on arrival, and the call awaits the correlated reply. A
@@ -201,8 +198,9 @@ mis-serves the agent.
   registry `selector`, not a path.
 - **Ids cross the wire as tagged strings, parsed at the edges.** In via
   `parse_*` (rejecting a malformed id as `invalid_params`), out via
-  `tagged_id::encode`. The agent only ever sees `mbx-…` / `knd-…` / `hdl-…` and
-  hands them back verbatim ([ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)).
+  `tagged_id::encode`. The agent sees `mbx-…` / `knd-…` / `hdl-…` and hands
+  kind and handle ids back verbatim; a mailbox id is output for reading, and an
+  actor is addressed by its path ([ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)).
 - **Explicit nulls, not absent fields.** An optional argument is `Option<T>` with
   `#[serde(default)]`; an optional reply field is `Option<T>` that serializes to
   `null`. The agent reads a present `null` as a decision; a missing key reads as a

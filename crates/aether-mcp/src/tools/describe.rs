@@ -92,10 +92,10 @@ pub(super) fn describe_transforms() -> Result<String, McpError> {
 pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -> Result<String, McpError> {
     let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
     // Every address is resolved by the selected engine, which returns the
-    // canonical path used as the cache key; a tagged `mbx-…` id is refused.
-    // The component host still receives the operator's original spelling so
-    // its own engine-atomic name handling remains the forwarding contract.
-    let canonical = mcp.resolve_component_path(engine, &args.address, "describe_component").await?;
+    // canonical path used as the cache key. The component host still
+    // receives the operator's original spelling so its own engine-atomic
+    // name handling remains the forwarding contract.
+    let canonical = mcp.resolve_engine_path(engine, &args.address).await.map_err(internal)?;
 
     // Cache fast-path: populated by load_component / replace_component or
     // a prior describe.

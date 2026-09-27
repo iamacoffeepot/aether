@@ -110,9 +110,7 @@ canonical lineage (`aether.component/aether.embedded:camera`) or an ADR-0166
 short path (`aether.component/:camera`). The selected engine resolves either
 spelling to the same canonical path before dispatch, and the `Call` names its
 recipient by that `ErasedActorPath`; aether-mcp does not hash operator strings or keep
-an alias cache. A tagged `mbx-…` id, on tools that accept it, is sent to the
-selected engine's `aether.inventory.resolve` for its canonical path, and the
-mail goes by that path. By default each item *blocks* until its
+an alias cache. By default each item *blocks* until its
 chain settles. The batch-level `replies` projection defaults to `terminal`: it
 keeps the last arrival-ordered reply plus any reply recognized as an error from
 its decoded `Err` shape or exact kind-name error suffix. Use `none` to suppress
@@ -240,8 +238,7 @@ shows its schema. `config_path` does not contain pre-encoded wire bytes.
 replica; docs on that block also follow the summary-vs-`full` projection.
 `replace_component` names its target by lineage address (canonical or short),
 sends it to the engine as the `aether.component.replace` target, and prints the
-address back; a tagged `mbx-…` address is refused with a pointer to the lineage
-address.
+address back.
 
 `list_binaries` and registry `list_components` return
 `{entries, total_matched, shown, truncated, notice}` in stable newest-first
@@ -270,9 +267,8 @@ dispatched atomically around the readback — `mails` before (the state that sho
 appear) and `after_mails` after (cleanup). How that frame is produced — world-space
 geometry, the camera matrix, the depth convention — is covered in
 [Rendering & camera](systems/rendering.md).
-`actor_logs` and `actor_cost` resolve the actor address, text or a tagged
-`mbx-…` id, inside the selected engine to its canonical path and query by that
-path. `actor_logs` pulls
+`actor_logs` and `actor_cost` resolve the actor address inside the selected
+engine to its canonical path and query by that path. `actor_logs` pulls
 recent entries from that actor's per-actor log ring; pass `contains` to filter message bodies by a case-sensitive substring
 substrate-side, before entries cross the wire. Thread the reply's `next_since`
 back as `since` to page forward without re-reading. Only in-actor `tracing::*` events reach a ring — see
@@ -292,8 +288,10 @@ one handler.
   never carries the wasm buffer itself. Host paths are not sandboxed task paths;
   see [Host paths and artifacts](operating/host-paths-and-artifacts.md).
 - **Wire ids are tagged strings.** Mailbox, kind, and handle ids come back as
-  `mbx-…`, `knd-…`, `hdl-…` — hand them back verbatim, don't reformat or parse them.
-  See [The type system](foundations/type-system.md).
+  `mbx-…`, `knd-…`, `hdl-…`. Hand kind and handle ids back verbatim, don't
+  reformat or parse them. A mailbox id is output for reading, never an
+  address: name an actor by its path. See
+  [The type system](foundations/type-system.md).
 - **The engine resolves textual actor addresses.** Canonical paths and
   short paths such as `root/:name` are checked against the selected
   engine's declared topology and live registry. Do not derive a mailbox id
@@ -317,8 +315,7 @@ one handler.
   it by the lineage returned by `load_component`, an unambiguous short path,
   or a retained boot-spec lineage. The selected engine first returns the live
   canonical path; aether-mcp then checks capabilities cached under that engine
-  and path and asks the component host only on a cache miss. A tagged `mbx-`
-  address is refused with a pointer to the lineage address. Registry
+  and path and asks the component host only on a cache miss. Registry
   `list_components` rows are stored artifacts, not lineage names.
 
 ## Where to read more

@@ -1,6 +1,6 @@
 use super::bytes::resolve_bytes_params;
 use super::components::{ResolvedComponent, StagedBootManifest};
-use super::ids::{mail_node_to_json, node_reversible_ids, parse_engine_id, parse_mailbox_id};
+use super::ids::{mail_node_to_json, node_reversible_ids, parse_engine_id};
 use super::{
     AWAIT_TIMEOUT_DEFAULT_MILLIS, AsyncMutex, ComponentSelector, ComponentSpec, EngineId, EngineMailSpec, EngineNames,
     FLEET_CAP, INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson,
@@ -123,24 +123,11 @@ impl Mcp {
     /// Resolve one operator-supplied address to the canonical `ErasedActorPath`
     /// the selected engine answers for it, which is what a `Call` then names.
     ///
-    /// A tagged `mbx-…` id is sent to the engine's `aether.inventory.resolve`,
-    /// which returns the registered path for that id; an id the engine names
-    /// no path for is an error naming the id and the engine. The tagged text
-    /// is never sent as a path itself: it parses as a one-segment `ErasedActorPath`,
-    /// so nothing downstream would catch it. Every textual address makes one
-    /// uncached `aether.inventory.resolve_address` RPC, so ADR-0166 expansion
-    /// and liveness stay owned by the engine registry.
+    /// Every address goes through one uncached
+    /// `aether.inventory.resolve_address` RPC, so ADR-0166 expansion and
+    /// liveness stay owned by the engine registry. A tagged `mbx-…` id is
+    /// text like any other: the engine refuses it as an unknown actor root.
     pub(super) async fn resolve_engine_path(&self, engine: EngineId, address: &str) -> anyhow::Result<ErasedActorPath> {
-        if address.starts_with("mbx-") {
-            parse_mailbox_id(address).map_err(|error| anyhow::anyhow!("{}", error.message))?;
-            return self
-                .engine_paths(engine, vec![address.to_owned()])
-                .await?
-                .pop()
-                .flatten()
-                .ok_or_else(|| anyhow::anyhow!("engine {} names no actor path for {address}", engine.0));
-        }
-
         let canonical = self.resolve_textual_address(engine, address).await?;
         ErasedActorPath::new(&canonical).map_err(|error| {
             anyhow::anyhow!("engine answered {address:?} with a non-path lineage {canonical:?}: {error}")
@@ -150,7 +137,9 @@ impl Mcp {
     /// Ask the selected engine for the canonical path of each tagged id, in
     /// one `aether.inventory.resolve`. The answer is in request order; an id
     /// the engine names nothing for, or names with text that is not a path,
-    /// is `None`.
+    /// is `None`. Its one caller is the traced walk (`finish_traced_dispatch`
+    /// in the mail tools module), which resolves the ids the engine's trace
+    /// rings reported, never an operator address.
     pub(super) async fn engine_paths(
         &self,
         engine: EngineId,
@@ -179,29 +168,6 @@ impl Mcp {
         }
     }
 
-    /// Resolve a textual component address in the selected engine to the
-    /// canonical lineage the component cache is keyed by. A tagged `mbx-…` id
-    /// is refused: `tool` keys components by lineage, and a position names no
-    /// lineage the operator can reuse.
-    pub(super) async fn resolve_component_path(
-        &self,
-        engine: EngineId,
-        address: &str,
-        tool: &str,
-    ) -> Result<ErasedActorPath, McpError> {
-        if address.starts_with("mbx-") {
-            return Err(McpError::invalid_params(
-                format!(
-                    "{tool} addresses a component by its lineage, not a tagged mailbox id ({address}): pass the \
-                     canonical address load_component returned (aether.component/aether.embedded:NAME) or its \
-                     short path (aether.component/:NAME)"
-                ),
-                None,
-            ));
-        }
-        self.resolve_engine_path(engine, address).await.map_err(super::render::internal)
-    }
-
     /// Observe one component and its kind vocabulary for compatibility work.
     /// This intentionally never consults the best-effort component/kind caches:
     /// failed live observation must remain inconclusive rather than producing a
@@ -211,9 +177,6 @@ impl Mcp {
         engine: EngineId,
         address: &str,
     ) -> anyhow::Result<StrictComponentSnapshot> {
-        if address.starts_with("mbx-") {
-            anyhow::bail!("compare_component_contracts requires a textual component address, not a tagged mailbox id");
-        }
         let canonical_lineage = self.resolve_textual_address(engine, address).await?;
         let reply = self
             .session

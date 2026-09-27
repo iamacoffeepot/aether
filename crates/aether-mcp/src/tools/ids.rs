@@ -13,14 +13,6 @@ pub(super) fn parse_engine_id(s: &str) -> Result<EngineId, McpError> {
         .map_err(|e| McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None))
 }
 
-/// Parse a tagged mailbox-id string (`mbx-…`, ADR-0064) into a
-/// `MailboxId`.
-pub(super) fn parse_mailbox_id(s: &str) -> Result<MailboxId, McpError> {
-    tagged_id::decode_with_tag(s, Tag::Mailbox)
-        .map(MailboxId)
-        .map_err(|e| McpError::invalid_params(format!("mailbox_id: {e}"), None))
-}
-
 /// Parse a `capture_frame` `window`: the window's actor path as
 /// `aether.window.list` reports it, or its short form.
 ///
