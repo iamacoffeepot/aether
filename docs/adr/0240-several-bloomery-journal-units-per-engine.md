@@ -385,9 +385,11 @@ chassis, and external tooling build the same name from the same parts.
   Some(UnitBundle::name(&unit, &digest)), export: Some(BUNDLE_NAMESPACE) }`
   sent to `aether.component`. `LoadComponent` is unchanged.
 - The driver keeps each load reply's stamped sender in
-  `roots: HashMap<Digest, ErasedActorRef>`, as it does on `main`, and sends
-  to roots only through those proofs. The name is for placement and for
-  readers; routing never parses it.
+  `roots: HashMap<Digest, ErasedActorRef>`, as it does on `main`. The erased
+  form stays only as the key-side proof: the driver types each root before it
+  sends to it, by the cast ([ADR-0231](0231-protocol-typed-references-and-reply-checks.md)
+  §4), because no send goes through an erased reference (#6895). The name is
+  for placement and for readers; routing never parses it.
 
 This amends ADR-0226:
 

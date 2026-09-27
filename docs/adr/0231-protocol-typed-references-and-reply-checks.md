@@ -150,7 +150,7 @@ The rules:
 | 1 | Static reply check on typed sends | not built |
 | 2 | `#[protocol]` and `CoveredBy` | built: `Row`, `RowReply`, `RowSet`, `CoversRows`, `Protocol`, `CoveredBy` (`crates/aether-actor/src/model/protocol.rs`) and `#[protocol]` (`crates/aether-actor-derive/src/protocol.rs`), over the per-handler `Contract<K>` rows and per-actor `Contracts::CONTRACTS`; `includes` and protocol-to-protocol coverage are not built |
 | 3 | `ProtocolRef<P>`, `ProtocolPath<P>`, contextual decode, `resolve` | `ProtocolPath<P>` and `ActorPath::narrow` built (`crates/aether-actor/src/path/`), with the path text as their only wire form. `ProtocolPath<P>`'s decode proves coverage against the live route at its path through `Kind::decode_with` and `DecodeCtx` (`crates/aether-data/src/wire/context.rs`, over the registry's `PublishedRoutes` answer in `crates/aether-substrate/src/mail/registry/mailbox/resolve.rs`), and it has no `Deserialize`; `ActorPath<R>`'s decode checks its leaf namespace, and the type constructors `ActorPath::<R>::instance` and `ActorPath::<C>::child` replace the declared links. `ProtocolRef<P>` built (`crates/aether-actor/src/reference/protocol_ref.rs`), a `Target` for each kind `P` lists through a row index the compiler infers (`RowAt`, `crates/aether-actor/src/model/protocol.rs`), with the native liveness-only `resolve` over a `ProtocolPath<P>` (`Registry::resolve_protocol`, `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). Not built: the guest's published-routes answer (ADR-0241), so a guest refuses a `ProtocolPath<P>` at decode; reference narrowing |
-| 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the erased send verb's removal and the cast are not |
+| 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the erased send verb's removal (#6895) and the cast are not |
 | 5 | Replace preserves contracts | built, the fallback rule included: `crates/aether-data/src/contract.rs`, `crates/aether-substrate/src/mail/registry/contract.rs`, `crates/aether-component/src/trampoline/runtime/contract.rs` |
 | 6 | Manual rows | built: `Undeclared` row, `ReplyContract::Manual` on both manifests |
 | 7 | Ctx typed by its actor | built, every ctx on both transports |
@@ -511,11 +511,16 @@ is kept per route. A replace never makes a resolve fail, because §5 refuses
 a replace that drops or changes a row; a resolve fails on liveness only.
 Every refusal names the path, never a position.
 
-An untyped `ErasedActorPath` (a config field, an MCP tool argument, an RPC
-`Call`) stays untyped: `resolve_path` proves it to an `ErasedActorRef`,
+A path in a kind or config that its receiver will send to is a typed path,
+an `ActorPath<R>` or a `ProtocolPath<P>` by what the holder needs, and it
+arrives typed; it is never an `ErasedActorPath`. An `ErasedActorPath` at the
+untyped boundary, an MCP tool argument or an RPC `Call` recipient, is
+delivered through the boundary's stand-in (§4). An `ErasedActorPath` that
+only names an actor is proven, where a proof is needed, by `resolve_path`,
 after filling a short path's holes from the generated root and child
-declarations, a static inventory rather than the live tree, and the cast
-(§4) types it.
+declarations, a static inventory rather than the live tree; the
+`ErasedActorRef` it returns serves identity and monitoring, and sends
+nothing.
 
 Each arm lands with its consumer. The native arm over a `ProtocolPath<P>`
 serves the Bloomery workspace's receipt of a request's storage source, and
@@ -590,9 +595,8 @@ impl ErasedActorRef {
 ```
 
 The cast is the fallback for references that arrive untyped: the envelope
-sender (`ctx.sender()`), a path proven through `resolve_path`, including one
-an MCP tool or an RPC `Call` put in a payload, and a native `resolve_live`
-answer. It runs once, at receipt, in the handler that received the reference,
+sender (`ctx.sender()`) and a native `resolve_live` answer. It runs once,
+at receipt, in the handler that received the reference,
 and reads the same published rows the contextual decode reads.
 
 | `T` | Succeeds when the published rows show |
@@ -758,7 +762,9 @@ silent or manual.
 - The publisher holds each subscriber as `ProtocolRef<Subscriber<K>>`, cast
   from the subscribe request's sender (§4). The cast is the runtime twin of
   the `subscribe` bound, for a request from a non-actor or an erased sender,
-  and fan-out sends through those references.
+  and fan-out sends through those references. A subscriber named explicitly
+  in a request, rather than by its sender, is a typed path (§3), never an
+  `ErasedActorPath`.
 
 ### 9. Relays
 
@@ -920,7 +926,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | `ActorPath<R>` held or received | `ctx.resolve`: `NotLive` refuses, else an `ActorRef<R>`, which sends every kind `R` handles, manual rows included; no row comparison |
 | `ProtocolPath<P>` decoded from mail, config, or saved state | a contextual decode (`decode_with`) against the engine: refused unless the rows the live route at the path published cover `P`; a decode without a context is refused at decode |
 | `ProtocolPath<P>` held or received, narrowed or decoded | `ctx.resolve`: `NotLive` refuses, else a `ProtocolRef<P>`; no row comparison |
-| `ErasedActorPath` received untyped (config, MCP, RPC) | `resolve_path` to an `ErasedActorRef`, then `cast::<T>()` |
+| `ErasedActorPath` received untyped (config, MCP, RPC) | a field its receiver sends to is never one: it is a typed path (§3); at the MCP/RPC boundary, delivered through the stand-in (§4); otherwise `resolve_path` to an `ErasedActorRef` for naming, identity, or monitoring |
 | `ErasedActorRef` (`ctx.sender()`, `resolve_path`, `resolve_live`) | no send; reply, monitor, key, or `cast::<T>()` first |
 | by path over the wire (MCP, RPC `Call`, `NamedMail` bundles) | exempt from §1; the boundary proves the path (ADR-0230 §3) and delivers through its stand-in |
 

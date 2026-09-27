@@ -144,6 +144,18 @@ must send only kinds the announcing actor handles. The editor relies on that
 by construction: `EditorRegion` handles each of the nine input kinds the shell
 forwards.
 
+That stored erased sender is the shape on `main`, and it is the erased send
+#6895 removes. Under the design rules
+([R-0039](../contributing/design-rules.md#r-0039),
+[R-0040](../contributing/design-rules.md#r-0040)), the receiver instead holds
+a `ProtocolRef<P>` of the protocol the dependent speaks, which it gets one of
+two ways: by casting the envelope sender at receipt
+([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
+§4), or by proving a typed path (an `ActorPath<R>` or a `ProtocolPath<P>`)
+that the announcement carries. Neither route exists for a guest on `main`:
+the cast is not built, and a guest's typed-path door lands with ADR-0241 and
+#6829.
+
 A reply to the announcing mail itself needs no stored reference. The handler
 replies, as any handler does.
 
@@ -176,14 +188,22 @@ Two shapes reach the loader, and both reuse doors above:
   `ctx.resolve_path` and keeps the `ErasedActorRef`.
 
 Either way the component holds an `ErasedActorRef`, so its sends to the loader
-are not kind-checked.
+are not kind-checked. Both are shapes on `main` that #6895 retires. A
+reference kept from `ctx.sender()` becomes a `ProtocolRef<P>` cast at
+receipt, as in the reverse direction above. The loader's config field becomes
+a typed path, an `ActorPath<R>` or a `ProtocolPath<P>` by what the component
+needs, and the component stores the typed proof `ctx.resolve` returns for it.
 
 ## Stored state holds proofs
 
-Keep `ActorRef<R>` or `ErasedActorRef` in actor state, never a `MailboxId`.
-The editor shell holds no address of its own: `Routing` stores the proof each
-region handed over and gives that same value back as a route's target, so the
-shell has nothing to resolve.
+Keep proofs in actor state, never a `MailboxId`. For an actor the state will
+send to, the proof is typed: an `ActorRef<R>` or a `ProtocolRef<P>`
+([R-0039](../contributing/design-rules.md#r-0039)). An `ErasedActorRef` is
+kept only where nothing is sent through it: comparing identity, keying a
+table, naming a path, or monitoring. The editor shell holds no address of its
+own: `Routing` stores the proof each region handed over and gives that same
+value back as a route's target, so the shell has nothing to resolve. On `main`
+that proof is the erased sender, which #6895 retires as described above.
 
 A position that arrives in a payload is proven once, at receipt. A native
 actor does that with the ctx verb `resolve_live`
@@ -195,7 +215,11 @@ guest has the same verb, `WasmCtx::resolve_path`: an `ErasedActorPath` from its
 config or a payload is proven once, at `wire` or at receipt, and kept as an
 `ErasedActorRef` (the environment bootstrap script in
 `crates/aether-bloomery-bootstrap` proves the journal owner and the bundle driver
-this way). A guest has no door for a payload-borne position and will not get
+this way). An `ErasedActorRef` proven this way and then sent through is an
+erased send #6895 removes; a path the holder will send to arrives as a typed
+path instead ([R-0040](../contributing/design-rules.md#r-0040)), and the
+bootstrap's move to `resolve` over an `ActorPath<R>` is #6829. A guest has
+no door for a payload-borne position and will not get
 one, because no guest API takes a `MailboxId`; a guest is told where to send by
 an `ErasedActorPath` or by the envelope sender.
 
@@ -220,6 +244,12 @@ announces itself.
 - A payload field carrying the sender's position, re-resolved at every send.
   The kind names what the sender stands for (`RegionAttach` names the region);
   the envelope carries who sent it.
+- A stored `ErasedActorRef` that is later sent through. Store a typed proof,
+  an `ActorRef<R>` or a `ProtocolRef<P>`
+  ([R-0039](../contributing/design-rules.md#r-0039)).
+- An `ErasedActorPath` field its receiver will send to. Carry an
+  `ActorPath<R>` or a `ProtocolPath<P>`
+  ([R-0040](../contributing/design-rules.md#r-0040)).
 
 ## Why capabilities never hit this
 
