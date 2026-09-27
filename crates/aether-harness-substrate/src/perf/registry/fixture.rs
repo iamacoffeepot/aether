@@ -116,6 +116,10 @@ impl aether_actor::Lifecycle<Self> for CommitChild {
         Ok(Self)
     }
 }
+impl aether_actor::Declared for CommitChild {
+    type Depends = ();
+    type Spawns = ();
+}
 impl NativeActor for CommitChild {
     type State = Self;
 }
@@ -184,6 +188,10 @@ impl aether_actor::Lifecycle<Self> for CommitParent {
     fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { live: Vec::new(), staged: 0, succeeded: 0, failed: 0 })
     }
+}
+impl aether_actor::Declared for CommitParent {
+    type Depends = ();
+    type Spawns = ();
 }
 impl NativeActor for CommitParent {
     type State = Self;

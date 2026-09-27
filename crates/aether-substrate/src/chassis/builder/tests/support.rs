@@ -62,6 +62,10 @@ macro_rules! close_observed_state {
             }
         }
 
+        impl aether_actor::Declared for $type {
+            type Depends = ();
+            type Spawns = ();
+        }
         impl NativeActor for $type {
             type State = Self;
         }
@@ -140,6 +144,10 @@ macro_rules! unit_shutdown_actor {
             }
         }
 
+        impl aether_actor::Declared for $type {
+            type Depends = ();
+            type Spawns = ();
+        }
         impl NativeActor for $type {
             type State = Self;
         }
@@ -170,6 +178,10 @@ impl aether_actor::Lifecycle<Self> for StubLog {
     }
 }
 
+impl aether_actor::Declared for StubLog {
+    type Depends = ();
+    type Spawns = ();
+}
 impl NativeActor for StubLog {
     type State = Self;
 }

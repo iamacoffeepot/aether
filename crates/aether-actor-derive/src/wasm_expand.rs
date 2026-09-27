@@ -346,7 +346,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         fallback.as_ref(),
         component_doc.as_ref(),
         config_kind_ty,
-        &opts.depends,
         opts.handler_set.as_ref().map(|set| (set, &**self_ty)),
     );
 
@@ -431,8 +430,9 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         &opts.depends,
         &opts.spawns,
     );
-    // ADR-0230: each `DependsOn<R>` impl pairs with the
-    // `InputsRecord::Dependency` record `manifest.rs` emits for the same `R`.
+    // ADR-0230: each `DependsOn<R>` impl names `R`'s position in the
+    // `Declared::Depends` list, from which `export!` writes the
+    // `InputsRecord::Dependency` records the host checks before `init`.
     let depends_impls = opts.depends.iter().enumerate().map(|(index, target)| {
         let index = position(index);
         quote! {
@@ -442,13 +442,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         }
     });
     // ADR-0114 (issue 6583): one `Spawns<C>` impl per declared inline child,
-    // which the typed spawn verbs require, and the matching bound on the
-    // hidden `__aether_listed_children::<M>`, which every `export!` that lists
-    // this actor calls with its own module type, so that `export!` must list
-    // every declared child. Emitted together here and nowhere else, from the
-    // same `spawns(..)` list the `Declared` impl carries.
-    let spawns = &opts.spawns;
-    let spawns_impls = spawns.iter().enumerate().map(|(index, child)| {
+    // which the typed spawn verbs require, each naming `C`'s position in the
+    // `Declared::Spawns` list. Every `export!` that lists this actor requires
+    // that list to be listed in its own module (`ListedIn`), so that `export!`
+    // must list every declared child.
+    let spawns_impls = opts.spawns.iter().enumerate().map(|(index, child)| {
         let index = position(index);
         quote! {
             impl #impl_generics ::aether_actor::Spawns<#child> for #self_ty #where_clause {
@@ -456,18 +454,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
         }
     });
-    let listed_children = quote! {
-        impl #impl_generics #self_ty #where_clause {
-            #[doc(hidden)]
-            #[allow(private_bounds)] // aether-suppression-request: a pub actor may declare a private child, and the check's bound names it; the fn is hidden and never called
-            pub fn __aether_listed_children<__AetherM: ::aether_actor::wasm::ListedModule>()
-            where
-                #(#spawns: ::aether_actor::Rebuildable<__AetherM>,)*
-            {
-            }
-        }
-    };
-
     // ADR-0075: emit one `impl HandlesKind<K> for Self {}` per handler
     // kind. Auto-generated marker impls gate `SendableTo<R>` on the flat
     // typed verbs (`ctx.send::<R>(&k)`) and `Target<K>` on `ActorRef<R>`
@@ -704,7 +690,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #declared
         #(#depends_impls)*
         #(#spawns_impls)*
-        #listed_children
 
         #(#handles_kind_impls)*
         #(#reply_marker_impls)*

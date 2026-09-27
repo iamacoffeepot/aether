@@ -65,6 +65,10 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
         }
     }
 
+    impl aether_actor::Declared for PreSeedProbe {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for PreSeedProbe {
         type State = Self;
     }
@@ -172,6 +176,10 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
         }
     }
 
+    impl aether_actor::Declared for SpawnCostProbe {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for SpawnCostProbe {
         type State = Self;
     }

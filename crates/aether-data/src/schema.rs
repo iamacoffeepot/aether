@@ -879,6 +879,13 @@ pub enum ActorLineageRecord {
 /// Custom-section name for anonymous actor placement facts (ADR-0166).
 pub const ACTOR_LINEAGE_SECTION: &str = "aether.actor.lineage";
 
+/// Custom-section name of the content-addressed marker (ADR-0241 §3). Its
+/// payload is one version byte the host does not interpret: the section's
+/// presence is the whole signal. Each namespace a module carrying it exports
+/// publishes as `<NAMESPACE>.<module hash>`, the module's BLAKE3 hash in 64
+/// lowercase hex, so every build is its own publication.
+pub const CONTENT_ADDRESSED_SECTION: &str = "aether.content_addressed";
+
 /// Version byte prefixing every [`ActorLineageRecord`] in the
 /// `aether.actor.lineage` custom section. v0x02 adds the
 /// [`ActorLineageRecord::ModuleChild`] variant; older readers must reject the

@@ -83,6 +83,25 @@ derived from the item it describes, never by requiring an `unsafe impl`.
 - **Settled:** #6843 (`#[protocol]` coverage is sealed traits with no
   `unsafe`); #6842 (contract rows exist only where a handler does, closed
   without `unsafe`).
+- **Superseded by:** [R-0036](#r-0036)
+
+### R-0036: Close a logic hole by construction where code outside its crate can reach it {#r-0036}
+
+A logic invariant that code outside the owning crate could break is closed by
+a sealed trait, a private constructor, or a type derived from the item it
+describes, never by requiring an `unsafe impl`. Code outside the crate
+includes a caller of a public item, an implementor of a trait implemented
+across crates, and a macro that expands in the author's crate. Plumbing that
+only the crate's own code reaches is held by that crate's code and review: a
+wrapper, seal, or authority token around it isolates nothing, and none is
+added. `unsafe` stays reserved for code whose misuse is undefined behaviour.
+
+- **Why:** a seal is worth its cost only where it stops code the crate does
+  not own; inside the crate it guards nothing and adds a layer to read.
+- **Settled:** #6843 (`#[protocol]` coverage is sealed traits with no
+  `unsafe`); #6842 (contract rows exist only where a handler does, closed
+  without `unsafe`); #6877 (a seal on an effect internal to the substrate's
+  registry, closed not planned).
 
 ### R-0003: Answer contract questions with types, not runtime machinery {#r-0003}
 
@@ -218,6 +237,39 @@ on its side.
   check at decode is not the invariant.
 - **Settled:** ADR-0230 §1 (proven references have no codec; a path crosses
   and is re-proven); #6272 (ADR-0230's references made unexportable).
+- **Superseded by:** [R-0037](#r-0037)
+
+### R-0037: Give every kind an explicit reach and never serialize a raw mailbox id {#r-0037}
+
+A kind is placed on two axes. The first is whether its decode needs a decode
+context: a kind is contextual or non-contextual. The second is its reach,
+how far its bytes may travel, one of three levels, narrowest first:
+
+- **Actor:** bytes the same actor encodes and decodes, such as a stored
+  request context.
+- **Engine:** mail between actors in one engine session. Verified references
+  may travel here.
+- **Wire:** another process, saved state, or the wire. Basic types and some
+  special types travel here.
+
+A kind's reach is the narrowest reach among its fields, derived through
+marker traits its fields implement, with no per-kind flag or attribute. A raw
+`MailboxId` has no reach: it crosses at no level. A description, an actor
+path, crosses where a reference cannot, and the receiver proves it again on
+its side.
+
+This rule records a direction that #6894 implements; it is not built on
+`main`. Until #6894 lands, no kind carries a reach, so proven references keep
+no codec and a description is what crosses.
+
+- **Why:** whether a proof survives the trip depends on where the bytes go,
+  so the kind's fields state how far they can go rather than every proof
+  being barred from every trip.
+- **Settled:** ADR-0230 §1 (proven references have no codec; a path crosses
+  and is re-proven); #6272 (ADR-0230's references made unexportable); #6894
+  (the decode-context axis, the three reach levels, and a kind's reach the
+  narrowest of its fields: the direction is decided and the mechanism is
+  pending there).
 
 ### R-0013: Model a closed set as a Rust enum {#r-0013}
 
@@ -246,6 +298,26 @@ An exception is narrow, named, and justified in the decision that makes it.
 - **Settled:** ADR-0230 §1 (no serialized type carries a `MailboxId`; existing
   positions are listed as debt); #6854 (`Address` and `AddressForm` deleted);
   #6846 (the remaining serialized positions).
+- **Superseded by:** [R-0038](#r-0038)
+
+### R-0038: Keep MailboxId out of every door outside the substrate {#r-0038}
+
+No public, actor, or guest API takes or returns a `MailboxId`, and it never
+serializes ([R-0037](#r-0037)). A test of actor behaviour names actors by
+reference or path. Inside `aether-substrate`'s plumbing and its own tests, a
+`MailboxId` is the registry's key and belongs there, with no wrapper or seal
+around it ([R-0036](#r-0036)). The rule is applied by its intent: the question
+is whether code outside the substrate could use the id as a door, not whether
+the type appears in a signature.
+
+- **Why:** a position is a hash of names, so outside the engine nothing can
+  tell a registered position from a computed one; inside the registry it is
+  the key the proofs are checked against.
+- **Settled:** ADR-0230 §1 (no serialized type carries a `MailboxId`; a
+  `MailboxId` is a registry key inside the engine); #6854 (`Address` and
+  `AddressForm` deleted); #6846 (the remaining serialized positions); #6877
+  (the substrate's own registry plumbing takes no seal); #6895 (sends go
+  through typed proofs).
 
 ### R-0015: Hold proofs in stored state, never positions {#r-0015}
 
@@ -261,6 +333,29 @@ never unwrapped as the argument of the send, monitor, or close it exists for.
   `MailboxId` is only a registry key inside the engine); #6312 (the window
   proves a subscriber at receipt and stores references); #6685 (reply-table
   and alias-route constructors sealed; tests send through proofs).
+- **Superseded by:** [R-0039](#r-0039)
+
+### R-0039: Hold a typed proof for every actor that stored state sends to {#r-0039}
+
+Actor state and capability tables that outlive a handler hold an
+`ActorRef<R>` or a `ProtocolRef<P>` for every actor they will send to, and
+tables are keyed by the proof. They never hold an `ErasedActorRef` for that
+purpose, because erased actor sending is being removed (#6895). An
+`ErasedActorRef` is kept only where nothing is sent through it: comparing
+identity, keying a table, naming its canonical path, monitoring, and
+ADR-0231 §4's cast, which types a reference that arrived untyped. A position
+that arrives in a payload is proven once, at receipt, in the handler that
+received it, and the proof is stored. A proof's id is never unwrapped as the
+argument of the send, monitor, or close it exists for.
+
+- **Why:** a stored typed proof carries both the check that its target was
+  live and the kinds it may be sent; an erased one carries only the first.
+- **Settled:** ADR-0230 §2 (a reference may be held in actor memory; a
+  `MailboxId` is only a registry key inside the engine); ADR-0231 §4 (an
+  erased reference has no send verb); #6312 (the window proves a subscriber
+  at receipt and stores references); #6685 (reply-table and alias-route
+  constructors sealed; tests send through proofs); #6895 (no send goes
+  through an erased reference).
 
 ## Actors, names, and addressing
 
@@ -276,6 +371,45 @@ enum with position forms, beside them.
 - **Settled:** ADR-0230 §2 (`ErasedActorPath` is the only actor description
   with a wire format); #6847 (actors are described only by actor paths);
   #6854 (`Address` deleted).
+- **Superseded by:** [R-0040](#r-0040)
+
+### R-0040: Carry a path its receiver will send to as a typed path {#r-0040}
+
+Any description of an actor that leaves a handler (a mail field, config, a
+journal record, the wire) is an `ErasedActorPath`, an `ActorPath<R>`, or a
+`ProtocolPath<P>`, with no second description type beside them. The paths
+mirror the references: `ErasedActorPath`, `ActorPath<R>`, and
+`ProtocolPath<P>` pair with `ErasedActorRef`, `ActorRef<R>`, and
+`ProtocolRef<P>`.
+
+A path carried in a kind or config that its receiver will later send to, such
+as a subscriber, a handler, a callback, or a source, is a typed path, never an
+`ErasedActorPath`. It is an `ActorPath<R>` when the holder needs one concrete
+actor type, and a `ProtocolPath<P>` when the holder needs only a protocol,
+such as a subscriber the publisher cannot name. The receiver proves it once,
+on receipt: a `ProtocolPath<P>` by its contextual decode, an `ActorPath<R>` by
+its decode's leaf-namespace check. `ctx.resolve` then makes either one live,
+and the proof it returns is what the receiver stores ([R-0039](#r-0039)).
+
+An `ErasedActorPath` names, renders, compares, or monitors an actor. It also
+names a recipient at the untyped boundary, such as an MCP tool argument or an
+RPC `Call` recipient, which the boundary delivers through its private
+stand-in (ADR-0231 §4).
+
+The typed doors are not all built on `main`. The native `resolve` takes only a
+`ProtocolPath<P>` (`crates/aether-substrate/src/actor/native/ctx/address.rs`),
+and its `ActorPath<R>` arm lands with its first native caller (ADR-0230 §3).
+A guest has no typed-path door yet: its `ProtocolPath<P>` decode lands with
+ADR-0241, and its `resolve` over an `ActorPath<R>` lands with #6829.
+
+- **Why:** an erased path proves to an erased reference, which has no send
+  verb, so a path meant for sending carries the type its sends need.
+- **Settled:** ADR-0230 §2 (the paths mirror the references); ADR-0231 §3
+  rule 3 (a link is typed by what its holder needs); #6847 (actors are
+  described only by actor paths, and protocol paths link them); #6854
+  (`Address` deleted); #6863 (contextual kinds decode only with a context);
+  #6895 (no send goes through an erased reference); #6896 (a path field its
+  receiver sends to is a typed path).
 
 ### R-0017: Keep one addressing grammar {#r-0017}
 
@@ -518,4 +652,10 @@ option that sends mail at boot is not added.
 Each ruling made after a rule lands is appended here, oldest first, and no
 line is edited or removed:
 `- <YYYY-MM-DD> · #NNNN or ADR-NNNN §N · <question in a few words> → <answer> · follows [R-NNNN](#r-nnnn)`.
-No rulings are logged yet.
+
+- 2026-09-26 · #6842 · where the declaration-list boundary stops → at hand-written declaration impls; a type no `#[actor]` builds is follow-up #6870 · follows [R-0002](#r-0002)
+- 2026-09-26 · #6842 (ADR-0231 §10) · visibility of a handled kind, dependency, or inline child → declared `pub`, and it may live in a private module · follows [R-0005](#r-0005)
+- 2026-09-26 · #6865 · when the dependency row joins admission → with step 3 (#6866) · follows [R-0009](#r-0009)
+- 2026-09-26 · #6865 · the `Publish` mail door and the module cache's move → deferred to step 5 · follows [R-0009](#r-0009)
+- 2026-09-26 · #6865 · what a native publication records → its namespace only · follows [R-0026](#r-0026)
+- 2026-09-26 · #6865 · how Bloomery bundles publish → each under its own per-digest namespace (the module hash) · follows [R-0021](#r-0021)

@@ -70,6 +70,10 @@ fn ctx_monitor_fires_notice_at_target_close() {
             Ok(Self { notice_count: params.0, sender_matched: params.1, monitored: None, handle: Mutex::new(None) })
         }
     }
+    impl aether_actor::Declared for Watcher {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for Watcher {
         type State = Self;
     }
@@ -214,6 +218,10 @@ fn watcher_close_prunes_targets_forward_index() {
             Ok(Self)
         }
     }
+    impl aether_actor::Declared for Target {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for Target {
         type State = Self;
     }
@@ -251,6 +259,10 @@ fn watcher_close_prunes_targets_forward_index() {
         fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_, Self>) {
             state.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
         }
+    }
+    impl aether_actor::Declared for Watcher {
+        type Depends = ();
+        type Spawns = ();
     }
     impl NativeActor for Watcher {
         type State = Self;

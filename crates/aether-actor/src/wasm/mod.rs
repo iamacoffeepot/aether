@@ -119,7 +119,10 @@ impl From<String> for ActorInitError {
 /// lives on the shared [`crate::Lifecycle`] capability; `WasmActor`
 /// composes it alongside the identity [`crate::Addressable`] supertrait and
 /// adds only the FFI-specific hot-swap surface (`type State`,
-/// `on_dehydrate`, `on_rehydrate`, ADR-0101). `InitError` is pinned to
+/// `on_dehydrate`, `on_rehydrate`, ADR-0101), and requires the actor's
+/// declaration lists ([`Declared`], ADR-0231 §10), whose dependency list
+/// `export!` writes into the inputs section the host checks before `init`.
+/// `InitError` is pinned to
 /// [`ActorInitError`] so a guest surfaces its own message in
 /// `LoadResult::Err { error }`; `Self::Config` and the ADR-0156
 /// `Self::Params` are both tightened to [`Kind`](aether_data::Kind) +
@@ -148,6 +151,7 @@ pub trait WasmDispatch<S> {
 #[allow(clippy::module_name_repetitions)]
 pub trait WasmActor:
     crate::Addressable
+    + Declared
     + for<'a> crate::Lifecycle<
         Self::State,
         InitError = ActorInitError,
@@ -265,11 +269,12 @@ pub trait ListedModule {
 /// listed types are the set the rehydrate shim rebuilds.
 ///
 /// Every `export!` also proves it lists each inline child a listed type
-/// declares in `#[actor(spawns(..))]` ([`Spawns`]): it calls each listed
-/// type's hidden `__aether_listed_children::<__AetherModule>()`, whose where
-/// clause requires `Rebuildable<__AetherModule>` for every declared child. So
-/// the types a module can spawn inline and the types a replace rebuilds are
-/// one set by construction.
+/// declares in `#[actor(spawns(..))]` ([`Spawns`]): it requires each listed
+/// type's [`Declared::Spawns`] list to be [`ListedIn<__AetherModule>`],
+/// which holds only when every child on the list is
+/// `Rebuildable<__AetherModule>`. So the types a module can spawn inline and
+/// the types a replace rebuilds are one set by construction, whether the
+/// spawner's [`Declared`] impl was emitted or hand-written.
 ///
 /// A hand-written impl does not compile (ADR-0231 §10): each impl names the
 /// type's position in the module's [`ListedModule::Listed`] as
@@ -298,13 +303,12 @@ pub trait Rebuildable<M: ListedModule> {
 /// that forwards to either verb repeats the bound.
 ///
 /// A hand-written impl does not compile (ADR-0231 §10): the one
-/// [`Declared`] impl `#[actor]` emits lists the declared
-/// children as [`Declared::Spawns`], from the same
-/// parsed `spawns(..)` list as the bound the `export!` coverage check reads,
-/// and each impl names `C`'s position there as [`Index`](Spawns::Index). An
-/// impl for an undeclared child either repeats an emitted impl (`E0119`) or
-/// names a position that holds another child or none (`E0277`), so no spawn
-/// skips the check.
+/// [`Declared`] impl lists the declared children as [`Declared::Spawns`],
+/// the list the `export!` coverage check reads ([`ListedIn`]), and each impl
+/// names `C`'s position there as [`Index`](Spawns::Index). An impl for an
+/// undeclared child either repeats an emitted impl (`E0119`) or names a
+/// position that holds another child or none (`E0277`), so no spawn skips
+/// the check.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` spawns `{C}` inline but does not declare it",
     label = "`{C}` is not in `{Self}`'s `spawns(..)`",
@@ -316,6 +320,31 @@ pub trait Spawns<C>: Declared {
     #[doc(hidden)]
     type Index: ListIndex<<Self as Declared>::Spawns, C>;
 }
+
+mod listed_sealed {
+    /// Private supertrait sealing [`super::ListedIn`] to its two structural
+    /// impls.
+    pub trait ListedSealed<M> {}
+}
+
+/// `L: ListedIn<M>` holds when every type on the declared inline-child list
+/// `L` is listed by the module `M`'s `export!` ([`Rebuildable<M>`]): `()`
+/// always, and `(C, Tail)` when `C: Rebuildable<M>` and `Tail: ListedIn<M>`.
+///
+/// Every `export!` requires each listed type's [`Declared::Spawns`] to be
+/// `ListedIn` its own module (ADR-0114 §5, ADR-0231 §10). Sealed, so the
+/// invoking crate cannot implement it for a list of its own unlisted
+/// children beside the structural impls.
+#[doc(hidden)]
+pub trait ListedIn<M: ListedModule>: listed_sealed::ListedSealed<M> {}
+
+impl<M: ListedModule> listed_sealed::ListedSealed<M> for () {}
+
+impl<M: ListedModule> ListedIn<M> for () {}
+
+impl<M: ListedModule, C: Rebuildable<M>, Tail: ListedIn<M>> listed_sealed::ListedSealed<M> for (C, Tail) {}
+
+impl<M: ListedModule, C: Rebuildable<M>, Tail: ListedIn<M>> ListedIn<M> for (C, Tail) {}
 
 /// Macro-generated placement facts for one exported Wasm actor.
 ///
@@ -474,7 +503,9 @@ pub mod guest_alloc;
 ///   instance.
 /// - `#[link_section = "aether.kinds.inputs"]` static that pins the
 ///   actor's handler manifest into the cdylib's wasm custom section
-///   the substrate reads at `load_component`.
+///   the substrate reads at `load_component`, followed by one `Dependency`
+///   record per entry of the actor's [`Declared::Depends`] list, which the
+///   host checks before `init` (ADR-0230 §3).
 /// - `#[link_section = "aether.namespace"]` static that pins the
 ///   actor's `Addressable::NAMESPACE` bytes (issue 525 Phase 1B).
 ///
@@ -1022,11 +1053,33 @@ macro_rules! __export_internal {
         // root crate (where `export!()` is invoked) and never in
         // transitive rlib pulls of a `#[actor]`-using crate, which
         // would otherwise stack duplicate Component records and fail
-        // the substrate's manifest reader.
+        // the substrate's manifest reader. The type's `Dependency` records
+        // follow its manifest, written from its `Declared::Depends` list
+        // (ADR-0231 §10), so the host checks exactly the declared list.
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        const __AETHER_SINGLE_INPUTS_LEN: usize = <$component>::__AETHER_INPUTS_MANIFEST_LEN
+            + $crate::__macro_internals::dependency_records_len(
+                <<$component as $crate::Declared>::Depends as $crate::DependencyList>::FIRST,
+            );
+
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(link_section = "aether.kinds.inputs")]
-        static __AETHER_INPUTS_SECTION: [u8; <$component>::__AETHER_INPUTS_MANIFEST_LEN] =
-            <$component>::__AETHER_INPUTS_MANIFEST;
+        static __AETHER_INPUTS_SECTION: [u8; __AETHER_SINGLE_INPUTS_LEN] = {
+            let mut out = [0u8; __AETHER_SINGLE_INPUTS_LEN];
+            const MANIFEST_LEN: usize = <$component>::__AETHER_INPUTS_MANIFEST_LEN;
+            const MANIFEST_BYTES: [u8; MANIFEST_LEN] = <$component>::__AETHER_INPUTS_MANIFEST;
+            let mut i = 0;
+            while i < MANIFEST_LEN {
+                out[i] = MANIFEST_BYTES[i];
+                i += 1;
+            }
+            let _ = $crate::__macro_internals::write_dependency_records(
+                <<$component as $crate::Declared>::Depends as $crate::DependencyList>::FIRST,
+                &mut out,
+                MANIFEST_LEN,
+            );
+            out
+        };
 
         // Issue 6590: the private inline children's groups, in their own
         // section beside the boundary-free single-actor inputs.
@@ -1474,11 +1527,17 @@ macro_rules! __export_internal {
         $crate::__export_internal!(@listed_index [$crate::Here] $($listed),*);
 
         // Never called: a closure body is type-checked, so each call's where
-        // clause requires every child the listed type declares in
-        // `spawns(..)` to be listed here as well, and an unused const needs
-        // no suppression.
+        // clause requires every child on the listed type's `Declared::Spawns`
+        // list to be listed here as well, and an unused const needs no
+        // suppression.
         const _: fn() = || {
-            $( <$listed>::__aether_listed_children::<__AetherModule>(); )*
+            fn __aether_lists_children<T: $crate::Declared>()
+            where
+                <T as $crate::Declared>::Spawns: $crate::wasm::ListedIn<__AetherModule>,
+            {
+            }
+
+            $( __aether_lists_children::<$listed>(); )*
         };
     };
 
@@ -1528,6 +1587,9 @@ macro_rules! __export_internal {
                 <$listed as $crate::Addressable>::NAMESPACE,
             )
             + <$listed>::__AETHER_INPUTS_MANIFEST_LEN
+            + $crate::__macro_internals::dependency_records_len(
+                <<$listed as $crate::Declared>::Depends as $crate::DependencyList>::FIRST,
+            )
         )+;
 
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
@@ -1569,6 +1631,13 @@ macro_rules! __export_internal {
                         pos += 1;
                         j += 1;
                     }
+                    // The type's `Dependency` records, from its
+                    // `Declared::Depends` list (ADR-0231 §10).
+                    pos = $crate::__macro_internals::write_dependency_records(
+                        <<$listed as $crate::Declared>::Depends as $crate::DependencyList>::FIRST,
+                        &mut out,
+                        pos,
+                    );
                 }
             )+
             let _ = pos;

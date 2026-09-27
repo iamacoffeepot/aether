@@ -65,6 +65,10 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
             Ok(Self)
         }
     }
+    impl aether_actor::Declared for Host {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for Host {
         type State = Self;
     }
@@ -113,6 +117,10 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { monitored: params.0, watched: params.1, notices: params.2, handles: Mutex::new(Vec::new()) })
         }
+    }
+    impl aether_actor::Declared for Watcher {
+        type Depends = ();
+        type Spawns = ();
     }
     impl NativeActor for Watcher {
         type State = Self;
@@ -287,6 +295,10 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
             Ok(Self { vacated: params })
         }
     }
+    impl aether_actor::Declared for Host {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for Host {
         type State = Self;
     }
@@ -336,6 +348,10 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { monitored: params.0, watched: params.1, notices: params.2, handles: Mutex::new(Vec::new()) })
         }
+    }
+    impl aether_actor::Declared for Watcher {
+        type Depends = ();
+        type Spawns = ();
     }
     impl NativeActor for Watcher {
         type State = Self;

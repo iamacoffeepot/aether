@@ -740,6 +740,10 @@ mod tests {
         }
     }
 
+    impl crate::Declared for TypedConfigChild {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl WasmActor for TypedConfigChild {
         type State = Self;
         type Persist = ();

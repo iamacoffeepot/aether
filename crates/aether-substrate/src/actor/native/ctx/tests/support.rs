@@ -47,6 +47,10 @@ impl Dispatch<Self> for StubActor {
     }
 }
 
+impl aether_actor::Declared for StubActor {
+    type Depends = ();
+    type Spawns = ();
+}
 impl NativeActor for StubActor {
     type State = Self;
 }
