@@ -7,7 +7,8 @@
 //! - the compiled `wasmtime::Module`;
 //! - the [`ModuleManifest`], every custom section the host reads (kinds,
 //!   exported and private actor groups, lineage, boot, namespace, the
-//!   no-default marker and the asset catalog), parsed once;
+//!   no-default and content-addressed markers, and the asset catalog), parsed
+//!   once;
 //! - each `aether.asset.*` section, checked into the blob store as its own
 //!   [`Blob`].
 //!
@@ -16,14 +17,21 @@
 //! caller drops its value. Every later load, boot, sibling spawn and replace
 //! of the same bytes reads the entry instead of the bytes.
 //!
+//! A module publishes the namespaces [`Module::published_groups`] names
+//! (ADR-0241 §3): its exported groups' declared namespaces, each qualified by
+//! the module's hash when the module is content-addressed.
+//!
 //! A `Module` has no public constructor; [`ModuleCache::check_in`] is the only
 //! way to get one. A clone shares its entry, and the entry lives while any
 //! clone does.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
 use aether_data::{Blob, BlobHash};
+
+use crate::actor::wasm::kind_manifest::ActorInputs;
 
 mod cache;
 mod manifest;
@@ -32,6 +40,10 @@ mod tests;
 
 pub use cache::ModuleCache;
 pub use manifest::ModuleManifest;
+
+/// The length of a module hash in lowercase hex, as a content-addressed
+/// module's published namespaces carry it.
+const HASH_HEX_BYTES: usize = 2 * size_of::<BlobHash>();
 
 /// A compiled, parsed module: one content hash's cache entry. Cheap to clone;
 /// every clone shares one entry. See the module docs.
@@ -67,6 +79,21 @@ impl Module {
     #[must_use]
     pub fn manifest(&self) -> &ModuleManifest {
         &self.entry.manifest
+    }
+
+    /// Every exported group under the namespace it publishes (ADR-0241 §3),
+    /// in declaration order: its declared namespace, or, for a
+    /// content-addressed module, `{namespace}.{hash}` with the module's hash
+    /// in 64 lowercase hex, so every build is its own publication. Inside the
+    /// module each type keeps its declared namespace: the export selector and
+    /// the type tag read [`ModuleManifest::exported_groups`].
+    pub fn published_groups(&self) -> impl Iterator<Item = (Cow<'_, str>, &ActorInputs)> {
+        let hash = self.manifest().content_addressed().then(|| blake3::Hash::from_bytes(*self.hash().as_bytes()));
+        self.manifest().exported_groups().map(move |(namespace, group)| {
+            let published =
+                hash.map_or(Cow::Borrowed(namespace), |hash| Cow::Owned(format!("{namespace}.{}", hash.to_hex())));
+            (published, group)
+        })
     }
 
     /// Each `aether.asset.*` section by asset name, in section order, as its

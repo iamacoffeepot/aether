@@ -435,7 +435,7 @@ impl Registry {
                 }
                 #[cfg(feature = "wasm")]
                 RegistryEffect::PublishModule(module) => {
-                    let surface = ModuleSurface::of(module.manifest());
+                    let surface = ModuleSurface::of(&module);
                     let table = staged_publications.as_ref().unwrap_or(&inner.publications);
                     let admitted = admit(
                         module.hash(),

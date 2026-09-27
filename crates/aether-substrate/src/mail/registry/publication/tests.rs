@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use aether_data::name_inventory::{NameEntry, ParamKind, TemplateEntry, inventory};
 use aether_data::{
-    Blob, BlobHash, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, MAILBOX_DOMAIN, ReplyContract, THREAD_DOMAIN,
-    wire,
+    Blob, BlobHash, CONTENT_ADDRESSED_SECTION, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, MAILBOX_DOMAIN,
+    ReplyContract, THREAD_DOMAIN, wire,
 };
 use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 use wasmtime::Engine;
@@ -247,6 +247,15 @@ impl Fixture {
     /// A module exporting each `(namespace, rows)` group, every row replying
     /// nothing.
     fn module(&self, groups: &[(&str, &[KindId])]) -> Module {
+        self.build(groups, "")
+    }
+
+    /// [`Self::module`] carrying the content-addressed marker.
+    fn content_addressed_module(&self, groups: &[(&str, &[KindId])]) -> Module {
+        self.build(groups, &format!(r#"(@custom "{CONTENT_ADDRESSED_SECTION}" "\01")"#))
+    }
+
+    fn build(&self, groups: &[(&str, &[KindId])], marker: &str) -> Module {
         let mut section = Vec::new();
         for (namespace, rows) in groups {
             let boundary = InputsRecord::ActorBoundary { namespace: (*namespace).to_owned().into() };
@@ -265,7 +274,7 @@ impl Fixture {
             write!(escaped, "\\{byte:02x}").expect("write to a String");
             escaped
         });
-        let wat = format!(r#"(module (@custom "{INPUTS_SECTION}" "{escaped}") (func (export "noop")))"#);
+        let wat = format!(r#"(module (@custom "{INPUTS_SECTION}" "{escaped}") {marker} (func (export "noop")))"#);
         let code = Blob::from(wat::parse_str(wat).expect("parse the fixture WAT"));
         self.modules.check_in(&self.blobs, &code).expect("check the module in")
     }
@@ -309,4 +318,28 @@ fn a_failed_batch_publishes_nothing() {
 
     assert!(matches!(fixture.apply(batch), Err(RegistryEffectError::Drop(_))));
     fixture.publish(&fixture.module(&[("test.x", &[KEPT])])).expect("test.x has no predecessor to narrow");
+}
+
+// Catches: a content-addressed export published under its declared namespace,
+// which refuses a unit's second bundle as a republish that drops a row (the
+// PR #6885 CI failure), or qualified by the wrong or a truncated hash.
+#[test]
+fn every_content_addressed_build_is_its_own_publication() {
+    const BUNDLE: &str = "test.publication.bundle";
+    let fixture = Fixture::new();
+    let first = fixture.content_addressed_module(&[(BUNDLE, &[KEPT, ADDED])]);
+    let second = fixture.content_addressed_module(&[(BUNDLE, &[KEPT])]);
+
+    let hex = first.hash().as_bytes().iter().fold(String::new(), |mut hex, byte| {
+        write!(hex, "{byte:02x}").expect("write to a String");
+        hex
+    });
+    let surface = ModuleSurface::of(&first);
+    let published: Vec<_> = surface.exported_namespaces().map(|namespace| &**namespace).collect();
+    assert_eq!(published, [format!("{BUNDLE}.{hex}").as_str()]);
+
+    fixture.publish(&first).expect("the first build publishes");
+    fixture.publish(&first).expect("a second unit on the same build shares its publication");
+    fixture.publish(&second).expect("a build that drops a row is not the first build's successor");
+    fixture.publish(&fixture.module(&[(BUNDLE, &[KEPT])])).expect("no build publishes the bare declared namespace");
 }

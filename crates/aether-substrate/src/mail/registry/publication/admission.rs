@@ -17,6 +17,10 @@
 //! 4. **Same hash.** A candidate whose hash already holds every one of its
 //!    namespaces changes nothing (§9).
 //!
+//! A content-addressed module's exported namespaces carry its hash
+//! ([`Module::published_groups`]), so the same bytes meet rule 4 and no other
+//! build is ever its predecessor.
+//!
 //! The module's kinds register in the same owner batch, after this check.
 
 use std::fmt;
@@ -25,7 +29,7 @@ use std::sync::Arc;
 use aether_data::BlobHash;
 
 use crate::actor::wasm::kind_manifest::ActorInputs;
-use crate::actor::wasm::module::ModuleManifest;
+use crate::actor::wasm::module::Module;
 use crate::mail::KindId;
 use crate::mail::registry::{ContractBreak, RouteContract};
 
@@ -37,9 +41,11 @@ pub struct ModuleSurface {
 }
 
 impl ModuleSurface {
-    /// The surface a module's manifest declares.
-    pub fn of(manifest: &ModuleManifest) -> Self {
-        Self::new(contracts(manifest.exported_groups()), contracts(manifest.private_groups()))
+    /// The surface `module` declares: each namespace it publishes
+    /// ([`Module::published_groups`]) and each private child type under its
+    /// declared namespace.
+    pub fn of(module: &Module) -> Self {
+        Self::new(contracts(module.published_groups()), contracts(module.manifest().private_groups()))
     }
 
     pub(super) fn new(exported: Vec<(Arc<str>, RouteContract)>, private: Vec<(Arc<str>, RouteContract)>) -> Self {
@@ -61,9 +67,11 @@ impl ModuleSurface {
     }
 }
 
-fn contracts<'a>(groups: impl Iterator<Item = (&'a str, &'a ActorInputs)>) -> Vec<(Arc<str>, RouteContract)> {
+fn contracts<'a>(groups: impl Iterator<Item = (impl AsRef<str>, &'a ActorInputs)>) -> Vec<(Arc<str>, RouteContract)> {
     groups
-        .map(|(namespace, group)| (Arc::from(namespace), RouteContract::from_capabilities(&group.capabilities)))
+        .map(|(namespace, group)| {
+            (Arc::from(namespace.as_ref()), RouteContract::from_capabilities(&group.capabilities))
+        })
         .collect()
 }
 

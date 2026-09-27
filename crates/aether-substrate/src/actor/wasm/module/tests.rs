@@ -1,6 +1,7 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 
-use aether_data::Blob;
+use aether_data::{Blob, CONTENT_ADDRESSED_SECTION, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, wire};
 use wasmtime::Engine;
 
 use super::{Module, ModuleCache};
@@ -110,4 +111,36 @@ fn an_owned_code_value_answers_the_module_its_checked_in_twin_does() {
 
     assert!(same_entry(&checked_in, &owned), "equal bytes answer one module whatever their backing");
     assert_eq!(checked_in.hash(), owned.hash());
+}
+
+/// A content-addressed module publishes each export as `<namespace>.<hash>`,
+/// which must stay one 256-byte segment, so an exported namespace longer than
+/// 191 bytes fails check-in, naming it. It catches a qualified namespace over
+/// the segment limit reaching the publication table, where it could never be
+/// spawned, and a limit off by one either way.
+#[test]
+fn a_content_addressed_module_refuses_a_namespace_too_long_to_carry_its_hash() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+    let content_addressed_exporting = |namespace: &str| {
+        let mut section = vec![INPUTS_SECTION_VERSION];
+        section.extend(
+            wire::to_vec(&InputsRecord::ActorBoundary { namespace: namespace.to_owned().into() })
+                .expect("encode an inputs record"),
+        );
+        let escaped = section.iter().fold(String::new(), |mut escaped, byte| {
+            write!(escaped, "\\{byte:02x}").expect("write to a String");
+            escaped
+        });
+        let wat = format!(
+            r#"(module (@custom "{INPUTS_SECTION}" "{escaped}") (@custom "{CONTENT_ADDRESSED_SECTION}" "\01") (func (export "noop")))"#
+        );
+        cache.check_in(&blobs, &blobs.check_in(wasm(&wat)))
+    };
+
+    let longest = "a".repeat(191);
+    content_addressed_exporting(&longest).expect("a 191-byte namespace carries its hash in one segment");
+
+    let too_long = "a".repeat(192);
+    let error = content_addressed_exporting(&too_long).map(drop).expect_err("a 192-byte namespace cannot carry it");
+    assert!(error.contains(&format!("`{too_long}`")), "the refusal names the namespace: {error}");
 }
