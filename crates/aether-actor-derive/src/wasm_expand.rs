@@ -422,14 +422,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 for #self_ty #where_clause {}
         }
     });
-    // ADR-0230 §2: a declared link is the safe `LinksTo<R>` impl alone. A
-    // link needs no live target, so no inputs-manifest record names it yet.
-    let links_impls = opts.links.iter().map(|target| {
-        quote! {
-            impl #impl_generics ::aether_actor::LinksTo<#target>
-                for #self_ty #where_clause {}
-        }
-    });
     // ADR-0114 (issue 6583): one `Spawns<C>` impl per declared inline child,
     // which the typed spawn verbs require, and the matching bound on the
     // hidden `__aether_listed_children::<M>`, which every `export!` that lists
@@ -683,7 +675,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #module_child_impl
         #(#child_impls)*
         #(#depends_impls)*
-        #(#links_impls)*
         #(#spawns_impls)*
         #listed_children
 

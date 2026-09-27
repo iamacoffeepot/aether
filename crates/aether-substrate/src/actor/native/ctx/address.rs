@@ -12,10 +12,6 @@
 //! [`NativeCtx::accept_call`] is its one-item form for a wire `Call`, whose
 //! recipient is an [`ErasedActorPath`] proven on arrival.
 //!
-//! "Who it can name" is answered by declaration: [`NativeCtx::link`] writes the
-//! typed path of a root instance this actor declares a link to, a
-//! description that proves nothing until its receiver resolves it.
-//!
 //! Beside these doors sit `outbound_parent` and `outbound_root`, the lineage
 //! every inheriting send stamps so it joins the handler's causal chain
 //! (ADR-0080 §7).
@@ -24,10 +20,10 @@ use std::error::Error;
 use std::fmt;
 
 use aether_actor::{
-    ActorPath, ActorRef, Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef,
-    Instanced, LinksTo, Protocol, ProtocolPath, ProtocolRef, ReplyMode, ResolveError, Root, Singleton,
+    ActorRef, Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef, Protocol,
+    ProtocolPath, ProtocolRef, ReplyMode, ResolveError, Singleton,
 };
-use aether_data::{ErasedActorPath, KindId, LoadName, MailId, MailboxId};
+use aether_data::{ErasedActorPath, KindId, MailId, MailboxId};
 use aether_kinds::NamedMail;
 
 use crate::mail::registry::{AddressResolutionError, Registry, ResolveLiveError};
@@ -80,24 +76,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE),
             (),
         ))
-    }
-
-    /// Write the canonical path of the root instance of `R` under `key`,
-    /// `R::NAMESPACE:key` (ADR-0230 §2): the name the registry gives the
-    /// instance spawned under that key. Compiles only for an actor that
-    /// declares `links(R)`, as the guest `WasmCtx::link` does, and writes
-    /// through the same writer.
-    ///
-    /// Writing reads no registry and folds nothing, and the path claims
-    /// nothing until its receiver resolves it. Its consumer is a Bloomery
-    /// unit's driver, which writes its journal's path and narrows it into
-    /// the workspace's `Run.source` (ADR-0240 D7).
-    #[must_use]
-    pub fn link<R: Root + Instanced>(&self, key: &LoadName) -> ActorPath<R>
-    where
-        A: LinksTo<R>,
-    {
-        aether_actor::__link::<A, R>(key)
     }
 
     /// Prove a position that arrived in a payload (ADR-0230): the third door

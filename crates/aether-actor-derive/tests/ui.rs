@@ -7,11 +7,10 @@
 //! `rejects_struct_no_namespace.rs:7`,
 //! `rejects_actor_child_of_cardinality_native.rs:10`,
 //! `rejects_actor_composable_native.rs:8`,
-//! `rejects_generic_native_lineage_struct.rs:6`, `accepts_declared_links.rs:34`,
-//! `rejects_link_without_declared_link.rs:21`, and
-//! `rejects_narrow_to_uncovered_protocol.rs:36`. Those files are read off disk
-//! by the struct-hosted harvest rather than compiled as cases; the `rt_` prefix
-//! is the current spelling of that set, not the exclusion rule.
+//! `rejects_generic_native_lineage_struct.rs:6`, `accepts_typed_paths.rs:30`,
+//! and `rejects_narrow_to_uncovered_protocol.rs:36`. Those files are read off
+//! disk by the struct-hosted harvest rather than compiled as cases; the `rt_`
+//! prefix is the current spelling of that set, not the exclusion rule.
 //!
 //! A fixture is compile-fail if and only if `tests/ui/<name>.stderr` exists,
 //! and a pass case otherwise. Compile-fail cases share one shard so trybuild
@@ -352,7 +351,6 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "accepts_actor_split_task_handler",
     "accepts_actor_typed_handler_wasm",
     "accepts_bare_type_address_of_embedded_peer",
-    "accepts_declared_links",
     "accepts_cfg_gated_handler_native",
     "accepts_cfg_gated_handler_set_wasm",
     "accepts_cfg_gated_handler_wasm",
@@ -367,6 +365,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "accepts_state_actor",
     "accepts_struct_hosted_actor",
     "accepts_struct_nested_runtime",
+    "accepts_typed_paths",
     "rejects_accessor_without_state",
     "rejects_actor_child_of_cardinality_native",
     "rejects_actor_child_of_cardinality_wasm",
@@ -397,7 +396,6 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_handler_set_duplicate_adoption",
     "rejects_handler_set_without_body",
     "rejects_inline_child_send_unhandled_kind",
-    "rejects_link_without_declared_link",
     "rejects_malformed_actor_composable",
     "rejects_malformed_actor_lineage",
     "rejects_malformed_export",

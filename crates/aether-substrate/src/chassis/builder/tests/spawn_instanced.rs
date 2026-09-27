@@ -1,19 +1,16 @@
 //! Instanced spawning: an instanced parent hatching an instanced grandchild, and
-//! the canonical registered name a finished spawn hands back, which a declared
-//! link writes from the actor type alone.
+//! the canonical registered name a finished spawn hands back, which the typed
+//! path constructors write from the actor types alone.
 
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
-use crate::actor::native::envelope::Envelope;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
 use crate::mail::MailboxId;
-use crate::mail::Source;
 use crate::mail::registry;
-use crate::mail::registry::OwnedDispatch;
-use crate::testing::{TestChassis, bare_substrate, registered_binding};
+use crate::testing::{TestChassis, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
-use aether_actor::{Addressable, ChildOf};
+use aether_actor::{ActorPath, Addressable, ChildOf};
 use aether_data::LoadName;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -205,6 +202,16 @@ fn instanced_can_spawn_grandchild() {
         Some("test.recursive.parent:p1/test.recursive.grandchild:only".to_owned()),
         "the staged receipt must carry the exact nested canonical registration name",
     );
+
+    let p1 = LoadName::new("p1").expect("a valid key");
+    let only = LoadName::new("only").expect("a valid key");
+    let written = ActorPath::<Grandchild>::child(&ActorPath::<Parent>::instance(&p1), &only).expect("under the caps");
+    assert_eq!(
+        spawned_name.lock().expect("spawned-name mutex poisoned").as_deref(),
+        Some(written.to_string().as_str()),
+        "the child constructor must write the name the staged receipt carried",
+    );
+
     assert!(
         chassis.actor_registry().is_live_at(grandchild_id),
         "grandchild should be Live in the registry under the lineage-folded id",
@@ -299,15 +306,15 @@ fn spawn_finish_with_name_returns_the_registered_top_level_name() {
     drop(chassis);
 }
 
-/// A root instanced actor a [`Linker`] links to, spawned by key.
-struct LinkedUnit;
+/// A root instanced actor, spawned by key.
+struct KeyedUnit;
 
-impl Addressable for LinkedUnit {
-    const NAMESPACE: &'static str = "test.link.unit";
+impl Addressable for KeyedUnit {
+    const NAMESPACE: &'static str = "test.path.unit";
     type Resolver = aether_actor::Many;
 }
-impl aether_actor::Root for LinkedUnit {}
-impl aether_actor::Lifecycle<Self> for LinkedUnit {
+impl aether_actor::Root for KeyedUnit {}
+impl aether_actor::Lifecycle<Self> for KeyedUnit {
     type Config = ();
     type Params = ();
     type InitError = BootError;
@@ -318,10 +325,10 @@ impl aether_actor::Lifecycle<Self> for LinkedUnit {
         Ok(Self)
     }
 }
-impl NativeActor for LinkedUnit {
+impl NativeActor for KeyedUnit {
     type State = Self;
 }
-impl Dispatch<Self> for LinkedUnit {
+impl Dispatch<Self> for KeyedUnit {
     fn dispatch(
         _state: &mut Self,
         _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
@@ -332,30 +339,12 @@ impl Dispatch<Self> for LinkedUnit {
     }
 }
 
-/// A native actor that declares a link to [`LinkedUnit`] and nothing else.
-struct Linker;
-
-#[aether_actor::actor(links(LinkedUnit))]
-impl NativeActor for Linker {
-    const NAMESPACE: &'static str = "test.link.linker";
-    type Config = ();
-
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self)
-    }
-
-    #[fallback]
-    fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
-        let _ = self;
-    }
-}
-
-/// `ctx.link::<R>(&key)` writes the name the registry gives the root instance
-/// spawned under that key. A writer that disagreed with the registry, with a
-/// wrong separator or a dropped key, would hand `resolve` a path that names no
-/// route. The expected text is the registry's own answer.
+/// `ActorPath::<R>::instance(&key)` writes the name the registry gives the
+/// root instance spawned under that key. A constructor that disagreed with the
+/// registry, with a wrong separator or a dropped key, would hand `resolve` a
+/// path that names no route. The expected text is the registry's own answer.
 #[test]
-fn link_writes_the_name_the_registry_gives_the_spawned_instance() {
+fn instance_writes_the_name_the_registry_gives_the_spawned_instance() {
     use crate::actor::native::spawn::Subname;
 
     let (registry, mailer) = bare_substrate();
@@ -364,18 +353,11 @@ fn link_writes_the_name_the_registry_gives_the_spawned_instance() {
         .expect("empty chassis boots");
     let key = LoadName::new("unit-7").expect("a valid key");
     let (_unit, canonical_name) = chassis
-        .spawn_actor::<LinkedUnit>(Subname::Named(key.as_str()), (), ())
+        .spawn_actor::<KeyedUnit>(Subname::Named(key.as_str()), (), ())
         .finish_with_name()
         .expect("named spawn succeeds");
 
-    let (binding, _linker) = registered_binding(
-        &registry,
-        &mailer,
-        Linker::NAMESPACE,
-        Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()),
-    );
-    let ctx: NativeCtx<'_, Linker> = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-    assert_eq!(ctx.link::<LinkedUnit>(&key).to_string(), canonical_name.as_str());
+    assert_eq!(ActorPath::<KeyedUnit>::instance(&key).to_string(), canonical_name.as_str());
 
     drop(chassis);
 }
