@@ -1,52 +1,39 @@
-//! Sans-io driver core for the native bundle driver (ADR-0226).
+//! The native bundle driver (ADR-0226): journal folds in, driver commands
+//! out, performed as mail by the `aether.bloomery.driver` actor.
 //!
-//! This crate holds both roles of the driver: startup recovery, `Call`
-//! handling, the per-digest program pipeline (section check, closure read,
-//! invoke) over one load per digest serving both roles, and `Transition` /
-//! `Fault` recording, plus the reactor half (journal following, membership,
-//! activation, live delivery, and reaction records). It owns every ADR-0226
-//! program decision (decisions 3,
-//! 4, and 9 for programs, and 11 for `Call`) and every reactor routing
-//! decision (decisions 5-9 for reactors, and 10-11 for `WatchHead` and
-//! `AwaitProcessed`) as a state machine over the journal folds.
+//! The identity half of the ADR-0122 split is always on: the
+//! [`BundleDriver`] marker. The runtime half, behind the `runtime` feature, is
+//! the sans-io program core, the construction params, and the actor's state;
+//! its module documentation describes the core.
 //!
-//! The core is sans-io: calls and typed replies go in, [`Command`]s come
-//! out, and the core itself performs no mail, threads, or clock reads. The
-//! native actor that sends and receives its mail stores each command's ticket
-//! as the request context, takes it back from the reply, and routes the reply
-//! to the matching [`ProgramCore`] method. A reply whose ticket the core is
-//! not waiting on returns no commands.
-//!
-//! Journal bytes are the only source of fold state: after a `Committed`
-//! append the core reads its own records back before its next decision,
-//! and at most one fenced [`AppendRecords`](aether_bloomery_kinds::AppendRecords)
-//! is ever in flight.
-//!
-//! The [`BundleDriver`] actor is the native shell around the core. Native code
-//! spawns it over a born journal owner, passing the unit's key and the
-//! journal's reference in [`DriverParams`]; it performs journal reads,
-//! appends, and the watch as mail to the journal owner, bundle loads for both
-//! roles to the component host under the unit's bundle name (ADR-0240 D4),
-//! `Invoke` to loaded program roots, and `Warm` / `Event` / `StatusQuery` to
-//! loaded reactor roots — each root the stamped sender of its bundle's load
-//! reply, kept by digest — and feeds each reply back through its ticketed
-//! continuation. A native `Call` is answered with exactly one `CallOutcome`
-//! once its outcome is recorded, and `AwaitProcessed` is answered with
-//! `Processed` once its bound is quiescent. A bundle root's fetch-on-miss
-//! is answered by the driver itself, from a byte-bounded cache of found
-//! artifacts or one journal read shared by every fetch of that digest.
+//! `no_std` without the `runtime` feature, so a wasm guest can name the driver
+//! and send it kind-checked mail.
 
+#![cfg_attr(not(feature = "runtime"), no_std)]
 #![forbid(unsafe_code)]
 
-mod actor;
-mod bundles;
-mod core;
-mod programs;
-mod reactors;
-mod recovery;
-
-pub use actor::{BundleDriver, DriverParams};
-pub use core::{
-    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket, EventsTicket,
-    InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
+#[cfg(feature = "runtime")]
+pub use runtime::{
+    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, DriverParams, EVENTS_PAGE, EvaluateTicket,
+    EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
 };
+
+/// `aether.bloomery.driver` actor **identity** (ADR-0122 split): the native
+/// bundle driver over the sans-io program core. A ZST carrying only the
+/// addressing, the per-handler `HandlesKind` markers, the contract rows, and
+/// the name-inventory row `#[actor]` emits always-on; the state-bearing
+/// runtime lives behind `feature = "runtime"`.
+///
+/// Answers `aether.bloomery.driver.call` with exactly one `CallOutcome` per
+/// call, once the outcome is recorded, and `aether.bloomery.driver.await_processed`
+/// with `Processed` once its bound is quiescent. It performs the core's commands
+/// as mail to the journal owner (including the watch), the component host,
+/// and bundle roots. One driver per unit; the type does not enforce it.
+#[actor(instanced, root, depends(ComponentHostCapability))]
+pub struct BundleDriver;
+
+use aether_actor::actor;
+use aether_component::ComponentHostCapability;
+
+#[cfg(feature = "runtime")]
+mod runtime;
