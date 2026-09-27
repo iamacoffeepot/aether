@@ -577,17 +577,7 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
         })
         .collect();
     let contract_rows = concat_contract_rows(&contract_parts);
-    // ADR-0231 §10: the set's rows as the tail of an adopter's `Contracts::Rows`
-    // list. A gated handler keeps its slot through the gate's `@select` arm,
-    // holding its row or `Gap` as this crate's features decide.
-    let row_entries = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
-        let entry = row_entry(h.class, &h.reply, &h.kind_ty);
-        match gate {
-            Some(gate_ident) => quote! { #gate_ident! { @select [#entry] [::aether_actor::Gap] } },
-            None => entry,
-        }
-    });
-    let rows = declaration_list(row_entries, quote! { () });
+    let rows = bridge_rows_list(handlers, &gate_idents);
     let inventory = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
         let reply_expr = native_reply_contract(h.class, &h.reply);
@@ -620,6 +610,21 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
             };
         }
     })
+}
+
+/// ADR-0231 §10: the set's rows as the tail of an adopter's `Contracts::Rows`
+/// list, for the bridge's `@rows` arm. A gated handler keeps its slot through
+/// the gate's `@select` arm, holding its row or `Gap` as this crate's features
+/// decide.
+fn bridge_rows_list(handlers: &[HandlerFn], gate_idents: &[Option<syn::Ident>]) -> TokenStream2 {
+    let row_entries = handlers.iter().zip(gate_idents).map(|(h, gate)| {
+        let entry = row_entry(h.class, &h.reply, &h.kind_ty);
+        match gate {
+            Some(gate_ident) => quote! { #gate_ident! { @select [#entry] [::aether_actor::Gap] } },
+            None => entry,
+        }
+    });
+    declaration_list(row_entries, quote! { () })
 }
 
 /// Wrap one bridge item in its handler's gate invocation, or leave it inline

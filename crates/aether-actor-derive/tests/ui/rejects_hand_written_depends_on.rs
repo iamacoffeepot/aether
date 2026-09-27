@@ -1,8 +1,10 @@
-//! ADR-0230 §3: `DependsOn<R>` is an `unsafe trait` that only
-//! `#[actor(depends(R))]` implements, because that expansion also records the
-//! dependency entry the pre-`init` liveness check reads. A hand-written, safe
-//! impl would mint `ActorRef<R>` proofs for an actor whose birth never checked
-//! that `R` was `Live`, so it is refused with `E0200`.
+//! ADR-0231 §10: a `DependsOn<R>` impl names `R`'s position in the actor's one
+//! `Declared::Depends` list, which `#[actor(depends(..))]` writes from the same
+//! list as the dependency entry the pre-`init` liveness check reads. An actor
+//! that declares no dependency has an empty list, so a hand-written impl names
+//! a position that holds nothing, is refused with `E0277`, and mints no
+//! `ActorRef<R>` proof for an actor whose birth never checked that `R` was
+//! `Live`.
 
 use aether_actor::{ActorInitError, Mail, WasmActor, WasmCtx, WasmInitCtx, actor};
 
@@ -41,6 +43,8 @@ impl WasmActor for Hand {
     fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }
 
-impl aether_actor::DependsOn<Peer> for Hand {}
+impl aether_actor::DependsOn<Peer> for Hand {
+    type Index = aether_actor::Here;
+}
 
 fn main() {}

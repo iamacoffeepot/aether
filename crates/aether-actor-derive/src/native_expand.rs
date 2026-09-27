@@ -992,13 +992,13 @@ fn native_row_specs(handler_kinds: &[HandlerMarker]) -> Vec<RowSpec<'_>> {
 /// The end of an actor's contract row list (ADR-0231 §10): an adopted set's
 /// rows, from its marker bridge's `@rows` arm, or `()`.
 fn set_rows_tail(handler_set: Option<&syn::Path>) -> TokenStream2 {
-    match handler_set {
-        Some(set) => {
+    handler_set.map_or_else(
+        || quote! { () },
+        |set| {
             let bridge = handler_set_bridge_ident(set);
             quote! { #bridge!(@rows) }
-        }
-        None => quote! { () },
-    }
+        },
+    )
 }
 
 /// ADR-0231 §4: the actor's `Contracts` impl over its `rows` list (§10) and

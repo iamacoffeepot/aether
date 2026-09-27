@@ -549,8 +549,10 @@ pub mod guest_alloc;
 /// aether_actor::export!(default = Parent, public = [Sibling], private = [Child]);
 /// ```
 ///
-/// Each `export!` declares a hidden module type and implements [`Rebuildable`]
-/// for every type it lists, exported or private, from any crate. A spawner
+/// Each `export!` declares a hidden, private module type whose
+/// [`ListedModule::Listed`] is every type the `export!` lists, exported or
+/// private, from any crate, and implements [`Rebuildable`] for each at its
+/// position there, so no other impl compiles (ADR-0231 §10). A spawner
 /// declares the inline children it spawns through the typed verbs in
 /// `#[actor(spawns(..))]` ([`Spawns`]), and the verbs require that
 /// declaration. Every `export!` then checks, at compile time, that it lists

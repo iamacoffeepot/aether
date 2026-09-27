@@ -18,7 +18,9 @@ pub use aether_kinds::{WindowId, WindowMode};
 // The forwarding command, its reply, and the command vocabulary they carry
 // arrive through the glob: the manager identity's always-on `#[actor]` markers
 // declare all three, so they cannot ride a runtime gate. The two below can —
-// nothing outside a window-bearing runtime names them.
+// nothing outside a window-bearing runtime names them. `RetireWindow` is a
+// `pub` type in a private module, because a handled kind must be `pub`
+// (ADR-0231 §10), and its `pub(crate)` re-export keeps it out of the glob.
 pub use kinds::*;
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 pub(crate) use kinds::{RetireWindow, WindowForwardContext};

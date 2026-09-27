@@ -290,17 +290,27 @@ pub enum ApplyWindowCommandResult {
 /// exists whether or not the public request carried a lineage id.
 ///
 /// Only a window-bearing runtime forwards, so this and [`RetireWindow`] carry
-/// the same gate their crate-root re-export already carries.
+/// the same gate their crate-root re-export already carries. This is a reply
+/// context, not a handled kind, so it stays `pub(crate)` in place.
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 #[aether_data::kind(name = "aether.window.internal.forward_context", copy, eq)]
 pub(crate) struct WindowForwardContext {
     pub request: u64,
 }
 
-/// Manager-private request that retires a child after platform-originated close.
+/// The manager-private kinds a window child handles. A handled kind enters
+/// its public actor's contract row list, so it is declared `pub` (ADR-0231
+/// §10); this module is private, so no other crate has a path to it.
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-#[aether_data::kind(name = "aether.window.internal.retire", copy, eq)]
-pub(crate) struct RetireWindow;
+mod internal {
+    /// Manager-private request that retires a child after platform-originated
+    /// close.
+    #[aether_data::kind(name = "aether.window.internal.retire", copy, eq)]
+    pub struct RetireWindow;
+}
+
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+pub(crate) use internal::RetireWindow;
 
 /// Subscribe an explicit mailbox to a kind for a window selector.
 #[aether_data::kind(name = "aether.window.subscribe", copy, eq)]

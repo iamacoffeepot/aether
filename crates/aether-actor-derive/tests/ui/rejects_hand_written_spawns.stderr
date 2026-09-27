@@ -1,0 +1,19 @@
+error[E0277]: the position `Here` does not hold `Other` in the declared list `(Exact, ())`
+  --> tests/ui/rejects_hand_written_spawns.rs:52:18
+   |
+52 |     type Index = Here;
+   |                  ^^^^ no declaration backs this entry
+   |
+   = note: a dependency is declared in `depends(..)` and an inline child in `spawns(..)` on the actor's `#[actor(..)]`, and a module's listing in its `export!`; only those expansions write these markers
+help: the trait `ListIndex<(Exact, ()), Other>` is not implemented for `Here`
+      but trait `ListIndex<(Exact, ()), Exact>` is implemented for it
+  --> $WORKSPACE/crates/aether-actor/src/model/declared.rs
+   |
+   | impl<T, Tail> ListIndex<(T, Tail), T> for Here {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `Exact`, found `Other`
+note: required by a bound in `aether_actor::Spawns::Index`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/mod.rs
+   |
+   |     type Index: ListIndex<<Self as Declared>::Spawns, C>;
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Spawns::Index`

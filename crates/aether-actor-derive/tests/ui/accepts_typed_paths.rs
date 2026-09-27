@@ -11,14 +11,14 @@ use aether_data::LoadName;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.typed_paths.ping")]
-struct Ping {
+pub struct Ping {
     seq: u32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.typed_paths.pong")]
-struct Pong {
+pub struct Pong {
     seq: u32,
 }
 
