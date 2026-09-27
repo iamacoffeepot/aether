@@ -17,6 +17,7 @@ mod tests {
     use aether_codec::frame::max_frame_size;
     use aether_data::{EngineId, Kind};
     use aether_kinds::{CostRow, CostTail, CostTailResult};
+    use aether_rpc::RpcError;
     use aether_tcp::{
         ListListeners, ListListenersResult, SessionDataReady, SessionWrite, UnbindListener, UnbindListenerResult,
     };
@@ -577,12 +578,17 @@ mod tests {
         );
     }
 
+    /// A closed session's route is retired, so the engine refuses a call to
+    /// its path at RPC receipt rather than delivering into a dead mailbox
+    /// (ADR-0079 §7, ADR-0230). The retirement lands at the registry owner's
+    /// next apply after the close, so poll until the refusal is observed.
     fn assert_tombstoned(harness: &mut FleetHarness, engine: EngineId, path: &str) {
-        let replies = harness.send(engine, path, &CostTail { kind: None });
         assert!(
-            replies.is_empty(),
-            "CostTail at formerly-live tombstoned path {path:?} must settle with zero replies, got {}",
-            replies.len(),
+            poll_until(|| matches!(
+                harness.try_send(engine, path, &CostTail { kind: None }),
+                Err(RpcError::NotPresent { .. })
+            )),
+            "CostTail at formerly-live tombstoned path {path:?} must be refused as not present",
         );
     }
 
