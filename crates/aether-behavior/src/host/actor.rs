@@ -748,10 +748,9 @@ mod tests {
     }
 
     // Tripwire: `on_rehydrate`'s body restores the script from resident bytes
-    // through a ctx-free path — so it structurally
-    // cannot re-spawn the wrapped child (spawn needs a ctx), the defer-to-the-
-    // walk invariant (#2694). A re-spawn would double-spawn against the
-    // unguarded reload insert.
+    // through a ctx-free path — so it structurally cannot re-spawn the wrapped
+    // child (spawn needs a ctx), the defer-to-the-walk invariant (#2694). A
+    // re-spawn would double-spawn against the unguarded reload insert.
     #[test]
     fn rehydrate_restores_without_spawning() {
         let kind = KindId(0x5678);
