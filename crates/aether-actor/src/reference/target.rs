@@ -2,11 +2,11 @@
 
 use aether_data::ActorMail;
 
-use super::{ActorRef, ErasedActorRef};
-use crate::model::HandlesKind;
+use super::{ActorRef, ErasedActorRef, ProtocolRef};
+use crate::model::{HandlesKind, Protocol, RowAt};
 
 mod sealed {
-    use crate::reference::{ActorRef, ErasedActorRef};
+    use crate::reference::{ActorRef, ErasedActorRef, ProtocolRef};
 
     /// The seal: only the proven references in this crate are targets.
     pub trait Sealed {}
@@ -15,8 +15,15 @@ mod sealed {
 
     impl Sealed for ErasedActorRef {}
 
+    impl<P> Sealed for ProtocolRef<P> {}
+
     impl<T: Sealed + ?Sized> Sealed for &T {}
 }
+
+/// The index of a target that needs no row lookup, an [`ActorRef<R>`] or an
+/// [`ErasedActorRef`]: the default of [`Target`]'s index parameter, so
+/// `Target<K>` is `Target<K, Direct>`. Inferred, never written.
+pub struct Direct;
 
 /// A held reference that mail of kind `K` may be sent through (ADR-0232 §1).
 ///
@@ -30,6 +37,13 @@ mod sealed {
 /// target carries engine-only mail (ADR-0233). A borrow of either is a target too, so a reference
 /// reached through a borrow, such as a map lookup, sends without a copy-out.
 /// A held reference is `Copy`, so a call site passes it by value.
+///
+/// A [`ProtocolRef<P>`] is a target only for the kinds `P` lists (ADR-0231
+/// §3). A protocol implements no [`Contract<K>`](crate::Contract), so its
+/// impl finds `K`'s row through [`RowAt<K, I>`]: `I` is the row's position,
+/// which the compiler infers at the call site. The native held-reference
+/// verbs take `impl Target<K, I>` with `I` inferred; the other targets are
+/// `Target<K, Direct>`, which `Target<K>` names.
 ///
 /// The trait is sealed: no crate outside `aether-actor` adds a target, so a
 /// foreign impl cannot forward an erased proof as any kind it likes.
@@ -68,7 +82,49 @@ mod sealed {
 ///     ctx.send_to(peer, &());
 /// }
 /// ```
-pub trait Target<K: ActorMail>: sealed::Sealed {
+///
+/// A protocol reference is a target for each kind its protocol lists, by
+/// value or by borrow, with the row's index inferred:
+///
+/// ```
+/// use aether_actor::{Protocol, ProtocolRef, Row, Silent, Target};
+/// use aether_data::ActorMail;
+/// use aether_kinds::{Ping, Pong};
+///
+/// struct Pinging;
+///
+/// impl Protocol for Pinging {
+///     type Rows = (Row<Ping, Pong>, Row<(), Silent>);
+/// }
+///
+/// fn sendable<K: ActorMail, I>(_: impl Target<K, I>, _: &K) {}
+///
+/// fn ping(pinging: ProtocolRef<Pinging>) {
+///     sendable(pinging, &Ping::default());
+///     sendable(&pinging, &());
+/// }
+/// ```
+///
+/// and for no other kind, even one the target may handle:
+///
+/// ```compile_fail,E0277
+/// use aether_actor::{Protocol, ProtocolRef, Row, Silent, Target};
+/// use aether_data::ActorMail;
+/// use aether_kinds::{Ping, Pong};
+///
+/// struct Pinging;
+///
+/// impl Protocol for Pinging {
+///     type Rows = (Row<Ping, Pong>, Row<(), Silent>);
+/// }
+///
+/// fn sendable<K: ActorMail, I>(_: impl Target<K, I>, _: &K) {}
+///
+/// fn ping(pinging: ProtocolRef<Pinging>) {
+///     sendable(pinging, &Pong::default());
+/// }
+/// ```
+pub trait Target<K: ActorMail, I = Direct>: sealed::Sealed {
     /// The proof this target sends through, with its actor type forgotten.
     fn erased(&self) -> ErasedActorRef;
 }
@@ -85,7 +141,16 @@ impl<K: ActorMail> Target<K> for ErasedActorRef {
     }
 }
 
-impl<K: ActorMail, T: Target<K> + ?Sized> Target<K> for &T {
+impl<P: Protocol, K: ActorMail, I> Target<K, I> for ProtocolRef<P>
+where
+    P::Rows: RowAt<K, I>,
+{
+    fn erased(&self) -> ErasedActorRef {
+        self.target()
+    }
+}
+
+impl<K: ActorMail, I, T: Target<K, I> + ?Sized> Target<K, I> for &T {
     fn erased(&self) -> ErasedActorRef {
         (**self).erased()
     }

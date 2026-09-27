@@ -5,9 +5,11 @@
 //! a tuple of [`Row<K, O>`]s. Everything else is computed here from that tuple
 //! through sealed traits: [`RowSet::CONTRACTS`] is the rows' list in the
 //! manifest's [`ReplyContract`] vocabulary, [`CoversRows`] decides whether a
-//! target has every row, and [`CoveredBy`] is the protocol-side name of that
-//! answer. A hand-written [`Protocol`] impl only declares rows, so no impl can
-//! state a list or a coverage claim that disagrees with them.
+//! target has every row, [`CoveredBy`] is the protocol-side name of that
+//! answer, and [`RowAt`] finds a kind's row for a send through a
+//! [`ProtocolRef`](crate::ProtocolRef). A hand-written [`Protocol`] impl only
+//! declares rows, so no impl can state a list, a coverage claim, or a sendable
+//! kind that disagrees with them.
 //!
 //! `#[protocol]` on a trait of signatures is sugar for the declaration:
 //!
@@ -102,15 +104,60 @@ mod covers_sealed {
 /// per tuple arity, so this is the only place coverage is computed.
 pub trait CoversRows<Rows>: covers_sealed::Sealed<Rows> {}
 
-/// Emits the `RowSet` and `CoversRows` impls for every tuple arity from the
-/// full parameter list down to one row, peeling one row per step.
+mod row_at_sealed {
+    /// Private supertrait sealing [`super::RowAt`] to the per-position impls
+    /// this module emits per tuple arity.
+    pub trait Sealed<K, I> {}
+}
+
+/// The zero-sized index of a row in a protocol's [`Rows`](Protocol::Rows)
+/// tuple: `At<0>` is the first row. The compiler infers it at a send through
+/// a [`ProtocolRef`](crate::ProtocolRef) and no one writes it.
+pub struct At<const N: usize>;
+
+/// `Rows: RowAt<K, I>` holds when the row tuple `Rows` has a row for the kind
+/// `K`, at the position `I`. Sealed, and implemented once per tuple arity and
+/// position as `RowAt<K_j, At<j>>`.
+///
+/// A send through a [`ProtocolRef<P>`](crate::ProtocolRef) is bounded
+/// `P::Rows: RowAt<K, I>`, so it compiles only for a kind `P` lists, and the
+/// compiler infers `I`. A protocol lists each kind once (`#[protocol]` refuses
+/// a duplicate), so at most one position matches and the index is never
+/// ambiguous.
+#[diagnostic::on_unimplemented(
+    message = "the protocol rows `{Self}` have no row for the kind `{K}`",
+    label = "not a kind the protocol lists",
+    note = "a protocol reference sends only the kinds its protocol lists (ADR-0231 §3)"
+)]
+pub trait RowAt<K, I>: row_at_sealed::Sealed<K, I> {}
+
+/// Emits the `RowSet`, `CoversRows`, and `RowAt` impls for every tuple arity
+/// from the full parameter list down to one row, peeling one row per step.
 macro_rules! row_tuples {
     () => {};
     ($head_kind:ident $head_reply:ident $(, $kind:ident $reply:ident)*) => {
         row_tuples!(@impl $head_kind $head_reply $(, $kind $reply)*);
         row_tuples!($($kind $reply),*);
     };
+    // One `RowAt` impl per position of the full tuple `$all`: each step takes
+    // the next row and the next position literal.
+    (@row_at [$($all_kind:ident $all_reply:ident),+] [$($index:literal)*]) => {};
+    (
+        @row_at [$($all_kind:ident $all_reply:ident),+] [$index:literal $($indices:literal)*]
+        $kind:ident $(, $rest_kind:ident)*
+    ) => {
+        impl<$($all_kind: Kind, $all_reply: RowReply),+> row_at_sealed::Sealed<$kind, At<$index>>
+            for ($(Row<$all_kind, $all_reply>,)+)
+        {
+        }
+
+        impl<$($all_kind: Kind, $all_reply: RowReply),+> RowAt<$kind, At<$index>> for ($(Row<$all_kind, $all_reply>,)+) {}
+
+        row_tuples!(@row_at [$($all_kind $all_reply),+] [$($indices)*] $($rest_kind),*);
+    };
     (@impl $($kind:ident $reply:ident),+) => {
+        row_tuples!(@row_at [$($kind $reply),+] [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15] $($kind),+);
+
         impl<$($kind: Kind, $reply: RowReply),+> rows_sealed::Sealed for ($(Row<$kind, $reply>,)+) {}
 
         impl<$($kind: Kind, $reply: RowReply),+> RowSet for ($(Row<$kind, $reply>,)+) {

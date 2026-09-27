@@ -231,13 +231,15 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// handler's causal chain (ADR-0080 §7, ADR-0232 §1).
     ///
     /// An [`ActorRef<R>`](aether_actor::ActorRef) target is kind-checked, so
-    /// the send compiles only when `R` handles `K`. An [`ErasedActorRef`] is
-    /// not, which ADR-0230 §2 allows for a proof whose actor type the caller
-    /// cannot name.
+    /// the send compiles only when `R` handles `K`, and a
+    /// [`ProtocolRef<P>`](aether_actor::ProtocolRef) target is checked
+    /// against `P`'s rows, so it compiles only when `P` lists `K`; the row's
+    /// index `I` is inferred. An [`ErasedActorRef`] is not checked, which
+    /// ADR-0230 §2 allows for a proof whose actor type the caller cannot name.
     ///
     /// Its consumer is the fleet server's `TerminateEngine` forward to the
     /// proxy its spawn proved.
-    pub fn send_to<K: ActorMail>(&mut self, target: impl Target<K>, payload: &K) {
+    pub fn send_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
         let _ = self.push_to(target.erased(), payload, self.outbound_parent(), self.outbound_root());
     }
 
@@ -248,16 +250,17 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// It inherits this handler's causal chain as [`Self::send_to`] does and
     /// returns the minted [`MailId`]. The target is kind-checked the same way:
     /// an [`ActorRef<R>`](aether_actor::ActorRef) only for the kinds `R`
-    /// handles, an [`ErasedActorRef`] unchecked.
+    /// handles, a [`ProtocolRef<P>`](aether_actor::ProtocolRef) only for the
+    /// kinds `P` lists, an [`ErasedActorRef`] unchecked.
     ///
     /// Its consumers are the bloomery driver's journal reads and appends,
     /// through its typed journal reference, and its four bundle-root sends
     /// (`Invoke`, `Warm`, `Evaluate`, and `StatusQuery`, to the erased root it
     /// kept from its load reply's stamped sender).
     #[must_use]
-    pub fn send_to_with_context<K: ActorMail, C: Kind>(
+    pub fn send_to_with_context<K: ActorMail, C: Kind, I>(
         &mut self,
-        target: impl Target<K>,
+        target: impl Target<K, I>,
         payload: &K,
         context: &C,
     ) -> MailId {
@@ -276,14 +279,15 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// the running chain did not cause and whose recipient may park the reply
     /// (ADR-0080 §7): inheriting would hold the running chain open for as
     /// long as the recipient waits. The reply roots in the recipient's tree
-    /// and still correlates home through the stored context.
+    /// and still correlates home through the stored context. The target is
+    /// kind-checked as [`Self::send_to_with_context`]'s is.
     ///
     /// Its consumer is the bloomery driver's `WatchHead`, the long poll the
     /// journal owner parks until the head moves.
     #[must_use]
-    pub fn send_detached_to_with_context<K: ActorMail, C: Kind>(
+    pub fn send_detached_to_with_context<K: ActorMail, C: Kind, I>(
         &mut self,
-        target: impl Target<K>,
+        target: impl Target<K, I>,
         payload: &K,
         context: &C,
     ) -> MailId {

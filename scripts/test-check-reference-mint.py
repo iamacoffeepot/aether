@@ -113,6 +113,24 @@ class ScannerTests(unittest.TestCase):
         status, _ = self.repo.run()
         self.assertEqual(status, 1)
 
+    def test_protocol_ref_mint_outside_the_allowlist_fails(self) -> None:
+        self.repo.write(
+            "crates/aether-substrate/src/actor/native/ctx/address.rs",
+            "fn sneak(id: MailboxId) -> ProtocolRef<P> {\n    aether_actor::__mint_protocol_ref(id)\n}\n",
+        )
+        self.repo.commit("sneaky protocol mint")
+
+        findings = self.repo.scan()
+
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(
+            findings[0].startswith("crates/aether-substrate/src/actor/native/ctx/address.rs:2: "),
+            findings[0],
+        )
+        self.assertIn("__mint_protocol_ref", findings[0])
+        status, _ = self.repo.run()
+        self.assertEqual(status, 1)
+
     def test_attribute_and_suppression_comment_do_not_relax(self) -> None:
         self.repo.write(
             "crates/aether-substrate/src/sneaky.rs",

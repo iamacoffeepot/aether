@@ -279,6 +279,32 @@ impl Registry {
         }
     }
 
+    /// The position of the `Live` route standing under exactly the canonical
+    /// `path`, from one read of the published view (ADR-0231 §3's receipt of
+    /// a typed path).
+    ///
+    /// A typed path is canonical and within the depth and byte caps by
+    /// construction, so it is folded as written, never expanded. The route at
+    /// the fold must carry `path` as its canonical name, which refuses a fold
+    /// collision, and must resolve `Live`: an inline alias answers `Live`
+    /// while its target parent is `Live`. Never registered, `Starting`,
+    /// `Dropped`, and a name mismatch all answer `None`.
+    ///
+    /// Consumer: `Registry::resolve_protocol`, the native receipt of a
+    /// protocol path.
+    pub(crate) fn live_route(&self, path: &ErasedActorPath) -> Option<MailboxId> {
+        let id = lineage_mailbox_id(path.as_str());
+        let routes = self.routes.load();
+        if routes.entry_for(&id)?.canonical_name != *path {
+            return None;
+        }
+
+        match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
+            ResolvedRoute::Live { .. } => Some(id),
+            ResolvedRoute::Starting { .. } | ResolvedRoute::Dropped | ResolvedRoute::Unknown => None,
+        }
+    }
+
     /// Reverse of `lookup`: name for a given mailbox id, or `None` if
     /// the id is unknown. Used by the closure dispatch path to stamp
     /// `origin` on observation mail (ADR-0011).
