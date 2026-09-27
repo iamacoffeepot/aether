@@ -10,9 +10,11 @@ use aether_bloomery_kinds::{
     ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, Name, Node, OpaqueBytes, ProgramName, Ref, Refusal, Tree,
 };
 use aether_bloomery_program::{Program, invoke};
+use aether_bloomery_workspace::{
+    EnvVar, Environment, Platform, Provides, RustToolchain, Tool, ToolName, Tools, TreePath,
+};
 use aether_bloomery_workspace_programs::environment::{EnvironmentMerge, MergeInput};
 use aether_data::{Cites, Storage};
-use aether_workspace::{EnvVar, Environment, Platform, Provides, RustToolchain, Tool, ToolName, Tools, TreePath};
 
 /// The toolchain directory rustup installs for the repository's channel.
 const DIRECTORY: &str = "1.97.1-x86_64-unknown-linux-gnu";

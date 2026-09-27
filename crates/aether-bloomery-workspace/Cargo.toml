@@ -1,16 +1,16 @@
 [package]
-name = "aether-workspace"
+name = "aether-bloomery-workspace"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The workspace contract (ADR-0237): run, environment, and import kinds, valid by construction, and the aether.workspace actor that answers them."
+description = "The workspace contract (ADR-0237): run, environment, and import kinds, valid by construction, and the aether.bloomery.workspace actor that answers them."
 
 # The ADR-0122 identity/runtime split rides the `runtime` feature. The identity
 # half (the kinds, their validators, the `WorkspaceCapability` marker, and the
 # `WorkspaceConfig` domain struct) is `no_std` and compiles always-on, so a wasm
 # program SDK depends on this crate with `default-features = false`. The
-# `runtime` feature adds the `aether.workspace` actor: the substrate-typed
+# `runtime` feature adds the `aether.bloomery.workspace` actor: the substrate-typed
 # state, the private Docker Engine API client, the journal sink and source it
 # decodes and encodes trees through, and the run sequence.
 [features]
@@ -64,7 +64,7 @@ inventory = { workspace = true }
 
 [dev-dependencies]
 # The crate's own actor scenario dials the stub daemon `test-support` exposes.
-aether-workspace = { path = ".", features = ["test-support"] }
+aether-bloomery-workspace = { path = ".", features = ["test-support"] }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 # The journal and import tests count the committed artifact rows on a
 # connection of their own.

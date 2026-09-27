@@ -1,4 +1,4 @@
-//! Resolved configuration for the `aether.workspace` actor (ADR-0237
+//! Resolved configuration for the `aether.bloomery.workspace` actor (ADR-0237
 //! decisions 8 and 9, ADR-0090). The Engine API endpoint and its TLS files,
 //! the import bounds, the host budget runs are provisioned from, the default
 //! allotment a run key never seen gets, and the fixed per-container limits are
@@ -16,7 +16,7 @@ use alloc::string::String;
 /// The endpoint an unset `endpoint` resolves to: the local daemon's socket.
 pub const DEFAULT_ENDPOINT: &str = "unix:///var/run/docker.sock";
 
-/// Resolved `aether.workspace` configuration.
+/// Resolved `aether.bloomery.workspace` configuration.
 ///
 /// Under `feature = "runtime"`, `#[derive(aether_substrate::Config)]` emits the
 /// env-shaped `WorkspaceConfigLayer`, the clap-shaped `WorkspaceOverlay`, and

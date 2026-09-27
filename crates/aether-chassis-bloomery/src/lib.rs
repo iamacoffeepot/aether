@@ -9,7 +9,7 @@
 //! Sampled programs fetch through it, and it keeps the capability's own
 //! deny-by-default allowlist, so a fetch reaches only the hosts an operator
 //! names with `--http-allowlist` and any other fetch is recorded as a refusal.
-//! The other is the `aether.workspace` actor (ADR-0237 decision 8), which
+//! The other is the `aether.bloomery.workspace` actor (ADR-0237 decision 8), which
 //! imports digest-pinned images into the journal through the Docker Engine
 //! API at `--workspace-endpoint`, writing only through the store of the
 //! journal this engine opened.

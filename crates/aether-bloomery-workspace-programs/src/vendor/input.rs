@@ -1,7 +1,7 @@
 //! `vendor.cargo.input`: the source tree and the environment a cargo vendor run fetches for.
 
 use aether_bloomery_kinds::{Ref, Tree};
-use aether_workspace::Environment;
+use aether_bloomery_workspace::Environment;
 
 /// What one cargo vendor run fetches for (ADR-0237 decisions 2 and 4).
 ///

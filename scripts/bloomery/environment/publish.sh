@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Bloomery environment images and publish them to a loopback
-# registry, so the `aether.workspace` actor can import them by digest
+# registry, so the `aether.bloomery.workspace` actor can import them by digest
 # (ADR-0237 decision 3).
 #
 #   publish.sh          start the registry if needed, build, push, and print

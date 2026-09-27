@@ -1,4 +1,4 @@
-//! The `aether.workspace` runtime half (ADR-0122 split), compiled only under
+//! The `aether.bloomery.workspace` runtime half (ADR-0122 split), compiled only under
 //! `feature = "runtime"`.
 //!
 //! Each `Import` and each `Run` runs on a worker thread through ADR-0093's
@@ -47,7 +47,7 @@ pub struct WorkspaceParams {
     pub artifacts: Option<ArtifactStore>,
 }
 
-/// `aether.workspace` runtime state: the importer each import clones onto its
+/// `aether.bloomery.workspace` runtime state: the importer each import clones onto its
 /// worker and the queue that bounds how many imports talk to the daemon at
 /// once, and the run queue that provisions and admits every run.
 pub struct WorkspaceCapabilityState {
@@ -63,7 +63,7 @@ impl NativeActor for WorkspaceCapability {
     type Config = WorkspaceConfig;
     type Params = WorkspaceParams;
 
-    const NAMESPACE: &'static str = "aether.workspace";
+    const NAMESPACE: &'static str = "aether.bloomery.workspace";
 
     /// Check the endpoint, the import bounds, the host budget, the default
     /// allotment, and the fixed limits, and take the journal's store. A
@@ -75,7 +75,7 @@ impl NativeActor for WorkspaceCapability {
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<WorkspaceCapabilityState, BootError> {
         let artifacts = params.artifacts.ok_or_else(|| {
-            boot_error("the aether.workspace actor needs the artifact store of the journal the chassis opened")
+            boot_error("the aether.bloomery.workspace actor needs the artifact store of the journal the chassis opened")
         })?;
         let endpoint = Endpoint::from_config(&config).map_err(|error| BootError::Other(Box::new(error)))?;
         let import_limits = limits(config.import_max_entries, config.import_max_bytes, "IMPORT")?;
@@ -100,7 +100,7 @@ impl NativeActor for WorkspaceCapability {
         let output = limits(config.output_max_entries, config.output_max_bytes, "OUTPUT")?;
 
         tracing::info!(
-            target: "aether_workspace",
+            target: "aether_bloomery_workspace",
             %endpoint,
             tls = matches!(endpoint, Endpoint::Tcp(_)),
             tls_ca_file = config.tls_ca_file.as_deref(),

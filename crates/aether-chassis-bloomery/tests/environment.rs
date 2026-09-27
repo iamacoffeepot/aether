@@ -10,11 +10,11 @@ use aether_bloomery_kinds::{
     PublishResult, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, Tree,
 };
 use aether_bloomery_view::Heads;
+use aether_bloomery_workspace::Environment;
 use aether_bloomery_workspace_programs::environment::MergeInput;
 use aether_data::Kind;
 use aether_harness_bloomery::{BloomeryHarness, Record};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_workspace::Environment;
 
 /// The head the seed binds to the workspace programs bundle.
 const WORKSPACE_PROGRAMS: Head<OpaqueBytes> = Head::new("workspace-programs");

@@ -10,7 +10,7 @@
 //! estimate.
 
 use aether_bloomery_kinds::{Ref, Refusal, Tree};
-use aether_workspace::{EnvVar, Mount, Mounts, Network, Run, Scratch, Step, Steps, ToolName, TreePath};
+use aether_bloomery_workspace::{EnvVar, Mount, Mounts, Network, Run, Scratch, Step, Steps, ToolName, TreePath};
 
 use super::{VendorInput, refused};
 
@@ -82,7 +82,7 @@ fn path(value: &str) -> Result<TreePath, Refusal> {
 #[cfg(test)]
 mod tests {
     use aether_bloomery_kinds::{Digest, Ref, Tree};
-    use aether_workspace::Mounts;
+    use aether_bloomery_workspace::Mounts;
 
     use super::{ENV, VendorInput, request};
 

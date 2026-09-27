@@ -225,11 +225,11 @@ impl Process {
 }
 
 /// Sampled workspace API: runs steps over a stored tree through
-/// [`aether_workspace::WorkspaceCapability`] (ADR-0237 decision 7).
-pub struct Workspace(Binding<aether_workspace::WorkspaceCapability>);
+/// [`aether_bloomery_workspace::WorkspaceCapability`] (ADR-0237 decision 7).
+pub struct Workspace(Binding<aether_bloomery_workspace::WorkspaceCapability>);
 
 impl InjectedApi for Workspace {
-    type Target = aether_workspace::WorkspaceCapability;
+    type Target = aether_bloomery_workspace::WorkspaceCapability;
     const SAMPLED: bool = true;
 
     fn from_env(env: &mut Env<Async>) -> Self {
@@ -249,9 +249,11 @@ impl Workspace {
     /// refusal when the call could not be sent.
     pub fn run(
         &mut self,
-        run: aether_workspace::Run,
-    ) -> impl Future<Output = Result<Result<aether_workspace::Outcome, aether_workspace::Refusal>, Refusal>> + Send + 'static
-    {
+        run: aether_bloomery_workspace::Run,
+    ) -> impl Future<
+        Output = Result<Result<aether_bloomery_workspace::Outcome, aether_bloomery_workspace::Refusal>, Refusal>,
+    > + Send
+    + 'static {
         RunCall { call: self.0.call(run) }
     }
 }
@@ -260,11 +262,11 @@ impl Workspace {
 /// exhausted allotment or an executor failure ends the invocation through
 /// [`Env::end`] and never resolves.
 struct RunCall {
-    call: Call<aether_workspace::WorkspaceCapability, aether_workspace::Run>,
+    call: Call<aether_bloomery_workspace::WorkspaceCapability, aether_bloomery_workspace::Run>,
 }
 
 impl Future for RunCall {
-    type Output = Result<Result<aether_workspace::Outcome, aether_workspace::Refusal>, Refusal>;
+    type Output = Result<Result<aether_bloomery_workspace::Outcome, aether_bloomery_workspace::Refusal>, Refusal>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -272,15 +274,19 @@ impl Future for RunCall {
         let fault = match Pin::new(&mut this.call).poll(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(refusal)) => return Poll::Ready(Err(refusal)),
-            Poll::Ready(Ok(aether_workspace::RunResult::Ok(outcome))) => return Poll::Ready(Ok(Ok(outcome))),
-            Poll::Ready(Ok(aether_workspace::RunResult::Refused(refusal))) => return Poll::Ready(Ok(Err(refusal))),
-            Poll::Ready(Ok(aether_workspace::RunResult::Exhausted(aether_workspace::Resource::Time))) => {
-                ExecutorFault::TimedOut
+            Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Ok(outcome))) => return Poll::Ready(Ok(Ok(outcome))),
+            Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Refused(refusal))) => {
+                return Poll::Ready(Ok(Err(refusal)));
             }
-            Poll::Ready(Ok(aether_workspace::RunResult::Exhausted(aether_workspace::Resource::Memory))) => {
-                ExecutorFault::ResourceExhausted
+            Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Exhausted(
+                aether_bloomery_workspace::Resource::Time,
+            ))) => ExecutorFault::TimedOut,
+            Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Exhausted(
+                aether_bloomery_workspace::Resource::Memory,
+            ))) => ExecutorFault::ResourceExhausted,
+            Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Failed { detail })) => {
+                ExecutorFault::Failed { reason: detail }
             }
-            Poll::Ready(Ok(aether_workspace::RunResult::Failed { detail })) => ExecutorFault::Failed { reason: detail },
         };
         env.end(fault);
         Poll::Pending

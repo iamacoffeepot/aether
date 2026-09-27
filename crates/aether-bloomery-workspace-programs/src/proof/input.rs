@@ -1,7 +1,7 @@
 //! `proof.clippy.input`: the source tree, the environment, and the vendored crate sources a clippy proof runs over.
 
 use aether_bloomery_kinds::{Ref, Tree};
-use aether_workspace::Environment;
+use aether_bloomery_workspace::Environment;
 
 /// What one clippy proof runs over (ADR-0237 decisions 2 and 4).
 ///

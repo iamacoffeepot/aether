@@ -547,7 +547,7 @@ fn invocation_child_has_no_run_kind_arm() {
 #[kind(name = "test.bloomery.sampled_workspace.input")]
 struct WorkspaceInput {
     tree: Ref<Tree>,
-    environment: Ref<aether_workspace::Environment>,
+    environment: Ref<aether_bloomery_workspace::Environment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -574,19 +574,19 @@ impl Program for SampledWorkspace {
 impl AsyncProgram for SampledWorkspace {
     async fn run(input: Self::Input, mut env: Env<Async>) -> Result<Self::Result, Refusal> {
         let mut workspace = Workspace::from_env(&mut env);
-        let step = aether_workspace::Step {
-            tool: aether_workspace::ToolName::new("tool").map_err(|_| Refusal::InputDecode)?,
+        let step = aether_bloomery_workspace::Step {
+            tool: aether_bloomery_workspace::ToolName::new("tool").map_err(|_| Refusal::InputDecode)?,
             args: vec!["target".to_owned()],
             env: Vec::new(),
             stdin: None,
         };
-        let run = aether_workspace::Run {
+        let run = aether_bloomery_workspace::Run {
             tree: input.tree,
             environment: input.environment,
-            mounts: aether_workspace::Mounts::new(Vec::new()).map_err(|_| Refusal::InputDecode)?,
-            steps: aether_workspace::Steps::new(vec![step]).map_err(|_| Refusal::InputDecode)?,
-            scratch: aether_workspace::Scratch::new(Vec::new()).map_err(|_| Refusal::InputDecode)?,
-            network: aether_workspace::Network::Off,
+            mounts: aether_bloomery_workspace::Mounts::new(Vec::new()).map_err(|_| Refusal::InputDecode)?,
+            steps: aether_bloomery_workspace::Steps::new(vec![step]).map_err(|_| Refusal::InputDecode)?,
+            scratch: aether_bloomery_workspace::Scratch::new(Vec::new()).map_err(|_| Refusal::InputDecode)?,
+            network: aether_bloomery_workspace::Network::Off,
         };
         let answered = workspace.run(run).await?;
         AFTER_AWAIT.set(true);
@@ -619,21 +619,21 @@ fn start_workspace() -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
 
 /// Answer the captured run with `reply`, then poll once: the invocation's end,
 /// and whether the program's code after the await ran.
-fn answer_workspace(reply: &aether_workspace::RunResult) -> Result<(PollResult, bool), Box<dyn Error>> {
+fn answer_workspace(reply: &aether_bloomery_workspace::RunResult) -> Result<(PollResult, bool), Box<dyn Error>> {
     let (mut session, pending) = start_workspace()?;
-    session.fulfill_send(&pending, aether_workspace::RunResult::ID, reply.encode_into_bytes());
+    session.fulfill_send(&pending, aether_bloomery_workspace::RunResult::ID, reply.encode_into_bytes());
     Ok((session.poll(), AFTER_AWAIT.get()))
 }
 
-fn step_outcome(stdout: &[u8]) -> Result<aether_workspace::Outcome, Box<dyn Error>> {
-    Ok(aether_workspace::Outcome {
-        steps: vec![aether_workspace::StepOutcome {
+fn step_outcome(stdout: &[u8]) -> Result<aether_bloomery_workspace::Outcome, Box<dyn Error>> {
+    Ok(aether_bloomery_workspace::Outcome {
+        steps: vec![aether_bloomery_workspace::StepOutcome {
             exit_code: Some(0),
             stdout: Ref::of_bytes(stdout),
             stderr: Ref::of_bytes(b""),
-            tool: aether_workspace::ToolRecord {
-                name: aether_workspace::ToolName::new("tool")?,
-                path: aether_workspace::TreePath::new("usr/bin/tool")?,
+            tool: aether_bloomery_workspace::ToolRecord {
+                name: aether_bloomery_workspace::ToolName::new("tool")?,
+                path: aether_bloomery_workspace::TreePath::new("usr/bin/tool")?,
                 file: Ref::of_bytes(b"#!tool\n"),
             },
         }],
@@ -647,19 +647,19 @@ fn a_workspace_run_targets_the_workspace_and_hands_the_program_its_outcome_or_re
     // reach the program, and a workspace refusal that ends the invocation
     // instead of reaching the program as `Ok(Err(..))`.
     let (_, pending) = start_workspace()?;
-    assert_eq!(pending.mailbox, "aether.workspace");
-    assert_eq!(pending.kind_id, aether_workspace::Run::ID);
-    assert_eq!(pending.expected_reply, aether_workspace::RunResult::ID);
+    assert_eq!(pending.mailbox, "aether.bloomery.workspace");
+    assert_eq!(pending.kind_id, aether_bloomery_workspace::Run::ID);
+    assert_eq!(pending.expected_reply, aether_bloomery_workspace::RunResult::ID);
 
-    let (ran, _) = answer_workspace(&aether_workspace::RunResult::Ok(step_outcome(b"checked")?))?;
+    let (ran, _) = answer_workspace(&aether_bloomery_workspace::RunResult::Ok(step_outcome(b"checked")?))?;
     let expected = encoded(&WorkspaceOut { stdout: Ref::of_bytes(b"checked") })?;
     let PollResult::Finished(Invoked::Completed { seq: 7, result, staged }) = ran else {
         return Err(format!("expected Completed after Ok, got {ran:?}").into());
     };
     assert_eq!((result, staged), (expected.digest(), vec![expected]), "the result cites stdout without staging it");
 
-    let unknown = aether_workspace::Refusal::UnknownTool(aether_workspace::ToolName::new("tool")?);
-    let (refused, after_await) = answer_workspace(&aether_workspace::RunResult::Refused(unknown))?;
+    let unknown = aether_bloomery_workspace::Refusal::UnknownTool(aether_bloomery_workspace::ToolName::new("tool")?);
+    let (refused, after_await) = answer_workspace(&aether_bloomery_workspace::RunResult::Refused(unknown))?;
     let PollResult::Finished(Invoked::Refused { seq: 7, refusal: Refusal::Refused { reason } }) = refused else {
         return Err(format!("expected the program's own refusal, got {refused:?}").into());
     };
@@ -675,9 +675,18 @@ fn an_exhausted_or_failed_run_ends_the_invocation_unseen_by_the_program() -> Res
     // mapping, and a failure detail lost on the way to the driver.
     let detail = Detail::new("starting container c1: the Docker daemon answered 500");
     let cases = [
-        (aether_workspace::RunResult::Exhausted(aether_workspace::Resource::Time), ExecutorFault::TimedOut),
-        (aether_workspace::RunResult::Exhausted(aether_workspace::Resource::Memory), ExecutorFault::ResourceExhausted),
-        (aether_workspace::RunResult::Failed { detail: detail.clone() }, ExecutorFault::Failed { reason: detail }),
+        (
+            aether_bloomery_workspace::RunResult::Exhausted(aether_bloomery_workspace::Resource::Time),
+            ExecutorFault::TimedOut,
+        ),
+        (
+            aether_bloomery_workspace::RunResult::Exhausted(aether_bloomery_workspace::Resource::Memory),
+            ExecutorFault::ResourceExhausted,
+        ),
+        (
+            aether_bloomery_workspace::RunResult::Failed { detail: detail.clone() },
+            ExecutorFault::Failed { reason: detail },
+        ),
     ];
     for (reply, expected) in cases {
         let (ended, after_await) = answer_workspace(&reply)?;

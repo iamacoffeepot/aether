@@ -6,13 +6,13 @@
 //! shared staging / flag-naming / help-forwarding machinery lives in
 //! `aether_chassis::cli`.
 
+use aether_bloomery_workspace::WorkspaceOverlay;
 use aether_chassis::boot::{ActorRingOverlay, RegistryQueueOverlay, SchedulerTuningOverlay, env_only_after_help};
 use aether_chassis::chassis_cli;
 use aether_chassis::cli::ChassisMeta;
 use aether_http::HttpOverlay;
 use aether_rpc::RpcServerOverlay;
 use aether_substrate::config::SettlementOverlay;
-use aether_workspace::WorkspaceOverlay;
 use clap::Parser;
 
 use crate::config::BloomeryOverlay;

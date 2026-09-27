@@ -4,7 +4,7 @@
 > (workspaces run steps over trees), decisions 2, 3, 4, 7, 8, and 9. The actor
 > answers `Import` and `Run`.
 
-The `aether.workspace` actor is the Bloomery engine's only route to a container.
+The `aether.bloomery.workspace` actor is the Bloomery engine's only route to a container.
 It talks to the Docker Engine API through a small client it owns privately, and
 everything it produces goes into the journal as trees and blobs. No program,
 component, or operator addresses the daemon directly, and there is no general
@@ -29,7 +29,7 @@ they produce.
 construction and on decode. It never carries a tag, because a tag can move and
 an imported tree must be a function of the request that named it.
 
-The actor is a root singleton at `aether.workspace`, so a program binding can
+The actor is a root singleton at `aether.bloomery.workspace`, so a program binding can
 name it in `depends(...)` (ADR-0230). Import is operator mail, reachable over RPC
 like the journal writes: it can make the daemon pull any digest-pinned image.
 The actor records no event. An operator publishes the tree under a head
@@ -167,7 +167,7 @@ A Bloomery program reaches the actor through the trailing `Workspace` binding
 
 ```rust
 async fn run(input: Self::Input, env: &mut Env<Async>, mut workspace: Workspace) -> Result<Self::Result, Refusal> {
-    let outcome = workspace.run(run).await?; // Result<Outcome, aether_workspace::Refusal>
+    let outcome = workspace.run(run).await?; // Result<Outcome, aether_bloomery_workspace::Refusal>
     // ...
 }
 ```
@@ -178,7 +178,7 @@ outer `Err` is the program's own `Refusal` for a call that broke: a reply that
 is not a `RunResult`, or a send the invocation could not make.
 
 The bundle's invocation declares `WorkspaceCapability` as a dependency, so the
-bundle loads only where `aether.workspace` is composed: the Bloomery chassis.
+bundle loads only where `aether.bloomery.workspace` is composed: the Bloomery chassis.
 Elsewhere the load is refused and the driver records a `BundleUnavailable`
 fault.
 
@@ -404,7 +404,7 @@ Run the steps on the host whose daemon the actor dials.
    }
    ```
 
-   The component declares `aether.workspace` a dependency, so the load is
+   The component declares `aether.bloomery.workspace` a dependency, so the load is
    refused on an engine without the workspace. A config missing a field is
    refused naming the field, as ``aether.bloomery.bootstrap.config has no `base` ``.
 5. **Watch.** `actor_logs` on
@@ -422,7 +422,7 @@ images get a new key. The script records nothing of its own.
 The script proves both actors from its config at `wire`, then sends, one
 request at a time:
 
-1. **Import.** `aether.workspace.import { image }` to `aether.workspace`, once
+1. **Import.** `aether.workspace.import { image }` to `aether.bloomery.workspace`, once
    per reference, the base first. Each answers `Ok { tree }`, and a
    second import of the same reference answers the same tree.
 2. **Merge.** After `aether.bloomery.journal.read_head` for the fence, it
