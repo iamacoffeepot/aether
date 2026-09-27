@@ -382,6 +382,41 @@ appears in a public signature.
   #6890 (closed: the rule covers public APIs other code is written
   against, not the core engine's machinery); #6903 (the line is the core
   engine crates, not `aether-substrate`).
+- **Superseded by:** [R-0043](#r-0043)
+
+### R-0043: Keep MailboxId out of public APIs so code written against them is correct by construction {#r-0043}
+
+The core engine crates, `aether-data`, `aether-actor`, `aether-substrate`,
+and their proc-macro crates `aether-data-derive`, `aether-actor-derive`, and
+`aether-derive`, hold and use a `MailboxId` in their own machinery: it is the
+registry's key, a routing input, and a field of the core's own engine-reach
+kinds ([R-0042](#r-0042)), with no wrapper or seal ([R-0036](#r-0036)). The
+public APIs that capabilities, components, harnesses, MCP, and tools are
+written against (an author-facing ctx verb, a kind they send or receive,
+anything they serialize, a test of actor behaviour outside the core crates)
+take and return none; an actor there is named by a proof
+([R-0044](#r-0044)) or a path ([R-0045](#r-0045)).
+
+The addressing rules are applied by their purpose, through two questions.
+Which code written against the engine does the change protect, and how does
+that code go wrong today? Which hot path or core machinery does it touch? A
+change that protects no such code, or adds a per-send, per-frame, or
+per-event cost, is not filed; that the core holds a `MailboxId` is never by
+itself a reason for a change.
+
+- **Why:** agents copy whatever a public API allows, and code holding a
+  position can send it any kind, keep it after the actor is replaced,
+  compute it, or carry it where it means nothing, each failing only at
+  runtime, so public APIs carry typed proofs and typed paths that make "can
+  this actor receive this" a compile error.
+- **Settled:** ADR-0230 §1 (a `MailboxId` is a registry key inside the
+  engine); #6854 (`Address` and `AddressForm` deleted); #6877 (the
+  registry plumbing takes no seal); #6895 (sends go through typed proofs);
+  #6890 (closed: the rule covers public APIs other code is written
+  against, not the core engine's machinery); #6903 (the line is the core
+  engine crates, not `aether-substrate`); #6879 (closed as not planned:
+  trace records keep their mailbox ids, and MCP renders them as names at
+  its edge); #6907 (the rule states its purpose and the two-question test).
 
 ### R-0015: Hold proofs in stored state, never positions {#r-0015}
 
@@ -420,6 +455,34 @@ argument of the send, monitor, or close it exists for.
   at receipt and stores references); #6685 (reply-table and alias-route
   constructors sealed; tests send through proofs); #6895 (no send goes
   through an erased reference).
+- **Superseded by:** [R-0044](#r-0044)
+
+### R-0044: Hold a typed proof for every actor that code written against the engine sends to from stored state {#r-0044}
+
+The state and tables of actors and capabilities written against the engine
+that outlive a handler hold an `ActorRef<R>` or a `ProtocolRef<P>` for every
+actor they will send to, and tables are keyed by the proof. The core engine's
+own registry, routing, and reply tables key by `MailboxId`
+([R-0043](#r-0043)). Stored state never holds an `ErasedActorRef` for
+sending, because erased actor sending is being removed (#6895). An
+`ErasedActorRef` is kept only where nothing is sent through it: comparing
+identity, keying a table, naming its canonical path, monitoring, and
+ADR-0231 §4's cast, which types a reference that arrived untyped. A position
+that arrives in a payload is proven once, at receipt, in the handler that
+received it, and the proof is stored. A proof's id is never unwrapped as the
+argument of the send, monitor, or close it exists for.
+
+- **Why:** stored state that holds a position or an erased reference can
+  send a kind its target does not handle and fail only at runtime, while a
+  typed proof carries both the liveness check and the kinds it may be sent,
+  so that mistake is a compile error; applied by [R-0043](#r-0043)'s test.
+- **Settled:** ADR-0230 §2 (a reference may be held in actor memory; a
+  `MailboxId` is only a registry key inside the engine); ADR-0231 §4 (an
+  erased reference has no send verb); #6312 (the window proves a subscriber
+  at receipt and stores references); #6685 (reply-table and alias-route
+  constructors sealed; tests send through proofs); #6895 (no send goes
+  through an erased reference); #6907 (the rule governs code written
+  against the engine, not the core's machinery).
 
 ## Actors, names, and addressing
 
@@ -474,6 +537,50 @@ ADR-0241, and its `resolve` over an `ActorPath<R>` lands with #6829.
   (`Address` deleted); #6863 (contextual kinds decode only with a context);
   #6895 (no send goes through an erased reference); #6896 (a path field its
   receiver sends to is a typed path).
+- **Superseded by:** [R-0045](#r-0045)
+
+### R-0045: Carry a path that code written against the engine will send to as a typed path {#r-0045}
+
+A description of an actor in a kind, config, or journal record that code
+written against the engine sends, receives, or configures is an
+`ErasedActorPath`, an `ActorPath<R>`, or a `ProtocolPath<P>`, with no second
+description type beside them; the core engine's own kinds may carry a
+`MailboxId` ([R-0043](#r-0043)). The paths mirror the references:
+`ErasedActorPath`, `ActorPath<R>`, and `ProtocolPath<P>` pair with
+`ErasedActorRef`, `ActorRef<R>`, and `ProtocolRef<P>`.
+
+A path carried in a kind or config that its receiver will later send to, such
+as a subscriber, a handler, a callback, or a source, is a typed path, never an
+`ErasedActorPath`. It is an `ActorPath<R>` when the holder needs one concrete
+actor type, and a `ProtocolPath<P>` when the holder needs only a protocol,
+such as a subscriber the publisher cannot name. The receiver proves it once,
+on receipt: a `ProtocolPath<P>` by its contextual decode, an `ActorPath<R>` by
+its decode's leaf-namespace check. `ctx.resolve` then makes either one live,
+and the proof it returns is what the receiver stores ([R-0044](#r-0044)).
+
+An `ErasedActorPath` names, renders, compares, or monitors an actor. It also
+names a recipient at the untyped boundary, such as an MCP tool argument or an
+RPC `Call` recipient, which the boundary delivers through its private
+stand-in (ADR-0231 §4).
+
+The typed doors are not all built on `main`. The native `resolve` takes only a
+`ProtocolPath<P>` (`crates/aether-substrate/src/actor/native/ctx/address.rs`),
+and its `ActorPath<R>` arm lands with its first native caller (ADR-0230 §3).
+A guest has no typed-path door yet: its `ProtocolPath<P>` decode lands with
+ADR-0241, and its `resolve` over an `ActorPath<R>` lands with #6829.
+
+- **Why:** an erased path proves only to an erased reference, which has no
+  send verb, so a path that code written against the engine will send to
+  carries the type its sends need and a wrong kind is a compile error rather
+  than a runtime failure; applied by [R-0043](#r-0043)'s test.
+- **Settled:** ADR-0230 §2 (the paths mirror the references); ADR-0231 §3
+  rule 3 (a link is typed by what its holder needs); #6847 (actors are
+  described only by actor paths, and protocol paths link them); #6854
+  (`Address` deleted); #6863 (contextual kinds decode only with a context);
+  #6895 (no send goes through an erased reference); #6896 (a path field its
+  receiver sends to is a typed path); #6907 (the rule governs descriptions
+  that code written against the engine carries; the core's own kinds may
+  carry a `MailboxId`).
 
 ### R-0017: Keep one addressing grammar {#r-0017}
 
