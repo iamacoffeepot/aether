@@ -140,7 +140,7 @@ The rules:
 |---|---|---|
 | 1 | Static reply check on typed sends | not built |
 | 2 | `#[protocol]` and `CoveredBy` | built: `Row`, `RowReply`, `RowSet`, `CoversRows`, `Protocol`, `CoveredBy` (`crates/aether-actor/src/model/protocol.rs`) and `#[protocol]` (`crates/aether-actor-derive/src/protocol.rs`), over the per-handler `Contract<K>` rows and per-actor `Contracts::CONTRACTS`; `includes` and protocol-to-protocol coverage are not built |
-| 3 | `ProtocolRef<P>`, `ProtocolPath<P>`, contextual decode, `resolve` | `ProtocolPath<P>` and `ActorPath::narrow` built (`crates/aether-actor/src/path/`), with the path text as their only wire and serde form and a decode that checks the grammar and canonical form only. `ProtocolRef<P>` built (`crates/aether-actor/src/reference/protocol_ref.rs`), a `Target` for each kind `P` lists through a row index the compiler infers (`RowAt`, `crates/aether-actor/src/model/protocol.rs`), with the native liveness-only `resolve` over a `ProtocolPath<P>` (`Registry::resolve_protocol`, `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). Not built: the type constructors that replace the declared-link writers on main (`#[actor(links(..))]`, `ctx.link`, `ctx.link_child`) and `ActorPath<R>`'s leaf-namespace decode check (#6857); contextual kinds and `decode_in` (#6858); reference narrowing |
+| 3 | `ProtocolRef<P>`, `ProtocolPath<P>`, contextual decode, `resolve` | `ProtocolPath<P>` and `ActorPath::narrow` built (`crates/aether-actor/src/path/`), with the path text as their only wire form. `ProtocolPath<P>`'s decode proves coverage against the live route at its path through `Kind::decode_with` and `DecodeCtx` (`crates/aether-data/src/wire/context.rs`, over the registry's `PublishedRoutes` answer in `crates/aether-substrate/src/mail/registry/mailbox/resolve.rs`), and it has no `Deserialize`; `ActorPath<R>`'s decode checks its leaf namespace, and the type constructors `ActorPath::<R>::instance` and `ActorPath::<C>::child` replace the declared links. `ProtocolRef<P>` built (`crates/aether-actor/src/reference/protocol_ref.rs`), a `Target` for each kind `P` lists through a row index the compiler infers (`RowAt`, `crates/aether-actor/src/model/protocol.rs`), with the native liveness-only `resolve` over a `ProtocolPath<P>` (`Registry::resolve_protocol`, `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). Not built: the guest's published-routes answer (ADR-0241), so a guest refuses a `ProtocolPath<P>` at decode; reference narrowing |
 | 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the erased send verb's removal and the cast are not |
 | 5 | Replace preserves contracts | built, the fallback rule included: `crates/aether-data/src/contract.rs`, `crates/aether-substrate/src/mail/registry/contract.rs`, `crates/aether-component/src/trampoline/runtime/contract.rs` |
 | 6 | Manual rows | built: `Undeclared` row, `ReplyContract::Manual` on both manifests |
@@ -338,7 +338,7 @@ should become one type is a separate question, not decided here.
 | Type | Claims | Made by | Can |
 |---|---|---|---|
 | `ProtocolRef<P>` | an actor whose rows cover `P` reached `Live` here, in this session | narrowing an `ActorRef<R>` or a `ProtocolRef<Q>`; `ctx.resolve` of a `ProtocolPath<P>`; the guard cast (§4) | send the kinds `P` lists, with §1's reply check; monitor; name its canonical path; be held in actor memory. No codec. |
-| `ProtocolPath<P>` | the text is a well-formed canonical path naming an actor whose rows cover `P`: narrowed, because the compiler proved the source actor type covers `P`; decoded, because the decode proved the engine's published rows for the path's leaf namespace cover `P`. Nothing about existence either way. | narrowing an `ActorPath<R>`; a contextual decode (`decode_in`) against the engine's context | be a kind field, which makes the kind contextual, a config field, or saved state; be compared and displayed; be resolved. It grants no send. |
+| `ProtocolPath<P>` | the text is a well-formed canonical path naming an actor whose rows cover `P`: narrowed, because the compiler proved the source actor type covers `P`; decoded, because the decode proved the engine's published rows for the live route at the path cover `P`. Nothing about existence after the decode. | narrowing an `ActorPath<R>`; a contextual decode (`decode_with`) against the engine's context | be a kind field, whose kind is then declared `no_serde`; be compared and displayed; be resolved. It grants no send. |
 
 #### `ProtocolRef<P>`
 
@@ -405,45 +405,59 @@ path adds no schema node, so the JSON codec, MCP, and the hub see a path.
 A `ProtocolPath<P>` claims that the actor it names publishes rows covering
 `P`. That is a fact about an engine, not about the text, so no decode of the
 text alone can prove it. A `ProtocolPath<P>` is therefore a contextual type:
-it decodes only against a context the engine supplies, and the decode proves
-the claim.
+its decode proves the claim against a context the engine supplies, and
+refuses without one.
 
-- The context answers one question: do the rows the engine publishes for a
-  namespace cover `<P::Rows as RowSet>::CONTRACTS`, compared as the cast
-  compares them (§4)? The decode checks the grammar and canonical form, as
-  every typed path's does, then asks it about the path's leaf namespace, and
-  refuses a path it answers no for, naming the path and the first kind whose
-  row is missing or different.
-- The kind derive computes a `CONTEXTUAL` marker from the kind's field
-  types; it is never declared by hand. A kind with a contextual field
-  anywhere inside it is contextual. A contextual kind has no plain decode,
-  only `decode_in(bytes, &ctx)`, so decoding one without a context does not
-  compile. `ProtocolPath<P>` itself has no context-free decode either.
-- Native dispatch supplies the engine's context when it decodes a
-  contextual kind for a handler. A guest reaches the context through a host
-  call, and the SDK caches a covering answer per (namespace, protocol): it
-  stays true, because a native namespace's rows are fixed for the engine
-  and a component's only grow (§5).
+- Every kind decodes through one body, `Kind::decode_with(bytes, &mut ctx)`,
+  which returns the value or a named `wire::Error`. The `DecodeCtx` is built
+  from what the decoding ctx already holds: its inbound mail's blob
+  attachments and its mail registry. It keeps both in private fields and
+  offers a leaf only the two decode operations: resolve a blob hash, and
+  prove that the live route at a path publishes a set of rows. Neither the
+  resolver nor the registry is reachable through it.
+- A `ProtocolPath<P>` leaf checks the grammar and canonical form, as every
+  typed path's decode does, then asks the context to prove that the `Live`
+  route standing under exactly its path publishes every row of
+  `<P::Rows as RowSet>::CONTRACTS`, compared as the cast compares them (§4).
+  The context's answer is the mail registry's published route contracts
+  (§4). The leaf refuses `ProtocolPathUnchecked` when the context has no
+  registry, `ProtocolPathUnpublished` when no `Live` route stands at the
+  path, and `UncoveredProtocolPath` naming the path and the first row that
+  is missing or different.
+- The plain shorthand (`decode_from_bytes`, `wire::decode_from_slice`)
+  decodes with an empty context, so it refuses every `ProtocolPath<P>`.
+  Serde carries no context, so `ProtocolPath<P>` has no `Deserialize`, and a
+  kind carrying one is declared `no_serde`.
+- Native dispatch decodes each typed arm with the inbound's attachments and
+  the registry, and logs a refusal at warn, naming the kind and the error,
+  before treating the mail as a miss. A guest's context carries its blob
+  holds only, so a guest decode of a `ProtocolPath<P>` refuses until
+  [ADR-0241](0241-code-is-published-not-loaded.md) gives it a published-routes
+  answer.
 
 So a `ProtocolPath<P>` that exists is valid by construction: narrowed where
 the compiler proved `P: CoveredBy<R>`, or decoded against the engine it is
 in. Bytes from another engine, a config file, a journal record, or an
-operator's MCP call become a `ProtocolPath<P>` only in an engine whose rows
-cover `P`. A sender is responsible for the validity of what it sends, and a
-value that exists is valid: the claim is proven once, where the value comes
-into existence, and nothing downstream checks it again, neither the RPC door
-nor `resolve`.
+operator's MCP call become a `ProtocolPath<P>` only in an engine where a live
+route at the path covers `P`. A sender is responsible for the validity of
+what it sends, and a value that exists is valid: the claim is proven once,
+where the value comes into existence, and nothing downstream checks it again,
+neither the RPC door nor `resolve`.
 
 `ProtocolPath<P>` is the class [ADR-0238](0238-engine-blob-store.md)
 decision 6 records for `Blob`: a type whose meaning depends on where it is.
-`Blob`'s typed decode stays context-free, because its inline form means the
-same bytes anywhere; a protocol path's claim means nothing apart from an
-engine, so its decode takes one.
+A shared (tag-1) `Blob` field resolves through the same context, and a
+resolved blob always decodes as a reference to the store entry; inline
+(tag-0) bytes mean the same bytes anywhere, so they need no context and
+decode owned. A protocol path's claim means nothing apart from an engine, so
+its decode always consults one.
 
 A path names a slot by name, so the same text names the same slot in any
 session. That is why a typed path may sit in a config or in saved state: the
 engine that reads it back proves its claim at the decode, and whether
-anything is live there, the receipt proves.
+anything is live there, the receipt proves. A reader that decodes with the
+plain shorthand or serde, as config and saved-state decodes do today, has no
+context, so it refuses a `ProtocolPath<P>`.
 
 #### Why two typed paths
 
@@ -519,6 +533,13 @@ whether it has a `#[fallback]`, on its `RouteRecord` when it goes `Live`, or,
 for an inline child's `Alias` route, when the alias is staged. The cast and
 the engine's context for a contextual decode (§3) read them there, so one
 published-route read answers both "is it `Live`" and "what does it cover".
+The context of a `decode_with` comes from the receiving ctx's own mail
+registry and attachments, the machinery `resolve` uses: the registry answers
+the rows the `Live` route standing under exactly the path published. A path
+with no published `Live` route, such as one to a type that is linked but not
+spawned or to a route still `Starting`, is therefore refused at decode until
+ADR-0241's namespace publication table answers for namespaces that are
+published but not yet spawned.
 
 | Route | Rows come from |
 |---|---|
@@ -779,7 +800,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | `ActorPath<R>` narrowed to `ProtocolPath<P>` | compiles if `P: CoveredBy<R>`, else compile error; the same text, with no registry read and no position |
 | `ActorPath<R>` decoded from mail, config, or saved state | the decode refuses a short path or a leaf namespace other than `R::NAMESPACE` |
 | `ActorPath<R>` held or received | `ctx.resolve`: `NotLive` refuses, else an `ActorRef<R>`, which sends every kind `R` handles, manual rows included; no row comparison |
-| `ProtocolPath<P>` decoded from mail, config, or saved state | a contextual decode (`decode_in`) against the engine: refused unless the published rows for its leaf namespace cover `P`; a decode without a context does not compile |
+| `ProtocolPath<P>` decoded from mail, config, or saved state | a contextual decode (`decode_with`) against the engine: refused unless the rows the live route at the path published cover `P`; a decode without a context is refused at decode |
 | `ProtocolPath<P>` held or received, narrowed or decoded | `ctx.resolve`: `NotLive` refuses, else a `ProtocolRef<P>`; no row comparison |
 | `ErasedActorPath` received untyped (config, MCP, RPC) | `resolve_path` to an `ErasedActorRef`, then `cast::<T>()` |
 | `ErasedActorRef` (`ctx.sender()`, `resolve_path`, `resolve_live`) | no send; reply, monitor, key, or `cast::<T>()` first |
@@ -823,8 +844,8 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | replace that drops or changes a row | runtime refusal; the old module keeps running |
 | replace that drops the `#[fallback]` | runtime refusal, as for a dropped row |
 | replace that adds a row | allowed; the route republishes the superset |
-| a `ProtocolPath<P>` arriving in an engine whose rows for its leaf namespace do not cover `P` | refused at decode, naming the path and the first kind whose row is missing or different |
-| a kind with a `ProtocolPath<P>` field decoded without a context | compile error: a contextual kind has no plain decode |
+| a `ProtocolPath<P>` arriving in an engine whose live route at the path does not cover `P`, or where no live route stands at the path | refused at decode, naming the path and, when a route stands there, the first kind whose row is missing or different |
+| a kind with a `ProtocolPath<P>` field decoded without a context | refused at decode: the empty context has no registry |
 | a `ProtocolPath<P>` whose target is dead or not yet started | `NotLive` at receipt |
 | a decoded `ActorPath<R>` whose leaf namespace is not `R::NAMESPACE` | refused at decode |
 | cast failure | `None`; the holder refuses or drops, nothing parked |
@@ -879,9 +900,10 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   caller-relative peer is written absolute from the writer's own path first
   (ADR-0230 §1).
 - A kind that carries a `ProtocolPath<P>` is contextual: it decodes only
-  inside an engine, through `decode_in`, and a guest's first decode of a
-  (namespace, protocol) pair costs a host call. A reader outside an engine
-  sees the field through its schema, as an `ErasedActorPath`'s text.
+  inside an engine, through `decode_with` against the engine's registry, and
+  it has no serde decode. A guest refuses one until ADR-0241. A reader
+  outside an engine sees the field through its schema, as an
+  `ErasedActorPath`'s text.
 - `send_ignoring_reply` still takes the sender's dispatch-miss path, which logs
   each discarded reply.
 
@@ -890,8 +912,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 - Runtime reply delivery, settlement, correlation, request contexts, and
   liveness are unchanged.
 - No new mail and no per-send cost. A resolve is one fold and one route-table
-  lookup; a cast adds a slice comparison, and so does a contextual decode,
-  which a guest caches per (namespace, protocol).
+  lookup; a cast adds a slice comparison, and so does a contextual decode.
 
 ## Alternatives considered
 

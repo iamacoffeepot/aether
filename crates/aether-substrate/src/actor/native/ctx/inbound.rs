@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use aether_actor::{ErasedActorRef, ReplyMode};
+use aether_data::wire::DecodeCtx;
 use aether_data::{Kind, MailId, RequestId};
 
 use crate::actor::native::envelope::Envelope;
@@ -71,23 +72,35 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.inbound.as_ref()
     }
 
-    /// Decode `payload` as `K` against the inbound envelope's attachments
-    /// (ADR-0238 decision 3): each tag-1 `Blob` field resolves to the entry
-    /// its hash names and yields a `Shared` value over it, and a hash no
-    /// attachment carries fails the decode. Without attachments it is
-    /// `K::decode_from_bytes`, unchanged.
+    /// Decode `payload` as `K` through `K::decode_with`, against a context
+    /// built from what this ctx already holds (ADR-0231 §3, ADR-0238
+    /// decision 3):
     ///
-    /// The `#[actor]` typed arms and native handler-set arms call it; a hand
-    /// decoder of an `&Envelope` is not affected, since it sees only blob-free
-    /// kinds today. It decodes only the mail being handled, so it grants
+    /// - the inbound envelope's attachments (none without an inbound): each
+    ///   tag-1 `Blob` field resolves to the entry its hash names and yields a
+    ///   `Shared` value over it, and a hash no attachment carries refuses;
+    /// - the mail registry `resolve` reads: each `ProtocolPath` field is
+    ///   proven against the contract the `Live` route at its path published,
+    ///   and a path with no live route, or whose route does not cover the
+    ///   protocol, refuses.
+    ///
+    /// A refusal is logged once at warn, naming the kind and the error, and
+    /// answers `None`, the typed arm's miss. The `#[actor]` typed arms and
+    /// native handler-set arms call it; a hand decoder of an `&Envelope` is
+    /// not affected. It decodes only the mail being handled, so it grants
     /// nothing the handler does not already receive.
     #[doc(hidden)]
     #[must_use]
     pub fn __decode_inbound<K: Kind>(&self, payload: &[u8]) -> Option<K> {
-        match self.inbound.as_ref().map(Envelope::attachments) {
-            Some(entries) if !entries.is_empty() => K::decode_with(payload, &mut AttachedEntries(entries)),
-            _ => K::decode_from_bytes(payload),
-        }
+        let entries = self.inbound.as_ref().map_or(&[][..], Envelope::attachments);
+        let mut blobs = AttachedEntries(entries);
+        let mut ctx = DecodeCtx::empty().blobs(&mut blobs).routes(&**self.binding.mailer().registry());
+
+        K::decode_with(payload, &mut ctx)
+            .inspect_err(
+                |error| tracing::warn!(target: "aether_substrate::mail", kind = K::NAME, %error, "decode refused"),
+            )
+            .ok()
     }
 
     /// ADR-0080 §5: the [`MailId`] of the mail currently being

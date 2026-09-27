@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use aether_data::canonical::kind_id_from_shape;
-use aether_data::wire::{self, BlobResolver, Encoder};
+use aether_data::wire::{self, BlobResolver, DecodeCtx, Encoder};
 use aether_data::{Blob, BlobHash, BlobReader, Kind, KindShape, SchemaShape};
 
 #[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -161,7 +161,8 @@ fn hooks_see_each_blob_field_once_and_resolve_its_hash() {
         (0..expected.len()).map(|index| [u8::try_from(index).expect("few blobs"); 32]).collect();
     let mut table =
         Table { entries: hashes.iter().copied().zip(expected.iter().cloned()).collect(), asked: Vec::new() };
-    let back = Carrier::decode_with(&recording.out, &mut table).expect("decode through the resolver");
+    let back = Carrier::decode_with(&recording.out, &mut DecodeCtx::empty().blobs(&mut table))
+        .expect("decode through the resolver");
     assert_eq!(table.asked, hashes);
     assert_eq!(blob_bytes(&back), expected);
 

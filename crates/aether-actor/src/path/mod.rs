@@ -7,9 +7,11 @@
 //! written by type constructors whose bounds check the topology
 //! (`ActorPath::<R>::instance`, `ActorPath::<C>::child`), and narrowed only
 //! where the compiler proves coverage. It crosses the wire as the path text
-//! alone; a decoded path is canonical, and a decoded `ActorPath<R>`'s leaf
-//! names an `R`. On receipt, `resolve` proves that a live actor stands at the
-//! path. Neither type holds a position.
+//! alone; a decoded path is canonical, a decoded `ActorPath<R>`'s leaf names
+//! an `R`, and a decoded `ProtocolPath<P>` is checked at decode against the
+//! engine's published route contracts: the live route at its path publishes
+//! every row of `P`. On receipt, `resolve` proves liveness: that a live actor
+//! still stands at the path. Neither type holds a position.
 //!
 //! The paths sit beside [`reference`](crate::reference), which holds the
 //! proofs: a path names, a reference sends.
@@ -29,9 +31,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// `Name("text")`, because a path is a name, not a position, and `Display`
 /// prints the text. The kind-field, encode, and serialize traits delegate to
 /// [`ErasedActorPath`]'s. Each type writes its own decodes beside it, over
-/// [`decode_canonical`] and [`deserialize_canonical`]. Invoked beside each
-/// type, whose module is a child of this one, so the trait names resolve
-/// through `super::`.
+/// [`decode_canonical`] (and, for `ActorPath`, [`deserialize_canonical`]).
+/// Invoked beside each type, whose module is a child of this one, so the
+/// trait names resolve through `super::`.
 macro_rules! typed_path_traits {
     ($name:ident<$param:ident>) => {
         impl<$param> Clone for $name<$param> {
@@ -140,13 +142,16 @@ impl Display for ShortTypedPath<'_> {
 
 #[cfg(test)]
 mod tests {
-    use aether_data::wire::decode_from_slice;
-    use alloc::string::ToString;
+    use aether_data::wire::{DecodeCtx, PublishedRoutes, decode_from_slice};
+    use aether_data::{Kind, KindId, ReplyContract};
+    use alloc::string::{String, ToString};
+    use alloc::sync::Arc;
+    use core::cell::RefCell;
     use serde::de::IntoDeserializer;
     use serde::de::value::{Error as ValueError, StrDeserializer};
 
     use super::*;
-    use crate::{Addressable, Many};
+    use crate::{Addressable, Many, Protocol, Row, RowSet, Silent};
 
     const CANONICAL: &str = "test.unit:alpha/test.member:beta";
     const SHORT: &str = "test.unit/:beta";
@@ -165,6 +170,41 @@ mod tests {
         type Resolver = Many;
     }
 
+    #[aether_data::kind(name = "test.path.poke")]
+    struct Poke {
+        seq: u32,
+    }
+
+    struct Poking;
+
+    impl Protocol for Poking {
+        type Rows = (Row<Poke, Silent>,);
+    }
+
+    #[aether_data::kind(name = "test.path.carries", no_serde)]
+    struct Carries {
+        path: ProtocolPath<Poking>,
+    }
+
+    /// Answers `rows` for every path, and records each path it was asked for.
+    struct Recording {
+        rows: Vec<(KindId, ReplyContract)>,
+        asked: RefCell<Vec<ErasedActorPath>>,
+    }
+
+    impl Recording {
+        fn answering(rows: &[(KindId, ReplyContract)]) -> Self {
+            Self { rows: rows.to_vec(), asked: RefCell::new(Vec::new()) }
+        }
+    }
+
+    impl PublishedRoutes for Recording {
+        fn published_rows(&self, path: &ErasedActorPath) -> Option<Arc<[(KindId, ReplyContract)]>> {
+            self.asked.borrow_mut().push(path.clone());
+            Some(self.rows.as_slice().into())
+        }
+    }
+
     fn wire(text: &str) -> Vec<u8> {
         let mut out = Vec::new();
         ErasedActorPath::new(text).expect("a well-formed path").encode(&mut out).expect("encodes");
@@ -175,26 +215,49 @@ mod tests {
         text.into_deserializer()
     }
 
+    fn carried(text: &str, routes: &Recording) -> Result<String, WireError> {
+        Carries::decode_with(&wire(text), &mut DecodeCtx::empty().routes(routes))
+            .map(|carries| carries.path.to_string())
+    }
+
     /// A typed path never expands, so a decode that let a hole through would
-    /// hand `resolve` a path it could never fold. Both codecs of both types
+    /// hand `resolve` a path it could never fold. Both codecs of `ActorPath`
     /// run the canonical check and keep a canonical path's text.
+    ///
+    /// A `ProtocolPath` leaf that passed the wrong path or rows (an empty row
+    /// set, which every route covers), or asked the context before the
+    /// canonical check, would mint a path whose claim nothing proved: the leaf
+    /// asks only for a canonical path, with exactly that text and `P`'s rows,
+    /// and the plain shorthand, which has no context, refuses.
     #[test]
     fn decode_refuses_a_short_path_and_keeps_a_canonical_one() {
         assert_eq!(decode_from_slice::<ActorPath<Member>>(&wire(SHORT)), Err(WireError::InvalidActorPath));
-        assert_eq!(decode_from_slice::<ProtocolPath<()>>(&wire(SHORT)), Err(WireError::InvalidActorPath));
         assert!(ActorPath::<Member>::deserialize(serde_text(SHORT)).is_err());
-        assert!(ProtocolPath::<()>::deserialize(serde_text(SHORT)).is_err());
 
         let decoded = decode_from_slice::<ActorPath<Member>>(&wire(CANONICAL)).expect("a canonical path decodes");
-        assert_eq!(decoded.to_string(), CANONICAL);
-        let decoded = decode_from_slice::<ProtocolPath<()>>(&wire(CANONICAL)).expect("a canonical path decodes");
         assert_eq!(decoded.to_string(), CANONICAL);
         let deserialized =
             ActorPath::<Member>::deserialize(serde_text(CANONICAL)).expect("a canonical path deserializes");
         assert_eq!(deserialized.to_string(), CANONICAL);
-        let deserialized =
-            ProtocolPath::<()>::deserialize(serde_text(CANONICAL)).expect("a canonical path deserializes");
-        assert_eq!(deserialized.to_string(), CANONICAL);
+
+        let covering = Recording::answering(<<Poking as Protocol>::Rows as RowSet>::CONTRACTS);
+
+        assert_eq!(carried(SHORT, &covering), Err(WireError::InvalidActorPath));
+        assert!(covering.asked.borrow().is_empty(), "a short path is refused before the context is asked");
+
+        assert_eq!(carried(CANONICAL, &covering).as_deref(), Ok(CANONICAL));
+        assert_eq!(*covering.asked.borrow(), [ErasedActorPath::new(CANONICAL).expect("a well-formed path")]);
+
+        let lacking = Recording::answering(&[(KindId(1), ReplyContract::None)]);
+
+        assert_eq!(
+            carried(CANONICAL, &lacking),
+            Err(WireError::UncoveredProtocolPath {
+                path: ErasedActorPath::new(CANONICAL).expect("a well-formed path"),
+                kind: Poke::ID,
+            }),
+        );
+        assert!(Carries::decode_from_bytes(&wire(CANONICAL)).is_none(), "the shorthand has no context");
     }
 
     /// An `ActorPath<R>` that exists names an `R`: a decode that claimed `R`

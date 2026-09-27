@@ -364,7 +364,7 @@ mod tests {
     use crate::wasm::inline::{ChildRecord, bundle};
     use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmCtx};
     use crate::{Addressable, Erased, Lifecycle, Manual};
-    use aether_data::{Kind, KindId, MailboxId};
+    use aether_data::{Kind, KindId, MailboxId, wire};
     use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec;
@@ -690,10 +690,10 @@ mod tests {
 
     /// A typed (non-`()`) `Config` for step 5's reconstruct coverage: wraps
     /// a `u32`. Hand-rolls `Kind` rather than deriving it (a host-only test
-    /// fixture needs no `Schema`/serde machinery) — `decode_from_bytes`
-    /// only succeeds on exactly 4 bytes, so it decodes `None` from empty
-    /// bytes just like a real typed config would, the branch
-    /// `reconstruct_one_child` must still honor.
+    /// fixture needs no `Schema`/serde machinery) — `decode_with` only
+    /// succeeds on exactly 4 bytes, so it refuses empty bytes just like a
+    /// real typed config would, the branch `reconstruct_one_child` must
+    /// still honor.
     #[derive(Clone, Copy, Default)]
     struct TypedConfig(u32);
 
@@ -701,9 +701,8 @@ mod tests {
         const NAME: &'static str = "test.inline.typed_config";
         const ID: KindId = KindId(0x7A11_0000_0000_0001);
 
-        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-            let arr: [u8; 4] = bytes.try_into().ok()?;
-            Some(Self(u32::from_le_bytes(arr)))
+        fn decode_with(bytes: &[u8], _ctx: &mut wire::DecodeCtx<'_>) -> Result<Self, wire::Error> {
+            wire::decode_from_slice(bytes).map(Self)
         }
 
         fn encode_into_bytes(&self) -> Vec<u8> {

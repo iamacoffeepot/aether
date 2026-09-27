@@ -348,10 +348,17 @@ for `P: CoveredBy<R>`.
 Both paths are kind fields, carried as the path text with `ErasedActorPath`'s
 schema. Decoding either accepts only a well-formed canonical path, and decoding
 an `ActorPath<R>` also refuses a path whose leaf namespace is not
-`R::NAMESPACE`, so an `ActorPath<R>` that exists names an `R`. Neither grants a
-send: its receiver's `resolve` proves that a live actor stands at the path. The
-first consumer, a Bloomery unit's driver, is to write its journal's storage
-source this way (ADR-0240 D7):
+`R::NAMESPACE`, so an `ActorPath<R>` that exists names an `R`. A decoded
+`ProtocolPath<P>` is checked against the mail registry's published contract
+for the live route at its path: the decode refuses a path with no live route,
+or whose route does not publish every row of `P`, so a `ProtocolPath<P>` that
+exists names an actor covering `P`. Native dispatch decodes with the registry;
+a guest's decode has none, so a guest refuses a `ProtocolPath<P>` until
+[ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md).
+Neither path grants a send: the route can leave after the decode, so its
+receiver's `resolve` proves that a live actor stands at the path. The first
+consumer, a Bloomery unit's driver, is to write its journal's storage source
+this way (ADR-0240 D7):
 
 ```rust
 let source: ProtocolPath<ArtifactStorage> =
@@ -362,7 +369,8 @@ A native actor that receives a `ProtocolPath<P>` proves it with
 `ctx.resolve(&path)`, which returns a `ProtocolRef<P>` or a `ResolveError`
 (ADR-0231 §3). `resolve` folds the canonical text and reads the route table
 once: a route must stand under exactly that name and be `Live`, or it refuses
-`NotLive`, naming the path, never a position. `P` stays the path's claim.
+`NotLive`, naming the path, never a position. It compares no rows: `P` was
+proven when the path was narrowed or decoded.
 `ctx.send_to(reference, &kind)` and its context-carrying siblings take the
 `ProtocolRef<P>` only for a kind `P` lists; any other kind is a compile error,
 whatever else the target handles:

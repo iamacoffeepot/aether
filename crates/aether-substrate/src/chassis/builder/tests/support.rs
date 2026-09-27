@@ -25,16 +25,7 @@ macro_rules! pod_kind {
             const NAME: &'static str = $name;
             const ID: aether_data::KindId = aether_data::KindId($id);
 
-            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != std::mem::size_of::<Self>() {
-                    return None;
-                }
-                Some(bytemuck::pod_read_unaligned(bytes))
-            }
-
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
+            aether_data::pod_kind_codec!();
         }
 
         impl aether_data::ActorMail for $type {}

@@ -4,8 +4,8 @@
 //! and the bytes: every codec writes it and every decode source reads it.
 //! Tag 1 is the blob's 32-byte hash, which only the in-process envelope
 //! encoder writes through [`Encoder::blob`]. A decode hands a tag-1 hash to
-//! [`Decoder::resolve`], which refuses unless the decode was given a
-//! resolver. The serde impls write the tag-0 form too, so `wire::to_vec`
+//! [`Decoder::resolve_blob`], which refuses unless the decode's context has
+//! a resolver. The serde impls write the tag-0 form too, so `wire::to_vec`
 //! and the [`WireEncode`] path agree byte for byte.
 
 use alloc::vec::Vec;
@@ -82,7 +82,7 @@ impl<'de> WireDecode<'de> for Blob {
             TAG_INLINE => decode_bytes(cursor).map(Self::from),
             TAG_HASH => {
                 let hash = BlobHash::from_bytes(take_array(cursor)?);
-                dec.resolve(hash)
+                dec.resolve_blob(hash)
             }
             other => Err(Error::InvalidBlobTag(other)),
         }

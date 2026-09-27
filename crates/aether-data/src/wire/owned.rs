@@ -42,14 +42,17 @@ pub trait WireDecode<'de>: Sized {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error>;
 
     /// Pull one `Self` off `dec`, resolving each tag-1 `Blob` field through
-    /// [`Decoder::resolve`]. The derive and the container impls override it
-    /// to pass `dec` to their fields; a leaf that holds no `Blob` keeps the
-    /// default, which reads [`WireDecode::decode`] from [`Decoder::cursor`].
+    /// [`Decoder::resolve_blob`] and proving each `ProtocolPath` through
+    /// [`Decoder::prove_route_covers`]. The derive and the container impls
+    /// override it to pass `dec` to their fields; a leaf that needs neither
+    /// operation keeps the default, which reads [`WireDecode::decode`] from
+    /// [`Decoder::cursor`].
     ///
     /// # Errors
     ///
-    /// The [`WireDecode::decode`] faults, or [`Error::DetachedBlob`] when
-    /// `dec` does not resolve a tag-1 hash.
+    /// The [`WireDecode::decode`] faults, [`Error::DetachedBlob`] when `dec`
+    /// does not resolve a tag-1 hash, or a `ProtocolPath` refusal when `dec`
+    /// cannot prove a path's route.
     fn decode_from<D: Decoder<'de> + ?Sized>(dec: &mut D) -> Result<Self, Error> {
         Self::decode(dec.cursor())
     }
@@ -66,8 +69,9 @@ pub fn encode_to_vec<T: WireEncode + ?Sized>(value: &T) -> Result<Vec<u8>, Error
     Ok(out)
 }
 
-/// Decode a value from a wire payload through [`WireDecode`], requiring every
-/// byte consumed.
+/// Decode a value from a wire payload through [`WireDecode`] with an empty
+/// context, requiring every byte consumed: a tag-1 `Blob` or a
+/// `ProtocolPath` refuses.
 ///
 /// # Errors
 ///
@@ -82,8 +86,8 @@ pub fn decode_from_slice<'a, T: WireDecode<'a>>(bytes: &'a [u8]) -> Result<T, Er
     }
 }
 
-/// Decode a value from the front of a wire payload, returning the unconsumed
-/// remainder.
+/// Decode a value from the front of a wire payload with an empty context,
+/// returning the unconsumed remainder.
 ///
 /// # Errors
 ///

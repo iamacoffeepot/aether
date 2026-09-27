@@ -23,6 +23,12 @@
 //!   bytes, tag 1 the blob's 32-byte hash, written only by the in-process
 //!   envelope encoder through the [`Encoder`] hook.
 //!
+//! A decode that needs the engine reaches it only through a [`DecodeCtx`]:
+//! a tag-1 `Blob` resolves through [`Decoder::resolve_blob`], and a
+//! `ProtocolPath` proves its route through [`Decoder::prove_route_covers`].
+//! The plain `&[u8]` decoder behind [`decode_from_slice`] refuses both, as
+//! [`DecodeCtx::empty`] does.
+//!
 //! This module is the workspace's structured wire format (ADR-0118,
 //! shipped). Kind encode/decode funnels through [`WireEncode`] /
 //! [`WireDecode`]. The serde adapter still backs `to_vec` / `from_bytes`
@@ -39,8 +45,10 @@ use serde::ser::Error as SerError;
 use serde::{Deserialize, Serialize};
 
 use crate::blob::BlobHash;
+use crate::{ErasedActorPath, KindId};
 
 mod attach;
+mod context;
 mod de;
 mod leaf;
 pub(crate) mod owned;
@@ -52,8 +60,9 @@ mod differential;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use attach::Resolving;
+pub(crate) use attach::InCtx;
 pub use attach::{BlobResolver, Decoder, Encoder};
+pub use context::{DecodeCtx, PublishedRoutes};
 pub use owned::{
     WireDecode, WireEncode, decode_bytes, decode_from_slice, encode_bytes, encode_to_vec, take_from_slice,
 };
@@ -89,6 +98,15 @@ pub enum Error {
     InvalidBlobTag(u8),
     /// A tag-1 `Blob` field whose hash the decode's resolver does not supply.
     DetachedBlob(BlobHash),
+    /// A `ProtocolPath` decoded by a context with no published routes.
+    ProtocolPathUnchecked { path: ErasedActorPath },
+    /// A `ProtocolPath` whose path has no `Live` route standing under it.
+    ProtocolPathUnpublished { path: ErasedActorPath },
+    /// A `ProtocolPath` whose live route does not publish `kind`'s row, or
+    /// publishes it with another reply.
+    UncoveredProtocolPath { path: ErasedActorPath, kind: KindId },
+    /// A hand-written kind with no decode body.
+    NoDecodeBody { kind: &'static str },
 }
 
 impl fmt::Display for Error {
@@ -107,6 +125,16 @@ impl fmt::Display for Error {
             Self::InvalidActorPath => f.write_str("aether wire: invalid actor path"),
             Self::InvalidBlobTag(tag) => write!(f, "aether wire: invalid blob tag {tag}"),
             Self::DetachedBlob(_) => f.write_str("aether wire: blob hash not supplied by the decode's resolver"),
+            Self::ProtocolPathUnchecked { path } => {
+                write!(f, "aether wire: protocol path `{path}` refused: this context has no registry")
+            }
+            Self::ProtocolPathUnpublished { path } => {
+                write!(f, "aether wire: protocol path `{path}` refused: no live route publishes at this path")
+            }
+            Self::UncoveredProtocolPath { path, kind } => {
+                write!(f, "aether wire: protocol path `{path}` refused: `{kind}`'s row is missing or different")
+            }
+            Self::NoDecodeBody { kind } => write!(f, "aether wire: kind `{kind}` has no decode body"),
         }
     }
 }

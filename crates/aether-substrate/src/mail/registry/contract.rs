@@ -88,4 +88,11 @@ impl RouteContract {
     pub(crate) fn into_parts(self) -> (Vec<(KindId, ReplyContract)>, bool) {
         (self.rows.to_vec(), self.fallback)
     }
+
+    /// The rows alone, shared rather than copied, for the registry's
+    /// [`PublishedRoutes`](aether_data::wire::PublishedRoutes) answer, which
+    /// a `ProtocolPath` decode checks coverage against.
+    pub(crate) fn into_rows(self) -> Arc<[(KindId, ReplyContract)]> {
+        self.rows
+    }
 }

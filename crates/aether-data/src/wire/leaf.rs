@@ -248,7 +248,7 @@ impl<'de, K: WireDecode<'de> + Ord, V: WireDecode<'de>> WireDecode<'de> for BTre
         let count = u32::from_le_bytes(take_array(dec.cursor())?) as usize;
         let mut map = Self::new();
         for _ in 0..count {
-            let key = K::decode(dec.cursor())?;
+            let key = K::decode_from(dec)?;
             let value = V::decode_from(dec)?;
             map.insert(key, value);
         }

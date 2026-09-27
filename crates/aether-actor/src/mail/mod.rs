@@ -238,27 +238,28 @@ impl Mail<'_> {
     }
 
     /// Decode a single inbound `K` via the wire shape `K`'s `Kind`
-    /// derive baked into `Kind::decode_from_bytes` — cast for
-    /// `#[repr(C)]` + `Pod` types, structured for schema-shaped types.
-    /// This is the canonical receive-side decode and what the
-    /// `#[actor]` dispatcher calls on every typed handler.
+    /// derive baked into `Kind::decode_with` — cast for `#[repr(C)]` +
+    /// `Pod` types, structured for schema-shaped types. This is the
+    /// canonical receive-side decode and what the `#[actor]` dispatcher
+    /// calls on every typed handler.
     ///
-    /// Hands `K::decode_from_bytes` exactly `byte_len` bytes from
-    /// `ptr` so the decoder is bounded by the substrate-written
-    /// frame and can't read past it into adjacent linear memory.
-    /// Returns `None` on kind mismatch, on `count != 1`, or when
-    /// `K::decode_from_bytes` itself returns `None` — which can be
-    /// either the default body for hand-rolled `Kind` impls that
-    /// didn't override, a cast-size mismatch, or a structured decode
-    /// error.
+    /// Hands the decode exactly `byte_len` bytes from `ptr` so the
+    /// decoder is bounded by the substrate-written frame and can't read
+    /// past it into adjacent linear memory. Returns `None` on kind
+    /// mismatch, on `count != 1`, or when the decode refuses — the
+    /// default body for hand-rolled `Kind` impls that didn't override,
+    /// a cast-size mismatch, a structured decode error, or a field the
+    /// context cannot resolve.
     ///
-    /// On wasm32 the decode is `K::decode_with` over the guest's
-    /// blob resolver (ADR-0238 decision 3): each tag-1 `Blob` field
-    /// becomes a `Shared` value holding one hold on this instance's
-    /// blob table, so decoding a mail twice holds twice and a field
-    /// never decoded holds nothing. A tag-1 hash the table neither
+    /// On wasm32 the decode is `K::decode_with` over a context carrying
+    /// the guest's blob resolver only (ADR-0238 decision 3): each tag-1
+    /// `Blob` field becomes a `Shared` value holding one hold on this
+    /// instance's blob table, so decoding a mail twice holds twice and a
+    /// field never decoded holds nothing. A tag-1 hash the table neither
     /// pins nor holds, such as one in bytes kept past their receive
-    /// call, fails the decode (`None`).
+    /// call, fails the decode (`None`). The context carries no published
+    /// routes, so a `ProtocolPath` field refuses in a guest until
+    /// ADR-0241. A refusal is logged at warn, naming the kind.
     #[must_use]
     pub fn decode_kind<K: Kind>(&self) -> Option<K> {
         if self.kind != K::ID.0 || self.count != 1 {
@@ -388,10 +389,13 @@ impl<'a> PriorState<'a> {
 
 /// [`Mail::decode_kind`]'s decode of a bounded payload: through the guest's
 /// blob resolver on wasm32, so tag-1 `Blob` fields become held `Shared`
-/// values (ADR-0238 decision 3).
+/// values (ADR-0238 decision 3). The context has no published routes, so a
+/// `ProtocolPath` refuses; a refusal is logged at warn.
 #[cfg(target_arch = "wasm32")]
 fn decode_payload<K: Kind>(bytes: &[u8]) -> Option<K> {
-    K::decode_with(bytes, &mut GuestResolver)
+    K::decode_with(bytes, &mut wire::DecodeCtx::empty().blobs(&mut GuestResolver))
+        .inspect_err(|error| tracing::warn!(kind = K::NAME, %error, "decode refused"))
+        .ok()
 }
 
 /// [`Mail::decode_kind`]'s decode of a bounded payload. The host build of the

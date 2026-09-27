@@ -758,13 +758,7 @@ mod tests {
         const NAME: &'static str = "test.execute_cast_reply";
         const ID: KindId = KindId(0xDEAD_BEEF_000A_0001);
 
-        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-            (bytes.len() == size_of::<Self>()).then(|| bytemuck::pod_read_unaligned(bytes))
-        }
-
-        fn encode_into_bytes(&self) -> Vec<u8> {
-            bytemuck::bytes_of(self).to_vec()
-        }
+        aether_data::pod_kind_codec!();
     }
 
     impl aether_data::ActorMail for CastReply {}

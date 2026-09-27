@@ -126,38 +126,53 @@ pub trait Kind {
     const NAME: &'static str;
     const ID: KindId;
 
-    /// Decode a single instance from substrate-supplied bytes. The
-    /// `Kind` derive auto-implements this with the right body for the
-    /// type's wire shape (cast for `#[repr(C)]` + `Pod`, structured
-    /// otherwise). Hand-rolled `Kind` impls that don't participate in
-    /// `#[actor]` receive dispatch can leave the default — it
-    /// returns `None`, which the SDK surfaces as a strict-receiver
-    /// miss (`DISPATCH_UNKNOWN_KIND`).
+    /// Decode one instance from `bytes` against `ctx`: the one decode body
+    /// per kind (ADR-0231 §3, ADR-0238 decision 3). A tag-1 `Blob` field
+    /// resolves through [`wire::DecodeCtx::resolve_blob`] and a
+    /// `ProtocolPath` proves its route through
+    /// [`wire::DecodeCtx::prove_route_covers`]; each refuses with its named
+    /// error when `ctx` was not given the hook it needs.
     ///
-    /// The dispatcher synthesised by `#[actor]` calls this through
-    /// `Mail::decode_kind::<K>()`, which hands `bytes` already sliced
-    /// to the substrate-supplied `byte_len` so the decoder is bounded
-    /// by the actual frame and can't read past the substrate-written
-    /// payload into adjacent linear memory.
-    #[must_use]
-    fn decode_from_bytes(_bytes: &[u8]) -> Option<Self>
+    /// The `Kind` derive implements it for the type's wire shape (cast for
+    /// `#[repr(C)]` + `Pod`, structured otherwise), and
+    /// [`pod_kind_codec!`] emits the cast body for a hand-written impl. The
+    /// default refuses [`wire::Error::NoDecodeBody`], which the dispatchers
+    /// surface as a strict-receiver miss.
+    ///
+    /// # Errors
+    ///
+    /// The malformed-bytes [`wire::Error`]s, a blob or protocol-path refusal
+    /// from `ctx`, or [`wire::Error::NoDecodeBody`].
+    fn decode_with(bytes: &[u8], ctx: &mut wire::DecodeCtx<'_>) -> Result<Self, wire::Error>
     where
         Self: Sized,
     {
-        None
+        let _ = (bytes, ctx);
+        Err(wire::Error::NoDecodeBody { kind: Self::NAME })
+    }
+
+    /// [`Kind::decode_with`] against [`wire::DecodeCtx::empty`], with the
+    /// refusal dropped: a tag-1 `Blob` or a `ProtocolPath` yields `None`.
+    /// Override [`Kind::decode_with`], never this.
+    #[must_use]
+    fn decode_from_bytes(bytes: &[u8]) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        Self::decode_with(bytes, &mut wire::DecodeCtx::empty()).ok()
     }
 
     /// Encode `self` into a fresh byte buffer in the wire shape this
     /// kind was declared with. The `Kind` derive auto-implements this
-    /// using the same `#[repr(C)]` autodetect as `decode_from_bytes`
+    /// using the same `#[repr(C)]` autodetect as `decode_with`
     /// (cast for `#[repr(C)]` + `NoUninit`, structured otherwise), so a
     /// single `Sink::send` / `Ctx::reply` call site dispatches both
     /// wire shapes without the caller picking the encoder.
     ///
     /// Default panics — sending a kind whose impl was hand-rolled
     /// without an override is a contract violation, not "I have no
-    /// payload" (the symmetric `decode_from_bytes` default returns
-    /// `None`, which the dispatcher surfaces as `DISPATCH_UNKNOWN_KIND`;
+    /// payload" (the symmetric `decode_with` default refuses
+    /// `NoDecodeBody`, which the dispatcher surfaces as a miss;
     /// silently shipping zero bytes here would write a garbled mail
     /// rather than fail loud). Hand-rolled `Kind` impls that need to
     /// send must override.
@@ -182,19 +197,6 @@ pub trait Kind {
     fn encode_with<E: wire::Encoder>(&self, enc: &mut E) -> Result<(), wire::Error> {
         enc.out().extend_from_slice(&self.encode_into_bytes());
         Ok(())
-    }
-
-    /// Decode one instance from `bytes`, resolving each tag-1 `Blob` field's
-    /// hash through `resolver` (ADR-0238 decision 3). The `Kind` derive
-    /// overrides it for structured kinds; the default ignores `resolver` and
-    /// is [`Kind::decode_from_bytes`].
-    #[must_use]
-    fn decode_with(bytes: &[u8], resolver: &mut dyn wire::BlobResolver) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        let _ = resolver;
-        Self::decode_from_bytes(bytes)
     }
 }
 
@@ -222,7 +224,7 @@ pub trait Kind {
 )]
 pub trait ActorMail: Kind {}
 
-/// Emit the `Kind::decode_from_bytes` / `encode_into_bytes` pair for a
+/// Emit the `Kind::decode_with` / `encode_into_bytes` pair for a
 /// hand-rolled `Kind` impl over a `#[repr(C)]` + `bytemuck::Pod` type.
 ///
 /// Use inside an `impl Kind for T` block whose `NAME` / `ID` are set by
@@ -235,7 +237,10 @@ pub trait ActorMail: Kind {}
 #[macro_export]
 macro_rules! pod_kind_codec {
     () => {
-        fn decode_from_bytes(bytes: &[u8]) -> ::core::option::Option<Self> {
+        fn decode_with(
+            bytes: &[u8],
+            _ctx: &mut $crate::wire::DecodeCtx<'_>,
+        ) -> ::core::result::Result<Self, $crate::wire::Error> {
             $crate::__derive_runtime::decode_cast::<Self>(bytes)
         }
 
@@ -246,10 +251,10 @@ macro_rules! pod_kind_codec {
 }
 
 /// `Kind` impl for the unit type. Lets `()` ride the same
-/// `Kind::decode_from_bytes` / `Kind::encode_into_bytes` shim path as
+/// `Kind::decode_with` / `Kind::encode_into_bytes` shim path as
 /// real kinds, which is what makes the `WasmActor::Config = ()` default
 /// (ADR-0090) decode through a uniform macro body. A zero-length byte
-/// slice decodes to `Some(())`; any non-empty slice returns `None`.
+/// slice decodes to `()`; any non-empty slice refuses `TrailingBytes`.
 /// Encoding is the empty byte vector.
 ///
 /// The `NAME` (`"aether.unit"`) gives the unit kind a stable wire name
@@ -261,11 +266,11 @@ impl Kind for () {
     const NAME: &'static str = "aether.unit";
     const ID: KindId = storage_kind_id_from_name(Self::NAME);
 
-    fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+    fn decode_with(bytes: &[u8], _ctx: &mut wire::DecodeCtx<'_>) -> Result<Self, wire::Error> {
         if bytes.is_empty() {
-            Some(())
+            Ok(())
         } else {
-            None
+            Err(wire::Error::TrailingBytes)
         }
     }
 
@@ -587,23 +592,30 @@ pub mod __derive_runtime {
         fold_path_segment, terminate_field_hash, variant_hash,
     };
     use crate::wire;
-    pub use crate::wire::{BlobResolver, Decoder, Encoder, WireDecode, WireEncode, decode_bytes, encode_bytes};
+    pub use crate::wire::{DecodeCtx, Decoder, Encoder, WireDecode, WireEncode, decode_bytes, encode_bytes};
     pub use alloc::borrow::Cow;
     pub use alloc::string::String;
     pub use alloc::vec::Vec;
+    use core::cmp::Ordering;
 
-    /// Cast-shape decode helper. Routes through `bytemuck::pod_read_unaligned`
-    /// after a length check so the Kind derive can emit a uniform call
-    /// without the user crate needing `bytemuck` in scope. `T` satisfies
+    /// Cast-shape decode helper: the body the Kind derive and
+    /// `pod_kind_codec!` emit for `Kind::decode_with` on a `#[repr(C)]`
+    /// kind. Routes through `bytemuck::pod_read_unaligned` after a length
+    /// check so the user crate needs no `bytemuck` in scope. `T` satisfies
     /// `AnyBitPattern` via the user's `#[derive(Pod)]`; the bound is
     /// enforced at the impl site rather than on `Kind` itself so non-
     /// cast kinds aren't poisoned by a trait they can't satisfy.
-    #[must_use]
-    pub fn decode_cast<T: bytemuck::AnyBitPattern>(bytes: &[u8]) -> Option<T> {
-        if bytes.len() != size_of::<T>() {
-            return None;
+    ///
+    /// # Errors
+    ///
+    /// [`wire::Error::UnexpectedEof`] when `bytes` is shorter than `T`,
+    /// [`wire::Error::TrailingBytes`] when it is longer.
+    pub fn decode_cast<T: bytemuck::AnyBitPattern>(bytes: &[u8]) -> Result<T, wire::Error> {
+        match bytes.len().cmp(&size_of::<T>()) {
+            Ordering::Less => Err(wire::Error::UnexpectedEof),
+            Ordering::Greater => Err(wire::Error::TrailingBytes),
+            Ordering::Equal => Ok(bytemuck::pod_read_unaligned(bytes)),
         }
-        Some(bytemuck::pod_read_unaligned(bytes))
     }
 
     /// Slice-cast helper for batched cast-shape kinds. The native
@@ -619,17 +631,6 @@ pub mod __derive_runtime {
         bytemuck::try_cast_slice(bytes).ok()
     }
 
-    /// Wire-shape decode helper. Sibling of `decode_cast` for
-    /// schema-shaped kinds (anything carrying `Vec` / `String` /
-    /// `Option` / a tagged enum). `T` satisfies [`WireDecode`] via
-    /// `#[derive(Schema)]`; the bound lives on this helper rather
-    /// than on `Kind` so cast kinds stay independent of the structured
-    /// codec. Reads the unversioned wire body (ADR-0118) directly.
-    #[must_use]
-    pub fn decode_wire<T: for<'de> WireDecode<'de>>(bytes: &[u8]) -> Option<T> {
-        wire::decode_from_slice(bytes).ok()
-    }
-
     /// Cast-shape encode helper. Mirror of `decode_cast`. Routes
     /// through `bytemuck::bytes_of` so the Kind derive emits a uniform
     /// call without the user crate needing `bytemuck` in scope. The
@@ -639,7 +640,7 @@ pub mod __derive_runtime {
         bytemuck::bytes_of(value).to_vec()
     }
 
-    /// Wire-shape encode helper. Mirror of `decode_wire`. The
+    /// Wire-shape encode helper. Mirror of `decode_wire_with`. The
     /// [`WireEncode`] bound lives here, not on `Kind`, so cast kinds stay
     /// independent of the structured codec. Emits the unversioned wire
     /// body (ADR-0118); encoding fails only past the `u32` length ceiling.
@@ -658,15 +659,28 @@ pub mod __derive_runtime {
         value.encode_to(enc)
     }
 
-    /// Wire-shape decode that resolves tag-1 `Blob` hashes through
-    /// `resolver`, requiring every byte consumed: the body the `Kind` derive
-    /// emits for `Kind::decode_with` on a structured kind. Sibling of
-    /// `decode_wire`.
-    #[must_use]
-    pub fn decode_wire_with<T: for<'de> WireDecode<'de>>(bytes: &[u8], resolver: &mut dyn BlobResolver) -> Option<T> {
-        let mut dec = wire::Resolving::new(bytes, resolver);
-        let value = T::decode_from(&mut dec).ok()?;
-        dec.is_empty().then_some(value)
+    /// Wire-shape decode against `ctx`, requiring every byte consumed: the
+    /// body the `Kind` derive emits for `Kind::decode_with` on a structured
+    /// kind (anything carrying `Vec` / `String` / `Option` / a tagged enum).
+    /// `T` satisfies [`WireDecode`] via `#[derive(Schema)]`; the bound
+    /// lives on this helper rather than on `Kind` so cast kinds stay
+    /// independent of the structured codec. Sibling of `decode_cast`.
+    ///
+    /// # Errors
+    ///
+    /// The field decode faults and refusals, or
+    /// [`wire::Error::TrailingBytes`] when input remains.
+    pub fn decode_wire_with<T: for<'de> WireDecode<'de>>(
+        bytes: &[u8],
+        ctx: &mut DecodeCtx<'_>,
+    ) -> Result<T, wire::Error> {
+        let mut dec = wire::InCtx::new(bytes, ctx);
+        let value = T::decode_from(&mut dec)?;
+        if dec.is_empty() {
+            Ok(value)
+        } else {
+            Err(wire::Error::TrailingBytes)
+        }
     }
 }
 
@@ -770,7 +784,7 @@ mod tests {
         const NAME: &'static str = "test.pod";
         const ID: KindId = KindId(0xDEAD_BEEF_0000_0001);
 
-        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+        fn decode_with(bytes: &[u8], _ctx: &mut wire::DecodeCtx<'_>) -> Result<Self, wire::Error> {
             __derive_runtime::decode_cast::<Self>(bytes)
         }
 

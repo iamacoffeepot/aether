@@ -190,15 +190,21 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // the substrate carried it as raw cast bytes (and the user has
     // `#[derive(Pod, Zeroable)]`); anything else is wire-shaped
     // (ADR-0118 `aether_data::wire`, and `#[derive(Schema)]` emits the
-    // owned codec). The dispatcher in `#[actor]` calls
-    // `Kind::decode_from_bytes` via `Mail::decode_kind::<K>()`;
-    // emitting the body per-impl here is what lets that one call site
-    // compile against types whose Pod / WireDecode bounds are disjoint.
+    // owned codec). Every decode reaches `Kind::decode_with`, the one
+    // body per kind (ADR-0231 §3); emitting it per-impl here is what lets
+    // the dispatchers' one call site compile against types whose Pod /
+    // WireDecode bounds are disjoint. A structured kind passes `ctx` down
+    // to its fields, so a `Blob` or `ProtocolPath` wherever it nests
+    // reaches the context (ADR-0238 decision 3); a `#[repr(C)]` kind
+    // cannot hold either, so its cast body leaves `ctx` unused.
     let has_repr_c = struct_has_repr_c(&input.attrs);
     let decode_body = if has_repr_c {
-        quote! { ::aether_data::__derive_runtime::decode_cast::<Self>(bytes) }
+        quote! {
+            let _ = ctx;
+            ::aether_data::__derive_runtime::decode_cast::<Self>(bytes)
+        }
     } else {
-        quote! { ::aether_data::__derive_runtime::decode_wire::<Self>(bytes) }
+        quote! { ::aether_data::__derive_runtime::decode_wire_with::<Self>(bytes, ctx) }
     };
     // Issue #240: encode mirror. Same `#[repr(C)]` autodetect as
     // `decode_body` — a single `Sink::send` call site routes through
@@ -209,9 +215,9 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     } else {
         quote! { ::aether_data::__derive_runtime::encode_wire::<Self>(self) }
     };
-    // ADR-0238: a structured kind passes the encoder and the resolver down
-    // to its `Blob` fields. A `#[repr(C)]` kind cannot hold a `Blob`, so it
-    // keeps `Kind`'s defaults.
+    // ADR-0238: a structured kind passes the encoder down to its `Blob`
+    // fields. A `#[repr(C)]` kind cannot hold a `Blob`, so it keeps
+    // `Kind`'s default.
     let blob_hooks = if has_repr_c {
         TokenStream2::new()
     } else {
@@ -221,13 +227,6 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 enc: &mut E,
             ) -> ::core::result::Result<(), ::aether_data::wire::Error> {
                 ::aether_data::__derive_runtime::encode_wire_with::<Self, E>(self, enc)
-            }
-
-            fn decode_with(
-                bytes: &[u8],
-                resolver: &mut dyn ::aether_data::__derive_runtime::BlobResolver,
-            ) -> ::core::option::Option<Self> {
-                ::aether_data::__derive_runtime::decode_wire_with::<Self>(bytes, resolver)
             }
         }
     };
@@ -276,7 +275,10 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 ),
             );
 
-            fn decode_from_bytes(bytes: &[u8]) -> ::core::option::Option<Self> {
+            fn decode_with(
+                bytes: &[u8],
+                ctx: &mut ::aether_data::__derive_runtime::DecodeCtx<'_>,
+            ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {
                 #decode_body
             }
 
@@ -712,8 +714,9 @@ fn expand_wire_codec(name: &syn::Ident, data: &Data) -> TokenStream2 {
 }
 
 // Each field goes through the hook: `encode_to(enc)` / `decode_from(dec)`,
-// so a `Blob` field wherever it nests reaches `Encoder::blob` once and a
-// tag-1 hash reaches `Decoder::resolve` (ADR-0238 decision 3). `Vec<u8>`
+// so a `Blob` field wherever it nests reaches `Encoder::blob` once, a
+// tag-1 hash reaches `Decoder::resolve_blob` (ADR-0238 decision 3), and a
+// `ProtocolPath` reaches `Decoder::prove_route_covers` (ADR-0231 §3). `Vec<u8>`
 // keeps its memcpy arm on the hook's buffer.
 fn encode_ref_expr(ref_expr: &TokenStream2, ty: &Type) -> TokenStream2 {
     if is_vec_u8(ty) {

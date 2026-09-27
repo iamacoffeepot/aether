@@ -1,8 +1,11 @@
 //! Route resolution: the alias-following walk every dispatch and name
 //! lookup shares, and the point-in-time answers it hands back.
 
+use std::sync::Arc;
+
 use aether_actor::ErasedActorRef;
-use aether_data::{ActorPathError, ActorPathForm, ErasedActorPath, ScopePathError, validate_scope_path};
+use aether_data::wire::PublishedRoutes;
+use aether_data::{ActorPathError, ActorPathForm, ErasedActorPath, ReplyContract, ScopePathError, validate_scope_path};
 
 use crate::mail::registry::{AddressResolutionError, ResolvedAddress, RouteContract, lineage_mailbox_id};
 use crate::mail::{KindId, MailboxId};
@@ -270,7 +273,9 @@ impl Registry {
     /// published view answers both whether the route is live and what it
     /// covers.
     ///
-    /// Consumer: `PassiveChassis::published_contract`, the test door.
+    /// Consumers: `PassiveChassis::published_contract`, the test door, and
+    /// the registry's [`PublishedRoutes`] impl, which a `ProtocolPath` decode
+    /// reads.
     pub(crate) fn published_contract(&self, id: MailboxId) -> Option<RouteContract> {
         let routes = self.routes.load();
         match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
@@ -290,8 +295,9 @@ impl Registry {
     /// while its target parent is `Live`. Never registered, `Starting`,
     /// `Dropped`, and a name mismatch all answer `None`.
     ///
-    /// Consumer: `Registry::resolve_protocol`, the native receipt of a
-    /// protocol path.
+    /// Consumers: `Registry::resolve_protocol`, the native receipt of a
+    /// protocol path, and the registry's [`PublishedRoutes`] impl, which a
+    /// `ProtocolPath` decode reads.
     pub(crate) fn live_route(&self, path: &ErasedActorPath) -> Option<MailboxId> {
         let id = lineage_mailbox_id(path.as_str());
         let routes = self.routes.load();
@@ -321,5 +327,15 @@ impl Registry {
     /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
     pub(crate) fn actor_path(&self, actor: ErasedActorRef) -> Option<ErasedActorPath> {
         self.routes.load().entry_for(&actor.id()).map(|route| route.canonical_name.clone())
+    }
+}
+
+/// The engine's published route contracts for a decode (ADR-0231 §3, §4):
+/// the rows the `Live` route standing under exactly `path` published, read
+/// through the same two reads `resolve` uses. Coverage is decided by the
+/// decode's context, never here.
+impl PublishedRoutes for Registry {
+    fn published_rows(&self, path: &ErasedActorPath) -> Option<Arc<[(KindId, ReplyContract)]>> {
+        self.live_route(path).and_then(|id| self.published_contract(id)).map(RouteContract::into_rows)
     }
 }
