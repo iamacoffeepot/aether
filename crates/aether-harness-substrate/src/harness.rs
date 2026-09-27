@@ -854,9 +854,10 @@ impl SubstrateHarness {
 
     /// The proven reference of the `C` instance keyed by `key` directly
     /// beneath `parent` — a child a loaded component spawned, or a window a
-    /// window capability opened (ADR-0230 §3's `Address<R>` door). The parent
-    /// travels as a reference the harness already handed out, so a child is
-    /// reached by type and key rather than by rendering its address.
+    /// window capability opened (ADR-0230 §3's child-beneath-a-held-reference
+    /// door). The parent travels as a reference the harness already handed
+    /// out, so a child is reached by type and key rather than by rendering
+    /// its address.
     ///
     /// # Errors
     ///

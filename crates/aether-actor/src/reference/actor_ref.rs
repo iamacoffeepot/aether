@@ -4,7 +4,7 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 
-use aether_data::{Address, MailboxId};
+use aether_data::MailboxId;
 
 use super::ErasedActorRef;
 use crate::Addressable;
@@ -13,9 +13,9 @@ use crate::Addressable;
 /// session (ADR-0230).
 ///
 /// A decoder cannot know that claim, so the proof is memory-only: [`ActorRef`]
-/// has no codec impl of any kind, and only resolving an [`Address`] against
-/// the registry yields one. What crosses a boundary is
-/// [`ActorRef::address`], and the receiver proves it again on its own side.
+/// has no codec impl of any kind, and only ADR-0230 §3's doors yield one.
+/// What crosses a boundary is the actor's path, and the receiver proves it
+/// again on its own side.
 ///
 /// ```compile_fail,E0277
 /// # use aether_actor::ActorRef;
@@ -69,13 +69,6 @@ impl<R> ActorRef<R> {
     #[must_use]
     pub const fn erase(self) -> ErasedActorRef {
         ErasedActorRef::new(self.id)
-    }
-
-    /// The exact address of the proven position: how a held reference is
-    /// handed to a peer, which resolves it on its own side.
-    #[must_use]
-    pub const fn address(self) -> Address<R> {
-        Address::exact(self.id)
     }
 }
 

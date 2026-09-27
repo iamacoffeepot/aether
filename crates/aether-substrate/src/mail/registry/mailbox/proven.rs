@@ -15,14 +15,14 @@
 //! question itself, because the position it is handed arrived in a payload
 //! and nothing upstream proved it. The fifth, `Registry::loaded`, types a
 //! reference the caller already holds, and the sixth, `Registry::live_child`,
-//! answers the same liveness question for a child address folded beneath a
+//! answers the same liveness question for a child key folded beneath a
 //! parent the caller already proved.
 
 use core::fmt;
 use std::error::Error;
 
-use aether_actor::{__mint_actor_ref, __mint_erased_actor_ref, ActorRef, Addressable, ErasedActorRef, Resolve};
-use aether_data::{Address, AddressForm, LoadName, MailboxCategory};
+use aether_actor::{__mint_actor_ref, __mint_erased_actor_ref, ActorRef, ErasedActorRef, Instanced};
+use aether_data::{LoadName, MailboxCategory};
 
 use crate::mail::registry::names::categorise_mailbox_name;
 use crate::mail::{KindId, MailboxId};
@@ -54,26 +54,21 @@ impl fmt::Display for AdoptRefused {
 
 impl Error for AdoptRefused {}
 
-/// Why a child address beneath a proven parent could not be proven
+/// Why no live child stands at a key beneath a proven parent
 /// (`PassiveChassis::child`). Names the child by its key and actor namespace,
-/// never by a position: the embedder built the address from a reference and a
-/// key, and those are what it can act on.
+/// never by a position: the embedder asked with a parent reference and a key,
+/// and those are what it can act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildRefused {
     /// The child's `NAMESPACE`.
     pub namespace: &'static str,
-    /// The instance key the address carried, when it carried one.
-    pub key: Option<LoadName>,
+    /// The instance key the embedder asked for.
+    pub key: LoadName,
 }
 
 impl fmt::Display for ChildRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.key {
-            Some(key) => {
-                write!(formatter, "no live {} child keyed {:?} beneath the parent", self.namespace, key.as_str())
-            }
-            None => write!(formatter, "no live {} child beneath the parent", self.namespace),
-        }
+        write!(formatter, "no live {} child keyed {:?} beneath the parent", self.namespace, self.key.as_str())
     }
 }
 
@@ -265,32 +260,34 @@ impl Registry {
         }
     }
 
-    /// Prove the child `address` names beneath a parent the caller already
-    /// proved (ADR-0230 section 3's `Address<R>` door, for an embedder).
+    /// Prove the child of type `C` at `key` beneath a parent the caller
+    /// already proved (ADR-0230 section 3's child-beneath-a-held-reference
+    /// door, for an embedder).
     ///
-    /// The address is folded with `C`'s resolver beneath the parent's
-    /// position, and the folded position is proven with the same
-    /// published-route walk [`Self::resolve_live`] takes: only a `Live` route
-    /// mints. `Starting`, `Dropped`, and never-registered positions refuse
-    /// alike, and so does an address that is not a child address, since only
-    /// a parent the caller holds a proof of anchors the fold.
+    /// The key is folded with `C`'s resolver beneath the parent's position,
+    /// and the folded position is proven with the same published-route walk
+    /// [`Self::resolve_live`] takes: only a `Live` route mints. `Starting`,
+    /// `Dropped`, and never-registered positions refuse alike. The parent's
+    /// proof anchors the fold, and the key is all it takes.
     ///
     /// Its one caller is
     /// [`PassiveChassis::child`](crate::chassis::builder::PassiveChassis::child),
-    /// through the spawner that holds the chassis registry; it builds the
-    /// address with `aether_actor::child_address` from the parent's reference.
-    pub(crate) fn live_child<C: Addressable>(&self, address: &Address<C>) -> Result<ActorRef<C>, ChildRefused> {
-        let AddressForm::Beneath { parent, key } = address.form() else {
-            return Err(ChildRefused { namespace: C::NAMESPACE, key: None });
-        };
-        let refused = || ChildRefused { namespace: C::NAMESPACE, key: key.clone() };
-        let position = <C::Resolver as Resolve>::candidate(parent.0, C::NAMESPACE, key.as_ref().map(LoadName::as_str))
-            .ok_or_else(refused)?;
+    /// through the spawner that holds the chassis registry; it passes the
+    /// parent's reference erased, and keeps the `ChildOf` placement bound on
+    /// its own signature.
+    pub(crate) fn live_child<C: Instanced>(
+        &self,
+        parent: ErasedActorRef,
+        key: LoadName,
+    ) -> Result<ActorRef<C>, ChildRefused> {
+        let position = C::resolve(parent.id().0, key.as_str());
 
         let routes = self.routes.load();
         match resolve_route(position, |candidate| routes.entry_for(&candidate)) {
             ResolvedRoute::Live { .. } => Ok(__mint_actor_ref(position)),
-            ResolvedRoute::Dropped | ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => Err(refused()),
+            ResolvedRoute::Dropped | ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => {
+                Err(ChildRefused { namespace: C::NAMESPACE, key })
+            }
         }
     }
 }
@@ -300,7 +297,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use aether_actor::Many;
+    use aether_actor::{Addressable, Many, Resolve};
 
     use crate::config::RegistryQueueCapacities;
     use crate::mail::mailer::Mailer;
@@ -319,8 +316,8 @@ mod tests {
         type Resolver = Many;
     }
 
-    fn child_address(parent: MailboxId, key: &str) -> Address<ProbeChild> {
-        Address::beneath(parent, Some(LoadName::new(key).expect("a valid key")))
+    fn child_key(key: &str) -> LoadName {
+        LoadName::new(key).expect("a valid key")
     }
 
     // A child lookup that answered for any folded position would hand an
@@ -355,14 +352,16 @@ mod tests {
         let reserved = completion.wait_timeout(Duration::from_millis(100)).expect("reservation completes");
         assert!(matches!(reserved.as_deref(), Ok([RegistryApplied::Starting { .. }])));
 
-        assert!(registry.live_child(&child_address(parent, "live")).is_ok());
-        let refused = registry.live_child(&child_address(parent, "starting")).expect_err("Starting is not provable");
-        assert_eq!(refused.key.as_ref().map(LoadName::as_str), Some("starting"));
+        let parent_ref = registry.resolve_live(parent).expect("the parent route is live");
+
+        assert!(registry.live_child::<ProbeChild>(parent_ref, child_key("live")).is_ok());
+        let refused =
+            registry.live_child::<ProbeChild>(parent_ref, child_key("starting")).expect_err("Starting is not provable");
+        assert_eq!(refused.key.as_str(), "starting");
         assert_eq!(refused.namespace, ProbeChild::NAMESPACE);
-        assert!(registry.live_child(&child_address(parent, "other")).is_err(), "a wrong key names no child");
         assert!(
-            registry.live_child(&Address::<ProbeChild>::exact(live)).is_err(),
-            "only an address beneath a parent is a child address",
+            registry.live_child::<ProbeChild>(parent_ref, child_key("other")).is_err(),
+            "a wrong key names no child"
         );
     }
 

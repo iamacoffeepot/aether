@@ -5,7 +5,7 @@ use std::io;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root, child_address};
+use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root};
 use aether_data::{KindId, LoadName, MailId, ReplyContract, SessionToken};
 use aether_kinds::{CostTail, CostTailResult};
 use crossbeam_channel::Receiver;
@@ -474,13 +474,14 @@ impl<C: Chassis> PassiveChassis<C> {
     }
 
     /// The proven reference of the `Child` instance keyed by `key` directly
-    /// beneath `parent` (ADR-0230 §3's `Address<R>` door, for an embedder).
+    /// beneath `parent` (ADR-0230 §3's child-beneath-a-held-reference door,
+    /// for an embedder).
     ///
     /// The embedder holds the parent's proof — a composed capability's, a
     /// load's, or another child's — and names the child by type and key, so
     /// a child a component spawned, or a window a window capability opened,
-    /// is reached without rendering or parsing an address. The child address
-    /// is folded beneath the parent and proven against the published routes;
+    /// is reached without rendering or parsing an address. The key is folded
+    /// beneath the parent's position and proven against the published routes;
     /// only a `Live` child answers.
     ///
     /// Its consumer is the substrate harness's `child::<P, C>`.
@@ -495,7 +496,7 @@ impl<C: Chassis> PassiveChassis<C> {
         Parent: Addressable,
         Child: ChildOf<Parent> + Instanced,
     {
-        self.booted.spawner.live_child(&child_address::<Parent, Child>(parent, key))
+        self.booted.spawner.live_child::<Child>(parent.erase(), key)
     }
 
     /// Place an instanced `A` at the chassis root **for a test**, without

@@ -83,8 +83,6 @@ pub enum Error {
     InvalidEnum(u32),
     /// A decoded load name that breaks the segment grammar.
     InvalidLoadName,
-    /// An address form selector that does not name a declared form.
-    InvalidAddressForm(u32),
     /// A decoded actor path that breaks the ADR-0166 address grammar.
     InvalidActorPath,
     /// A `Blob` field's tag was neither `0` (inline bytes) nor `1` (a hash).
@@ -106,7 +104,6 @@ impl fmt::Display for Error {
             Self::Message(m) => f.write_str(m),
             Self::InvalidEnum(selector) => write!(f, "aether wire: invalid enum selector {selector}"),
             Self::InvalidLoadName => f.write_str("aether wire: invalid load name"),
-            Self::InvalidAddressForm(form) => write!(f, "aether wire: invalid address form {form}"),
             Self::InvalidActorPath => f.write_str("aether wire: invalid actor path"),
             Self::InvalidBlobTag(tag) => write!(f, "aether wire: invalid blob tag {tag}"),
             Self::DetachedBlob(_) => f.write_str("aether wire: blob hash not supplied by the decode's resolver"),
