@@ -46,6 +46,8 @@ use alloc::string::String;
 
 use core::fmt;
 
+use crate::model::{Declared, ListIndex};
+
 pub mod bridge;
 pub mod ctx;
 pub mod inline;
@@ -238,6 +240,18 @@ where
 {
 }
 
+/// The list of types a module's `export!` lists, exported and private, in
+/// listing order, as a type-level list `(T1, (T2, (…, ())))` (ADR-0231 §10).
+///
+/// `export!` declares a hidden module type, `__AetherModule`, and emits the
+/// one impl of this trait for it. Each [`Rebuildable`] impl names a position
+/// in [`Listed`](ListedModule::Listed).
+#[doc(hidden)]
+pub trait ListedModule {
+    /// The listed types, in listing order.
+    type Listed;
+}
+
 /// A type the module `M`'s `export!` lists, exported or under
 /// `private = [..]`, so a `replace_component` swap can rebuild it as an
 /// inline child (ADR-0114 §5).
@@ -255,18 +269,22 @@ where
 /// the types a module can spawn inline and the types a replace rebuilds are
 /// one set by construction.
 ///
-/// # Safety
-///
-/// Implement it only through `export!`. A hand-written impl lets the
-/// coverage check pass for a child the module's rebuild arm does not list, so
-/// the next replace drops it while its alias survives and the parent answers
-/// its mail.
+/// A hand-written impl does not compile (ADR-0231 §10): each impl names the
+/// type's position in the module's [`ListedModule::Listed`] as
+/// [`Index`](Rebuildable::Index), so an impl for a type the `export!` does not
+/// list either repeats an emitted impl (`E0119`) or names a position that
+/// holds another type or none (`E0277`).
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is spawned inline by an actor this `export!` lists, but this `export!` does not list it",
     label = "not listed by this module's `export!`",
     note = "list it under `private = [{Self}]` in this `export!` so a replace can rebuild it, or export it"
 )]
-pub unsafe trait Rebuildable<M> {}
+pub trait Rebuildable<M: ListedModule> {
+    /// The type's position in `M`'s [`ListedModule::Listed`], written by
+    /// `export!`.
+    #[doc(hidden)]
+    type Index: ListIndex<<M as ListedModule>::Listed, Self>;
+}
 
 /// The spawner `Self` declares `C` as an inline child in
 /// `#[actor(spawns(C, …))]` (ADR-0114 §5).
@@ -277,17 +295,25 @@ pub unsafe trait Rebuildable<M> {}
 /// that it also lists each declared child ([`Rebuildable`]). A generic helper
 /// that forwards to either verb repeats the bound.
 ///
-/// # Safety
-///
-/// Implement it only through `#[actor]`, which emits it together with the
-/// matching bound the `export!` coverage check reads. A hand-written impl lets
-/// a spawn skip that check, so a replace drops a child no `export!` lists.
+/// A hand-written impl does not compile (ADR-0231 §10): the one
+/// [`Declared`] impl `#[actor]` emits lists the declared
+/// children as [`Declared::Spawns`], from the same
+/// parsed `spawns(..)` list as the bound the `export!` coverage check reads,
+/// and each impl names `C`'s position there as [`Index`](Spawns::Index). An
+/// impl for an undeclared child either repeats an emitted impl (`E0119`) or
+/// names a position that holds another child or none (`E0277`), so no spawn
+/// skips the check.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` spawns `{C}` inline but does not declare it",
     label = "`{C}` is not in `{Self}`'s `spawns(..)`",
     note = "add `{C}` to `spawns(..)` in `{Self}`'s `#[actor(..)]`"
 )]
-pub unsafe trait Spawns<C> {}
+pub trait Spawns<C>: Declared {
+    /// `C`'s position in [`Declared::Spawns`](crate::Declared::Spawns),
+    /// written by the expansion that declared it.
+    #[doc(hidden)]
+    type Index: ListIndex<<Self as Declared>::Spawns, C>;
+}
 
 /// Macro-generated placement facts for one exported Wasm actor.
 ///
@@ -523,8 +549,10 @@ pub mod guest_alloc;
 /// aether_actor::export!(default = Parent, public = [Sibling], private = [Child]);
 /// ```
 ///
-/// Each `export!` declares a hidden module type and implements [`Rebuildable`]
-/// for every type it lists, exported or private, from any crate. A spawner
+/// Each `export!` declares a hidden, private module type whose
+/// [`ListedModule::Listed`] is every type the `export!` lists, exported or
+/// private, from any crate, and implements [`Rebuildable`] for each at its
+/// position there, so no other impl compiles (ADR-0231 §10). A spawner
 /// declares the inline children it spawns through the typed verbs in
 /// `#[actor(spawns(..))]` ([`Spawns`]), and the verbs require that
 /// declaration. Every `export!` then checks, at compile time, that it lists
@@ -1428,14 +1456,20 @@ macro_rules! __export_internal {
     // Every finished `export!` form emits them through this one arm, once.
     // Not gated on the wasm target or `library`: a crate's spawn declarations
     // are checked on the host build and in a `library` embed as well.
+    //
+    // ADR-0231 §10: the module's one `ListedModule` impl lists the types in
+    // listing order, and each `Rebuildable` impl names its type's position
+    // there, so a hand-written one does not compile. A type listed twice gets
+    // two impls and collides.
     (@listed $($listed:ty),*) => {
         #[doc(hidden)]
-        pub struct __AetherModule;
+        struct __AetherModule;
 
-        $(
-            // SAFETY: emitted by `export!` for a type its rebuild arm lists.
-            unsafe impl $crate::Rebuildable<__AetherModule> for $listed {}
-        )*
+        impl $crate::wasm::ListedModule for __AetherModule {
+            type Listed = $crate::__export_internal!(@listed_list $($listed),*);
+        }
+
+        $crate::__export_internal!(@listed_index [$crate::Here] $($listed),*);
 
         // Never called: a closure body is type-checked, so each call's where
         // clause requires every child the listed type declares in
@@ -1444,6 +1478,23 @@ macro_rules! __export_internal {
         const _: fn() = || {
             $( <$listed>::__aether_listed_children::<__AetherModule>(); )*
         };
+    };
+
+    // The listed types as a type-level list, `(T1, (T2, (…, ())))`.
+    (@listed_list) => { () };
+    (@listed_list $head:ty $(, $tail:ty)*) => {
+        ($head, $crate::__export_internal!(@listed_list $($tail),*))
+    };
+
+    // One `Rebuildable` impl per listed type, each naming its position: the
+    // accumulator starts at `Here` and wraps one `There` per type passed.
+    (@listed_index [$index:ty]) => {};
+    (@listed_index [$index:ty] $head:ty $(, $tail:ty)*) => {
+        impl $crate::Rebuildable<__AetherModule> for $head {
+            type Index = $index;
+        }
+
+        $crate::__export_internal!(@listed_index [$crate::There<$index>] $($tail),*);
     };
 
     // Issue 6590: pin the private inline children's inputs into the sibling

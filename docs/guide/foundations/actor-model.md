@@ -288,12 +288,15 @@ trace, and cost tails do. Incremental or unbounded delivery publishes to
 subscribers (`Publishes<K>` / `subscribe`).
 
 `#[actor]` records each handler's answer as a type-level **contract row**,
-`impl Contract<K> for A { type Reply = … }`: the reply kind `O` for `-> O` or
-`-> Pending<O>`, `Silent` for `-> ()`, and `Undeclared` for a manual handler. It
-also emits `Contracts::CONTRACTS`, the same rows as `(KindId, ReplyContract)`
-pairs in the vocabulary the inputs manifest and the native handler inventory
-report, with an adopted handler set's rows appended. A `#[fallback]`
-contributes neither. The reply checks
+`impl Contract<K> for A { type Reply = …; type Index = … }`: the reply kind `O`
+for `-> O` or `-> Pending<O>`, `Silent` for `-> ()`, and `Undeclared` for a
+manual handler. Each row names its position in the actor's one type-level
+row list, `Contracts::Rows`, so a row exists only where a handler does: a
+hand-written row for a kind the actor does not handle does not compile, and a
+handled kind of a public actor is declared `pub` (ADR-0231 §10). It also emits
+`Contracts::CONTRACTS`, the same rows as `(KindId, ReplyContract)` pairs in the
+vocabulary the inputs manifest and the native handler inventory report, with an
+adopted handler set's rows appended. A `#[fallback]` contributes neither. The reply checks
 [ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
 specifies are built on them. A route publishes its actor's rows, and whether it
 has a `#[fallback]`, on its route record when it goes `Live`: a native actor its

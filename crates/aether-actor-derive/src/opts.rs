@@ -33,16 +33,18 @@ pub struct ActorOpts {
     /// logical parents.
     pub child_of: Vec<syn::TypePath>,
     /// ADR-0230: actor types this actor depends on, from one
-    /// `depends(A, B, …)` list. Each listed type emits
-    /// `unsafe impl DependsOn<R> for Self` plus one `Dependency`
-    /// inputs-manifest record, in list order; the host refuses the load
-    /// while any entry has no `Live` route. Only
+    /// `depends(A, B, …)` list. The list becomes `Declared::Depends`, and
+    /// each listed type emits `impl DependsOn<R> for Self` at its position in
+    /// it (ADR-0231 §10) plus one `Dependency` inputs-manifest record, in list
+    /// order; the host refuses the load while any entry has no `Live` route.
+    /// Only
     /// keyless (`One` / `Embedded`) actors are declarable — a keyed `R` is a
     /// trait-bound compile error on the emitted impl, not a macro error here.
     pub depends: Vec<syn::TypePath>,
     /// ADR-0114: the inline children this Wasm actor spawns through the typed
-    /// verbs, from one `spawns(A, B, …)` list. Each listed type emits
-    /// `unsafe impl Spawns<C> for Self`, which the verbs require, and a
+    /// verbs, from one `spawns(A, B, …)` list. The list becomes
+    /// `Declared::Spawns`, and each listed type emits `impl Spawns<C> for
+    /// Self` at its position in it (ADR-0231 §10), which the verbs require, and a
     /// `Rebuildable<M>` bound on the hidden `__aether_listed_children::<M>`,
     /// which every `export!` listing this actor calls for its own module, so
     /// that `export!` must list every declared child.

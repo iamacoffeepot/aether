@@ -355,14 +355,29 @@ impl ChildOf<NestingParent> for FailingChild {}
 impl ChildOf<NestingParent> for StubChild {}
 
 // The host unit tests stand in for `#[actor(spawns(..))]`, which emits these
-// declarations for the typed inline spawn verbs.
-// SAFETY: no `export!` runs in these tests, so there is no coverage check to
-// skip and no rebuild arm to miss a child.
-unsafe impl crate::Spawns<FailingChild> for NestingParent {}
-// SAFETY: as above.
-unsafe impl crate::Spawns<SucceedingChild> for NestingParent {}
-// SAFETY: as above.
-unsafe impl crate::Spawns<SucceedingChild> for LifecycleProbe {}
+// declarations for the typed inline spawn verbs: the one `Declared` list per
+// spawner and each `Spawns` impl at its child's position in it.
+impl crate::Declared for NestingParent {
+    type Depends = ();
+    type Spawns = (FailingChild, (SucceedingChild, ()));
+}
+
+impl crate::Spawns<FailingChild> for NestingParent {
+    type Index = crate::Here;
+}
+
+impl crate::Spawns<SucceedingChild> for NestingParent {
+    type Index = crate::There<crate::Here>;
+}
+
+impl crate::Declared for LifecycleProbe {
+    type Depends = ();
+    type Spawns = (SucceedingChild, ());
+}
+
+impl crate::Spawns<SucceedingChild> for LifecycleProbe {
+    type Index = crate::Here;
+}
 
 impl crate::WasmDispatch<Self> for NestingParent {
     fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {

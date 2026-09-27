@@ -20,7 +20,7 @@ use aether_actor::actor;
     aether_data::Schema,
 )]
 #[kind(name = "test.ping_fb")]
-struct Ping {
+pub struct Ping {
     seq: u32,
 }
 

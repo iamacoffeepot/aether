@@ -397,12 +397,15 @@ capability) or a co-hosted peer under the same parent (`Embedded`). A keyed
 (`Instanced`) entry is a compile error: which instance is meant is run-time
 data, and that instance is reached through the reference its spawn returned. The declaration travels in the
 wasm inputs section, so the host reads it without running the guest, and the
-macro also emits `unsafe impl DependsOn<R>` for each entry. The macro is the
-trait's only implementer: `DependsOn` is an `unsafe trait` whose safety contract
-is that the dependency entry is recorded beside the impl. A hand-written safe
-impl fails to compile (`E0200`), and a hand-written `unsafe impl` would mint
-proofs for a dependency the host never checks. A second `depends(...)` in the
-same attribute is a compile error: every dependency goes in the one list.
+macro also emits the actor's one `Declared` impl, whose `Depends` lists the
+entries, and an `impl DependsOn<R>` for each entry that names `R`'s position in
+that list. A hand-written `DependsOn<R>` for an undeclared `R` repeats an
+emitted impl (`E0119`) or names a position that holds another dependency or
+none (`E0277`), so no proof is minted for a dependency the host never checks
+([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
+§10). An entry of a public actor is declared `pub`, in a private module if it
+must stay out of other crates' reach. A second `depends(...)` in the same
+attribute is a compile error: every dependency goes in the one list.
 
 A load, a module boot actor, or a replacement whose declared dependency has no
 `Live` route is refused before `init` — the operation replies its `Err` naming

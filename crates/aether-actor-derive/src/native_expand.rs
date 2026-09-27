@@ -16,8 +16,8 @@ use crate::handler_parse::{
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
 use crate::reply_markers::{
-    ReplyMarkerSite, contract_element, contract_element_ty, contract_row_impl, contract_rows_expr, contracts_impl,
-    native_reply_contract, reply_marker_impl,
+    ReplyMarkerSite, RowSpec, RowsList, contract_element, contract_element_ty, contract_row_impl, contract_rows_expr,
+    contracts_impl, declared_impl, native_reply_contract, position, reply_marker_impl, rows_list,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -374,10 +374,12 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 &handler_kinds,
                 fallback.is_some(),
             );
-            let set_markers = emit_handler_set_markers(opts.handler_set.as_ref(), self_ty);
+            let set_markers = emit_handler_set_markers(opts.handler_set.as_ref(), self_ty, handler_kinds.len());
+            let rows = rows_list(&native_row_specs(&handler_kinds), set_rows_tail(opts.handler_set.as_ref()))?;
             let contracts = emit_native_contracts(
                 self_ty,
                 generics,
+                &rows,
                 &contract_rows_expr(&native_contract_elements(&handler_kinds)),
                 opts.handler_set.as_ref(),
             );
@@ -939,10 +941,11 @@ fn emit_native_reply_markers(
     quote! { #(#markers)* }
 }
 
-/// ADR-0231 §1: one `Contract<K>` row per mail handler. An adopted set's
-/// per-kind rows arrive through its marker bridge instead. A fallback-only
-/// catch-all has no handler, so it gets no row: a `#[fallback]` does not count
-/// as handling a kind.
+/// ADR-0231 §1: one `Contract<K>` row per mail handler, each at its handler's
+/// position in `Contracts::Rows` (§10). An adopted set's per-kind rows arrive
+/// through its marker bridge instead. A fallback-only catch-all has no
+/// handler, so it gets no row: a `#[fallback]` does not count as handling a
+/// kind.
 fn emit_native_contract_rows(
     self_ty: &Type,
     generics: &syn::Generics,
@@ -952,11 +955,12 @@ fn emit_native_contract_rows(
     let impl_generics_ts = quote! { #impl_generics };
     let self_ty_ts = quote! { #self_ty };
     let where_clause_ts = quote! { #where_clause };
-    let rows = handler_kinds.iter().map(|marker| {
+    let rows = handler_kinds.iter().enumerate().map(|(index, marker)| {
         contract_row_impl(
             marker.class,
             &marker.reply,
             &marker.kind,
+            &position(index),
             &ReplyMarkerSite {
                 impl_generics: &impl_generics_ts,
                 self_ty: &self_ty_ts,
@@ -977,17 +981,38 @@ fn native_contract_elements(handler_kinds: &[HandlerMarker]) -> Vec<TokenStream2
         .collect()
 }
 
-/// ADR-0231 §4: the actor's `Contracts` impl over its `local` rows, with an
-/// adopted set's rows appended (ADR-0169). A fallback-only catch-all passes no
-/// local rows and gets an empty list.
+/// Each mail handler as its actor's contract row list sees it.
+fn native_row_specs(handler_kinds: &[HandlerMarker]) -> Vec<RowSpec<'_>> {
+    handler_kinds
+        .iter()
+        .map(|marker| RowSpec { class: marker.class, reply: &marker.reply, kind_ty: &marker.kind, cfgs: &marker.cfgs })
+        .collect()
+}
+
+/// The end of an actor's contract row list (ADR-0231 §10): an adopted set's
+/// rows, from its marker bridge's `@rows` arm, or `()`.
+fn set_rows_tail(handler_set: Option<&syn::Path>) -> TokenStream2 {
+    handler_set.map_or_else(
+        || quote! { () },
+        |set| {
+            let bridge = handler_set_bridge_ident(set);
+            quote! { #bridge!(@rows) }
+        },
+    )
+}
+
+/// ADR-0231 §4: the actor's `Contracts` impl over its `rows` list (§10) and
+/// its `local` rows, with an adopted set's rows appended (ADR-0169). A
+/// fallback-only catch-all passes no local rows and gets an empty list.
 ///
-/// A native set's rows come from its marker bridge's `@contracts` arm rather
-/// than a trait const: a struct-hosted identity cannot always name the set
-/// trait (it may sit in a private module of the runtime tree), while the
-/// bridge is reached by name from the same scope as the marker invocation.
+/// A native set's rows come from its marker bridge's `@contracts` and `@rows`
+/// arms rather than trait items: a struct-hosted identity cannot always name
+/// the set trait (it may sit in a private module of the runtime tree), while
+/// the bridge is reached by name from the same scope as the marker invocation.
 fn emit_native_contracts(
     self_ty: &Type,
     generics: &syn::Generics,
+    rows: &RowsList,
     local: &TokenStream2,
     handler_set: Option<&syn::Path>,
 ) -> TokenStream2 {
@@ -1006,6 +1031,8 @@ fn emit_native_contracts(
             where_clause: &where_clause_ts,
             cfgs: &[],
         },
+        &rows.aliases,
+        &rows.list,
         local,
         set_rows.as_ref(),
     )
@@ -1020,7 +1047,10 @@ fn handler_set_bridge_ident(set: &syn::Path) -> syn::Ident {
 /// ADR-0169: invoke the adopted set's generated marker bridge, which pastes one
 /// `impl HandlesKind<K> for #self_ty {}` and one `HandlerEntry` inventory row
 /// per set kind. `#[actor]` reads a trait *path*, never the trait body, so the
-/// kinds can only reach it through a macro the set itself emitted.
+/// kinds can only reach it through a macro the set itself emitted. The
+/// invocation passes the position just past the adopter's `local_rows`
+/// contract rows, where the set's rows begin in its `Contracts::Rows` list
+/// (ADR-0231 §10).
 ///
 /// The invocation is deliberately unqualified. `#[macro_export]` publishes the
 /// bridge into the crate-root macro prelude, which resolves order-independently
@@ -1028,12 +1058,13 @@ fn handler_set_bridge_ident(set: &syn::Path) -> syn::Ident {
 /// as `crate::__aether_handler_set_markers_…!` trips
 /// `macro_expanded_macro_exports_accessed_by_absolute_paths` (rust-lang issue
 /// 52234) for every same-crate adopter, which is all of them today.
-fn emit_handler_set_markers(handler_set: Option<&syn::Path>, self_ty: &Type) -> TokenStream2 {
+fn emit_handler_set_markers(handler_set: Option<&syn::Path>, self_ty: &Type, local_rows: usize) -> TokenStream2 {
     let Some(set) = handler_set else {
         return quote! {};
     };
     let bridge = handler_set_bridge_ident(set);
-    quote! { #bridge!(#self_ty); }
+    let base = position(local_rows);
+    quote! { #bridge!(#self_ty, #base); }
 }
 
 /// Emit ADR-0166 placement marker impls and their native link-time inventory
@@ -1071,14 +1102,30 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
                 for #self_ty #where_clause {}
         }
     });
-    // ADR-0230: native expansion emits each `unsafe impl DependsOn<R>` together
+    // ADR-0230 / ADR-0231 §10: the one `Declared` impl lists the dependencies,
+    // and each `DependsOn<R>` impl names `R`'s position in it, emitted together
     // with the link-time `DependencyEntry` for the same `R` below, which the
-    // birth sites check before `init`. Emitting the two together is the
-    // trait's safety contract.
-    let depends_impls = opts.depends.iter().map(|target| {
+    // birth sites check before `init`. A native actor declares no inline
+    // children, so its `Spawns` list is empty.
+    let impl_generics_ts = quote! { #impl_generics };
+    let self_ty_ts = quote! { #self_ty };
+    let where_clause_ts = quote! { #where_clause };
+    let declared = declared_impl(
+        &ReplyMarkerSite {
+            impl_generics: &impl_generics_ts,
+            self_ty: &self_ty_ts,
+            where_clause: &where_clause_ts,
+            cfgs: &[],
+        },
+        &opts.depends,
+        &[],
+    );
+    let depends_impls = opts.depends.iter().enumerate().map(|(index, target)| {
+        let index = position(index);
         quote! {
-            unsafe impl #impl_generics ::aether_actor::DependsOn<#target>
-                for #self_ty #where_clause {}
+            impl #impl_generics ::aether_actor::DependsOn<#target> for #self_ty #where_clause {
+                type Index = #index;
+            }
         }
     });
     // `ActorId::singleton` is the right tag by construction here: `anchors`
@@ -1136,6 +1183,7 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
     quote! {
         #root_impl
         #(#child_impls)*
+        #declared
         #(#depends_impls)*
         #inventory
     }
@@ -1354,7 +1402,7 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
     // `#[runtime]` attribute the harvest just read. The dispatch delegation is
     // emitted there; the markers have to be emitted here, against the struct
     // that carries the identity.
-    let set_markers = emit_handler_set_markers(identity.handler_set.as_ref(), &self_ty);
+    let set_markers = emit_handler_set_markers(identity.handler_set.as_ref(), &self_ty, identity.handler_kinds.len());
 
     // ADR-0123 gap 3: a compile-time dependency edge on the runtime file so a
     // transport-only (runtime-off) build — where `mod runtime` is cfg-stripped
@@ -1376,15 +1424,22 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
     let imports = select_for_demands(&harvested.kind_imports, &demands);
     let module_ident = quote::format_ident!("__aether_actor_identity_{}", ident.to_string().to_lowercase());
 
-    // ADR-0231 §4: the local rows name handler kinds, so they are built inside
-    // the private module where the harvested imports resolve. The `Contracts`
-    // impl sits out here beside the set's bridge invocation, whose `@contracts`
-    // arm resolves by name from this scope as the marker invocation does.
+    // ADR-0231 §4 / §10: the local rows name handler kinds, so they are built
+    // inside the private module where the harvested imports resolve: the
+    // `CONTRACTS` slice, and the `Rows` list as an alias over its tail with the
+    // gated slots' alias pairs beside it. The `Contracts` impl sits out here
+    // beside the set's bridge invocation, whose `@contracts` and `@rows` arms
+    // resolve by name from this scope as the marker invocation does.
     let element_ty = contract_element_ty();
     let local_rows = contract_rows_expr(&native_contract_elements(&identity.handler_kinds));
+    let local_list = rows_list(&native_row_specs(&identity.handler_kinds), quote! { __AetherTail })?;
+    let local_aliases = &local_list.aliases;
+    let local_list_ty = &local_list.list;
+    let set_tail = set_rows_tail(identity.handler_set.as_ref());
     let contracts = emit_native_contracts(
         &self_ty,
         &item.generics,
+        &RowsList { aliases: quote! {}, list: quote! { #module_ident::__AetherRows<#set_tail> } },
         &quote! { #module_ident::__AETHER_CONTRACT_ROWS },
         identity.handler_set.as_ref(),
     );
@@ -1397,6 +1452,8 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
             #(#imports)*
             #markers
             pub(super) const __AETHER_CONTRACT_ROWS: &'static [#element_ty] = #local_rows;
+            #local_aliases
+            pub(super) type __AetherRows<__AetherTail> = #local_list_ty;
         }
         #set_markers
         #contracts

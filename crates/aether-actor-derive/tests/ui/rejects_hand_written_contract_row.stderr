@@ -1,0 +1,19 @@
+error[E0277]: the position `Here` holds no contract row for `Unhandled` in `(Row<Handled, Silent>, ())`
+  --> tests/ui/rejects_hand_written_contract_row.rs:38:18
+   |
+38 |     type Index = Here;
+   |                  ^^^^ no handler backs this contract row
+   |
+   = note: a contract row exists only where the actor's `#[actor]` declares a handler for its kind (ADR-0231 §10)
+help: the trait `RowIndex<(Row<Handled, Silent>, ()), Unhandled>` is not implemented for `Here`
+      but trait `RowIndex<(Row<Handled, Silent>, ()), Handled>` is implemented for it
+  --> $WORKSPACE/crates/aether-actor/src/model/declared.rs
+   |
+   | impl<K: Kind, O: ReplyShape, Tail> RowIndex<(Row<K, O>, Tail), K> for Here {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `Handled`, found `Unhandled`
+note: required by a bound in `aether_actor::Contract::Index`
+  --> $WORKSPACE/crates/aether-actor/src/model/contract.rs
+   |
+   |     type Index: RowIndex<<Self as Contracts>::Rows, K, Reply = Self::Reply>;
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Contract::Index`

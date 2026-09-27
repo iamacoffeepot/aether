@@ -41,7 +41,15 @@
 //! because the orphan rule forecloses the set declaring the markers itself —
 //! `impl<T: Set> HandlesKind<K> for T` puts the `Self` type parameter ahead of
 //! the first local type in the trait reference. The adopter's `#[actor]` emits
-//! one invocation of it.
+//! one invocation of it, passing its type and the position just past its own
+//! contract rows.
+//!
+//! The bridge's `@rows` arm expands to the set's rows as a type-level list
+//! (ADR-0231 §10), which the adopter's `Contracts::Rows` ends with in place of
+//! `()`. Each `Contract<K>` row the bridge pastes names its position in that
+//! list: the adopter's position past its own rows, stepped once per earlier
+//! set row. So a set row, like a local one, exists only at a position of the
+//! adopter's one list.
 //!
 //! The bridge's `@contracts` arm expands to the set's `CONTRACTS` rows as a
 //! `&'static [(KindId, ReplyContract)]` expression, which the adopter appends
@@ -105,8 +113,10 @@
 //! adopter enables. The gate is a pass-through over `$($t:tt)*` rather than one
 //! macro per item, so a handler's marker and its inventory row share a single
 //! pair and the count stays linear in gated handlers. Its `@select [kept]
-//! [stripped]` arm serves expression position, where an empty expansion is not
-//! allowed: the `@contracts` rows pick the handler's row or an empty slice. A handler with no `#[cfg]`
+//! [stripped]` arm serves expression and type position, where an empty
+//! expansion is not allowed: the `@contracts` rows pick the handler's row or an empty slice, and
+//! the `@rows` list picks the handler's `Row<K, O>` or `Gap`, so the handler
+//! keeps its slot and every later row its position. A handler with no `#[cfg]`
 //! gets no gate and its tokens stay inline, so an unchanged set expands to
 //! exactly what it expanded to before.
 
@@ -122,8 +132,9 @@ use crate::handler_parse::{
 };
 use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{
-    ReplyMarkerSite, concat_contract_rows, contract_element, contract_element_ty, contract_row_impl,
-    contract_rows_expr, native_reply_contract, reply_marker_impl,
+    ReplyMarkerSite, concat_contract_rows, conjoined_cfg_predicate, contract_element, contract_element_ty,
+    contract_row_impl, contract_rows_expr, declaration_list, native_reply_contract, position_past, reply_marker_impl,
+    row_entry,
 };
 
 /// Which actor transport a set's handlers are written against, read off the
@@ -519,7 +530,11 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
         })
         .collect::<syn::Result<Vec<_>>>()?;
 
-    let markers = handlers.iter().zip(&gate_idents).flat_map(|(h, gate)| {
+    // ADR-0231 §10: set row `j` sits `j` entries past the adopter's own rows,
+    // whose end the adopter passes as `$base` (the position just past its last
+    // local row). `There` steps commute, so wrapping `$base` in `j` of them
+    // names the same position as counting the adopter's rows first.
+    let markers = handlers.iter().zip(&gate_idents).enumerate().flat_map(|(position, (h, gate))| {
         let kind_ty = &h.kind_ty;
         let handles_marker =
             wrap_in_gate(gate.as_ref(), quote! { impl ::aether_actor::HandlesKind<#kind_ty> for $ty {} });
@@ -539,6 +554,7 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
             h.class,
             &h.reply,
             kind_ty,
+            &position_past(quote! { $base }, position),
             &ReplyMarkerSite { impl_generics: &empty, self_ty: &self_ty, where_clause: &empty, cfgs: &[] },
         );
         markers.push(wrap_in_gate(gate.as_ref(), contract));
@@ -561,6 +577,7 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
         })
         .collect();
     let contract_rows = concat_contract_rows(&contract_parts);
+    let rows = bridge_rows_list(handlers, &gate_idents);
     let inventory = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
         let reply_expr = native_reply_contract(h.class, &h.reply);
@@ -586,12 +603,28 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
         #[doc(hidden)]
         macro_rules! #macro_ident {
             (@contracts) => { #contract_rows };
-            ($ty:ty) => {
+            (@rows) => { #rows };
+            ($ty:ty, $base:ty) => {
                 #(#markers)*
                 #(#inventory)*
             };
         }
     })
+}
+
+/// ADR-0231 §10: the set's rows as the tail of an adopter's `Contracts::Rows`
+/// list, for the bridge's `@rows` arm. A gated handler keeps its slot through
+/// the gate's `@select` arm, holding its row or `Gap` as this crate's features
+/// decide.
+fn bridge_rows_list(handlers: &[HandlerFn], gate_idents: &[Option<syn::Ident>]) -> TokenStream2 {
+    let row_entries = handlers.iter().zip(gate_idents).map(|(h, gate)| {
+        let entry = row_entry(h.class, &h.reply, &h.kind_ty);
+        match gate {
+            Some(gate_ident) => quote! { #gate_ident! { @select [#entry] [::aether_actor::Gap] } },
+            None => entry,
+        }
+    });
+    declaration_list(row_entries, quote! { () })
 }
 
 /// Wrap one bridge item in its handler's gate invocation, or leave it inline
@@ -602,20 +635,6 @@ fn wrap_in_gate(gate: Option<&syn::Ident>, tokens: TokenStream2) -> TokenStream2
         Some(gate_ident) => quote! { #gate_ident! { #tokens } },
         None => tokens,
     }
-}
-
-/// The conjunction of a handler's `#[cfg]` predicates, as `all(P1, …, Pn)`.
-///
-/// Purely syntactic: the macro reads the predicate tokens the author wrote and
-/// never evaluates them, so any predicate rustc accepts — including a custom
-/// `--cfg` flag from a build script — rides through unexamined, and an
-/// ill-formed one is diagnosed by rustc at the author's own span. Stacking the
-/// attributes would express the conjunction on the positive arm, but the
-/// negative arm needs the predicate as a term, so it is built once here.
-fn conjoined_cfg_predicate(cfgs: &[syn::Attribute]) -> syn::Result<TokenStream2> {
-    let predicates =
-        cfgs.iter().map(|attr| Ok(attr.meta.require_list()?.tokens.clone())).collect::<syn::Result<Vec<_>>>()?;
-    Ok(quote! { all(#(#predicates),*) })
 }
 
 /// The set's own kind-id if-chain. Structurally the same shape

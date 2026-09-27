@@ -22,6 +22,7 @@
 
 mod contract;
 pub mod ctx;
+mod declared;
 mod protocol;
 mod publish;
 mod sendable;
@@ -30,6 +31,7 @@ pub mod slot;
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
 pub use self::contract::{Contract, Contracts, ReplyShape, Silent, SilentRow, Undeclared};
+pub use self::declared::{Declared, Gap, Here, ListIndex, RowIndex, There};
 pub use self::protocol::{At, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet};
 pub use self::publish::{Publisher, Publishes};
 pub use self::sendable::SendableTo;
@@ -433,21 +435,28 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 /// }
 /// ```
 ///
-/// # Safety
-///
-/// Implement it only through `#[actor(depends(R))]`. That expansion also
-/// records the dependency entry the pre-`init` check reads — a link-time
-/// `DependencyEntry` on native, an `InputsRecord::Dependency` in the inputs
-/// manifest on wasm. A hand-written impl mints [`ActorRef<R>`](crate::ActorRef)
-/// proofs for an actor whose birth never checked that `R` was `Live`.
+/// A hand-written impl does not compile (ADR-0231 §10). The one
+/// [`Declared`] impl `#[actor]` emits lists the actor's dependencies as
+/// [`Declared::Depends`], from the same parsed `depends(..)` list as the
+/// dependency entry the pre-`init` check reads (a link-time `DependencyEntry`
+/// on native, an `InputsRecord::Dependency` in the inputs manifest on wasm).
+/// Each impl names `R`'s position in that list as [`Index`](DependsOn::Index),
+/// so an impl for an undeclared `R` either repeats an emitted impl (`E0119`)
+/// or names a position that holds another dependency or none (`E0277`), and no
+/// [`ActorRef<R>`](crate::ActorRef) proof is minted for an actor whose birth
+/// never checked that `R` was `Live`.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not declare a dependency on `{R}`",
     note = "add `{R}` to the `depends(...)` list on the actor's `#[actor(...)]` attribute"
 )]
-pub unsafe trait DependsOn<R: Singleton + CallerAddressable>: Addressable
+pub trait DependsOn<R: Singleton + CallerAddressable>: Addressable + Declared
 where
     R::Resolver: DependencyResolver,
 {
+    /// `R`'s position in [`Declared::Depends`], written by the expansion
+    /// that declared it.
+    #[doc(hidden)]
+    type Index: ListIndex<<Self as Declared>::Depends, R>;
 }
 
 /// The boot/teardown capability an actor composes onto its identity

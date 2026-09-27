@@ -26,8 +26,9 @@ markers), [ADR-0230](0230-proven-actor-references.md)
 an erased reference), [ADR-0232](0232-flat-ctx-send-verbs.md) (`send_to`),
 and the replace contract of
 [ADR-0022](0022-drain-on-swap.md), [ADR-0038](0038-actor-per-component-dispatch.md),
-[ADR-0101](0101-replace-hooks-on-ffiactor.md) and ADR-0169. The full list is
-under [Amendments](#amendments).
+[ADR-0101](0101-replace-hooks-on-ffiactor.md) and ADR-0169, and the
+inline-child markers of [ADR-0114](0114-inline-child-actors.md). The full list
+is under [Amendments](#amendments).
 
 ## Context
 
@@ -43,9 +44,14 @@ The compiler already knows half of this. `#[actor]` emits, per handler, a
 `HandlesKind<K>` marker and a `Contract<K>` row whose `Reply` is the reply kind
 `O`, `Silent`, or `Undeclared` for a manual handler
 (`crates/aether-actor/src/model/contract.rs`,
-`crates/aether-actor-derive/src/reply_markers.rs`), and per actor a
-`Contracts::CONTRACTS` list of the same rows in the manifest's `ReplyContract`
-vocabulary. Typed sends bound on `HandlesKind<K>` only. No bound connects the
+`crates/aether-actor-derive/src/reply_markers.rs`), and per actor one
+`Contracts` impl carrying the same rows twice: as the type-level list
+`Contracts::Rows`, which each `Contract<K>` row names its position in (§10), and
+as the `Contracts::CONTRACTS` list in the manifest's `ReplyContract`
+vocabulary. It also emits one `Declared` impl listing the actor's
+`depends(..)` and `spawns(..)` entries, which each `DependsOn<R>` and
+`Spawns<C>` impl names its position in (§10). Typed sends bound on
+`HandlesKind<K>` only. No bound connects the
 target's reply to the sender, so a caller can send `LoadMesh` to an actor that
 replies `MeshLoadResult` from a sender with no `MeshLoadResult` handler, and it
 compiles.
@@ -135,6 +141,9 @@ The rules:
 8. A subscriber's or watcher's handler for the event is silent or manual (§8).
 9. Relays forward through typed references; the reply they pass through is not
    checked (§9).
+10. A contract row, a declared dependency, a declared inline child, and a
+    module listing exist only at a position of their actor's or module's one
+    declaration list (§10).
 
 | § | Decision | On main |
 |---|---|---|
@@ -147,6 +156,7 @@ The rules:
 | 7 | Ctx typed by its actor | built, every ctx on both transports |
 | 8 | Silent subscribers and watchers | built for the wasm `subscribe` (`crates/aether-actor/src/wasm/ctx/subscribe.rs`); the `monitor` bound and subscriber references are not |
 | 9 | Relays | `forward_to` and `DeferredReply::hand_off` exist; the typed target is not built |
+| 10 | Markers exist only at a declared position | built: `Here`, `There<I>`, `Gap`, `ListIndex`, `RowIndex`, `Declared` (`crates/aether-actor/src/model/declared.rs`), `Contracts::Rows` and the `Index` of `Contract<K>`, `DependsOn<R>`, `Spawns<C>`, and `Rebuildable<M>`, emitted by `#[actor]` (`crates/aether-actor-derive/src/reply_markers.rs`, `wasm_expand.rs`, `native_expand.rs`, `handler_set.rs`) and `export!` (`crates/aether-actor/src/wasm/mod.rs`); a type no `#[actor]` built still writes its own declaration impl (#6870) |
 
 ### 1. The static reply check
 
@@ -769,6 +779,114 @@ consumer is the component host's load reply. All run from manual handlers.
   kind to equal the relaying handler's `O`, is not decided here. No consumer
   needs it.
 
+### 10. Markers exist only at a declared position
+
+Four per-actor markers stand for facts only a macro expansion establishes:
+`Contract<K>` (a handler for `K` exists, §1, §2), `DependsOn<R>` (the birth
+checked that `R` was `Live`, ADR-0230 §3), `Spawns<C>` (the spawner declared
+`C`, ADR-0114 §5), and `Rebuildable<M>` (the module's `export!` lists the
+type). Sealing cannot close them, because `#[actor]` and `export!` expand in
+the author's crate and any path they name the author can name too, and
+`unsafe` marks undefined behaviour, not a logic rule. They are closed by
+coherence instead: a trait has one impl per type, and a hand-written impl
+cannot add to it.
+
+`#[actor]` emits one `Contracts` impl and one `Declared` impl per actor, and
+`export!` one `ListedModule` impl for its module type, each carrying its
+entries as a type-level list `(E1, (E2, (…, ())))` in declaration order. Each
+marker names its entry's position in that list:
+
+```rust
+pub trait Contracts {
+    type Rows; // (Row<K1, O1>, (Row<K2, O2>, (…, ()))), one entry per handler
+    const CONTRACTS: &'static [(KindId, ReplyContract)];
+}
+
+pub trait Declared {
+    type Depends; // (R1, (R2, ())) from depends(..)
+    type Spawns;  // (C1, (C2, ())) from spawns(..); () on native
+}
+
+pub trait Contract<K: Kind>: Contracts {
+    type Reply: ReplyShape;
+    #[doc(hidden)]
+    type Index: RowIndex<<Self as Contracts>::Rows, K, Reply = Self::Reply>;
+}
+
+pub trait DependsOn<R: Singleton + CallerAddressable>: Addressable + Declared
+where
+    R::Resolver: DependencyResolver,
+{
+    #[doc(hidden)]
+    type Index: ListIndex<<Self as Declared>::Depends, R>;
+}
+
+pub trait Spawns<C>: Declared {
+    #[doc(hidden)]
+    type Index: ListIndex<<Self as Declared>::Spawns, C>;
+}
+
+pub trait Rebuildable<M: ListedModule> {
+    #[doc(hidden)]
+    type Index: ListIndex<<M as ListedModule>::Listed, Self>;
+}
+```
+
+A position is `Here` (the list's head) or `There<I>` (position `I` of the
+tail). `ListIndex<L, T>` and `RowIndex<L, K>` are sealed and implemented
+structurally in `aether-actor` only: `Here: ListIndex<(T, Tail), T>`, and
+`There<I>: ListIndex<(H, Tail), T>` when `I: ListIndex<Tail, T>`; `RowIndex`
+is the same walk over `Row<K, O>` entries and carries the row's reply. The
+expansion knows each entry's position and writes it (`type Index =
+There<Here>;`). A hand-written marker either repeats an impl the expansion
+emitted (`E0119`) or names a position that holds a different kind,
+dependency, or type, or no entry at all (`E0277` on the `Index` bound). A
+marker that type-checks is backed by a declaration, and none of the four
+traits is `unsafe`. Consumers keep their bounds (`T: Contract<K, Reply = O>`,
+`A: DependsOn<R>`, `P: Spawns<C>`, `C: Rebuildable<M>`), and no turbofish
+names an index.
+
+- **Gated handlers.** A `#[cfg]`-gated handler keeps its slot: a pair of
+  `#[cfg]`-ed type aliases beside the `Contracts` impl picks its `Row<K, O>`
+  when its predicates hold and `Gap` when they do not. `Gap` holds no row, so
+  only `There` steps over it, and every other handler's position is the same
+  in every configuration.
+- **Handler sets.** A native set's marker bridge has an `@rows` arm, the set's
+  rows as a list, each gated row picked through the set's own gate, so the
+  definer's features decide as ADR-0183 requires. The adopter's `Rows` ends
+  with that list in place of `()`, and its bridge invocation passes the
+  position just past its own rows; the bridge writes set row `j`'s position
+  as `j` `There` steps around it. A wasm set emits no per-kind `Contract` row
+  and adds nothing to `Rows`; its rows reach `CONTRACTS` as before.
+- **`export!` owns its module's list.** The `@listed` arm implements the
+  doc-hidden `aether_actor::wasm::ListedModule` for its `__AetherModule`
+  (`type Listed = (T1, (T2, ()))`) and writes each `Rebuildable` impl at its
+  position through a recursive accumulator. A type listed twice still
+  collides (`E0119`). `__AetherModule` is private: `Listed` may name a bundle
+  generator's private type, and only the invoking crate names the module
+  type.
+- **Declared entries are `pub`.** `Rows`, `Depends`, and `Spawns` are
+  associated types of public-trait impls for an actor, so for a public actor
+  each type they name must be nominally `pub`, or rustc refuses the impl
+  with `E0446` (private type in public interface). A handled kind, a declared
+  dependency, and a declared inline child are declared `pub`, and may live in
+  a private module to stay out of other crates' reach; `#[actor]` enforces
+  this through `E0446`, with no check of its own. `RetireWindow`
+  (`crates/aether-window/src/kinds.rs`), the window manager's order to a
+  child it retires, is the worked case: a `pub struct` in a private
+  `mod internal`, re-exported `pub(crate)`, so it enters the public window
+  instance actors' `Rows` while no other crate has a path to it.
+- **What stays.** `CONTRACTS`, the native `DependencyEntry` inventory, and
+  the wasm `InputsRecord::Dependency` records are emitted from the same parsed
+  lists as `Rows` and `Depends`, in the same expansion.
+
+The boundary is the declaration impl. A type that no `#[actor]` expansion
+built writes its own `Contracts` / `Declared` impl, as it writes its own
+`Dispatch` or `WasmDispatch`, and can list an entry its hand-written dispatch
+or records do not back. Closing that case, with the native birth check
+reading `<A as Declared>::Depends` and dispatch derived from the row list, is
+#6870.
+
 ## Scenario sweep
 
 "Compiles" and "compile error" describe the send site. "Runtime guard" means a
@@ -852,6 +970,8 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | a peer compiled against a different build of `R` | refused at the registry-consulting `ActorRef<R>` door |
 | a protocol reached twice through `includes` | rows appear once |
 | a manual row where a protocol expects a single or silent row | not covered, statically and at run time |
+| a hand-written `Contract<K>`, `DependsOn<R>`, `Spawns<C>`, or `Rebuildable<M>` for an actor `#[actor]` built or a module `export!` built | compile error: `E0119` when it repeats an emitted impl, else `E0277` on its `Index` bound (§10) |
+| a public actor handling a crate-private kind, or declaring a crate-private dependency or inline child | compile error `E0446` at the `#[actor]`; declare the type `pub` inside a private module (§10) |
 
 ## Consequences
 
@@ -991,6 +1111,40 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   for a refusal that is simpler as a rule.
 - **Failing stale sends at run time after a contract-changing replace.** Turns
   a replace into a runtime fault in every peer instead of one refused operation.
+- **Keep `unsafe trait` on `DependsOn`, `Spawns`, and `Rebuildable`, and add
+  it to `Contract`.** `unsafe` marks undefined behaviour, and a logic rule
+  behind it stays open to anyone who writes the keyword (§10).
+- **Seal each marker with a supertrait the macro implements through a
+  doc-hidden path.** The macro expands in the author's crate, so the author
+  can name any path it names.
+- **An unnameable per-actor rows type in an anonymous `const _` block, with
+  per-kind impls on it.** The projection `<A as Contracts>::Rows` names it,
+  and rustc accepts an impl whose self type is a concrete projection.
+- **A blanket `impl<T, K, I> Contract<K> for T where T::Rows: RowAt<K, I>`.**
+  `I` is unconstrained (`E0207`), as §2 records for protocols. Moving the
+  index into the trait (`Contract<K, I>`) makes `ctx.subscribe::<P, K>()` and
+  `narrow` spell `_`, and the `CoversRows` blankets hit `E0207` again.
+- **A const assertion that `K` is in `CONTRACTS`, evaluated where a row is
+  used.** It runs after monomorphization, so `cargo check` never evaluates it,
+  and the trait solver that decides `CoveredBy` cannot see it.
+- **Flat row tuples that reuse the protocol `RowAt<K, At<N>>` impls.** Capped
+  at 16 rows; the render runtime has 21 handlers and the widget panel 32.
+- **Leave a cfg-disabled handler out of the rows list.** Every later position
+  would then depend on the enabled features.
+- **Make `RetireWindow` `pub` at the kinds root.** `aether-window`'s
+  `pub use kinds::*` then exports it, and any crate could send a window child
+  the manager's shut-down order, skipping `CloseWindow` and the manager's
+  bookkeeping.
+- **Leave crate-private kinds out of `Rows`.** The handler keeps its
+  `CONTRACTS` entry but loses its `Contract<RetireWindow>` row, so the rows
+  stop matching the handlers, and once §1 moves typed sends onto
+  `Contract<K>` the manager's own typed `ctx.send_to(child, &RetireWindow)`
+  stops compiling.
+- **Derive dispatch from the row list** (each row a handler entry type whose
+  `handle` a sealed dispatcher calls, the actor-framework `Handler<M>`
+  shape). The only shape that also closes a type with no `#[actor]`, but it
+  rewrites dispatch on both transports and every hand-written test actor;
+  #6870.
 
 ## Amendments
 
@@ -1026,4 +1180,11 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   set reads as `WasmCtx<'_, Self>`. A set bounds what its default bodies reach
   with supertraits (`DependsOn<R>`), and `#[handler_set]` adds `Sized` to them.
   An override is a plain trait-method impl, so it spells the typed signature
-  `WasmCtx<'_, Self>`.
+  `WasmCtx<'_, Self>`. A native set's bridge also carries the set's rows as a
+  list an adopter's `Contracts::Rows` ends with (§10).
+- **ADR-0230 §3.** `DependsOn<R>` is a safe trait whose impl names `R`'s
+  position in the actor's `Declared::Depends` list; a hand-written impl is
+  refused with `E0119` or `E0277` rather than `E0200` (§10).
+- **ADR-0114 §5.** `Rebuildable<M>` and `Spawns<C>` are safe traits whose
+  impls name a position in `export!`'s module list and the spawner's
+  `spawns(..)` list, and `export!`'s module type is private (§10).

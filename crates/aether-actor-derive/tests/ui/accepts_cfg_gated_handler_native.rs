@@ -28,7 +28,7 @@ use aether_actor::actor;
     aether_data::Schema,
 )]
 #[kind(name = "test.cfg_native.always")]
-struct Always {
+pub struct Always {
     seq: u32,
 }
 
@@ -43,7 +43,7 @@ struct Always {
     aether_data::Schema,
 )]
 #[kind(name = "test.cfg_native.gated")]
-struct Gated {
+pub struct Gated {
     seq: u32,
 }
 

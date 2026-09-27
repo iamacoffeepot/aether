@@ -1,11 +1,19 @@
-error[E0200]: the trait `DependsOn<Peer>` requires an `unsafe impl` declaration
-  --> tests/ui/rejects_hand_written_depends_on.rs:44:1
+error[E0277]: the position `Here` does not hold `Peer` in the declared list `()`
+  --> tests/ui/rejects_hand_written_depends_on.rs:47:18
    |
-44 | impl aether_actor::DependsOn<Peer> for Hand {}
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+47 |     type Index = aether_actor::Here;
+   |                  ^^^^^^^^^^^^^^^^^^ no declaration backs this entry
    |
-   = note: the trait `DependsOn<Peer>` enforces invariants that the compiler can't check. Review the trait documentation and make sure this implementation upholds those invariants before adding the `unsafe` keyword
-help: add `unsafe` to this trait implementation
+   = note: a dependency is declared in `depends(..)` and an inline child in `spawns(..)` on the actor's `#[actor(..)]`, and a module's listing in its `export!`; only those expansions write these markers
+help: the trait `ListIndex<(), Peer>` is not implemented for `Here`
+      but trait `ListIndex<(Peer, _), Peer>` is implemented for it
+  --> $WORKSPACE/crates/aether-actor/src/model/declared.rs
    |
-44 | unsafe impl aether_actor::DependsOn<Peer> for Hand {}
-   | ++++++
+   | impl<T, Tail> ListIndex<(T, Tail), T> for Here {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `(Peer, _)`, found `()`
+note: required by a bound in `aether_actor::DependsOn::Index`
+  --> $WORKSPACE/crates/aether-actor/src/model/mod.rs
+   |
+   |     type Index: ListIndex<<Self as Declared>::Depends, R>;
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `DependsOn::Index`
