@@ -6,6 +6,7 @@ use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inlin
 use crate::mail::Mail;
 use crate::model::ctx::{Erased, Manual, Single};
 use crate::model::{Addressable, Embedded, HandlesKind, Resolve};
+use crate::reference::ErasedActorRef;
 use crate::wasm::inline::{ChildRecord, RouteDecision};
 use crate::wasm::{ActorInitError, WasmInitCtx};
 use aether_data::{ActorId, MailboxId, Source};
@@ -143,6 +144,12 @@ fn ctx_relative_verbs_resolve_and_route_in_place() {
     let child = ctx.child("widget").expect("the widget resolves by subname");
     assert_eq!(child.id, widget, "child resolves to the alias id");
     assert!(ctx.child("missing").is_none(), "a missing subname resolves to None");
+    assert_eq!(child.reference(), ErasedActorRef::new(widget), "the relative's proof names the resolved child");
+    assert_ne!(
+        child.reference(),
+        ErasedActorRef::new(MailboxId(root)),
+        "the relative's proof is not the addresser's own",
+    );
     let grandchild = child.child("label").expect("the grandchild resolves relative to the child handle");
     assert_eq!(grandchild.id, label, "handle-relative child walk reaches the grandchild");
     assert!(child.child("missing").is_none(), "a missing grandchild segment resolves to None");
