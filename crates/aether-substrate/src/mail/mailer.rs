@@ -1286,8 +1286,8 @@ mod tests {
         // Stable test sentinel — distinct from real schema-hashed kind ids.
         const ID: KindId = KindId(0xDEAD_BEEF_0003_0001);
 
-        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-            wire::from_bytes(bytes).ok()
+        fn decode_with(bytes: &[u8], _ctx: &mut wire::DecodeCtx<'_>) -> Result<Self, wire::Error> {
+            wire::from_bytes(bytes)
         }
 
         fn encode_into_bytes(&self) -> Vec<u8> {

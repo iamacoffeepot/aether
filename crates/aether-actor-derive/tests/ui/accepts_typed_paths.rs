@@ -39,7 +39,7 @@ impl Addressable for Member {
 
 impl ChildOf<Unit> for Member {}
 
-#[aether_data::kind(name = "test.typed_paths.paths")]
+#[aether_data::kind(name = "test.typed_paths.paths", no_serde)]
 struct Paths {
     unit: ActorPath<Unit>,
     pinging: ProtocolPath<Pinging>,

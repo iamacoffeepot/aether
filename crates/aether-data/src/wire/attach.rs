@@ -1,18 +1,23 @@
-//! The encoder and decoder hooks a `Blob` field reaches (ADR-0238 decision 3).
+//! The encoder and decoder hooks a `Blob` or `ProtocolPath` field reaches
+//! (ADR-0238 decision 3, ADR-0231 §3).
 //!
 //! [`WireEncode::encode_to`](super::WireEncode::encode_to) and
 //! [`WireDecode::decode_from`](super::WireDecode::decode_from) pass one hook
 //! through the derive and every container, so each `Blob` field calls
-//! [`Encoder::blob`] once on the way out and [`Decoder::resolve`] once per
-//! tag-1 field on the way in. The plain hooks, `Vec<u8>` and `&[u8]`, write
-//! tag 0 and refuse tag 1; the in-process envelope encoder is the only
-//! encoder that overrides `blob`, and a decode resolves a tag-1 hash only
-//! through the [`BlobResolver`] it was handed.
+//! [`Encoder::blob`] once on the way out. On the way in a decode reaches the
+//! engine only through the two [`Decoder`] operations:
+//! [`Decoder::resolve_blob`] once per tag-1 `Blob` field, and
+//! [`Decoder::prove_route_covers`] once per `ProtocolPath`. The plain hooks,
+//! `Vec<u8>` and `&[u8]`, write tag 0 and refuse both operations, exactly as
+//! an empty [`DecodeCtx`] does; the in-process envelope encoder is the only
+//! encoder that overrides `blob`, and a decode that resolves goes through
+//! the [`DecodeCtx`] it was handed.
 
 use alloc::vec::Vec;
 
-use super::Error;
+use super::{DecodeCtx, Error};
 use crate::blob::{self, Blob, BlobHash};
+use crate::{ErasedActorPath, KindId, ReplyContract};
 
 /// Where an encode writes: the output buffer plus the `Blob` field hook.
 pub trait Encoder {
@@ -35,18 +40,29 @@ impl Encoder for Vec<u8> {
     }
 }
 
-/// Where a decode reads: the input cursor plus the tag-1 hook.
+/// Where a decode reads: the input cursor plus the two engine operations.
 pub trait Decoder<'de> {
     /// The input cursor.
     fn cursor(&mut self) -> &mut &'de [u8];
 
-    /// Resolve a tag-1 field's hash to its value. The default refuses.
+    /// Resolve a tag-1 `Blob` field's hash to its value. The default refuses.
     ///
     /// # Errors
     ///
     /// [`Error::DetachedBlob`] naming the hash.
-    fn resolve(&mut self, hash: BlobHash) -> Result<Blob, Error> {
+    fn resolve_blob(&mut self, hash: BlobHash) -> Result<Blob, Error> {
         Err(Error::DetachedBlob(hash))
+    }
+
+    /// Prove that the live route at `path` publishes every one of `rows`
+    /// ([`DecodeCtx::prove_route_covers`]). The default refuses.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ProtocolPathUnchecked`] naming the path.
+    fn prove_route_covers(&self, path: &ErasedActorPath, rows: &[(KindId, ReplyContract)]) -> Result<(), Error> {
+        let _ = rows;
+        Err(Error::ProtocolPathUnchecked { path: path.clone() })
     }
 }
 
@@ -67,18 +83,18 @@ pub trait BlobResolver {
     fn resolve(&mut self, hash: BlobHash) -> Result<Blob, Error>;
 }
 
-/// A [`Decoder`] over a slice that resolves tag-1 hashes through a
-/// [`BlobResolver`]. The resolver is a trait object, so each kind has one
-/// decode body however many resolvers exist.
-pub struct Resolving<'de, 'r> {
+/// A [`Decoder`] over a slice that forwards both engine operations to a
+/// [`DecodeCtx`]. The context is borrowed whole, so each kind has one decode
+/// body whatever the context carries.
+pub struct InCtx<'de, 'x, 'c> {
     cursor: &'de [u8],
-    resolver: &'r mut dyn BlobResolver,
+    ctx: &'x mut DecodeCtx<'c>,
 }
 
-impl<'de, 'r> Resolving<'de, 'r> {
-    /// A decoder over `cursor` that resolves through `resolver`.
-    pub fn new(cursor: &'de [u8], resolver: &'r mut dyn BlobResolver) -> Self {
-        Self { cursor, resolver }
+impl<'de, 'x, 'c> InCtx<'de, 'x, 'c> {
+    /// A decoder over `cursor` that resolves through `ctx`.
+    pub fn new(cursor: &'de [u8], ctx: &'x mut DecodeCtx<'c>) -> Self {
+        Self { cursor, ctx }
     }
 
     /// Whether every input byte was consumed.
@@ -87,12 +103,16 @@ impl<'de, 'r> Resolving<'de, 'r> {
     }
 }
 
-impl<'de> Decoder<'de> for Resolving<'de, '_> {
+impl<'de> Decoder<'de> for InCtx<'de, '_, '_> {
     fn cursor(&mut self) -> &mut &'de [u8] {
         &mut self.cursor
     }
 
-    fn resolve(&mut self, hash: BlobHash) -> Result<Blob, Error> {
-        self.resolver.resolve(hash)
+    fn resolve_blob(&mut self, hash: BlobHash) -> Result<Blob, Error> {
+        self.ctx.resolve_blob(hash)
+    }
+
+    fn prove_route_covers(&self, path: &ErasedActorPath, rows: &[(KindId, ReplyContract)]) -> Result<(), Error> {
+        self.ctx.prove_route_covers(path, rows)
     }
 }

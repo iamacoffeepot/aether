@@ -1,27 +1,92 @@
-//! [`ProtocolPath<P>`]: a protocol-typed path (ADR-0231 §3), and the one way
-//! to make one, [`ActorPath::narrow`].
+//! [`ProtocolPath<P>`]: a protocol-typed path (ADR-0231 §3), made by
+//! [`ActorPath::narrow`] or decoded against the engine's published route
+//! contracts.
 
 use core::marker::PhantomData;
 
 use aether_data::ErasedActorPath;
-use aether_data::wire::{Error as WireError, WireDecode};
-use serde::{Deserialize, Deserializer};
+use aether_data::wire::{Decoder, Error as WireError, WireDecode};
 
 use super::ActorPath;
-use crate::CoveredBy;
+use crate::{CoveredBy, Protocol, RowSet};
 
 /// The canonical path of an actor whose rows cover the protocol `P`: an
 /// [`ErasedActorPath`] under that claim (ADR-0231 §3).
 ///
-/// Made only by [`ActorPath::narrow`], which compiles only when the
-/// compiler has proved `P: CoveredBy<R>`. Decoded, it claims only that the
-/// text is a well-formed canonical path, and `P` stays the writer's claim.
-/// Nothing about existence either way, and it grants no send: a receiver's
-/// `resolve` proves that a live actor stands at the path.
+/// A value that exists holds its claim, made one of two ways:
 ///
-/// On the wire and through serde it is the path text alone, with
-/// [`ErasedActorPath`]'s schema and codec, so it may be a kind field, a
-/// config field, or saved state.
+/// - [`ActorPath::narrow`], which compiles only when the compiler has
+///   proved `P: CoveredBy<R>`;
+/// - a decode through [`Kind::decode_with`](aether_data::Kind::decode_with),
+///   whose context proves that the `Live` route standing at the path
+///   published every row of `P` (ADR-0231 §4). The decode refuses
+///   [`WireError::ProtocolPathUnchecked`] when the context has no published
+///   routes, [`WireError::ProtocolPathUnpublished`] when no live route stands
+///   at the path, and [`WireError::UncoveredProtocolPath`] naming the first
+///   row of `P` the route does not publish. The plain shorthand
+///   (`decode_from_bytes`, `wire::decode_from_slice`) decodes with an empty
+///   context, so it always refuses.
+///
+/// It grants no send: the route can leave between decode and use, so a
+/// receiver's `resolve` proves that a live actor still stands at the path.
+///
+/// On the wire it is the path text alone, with [`ErasedActorPath`]'s schema
+/// and codec, so it may be a kind field. It serializes but has no
+/// `Deserialize`, since serde carries no context: a kind carrying one is
+/// declared `no_serde`.
+///
+/// ```compile_fail,E0277
+/// use aether_actor::{ProtocolPath, protocol};
+///
+/// #[aether_data::kind(name = "example.ping")]
+/// struct Ping {
+///     seq: u32,
+/// }
+///
+/// #[protocol]
+/// trait Pinging {
+///     fn ping(mail: Ping);
+/// }
+///
+/// // The kind derives `Deserialize`, which `ProtocolPath` does not implement.
+/// #[aether_data::kind(name = "example.carries")]
+/// struct Carries {
+///     path: ProtocolPath<Pinging>,
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// Declared `no_serde`, the same kind decodes through `decode_with` only:
+///
+/// ```
+/// use aether_actor::{Kind, ProtocolPath, protocol};
+/// use aether_data::ErasedActorPath;
+/// use aether_data::wire::{self, DecodeCtx, Error};
+///
+/// #[aether_data::kind(name = "example.ping")]
+/// struct Ping {
+///     seq: u32,
+/// }
+///
+/// #[protocol]
+/// trait Pinging {
+///     fn ping(mail: Ping);
+/// }
+///
+/// #[aether_data::kind(name = "example.carries", no_serde)]
+/// struct Carries {
+///     path: ProtocolPath<Pinging>,
+/// }
+///
+/// fn main() {
+///     let path = ErasedActorPath::new("example.pinger").expect("a valid path");
+///     let bytes = wire::encode_to_vec(&path).expect("encodes");
+///
+///     let refused = Carries::decode_with(&bytes, &mut DecodeCtx::empty()).map(|_| ());
+///     assert_eq!(refused, Err(Error::ProtocolPathUnchecked { path }));
+/// }
+/// ```
 pub struct ProtocolPath<P> {
     path: ErasedActorPath,
     _protocol: PhantomData<fn() -> P>,
@@ -56,20 +121,20 @@ impl<R> ActorPath<R> {
     }
 }
 
-/// A canonical path, or `WireError::InvalidActorPath`. The canonical check
-/// alone: any actor covering `P` may live at the text, so no leaf is
-/// compared.
-impl<'de, P> WireDecode<'de> for ProtocolPath<P> {
+/// A canonical path whose live route covers `P`. The canonical check comes
+/// first, so a malformed or short path is `WireError::InvalidActorPath` and
+/// the decoder is never asked; any actor covering `P` may live at the text,
+/// so no leaf namespace is compared. The plain [`WireDecode::decode`] goes
+/// through the `&[u8]` decoder, which refuses the route proof.
+impl<'de, P: Protocol> WireDecode<'de> for ProtocolPath<P> {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
-        super::decode_canonical(cursor).map(Self::from_erased)
+        Self::decode_from(cursor)
     }
-}
 
-/// A canonical path, or a custom error naming the rule. The canonical check
-/// alone, as the wire decode.
-impl<'de, P> Deserialize<'de> for ProtocolPath<P> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        super::deserialize_canonical(deserializer).map(Self::from_erased)
+    fn decode_from<D: Decoder<'de> + ?Sized>(dec: &mut D) -> Result<Self, WireError> {
+        let path = super::decode_canonical(dec.cursor())?;
+        dec.prove_route_covers(&path, <P::Rows as RowSet>::CONTRACTS)?;
+        Ok(Self::from_erased(path))
     }
 }
 
