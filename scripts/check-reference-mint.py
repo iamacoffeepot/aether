@@ -2,10 +2,12 @@
 """Reject reference mints outside the gate's allowlist.
 
 The gated mints turn a confirmed-`Live` position into a proven reference
-(`__mint_actor_ref`, `__mint_erased_actor_ref`, `__mint_protocol_ref`), or
-an engine backing into a `Shared` `Blob` (`__mint_shared_blob`, and the guest
-backing's `__mint_guest_blob`, ADR-0238 decision 4), so only the paths in
-`ALLOWED_PATHS` may name them. Every other mention in tracked Rust source
+(`__mint_actor_ref`, `__mint_erased_actor_ref`, `__mint_protocol_ref`), an
+engine backing into a `Shared` `Blob` (`__mint_shared_blob`, and the guest
+backing's `__mint_guest_blob`, ADR-0238 decision 4), or an ingress bridge's
+private stand-in (`__mint_ingress_ref`, ADR-0231 §4 "Ingress bridges: a
+private stand-in"), so only the paths in `ALLOWED_PATHS` may name them.
+Every other mention in tracked Rust source
 is a finding: nothing written in scanned source — no comment, attribute,
 marker, or flag — relaxes this scan, and widening the allowlist means editing
 this gate in a reviewed diff.
@@ -27,11 +29,12 @@ ALLOWED_PATHS = (
     "crates/aether-actor/src/lib.rs",
     "crates/aether-data/src/blob/mod.rs",
     "crates/aether-data/src/lib.rs",
+    "crates/aether-http/src/server/runtime/ingress.rs",
     "crates/aether-substrate/src/mail/registry/mailbox/proven.rs",
     "crates/aether-substrate/src/store/entry.rs",
 )
 
-MINT_RE = re.compile(r"\b__mint_(actor_ref|erased_actor_ref|protocol_ref|shared_blob|guest_blob)\b")
+MINT_RE = re.compile(r"\b__mint_(actor_ref|erased_actor_ref|protocol_ref|shared_blob|guest_blob|ingress_ref)\b")
 
 
 class OperationalError(RuntimeError):
