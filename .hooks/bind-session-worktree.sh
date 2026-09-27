@@ -6,6 +6,10 @@
 
 set -u
 
+# An Anthropic-hosted cloud session works in a disposable clone on its own VM,
+# so there is no primary checkout to protect and no session worktree to bind.
+[[ "${CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE:-}" == "cloud_default" ]] && exit 0
+
 input=$(cat)
 
 # Project root — try Claude, Muse, and generic envs

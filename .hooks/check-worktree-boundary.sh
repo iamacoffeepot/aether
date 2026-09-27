@@ -17,6 +17,10 @@
 
 set -u
 
+# An Anthropic-hosted cloud session works in a disposable clone on its own VM,
+# so there is no primary checkout to protect and no session worktree to bind.
+[[ "${CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE:-}" == "cloud_default" ]] && exit 0
+
 input=$(cat)
 session_id=$(printf '%s' "$input" | jq -r '.session_id // ""')
 tool_name=$(printf '%s' "$input" | jq -r '.tool_name // ""')
