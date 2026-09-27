@@ -137,6 +137,9 @@ expect_no "edit gate: Bash tool -> not gated here" check-worktree-boundary.sh \
     '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git push"}}' "$ASK"
 expect_no "edit gate: no worktree -> fail open" check-worktree-boundary.sh \
     "{\"session_id\":\"NONE\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SCAFFOLD/src/lib.rs\"}}" "$ASK"
+ENVX=(CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE=cloud_default)
+expect_no "edit gate: anthropic-hosted cloud session -> silent allow" check-worktree-boundary.sh \
+    "{\"session_id\":\"SESS\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SCAFFOLD/src/lib.rs\"}}" "$ASK"
 
 echo "## check-worktree-clean.sh — PostToolUse don't-dirty-main tripwire"
 expect "clean main -> allow" check-worktree-clean.sh '{"session_id":"SESS"}' 0
@@ -147,6 +150,13 @@ CWD="$SCAFFOLD/.agents/worktrees/SESS"
 expect "dirty main, no session id, run from a worktree -> block" check-worktree-clean.sh '{}' 2 "primary checkout is dirty"
 ENVX=(AETHER_CODEX_ALLOW_DIRTY_MAIN=1)
 expect "dirty main, AETHER_CODEX_ALLOW_DIRTY_MAIN=1 -> allow" check-worktree-clean.sh '{"session_id":"SESS"}' 0
+# The cloud gate must cover the main-root fallback, which needs no session id.
+CWD="$SCAFFOLD/.agents/worktrees/SESS"
+ENVX=(CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE=cloud_default)
+expect "dirty main, anthropic-hosted cloud session -> allow" check-worktree-clean.sh '{"session_id":"NONE"}' 0
+CWD="$SCAFFOLD/.agents/worktrees/SESS"
+ENVX=(CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE=self_hosted)
+expect "dirty main, other remote environment -> block" check-worktree-clean.sh '{"session_id":"NONE"}' 2 "primary checkout is dirty"
 reset_main
 expect "clean main, unbound session -> allow" check-worktree-clean.sh '{"session_id":"NONE"}' 0
 
@@ -251,6 +261,9 @@ expect "bind: rerun on an existing worktree -> exit 0" bind-session-worktree.sh 
     '{"session_id":"BINDLOCK"}' 0 ".agents/worktrees/BINDLOCK"
 expect "bind: session id is sanitized into the key" bind-session-worktree.sh \
     '{"session_id":"odd/id with space"}' 0 ".agents/worktrees/odd-id-with-space"
+ENVX=(CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE=cloud_default)
+expect "bind: anthropic-hosted cloud session -> exit 0" bind-session-worktree.sh '{"session_id":"CLOUD"}' 0
+refute "bind: anthropic-hosted cloud session binds no worktree" test -e "$SCAFFOLD/.agents/worktrees/CLOUD"
 
 echo "## release-session-worktree.sh — unlocks the real worktree on session end"
 expect "release: exits 0" release-session-worktree.sh '{"session_id":"BINDLOCK"}' 0
