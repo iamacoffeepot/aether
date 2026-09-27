@@ -22,7 +22,9 @@ use core::fmt::{self, Debug, Display, Formatter};
 use core::hash::{Hash, Hasher};
 
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
-use aether_data::{ActorPathForm, CastEligible, ErasedActorPath, LabelNode, Schema, SchemaType};
+use aether_data::{
+    ActorPathForm, CastEligible, CrossesActors, CrossesWire, ErasedActorPath, LabelNode, Schema, SchemaType,
+};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -78,6 +80,11 @@ macro_rules! typed_path_traits {
         impl<$param> super::CastEligible for $name<$param> {
             const ELIGIBLE: bool = false;
         }
+
+        // A typed path is a description, proven again at receipt, so it has
+        // wire reach (ADR-0242).
+        impl<$param> super::CrossesActors for $name<$param> {}
+        impl<$param> super::CrossesWire for $name<$param> {}
 
         impl<$param> super::WireEncode for $name<$param> {
             fn encode(&self, out: &mut super::Vec<u8>) -> Result<(), super::WireError> {

@@ -68,14 +68,34 @@ A kind whose derive list this vocabulary cannot state exactly — no `Debug`, no
 type; the attribute is shorthand for the common contract, not a replacement for
 the derives.
 
-Every typed send and reply requires `ActorMail`, which the `Kind` derive
-implements unless the kind declares `engine_only`. A hand-written `Kind` impl
-adds `impl aether_data::ActorMail for T {}` itself when actors may send the
-kind; without it, the kind cannot be sent at all.
-
 Reply is a handler contract, not a `Kind` associated type. Name/result shapes
 should make the pairing clear, but live handler inventory is what declares the
 actual reply.
+
+### Reach
+
+A kind's reach says where its bytes may go (ADR-0242), and it is the
+narrowest reach among its fields; nothing on the kind declares it:
+
+| Reach | Marker | Its bytes cross | Example leaves |
+|---|---|---|---|
+| Actor | neither | nothing: they stay in their own actor's request-context table | `ReplyHandle`, `Source`, `SourceAddr` |
+| Engine | `CrossesActors` | in-process mail between actors | `MailboxId`, `MailId` |
+| Wire | `CrossesActors` and `CrossesWire` | a wire `Call`, an MCP bundle, a file | primitives, `String`, `KindId`, `EngineId`, paths, `Blob` |
+
+The `Schema` and `Storage` derives implement each marker for a type whose
+every field implements it, and the containers forward both. A hand-written
+`Schema` impl adds the markers its type deserves beside it; without them, the
+type has actor reach.
+
+Every typed send and reply requires `ActorMail`, which the `Kind` derive
+implements for a kind that crosses actors, unless the kind declares
+`engine_only`. So a request context holding a `ReplyHandle` or a `Source` is
+never mail, and no handler may receive it. A hand-written `Kind` impl adds
+`impl aether_data::ActorMail for T {}` itself when actors may send the kind,
+and its type must cross actors; without it, the kind cannot be sent at all.
+The typed doors that cross the wire, a component's `Config` and the fleet
+harness's typed sends, take `WireMail`, a kind of wire reach.
 
 ## 3. Re-export the marker surface
 

@@ -134,7 +134,8 @@ pub(super) fn emit_validate(input: &DeriveInput) -> TokenStream2 {
     let element = emit_validate_element(name, inner);
     let wire = emit_validate_wire(name, inner);
     let cites = emit_validate_cites(name, inner);
-    quote! { #schema #leaves #element #wire #cites }
+    let reach = crate::reach_impls(input, &[inner]);
+    quote! { #schema #reach #leaves #element #wire #cites }
 }
 
 fn validate_inner(input: &DeriveInput) -> &Type {

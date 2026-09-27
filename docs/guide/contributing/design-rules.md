@@ -292,18 +292,20 @@ wire; which kinds may carry one is the door rule's question
 ([R-0041](#r-0041)). A description, an actor path, crosses where a reference
 cannot, and the receiver proves it again on its side.
 
-This rule records a direction that #6894 implements; it is not built on
-`main`. Until #6894 lands, no kind carries a reach, so proven references keep
-no codec and a description is what crosses.
+The markers are `CrossesActors`, engine reach or wider, and `CrossesWire`,
+wire reach. The `Schema` and `Storage` derives implement each for a type whose
+every field implements it, only a kind that crosses actors is `ActorMail`, and
+the typed wire doors take `WireMail` (ADR-0242). A typed proof's position is
+encoded only by its contextual engine-reach codec, which lands with its first
+carrier; until then proven references keep no codec.
 
 - **Why:** whether a proof survives the trip depends on where the bytes go,
   so the kind's fields state how far they can go rather than every proof
   being barred from every trip.
 - **Settled:** ADR-0230 §1 (proven references have no codec; a path crosses
   and is re-proven); #6272 (ADR-0230's references made unexportable); #6894
-  (the decode-context axis, the three reach levels, and a kind's reach the
-  narrowest of its fields: the direction is decided and the mechanism is
-  pending there); #6890 (closed: a `MailboxId` has engine reach, so a kind
+  (ADR-0242: the decode-context axis, the three reach levels, and a kind's
+  reach the narrowest of its fields); #6890 (closed: a `MailboxId` has engine reach, so a kind
   carrying one cannot reach the wire).
 
 ### R-0013: Model a closed set as a Rust enum {#r-0013}
@@ -721,3 +723,4 @@ line is edited or removed:
 - 2026-09-26 · #6865 · the `Publish` mail door and the module cache's move → deferred to step 5 · follows [R-0009](#r-0009)
 - 2026-09-26 · #6865 · what a native publication records → its namespace only · follows [R-0026](#r-0026)
 - 2026-09-26 · #6865 · how Bloomery bundles publish → each under its own per-digest namespace (the module hash) · follows [R-0021](#r-0021)
+- 2026-09-27 · #6894 (ADR-0242) · how a kind's reach is carried → the `CrossesActors` and `CrossesWire` markers, folded from the fields by the derives; `ActorMail` only for a kind that crosses actors; `WireMail` on the typed wire doors · follows [R-0042](#r-0042)

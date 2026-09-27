@@ -19,7 +19,7 @@ use super::{Blob, BlobHash, BlobReader, Repr};
 use crate::schema::{LabelNode, SchemaType};
 use crate::wire::owned::{decode_bytes, take, take_array, write_count};
 use crate::wire::{Decoder, Encoder, Error, WireDecode, WireEncode};
-use crate::{CastEligible, Schema};
+use crate::{CastEligible, CrossesActors, CrossesWire, Schema};
 
 /// Inline bytes: a `u32` length, then the bytes.
 const TAG_INLINE: u8 = 0;
@@ -31,6 +31,9 @@ impl Schema for Blob {
     const LABEL: Option<&'static str> = None;
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
+
+impl CrossesActors for Blob {}
+impl CrossesWire for Blob {}
 
 impl CastEligible for Blob {
     const ELIGIBLE: bool = false;

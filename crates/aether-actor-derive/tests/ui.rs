@@ -372,6 +372,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_actor_composable_cardinality",
     "rejects_actor_composable_child_of",
     "rejects_actor_composable_native",
+    "rejects_actor_reach_handler",
     "rejects_actor_root_wasm",
     "rejects_actor_unknown_arg",
     "rejects_bare_handler_native",

@@ -48,8 +48,10 @@ impl Kind for RegistryChanged {
 }
 
 /// Ordinary mail (ADR-0233): a forged wake only makes the receiver re-read
-/// the real inventory.
+/// the real inventory. It is a wake inside one engine, so it crosses actors
+/// and not the wire (ADR-0242).
 impl aether_data::ActorMail for RegistryChanged {}
+impl aether_data::CrossesActors for RegistryChanged {}
 
 /// Sentinel the substrate passes as the reply-handle parameter on
 /// the `receive` shim when there is no reply target — for
@@ -71,6 +73,10 @@ pub const NO_REPLY_HANDLE: u32 = u32::MAX;
 /// guarantees the handle stays valid from receipt until it is
 /// answered. A handle is one-shot: the first `Ctx::reply` that uses
 /// it consumes it, and a later `reply` with the same handle fails.
+///
+/// It has actor reach (ADR-0242): the raw value indexes this instance's own
+/// reply table, so it implements neither reach marker. A request context may
+/// hold one, and that context is never mail.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ReplyHandle {
     pub(crate) raw: u32,

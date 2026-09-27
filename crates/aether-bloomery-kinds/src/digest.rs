@@ -48,6 +48,9 @@ impl Schema for Digest {
     const LABEL_NODE: LabelNode = <[u8; 32] as Schema>::LABEL_NODE;
 }
 
+impl aether_data::CrossesActors for Digest {}
+impl aether_data::CrossesWire for Digest {}
+
 impl StorageLeaves for Digest {
     fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
         <[u8; 32] as StorageLeaves>::contribute(&self.0, carry, depth, sink)

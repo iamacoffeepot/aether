@@ -42,21 +42,26 @@ engine_only)]` on the longhand derive).
 
 ### The `ActorMail` marker
 
-`aether_data::ActorMail: Kind` is a positive marker for mail an actor may send
-or reply:
+`aether_data::ActorMail: Kind + CrossesActors` is a positive marker for mail an
+actor may send or reply, and only a kind that crosses actors has it
+([ADR-0242](0242-a-kinds-reach-is-its-narrowest-fields.md)):
 
 ```rust
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is engine-only mail: the engine sends it, never an actor",
     label = "declared #[kind(engine_only)]"
 )]
-pub trait ActorMail: Kind {}
+pub trait ActorMail: Kind + CrossesActors {}
 ```
 
-- The `Kind` derive emits `impl ActorMail` for every kind unless it declares
-  `engine_only`.
+- The `Kind` derive emits `impl ActorMail for K where for<'__reach> K:
+  CrossesActors`, unless the kind declares `engine_only`, which withholds it
+  outright. A kind whose fields include one of actor reach, such as a request
+  context holding a reply handle, is therefore not actor mail, and a typed
+  send of it fails with the reach diagnostic (ADR-0242 §4).
 - A hand-written `Kind` impl adds `impl ActorMail for T {}` itself when the kind
-  is actor-sendable. Leaving it out fails closed: the kind cannot be sent.
+  is actor-sendable, and the supertrait holds it to a type that crosses actors.
+  Leaving it out fails closed: the kind cannot be sent.
 - It is not sealed. The orphan rule already stops a crate from implementing it
   for a kind it does not own, and a seal would need an escape hatch for the
   derive.
@@ -78,7 +83,8 @@ handler that declares an engine-only reply fails at its declaration.
 Bounds that name a kind an actor receives, subscribes to, stores (request
 contexts, persistence), or decodes stay `Kind`, as do host-side helpers
 (`Mailer::send_reply`, `InboundMail::reply`, the chassis drivers,
-`aether_substrate::testing`).
+`aether_substrate::testing`). The one addition is on receipt: every handler's
+kind must cross actors (ADR-0242 §4).
 
 ### Storage kinds
 

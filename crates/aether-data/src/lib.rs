@@ -44,6 +44,7 @@ pub mod ids;
 pub mod mail;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod name_inventory;
+mod reach;
 pub mod reference;
 pub mod schema;
 pub mod storage;
@@ -70,6 +71,7 @@ pub use name_inventory::{
     ChildEntry, NameEntry, ParamKind, RootEntry, TemplateEntry, build_static_reverse_map, child_entries, fill_template,
     id_for_name, name_entries, root_entries, template_entries,
 };
+pub use reach::{CrossesActors, CrossesWire, WireMail};
 pub use reference::{
     ActorPathError, ActorPathForm, ErasedActorPath, LoadName, LoadNameError, Namespace, PathSegment, SegmentFault,
 };
@@ -109,7 +111,8 @@ pub use aether_data_derive::transform;
 /// `Clone`, `Kind`, `Schema`, `Serialize`, `Deserialize` plus the
 /// `#[kind(name = …)]` helper, with `copy` / `default` / `partial_eq` /
 /// `eq` / `pod` / `no_serde` / `derive(…)` naming the departures and
-/// `engine_only` declaring engine-only mail (see [`ActorMail`]). Spell
+/// `engine_only` declaring engine-only mail (see [`ActorMail`]). A kind
+/// declares no reach: its reach is its narrowest field's (ADR-0242). Spell
 /// it fully qualified at the declaration site — the bare `#[kind(…)]`
 /// name belongs to the derives' inert helper attribute. Behind the
 /// `derive` feature like the other macros.
@@ -201,20 +204,25 @@ pub trait Kind {
 }
 
 /// A kind an actor may send or reply: every typed send and reply bound
-/// requires it in place of plain [`Kind`] (ADR-0233).
+/// requires it in place of plain [`Kind`] (ADR-0233), and only a kind that
+/// [`CrossesActors`] has it (ADR-0242).
 ///
-/// The kinds without it are engine-only mail — statements only the engine
-/// can make, such as "this actor departed" or "this chain settled". The
-/// engine sends those from host code through the mailer, never through an
-/// actor's binding, so no actor-facing send path accepts them.
+/// Two classes of kind lack it. Engine-only mail is statements only the
+/// engine can make, such as "this actor departed" or "this chain settled".
+/// The engine sends those from host code through the mailer, never through
+/// an actor's binding, so no actor-facing send path accepts them. A kind of
+/// actor reach, such as a request context holding a reply handle, keeps its
+/// bytes in its own actor, so it is never mail.
 ///
-/// The `Kind` derive implements it for every kind unless the kind declares
+/// The `Kind` derive implements it for every kind whose fields all cross
+/// actors, through a where-clause, unless the kind declares
 /// `#[kind(engine_only)]`; that declaration instead submits the kind to the
 /// link-time engine-only list the raw-`KindId` doors read. A hand-written
 /// `Kind` impl adds `impl ActorMail for T {}` itself when the kind is
-/// actor-sendable; leaving it out fails closed, because the kind then
-/// cannot be sent. The `Storage` derive emits none: storage values reach
-/// mail only through handle indirection.
+/// actor-sendable, and the supertrait holds it to a type that crosses
+/// actors; leaving it out fails closed, because the kind then cannot be
+/// sent. The `Storage` derive emits none: storage values reach mail only
+/// through handle indirection.
 ///
 /// Not sealed: the orphan rule already stops a crate from implementing it
 /// for a kind it does not own.
@@ -222,7 +230,7 @@ pub trait Kind {
     message = "`{Self}` is engine-only mail: the engine sends it, never an actor",
     label = "declared #[kind(engine_only)]"
 )]
-pub trait ActorMail: Kind {}
+pub trait ActorMail: Kind + CrossesActors {}
 
 /// Emit the `Kind::decode_with` / `encode_into_bytes` pair for a
 /// hand-rolled `Kind` impl over a `#[repr(C)]` + `bytemuck::Pod` type.
@@ -386,8 +394,16 @@ mod schema_impls {
     use alloc::vec::Vec;
 
     use crate::schema::{LabelCell, LabelNode, Primitive, SchemaCell, SchemaType};
-    use crate::{DagId, KindId, MailboxId, Schema, ThreadId, TransformId};
+    use crate::{CrossesActors, CrossesWire, DagId, KindId, MailboxId, Schema, ThreadId, TransformId};
     use alloc::collections::BTreeMap;
+
+    /// Both reach markers for a leaf of wire reach (ADR-0242).
+    macro_rules! crosses_wire {
+        ($t:ty) => {
+            impl CrossesActors for $t {}
+            impl CrossesWire for $t {}
+        };
+    }
 
     macro_rules! scalar {
         ($t:ty, $p:ident) => {
@@ -396,6 +412,8 @@ mod schema_impls {
                 const LABEL: Option<&'static str> = None;
                 const LABEL_NODE: LabelNode = LabelNode::Anonymous;
             }
+
+            crosses_wire!($t);
         };
     }
 
@@ -416,6 +434,8 @@ mod schema_impls {
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
+    crosses_wire!(bool);
+
     // ADR-0090: the unit kind. Its schema is `SchemaType::Unit` and its
     // label is anonymous. Pairs with the `impl Kind for ()` above so a
     // 0-byte payload round-trips through `<() as Kind>::decode_from_bytes`
@@ -426,11 +446,15 @@ mod schema_impls {
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
+    crosses_wire!(());
+
     impl Schema for String {
         const SCHEMA: SchemaType = SchemaType::String;
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
+
+    crosses_wire!(String);
 
     // Generic `Vec<T>`. `Vec<u8>` is the canonical byte-buffer shape
     // and the wire vocabulary has a `Bytes` arm to render it as
@@ -447,11 +471,17 @@ mod schema_impls {
         const LABEL_NODE: LabelNode = LabelNode::Vec(LabelCell::Static(&T::LABEL_NODE));
     }
 
+    impl<T: CrossesActors> CrossesActors for Vec<T> {}
+    impl<T: CrossesWire> CrossesWire for Vec<T> {}
+
     impl<T: Schema + 'static> Schema for Option<T> {
         const SCHEMA: SchemaType = SchemaType::Option(SchemaCell::Static(&T::SCHEMA));
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Option(LabelCell::Static(&T::LABEL_NODE));
     }
+
+    impl<T: CrossesActors> CrossesActors for Option<T> {}
+    impl<T: CrossesWire> CrossesWire for Option<T> {}
 
     /// `Box<T>` is a representation wrapper *around* `T`, not a schema type:
     /// it contributes no node of its own and delegates every associated
@@ -475,6 +505,9 @@ mod schema_impls {
         const LABEL_NODE: LabelNode = T::LABEL_NODE;
     }
 
+    impl<T: CrossesActors> CrossesActors for Box<T> {}
+    impl<T: CrossesWire> CrossesWire for Box<T> {}
+
     impl<T: Schema + 'static, const N: usize> Schema for [T; N] {
         const SCHEMA: SchemaType = SchemaType::Array {
             element: SchemaCell::Static(&T::SCHEMA),
@@ -489,6 +522,9 @@ mod schema_impls {
         const LABEL_NODE: LabelNode = LabelNode::Array(LabelCell::Static(&T::LABEL_NODE));
     }
 
+    impl<T: CrossesActors, const N: usize> CrossesActors for [T; N] {}
+    impl<T: CrossesWire, const N: usize> CrossesWire for [T; N] {}
+
     // ADR-0064 / ADR-0065 typed-id newtypes.
     impl Schema for MailboxId {
         const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
@@ -496,11 +532,17 @@ mod schema_impls {
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
+    // Engine reach (ADR-0242): a raw mailbox position is a registry key inside
+    // its engine, so it crosses actors and not the wire.
+    impl CrossesActors for MailboxId {}
+
     impl Schema for KindId {
         const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
         const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
+
+    crosses_wire!(KindId);
 
     impl Schema for DagId {
         const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
@@ -508,17 +550,23 @@ mod schema_impls {
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
+    crosses_wire!(DagId);
+
     impl Schema for TransformId {
         const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
         const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
+    crosses_wire!(TransformId);
+
     impl Schema for ThreadId {
         const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
         const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
+
+    crosses_wire!(ThreadId);
 
     // Issue #232: `BTreeMap<K, V>` lands as `SchemaType::Map`. The
     // `Ord` bound is what proto3-style stringify-and-canonicalize
@@ -535,6 +583,9 @@ mod schema_impls {
         const LABEL_NODE: LabelNode =
             LabelNode::Map { key: LabelCell::Static(&K::LABEL_NODE), value: LabelCell::Static(&V::LABEL_NODE) };
     }
+
+    impl<K: CrossesActors, V: CrossesActors> CrossesActors for BTreeMap<K, V> {}
+    impl<K: CrossesWire, V: CrossesWire> CrossesWire for BTreeMap<K, V> {}
 }
 
 /// Native-only auto-collection slot for `#[derive(Kind)]` types
