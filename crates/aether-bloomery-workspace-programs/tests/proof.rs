@@ -7,8 +7,8 @@ mod support;
 use std::error::Error;
 
 use aether_bloomery_kinds::{Digest, Invoked, Ref, Refusal};
+use aether_bloomery_workspace::{Outcome, RunResult, RustToolchain};
 use aether_bloomery_workspace_programs::proof::{ClippyInput, ClippyProof, ClippyResult};
-use aether_workspace::{Outcome, RunResult, RustToolchain};
 
 use support::{completed_with, one_step, output_tree};
 
@@ -38,7 +38,8 @@ fn a_non_zero_exit_fails_citing_stderr_not_stdout() -> Result<(), Box<dyn Error>
 fn a_workspace_refusal_is_the_programs_refusal_not_a_failed_proof() -> Result<(), Box<dyn Error>> {
     // Catches a refusal about the environment recorded as a failed proof of the tree.
     let wants = RustToolchain::new("1.97.1", vec!["clippy".to_owned()], Vec::new())?;
-    let mismatch = aether_workspace::Refusal::ToolchainMismatch { tree_wants: wants, environment_provides: None };
+    let mismatch =
+        aether_bloomery_workspace::Refusal::ToolchainMismatch { tree_wants: wants, environment_provides: None };
     let invoked = answer(&RunResult::Refused(mismatch))?;
     let Invoked::Refused { seq: 7, refusal: Refusal::Refused { reason } } = invoked else {
         return Err(format!("expected the program's own refusal, got {invoked:?}").into());

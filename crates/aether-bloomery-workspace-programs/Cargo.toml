@@ -27,7 +27,7 @@ aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-program = { path = "../aether-bloomery-program" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 # The identity half only: the `Environment` kind and the values it carries.
-aether-workspace = { path = "../aether-workspace", default-features = false }
+aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-features = false }
 
 [lints]
 workspace = true

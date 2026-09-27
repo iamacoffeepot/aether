@@ -20,7 +20,7 @@ aether-actor = { path = "../aether-actor" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 # The identity half only: `WorkspaceCapability`, `Import`, and `Environment`.
-aether-workspace = { path = "../aether-workspace", default-features = false }
+aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-features = false }
 # `MergeInput`, the `environment.merge` input the script stages. `library`
 # strips the bundle's own `export!` entry surface (one `export!` per wasm
 # module); `xtask dist` builds each component package in its own cargo
@@ -37,7 +37,7 @@ aether-chassis-bloomery = { path = "../aether-chassis-bloomery" }
 aether-harness-bloomery = { path = "../aether-harness-bloomery" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-kinds = { path = "../aether-kinds" }
-aether-workspace = { path = "../aether-workspace", features = ["test-support"] }
+aether-bloomery-workspace = { path = "../aether-bloomery-workspace", features = ["test-support"] }
 clap = { workspace = true }
 
 [lints]

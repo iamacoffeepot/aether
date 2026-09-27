@@ -41,11 +41,11 @@ impl Importer {
     pub fn answer(&self, image: &ImageRef) -> ImportResult {
         match self.run(image) {
             Ok(tree) => {
-                tracing::info!(target: "aether_workspace", image = image.as_str(), tree = %tree.digest(), "imported");
+                tracing::info!(target: "aether_bloomery_workspace", image = image.as_str(), tree = %tree.digest(), "imported");
                 ImportResult::Ok { tree }
             }
             Err(error) => {
-                tracing::warn!(target: "aether_workspace", image = image.as_str(), %error, "import failed");
+                tracing::warn!(target: "aether_bloomery_workspace", image = image.as_str(), %error, "import failed");
                 ImportResult::Failed { detail: Detail::new(error.to_string()) }
             }
         }

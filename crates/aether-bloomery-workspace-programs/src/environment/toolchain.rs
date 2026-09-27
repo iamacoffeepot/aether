@@ -16,7 +16,7 @@
 
 use aether_bloomery_kinds::{Name, Node, Ref, Refusal, Tree};
 use aether_bloomery_program::{Env, Sync};
-use aether_workspace::{EnvVar, Platform, RustToolchain, Tool, ToolName, Tools, TreePath};
+use aether_bloomery_workspace::{EnvVar, Platform, RustToolchain, Tool, ToolName, Tools, TreePath};
 
 use super::{names, refused};
 

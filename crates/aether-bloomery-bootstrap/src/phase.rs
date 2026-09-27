@@ -6,9 +6,9 @@ use aether_bloomery_kinds::{
     Call, ClosureArtifact, Digest, EncodedArtifact, Head, HeadNameError, NativeOrigin, OpaqueBytes, ProgramName,
     Publish, RecordedHead, RecordedHeadMove, Ref, Tree,
 };
+use aether_bloomery_workspace::Environment;
 use aether_bloomery_workspace_programs::environment::MergeInput;
 use aether_data::{Kind, Storage, StorageError};
-use aether_workspace::Environment;
 
 /// The head the operator binds to the workspace programs bundle.
 const WORKSPACE_PROGRAMS: Head<OpaqueBytes> = Head::new("workspace-programs");

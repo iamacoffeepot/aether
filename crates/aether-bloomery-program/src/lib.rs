@@ -63,7 +63,7 @@ pub mod __macro_internals {
         /// Target of [`crate::Process`].
         pub type Process = aether_process::ProcessCapability;
         /// Target of [`crate::Workspace`].
-        pub type Workspace = aether_workspace::WorkspaceCapability;
+        pub type Workspace = aether_bloomery_workspace::WorkspaceCapability;
     }
 
     /// Compiles only when `Api`'s [`InjectedApi::Target`] is `T`. `#[program]`

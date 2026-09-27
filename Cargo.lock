@@ -131,13 +131,13 @@ dependencies = [
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
  "aether-bloomery-view",
+ "aether-bloomery-workspace",
  "aether-bloomery-workspace-programs",
  "aether-chassis-bloomery",
  "aether-data",
  "aether-harness-bloomery",
  "aether-harness-substrate",
  "aether-kinds",
- "aether-workspace",
  "clap",
  "tracing",
 ]
@@ -233,13 +233,13 @@ dependencies = [
  "aether-actor",
  "aether-bloomery-kinds",
  "aether-bloomery-program-derive",
+ "aether-bloomery-workspace",
  "aether-component",
  "aether-data",
  "aether-harness-substrate",
  "aether-http",
  "aether-kinds",
  "aether-process",
- "aether-workspace",
  "wasmparser 0.246.2",
 ]
 
@@ -306,6 +306,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery-workspace"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-journal",
+ "aether-bloomery-kinds",
+ "aether-bloomery-tar",
+ "aether-bloomery-workspace",
+ "aether-data",
+ "aether-harness-substrate",
+ "aether-substrate",
+ "clap",
+ "confique",
+ "httparse",
+ "inventory",
+ "rcgen",
+ "rusqlite",
+ "rustls",
+ "serde_json",
+ "tempfile",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "aether-bloomery-workspace-programs"
 version = "0.3.0-alpha"
 dependencies = [
@@ -313,8 +338,8 @@ dependencies = [
  "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
+ "aether-bloomery-workspace",
  "aether-data",
- "aether-workspace",
 ]
 
 [[package]]
@@ -357,6 +382,7 @@ dependencies = [
  "aether-bloomery-kinds",
  "aether-bloomery-muse",
  "aether-bloomery-view",
+ "aether-bloomery-workspace",
  "aether-bloomery-workspace-programs",
  "aether-chassis",
  "aether-component",
@@ -368,7 +394,6 @@ dependencies = [
  "aether-http",
  "aether-rpc",
  "aether-substrate",
- "aether-workspace",
  "clap",
  "confique",
  "serde_json",
@@ -1131,8 +1156,8 @@ dependencies = [
  "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
+ "aether-bloomery-workspace",
  "aether-data",
- "aether-workspace",
 ]
 
 [[package]]
@@ -1269,31 +1294,6 @@ dependencies = [
  "serde",
  "tracing",
  "winit",
-]
-
-[[package]]
-name = "aether-workspace"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-bloomery-journal",
- "aether-bloomery-kinds",
- "aether-bloomery-tar",
- "aether-data",
- "aether-harness-substrate",
- "aether-substrate",
- "aether-workspace",
- "clap",
- "confique",
- "httparse",
- "inventory",
- "rcgen",
- "rusqlite",
- "rustls",
- "serde_json",
- "tempfile",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
 ]
 
 [[package]]

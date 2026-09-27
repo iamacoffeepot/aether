@@ -14,13 +14,13 @@ use aether_bloomery_kinds::{
     RequestSource, Requested, Transition, Tree, WatchHeadResult,
 };
 use aether_bloomery_view::Heads;
+use aether_bloomery_workspace::testing::{StubDaemon, StubReply, StubRequest, TarWriter};
+use aether_bloomery_workspace::{Environment, ImageRef};
 use aether_chassis_bloomery::BloomeryCli;
 use aether_data::{ErasedActorPath, Kind};
 use aether_harness_bloomery::{Record, SeededJournal, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_workspace::testing::{StubDaemon, StubReply, StubRequest, TarWriter};
-use aether_workspace::{Environment, ImageRef};
 use clap::Parser;
 
 /// The head the seed binds to the workspace programs bundle.

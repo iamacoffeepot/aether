@@ -31,7 +31,7 @@ mod run;
 
 use aether_bloomery_kinds::{Detail, Mode, Refusal};
 use aether_bloomery_program::{Async, Env, Program, Workspace, program};
-use aether_workspace::Outcome;
+use aether_bloomery_workspace::Outcome;
 
 pub use input::VendorInput;
 pub use result::VendorResult;

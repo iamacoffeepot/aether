@@ -1,4 +1,4 @@
-//! The `aether.workspace` actor composed on a [`SubstrateHarness`] over a temp
+//! The `aether.bloomery.workspace` actor composed on a [`SubstrateHarness`] over a temp
 //! journal's artifact store, with its endpoint pointed at the stub daemon.
 
 #![cfg(unix)]
@@ -9,12 +9,12 @@ use std::thread;
 
 use aether_bloomery_journal::{ArtifactBatch, ArtifactStore, Journal};
 use aether_bloomery_kinds::{Name, Node, Ref, Tree};
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_workspace::testing::{RunScript, StubDaemon, StubReply, StubRequest, TarWriter};
-use aether_workspace::{
+use aether_bloomery_workspace::testing::{RunScript, StubDaemon, StubReply, StubRequest, TarWriter};
+use aether_bloomery_workspace::{
     Environment, ImageRef, Import, ImportResult, Mounts, Network, Platform, Provides, Resource, Run, RunResult,
     Scratch, Step, Steps, Tool, ToolName, Tools, TreePath, WorkspaceCapability, WorkspaceConfig, WorkspaceParams,
 };
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 
 type TestResult = Result<(), Box<dyn Error>>;
 

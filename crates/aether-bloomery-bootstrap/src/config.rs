@@ -1,8 +1,8 @@
 //! The bootstrap's config: the two images to import and the two actors to mail.
 
 use aether_actor::ActorInitError;
+use aether_bloomery_workspace::ImageRef;
 use aether_data::{ErasedActorPath, Kind};
-use aether_workspace::ImageRef;
 
 /// What the operator hands `load_component` as `config`: the base and
 /// toolchain images `publish.sh` printed, and the paths of the journal owner

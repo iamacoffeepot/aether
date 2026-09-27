@@ -232,7 +232,7 @@ fn execute(
     let stats_stream = engine
         .stats(container)
         .inspect_err(|error| {
-            tracing::warn!(target: "aether_workspace", %container, %error, "opening the stats stream failed");
+            tracing::warn!(target: "aether_bloomery_workspace", %container, %error, "opening the stats stream failed");
         })
         .ok()
         .map(stats::StatsStream::split);
@@ -257,7 +257,7 @@ fn execute(
             stop.stop();
             let peak = sampler.join().unwrap_or_else(|_| Err(io::Error::other("the stats sampler panicked")));
             peak.inspect_err(|error| {
-                tracing::warn!(target: "aether_workspace", %container, %error, "reading the stats stream failed");
+                tracing::warn!(target: "aether_bloomery_workspace", %container, %error, "reading the stats stream failed");
             })
             .ok()
             .flatten()
