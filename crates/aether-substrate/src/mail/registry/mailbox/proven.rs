@@ -1,5 +1,5 @@
 //! The registry's liveness reads, [`Registry::is_live`] over a reference and
-//! the crate-private position form beside it, and the six mints beside
+//! the crate-private position form beside it, and the seven mints beside
 //! them.
 //!
 //! The callers of the gated mint outside the SDK itself. Two mint with no
@@ -16,12 +16,18 @@
 //! and nothing upstream proved it. The fifth, `Registry::loaded`, types a
 //! reference the caller already holds, and the sixth, `Registry::live_child`,
 //! answers the same liveness question for a child key folded beneath a
-//! parent the caller already proved.
+//! parent the caller already proved. The seventh, `Registry::resolve_protocol`,
+//! proves a protocol path that arrived in mail: it answers the liveness
+//! question at the path's canonical name and checks the route's published
+//! rows against the protocol's.
 
 use core::fmt;
 use std::error::Error;
 
-use aether_actor::{__mint_actor_ref, __mint_erased_actor_ref, ActorRef, ErasedActorRef, Instanced};
+use aether_actor::{
+    __mint_actor_ref, __mint_erased_actor_ref, __mint_protocol_ref, ActorRef, ErasedActorRef, Instanced, Protocol,
+    ProtocolPath, ProtocolRef, ResolveError,
+};
 use aether_data::{LoadName, MailboxCategory};
 
 use crate::mail::registry::names::categorise_mailbox_name;
@@ -289,6 +295,34 @@ impl Registry {
                 Err(ChildRefused { namespace: C::NAMESPACE, key })
             }
         }
+    }
+
+    /// Prove a protocol path that arrived in mail (ADR-0231 §3's receipt of
+    /// a decoded `ProtocolPath<P>`).
+    ///
+    /// The path is folded as written and one read of the published view,
+    /// [`Self::live_route`], finds the `Live` route under exactly that
+    /// canonical name, or refuses [`ResolveError::NotLive`]. A decoded path
+    /// carries only its writer's claim, so the route's published rows are what
+    /// prove `P`: they must cover every row of `P`, or the resolve refuses
+    /// [`ResolveError::Uncovered`] naming the first kind that is missing or
+    /// replies differently. A covered answer is kept on the published
+    /// contract, so a later resolve of the same protocol at the same route
+    /// compares nothing; liveness is read every time.
+    ///
+    /// Its one caller is
+    /// [`NativeCtx::resolve`](crate::actor::native::NativeCtx::resolve).
+    pub(crate) fn resolve_protocol<P: Protocol + 'static>(
+        &self,
+        path: &ProtocolPath<P>,
+    ) -> Result<ProtocolRef<P>, ResolveError> {
+        let path = path.as_erased();
+        let (position, contract) = self.live_route(path).ok_or_else(|| ResolveError::NotLive { path: path.clone() })?;
+
+        if let Some(kind) = contract.first_uncovered::<P>() {
+            return Err(ResolveError::Uncovered { path: path.clone(), kind });
+        }
+        Ok(__mint_protocol_ref(position))
     }
 }
 

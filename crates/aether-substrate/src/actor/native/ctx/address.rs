@@ -2,10 +2,12 @@
 //!
 //! "Who it can address" is answered by proof. [`NativeCtx::actor_ref`] mints
 //! one for a declared dependency, [`NativeCtx::resolve_live`] proves a
-//! position that arrived in a payload, and [`NativeCtx::resolve_path`] proves
-//! an [`ErasedActorPath`] that arrived in one; each hands back a proven reference,
-//! which is what ADR-0230 lets a cap keep past the handler that received it
-//! and what the flat send verbs route through. [`NativeCtx::accept_bundle`] is
+//! position that arrived in a payload, [`NativeCtx::resolve_path`] proves
+//! an [`ErasedActorPath`] that arrived in one, and [`NativeCtx::resolve`]
+//! proves a [`ProtocolPath`] that arrived in one against the route's published
+//! rows; each hands back a proven reference, which is what ADR-0230 lets a cap
+//! keep past the handler that received it and what the flat send verbs route
+//! through. [`NativeCtx::accept_bundle`] is
 //! the bundle front of the payload-borne door: it proves a mail bundle's
 //! addresses and hands back items that can only be delivered.
 //! [`NativeCtx::accept_call`] is its one-item form for a wire `Call`, whose
@@ -24,7 +26,7 @@ use std::fmt;
 
 use aether_actor::{
     ActorPath, ActorRef, Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef,
-    Instanced, LinksTo, ReplyMode, Root, Singleton,
+    Instanced, LinksTo, Protocol, ProtocolPath, ProtocolRef, ReplyMode, ResolveError, Root, Singleton,
 };
 use aether_data::{ErasedActorPath, KindId, LoadName, MailId, MailboxId};
 use aether_kinds::NamedMail;
@@ -138,6 +140,29 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// describe receipts, and the trampoline's replacement dependency check.
     pub fn resolve_path(&self, address: &ErasedActorPath) -> Result<ErasedActorRef, ResolvePathError> {
         self.binding.resolve_path(address)
+    }
+
+    /// Prove a [`ProtocolPath<P>`] that arrived in mail (ADR-0231 §3): the
+    /// protocol-typed front of [`Self::resolve_path`].
+    ///
+    /// In-process mail is encoded, so every protocol path a native actor
+    /// receives is a decoded one, and `P` is only its writer's claim. The path
+    /// is folded as written, one route-table read finds the `Live` route
+    /// under exactly that canonical name, and its published rows must cover
+    /// every row of `P`. A covered answer is kept per route and protocol, so
+    /// a later resolve compares no rows. The [`ProtocolRef<P>`] it mints sends
+    /// through `send_to` for exactly the kinds `P` lists.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::NotLive`] when no `Live` route stands under the path's
+    /// canonical name, and [`ResolveError::Uncovered`] naming the first kind
+    /// of `P` the route's rows do not cover. Neither names a position.
+    ///
+    /// Its consumer is the Bloomery workspace's receipt of `Run.source` and
+    /// `Import.source` (#6841).
+    pub fn resolve<P: Protocol + 'static>(&self, path: &ProtocolPath<P>) -> Result<ProtocolRef<P>, ResolveError> {
+        self.binding.mailer().registry().resolve_protocol(path)
     }
 
     /// Prove a mail bundle that crossed the MCP or harness boundary inside a

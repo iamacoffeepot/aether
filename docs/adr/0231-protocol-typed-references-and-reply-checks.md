@@ -138,7 +138,7 @@ The rules:
 |---|---|---|
 | 1 | Static reply check on typed sends | not built |
 | 2 | `#[protocol]` and `CoveredBy` | built: `Row`, `RowReply`, `RowSet`, `CoversRows`, `Protocol`, `CoveredBy` (`crates/aether-actor/src/model/protocol.rs`) and `#[protocol]` (`crates/aether-actor-derive/src/protocol.rs`), over the per-handler `Contract<K>` rows and per-actor `Contracts::CONTRACTS`; `includes` and protocol-to-protocol coverage are not built |
-| 3 | `ProtocolRef<P>`, `ProtocolPath<P>`, `resolve` | `ProtocolPath<P>` and `ActorPath::narrow` built (`crates/aether-actor/src/path/`), with the path text as their only wire and serde form; `ProtocolRef<P>`, reference narrowing, `resolve`, and the protocol path's in-memory `source` tag are not |
+| 3 | `ProtocolRef<P>`, `ProtocolPath<P>`, `resolve` | `ProtocolPath<P>` and `ActorPath::narrow` built (`crates/aether-actor/src/path/`), with the path text as their only wire and serde form; `ProtocolRef<P>` built (`crates/aether-actor/src/reference/protocol_ref.rs`), a `Target` for each kind `P` lists through a row index the compiler infers (`RowAt`, `crates/aether-actor/src/model/protocol.rs`); the native `resolve` over a decoded `ProtocolPath<P>` built (`Registry::resolve_protocol`, `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`), its covered answer kept per route and protocol on the published `RouteContract`; the protocol path's in-memory `source` tag, reference narrowing, the native arm over an `ActorPath<R>`, and both guest arms are not |
 | 4 | Published rows, no erased send verb, the cast, build skew as a load-time link check | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the erased send verb's removal, the cast, and the link check are not |
 | 5 | Replace preserves contracts | built, the fallback rule included: `crates/aether-data/src/contract.rs`, `crates/aether-substrate/src/mail/registry/contract.rs`, `crates/aether-component/src/trampoline/runtime/contract.rs` |
 | 6 | Manual rows | built: `Undeclared` row, `ReplyContract::Manual` on both manifests |
@@ -446,8 +446,9 @@ collision. What else is checked depends on what the code already holds:
 | `ProtocolPath<P>` narrowed in this binary | the route's tag is the source actor's, or `OtherActor` | `P: CoveredBy<R>` was proven when it was narrowed, and `R` is identified as above |
 | `ProtocolPath<P>` decoded at a boundary | the route's published rows cover `<P::Rows as RowSet>::CONTRACTS`, compared as the cast compares them (§4), or `Uncovered`, naming the first kind whose row is missing or different | the path crossed a boundary (ADR-0230 §1) and its text could have come from anyone, so the published rows are the one thing that proves `P` |
 
-The row comparison for a decoded protocol path is the only one left at run
-time, and it is the boundary's, not each resolve's. Published rows only grow:
+In-process mail is encoded, so every protocol path a native actor receives
+is a decoded one. The row comparison for a decoded protocol path is the only
+one left at run time, and it is the boundary's, not each resolve's. Published rows only grow:
 the registry republishes a route's contract only when `first_break` finds no
 dropped or changed row (#6844, §5). So a positive answer is kept per route and
 protocol and never compared again, and a path built in code and resolved in
@@ -850,10 +851,10 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   `ErasedActorPath`, and the receiver pays the cast at receipt; a
   caller-relative peer is written absolute from the writer's own path first
   (ADR-0230 §1).
-- Resolving a typed path needs the route record to carry its actor type,
-  the load-time link check needs the registry to keep live links by tag,
-  and a decoded protocol path's answer needs a per-route cache. None exists
-  on main (ADR-0230 §3).
+- Resolving an actor path, or a protocol path narrowed in the same binary,
+  needs the route record to carry its actor type, and the load-time link
+  check needs the registry to keep live links by tag. Neither exists on main
+  (ADR-0230 §3).
 - A guest that names an actor by typed path declares the link, and a load
   that would run against a skewed build of that actor is refused.
 - `send_ignoring_reply` still takes the sender's dispatch-miss path, which logs

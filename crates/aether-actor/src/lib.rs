@@ -55,20 +55,20 @@ pub use local::Local;
 pub use model::ctx::{Erased, MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
 pub use model::{
-    Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, Contract, Contracts, CoveredBy,
+    Actor, Addressable, At, CallerAddressable, CallerScope, CallerScoped, ChildOf, Contract, Contracts, CoveredBy,
     CoversRows, DependencyResolver, DependsOn, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced,
     Lifecycle, LinksTo, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol, Publisher, Publishes, Replies,
-    ReplyShape, Resolve, Root, Row, RowReply, RowSet, SendableTo, Silent, SilentRow, Singleton, Subname, Undeclared,
-    root_mailbox, validate_namespace_segment,
+    ReplyShape, Resolve, Root, Row, RowAt, RowReply, RowSet, SendableTo, Silent, SilentRow, Singleton, Subname,
+    Undeclared, root_mailbox, validate_namespace_segment,
 };
 #[doc(hidden)]
 pub use path::__link;
-pub use path::{ActorPath, ProtocolPath};
+pub use path::{ActorPath, ProtocolPath, ResolveError};
 #[doc(hidden)]
-pub use reference::{__mint_actor_ref, __mint_erased_actor_ref};
+pub use reference::{__mint_actor_ref, __mint_erased_actor_ref, __mint_protocol_ref};
 // The `resolve_path_p32` answer (ADR-0230 §3): the substrate's host fn encodes
 // it, and `WasmCtx::resolve_path` decodes it.
-pub use reference::{ActorRef, ErasedActorRef, Target};
+pub use reference::{ActorRef, Direct, ErasedActorRef, ProtocolRef, Target};
 pub use request_context::{RequestContextTable, split_state_envelope};
 #[doc(hidden)]
 pub use wasm::bridge::address::__ResolvedPath;

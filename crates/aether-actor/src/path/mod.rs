@@ -1,5 +1,6 @@
 //! Typed actor paths (ADR-0230 §2, ADR-0231 §3): [`ActorPath`] and
-//! [`ProtocolPath`], descriptions with a codec.
+//! [`ProtocolPath`], descriptions with a codec, and [`ResolveError`], why a
+//! receiver's `resolve` could not prove one.
 //!
 //! A typed path is an [`ErasedActorPath`] under a compile-time claim: that an
 //! `R` lives at the text, or an actor covering the protocol `P`. The claim is
@@ -103,9 +104,11 @@ macro_rules! typed_path_traits {
 
 mod actor_path;
 mod protocol_path;
+mod resolve_error;
 
 pub use actor_path::ActorPath;
 pub use protocol_path::ProtocolPath;
+pub use resolve_error::ResolveError;
 
 /// Write `R`'s canonical path, `R::NAMESPACE:key`, for the native
 /// `NativeCtx::link` in `aether-substrate`, which cannot reach the constructor

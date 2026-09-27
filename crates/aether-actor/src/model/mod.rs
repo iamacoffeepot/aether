@@ -32,7 +32,7 @@ use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
 pub use self::contract::{Contract, Contracts, ReplyShape, Silent, SilentRow, Undeclared};
 pub use self::link::LinksTo;
-pub use self::protocol::{CoveredBy, CoversRows, Protocol, Row, RowReply, RowSet};
+pub use self::protocol::{At, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet};
 pub use self::publish::{Publisher, Publishes};
 pub use self::sendable::SendableTo;
 

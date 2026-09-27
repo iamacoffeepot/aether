@@ -31,6 +31,14 @@ impl<P> ProtocolPath<P> {
     pub(crate) const fn from_erased(path: ErasedActorPath) -> Self {
         Self { path, _protocol: PhantomData }
     }
+
+    /// The path text, for the native `resolve` in `aether-substrate`, which
+    /// folds it. Grants nothing: the text is already public through
+    /// `Display`, and a typed path cannot be built from it.
+    #[must_use]
+    pub const fn as_erased(&self) -> &ErasedActorPath {
+        &self.path
+    }
 }
 
 impl<R> ActorPath<R> {

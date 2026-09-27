@@ -7,7 +7,6 @@ use std::thread;
 use std::time::Duration;
 
 use aether_data::ReplyContract;
-use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 
 use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
@@ -17,6 +16,8 @@ use crate::mail::registry::{ContractBreak, MailboxEntry, Registry, RouteContract
 use crate::mail::{KindId, MailboxId};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, SlotState, WakeSink};
 use crate::testing::boot_authority as auth;
+
+use super::support::contract;
 
 const PING: KindId = KindId(1);
 const QUERY: KindId = KindId(2);
@@ -58,19 +59,6 @@ fn direct_and_owner_paths_share_the_transitional_writer() {
     let direct_result = direct.join().expect("direct writer does not panic");
     assert_ne!(owner_result.is_ok(), direct_result.is_ok(), "exactly one serialized writer claims the route");
     assert_eq!(registry.list_mailbox_descriptors().iter().filter(|entry| entry.name == "shared-writer").count(), 1);
-}
-
-/// A route contract with `rows` and, when `fallback`, a `#[fallback]`, built
-/// the way both transports build theirs: from a receive surface.
-fn contract(rows: &[(KindId, ReplyContract)], fallback: bool) -> RouteContract {
-    RouteContract::from_capabilities(&ComponentCapabilities {
-        handlers: rows
-            .iter()
-            .map(|(id, reply)| HandlerCapability { id: *id, name: String::new(), doc: None, reply: *reply })
-            .collect(),
-        fallback: fallback.then_some(FallbackCapability { doc: None }),
-        ..ComponentCapabilities::default()
-    })
 }
 
 fn base() -> RouteContract {

@@ -350,9 +350,8 @@ for `P: CoveredBy<R>`.
 Both paths are kind fields, carried as the path text with `ErasedActorPath`'s
 schema. Decoding one accepts only a well-formed canonical path and claims
 nothing about `R` or `P`, and neither grants a send: a path claims nothing
-until its receiver's `resolve` proves it (#6837, #6829). The first consumer, a
-Bloomery unit's driver, is to write its journal's storage source this way
-(ADR-0240 D7):
+until its receiver's `resolve` proves it. The first consumer, a Bloomery unit's
+driver, is to write its journal's storage source this way (ADR-0240 D7):
 
 ```rust
 #[actor(links(JournalActor))]
@@ -361,6 +360,30 @@ impl NativeActor for BundleDriver { /* … */ }
 // in a handler
 let source: ProtocolPath<ArtifactStorage> = ctx.link::<JournalActor>(&unit_key).narrow::<ArtifactStorage>();
 ```
+
+A native actor that receives a `ProtocolPath<P>` proves it with
+`ctx.resolve(&path)`, which returns a `ProtocolRef<P>` or a `ResolveError`
+(ADR-0231 §3). In-process mail is encoded, so the path it receives is always a
+decoded one and `P` is only its writer's claim. `resolve` folds the canonical
+text and reads the route table once: a route must stand under exactly that
+name and be `Live`, or it refuses `NotLive`, and the route's published rows must
+cover every row of `P`, or it refuses `Uncovered` naming the first kind whose
+row is missing or replies differently. Both refusals name the path, never a
+position. A covered answer is kept per route and protocol, so the rows are
+compared once. `ctx.send_to(reference, &kind)` and its context-carrying
+siblings take the `ProtocolRef<P>` only for a kind `P` lists; any other kind is
+a compile error, whatever else the target handles:
+
+```rust
+// `run.source: ProtocolPath<ArtifactStorage>`
+match ctx.resolve(&run.source) {
+    Ok(storage) => ctx.send_to(storage, &read),
+    Err(error) => tracing::warn!(%error, "the run's source is refused"),
+}
+```
+
+The guest arm, `resolve` over an `ActorPath<R>`, lands with the Bloomery
+bootstrap (#6829).
 
 ### Helpers that only send
 

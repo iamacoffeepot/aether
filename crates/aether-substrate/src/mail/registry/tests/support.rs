@@ -1,12 +1,14 @@
 //! Fixtures shared across the registry test siblings: the activation
-//! doubles a prepared birth stands on, the inventory subscriber, and the
-//! traced envelopes the settlement assertions are written against.
+//! doubles a prepared birth stands on, the inventory subscriber, the traced
+//! envelopes the settlement assertions are written against, and the route
+//! contracts the publish and resolve tests build.
 
 use std::panic;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use aether_data::ErasedActorPath;
+use aether_data::{ErasedActorPath, ReplyContract};
+use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::cost::CostCell;
@@ -185,4 +187,17 @@ pub(super) fn traced_unknown_mail(
     let settled = settlement.subscribe_settlement(root);
     mailer.record_sent(root, root, None, root.sender, recipient, KindId(0x4111));
     (Mail::new(recipient, KindId(0x4111), payload, 1).with_lineage(Some(root), Some(root), None), settled)
+}
+
+/// A route contract with `rows` and, when `fallback`, a `#[fallback]`, built
+/// the way both transports build theirs: from a receive surface.
+pub(super) fn contract(rows: &[(KindId, ReplyContract)], fallback: bool) -> RouteContract {
+    RouteContract::from_capabilities(&ComponentCapabilities {
+        handlers: rows
+            .iter()
+            .map(|(id, reply)| HandlerCapability { id: *id, name: String::new(), doc: None, reply: *reply })
+            .collect(),
+        fallback: fallback.then_some(FallbackCapability { doc: None }),
+        ..ComponentCapabilities::default()
+    })
 }
