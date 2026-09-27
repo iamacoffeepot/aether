@@ -4,19 +4,40 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Sans-io driver core for the native bundle driver: journal folds in, driver commands out (ADR-0226)."
+description = "Sans-io driver core for the native bundle driver: journal folds in, driver commands out (ADR-0226), split into an always-on driver actor identity and a runtime feature carrying the core and the actor."
+
+# The ADR-0122 identity/runtime split rides the `runtime` feature. The identity
+# half (the `BundleDriver` marker with its handled-kind markers and contract
+# rows) is `no_std` and compiles always-on, so a wasm guest names the driver
+# with `default-features = false`. The `runtime` feature adds the sans-io
+# program core, the construction params, and the `aether.bloomery.driver`
+# actor's substrate-typed state; it brings the journal's runtime with it.
+[features]
+default = ["runtime"]
+runtime = [
+  "dep:aether-substrate",
+  "dep:aether-bloomery-journal",
+  "dep:aether-bloomery-program",
+  "dep:aether-bloomery-view",
+  "dep:wasmparser",
+]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
-aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
-aether-bloomery-program = { path = "../aether-bloomery-program" }
-aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-component = { path = "../aether-component", default-features = false }
 aether-data = { path = "../aether-data", features = ["derive"] }
+# Identity-side: `LoadResult`, the component host's load reply, is a handled
+# kind of the driver.
 aether-kinds = { path = "../aether-kinds" }
-aether-substrate = { path = "../aether-substrate" }
-wasmparser = "0.246"
+# Native-only runtime half: the actor runtime, the journal owner the driver
+# mails (with its own runtime), the program and view vocabularies the core
+# folds, and the bundle section check.
+aether-substrate = { path = "../aether-substrate", optional = true }
+aether-bloomery-journal = { path = "../aether-bloomery-journal", optional = true }
+aether-bloomery-program = { path = "../aether-bloomery-program", optional = true }
+aether-bloomery-view = { path = "../aether-bloomery-view", optional = true }
+wasmparser = { version = "0.246", optional = true }
 
 [dev-dependencies]
 # The end-to-end scenarios boot the shipped bloomery chassis through its
