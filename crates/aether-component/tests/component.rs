@@ -1,9 +1,8 @@
 //! Component-lifecycle scenarios (issue 430, rehomed per issue #3769):
-//! load + list, multi-actor export selection (ADR-0096 / ADR-0138),
-//! runtime sibling spawn (ADR-0097), drop, and `replace_component` with
-//! its dehydrate / rehydrate state carry (ADR-0022 / ADR-0101 /
-//! ADR-0113), each driven through a [`SubstrateHarness`] composed with
-//! just the component host.
+//! load + list, multi-actor export selection (ADR-0096 / ADR-0138), drop,
+//! and `replace_component` with its dehydrate / rehydrate state carry
+//! (ADR-0022 / ADR-0101 / ADR-0113), each driven through a
+//! [`SubstrateHarness`] composed with just the component host.
 //!
 //! `require_wasm` locates the fixture's
 //! `target/wasm32-unknown-unknown/<profile>/<crate>.wasm` under the
@@ -14,16 +13,14 @@
 use std::fs;
 use std::path::Path;
 
-use aether_actor::ActorRef;
 use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{ErasedActorPath, LoadName};
+use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{
-    DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, LogTailResult, Ping,
-    ReplaceComponent, ReplaceResult,
+    DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, ReplaceComponent,
+    ReplaceResult,
 };
-use aether_test_fixtures_bundle::{Panel, RootManager};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -46,22 +43,8 @@ fn probe_address() -> String {
     format!("aether.component/{}:{PROBE_NAME}", WasmTrampoline::NAMESPACE)
 }
 
-/// A child's instance key.
-fn key(text: &str) -> LoadName {
-    LoadName::new(text).expect("a valid instance key")
-}
-
 /// The kind the probe broadcasts to the harness observer once per tick.
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
-
-/// How many `panel_ping` entries a spawned `Panel` has logged. `send_and_settle`
-/// returns once the ping's chain drains, so the entry is already in the ring.
-fn panel_pings(harness: &mut SubstrateHarness, panel: ActorRef<Panel>) -> usize {
-    match harness.log_tail(panel.erase(), None, Some("panel_ping".to_owned())) {
-        LogTailResult::Ok { entries, .. } => entries.len(),
-        LogTailResult::Err { error } => panic!("log_tail on the spawned Panel failed: {error}"),
-    }
-}
 
 /// Load the probe into the harness via `execute`, blocking on the
 /// `LoadResult` reply so subsequent `advance` ops see a
@@ -330,96 +313,6 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
             panic!("a named load of a defaultless module must succeed; got err {error}")
         }
     }
-}
-
-/// ADR-0097: a loaded `RootManager` spawns a `Panel` sibling at runtime
-/// via `ctx.spawn_child::<RootManager, Panel>`. Pinging `RootManager` triggers the
-/// spawn; the spawned `Panel` registers at
-/// `aether.embedded:0` (Counter discriminator — a flat segment, no type
-/// prefix), and pinging *it* makes it log `panel_ping` — proving the
-/// spawned sibling is addressable and dispatches. The `send_and_settle`
-/// send blocks until the whole tree (including the spawned trampoline's
-/// init) drains, so the panel is registered before the second send routes.
-#[test]
-fn multi_actor_sibling_spawn() {
-    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
-        return;
-    };
-    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let (root, root_path) = harness
-        .load::<RootManager>(LoadComponent {
-            wasm,
-            name: None,
-            // `RootManager` is a non-entry actor in the bundle; select
-            // it by its `test.ui.root` export.
-            config: Vec::new(),
-            export: Some("test.ui.root".to_owned()),
-        })
-        .unwrap_or_else(|error| panic!("multi-actor load failed: {error}"));
-    let root_name = root_path.to_string();
-    assert!(root_name.ends_with(":test.ui.root"), "selected export should resolve to test.ui.root; got {root_name}");
-
-    // RootManager spawns a Panel sibling (Counter → 0).
-    harness
-        .execute(vec![("spawn", HarnessOp::send_and_settle::<Ping>(&root, &Ping { seq: 0 }))])
-        .expect("spawn sequence");
-
-    // ADR-0099 §3/§4: a spawned sibling nests under its spawner, keyed by
-    // its Counter discriminator — a flat segment ("0"), no type prefix. The
-    // spawned Panel logs panel_ping when pinged.
-    let panel = harness.child::<RootManager, Panel>(&root, key("0")).expect("the spawned Panel is live");
-    harness
-        .execute(vec![("ping_panel", HarnessOp::send_and_settle::<Ping>(&panel, &Ping { seq: 1 }))])
-        .expect("ping sequence");
-
-    assert_eq!(panel_pings(&mut harness, panel), 1, "the spawned Panel (0) should have dispatched its ping once");
-}
-
-/// Issue iamacoffeepot/aether#2503: `RootManager` spawns two `Panel`
-/// siblings from a *single* `receive` (`Ping { seq: 2 }` drives two
-/// `ctx.spawn_child` calls before the handler returns). Both spawns
-/// must survive the post-`receive` drain — pre-fix, the ctx slot was
-/// `Option<PendingSpawn>` and a second stage overwrote the first, so
-/// only the last-staged sibling (Counter `1`) ever actually spawned:
-/// pinging Counter `0`'s predicted `MailboxId` warn-dropped with no
-/// log entry, and only Counter `1` logged `panel_ping`.
-#[test]
-fn multi_actor_sibling_spawn_twice_in_one_receive() {
-    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
-        return;
-    };
-    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let (root, _) = harness
-        .load::<RootManager>(LoadComponent {
-            wasm,
-            name: None,
-            config: Vec::new(),
-            export: Some("test.ui.root".to_owned()),
-        })
-        .unwrap_or_else(|error| panic!("multi-actor load failed: {error}"));
-
-    // RootManager spawns two Panel siblings (Counter 0 and 1) from this one
-    // Ping receive.
-    harness
-        .execute(vec![("spawn_two", HarnessOp::send_and_settle::<Ping>(&root, &Ping { seq: 2 }))])
-        .expect("spawn-twice sequence");
-
-    // Both Panels nest under RootManager's lineage; the Counter
-    // discriminator advances once per spawn_child call, in guest call
-    // order, so the two staged within one receive are keyed "0" then "1".
-    let panel_0 = harness.child::<RootManager, Panel>(&root, key("0")).expect("Panel 0 is live");
-    let panel_1 = harness.child::<RootManager, Panel>(&root, key("1")).expect("Panel 1 is live");
-    harness
-        .execute(vec![
-            ("ping_panel_0", HarnessOp::send_and_settle::<Ping>(&panel_0, &Ping { seq: 1 })),
-            ("ping_panel_1", HarnessOp::send_and_settle::<Ping>(&panel_1, &Ping { seq: 1 })),
-        ])
-        .expect("ping-both sequence");
-
-    assert_eq!(panel_pings(&mut harness, panel_0), 1, "Panel 0, staged first in the one receive, should have spawned");
-    assert_eq!(panel_pings(&mut harness, panel_1), 1, "Panel 1, staged second in the one receive, should have spawned");
 }
 
 /// Dropping the probe stops further `tick_observed` broadcasts.

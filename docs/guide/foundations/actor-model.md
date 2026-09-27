@@ -3,7 +3,7 @@
 > **Governing ADR:** [ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md) (the unified actor model — capabilities and
 > components are one model, not two) with [ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md) (the lifecycle stages)
 > and [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the `#[actor]` macro), extended by [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (a wasm module exports several
-> actor types), [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) (a component spawns its siblings), and [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (actor
+> actor types), [ADR-0114](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0114-inline-child-actors.md) (a component spawns inline children), and [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (actor
 > identity and addressing), plus [ADR-0166](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0166-typed-actor-lineage-and-abbreviated-external-addresses.md) (declared placement permissions). This model is **stable**; it's the
 > spine everything else hangs off. Signatures here were read from the current SDK
 > (`aether-actor`) and runtime (`aether-substrate`).
@@ -108,9 +108,9 @@ compiles.
 
 Host matters as well as stage. Resolving, sending, and replying are common to both;
 a few operations are host-specific. A native capability can spawn any instanced child
-actor and ask to shut itself down. A component can spawn its **sibling** types — the
-other actors its own module exports
-([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md), and the
+actor and ask to shut itself down. A component creates children **inline** — instances
+of the other actors its own module exports, co-located in its wasm instance
+([ADR-0114](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0114-inline-child-actors.md), and the
 [cardinality](#one-or-many-cardinality) section below) — while its own load, drop, and
 replace are driven from outside. The concrete context types differ by host too —
 `WasmInitCtx`/`WasmCtx` in a component and `NativeInitCtx`/`NativeCtx` in a
@@ -723,7 +723,7 @@ the reference that spawn returned, kept in its own child map. A subname is
 never folded at a send site: an instance is reached through the reference its
 spawn returned or through a `child` / `child_as` relative.
 
-`ctx.spawn_child` works on both hosts. A native capability names only the child
+`ctx.spawn_child` is the native verb. A native capability names only the child
 type, and can spawn an `Instanced` native actor when that child declares
 `ChildOf<Parent>` for the actor doing the spawning:
 `ctx.spawn_child::<TcpSessionActor>(subname, config, params)`. The parent comes
@@ -833,25 +833,23 @@ build, which the scheduler escalates through the chassis aborter, because a lost
 reply strands the caller forever. An actor that closes with debts still parked
 discharges each one with `abandon_for_actor_close`, the one quiet path.
 
-Wasm enforces
-the same `ChildOf` permission, and names both types to do it: a component spawns
-its own **sibling** types — `Instanced` actors its module also exports
-([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)) — only when the child declares the exact
+Wasm enforces the same `ChildOf` permission when a component creates a child
+inline ([ADR-0114](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0114-inline-child-actors.md)): the child is an `Instanced` actor its module also
+exports (or lists under `private = [..]`), co-located in the parent's wasm
+instance, and the spawn compiles only when the child declares the exact
 `child_of(Parent)` relationship or is an instanced `composable` module child.
-One wasm crate can export several
-actor types (`export!(public = [RootManager, Panel, …])`), and a running instance stands up a
-sibling just as the listener stands up a session:
-`ctx.spawn_child::<RootManager, Panel>(Subname::Counter, &config)`. `WasmCtx` is
-addressed by tag rather than by Rust type, so the parent is named at the call
-and the SDK checks it against the ctx's registry-backed actor tag before
-encoding config or calling the host; writing a different parent type earns an
-error rather than bypassing the declared edge. The co-located
-counterpart — an inline child (ADR-0114) — is
-`ctx.spawn_inline::<Panel>(Subname::Named("body"), &config)`, which names only
-the child type and reads the parent from the ctx as the native side does; its
-two-type sibling `spawn_inline_child::<RootManager, Panel>` stays for the
-per-parent `child_of(Parent)` edge. Either hands back an `InlineChild<Panel>`,
-whose `send` is checked against `Panel`'s handler set. A component spawns within the
+One wasm crate can export several actor types
+(`export!(public = [RootManager, Panel, …])`), and a running instance stands up a
+child just as the listener stands up a session:
+`ctx.spawn_inline::<Panel>(Subname::Named("body"), &config)` names only the child
+type and reads the parent from the ctx as the native side does. Its two-type
+counterpart `ctx.spawn_inline_child::<RootManager, Panel>(Subname::Counter, &config)`
+stays for the per-parent `child_of(Parent)` edge: `WasmCtx` is addressed by tag
+rather than by Rust type, so the parent is named at the call and the SDK checks it
+against the ctx's registry-backed actor tag before allocating the child's alias;
+writing a different parent type earns an error rather than bypassing the declared
+edge. Either hands back an `InlineChild<Panel>`, whose `send` is checked against
+`Panel`'s handler set. A component spawns within the
 module it was built from; a foreign module comes in through `load_component`, which
 carries its own code and kinds — the boundary is covered in
 [Components & lifecycle](../systems/components.md).

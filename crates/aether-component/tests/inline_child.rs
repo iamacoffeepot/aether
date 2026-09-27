@@ -21,14 +21,13 @@ use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, te
 use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_bundle::{
-    EagerDetachChild, InlineChild, InlineDespawnChild, InlineDespawnParent, InlineParent, InlineStatefulChild,
-    InlineStatefulParent, InlineTagParent, NestedDetachedLeaf, NestedLineageChild, NestedLineageLeaf,
-    NestedLineageParent,
+    InlineChild, InlineDespawnChild, InlineDespawnParent, InlineParent, InlineStatefulChild, InlineStatefulParent,
+    InlineTagParent, NestedLineageChild, NestedLineageLeaf, NestedLineageParent,
 };
 use aether_test_fixtures_fs_demux::{InlineFsDemuxChild, InlineFsDemuxParent};
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, FsDemuxReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
-    InlineProbe, RunFsDemux, SpawnNestedDetached, TagSpawnQuery, TagSpawnReport,
+    InlineProbe, RunFsDemux, TagSpawnQuery, TagSpawnReport,
 };
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -244,14 +243,13 @@ fn a_private_inline_child_is_not_loadable_by_selector() {
 }
 
 /// Issue 4490 end-to-end lineage packet. A root wasm actor spawns an inline
-/// `branch`, that actor immediately spawns an inline `leaf`, and later the
-/// branch spawns a detached `worker`. Both grandchildren must live at the
+/// `branch`, and that actor immediately spawns an inline `leaf` while
+/// `branch` is still only locally prepared. The grandchild must live at the
 /// rendered branch lineage rather than restarting from the component root.
-/// The inline leaf accepts delivery, persists across replacement under the
-/// same logical parent, and can still be found and torn down by that parent
-/// after reconstruction; the detached worker remains independently live.
+/// The leaf accepts delivery, persists across replacement under the same
+/// logical parent, and can still be found and torn down by that parent after
+/// reconstruction.
 #[test]
-#[allow(clippy::too_many_lines)]
 fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_nested_lineage";
@@ -282,24 +280,6 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
         .expect("deliver to nested inline leaf");
     assert_eq!(before.reply::<CountReport>("query").expect("decode nested leaf count"), CountReport { count: 2 },);
 
-    // Spawn a detached wasm actor while dispatching the inline branch. Its
-    // predicted and registered identity must use the same branch seed.
-    harness
-        .execute(vec![(
-            "spawn_worker",
-            HarnessOp::send_and_settle::<SpawnNestedDetached>(&branch, &SpawnNestedDetached),
-        )])
-        .expect("nested detached spawn settles");
-    let worker = await_child::<NestedLineageChild, NestedDetachedLeaf>(&harness, branch, "worker");
-    let reached = harness
-        .execute(vec![("probe", HarnessOp::send_and_await_reply(&worker, &CountQuery))])
-        .expect("the detached worker answers");
-    assert_eq!(
-        reached.reply::<CountReport>("probe").expect("decode nested worker reply"),
-        CountReport { count: 77 },
-        "the detached worker is delivered at the executing inline actor's lineage",
-    );
-
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
     let swapped = harness
         .execute(vec![(
@@ -323,13 +303,6 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
         CountReport { count: 2 },
         "rehydration restores the leaf under its persisted branch parent",
     );
-    let worker_after = harness
-        .execute(vec![("worker", HarnessOp::send_and_await_reply(&worker, &CountQuery))])
-        .expect("detached worker outlives root replacement");
-    assert_eq!(
-        worker_after.reply::<CountReport>("worker").expect("decode post-replace worker reply"),
-        CountReport { count: 77 },
-    );
 
     // The reconstructed branch resolves its reconstructed child by logical
     // parent and retires that exact grandchild alias.
@@ -338,39 +311,6 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
         .expect("despawn reconstructed nested leaf");
     let retired = harness.child::<NestedLineageChild, NestedLineageLeaf>(&branch, key("leaf"));
     assert!(retired.is_err(), "the reconstructed grandchild route retires at its nested position; got {retired:?}");
-}
-
-/// Issue 6672: a detached spawn is refused when the trampoline cannot prove
-/// its parent at drain. `SpawnNestedDetached` makes the root spawn an inline
-/// `eager` child whose `wire` names its own alias, still only staged in that
-/// same guest call, as a detached `wired` leaf's parent. The alias publishes
-/// and `eager` goes live, but `wired` is never staged, so it never appears.
-#[test]
-fn detached_spawn_beneath_an_unpublished_inline_parent_is_refused() {
-    const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
-    const FIXTURE_NAME: &str = "inline_eager_detach";
-
-    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
-        return;
-    };
-    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let (root, _path) = harness
-        .load::<NestedLineageParent>(LoadComponent {
-            wasm,
-            name: Some(FIXTURE_NAME.to_owned()),
-            config: Vec::new(),
-            export: Some("test.inline.nested_parent".to_owned()),
-        })
-        .unwrap_or_else(|error| panic!("nested lineage fixture load failed: {error}"));
-
-    harness
-        .execute(vec![("spawn_eager", HarnessOp::send_and_settle::<SpawnNestedDetached>(&root, &SpawnNestedDetached))])
-        .expect("eager inline spawn settles");
-    let eager = await_child::<NestedLineageParent, EagerDetachChild>(&harness, root, "eager");
-
-    let wired = harness.child::<EagerDetachChild, NestedDetachedLeaf>(&eager, key("wired"));
-    assert!(wired.is_err(), "a detached spawn beneath an unproven parent stages no birth; got {wired:?}");
 }
 
 /// Issue 2692: the real `export!`-generated by-tag resolver spawns an inline

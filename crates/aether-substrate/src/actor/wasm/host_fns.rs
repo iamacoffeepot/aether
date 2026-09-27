@@ -12,7 +12,7 @@ use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
 use crate::actor::native::ResolvePathError;
-use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
+use crate::actor::wasm::component::{ComponentCtx, StateBundle, TRAMPOLINE_NAMESPACE};
 use crate::mail::attachments::{EncodedMail, inline_payload};
 use crate::mail::boundary::is_engine_only;
 use crate::mail::registry::{PreparedAliasRoute, RouteContract};
@@ -149,195 +149,10 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // HOST_FN_OK: ADR-0097 — sibling spawn is a synchronous host fn by
-    // design. The mail-sink alternative (spawn-via-mail to
-    // aether.component) was considered and rejected there: it makes the
-    // call site async and loses the native `spawn_child` symmetry. The
-    // host fn only *stages* the request (it can't name the
-    // capabilities-layer WasmTrampoline); the trampoline performs the
-    // spawn after `receive` returns.
-    //
-    // ADR-0097: stage a sibling-spawn request. The guest passes the
-    // sibling's actor-type `tag`, an `is_counter` flag, the subname
-    // (the full prefixed name for `Named`, the type-namespace prefix
-    // for `Counter`), and the encoded `Config` bytes. This host fn
-    // can't perform the spawn itself — `spawn_child::<WasmTrampoline>`
-    // names a capabilities-layer type substrate can't see — so it
-    // stages the request onto the ctx and returns the new instance's
-    // `MailboxId` synchronously (`hash("{TRAMPOLINE_NAMESPACE}:{subname}")`,
-    // ADR-0029). The trampoline drains the request after `receive`
-    // returns and runs the real spawn (ADR-0097 §4). On any host-side
-    // error (no memory, OOB, bad UTF-8, no spawner) it warn-logs and
-    // returns 0 without staging — the sibling simply never appears.
-    linker.func_wrap(
-        "aether",
-        "spawn_sibling_p32",
-        |mut caller: Caller<'_, ComponentCtx>,
-         tag: u64,
-         is_counter: u32,
-         subname_ptr: u32,
-         subname_len: u32,
-         config_ptr: u32,
-         config_len: u32|
-         -> u64 {
-            // Copy subname + config out of guest memory, ending the
-            // immutable borrow before the `data_mut` stage below.
-            let copied = {
-                let Some(memory) = caller
-                    .get_export("memory")
-                    .and_then(wasmtime::Extern::into_memory)
-                else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling: guest exports no memory");
-                    return 0;
-                };
-                let data = memory.data(&caller);
-                let read = |ptr: u32, len: u32| -> Option<&[u8]> {
-                    let start = ptr as usize;
-                    let end = start.checked_add(len as usize)?;
-                    (end <= data.len()).then(|| &data[start..end])
-                };
-                let (Some(subname_bytes), Some(config_bytes)) =
-                    (read(subname_ptr, subname_len), read(config_ptr, config_len))
-                else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling: subname/config pointer out of bounds");
-                    return 0;
-                };
-                let Ok(subname) = from_utf8(subname_bytes) else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling: subname is not valid UTF-8");
-                    return 0;
-                };
-                (subname.to_owned(), config_bytes.to_vec())
-            };
-            let (subname_prefix, config) = copied;
-
-            // `Counter`: the discriminator is the bare counter value — a
-            // flat segment with no prefix, per the convention that `.`
-            // appears only inside namespace atoms (ADR-0099 §4).
-            let full_subname = if is_counter == 0 {
-                subname_prefix
-            } else {
-                let Some(n) = caller
-                    .data()
-                    .binding
-                    .spawner()
-                    .map(|spawner| spawner.next_counter())
-                else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling: no spawner on the binding (counter subname unresolvable)");
-                    return 0;
-                };
-                n.to_string()
-            };
-
-            // ADR-0099 §3: a spawned sibling nests under this trampoline,
-            // so its id folds the sibling's instanced node onto the
-            // trampoline's lineage carry — the same fold the drain-time
-            // `spawn_child::<WasmTrampoline>` runs (it carries the
-            // trampoline's binding carry), so the synchronous prediction
-            // matches the registered id.
-            let trampoline_carry = caller.data().binding.carry();
-            let sibling_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
-            let mailbox_id = aether_data::with_tag(
-                aether_data::Tag::Mailbox,
-                aether_data::fold_lineage(trampoline_carry, sibling_node),
-            );
-            let parent = caller.data().sender;
-            caller.data_mut().pending_spawns.push(PendingSpawn {
-                parent,
-                tag,
-                subname: full_subname,
-                config,
-            });
-            mailbox_id
-        },
-    )?;
-
-    // Issue 4490: current SDK guests use the scoped import so a spawn from
-    // an inline actor extends that executing actor's lineage. The legacy
-    // import above stays registered for already-built guests and retains its
-    // component-root behavior.
-    linker.func_wrap(
-        "aether",
-        "spawn_sibling_scoped_p32",
-        |mut caller: Caller<'_, ComponentCtx>,
-         parent: u64,
-         tag: u64,
-         is_counter: u32,
-         subname_ptr: u32,
-         subname_len: u32,
-         config_ptr: u32,
-         config_len: u32|
-         -> u64 {
-            let parent = MailboxId(parent);
-            if parent != caller.data().sender && !is_own_cluster_alias(caller.data(), parent) {
-                tracing::warn!(
-                    target: "aether_substrate::component",
-                    %parent,
-                    component = %caller.data().actor_name(),
-                    "spawn_sibling_scoped: parent is not an actor in this component cluster",
-                );
-                return 0;
-            }
-
-            let copied = {
-                let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling_scoped: guest exports no memory");
-                    return 0;
-                };
-                let data = memory.data(&caller);
-                let read = |ptr: u32, len: u32| -> Option<&[u8]> {
-                    let start = ptr as usize;
-                    let end = start.checked_add(len as usize)?;
-                    (end <= data.len()).then(|| &data[start..end])
-                };
-                let (Some(subname_bytes), Some(config_bytes)) =
-                    (read(subname_ptr, subname_len), read(config_ptr, config_len))
-                else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling_scoped: subname/config pointer out of bounds");
-                    return 0;
-                };
-                let Ok(subname) = from_utf8(subname_bytes) else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling_scoped: subname is not valid UTF-8");
-                    return 0;
-                };
-                (subname.to_owned(), config_bytes.to_vec())
-            };
-            let (subname_prefix, config) = copied;
-            let full_subname = if is_counter == 0 {
-                subname_prefix
-            } else {
-                let Some(n) = caller
-                    .data()
-                    .binding
-                    .spawner()
-                    .map(|spawner| spawner.next_counter())
-                else {
-                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling_scoped: no spawner on the binding (counter subname unresolvable)");
-                    return 0;
-                };
-                n.to_string()
-            };
-
-            // A tagged MailboxId is a routing-equivalent fold seed
-            // (ADR-0099's routing-seed invariant), so no parallel raw carry
-            // crosses the ABI.
-            let sibling_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
-            let mailbox_id = aether_data::with_tag(
-                aether_data::Tag::Mailbox,
-                aether_data::fold_lineage(parent.0, sibling_node),
-            );
-            caller.data_mut().pending_spawns.push(PendingSpawn {
-                parent,
-                tag,
-                subname: full_subname,
-                config,
-            });
-            mailbox_id
-        },
-    )?;
-
-    // HOST_FN_OK: ADR-0114 — inline-child spawn is a synchronous host fn,
-    // like `spawn_sibling`. Unlike `spawn_sibling` (which stages a
-    // detached spawn the trampoline drains after `receive`), the inline
+    // HOST_FN_OK: ADR-0114 — inline-child spawn is a synchronous host fn by
+    // design. A spawn-via-mail to `aether.component` would make the call
+    // site async and lose the native `spawn_child` symmetry, so the guest
+    // gets the alias id back in the same call. The inline
     // child's state remains co-located in the parent's wasm instance. The
     // host folds the deterministic alias id and stages a logical route to
     // the parent; the trampoline drains it after the guest call and the
@@ -349,9 +164,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // ADR-0114: register an inline child's alias route. The guest passes
     // an `is_counter` flag and the bare subname (empty for `Counter`). The
     // alias id is `with_tag(Mailbox, fold_lineage(parent_carry,
-    // instanced(aether.embedded, subname)))` — the same fold a detached
-    // sibling renders post-#1920 (so the synchronous prediction matches a
-    // `Call`-by-name resolution). On any host-side error (no memory, OOB,
+    // instanced(aether.embedded, subname)))`, so the synchronous prediction
+    // matches a `Call`-by-name resolution. On any host-side error (no memory, OOB,
     // bad UTF-8, no spawner, or missing parent name) it warn-logs and
     // returns 0 without staging — the child simply never becomes addressable.
     linker.func_wrap(
@@ -388,9 +202,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 subname.to_owned()
             };
 
-            // `Counter`: the discriminator is the bare counter value — the
-            // same source `spawn_sibling` draws from, so inline + detached
-            // children never collide under one parent (ADR-0099 §4).
+            // `Counter`: the discriminator is the bare counter value drawn
+            // from the binding's spawner, so counter-named children never
+            // collide under one parent (ADR-0099 §4).
             let full_subname = if is_counter == 0 {
                 subname_prefix
             } else {
@@ -408,8 +222,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
 
             let ctx = caller.data();
             // ADR-0099 §3: fold the alias id onto the parent trampoline's
-            // lineage carry — identical to `spawn_sibling`'s fold, so the
-            // id matches a written-name `Call` resolution.
+            // lineage carry, so the id matches a written-name `Call`
+            // resolution.
             let parent_carry = ctx.binding.carry();
             let child_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
             let alias_id = MailboxId(aether_data::with_tag(

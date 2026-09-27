@@ -89,7 +89,7 @@ use aether_actor::{
 };
 use aether_test_fixtures_kinds::{
     Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT,
-    InlineConfiguredChildConfig, InlineEcho, InlineProbe, SpawnNestedDetached, TagSpawnQuery, TagSpawnReport,
+    InlineConfiguredChildConfig, InlineEcho, InlineProbe, TagSpawnQuery, TagSpawnReport,
 };
 
 /// Durable state the `InlineStatefulChild` carries across `replace_component`.
@@ -397,12 +397,10 @@ impl WasmActor for InlineConfiguredChild {
 
 /// Issue 4490 entry fixture. Its inline child immediately spawns a second
 /// inline generation from `wire`, producing a true grandchild lineage while
-/// the first alias is still only locally prepared. On `SpawnNestedDetached`
-/// it spawns an inline `EagerDetachChild` whose `wire` names that child's own
-/// alias as a detached spawn's parent inside the same guest call (issue 6672).
+/// the first alias is still only locally prepared.
 pub struct NestedLineageParent;
 
-#[actor(spawns(NestedLineageChild, EagerDetachChild))]
+#[actor(spawns(NestedLineageChild))]
 impl WasmActor for NestedLineageParent {
     const NAMESPACE: &'static str = "test.inline.nested_parent";
 
@@ -414,18 +412,13 @@ impl WasmActor for NestedLineageParent {
         let _ = ctx.spawn_inline_child::<NestedLineageParent, NestedLineageChild>(Subname::Named("branch"), &());
     }
 
-    #[handler::single]
-    fn on_spawn_detached(&mut self, ctx: &mut WasmCtx<'_>, _trigger: SpawnNestedDetached) {
-        let _ = ctx.spawn_inline_child::<NestedLineageParent, EagerDetachChild>(Subname::Named("eager"), &());
-    }
-
     #[fallback]
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }
 
 /// First inline generation in the issue 4490 fixture. It spawns the durable
-/// inline leaf from `wire`, can spawn a detached wasm sibling on demand, and
-/// resolves the leaf from the reconstructed logical tree for teardown.
+/// inline leaf from `wire` and resolves the leaf from the reconstructed
+/// logical tree for teardown.
 pub struct NestedLineageChild;
 
 #[actor(instanced, child_of(NestedLineageParent), spawns(NestedLineageLeaf))]
@@ -441,38 +434,11 @@ impl WasmActor for NestedLineageChild {
     }
 
     #[handler::single]
-    fn on_spawn_detached(&mut self, ctx: &mut WasmCtx<'_>, _trigger: SpawnNestedDetached) {
-        let _ = ctx.spawn_child::<NestedLineageChild, NestedDetachedLeaf>(Subname::Named("worker"), &());
-    }
-
-    #[handler::single]
     fn on_despawn(&mut self, ctx: &mut WasmCtx<'_>, _trigger: DespawnChild) {
         if let Some(leaf) = ctx.child_as::<NestedLineageLeaf>("leaf") {
             let _ = ctx.despawn_inline_child(leaf.erase());
         }
     }
-}
-
-/// Issue 6672 inline child whose `wire` spawns a detached `NestedDetachedLeaf`
-/// beneath its own alias while that alias is still only staged in the guest
-/// call that spawned it. The trampoline cannot prove that parent when it
-/// drains the spawn, so the `wired` leaf is refused and never goes live.
-pub struct EagerDetachChild;
-
-#[actor(instanced, child_of(NestedLineageParent))]
-impl WasmActor for EagerDetachChild {
-    const NAMESPACE: &'static str = "test.inline.eager_detach_child";
-
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(EagerDetachChild)
-    }
-
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let _ = ctx.spawn_child::<EagerDetachChild, NestedDetachedLeaf>(Subname::Named("wired"), &());
-    }
-
-    #[fallback]
-    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }
 
 /// Stateful inline grandchild. Its count proves both delivery at the nested
@@ -507,28 +473,6 @@ impl WasmActor for NestedLineageLeaf {
     fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
-        }
-    }
-}
-
-/// Detached wasm child spawned by `NestedLineageChild` (and, refused, by
-/// `EagerDetachChild`). It starts at a distinguishable value so an
-/// addressable reply proves the detached spawn registered and delivered under
-/// the inline actor's lineage.
-pub struct NestedDetachedLeaf;
-
-#[actor(instanced, child_of(NestedLineageChild), child_of(EagerDetachChild))]
-impl WasmActor for NestedDetachedLeaf {
-    const NAMESPACE: &'static str = "test.inline.nested_detached_leaf";
-
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(NestedDetachedLeaf)
-    }
-
-    #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&CountReport { count: 77 });
         }
     }
 }

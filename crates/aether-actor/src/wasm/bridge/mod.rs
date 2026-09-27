@@ -11,7 +11,7 @@
 //! - `log` — log-event FFI (`emit_log_event`). Split from `mail` because
 //!   it is a distinct op family with no relation to mail routing.
 //! - `mail` — outbound mail (`send_mail`, `reply_mail`,
-//!   `prev_correlation`, `spawn_sibling`, `spawn_inline_child`).
+//!   `prev_correlation`, `spawn_inline_child`).
 //!   Correlation lives here because every send mints one so a handler
 //!   can match a reply to the request it sent — it's mail-level metadata.
 //! - `persist` — migration-bundle deposit

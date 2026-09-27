@@ -129,9 +129,9 @@ impl Resolve for Embedded {
     }
 }
 
-/// Keyed embedded resolution (ADR-0119, ADR-0097): a spawned sibling under
-/// the embed scope, keyed by a runtime `subname` rather than the actor's own
-/// `NAMESPACE`. Folds `instanced(EMBEDDED_SCOPE, subname)` onto the caller's
+/// Keyed embedded resolution (ADR-0119, ADR-0114): an instanced embedded
+/// child spawned inline under the embed scope, keyed by a runtime `subname`
+/// rather than the actor's own `NAMESPACE`. Folds `instanced(EMBEDDED_SCOPE, subname)` onto the caller's
 /// carry. Keyed (`Args<'a> = &'a str`), so it is an [`Instanced`].
 pub struct EmbeddedMany;
 
@@ -198,9 +198,8 @@ impl CallerScope {
 ///   caller.
 /// - [`Embedded`] declares [`CallerScope::Parent`] for a co-hosted embedded
 ///   singleton beneath the caller's runtime parent.
-/// - [`EmbeddedMany`] declares [`CallerScope::Current`] for a spawned sibling
-///   whose lineage extends the spawner's (ADR-0099 §Negative "sibling spawn
-///   nests").
+/// - [`EmbeddedMany`] declares [`CallerScope::Current`] for an instanced
+///   embedded child spawned inline, whose lineage extends the spawner's.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a caller-scoped resolution strategy",
     label = "does not declare a caller-relative scope for bare-type resolution",
@@ -603,9 +602,9 @@ impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {
 ///
 /// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
 /// Derived from the resolver (ADR-0119): a keyed [`Resolver`](Addressable::Resolver)
-/// (`Args<'a> = &'a str` — [`Many`], or [`EmbeddedMany`] for spawned
-/// siblings) makes the actor an `Instanced`, reached through the reference
-/// its spawn returned. The blanket impl supplies it; nobody writes
+/// (`Args<'a> = &'a str` — [`Many`], or [`EmbeddedMany`] for instanced
+/// embedded children) makes the actor an `Instanced`, reached through the
+/// reference its spawn returned. The blanket impl supplies it; nobody writes
 /// `impl Instanced`.
 pub trait Instanced: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>> {}
 impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>>> Instanced for T {}
@@ -614,9 +613,9 @@ impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>>> Instanced fo
 /// full mailbox name is `"{A::NAMESPACE}:{subname}"`; the substrate
 /// hashes that string deterministically (ADR-0029) to the returned
 /// `MailboxId`. Shared spawn-addressing vocabulary: native
-/// `spawn_child` and the FFI guest's `WasmCtx::spawn_child` (ADR-0097)
-/// both name children through it, so the two transports name children
-/// the same way.
+/// `spawn_child` and the FFI guest's inline spawn verbs
+/// (`WasmCtx::spawn_inline_child`, ADR-0114) both name children through
+/// it, so the two transports name children the same way.
 #[derive(Debug, Clone, Copy)]
 pub enum Subname<'a> {
     /// Spawner-allocated monotonic discriminator — "spawn me one of

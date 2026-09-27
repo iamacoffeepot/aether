@@ -160,15 +160,6 @@ pub struct ComponentCtx {
     /// [`super::Component::resume_correlations`], so its replies never reuse a trace
     /// `MailId` its predecessor already sent (#6422).
     reply_lineage_counter: Cell<u64>,
-    /// ADR-0097: sibling-spawn requests staged by the `spawn_sibling`
-    /// host fn and drained by the trampoline after `receive_p32`
-    /// returns — the same host-fn-stages / host-drains pattern as
-    /// `saved_state`. Empty outside an in-flight spawn; a handler that
-    /// calls `spawn_child` more than once in one `receive` stages one
-    /// entry per call, in guest call order. The trampoline performs the
-    /// actual `spawn_child::<WasmTrampoline>`; substrate can't name that
-    /// capabilities-layer type (ADR-0097 §4).
-    pub pending_spawns: Vec<PendingSpawn>,
     /// ADR-0165: logical inline-child aliases staged by the host function.
     /// The trampoline drains these after the guest call and submits them to
     /// the registry owner; no parent endpoint is retained in the Store.
@@ -199,33 +190,15 @@ pub struct ComponentCtx {
 
 /// The mailbox-name prefix every wasm component (loaded or spawned)
 /// registers under: `aether.embedded:<name>` — the embedding-host scope
-/// namespace (ADR-0099 §5/§6, ADR-0119). The `spawn_sibling` host fn
-/// (ADR-0097) needs this string to predict a spawned sibling's
-/// `MailboxId = fold(host_carry, hash("{prefix}:{subname}"))`
+/// namespace (ADR-0099 §5/§6, ADR-0119). The inline-child spawn host fns
+/// (ADR-0114) fold an alias with it to predict the child's
+/// `MailboxId = fold(parent_carry, hash("{prefix}:{subname}"))`
 /// synchronously. It **forward-feeds** the sole owner of the literal,
 /// [`EMBEDDED_SCOPE`](aether_actor::EMBEDDED_SCOPE), which sits below this
 /// crate, so substrate and the capabilities-layer `WasmTrampoline` now
 /// reference one const instead of mirroring two literals; capabilities'
 /// `trampoline_namespace_matches_substrate` test guards the match.
 pub const TRAMPOLINE_NAMESPACE: &str = aether_actor::EMBEDDED_SCOPE;
-
-/// ADR-0097: a sibling-spawn request the `spawn_sibling` host fn stages
-/// onto [`ComponentCtx`] for the trampoline to drain and execute.
-/// `parent` is the guest-named position the child extends — the executing
-/// actor or one of its inline aliases, admitted by the host function's cluster
-/// membership check — not necessarily the physical trampoline root. It is a
-/// request, not a proof: the trampoline proves it when it drains the spawn and
-/// refuses the spawn, staging nothing, when it does not prove. `tag`
-/// selects the exported type at `init_typed_p32`; `subname` is the resolved
-/// trampoline subname and `config` is the encoded `Config` kind handed to the
-/// new instance.
-#[derive(Debug, Clone)]
-pub struct PendingSpawn {
-    pub parent: MailboxId,
-    pub tag: u64,
-    pub subname: String,
-    pub config: Vec<u8>,
-}
 
 /// Issue iamacoffeepot/aether#1465: starting value of
 /// [`ComponentCtx::reply_lineage_counter`]. Sits at the top half of the
@@ -287,7 +260,6 @@ impl ComponentCtx {
             in_flight_mail_id: Cell::new(None),
             in_flight_root: Cell::new(None),
             reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
-            pending_spawns: Vec::new(),
             pending_aliases: Vec::new(),
             pending_alias_retirements: Vec::new(),
             inline_contracts: FxHashMap::default(),

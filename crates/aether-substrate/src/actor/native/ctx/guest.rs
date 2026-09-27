@@ -42,8 +42,8 @@ impl<M: ReplyMode, A: GuestHost> NativeCtx<'_, A, M> {
     /// the actor goes on dispatching its own handlers whatever it hosts, so
     /// they stay measured across a replace and a drop.
     ///
-    /// Its consumer is `WasmTrampoline`: its `wire` hook (load, module boot,
-    /// sibling spawn), its replace handler, and its unload.
+    /// Its consumer is `WasmTrampoline`: its `wire` hook (load and module
+    /// boot), its replace handler, and its unload.
     pub fn sync_guest(&self, state: &A::State) {
         let mut measured = <A as Dispatch<A::State>>::measured_kinds();
         match A::guest(state) {

@@ -10,8 +10,8 @@
 //! The cap is heavy and already decomposed, so unlike `aether.fs`'s
 //! single-file `runtime.rs` the runtime half is a directory module:
 //! [`state`] (the field-bearing `WasmTrampolineState`), [`config`] (the
-//! `WasmTrampolineConfig` init bundle), [`replace`] (the inherent replace /
-//! sibling-spawn impl on the state), and [`contract`] (the replace-time
+//! `WasmTrampolineConfig` init bundle), [`replace`] (the inherent replace
+//! impl on the state), and [`contract`] (the replace-time
 //! contract refusal, ADR-0231 §5).
 
 mod config;
@@ -40,7 +40,7 @@ pub use aether_kinds::{DropComponent, DropResult, LoadResult, ReplaceComponent, 
 use aether_substrate::actor::native::ctx::GuestHost;
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
-    Dispatch, NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
+    Dispatch, NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, TaskDone,
 };
 pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::Component;
@@ -72,7 +72,7 @@ impl NativeActor for WasmTrampoline {
     /// name, so an embeddable actor's id depends on what the code is, not
     /// how it is hosted, and the namespace is written only on its owner.
     /// Reachable on every target because `#[actor]` emits the always-on
-    /// `Addressable` impl. ADR-0097: the substrate's `TRAMPOLINE_NAMESPACE`
+    /// `Addressable` impl. The substrate's `TRAMPOLINE_NAMESPACE`
     /// forward-feeds the same const, collapsing the former two-literal mirror
     /// into one source; the `trampoline_namespace_matches_substrate` test
     /// guards the match.
@@ -144,9 +144,9 @@ impl NativeActor for WasmTrampoline {
 
     /// Register the guest's accept set and cost rows from this actor's
     /// [`GuestHost`] declaration, then fire the wasm guest's `wire` hook.
-    /// Every birth of a trampoline — a load, a module boot, a sibling spawn —
-    /// runs this hook, so the declaration is the accept set's one writer and
-    /// the set is in place before the guest's `wire` sends anything.
+    /// Every birth of a trampoline — a load or a module boot — runs this
+    /// hook, so the declaration is the accept set's one writer and the set
+    /// is in place before the guest's `wire` sends anything.
     ///
     /// Issue 640 Phase 2: the guest's `wire` fires post-registration. The
     /// cap-side spawn flow registers the trampoline mailbox in step 5–7; this
@@ -239,15 +239,6 @@ impl NativeActor for WasmTrampoline {
     }
 
     #[handler(task)]
-    fn on_sibling_spawn_done(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<WasmTrampoline>, replace::SiblingSpawnContext>,
-    ) {
-        WasmTrampolineState::finish_sibling_spawn(done);
-    }
-
-    #[handler(task)]
     fn on_inline_alias_done(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -265,11 +256,10 @@ impl NativeActor for WasmTrampoline {
     /// `receive_p32` dispatch shim does the rest.
     #[fallback]
     fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, env: &Envelope) -> bool {
-        // ADR-0097: deliver the inbound, then drain every sibling spawn
-        // the guest staged during `deliver`. The block scopes the
-        // `&mut component` borrow so `spawn_sibling` can read the
-        // trampoline's other fields afterward.
-        let (aliases, retired, pendings) = {
+        // Deliver the inbound, then drain the inline-child aliases and
+        // retirements the guest staged during `deliver`. The block scopes
+        // the `&mut component` borrow to the guest call.
+        let (aliases, retired) = {
             let Some(component) = state.component.as_mut() else {
                 tracing::warn!(
                     target: "aether_component",
@@ -292,17 +282,10 @@ impl NativeActor for WasmTrampoline {
                 let kind = ctx.kind_label(env.kind);
                 ctx.fatal_abort(format!("component {} (kind {kind}) trapped: {e}", ctx.path()));
             }
-            (
-                component.drain_pending_aliases(),
-                component.drain_pending_alias_retirements(),
-                component.drain_pending_spawns(),
-            )
+            (component.drain_pending_aliases(), component.drain_pending_alias_retirements())
         };
         WasmTrampolineState::stage_inline_aliases(ctx, aliases);
         WasmTrampolineState::stage_inline_alias_retirements(ctx, retired);
-        for pending in pendings {
-            state.spawn_sibling(ctx, pending);
-        }
         true
     }
 }

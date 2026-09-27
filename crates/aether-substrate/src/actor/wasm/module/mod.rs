@@ -14,8 +14,8 @@
 //!
 //! The wasm bytes are used to compile and to parse, and are then let go:
 //! nothing here holds the code blob, so the bytes leave the store once the
-//! caller drops its value. Every later load, boot, sibling spawn and replace
-//! of the same bytes reads the entry instead of the bytes.
+//! caller drops its value. Every later load, boot and replace of the same
+//! bytes reads the entry instead of the bytes.
 //!
 //! A module publishes the namespaces [`Module::published_groups`] names
 //! (ADR-0241 §3): its exported groups' declared namespaces, each qualified by

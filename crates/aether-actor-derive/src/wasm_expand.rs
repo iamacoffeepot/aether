@@ -381,7 +381,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // ADR-0119: an FFI/wasm component is embedded — it resolves under the
     // reserved `aether.embedded` scope. Default `Embedded` (keyless ⇒
     // `Singleton`, reached by `ctx.send::<R>(..)`); `#[actor(instanced)]`
-    // selects `EmbeddedMany` for a spawn-sibling child (ADR-0097). Cardinality
+    // selects `EmbeddedMany` for an inline-spawned child (ADR-0114). Cardinality
     // is derived from the resolver; nothing emits `impl Singleton` here.
     let resolver_ty = if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
         quote! { ::aether_actor::EmbeddedMany }

@@ -38,9 +38,9 @@ mod staged;
 #[cfg(test)]
 mod tests;
 
-/// The spawn-subname vocabulary, re-exported from `aether-actor`
-/// (ADR-0097). It's shared between native `spawn_child` and the FFI
-/// guest's `WasmCtx::spawn_child`, so it lives in the actor SDK both
+/// The spawn-subname vocabulary, re-exported from `aether-actor`. It's
+/// shared between native `spawn_child` and the FFI guest's inline spawn
+/// verbs (ADR-0114), so it lives in the actor SDK both
 /// transports depend on; native call sites import it from this path
 /// unchanged. The full mailbox name is `"{A::NAMESPACE}:{subname}"`,
 /// hashed deterministically (ADR-0029) to the returned `MailboxId`.
