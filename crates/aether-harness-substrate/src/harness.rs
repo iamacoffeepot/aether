@@ -1772,98 +1772,113 @@ mod tests {
         assert!(err.to_string().contains("in_flight=1"), "Display should surface the pending dump: {err}");
     }
 
+    use aether_substrate::{BootError, NativeCtx, NativeInitCtx};
+
+    /// A lifecycle stage subscriber for the scenarios below: silent `Tick`
+    /// and `Shutdown` handlers, so its path narrows to a subscriber of each,
+    /// that forward what they receive to the harness observer, where
+    /// `count_observed` counts it and the forward's own trace carries the
+    /// broadcast's lineage.
+    struct StageRelay;
+
+    #[aether_actor::actor(singleton, root, depends(aether_test_fixtures_kinds::SubstrateHarnessObserver))]
+    impl NativeActor for StageRelay {
+        const NAMESPACE: &'static str = "test.harness.stage_relay";
+        type Config = ();
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+
+        #[handler::single]
+        fn on_tick(&mut self, ctx: &mut NativeCtx<'_>, tick: Tick) {
+            let _ = self;
+            ctx.send::<aether_test_fixtures_kinds::SubstrateHarnessObserver>(&tick);
+        }
+
+        #[handler::single]
+        fn on_shutdown(&mut self, ctx: &mut NativeCtx<'_>, shutdown: aether_kinds::Shutdown) {
+            let _ = self;
+            ctx.send::<aether_test_fixtures_kinds::SubstrateHarnessObserver>(&shutdown);
+        }
+    }
+
+    /// Boot a harness composing the [`StageRelay`], or `None` when no wgpu
+    /// adapter is available.
+    fn stage_relay_harness() -> Option<SubstrateHarness> {
+        match SubstrateHarness::builder().size(64, 48).with_actor::<StageRelay>(()).build() {
+            Ok(tb) => Some(tb),
+            Err(e) => {
+                eprintln!("skipping: SubstrateHarness boot failed (likely no wgpu adapter): {e}");
+                None
+            }
+        }
+    }
+
+    /// Subscribe the [`StageRelay`] to one lifecycle stage by its path.
+    fn subscribe_relay(tb: &SubstrateHarness, subscription: aether_lifecycle::LifecycleSubscription) -> HarnessOp {
+        HarnessOp::send_and_settle(
+            &tb.actor_ref::<aether_lifecycle::LifecycleCapability>(),
+            &aether_lifecycle::LifecycleSubscribe { subscription },
+        )
+    }
+
     /// Issue iamacoffeepot/aether#723: chassis-source ticks are minted
     /// as chassis roots, and the lifecycle cap fanout
     /// propagates `(root, parent_mail)` from the inbound through
     /// `NativeCtx::fanout` so each subscriber-bound copy lands in the
-    /// same causal chain. Verified by registering a closure-bound
-    /// mailbox, subscribing it to ticks, advancing one tick, and
-    /// asserting the captured `MailDispatch` carries non-default root +
-    /// parent.
+    /// same causal chain. Verified by subscribing the [`StageRelay`] to
+    /// ticks, advancing one tick, and reading the relay's forward of the
+    /// `Tick` it received from its own trace ring: the forward's parent is
+    /// the fanned-out copy, and its root is the advance's, not that copy.
     #[test]
     fn tick_fanout_propagates_chassis_root_lineage() {
-        use aether_data::{Kind as DataKind, MailId};
-        use aether_kinds::LifecycleSubscribe;
-        use aether_substrate::mail::registry::MailDispatch;
-        use aether_substrate::testing::boot_authority;
-        use std::sync::Mutex;
+        use aether_actor::ActorPath;
+        use aether_data::Kind as DataKind;
+        use aether_kinds::trace::{TraceEvent, TraceTail, TraceTailResult};
+        use aether_lifecycle::LifecycleSubscription;
 
-        type CapturedRow = (Option<MailId>, Option<MailId>, Option<MailId>);
-
-        let mut tb = match SubstrateHarness::start_with_size(64, 48) {
-            Ok(tb) => tb,
-            Err(e) => {
-                eprintln!("skipping: SubstrateHarness boot failed (likely no wgpu adapter): {e}");
-                return;
-            }
+        let Some(mut tb) = stage_relay_harness() else {
+            return;
         };
 
-        // Register a synchronous closure mailbox that captures the
-        // lineage of every mail it receives. `register_inline` is the
-        // correct variant: the handler does immediate work (push into
-        // a captured Vec) rather than enqueueing onto a downstream
-        // inbox, so the producer-side `Received`/`Finished` bracket
-        // belongs on the call site. The lifecycle cap's subscribe
-        // path admits an `Inline` mailbox as readily as an `Inbox`
-        // one, so this mailbox takes stage broadcasts. Pre-#845 this
-        // used `register_inbox` and the substrate's `run_frame`
-        // silently swallowed the resulting in_flight leak; strict
-        // propagation surfaces the variant mismatch as a
-        // `SettlementTimeout`, which is the right shape — the
-        // handler that owns the bracket gets to advertise its
-        // contract via the variant choice.
-        let captured: Arc<Mutex<Vec<CapturedRow>>> = Arc::new(Mutex::new(Vec::new()));
-        let captured_for_handler = Arc::clone(&captured);
-        let (registry, _) = tb.boot().handles_for_test();
-        let subscriber_mbox = registry.register_inline(
-            &boot_authority(),
-            "issue_723_test_subscriber",
-            Arc::new(move |dispatch: MailDispatch<'_>| {
-                captured_for_handler.lock().expect("test setup: captured mutex is never poisoned").push((
-                    dispatch.mail_id,
-                    dispatch.root,
-                    dispatch.parent_mail,
-                ));
-            }),
-        );
+        // Subscribe the relay to the `Tick` lifecycle stage (goes through the
+        // lifecycle cap's on_subscribe handler), then advance one tick. The
+        // advance issues a `LifecycleAdvance` whose chain root the lifecycle
+        // cap threads through `broadcast_to_subscribers` (`NativeCtx::fanout`)
+        // to every stage subscriber (issue 723 lineage, ADR-0082 §6).
+        // Sequencing both through `execute` settles the subscribe before the
+        // tick fires.
+        let subscription = LifecycleSubscription::Tick(ActorPath::<StageRelay>::root().narrow());
+        tb.execute(vec![("subscribe", subscribe_relay(&tb, subscription)), ("advance", HarnessOp::advance(1))])
+            .expect("subscribe + advance");
+        assert!(tb.count_observed(Tick::NAME) > 0, "subscriber received no Tick — fanout never reached it");
 
-        // Subscribe the closure mailbox to the `Tick` lifecycle stage
-        // (goes through the lifecycle cap's on_subscribe handler), then
-        // advance one tick. The advance issues a `LifecycleAdvance` whose
-        // chain root the lifecycle cap threads through
-        // `broadcast_to_subscribers` (`send_envelope_tracked_to`) to every
-        // stage subscriber (issue 723 lineage, ADR-0082 §6). Sequencing
-        // both through `execute` settles the subscribe before the tick
-        // fires.
-        tb.execute(vec![
-            (
-                "subscribe",
-                HarnessOp::send_and_settle(
-                    &tb.actor_ref::<aether_lifecycle::LifecycleCapability>(),
-                    &LifecycleSubscribe { stage: Tick::ID.0, mailbox: subscriber_mbox.id().0 },
-                ),
-            ),
-            ("advance", HarnessOp::advance(1)),
-        ])
-        .expect("subscribe + advance");
-
-        let captured = captured.lock().expect("test setup: captured mutex is never poisoned");
-        assert!(!captured.is_empty(), "subscriber received no mail — fanout never reached it");
-        let (mail_id, root, parent) = captured[0];
-        // Issue 723 fix: each fanned-out copy gets its own MailId, but
-        // the root is inherited from the chassis-root tick and the
-        // parent_mail points at it. Pre-fix both would be absent
-        // (orphaned: ctx had no in-flight lineage because the tick used
-        // bare push, AND the fanout used bare push too).
-        assert!(root.is_some(), "fanned-out copy should inherit a root");
-        assert!(parent.is_some(), "fanned-out copy should carry a parent_mail (got {parent:?})");
-        // The fanned-out copy's own mail_id must be distinct from its
-        // parent — it's a child node in the trace tree.
+        let relay = tb.actor_ref::<StageRelay>().erase();
+        let tail = TraceTail { max: 0, since: None, root: None };
+        let reply = tb.request_bytes(relay, TraceTail::ID, tail.encode_into_bytes()).expect("the relay's ring answers");
+        let Some(TraceTailResult::Ok { entries, .. }) = TraceTailResult::decode_from_bytes(&reply) else {
+            panic!("the relay's trace tail decodes");
+        };
+        let (mail_id, root, parent) = entries
+            .iter()
+            .find_map(|entry| match entry.event {
+                TraceEvent::Sent { mail_id, root, parent_mail, kind, .. } if kind == Tick::ID => {
+                    Some((mail_id, root, parent_mail))
+                }
+                _ => None,
+            })
+            .expect("the relay's ring records the forward of the Tick it received");
+        let parent = parent.expect("the forward carries the fanned-out Tick copy as its parent");
+        // Issue 723 fix: each fanned-out copy gets its own MailId, but the
+        // root is inherited from the chassis-root tick. Pre-fix the copy
+        // was orphaned and rooted its own chain, so the forward's root would
+        // be the copy it answers.
         assert_ne!(
-            mail_id.expect("a fanned-out copy carries its own mail id"),
-            parent.expect("test setup: parent was asserted non-None above"),
-            "fanned-out mail_id should differ from parent (each fanout copy gets a fresh id)"
+            root, parent,
+            "the fanned-out copy should inherit the advance's root rather than root its own chain"
         );
+        assert_ne!(mail_id, parent, "the forward is a child node in the trace tree, not its parent");
     }
 
     /// iamacoffeepot/aether#1489: a `Quit` mail drives the frame
@@ -1876,72 +1891,41 @@ mod tests {
     /// here without a live window (the harness shares the same
     /// `frame_lifecycle_config` graph desktop uses).
     ///
-    /// Registers an inline mailbox subscribed to the `Shutdown` stage,
-    /// sends `Quit` to `aether.lifecycle`, then advances one frame. The
-    /// run-frame loop drives the whole `Tick → Render → Present →
-    /// Shutdown` chain in that single advance once `quit_pending` is set
-    /// (each stage breaks the loop only at `Tick` cycle-complete or the
-    /// `next == 0` terminal), so observing the `Shutdown` broadcast at the
-    /// subscriber proves the quit was consumed at `Present` and that
-    /// `Shutdown` fired + settled.
+    /// Subscribes the [`StageRelay`] to the `Shutdown` stage, sends `Quit`
+    /// to `aether.lifecycle`, then advances one frame. The run-frame loop
+    /// drives the whole `Tick → Render → Present → Shutdown` chain in that
+    /// single advance once `quit_pending` is set (each stage breaks the
+    /// loop only at `Tick` cycle-complete or the `next == 0` terminal), so
+    /// observing the relay's forward of the `Shutdown` broadcast proves the
+    /// quit was consumed at `Present` and that `Shutdown` fired + settled.
     #[test]
     fn quit_drains_frame_then_broadcasts_shutdown() {
+        use aether_actor::ActorPath;
         use aether_data::Kind as DataKind;
-        use aether_kinds::{LifecycleSubscribe, Quit, Shutdown};
-        use aether_substrate::mail::registry::MailDispatch;
-        use aether_substrate::testing::boot_authority;
-        use std::sync::Mutex;
+        use aether_kinds::{Quit, Shutdown};
+        use aether_lifecycle::LifecycleSubscription;
 
-        let mut tb = match SubstrateHarness::start_with_size(64, 48) {
-            Ok(tb) => tb,
-            Err(e) => {
-                eprintln!("skipping: SubstrateHarness boot failed (likely no wgpu adapter): {e}");
-                return;
-            }
+        let Some(mut tb) = stage_relay_harness() else {
+            return;
         };
-
-        // Record the kind id of every mail the observer receives. The
-        // lifecycle cap broadcasts the `Shutdown` stage to its
-        // subscribers when it reaches the terminal; `register_inline` is
-        // the right variant (immediate work, no downstream enqueue) so
-        // the producer-side settlement bracket stays on the broadcast
-        // call site — the same shape the Tick-fanout test above relies on.
-        let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
-        let observed_for_handler = Arc::clone(&observed);
-        let (registry, _) = tb.boot().handles_for_test();
-        let observer_mailbox = registry.register_inline(
-            &boot_authority(),
-            "issue_1489_shutdown_observer",
-            Arc::new(move |dispatch: MailDispatch<'_>| {
-                observed_for_handler
-                    .lock()
-                    .expect("test setup: observed mutex is never poisoned")
-                    .push(dispatch.kind.0);
-            }),
-        );
 
         // Subscribe to Shutdown, set the quit flag, then advance one
         // frame — `execute` settles each step before the next, so the
         // subscription and `quit_pending` are both in place when the
         // advance fires.
+        let subscription = LifecycleSubscription::Shutdown(ActorPath::<StageRelay>::root().narrow());
         tb.execute(vec![
-            (
-                "subscribe_shutdown",
-                HarnessOp::send_and_settle(
-                    &tb.actor_ref::<aether_lifecycle::LifecycleCapability>(),
-                    &LifecycleSubscribe { stage: <Shutdown as DataKind>::ID.0, mailbox: observer_mailbox.id().0 },
-                ),
-            ),
+            ("subscribe_shutdown", subscribe_relay(&tb, subscription)),
             ("quit", HarnessOp::send_and_settle(&tb.actor_ref::<aether_lifecycle::LifecycleCapability>(), &Quit {})),
             ("advance", HarnessOp::advance(1)),
         ])
         .expect("subscribe + quit + advance");
 
-        let observed = observed.lock().expect("test setup: observed mutex is never poisoned");
         assert!(
-            observed.contains(&<Shutdown as DataKind>::ID.0),
-            "Shutdown broadcast never reached the subscriber — quit was not drained to the \
-             terminal; observed kind ids: {observed:?}",
+            tb.count_observed(Shutdown::NAME) > 0,
+            "Shutdown broadcast never reached the subscriber — quit was not drained to the terminal; observed \
+             kinds: {:?}",
+            tb.observed_kinds(),
         );
     }
 

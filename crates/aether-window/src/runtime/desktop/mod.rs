@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use aether_actor::{ActorRef, ErasedActorRef, Manual, Single, runtime};
-use aether_data::{ActorMail, ErasedActorPath};
+use aether_data::ErasedActorPath;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
     TextInput, WindowMode, WindowSize,
@@ -45,7 +45,7 @@ use self::input::{
 };
 use self::menu::{apply_menu, parse_menu_item_id};
 use super::manager::WindowManagerSurface;
-use super::subscribers::WindowSubscribers;
+use super::subscribers::{Published, WindowSubscribers};
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
     DesktopWindowCapability, DesktopWindowInstance, FocusWindowResult, ListWindows, ListWindowsResult,
@@ -817,8 +817,8 @@ impl DesktopWindowCapabilityState {
         WindowSize { window: path.clone(), width, height, scale_factor }
     }
 
-    fn publish<K: ActorMail, A>(&self, ctx: &mut NativeCtx<'_, A, Single>, window: &ErasedActorPath, event: &K) {
-        ctx.fanout(self.subscribers.recipients(window, K::ID), event);
+    fn publish<K: Published, A>(&self, ctx: &mut NativeCtx<'_, A, Single>, window: &ErasedActorPath, event: &K) {
+        ctx.fanout(self.subscribers.recipients::<K>(window), event);
     }
 }
 
@@ -1013,24 +1013,24 @@ mod tests {
     use std::fmt::Debug;
     use std::sync::mpsc;
 
-    use aether_data::{ErasedActorPath, Kind, MailboxId};
+    use aether_data::{ErasedActorPath, Kind};
     use aether_kinds::mouse_button;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::SpawnError;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::Source;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::registry::{InboxHandler, MailDispatch, OwnedDispatch, noop_handler};
+    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, noop_handler};
     use aether_substrate::testing::{
-        bare_substrate, boot_authority, boot_test_chassis_with, decode_session_reply, drop_ref, fresh_substrate,
-        manual_dispatch_ctx, registered_binding, registered_ref, session_sender, test_mailer_and_rx, token_root,
-        unrouted_binding,
+        bare_substrate, boot_test_chassis_with, decode_session_reply, drop_ref, fresh_substrate, manual_dispatch_ctx,
+        registered_binding, session_sender, test_mailer_and_rx, token_root, unrouted_binding,
     };
 
     use super::*;
+    use crate::runtime::subscribers::fixture::{recipients, stand, subscriber, watcher};
     // The subscription request kinds moved to the `WindowSubscriptions` set,
     // so the manager module no longer imports them for `use super::*` to carry.
-    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow, WindowCapability};
+    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow, WindowCapability, WindowSubscription};
 
     fn test_state() -> DesktopWindowCapabilityState {
         DesktopWindowCapabilityState {
@@ -1090,35 +1090,34 @@ mod tests {
         window
     }
 
+    /// An explicit subscribe proves its subscriber path live at receipt: a
+    /// path with no live actor answers `Err` naming it and adds no route,
+    /// and a live one is held. An unsubscribe whose subscriber has since gone
+    /// answers `Err` naming it and leaves the table as it was; a departed
+    /// subscriber's rows leave with its `MonitorNotice` instead.
     #[test]
     fn explicit_subscriptions_validate_before_mutating_routes() {
         let mut state = test_state();
         let (registry, mailer) = bare_substrate();
         let binding = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-        let unknown = MailboxId(0xBAD);
+        let key = |name| WindowSubscription::Key(watcher(name).narrow());
+        let names = |name, error: &str| error.contains(watcher(name).as_erased().as_str());
 
-        assert!(matches!(
-            DesktopWindowCapability::on_subscribe(
-                &mut state,
-                &mut ctx,
-                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: unknown },
-            ),
-            SubscribeWindowResult::Err { error } if error == "unknown mailbox id 0x0000000000000bad"
-        ));
-        assert!(state.subscribers.recipients(&path("main"), Key::ID).is_empty());
-
-        let subscriber = registry.register_inline(
-            &boot_authority(),
-            "test.window.dropped",
-            Arc::new(|_dispatch: MailDispatch<'_>| {}),
+        let unknown = DesktopWindowCapability::on_subscribe(
+            &mut state,
+            &mut ctx,
+            SubscribeWindow { selector: crate::WindowSelector::All, subscription: key("unknown") },
         );
-        let dropped = subscriber.id();
+        assert!(matches!(unknown, SubscribeWindowResult::Err { error } if names("unknown", &error)));
+        assert!(recipients::<Key>(&state.subscribers, &path("main")).is_empty());
+
+        let subscriber = stand(&registry, "dropped", noop_handler());
         assert!(matches!(
             DesktopWindowCapability::on_subscribe(
                 &mut state,
                 &mut ctx,
-                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+                SubscribeWindow { selector: crate::WindowSelector::All, subscription: key("dropped") },
             ),
             SubscribeWindowResult::Ok
         ));
@@ -1128,11 +1127,11 @@ mod tests {
             DesktopWindowCapability::on_unsubscribe(
                 &mut state,
                 &mut ctx,
-                UnsubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+                UnsubscribeWindow { selector: crate::WindowSelector::All, subscription: key("dropped") },
             ),
-            SubscribeWindowResult::Err { error } if error == format!("mailbox {dropped:?} already dropped")
+            SubscribeWindowResult::Err { error } if names("dropped", &error)
         ));
-        assert_eq!(state.subscribers.recipients(&path("main"), Key::ID), BTreeSet::from([subscriber]));
+        assert_eq!(recipients::<Key>(&state.subscribers, &path("main")), BTreeSet::from([subscriber]));
     }
 
     #[test]
@@ -1387,9 +1386,9 @@ mod tests {
     fn direct_publication_preserves_source_and_causal_lineage() {
         let registry = Arc::new(Registry::new());
         let (tx, rx) = mpsc::channel();
-        let subscriber = registered_ref(
+        stand(
             &registry,
-            "test.window.subscriber",
+            "direct",
             Arc::new(move |dispatch: OwnedDispatch| {
                 dispatch.discharge();
                 tx.send(dispatch).expect("record routed window event");
@@ -1401,7 +1400,8 @@ mod tests {
         let root = token_root(7);
         let parent = token_root(9);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, Some(parent), Some(root));
-        state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, subscriber);
+        let direct = subscriber::<Key>(&ctx, "direct");
+        state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, direct);
 
         let main = path("main");
         state.publish(&mut ctx, &main, &Key { window: main.clone(), code: 41 });
@@ -1458,9 +1458,9 @@ mod tests {
 
         let registry = Arc::new(Registry::new());
         let (tx, rx) = mpsc::channel();
-        let subscriber = registered_ref(
+        stand(
             &registry,
-            "test.window.pixel-space",
+            "pixel-space",
             Arc::new(move |dispatch: OwnedDispatch| {
                 dispatch.discharge();
                 tx.send(dispatch).expect("record published input");
@@ -1471,9 +1471,15 @@ mod tests {
 
         let mut state = test_state();
         let (window, winit_id) = insert_scaled_window(&mut state, 2.0);
-        for kind in [MouseMove::ID, MouseButton::ID, MouseWheel::ID, WindowSize::ID] {
-            state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, kind, subscriber);
-        }
+        let all = || crate::WindowSelector::All;
+        let (moves, buttons) =
+            (subscriber::<MouseMove>(&ctx, "pixel-space"), subscriber::<MouseButton>(&ctx, "pixel-space"));
+        let (wheels, sizes) =
+            (subscriber::<MouseWheel>(&ctx, "pixel-space"), subscriber::<WindowSize>(&ctx, "pixel-space"));
+        state.subscribers.subscribe(&mut ctx, all(), moves);
+        state.subscribers.subscribe(&mut ctx, all(), buttons);
+        state.subscribers.subscribe(&mut ctx, all(), wheels);
+        state.subscribers.subscribe(&mut ctx, all(), sizes);
 
         let device_id = DeviceId::dummy();
         state.window_event(

@@ -64,6 +64,15 @@ impl<P> ProtocolRef<P> {
     pub(crate) const fn target(self) -> ErasedActorRef {
         self.target
     }
+
+    /// Forget the protocol, keeping the proof: the key a table holding
+    /// protocol references compares, monitors, and purges by, since an
+    /// erased reference serves every use but a send (ADR-0231 §4). The
+    /// mirror of [`ActorRef::erase`](crate::ActorRef::erase).
+    #[must_use]
+    pub const fn erase(self) -> ErasedActorRef {
+        self.target
+    }
 }
 
 impl<P> Clone for ProtocolRef<P> {

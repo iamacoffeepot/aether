@@ -15,10 +15,10 @@ publish = false
 # depends on it, so capabilities keeps no `aether-lifecycle` dependency
 # (no facade).
 #
-# The `aether.lifecycle.*` mail kinds (`LifecycleAdvance`, the subscribe
-# family, the stage-signal ZSTs) stay in `aether-kinds`: they are substrate
-# protocol vocabulary many actors address rather than a cap-internal
-# detail, so this crate only references them.
+# The stage-signal ZSTs and `LifecycleAdvance` stay in `aether-kinds`: they
+# are substrate protocol vocabulary many actors address. The subscribe family
+# lives in this crate's `kinds` module, because an explicit subscriber is a
+# `ProtocolPath` from `aether-actor`, which `aether-kinds` cannot depend on.
 #
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # wasm-safe identity and `HandlesKind` markers compile always-on; the
@@ -34,8 +34,13 @@ runtime = ["dep:aether-substrate", "dep:tracing", "dep:clap", "dep:confique"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
-aether-data = { path = "../aether-data" }
+aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
+# The subscription kinds in `kinds` derive through `#[aether_data::kind]`,
+# whose expansion names `::bytemuck` on the two cast-shaped reflexive kinds and
+# `::serde` on the reply.
+bytemuck = { workspace = true, features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # Native-only runtime half — gated so wasm/marker builds skip the substrate
 # runtime.
 aether-substrate = { path = "../aether-substrate", optional = true }
@@ -56,7 +61,7 @@ confique = { workspace = true, optional = true }
 # expansion on `LifecycleConfig`. False positives, so ignored here rather
 # than dropped.
 [package.metadata.cargo-machete]
-ignored = ["clap", "confique"]
+ignored = ["bytemuck", "clap", "confique", "serde"] # aether-suppression-request: bytemuck and serde are used only through the #[aether_data::kind] expansion in `kinds`, invisible to a source-only scan
 
 # The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
 # `inventory::submit!` HandlerEntry per handler, so native builds need

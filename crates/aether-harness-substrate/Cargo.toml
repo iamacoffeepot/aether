@@ -53,6 +53,9 @@ tracing = { workspace = true, features = ["std", "attributes"] }
 # `#[cfg(test)]` fixtures register observer mailboxes directly against the
 # booted registry, so they need the token production boot holds.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# `SubstrateHarnessObserver`, the typed marker the lifecycle and window-event
+# scenarios' fixture subscribers forward what they receive to.
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 
 # cargo-machete's source-only scan cannot see that `clap` and `confique`
 # are used exclusively through `#[derive(aether_substrate::Config)]`

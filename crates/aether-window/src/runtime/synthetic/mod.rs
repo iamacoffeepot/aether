@@ -10,7 +10,7 @@ use aether_kinds::MonitorNotice;
 use aether_substrate::{InboundMail, MonitorHandle, Subname};
 
 use super::manager::WindowManagerSurface;
-use super::subscribers::WindowSubscribers;
+use super::subscribers::{Published, WindowSubscribers};
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
     FocusWindowResult, InjectWindowEvent, ListWindows, ListWindowsResult, RequestWindowRedrawResult, RetireWindow,
@@ -83,8 +83,8 @@ impl SyntheticWindowCapabilityState {
         }
     }
 
-    fn publish<K: aether_data::ActorMail, A>(&self, ctx: &mut NativeCtx<'_, A>, window: &ErasedActorPath, event: &K) {
-        ctx.fanout(self.subscribers.recipients(window, K::ID), event);
+    fn publish<K: Published, A>(&self, ctx: &mut NativeCtx<'_, A>, window: &ErasedActorPath, event: &K) {
+        ctx.fanout(self.subscribers.recipients::<K>(window), event);
     }
 
     /// Promote an authoritatively applied child into the live window set, or
@@ -303,10 +303,13 @@ impl NativeActor for SyntheticWindowCapability {
         state.apply_at_window(ctx, &window, mail.command)
     }
 
+    /// Fan an injected event out as the published kind it names, through
+    /// the typed set for that kind. A kind the window does not publish, or a
+    /// payload that does not decode as the kind, warns and sends nothing.
     #[handler::single]
     fn on_inject(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: InjectWindowEvent) {
-        for recipient in state.subscribers.recipients(&mail.window, mail.kind) {
-            let _ = ctx.send_envelope_tracked_to(recipient, mail.kind, &mail.payload);
+        if let Err(error) = state.subscribers.publish_encoded(ctx, &mail.window, mail.kind, &mail.payload) {
+            tracing::warn!(target: "aether_window", window = %mail.window, %error, "injected window event not published");
         }
     }
 
@@ -344,19 +347,20 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    use aether_data::{Kind, MailboxId};
+    use aether_data::Kind;
     use aether_kinds::Key;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::Source;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::registry::MailDispatch;
-    use aether_substrate::testing::{bare_substrate, boot_authority, drop_ref, unrouted_binding};
+    use aether_substrate::mail::registry::noop_handler;
+    use aether_substrate::testing::{bare_substrate, drop_ref, unrouted_binding};
 
     use super::*;
+    use crate::runtime::subscribers::fixture::{recipients, stand, watcher};
     // The subscription request kinds moved to the `WindowManagerSurface` set,
     // so the manager module no longer imports them for `use super::*` to carry.
-    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow};
+    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow, WindowSubscription};
 
     fn test_state() -> SyntheticWindowCapabilityState {
         SyntheticWindowCapabilityState {
@@ -421,35 +425,34 @@ mod tests {
         );
     }
 
+    /// An explicit subscribe proves its subscriber path live at receipt: a
+    /// path with no live actor answers `Err` naming it and adds no route,
+    /// and a live one is held. An unsubscribe whose subscriber has since gone
+    /// answers `Err` naming it and leaves the table as it was; a departed
+    /// subscriber's rows leave with its `MonitorNotice` instead.
     #[test]
     fn explicit_subscriptions_validate_before_mutating_routes() {
         let (registry, mailer) = bare_substrate();
         let binding = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
         let mut state = test_state();
-        let unknown = MailboxId(0xBAD);
+        let key = |name| WindowSubscription::Key(watcher(name).narrow());
+        let names = |name, error: &str| error.contains(watcher(name).as_erased().as_str());
 
-        assert!(matches!(
-            SyntheticWindowCapability::on_subscribe(
-                &mut state,
-                &mut ctx,
-                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: unknown },
-            ),
-            SubscribeWindowResult::Err { error } if error == "unknown mailbox id 0x0000000000000bad"
-        ));
-        assert!(state.subscribers.recipients(&main_path(), Key::ID).is_empty());
-
-        let subscriber = registry.register_inline(
-            &boot_authority(),
-            "test.synthetic.dropped",
-            Arc::new(|_dispatch: MailDispatch<'_>| {}),
+        let unknown = SyntheticWindowCapability::on_subscribe(
+            &mut state,
+            &mut ctx,
+            SubscribeWindow { selector: crate::WindowSelector::All, subscription: key("unknown") },
         );
-        let dropped = subscriber.id();
+        assert!(matches!(unknown, SubscribeWindowResult::Err { error } if names("unknown", &error)));
+        assert!(recipients::<Key>(&state.subscribers, &main_path()).is_empty());
+
+        let subscriber = stand(&registry, "dropped", noop_handler());
         assert!(matches!(
             SyntheticWindowCapability::on_subscribe(
                 &mut state,
                 &mut ctx,
-                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+                SubscribeWindow { selector: crate::WindowSelector::All, subscription: key("dropped") },
             ),
             SubscribeWindowResult::Ok
         ));
@@ -459,11 +462,11 @@ mod tests {
             SyntheticWindowCapability::on_unsubscribe(
                 &mut state,
                 &mut ctx,
-                UnsubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+                UnsubscribeWindow { selector: crate::WindowSelector::All, subscription: key("dropped") },
             ),
-            SubscribeWindowResult::Err { error } if error == format!("mailbox {dropped:?} already dropped")
+            SubscribeWindowResult::Err { error } if names("dropped", &error)
         ));
-        assert_eq!(state.subscribers.recipients(&main_path(), Key::ID), BTreeSet::from([subscriber]));
+        assert_eq!(recipients::<Key>(&state.subscribers, &main_path()), BTreeSet::from([subscriber]));
     }
 
     /// Reducer-only: drives `check_create` directly rather than the handler,

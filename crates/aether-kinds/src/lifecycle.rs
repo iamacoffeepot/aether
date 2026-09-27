@@ -1,6 +1,6 @@
-//! Lifecycle stage and subscription kind vocabulary.
-
-use alloc::string::String;
+//! Lifecycle stage kind vocabulary. The subscription request kinds live in
+//! `aether-lifecycle`, beside the capability that answers them, because
+//! their subscriber is a `ProtocolPath` this crate cannot name.
 
 // ADR-0082 lifecycle stage kinds. Most are empty signals. `Tick` carries
 // the elapsed time its subscribers need to state motion in seconds rather
@@ -116,84 +116,6 @@ pub struct LifecycleAdvance {
 pub struct LifecycleAdvanceComplete {
     pub completed: u64,
     pub next: u64,
-}
-
-/// Subscribe a mailbox to a lifecycle stage broadcast (ADR-0082 §7).
-/// `stage` is the [`KindId`](aether_data::KindId) of the stage kind
-/// (e.g. `<Tick as Kind>::ID.0`); `mailbox` is the subscriber's mailbox
-/// id. Substrate replies with [`LifecycleSubscribeResult`] —
-/// `Err { reason: UnsupportedStage }` when the chassis's lifecycle
-/// graph doesn't declare a state at that kind, fail-fast at wire time
-/// per ADR-0082 §7.
-#[repr(C)]
-#[aether_data::kind(name = "aether.lifecycle.subscribe", pod, default, eq)]
-pub struct LifecycleSubscribe {
-    pub stage: u64,
-    pub mailbox: u64,
-}
-
-/// Reflexive counterpart of [`LifecycleSubscribe`]: subscribe the
-/// *sending* actor to a lifecycle stage broadcast, with no explicit
-/// `mailbox` field. The cap resolves the subscriber from the inbound
-/// envelope's host-stamped `Source` (ADR-0083) via
-/// `ctx.sender()`, so the subscriber cannot be forged and the
-/// op is gated to in-process actors by construction — an external
-/// session or another engine has no local mailbox and gets an `Err`
-/// reply, pushing it onto the named [`LifecycleSubscribe`] form. This
-/// is the common "subscribe me" case; `stage` carries the same
-/// [`KindId`](aether_data::KindId) as [`LifecycleSubscribe`]. Substrate
-/// replies with [`LifecycleSubscribeResult`].
-#[repr(C)]
-#[aether_data::kind(name = "aether.lifecycle.subscribe_self", pod, default, eq)]
-pub struct LifecycleSubscribeSelf {
-    pub stage: u64,
-}
-
-/// Unsubscribe counterpart of [`LifecycleSubscribe`]. Idempotent on
-/// "not currently subscribed."
-#[repr(C)]
-#[aether_data::kind(name = "aether.lifecycle.unsubscribe", pod, default, eq)]
-pub struct LifecycleUnsubscribe {
-    pub stage: u64,
-    pub mailbox: u64,
-}
-
-/// Reflexive counterpart of [`LifecycleUnsubscribe`]: unsubscribe the
-/// *sending* actor from a lifecycle stage, with no explicit `mailbox`
-/// field. The cap resolves the subscriber from the inbound envelope's
-/// host-stamped `Source` (ADR-0083), the same gating as
-/// [`LifecycleSubscribeSelf`]. Idempotent on "not currently
-/// subscribed." Substrate replies with [`LifecycleSubscribeResult`].
-#[repr(C)]
-#[aether_data::kind(name = "aether.lifecycle.unsubscribe_self", pod, default, eq)]
-pub struct LifecycleUnsubscribeSelf {
-    pub stage: u64,
-}
-
-/// `aether.lifecycle.unsubscribe_all` — remove `mailbox` from every
-/// lifecycle stage's subscriber set in one shot. The externally
-/// sendable bulk form; drop-time cleanup rides the ADR-0079
-/// vacate/close `MonitorNotice` instead, so the per-stage broadcast
-/// stops firing at a dropped trampoline without anyone mailing this —
-/// the lifecycle-family counterpart of `UnsubscribeAllWindows` for
-/// `aether.window`. Idempotent: a mailbox with no stage subscriptions
-/// is still a no-op. Fire-and-forget; no reply. Cast-shape (Pod), one
-/// `mailbox` field, matching the sibling lifecycle kinds' raw-`u64`
-/// shape.
-#[repr(C)]
-#[aether_data::kind(name = "aether.lifecycle.unsubscribe_all", pod, default, eq)]
-pub struct LifecycleUnsubscribeAll {
-    pub mailbox: u64,
-}
-
-/// Reply to [`LifecycleSubscribe`] / [`LifecycleUnsubscribe`].
-/// `Err` carries the stage kind id and a human-readable reason —
-/// fail-fast subscribe per ADR-0082 §7. Same shape and rationale as
-/// `SubscribeWindowResult` for window-event subscriptions.
-#[aether_data::kind(name = "aether.lifecycle.subscribe_result")]
-pub enum LifecycleSubscribeResult {
-    Ok,
-    Err { stage: u64, error: String },
 }
 
 #[cfg(test)]

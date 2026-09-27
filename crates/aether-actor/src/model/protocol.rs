@@ -221,3 +221,22 @@ pub trait CoveredBy<R>: covered_sealed::Sealed<R> {}
 impl<P: Protocol, R: CoversRows<P::Rows>> covered_sealed::Sealed<R> for P {}
 
 impl<P: Protocol, R: CoversRows<P::Rows>> CoveredBy<R> for P {}
+
+pub(crate) mod cast_sealed {
+    /// Private supertrait sealing [`super::CastTarget`] to the protocols
+    /// this crate lists: today, [`Subscriber<K>`](crate::Subscriber) alone.
+    pub trait Sealed {}
+}
+
+/// A protocol the native `ctx.cast` may type an erased reference as
+/// (ADR-0231 §4's guard cast). Sealed.
+///
+/// The cast reads the contract the reference's `Live` route published and
+/// mints a [`ProtocolRef<Self>`](crate::ProtocolRef) only when
+/// [`admits`](CastTarget::admits) accepts those rows. The rule lives here,
+/// beside the protocol, and the seal keeps any other crate from naming a
+/// protocol whose rule admits rows of its own choosing.
+pub trait CastTarget: Protocol + cast_sealed::Sealed {
+    /// Whether a route publishing `rows` answers this protocol.
+    fn admits(rows: &[(KindId, ReplyContract)]) -> bool;
+}

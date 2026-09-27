@@ -32,8 +32,8 @@ use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
 pub use self::contract::{Contract, Contracts, ReplyShape, Silent, SilentRow, Undeclared};
 pub use self::declared::{Declared, Gap, Here, ListIndex, RowIndex, There};
-pub use self::protocol::{At, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet};
-pub use self::publish::{Publisher, Publishes};
+pub use self::protocol::{At, CastTarget, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet};
+pub use self::publish::{Publisher, Publishes, Subscriber};
 pub use self::sendable::SendableTo;
 
 /// A resolution strategy (ADR-0119): given a caller's lineage carry, the

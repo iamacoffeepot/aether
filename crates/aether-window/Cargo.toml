@@ -34,7 +34,7 @@ runtime = ["dep:aether-substrate"]
 desktop = ["runtime", "dep:winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:muda", "dep:tracing"]
 # Deterministic in-memory window manager and raw event injection surface for
 # real-substrate harness tests. Production chassis do not enable this feature.
-synthetic = ["runtime"]
+synthetic = ["runtime", "dep:tracing"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
@@ -47,8 +47,9 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 # The winit window handle the desktop runtime mutates. Gated behind the
 # `desktop` feature so only a desktop chassis build pulls it.
 winit = { version = "0.30", optional = true }
-# The desktop runtime's only log site: a menu shortcut the platform cannot
-# parse into an accelerator. Gated with the rest of the desktop half.
+# The desktop runtime's log site, a menu shortcut the platform cannot parse
+# into an accelerator, and the synthetic runtime's, an injected event it does
+# not publish. Gated with those two runtimes.
 tracing = { workspace = true, default-features = false, features = ["std"], optional = true }
 
 # The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated

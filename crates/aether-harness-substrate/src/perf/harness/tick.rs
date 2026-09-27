@@ -3,8 +3,8 @@
 
 use aether_actor::{ActorRef, OutboundReply, Publisher};
 use aether_data::{Kind, KindId, ReplyContract};
-use aether_kinds::{ComponentCapabilities, HandlerCapability, LifecycleSubscribeResult, Tick};
-use aether_lifecycle::LifecycleCapability;
+use aether_kinds::{ComponentCapabilities, HandlerCapability, Tick};
+use aether_lifecycle::{LifecycleCapability, LifecycleSubscribeResult};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx};
 
 use super::{CountQuery, CountReport, Ping, Relay};
