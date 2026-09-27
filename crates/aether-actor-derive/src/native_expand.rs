@@ -1081,14 +1081,6 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
                 for #self_ty #where_clause {}
         }
     });
-    // ADR-0230 §2: a declared link is the safe `LinksTo<R>` impl alone. A
-    // link needs no live target, so no inventory fact records it yet.
-    let links_impls = opts.links.iter().map(|target| {
-        quote! {
-            impl #impl_generics ::aether_actor::LinksTo<#target>
-                for #self_ty #where_clause {}
-        }
-    });
     // `ActorId::singleton` is the right tag by construction here: `anchors`
     // already excluded the instanced case, which is the only one this call
     // would have misdescribed.
@@ -1145,7 +1137,6 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
         #root_impl
         #(#child_impls)*
         #(#depends_impls)*
-        #(#links_impls)*
         #inventory
     }
 }
@@ -1417,8 +1408,8 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
 /// gated to match the place that wants it (see [`ImportDemand`]).
 ///
 /// Four shapes: the always-on frame (the `Addressable` body's `NAMESPACE`
-/// expression plus the declared parents, dependencies, and link targets, named
-/// by the `Addressable` / `ChildOf` / `DependsOn` / `LinksTo` impls), each handler's argument kind
+/// expression plus the declared parents and dependencies, named by the
+/// `Addressable` / `ChildOf` / `DependsOn` impls), each handler's argument kind
 /// under that handler's own `#[cfg]`s, single-reply kinds used by the ADR-0227
 /// marker impls, the ADR-0231 `Contract` rows and the `CONTRACTS` rows const,
 /// and each inventory reply kind under the handler cfgs plus `not(wasm)`.
@@ -1434,9 +1425,7 @@ fn identity_import_demands(
     let namespace = &identity.namespace;
     let parents = &opts.child_of;
     let targets = &opts.depends;
-    let links = &opts.links;
-    let mut demands =
-        vec![ImportDemand { cfgs: Vec::new(), tokens: quote! { #namespace #(#parents)* #(#targets)* #(#links)* } }];
+    let mut demands = vec![ImportDemand { cfgs: Vec::new(), tokens: quote! { #namespace #(#parents)* #(#targets)* } }];
 
     for marker in &identity.handler_kinds {
         let cfgs: Vec<TokenStream2> = marker.cfgs.iter().map(|cfg| quote! { #cfg }).collect();

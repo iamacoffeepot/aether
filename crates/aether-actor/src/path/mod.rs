@@ -4,12 +4,12 @@
 //!
 //! A typed path is an [`ErasedActorPath`] under a compile-time claim: that an
 //! `R` lives at the text, or an actor covering the protocol `P`. The claim is
-//! written from actor types, by an actor that declares the link
-//! (`#[actor(links(R))]`), and narrowed only where the compiler proves
-//! coverage. It crosses the wire as the path text alone, so a decoded path
-//! carries the writer's claim and nothing more. On receipt, `resolve` proves
-//! that a live actor stands at the path; a decoded path's claim stays its
-//! writer's. Neither type holds a position.
+//! written by type constructors whose bounds check the topology
+//! (`ActorPath::<R>::instance`, `ActorPath::<C>::child`), and narrowed only
+//! where the compiler proves coverage. It crosses the wire as the path text
+//! alone; a decoded path is canonical, and a decoded `ActorPath<R>`'s leaf
+//! names an `R`. On receipt, `resolve` proves that a live actor stands at the
+//! path. Neither type holds a position.
 //!
 //! The paths sit beside [`reference`](crate::reference), which holds the
 //! proofs: a path names, a reference sends.
@@ -19,20 +19,19 @@ use core::fmt::{self, Debug, Display, Formatter};
 use core::hash::{Hash, Hasher};
 
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
-use aether_data::{ActorPathForm, CastEligible, ErasedActorPath, LabelNode, LoadName, Schema, SchemaType};
+use aether_data::{ActorPathForm, CastEligible, ErasedActorPath, LabelNode, Schema, SchemaType};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{Instanced, LinksTo, Root};
-
-/// The value, kind-field, and serde traits both typed paths share, over the
-/// text alone and with no bound on the phantom parameter. `Clone`,
-/// `PartialEq`, `Eq`, and `Hash` compare the text. `Debug` prints
+/// The value, kind-field, encode, and serialize traits both typed paths
+/// share, over the text alone and with no bound on the phantom parameter.
+/// `Clone`, `PartialEq`, `Eq`, and `Hash` compare the text. `Debug` prints
 /// `Name("text")`, because a path is a name, not a position, and `Display`
-/// prints the text. The kind-field and serde traits delegate to
-/// [`ErasedActorPath`]'s, and each decode runs [`decode_canonical`] or
-/// [`deserialize_canonical`]. Invoked beside each type, whose module is a
-/// child of this one, so the trait names resolve through `super::`.
+/// prints the text. The kind-field, encode, and serialize traits delegate to
+/// [`ErasedActorPath`]'s. Each type writes its own decodes beside it, over
+/// [`decode_canonical`] and [`deserialize_canonical`]. Invoked beside each
+/// type, whose module is a child of this one, so the trait names resolve
+/// through `super::`.
 macro_rules! typed_path_traits {
     ($name:ident<$param:ident>) => {
         impl<$param> Clone for $name<$param> {
@@ -83,21 +82,9 @@ macro_rules! typed_path_traits {
             }
         }
 
-        impl<'de, $param> super::WireDecode<'de> for $name<$param> {
-            fn decode(cursor: &mut &'de [u8]) -> Result<Self, super::WireError> {
-                super::decode_canonical(cursor).map(Self::from_erased)
-            }
-        }
-
         impl<$param> super::Serialize for $name<$param> {
             fn serialize<S: super::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
                 super::Serialize::serialize(&self.path, serializer)
-            }
-        }
-
-        impl<'de, $param> super::Deserialize<'de> for $name<$param> {
-            fn deserialize<D: super::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                super::deserialize_canonical(deserializer).map(Self::from_erased)
             }
         }
     };
@@ -110,20 +97,6 @@ mod resolve_error;
 pub use actor_path::ActorPath;
 pub use protocol_path::ProtocolPath;
 pub use resolve_error::ResolveError;
-
-/// Write `R`'s canonical path, `R::NAMESPACE:key`, for the native
-/// `NativeCtx::link` in `aether-substrate`, which cannot reach the constructor
-/// private to this crate.
-///
-/// It takes a key, never text, and writes only `R`'s own path, and it
-/// compiles only for `A: LinksTo<R>`, the bound the calling verb already
-/// carries. A call outside a linking actor's ctx writes a correct path that
-/// proves and sends nothing. Not part of the public API.
-#[doc(hidden)]
-#[must_use]
-pub fn __link<A: LinksTo<R>, R: Root + Instanced>(key: &LoadName) -> ActorPath<R> {
-    ActorPath::root_instance(key)
-}
 
 /// A decoded typed path is a well-formed canonical path (ADR-0230 §2,
 /// ADR-0231 §3): a typed path is written from actor types, so it never has a
@@ -173,9 +146,24 @@ mod tests {
     use serde::de::value::{Error as ValueError, StrDeserializer};
 
     use super::*;
+    use crate::{Addressable, Many};
 
     const CANONICAL: &str = "test.unit:alpha/test.member:beta";
     const SHORT: &str = "test.unit/:beta";
+
+    struct Unit;
+
+    impl Addressable for Unit {
+        const NAMESPACE: &'static str = "test.unit";
+        type Resolver = Many;
+    }
+
+    struct Member;
+
+    impl Addressable for Member {
+        const NAMESPACE: &'static str = "test.member";
+        type Resolver = Many;
+    }
 
     fn wire(text: &str) -> Vec<u8> {
         let mut out = Vec::new();
@@ -192,19 +180,41 @@ mod tests {
     /// run the canonical check and keep a canonical path's text.
     #[test]
     fn decode_refuses_a_short_path_and_keeps_a_canonical_one() {
-        assert_eq!(decode_from_slice::<ActorPath<()>>(&wire(SHORT)), Err(WireError::InvalidActorPath));
+        assert_eq!(decode_from_slice::<ActorPath<Member>>(&wire(SHORT)), Err(WireError::InvalidActorPath));
         assert_eq!(decode_from_slice::<ProtocolPath<()>>(&wire(SHORT)), Err(WireError::InvalidActorPath));
-        assert!(ActorPath::<()>::deserialize(serde_text(SHORT)).is_err());
+        assert!(ActorPath::<Member>::deserialize(serde_text(SHORT)).is_err());
         assert!(ProtocolPath::<()>::deserialize(serde_text(SHORT)).is_err());
 
-        let decoded = decode_from_slice::<ActorPath<()>>(&wire(CANONICAL)).expect("a canonical path decodes");
+        let decoded = decode_from_slice::<ActorPath<Member>>(&wire(CANONICAL)).expect("a canonical path decodes");
         assert_eq!(decoded.to_string(), CANONICAL);
         let decoded = decode_from_slice::<ProtocolPath<()>>(&wire(CANONICAL)).expect("a canonical path decodes");
         assert_eq!(decoded.to_string(), CANONICAL);
-        let deserialized = ActorPath::<()>::deserialize(serde_text(CANONICAL)).expect("a canonical path deserializes");
+        let deserialized =
+            ActorPath::<Member>::deserialize(serde_text(CANONICAL)).expect("a canonical path deserializes");
         assert_eq!(deserialized.to_string(), CANONICAL);
         let deserialized =
             ProtocolPath::<()>::deserialize(serde_text(CANONICAL)).expect("a canonical path deserializes");
         assert_eq!(deserialized.to_string(), CANONICAL);
+    }
+
+    /// An `ActorPath<R>` that exists names an `R`: a decode that claimed `R`
+    /// for any text, read the root step instead of the leaf, or compared the
+    /// leaf by prefix would hand a receiver a path naming another actor.
+    /// Both codecs compare the leaf namespace with `R::NAMESPACE` exactly.
+    #[test]
+    fn decode_refuses_a_path_whose_leaf_names_another_actor() {
+        const EXTENDED: &str = "test.unit:alpha/test.member.extra:beta";
+        const SINGLETON: &str = "test.unit";
+
+        assert!(decode_from_slice::<ActorPath<Member>>(&wire(CANONICAL)).is_ok());
+        assert!(ActorPath::<Member>::deserialize(serde_text(CANONICAL)).is_ok());
+        assert_eq!(decode_from_slice::<ActorPath<Unit>>(&wire(CANONICAL)), Err(WireError::InvalidActorPath));
+        assert!(ActorPath::<Unit>::deserialize(serde_text(CANONICAL)).is_err());
+
+        assert!(decode_from_slice::<ActorPath<Unit>>(&wire(SINGLETON)).is_ok());
+        assert!(ActorPath::<Unit>::deserialize(serde_text(SINGLETON)).is_ok());
+
+        assert_eq!(decode_from_slice::<ActorPath<Member>>(&wire(EXTENDED)), Err(WireError::InvalidActorPath));
+        assert!(ActorPath::<Member>::deserialize(serde_text(EXTENDED)).is_err());
     }
 }

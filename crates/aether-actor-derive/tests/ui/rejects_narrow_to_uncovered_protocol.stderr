@@ -1,10 +1,10 @@
 error[E0277]: `Unit` has no contract row for `Poke`
-  --> tests/ui/rejects_narrow_to_uncovered_protocol.rs:52:54
+  --> tests/ui/rejects_narrow_to_uncovered_protocol.rs:41:61
    |
-52 |         let _other = ctx.link::<Unit>(&key).narrow::<Other>();
-   |                                             ------   ^^^^^ no handler for `Poke` on this target
-   |                                             |
-   |                                             required by a bound introduced by this call
+41 |     let _other = ActorPath::<Unit>::instance(&key).narrow::<Other>();
+   |                                                    ------   ^^^^^ no handler for `Poke` on this target
+   |                                                    |
+   |                                                    required by a bound introduced by this call
    |
    = note: a `#[fallback]` does not count as handling a kind
 help: the trait `Contract<Poke>` is not implemented for `Unit`

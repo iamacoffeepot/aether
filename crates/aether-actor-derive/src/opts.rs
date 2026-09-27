@@ -40,13 +40,6 @@ pub struct ActorOpts {
     /// keyless (`One` / `Embedded`) actors are declarable — a keyed `R` is a
     /// trait-bound compile error on the emitted impl, not a macro error here.
     pub depends: Vec<syn::TypePath>,
-    /// ADR-0230 §2: actor types this actor writes typed paths to, from one
-    /// `links(A, B, …)` list. Each listed type emits
-    /// `impl LinksTo<R> for Self`, which `ctx.link::<R>` and
-    /// `ctx.link_child::<P, R>` require. A link needs no live target, so it
-    /// emits no inputs-manifest record yet, and any addressable `R`,
-    /// instanced included, is declarable.
-    pub links: Vec<syn::TypePath>,
     /// ADR-0114: the inline children this Wasm actor spawns through the typed
     /// verbs, from one `spawns(A, B, …)` list. Each listed type emits
     /// `unsafe impl Spawns<C> for Self`, which the verbs require, and a
@@ -141,9 +134,6 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         } else if meta.path.is_ident("depends") {
             // ADR-0230 (issue 6557): one list per actor.
             parse_type_list_once(&meta, &mut opts.depends, "depends", "RenderCapability", "FsCapability")
-        } else if meta.path.is_ident("links") {
-            // ADR-0230 §2: one list per actor, like `depends`.
-            parse_type_list_once(&meta, &mut opts.links, "links", "JournalActor", "BundleDriver")
         } else if meta.path.is_ident("spawns") {
             // ADR-0114 (issue 6583): one list per actor, like `depends`.
             parse_type_list_once(&meta, &mut opts.spawns, "spawns", "Label", "Button")
@@ -165,7 +155,7 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         } else {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
-                 `root`, `child_of(TypePath)`, `depends(TypePath)`, `links(TypePath)`, `spawns(TypePath)`, \
+                 `root`, `child_of(TypePath)`, `depends(TypePath)`, `spawns(TypePath)`, \
                  `composable`, \
                  `handler_set(TraitPath)`, \
                  `runtime_feature = \"name\"`, or a bare runtime module path",
@@ -196,7 +186,7 @@ fn push_actor_type_entry(meta: &meta::ParseNestedMeta, slot: &mut Vec<syn::TypeP
     Ok(())
 }
 
-/// Parse a `depends` / `links` / `spawns` list into `slot`, refusing a second list for
+/// Parse a `depends` / `spawns` list into `slot`, refusing a second list for
 /// the same option. Empty lists are refused, so a non-empty slot means the
 /// option was already written.
 fn parse_type_list_once(
@@ -215,8 +205,8 @@ fn parse_type_list_once(
     Ok(())
 }
 
-/// Parse one `option(A, B, …)` type list — `depends` or `links` (ADR-0230)
-/// or `spawns` (ADR-0114): at least one actor type path, comma-separated,
+/// Parse one `option(A, B, …)` type list — `depends` (ADR-0230) or
+/// `spawns` (ADR-0114): at least one actor type path, comma-separated,
 /// trailing comma allowed, each type named once. Declaration order is kept,
 /// so it is the order of the emitted impl items and, for `depends`, the
 /// `Dependency` records.
@@ -256,7 +246,7 @@ fn parse_type_list(
 }
 
 /// Whether `slot` already names `target`, compared by token spelling — the
-/// one definition of "identical" `child_of`, `depends`, `links` and `spawns`
+/// one definition of "identical" `child_of`, `depends` and `spawns`
 /// share.
 fn contains_type(slot: &[syn::TypePath], target: &syn::TypePath) -> bool {
     let target_tokens = target.to_token_stream().to_string();

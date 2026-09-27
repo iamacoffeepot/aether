@@ -4,6 +4,8 @@
 use core::marker::PhantomData;
 
 use aether_data::ErasedActorPath;
+use aether_data::wire::{Error as WireError, WireDecode};
+use serde::{Deserialize, Deserializer};
 
 use super::ActorPath;
 use crate::CoveredBy;
@@ -51,6 +53,23 @@ impl<R> ActorPath<R> {
     #[must_use]
     pub fn narrow<P: CoveredBy<R>>(&self) -> ProtocolPath<P> {
         ProtocolPath::from_erased(self.erased().clone())
+    }
+}
+
+/// A canonical path, or `WireError::InvalidActorPath`. The canonical check
+/// alone: any actor covering `P` may live at the text, so no leaf is
+/// compared.
+impl<'de, P> WireDecode<'de> for ProtocolPath<P> {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
+        super::decode_canonical(cursor).map(Self::from_erased)
+    }
+}
+
+/// A canonical path, or a custom error naming the rule. The canonical check
+/// alone, as the wire decode.
+impl<'de, P> Deserialize<'de> for ProtocolPath<P> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        super::deserialize_canonical(deserializer).map(Self::from_erased)
     }
 }
 

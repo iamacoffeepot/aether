@@ -3,7 +3,7 @@
 //! whose one handler answers `Ping` with `Pong`, so it lacks `Other`'s `Poke`
 //! row.
 
-use aether_actor::{ActorInitError, Mail, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
+use aether_actor::{ActorPath, actor, protocol};
 use aether_data::LoadName;
 
 #[repr(C)]
@@ -36,21 +36,7 @@ trait Other {
 #[actor(instanced, root, rt_ok)]
 pub struct Unit;
 
-struct Bootstrap;
-
-#[actor(links(Unit))]
-impl WasmActor for Bootstrap {
-    const NAMESPACE: &'static str = "test.uncovered.bootstrap";
-
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Self)
-    }
-
-    #[fallback]
-    fn on_other(&mut self, ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {
-        let key = LoadName::new("alpha").expect("a valid key");
-        let _other = ctx.link::<Unit>(&key).narrow::<Other>();
-    }
+fn main() {
+    let key = LoadName::new("alpha").expect("a valid key");
+    let _other = ActorPath::<Unit>::instance(&key).narrow::<Other>();
 }
-
-fn main() {}
