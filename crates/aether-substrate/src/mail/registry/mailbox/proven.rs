@@ -1,5 +1,5 @@
 //! The registry's liveness reads, [`Registry::is_live`] over a reference and
-//! the crate-private position form beside it, and the seven mints beside
+//! the crate-private position form beside it, and the eight mints beside
 //! them.
 //!
 //! The callers of the gated mint outside the SDK itself. Two mint with no
@@ -18,14 +18,17 @@
 //! answers the same liveness question for a child key folded beneath a
 //! parent the caller already proved. The seventh, `Registry::resolve_protocol`,
 //! proves a protocol path that arrived in mail: it answers the same liveness
-//! question at the path's canonical name.
+//! question at the path's canonical name. The eighth, `Registry::cast`, types
+//! an erased reference the caller already holds as a protocol, once one read
+//! of the published view finds its route `Live` and publishing rows the
+//! protocol admits.
 
 use core::fmt;
 use std::error::Error;
 
 use aether_actor::{
-    __mint_actor_ref, __mint_erased_actor_ref, __mint_protocol_ref, ActorRef, ErasedActorRef, Instanced, Protocol,
-    ProtocolPath, ProtocolRef, ResolveError,
+    __mint_actor_ref, __mint_erased_actor_ref, __mint_protocol_ref, ActorRef, CastTarget, ErasedActorRef, Instanced,
+    Protocol, ProtocolPath, ProtocolRef, ResolveError,
 };
 use aether_data::{LoadName, MailboxCategory};
 
@@ -312,6 +315,28 @@ impl Registry {
     pub(crate) fn resolve_protocol<P: Protocol>(&self, path: &ProtocolPath<P>) -> Result<ProtocolRef<P>, ResolveError> {
         let path = path.as_erased();
         self.live_route(path).map(__mint_protocol_ref).ok_or_else(|| ResolveError::NotLive { path: path.clone() })
+    }
+
+    /// Type an erased reference the caller already holds as the protocol `T`
+    /// (ADR-0231 §4's guard cast), or answer `None`.
+    ///
+    /// One read of the published view, [`Self::published_contract`], finds
+    /// the route `reference` proves `Live` and reads the rows it published;
+    /// `T::admits` decides whether those rows answer `T`. A `Starting`,
+    /// `Dropped`, or unknown route answers `None`, as does a live one whose
+    /// rows `T` does not admit, such as a closure route's empty contract.
+    ///
+    /// Its one caller is
+    /// [`NativeCtx::cast`](crate::actor::native::NativeCtx::cast).
+    pub(crate) fn cast<T: CastTarget>(&self, reference: ErasedActorRef) -> Option<ProtocolRef<T>> {
+        let position = reference.id();
+        let rows = self.published_contract(position)?.into_rows();
+
+        if T::admits(&rows) {
+            Some(__mint_protocol_ref(position))
+        } else {
+            None
+        }
     }
 }
 

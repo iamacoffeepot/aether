@@ -9,7 +9,7 @@ use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, RequestWindowRedraw, RequestWindowRedrawResult,
     SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult,
     SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
-    UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf,
+    UnsubscribeWindow, UnsubscribeWindowSelf,
 };
 
 /// Re-dispatch one root-addressed per-window command at the sole live window,
@@ -80,14 +80,17 @@ pub trait WindowManagerSurface {
     /// answer, not a reason to hide a window from the root's arithmetic.
     fn routable_windows(state: &Self::State) -> Vec<ErasedActorPath>;
 
-    /// Subscribe an explicit mailbox to one kind for one selector.
+    /// Subscribe an explicitly named actor to one kind for one selector.
+    ///
+    /// The subscriber's path reached this handler only because its decode
+    /// proved the live route there handles the kind silently (ADR-0231 §3);
+    /// it is proven live once more here, at receipt, and the table keeps the
+    /// `ProtocolRef<Subscriber<K>>` that proof returns. A path whose actor
+    /// has gone answers `Err` naming it.
     #[handler::single]
     fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
-        match ctx.resolve_live(mail.mailbox) {
-            Ok(subscriber) => {
-                Self::subscribers(state).subscribe(ctx, mail.selector, mail.kind, subscriber);
-                SubscribeWindowResult::Ok
-            }
+        match Self::subscribers(state).subscribe_path(ctx, mail.selector, &mail.subscription) {
+            Ok(()) => SubscribeWindowResult::Ok,
             Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
         }
     }
@@ -105,18 +108,17 @@ pub trait WindowManagerSurface {
         }
     }
 
-    /// Drop an explicit mailbox's subscription to one kind for one selector.
+    /// Drop an explicitly named actor's subscription to one kind for one
+    /// selector. The path is proven live at receipt and its key removed; a
+    /// path whose actor has gone answers `Err` naming it.
     #[handler::single]
     fn on_unsubscribe(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
         mail: UnsubscribeWindow,
     ) -> SubscribeWindowResult {
-        match ctx.resolve_live(mail.mailbox) {
-            Ok(subscriber) => {
-                Self::subscribers(state).unsubscribe(mail.selector, mail.kind, subscriber);
-                SubscribeWindowResult::Ok
-            }
+        match Self::subscribers(state).unsubscribe_path(ctx, mail.selector, &mail.subscription) {
+            Ok(()) => SubscribeWindowResult::Ok,
             Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
         }
     }
@@ -131,17 +133,6 @@ pub trait WindowManagerSurface {
         match Self::subscribers(state).unsubscribe_self(ctx, mail.selector, mail.kind) {
             Ok(()) => SubscribeWindowResult::Ok,
             Err(error) => SubscribeWindowResult::Err { error },
-        }
-    }
-
-    /// Drop a mailbox from every window-event subscription it holds. The
-    /// mailbox is proven at receipt (ADR-0230); one that no longer proves is
-    /// a no-op, its subscriptions having already gone with its
-    /// `MonitorNotice`.
-    #[handler::single]
-    fn on_unsubscribe_all(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
-        if let Ok(subscriber) = ctx.resolve_live(mail.mailbox) {
-            Self::subscribers(state).unsubscribe_all(subscriber);
         }
     }
 

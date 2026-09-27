@@ -12,6 +12,37 @@
 // actor dispatch ABI.
 #![allow(clippy::needless_pass_by_value)]
 
+/// The kinds the `aether.window` mailbox publishes to its selector-keyed
+/// subscribers, each beside the field its typed subscriber set is stored in:
+/// the one list the `Publishes` impls, the [`WindowSubscription`] variants,
+/// and the runtime's typed sets and kind dispatch are all written from, so a
+/// new published kind is added here once.
+///
+/// `$emit` is a macro taking the list as `$($kind:ident $field:ident),+`.
+/// Device events and window lifecycle travel the same machinery, so both are
+/// listed. The request/reply vocabulary (`ListWindows`, `SetWindowTitle`,
+/// their results) is absent: it is mail *to* the cap, not a broadcast from
+/// it.
+macro_rules! published_window_kinds {
+    ($emit:ident) => {
+        $emit! {
+            Key key,
+            KeyRelease key_release,
+            MouseMove mouse_move,
+            MouseButton mouse_button,
+            MouseButtonRelease mouse_button_release,
+            MouseWheel mouse_wheel,
+            WindowSize window_size,
+            TextInput text_input,
+            ImePreedit ime_preedit,
+            Modifiers modifiers,
+            WindowOpened window_opened,
+            WindowClosed window_closed,
+            WindowMenuActivated window_menu_activated,
+        }
+    };
+}
+
 pub mod kinds;
 
 pub use aether_kinds::WindowMode;
@@ -87,33 +118,22 @@ pub struct SyntheticWindowCapability;
 #[actor(instanced, child_of(SyntheticWindowCapability), depends(WindowCapability), runtime::synthetic::instance)]
 pub struct SyntheticWindowInstance;
 
-// The kinds the `aether.window` mailbox fans out to its selector-keyed
-// subscriber set, one `Publishes` impl each — the compile-time gate on
-// the flat `ctx.subscribe::<WindowCapability, K>()` verb. Device events
-// and window lifecycle both travel that one machinery, so both are listed.
-//
-// These sit on the neutral `WindowCapability` identity rather than on
-// a runtime, because the published vocabulary belongs to the mailbox:
-// desktop, synthetic, and headless all claim `aether.window`, and a
-// subscriber addresses the identity without knowing which is installed.
-// A runtime with no window peripheral emits none of them — that is a
-// deployment fact the marker cannot and should not encode.
-//
-// The request/reply vocabulary (`ListWindows`, `SetWindowTitle`, their
-// results) is absent: it is mail *to* the cap, not a broadcast from it.
-impl Publishes<Key> for WindowCapability {}
-impl Publishes<KeyRelease> for WindowCapability {}
-impl Publishes<MouseMove> for WindowCapability {}
-impl Publishes<MouseButton> for WindowCapability {}
-impl Publishes<MouseButtonRelease> for WindowCapability {}
-impl Publishes<MouseWheel> for WindowCapability {}
-impl Publishes<WindowSize> for WindowCapability {}
-impl Publishes<TextInput> for WindowCapability {}
-impl Publishes<ImePreedit> for WindowCapability {}
-impl Publishes<Modifiers> for WindowCapability {}
-impl Publishes<WindowOpened> for WindowCapability {}
-impl Publishes<WindowClosed> for WindowCapability {}
-impl Publishes<WindowMenuActivated> for WindowCapability {}
+/// Writes one `Publishes` impl per published kind — the compile-time gate on
+/// the flat `ctx.subscribe::<WindowCapability, K>()` verb.
+///
+/// They sit on the neutral `WindowCapability` identity rather than on a
+/// runtime, because the published vocabulary belongs to the mailbox:
+/// desktop, synthetic, and headless all claim `aether.window`, and a
+/// subscriber addresses the identity without knowing which is installed. A
+/// runtime with no window peripheral emits none of them — that is a
+/// deployment fact the marker cannot and should not encode.
+macro_rules! publishes {
+    ($($kind:ident $field:ident),+ $(,)?) => {
+        $(impl Publishes<$kind> for WindowCapability {})+
+    };
+}
+
+published_window_kinds!(publishes);
 
 /// The flat subscribe verbs send these self-addressed requests, selecting
 /// every window.

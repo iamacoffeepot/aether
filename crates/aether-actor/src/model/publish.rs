@@ -1,10 +1,45 @@
 //! The publisher markers: [`Publishes<K>`], which says an actor fans a kind
 //! out to its subscribers, and [`Publisher`], which says how that actor's
-//! subscribe and unsubscribe requests are built (ADR-0232 §3).
+//! subscribe and unsubscribe requests are built (ADR-0232 §3), and
+//! [`Subscriber<K>`], the protocol a publisher holds each subscriber under
+//! (ADR-0231 §8).
 
-use aether_data::Kind;
+use core::marker::PhantomData;
 
-use super::{Addressable, SendableTo};
+use aether_data::{ActorMail, Kind, KindId, ReplyContract};
+
+use super::protocol::{CastTarget, Row, cast_sealed};
+use super::{Addressable, Protocol, SendableTo, Silent};
+
+/// The one-row protocol of a subscriber to the published kind `K`: it
+/// handles `K` silently (ADR-0231 §8).
+///
+/// A publisher holds each subscriber as a
+/// [`ProtocolRef<Subscriber<K>>`](crate::ProtocolRef), so its fan-out
+/// compiles only for `K`. An explicit subscribe request carries a
+/// [`ProtocolPath<Subscriber<K>>`](crate::ProtocolPath), which decodes only
+/// against a route that publishes the exact silent row. A reflexive request
+/// types its sender with the native `ctx.cast`, which also admits a manual
+/// row for `K`: the one place a manual handler passes as silent, because a
+/// published event has no one waiting for a reply either way.
+///
+/// A type-level label only, never constructed.
+pub struct Subscriber<K>(PhantomData<fn() -> K>);
+
+impl<K: ActorMail> Protocol for Subscriber<K> {
+    type Rows = (Row<K, Silent>,);
+}
+
+impl<K: ActorMail> cast_sealed::Sealed for Subscriber<K> {}
+
+/// A route answers `Subscriber<K>` when it publishes a row for `K` that is
+/// silent or manual. A replying row is refused, since the publisher would
+/// drop every reply.
+impl<K: ActorMail> CastTarget for Subscriber<K> {
+    fn admits(rows: &[(KindId, ReplyContract)]) -> bool {
+        rows.iter().any(|&(kind, reply)| kind == K::ID && matches!(reply, ReplyContract::None | ReplyContract::Manual))
+    }
+}
 
 /// How a publishing actor's subscription requests are built: one impl per
 /// publisher, written in the publisher's own crate beside its
@@ -71,3 +106,26 @@ pub trait Publisher: Addressable {
             `ctx.subscribe::<WindowCapability, Key>()`"
 )]
 pub trait Publishes<K: Kind>: Publisher {}
+
+#[cfg(test)]
+mod tests {
+    use aether_data::{Kind, ReplyContract};
+    use aether_kinds::{Ping, Pong};
+
+    use super::{CastTarget, Subscriber};
+
+    // A cast that admitted a replying handler would hand a publisher a
+    // subscriber whose every reply it drops, and one that admitted a route
+    // with no row for the kind would fan the event out to an actor that
+    // cannot handle it.
+    #[test]
+    fn a_subscriber_cast_admits_only_a_silent_or_manual_row_for_its_kind() {
+        let admits = |rows: &[_]| <Subscriber<Ping> as CastTarget>::admits(rows);
+
+        assert!(admits(&[(Pong::ID, ReplyContract::None), (Ping::ID, ReplyContract::None)]));
+        assert!(admits(&[(Ping::ID, ReplyContract::Manual)]));
+        assert!(!admits(&[(Ping::ID, ReplyContract::One(Pong::ID))]));
+        assert!(!admits(&[(Pong::ID, ReplyContract::None)]));
+        assert!(!admits(&[]));
+    }
+}

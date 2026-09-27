@@ -3,8 +3,9 @@
 //! "Who it can address" is answered by proof. [`NativeCtx::actor_ref`] mints
 //! one for a declared dependency, [`NativeCtx::resolve_live`] proves a
 //! position that arrived in a payload, [`NativeCtx::resolve_path`] proves
-//! an [`ErasedActorPath`] that arrived in one, and [`NativeCtx::resolve`]
-//! proves a [`ProtocolPath`] that arrived in one; each hands back a proven
+//! an [`ErasedActorPath`] that arrived in one, [`NativeCtx::resolve`]
+//! proves a [`ProtocolPath`] that arrived in one, and [`NativeCtx::cast`]
+//! types an erased reference already held as a protocol; each hands back a proven
 //! reference, which is what ADR-0230 lets a cap keep past the handler that
 //! received it and what the flat send verbs route through. [`NativeCtx::accept_bundle`] is
 //! the bundle front of the payload-borne door: it proves a mail bundle's
@@ -20,8 +21,8 @@ use std::error::Error;
 use std::fmt;
 
 use aether_actor::{
-    ActorRef, Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef, Protocol,
-    ProtocolPath, ProtocolRef, ReplyMode, ResolveError, Singleton,
+    ActorRef, Addressable, CallerAddressable, CallerScoped, CastTarget, DependencyResolver, DependsOn, ErasedActorRef,
+    Protocol, ProtocolPath, ProtocolRef, ReplyMode, ResolveError, Singleton,
 };
 use aether_data::{ErasedActorPath, KindId, MailId, MailboxId};
 use aether_kinds::NamedMail;
@@ -84,11 +85,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// The other two ask nothing of the registry. [`Self::send_to`] sends
     /// through a proof the actor already holds, and [`Self::actor_ref`] mints a
     /// declared dependency's proof from an answer the load already gave. This
-    /// one is for the id a caller put in a kind field — `SubscribeWindow`'s
-    /// `mailbox` is the motivating consumer — which nothing upstream proved,
-    /// so it pays one published-route read to find out. It runs once, at
-    /// receipt, and never on the send path; a handler that proves its
-    /// subscriber here keeps the proof, not the position.
+    /// one is for a position that reached the actor without a proof, which
+    /// nothing upstream proved, so it pays one published-route read to find
+    /// out. It runs once, at receipt, and never on the send path; a caller
+    /// that proves a position here keeps the proof, not the position. An
+    /// actor carried in a payload is named by a path instead, and proven
+    /// through [`Self::resolve_path`] or [`Self::resolve`].
     ///
     /// [`Self::sender`](super::NativeCtx::sender) remains the door for the
     /// host-stamped source — that answer is already known and costs no read.
@@ -132,10 +134,31 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// [`ResolveError::NotLive`] naming the path when no `Live` route stands
     /// under its canonical name. It never names a position.
     ///
-    /// Its consumer is the Bloomery workspace's receipt of `Run.source` and
-    /// `Import.source` (#6841).
+    /// Its consumers are the Bloomery workspace's receipt of `Run.source` and
+    /// `Import.source` (#6841), and the window manager's and the lifecycle
+    /// capability's explicit subscribe and unsubscribe receipts, whose
+    /// subscriber is a `ProtocolPath<Subscriber<K>>`.
     pub fn resolve<P: Protocol>(&self, path: &ProtocolPath<P>) -> Result<ProtocolRef<P>, ResolveError> {
         self.binding.mailer().registry().resolve_protocol(path)
+    }
+
+    /// Type an erased reference this actor already holds as the protocol `T`
+    /// (ADR-0231 §4's guard cast): `Some` when the reference's route is
+    /// `Live` and the rows it published answer `T`, `None` otherwise.
+    ///
+    /// One read of the published view answers both. The reference usually
+    /// arrived untyped, as [`Self::sender`](super::NativeCtx::sender) does, and
+    /// the cast is how a handler that must send through it later gets a typed
+    /// proof to keep. `T` is sealed: [`Subscriber<K>`](aether_actor::Subscriber)
+    /// admits a silent or manual row for `K`.
+    ///
+    /// Its consumers are the window manager's and the lifecycle capability's
+    /// reflexive `subscribe_self` receipts, which type the sender as a
+    /// subscriber to the requested kind and refuse one whose rows do not
+    /// answer it.
+    #[must_use]
+    pub fn cast<T: CastTarget>(&self, reference: ErasedActorRef) -> Option<ProtocolRef<T>> {
+        self.binding.mailer().registry().cast(reference)
     }
 
     /// Prove a mail bundle that crossed the MCP or harness boundary inside a

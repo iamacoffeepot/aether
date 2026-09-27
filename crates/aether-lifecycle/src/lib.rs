@@ -27,9 +27,10 @@
 //!    [`LifecycleAdvanceComplete`](aether_kinds::LifecycleAdvanceComplete) to
 //!    the chassis loop that issued the advance.
 //!
-//! The `aether.lifecycle.*` mail kinds stay in `aether-kinds`: they are
-//! substrate protocol vocabulary many actors address, not a detail of this
-//! capability.
+//! The stage kinds and the advance stay in `aether-kinds`: they are substrate
+//! protocol vocabulary many actors address. The subscription request kinds
+//! live in [`kinds`], beside the capability that answers them, because an
+//! explicit subscriber is a `ProtocolPath` that `aether-kinds` cannot name.
 
 #![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
@@ -38,6 +39,31 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_actor::actor;
+
+/// The stage kinds this capability publishes, each beside the field its
+/// typed subscriber set is stored in: the one list the `Publishes` impls,
+/// the [`LifecycleSubscription`] variants, and the runtime's typed sets and
+/// stage dispatch are all written from, so a new stage is added here once.
+///
+/// `$emit` is a macro taking the list as `$($stage:ident $field:ident),+`.
+/// The list is ADR-0082's stage vocabulary, which a chassis lifecycle graph
+/// can declare as a state; `Quit` and `LifecycleAdvance` are absent because
+/// they travel into the cap as signals, never out of it as a broadcast.
+macro_rules! published_stages {
+    ($emit:ident) => {
+        $emit! {
+            Tick tick,
+            InitCaps init_caps,
+            InitComponents init_components,
+            Render render,
+            Present present,
+            Shutdown shutdown,
+        }
+    };
+}
+
+pub mod kinds;
+pub use kinds::*;
 
 mod graph;
 // `LifecycleStateData` is named only by `mod settlement`'s `resolve_edge`,

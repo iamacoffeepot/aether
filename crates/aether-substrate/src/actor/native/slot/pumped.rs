@@ -92,6 +92,18 @@ where
         Self { actor: Some(actor), binding, slots, actor_registry, self_id, _not_send: PhantomData }
     }
 
+    /// Release the mail `wire` sent, held since before `wire` ran, once the
+    /// boot has published the route `Live` with the actor's contract.
+    pub(crate) fn release_outbound_after_activation(&self) {
+        self.binding.release_outbound_after_activation();
+    }
+
+    /// Reject the mail `wire` sent when the boot fails after `wire` ran,
+    /// balancing its settlement.
+    pub(crate) fn discard_outbound_after_activation(&self) {
+        self.binding.discard_outbound_after_activation();
+    }
+
     /// Drain every envelope currently queued on the actor's inbox, running
     /// the shared `dispatch_envelope` body for each. Callable from any pump
     /// point on the owning thread (the desktop driver calls it in

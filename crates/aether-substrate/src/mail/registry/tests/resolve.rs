@@ -263,3 +263,61 @@ fn published_rows_answer_only_the_live_route_under_the_path() {
         assert_eq!(registry.published_rows(&path(name)), None, "{name}");
     }
 }
+
+/// ADR-0231 §4's guard cast types a held reference as `Subscriber<Load>`
+/// only while its route is `Live` and publishes a silent or manual `Load`
+/// row. Each case names the bug it catches:
+///
+/// - a `Live` route publishing `(Load, None)` or `(Load, Manual)` mints: a
+///   cast that reads anything but the published rows, or that refuses the
+///   manual row a subscriber may answer an event with;
+/// - a route publishing `(Load, One(Loaded))` or no `Load` row, and a closure
+///   route's empty contract, answer `None`: a cast that mints for a sender
+///   whose rows do not answer the protocol;
+/// - a `Starting` reservation and a dropped route answer `None`: a cast that
+///   mints for a sender that is not live.
+#[test]
+fn cast_mints_only_for_a_live_route_whose_rows_the_protocol_admits() {
+    use aether_actor::Subscriber;
+
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
+    let stand = |name: &str, rows: &[(KindId, ReplyContract)]| {
+        let id = registry.try_register_inbox(&auth(), name, noop_handler()).expect("the route name is free");
+        registry.publish_contract(&auth(), id, contract(rows)).expect("an empty contract takes any rows");
+        registry.resolve_live(id).expect("the route is live")
+    };
+    let cast = |reference| registry.cast::<Subscriber<Load>>(reference).is_some();
+
+    let silent = stand("test.cast.silent", &[(Load::ID, ReplyContract::None)]);
+    let manual = stand("test.cast.manual", &[(Loaded::ID, ReplyContract::None), (Load::ID, ReplyContract::Manual)]);
+    assert!(cast(silent), "a silent row answers the subscriber protocol");
+    assert!(cast(manual), "a manual row answers it too");
+
+    let replying = stand("test.cast.replying", &[(Load::ID, ReplyContract::One(Loaded::ID))]);
+    let unrelated = stand("test.cast.unrelated", &[(Loaded::ID, ReplyContract::None)]);
+    let closure = stand("test.cast.closure", &[]);
+    for (name, reference) in [("replying", replying), ("unrelated", unrelated), ("closure", closure)] {
+        assert!(!cast(reference), "{name}: the published rows do not answer the protocol");
+    }
+
+    let starting = "test.cast.starting";
+    let reserved =
+        registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(starting.to_owned())])).expect("submits");
+    owner.run_once();
+    starting_token(
+        &reserved.wait_timeout(Duration::from_millis(100)).expect("reservation completes").expect("reserves"),
+    );
+    let starting = registry.stamped_sender(lineage_mailbox_id(starting)).expect("a Starting record stands there");
+    let dropped = stand("test.cast.dropped", &[(Load::ID, ReplyContract::None)]);
+    registry.drop_mailbox(&auth(), dropped.id()).expect("the live route retires");
+    assert!(!cast(starting), "a Starting route is not live");
+    assert!(!cast(dropped), "a dropped route is not live");
+}

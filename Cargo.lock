@@ -691,6 +691,7 @@ dependencies = [
  "aether-lifecycle",
  "aether-substrate",
  "aether-substrate-harness-cap",
+ "aether-test-fixtures-kinds",
  "aether-trace",
  "aether-window",
  "anyhow",
@@ -812,9 +813,11 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-substrate",
+ "bytemuck",
  "clap",
  "confique",
  "inventory",
+ "serde",
  "tracing",
 ]
 

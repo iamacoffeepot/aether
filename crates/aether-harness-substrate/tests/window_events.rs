@@ -1,13 +1,55 @@
-use aether_actor::ActorRef;
+use aether_actor::{ActorPath, ActorRef, actor};
 use aether_data::{ErasedActorPath, Kind, LoadName};
-use aether_harness_substrate::{ExecutionResult, HarnessOp, SubstrateHarness, substrate_harness_observer_mailbox};
+use aether_harness_substrate::{ExecutionResult, HarnessOp, SubstrateHarness};
 use aether_kinds::{Key, MouseMove};
+use aether_substrate::{BootError, NativeActor, NativeCtx, NativeInitCtx};
+use aether_test_fixtures_kinds::SubstrateHarnessObserver;
 use aether_window::{
     CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
     ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult,
     SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SyntheticWindowCapability, SyntheticWindowInstance,
-    UnsubscribeWindow, WindowMode, WindowSelector, WindowSizeRequest, WindowSpec, window_path,
+    UnsubscribeWindow, WindowMode, WindowSelector, WindowSizeRequest, WindowSpec, WindowSubscription, window_path,
 };
+
+/// The scenario's subscriber: silent `Key` and `MouseMove` handlers, so its
+/// path narrows to a subscriber of each, that forward every event to the
+/// harness observer, where `count_observed` counts it. Each handler owns the
+/// event it was dispatched and drops it once forwarded.
+struct Relay;
+
+#[actor(singleton, root, depends(SubstrateHarnessObserver))]
+impl NativeActor for Relay {
+    const NAMESPACE: &'static str = "test.window_events.relay";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[handler::single]
+    fn on_key(&mut self, ctx: &mut NativeCtx<'_>, key: Key) {
+        let _ = self;
+        ctx.send::<SubstrateHarnessObserver>(&key);
+        drop(key);
+    }
+
+    #[handler::single]
+    fn on_mouse_move(&mut self, ctx: &mut NativeCtx<'_>, mouse: MouseMove) {
+        let _ = self;
+        ctx.send::<SubstrateHarnessObserver>(&mouse);
+        drop(mouse);
+    }
+}
+
+/// The relay as a subscriber to `Key`.
+fn keys() -> WindowSubscription {
+    WindowSubscription::Key(ActorPath::<Relay>::root().narrow())
+}
+
+/// The relay as a subscriber to `MouseMove`.
+fn moves() -> WindowSubscription {
+    WindowSubscription::MouseMove(ActorPath::<Relay>::root().narrow())
+}
 
 fn window(name: &str) -> ErasedActorPath {
     window_path(&LoadName::new(name).expect("window name"))
@@ -195,7 +237,8 @@ fn synthetic_runtime_models_window_lifecycle_and_controls_in_memory() {
 fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
     let first_path = window("first");
     let second_path = window("second");
-    let mut harness = SubstrateHarness::start().expect("boot synthetic window harness");
+    let mut harness =
+        SubstrateHarness::builder().with_actor::<Relay>(()).build().expect("boot synthetic window harness");
     let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
     harness
         .execute(vec![
@@ -210,25 +253,20 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
         ])
         .expect("create routed windows");
 
-    let observer = substrate_harness_observer_mailbox();
     harness
         .execute(vec![
             (
                 "key-all",
                 HarnessOp::send_and_settle(
                     &synthetic,
-                    &SubscribeWindow { selector: WindowSelector::All, kind: Key::ID, mailbox: observer },
+                    &SubscribeWindow { selector: WindowSelector::All, subscription: keys() },
                 ),
             ),
             (
                 "key-second",
                 HarnessOp::send_and_settle(
                     &synthetic,
-                    &SubscribeWindow {
-                        selector: WindowSelector::One(second_path.clone()),
-                        kind: Key::ID,
-                        mailbox: observer,
-                    },
+                    &SubscribeWindow { selector: WindowSelector::One(second_path.clone()), subscription: keys() },
                 ),
             ),
             ("key-first-event", key_from(synthetic, &first_path, 11)),
@@ -243,11 +281,7 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
                 "move-second",
                 HarnessOp::send_and_settle(
                     &synthetic,
-                    &SubscribeWindow {
-                        selector: WindowSelector::One(second_path.clone()),
-                        kind: MouseMove::ID,
-                        mailbox: observer,
-                    },
+                    &SubscribeWindow { selector: WindowSelector::One(second_path.clone()), subscription: moves() },
                 ),
             ),
             ("move-first-event", move_from(synthetic, &first_path, 1.0, 2.0)),
@@ -262,7 +296,7 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
                 "unsubscribe-all-selector",
                 HarnessOp::send_and_settle(
                     &synthetic,
-                    &UnsubscribeWindow { selector: WindowSelector::All, kind: Key::ID, mailbox: observer },
+                    &UnsubscribeWindow { selector: WindowSelector::All, subscription: keys() },
                 ),
             ),
             ("key-first-after-unsubscribe", key_from(synthetic, &first_path, 33)),
@@ -271,11 +305,7 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
                 "unsubscribe-second-selector",
                 HarnessOp::send_and_settle(
                     &synthetic,
-                    &UnsubscribeWindow {
-                        selector: WindowSelector::One(second_path.clone()),
-                        kind: Key::ID,
-                        mailbox: observer,
-                    },
+                    &UnsubscribeWindow { selector: WindowSelector::One(second_path.clone()), subscription: keys() },
                 ),
             ),
             ("key-second-after-unsubscribe", key_from(synthetic, &second_path, 55)),

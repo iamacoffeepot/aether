@@ -1,7 +1,11 @@
 //! Public wire vocabulary for the `aether.window` manager.
 
-use aether_data::{ErasedActorPath, KindId, MailboxId};
-use aether_kinds::WindowMode;
+use aether_actor::{ProtocolPath, Subscriber};
+use aether_data::{ErasedActorPath, KindId};
+use aether_kinds::{
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
+    WindowMode, WindowSize,
+};
 use serde::{Deserialize, Serialize};
 
 /// Select one window, by its canonical actor path, or every current and
@@ -316,27 +320,52 @@ mod internal {
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 pub(crate) use internal::RetireWindow;
 
-/// Subscribe an explicit mailbox to a kind for a window selector.
-#[aether_data::kind(name = "aether.window.subscribe", eq)]
-pub struct SubscribeWindow {
-    pub selector: WindowSelector,
-    pub kind: KindId,
-    pub mailbox: MailboxId,
+/// Writes [`WindowSubscription`] from the published-kind list.
+macro_rules! subscription {
+    ($($kind:ident $field:ident),+ $(,)?) => {
+        /// One published kind and the subscriber to hold for it: the path of an
+        /// actor that handles the kind silently (ADR-0231 §8). The path decodes
+        /// only against a live route that publishes that silent row.
+        ///
+        /// Over MCP each variant takes the subscriber's canonical path, as in
+        /// `{"Key": "aether.component/aether.embedded:ui"}`.
+        #[derive(aether_data::Schema, Debug, Clone, PartialEq, Eq)]
+        pub enum WindowSubscription {
+            $(
+                #[doc = concat!("A subscriber to [`", stringify!($kind), "`].")]
+                $kind(ProtocolPath<Subscriber<$kind>>),
+            )+
+        }
+    };
 }
 
-/// Subscribe the sending actor to a kind for a window selector.
+published_window_kinds!(subscription);
+
+/// Subscribe an explicitly named actor to one published kind for a window
+/// selector. `subscription` names the kind and the subscriber's canonical
+/// path; the manager proves it live at receipt and replies `Err` when it is
+/// not.
+#[aether_data::kind(name = "aether.window.subscribe", no_serde, eq)]
+pub struct SubscribeWindow {
+    pub selector: WindowSelector,
+    pub subscription: WindowSubscription,
+}
+
+/// Subscribe the sending actor to a kind for a window selector. The sender
+/// must handle the kind silently or manually; the manager refuses one whose
+/// published rows do not.
 #[aether_data::kind(name = "aether.window.subscribe_self", eq)]
 pub struct SubscribeWindowSelf {
     pub selector: WindowSelector,
     pub kind: KindId,
 }
 
-/// Remove an explicit mailbox's subscription for a selector and kind.
-#[aether_data::kind(name = "aether.window.unsubscribe", eq)]
+/// Remove an explicitly named actor's subscription for a selector and kind,
+/// named by the same `subscription` its subscribe carried.
+#[aether_data::kind(name = "aether.window.unsubscribe", no_serde, eq)]
 pub struct UnsubscribeWindow {
     pub selector: WindowSelector,
-    pub kind: KindId,
-    pub mailbox: MailboxId,
+    pub subscription: WindowSubscription,
 }
 
 /// Remove the sending actor's subscription for a selector and kind.
@@ -351,15 +380,6 @@ pub struct UnsubscribeWindowSelf {
 pub enum SubscribeWindowResult {
     Ok,
     Err { error: String },
-}
-
-/// Remove one mailbox from every window-event subscription.
-///
-/// This is the externally sendable bulk form. Runtime monitor cleanup uses
-/// the same operation internally when a subscriber mailbox closes.
-#[aether_data::kind(name = "aether.window.unsubscribe_all", copy, eq)]
-pub struct UnsubscribeAllWindows {
-    pub mailbox: MailboxId,
 }
 
 /// Raw, already-encoded window event injected through the synthetic runtime.

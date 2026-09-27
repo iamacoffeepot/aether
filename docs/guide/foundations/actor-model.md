@@ -535,11 +535,22 @@ pub trait WindowManagerSurface {
     fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers;
 
     #[handler::single]
-    fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
-        Self::subscribers(state).unsubscribe_all(mail.mailbox);
+    fn on_unsubscribe(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: UnsubscribeWindow,
+    ) -> SubscribeWindowResult {
+        match Self::subscribers(state).unsubscribe_path(ctx, mail.selector, &mail.subscription) {
+            Ok(()) => SubscribeWindowResult::Ok,
+            Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
+        }
     }
 }
 ```
+
+`unsubscribe_path` matches the subscription's variant, proves its
+`ProtocolPath<Subscriber<K>>` live with `ctx.resolve`, and removes that
+reference's key from the kind's typed set.
 
 And under the [split identity / runtime shape](../capability-anatomy.md) the
 adoption is declared on `#[runtime]`, in the runtime file where the dispatch

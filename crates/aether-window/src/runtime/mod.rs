@@ -7,7 +7,7 @@ use super::{
     FocusWindow, FocusWindowResult, HeadlessWindowCapability, ListWindows, ListWindowsResult, RequestWindowRedraw,
     RequestWindowRedrawResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult,
     SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult,
-    SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf,
+    SubscribeWindowSelf, UnsubscribeWindow, UnsubscribeWindowSelf,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -87,9 +87,6 @@ impl NativeActor for HeadlessWindowCapability {
     ) -> SubscribeWindowResult {
         SubscribeWindowResult::Err { error: unsupported() }
     }
-
-    #[handler::single]
-    fn on_unsubscribe_all(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UnsubscribeAllWindows) {}
 
     // The seven per-window commands, refused at the root as well as at an
     // endpoint (iamacoffeepot/aether#5505). Both identities are addressable, so

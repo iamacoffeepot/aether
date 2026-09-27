@@ -98,17 +98,18 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// the fanout — every subscriber-bound copy gets its own fresh
     /// `MailId` keyed under the same parent edge.
     ///
-    /// Recipients still aren't known to share a receiver type at compile site
-    /// — subscribers register at runtime — so this keeps taking a runtime set
+    /// Recipients are not known to share a receiver type at the compile
+    /// site — subscribers register at runtime — so this takes a runtime set
     /// rather than the typed `R: Singleton + HandlesKind<K>` shape of the
-    /// flat [`Self::send`]. What each one is has narrowed: an
-    /// [`ErasedActorRef`] the publisher already holds, proven when the
-    /// subscription was accepted (ADR-0230), not a position handed over at
-    /// the fan-out. The empty recipient set is a fast no-op — encoding only
+    /// flat [`Self::send`]. Each recipient is a held proof checked for `K`
+    /// the way [`Self::send_to`] checks one: a publisher's subscriber set is
+    /// `ProtocolRef<Subscriber<K>>`s, proven when each subscription was
+    /// accepted (ADR-0230, ADR-0231 §8), so a fan-out of any other kind does
+    /// not compile. The empty recipient set is a fast no-op — encoding only
     /// runs when there's at least one consumer.
     ///
     /// Issue iamacoffeepot/aether#723.
-    pub fn fanout<K: ActorMail>(&mut self, recipients: impl IntoIterator<Item = ErasedActorRef>, payload: &K) {
+    pub fn fanout<K: ActorMail, I, T: Target<K, I>>(&mut self, recipients: impl IntoIterator<Item = T>, payload: &K) {
         let mut recipients = recipients.into_iter();
         let Some(first) = recipients.next() else {
             return;
@@ -119,7 +120,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let root = self.outbound_root();
         let kind = K::ID.0;
         self.binding.push_envelope_buffered(OutboundSend {
-            recipient: first.id().0,
+            recipient: first.erased().id().0,
             kind,
             bytes: &encoded.bytes,
             attachments,
@@ -129,7 +130,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         });
         for recipient in recipients {
             self.binding.push_envelope_buffered(OutboundSend {
-                recipient: recipient.id().0,
+                recipient: recipient.erased().id().0,
                 kind,
                 bytes: &encoded.bytes,
                 attachments,
