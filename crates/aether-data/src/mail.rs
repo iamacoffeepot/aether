@@ -58,11 +58,10 @@ impl Schema for MailId {
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
-// Listed debt (ADR-0230 §1, ADR-0242): `MailId` names its sender by raw
-// position, so it keeps both reach markers only until #6889 and #6890 remove
-// that position from it.
+// Engine reach (ADR-0242): `MailId` names its sender by raw position, which
+// means something only inside its engine, so it crosses actors and not the
+// wire.
 impl crate::CrossesActors for MailId {}
-impl crate::CrossesWire for MailId {}
 
 impl WireEncode for MailId {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {

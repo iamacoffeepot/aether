@@ -532,9 +532,9 @@ mod schema_impls {
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
-    // Listed debt (ADR-0230 §1, ADR-0242): a raw mailbox position keeps both
-    // reach markers only until #6889 and #6890 remove its codec.
-    crosses_wire!(MailboxId);
+    // Engine reach (ADR-0242): a raw mailbox position is a registry key inside
+    // its engine, so it crosses actors and not the wire.
+    impl CrossesActors for MailboxId {}
 
     impl Schema for KindId {
         const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
