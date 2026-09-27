@@ -536,9 +536,10 @@ typed path would exclude a holder that claimed the route through
 
 Each arm lands with its consumer. The native arm over a `ProtocolPath<P>`
 serves the Bloomery workspace's receipt of a request's storage source, the
-window's and the lifecycle capability's explicit subscribe and
-unsubscribe receipts, and the http server's `register_route` receipt, and the guest arm over an `ActorPath<R>` serves the Bloomery bootstrap resolving
-its unit's journal and driver
+window's and the lifecycle capability's explicit subscribe and unsubscribe
+receipts, and the http server's `register_route` receipt. The guest arm over
+an `ActorPath<R>` serves the Bloomery bootstrap resolving its unit's journal
+and driver
 ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md) D7, D8). The
 other two arms come with their first callers. A guest's call is one host
 call, as `resolve_path`'s is.
