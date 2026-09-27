@@ -14,7 +14,6 @@ publish = false
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
-aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 aether-render = { path = "../aether-render" }
 aether-substrate = { path = "../aether-substrate" }
