@@ -1,7 +1,3 @@
-// Handler methods take decoded payloads by value as part of the actor
-// dispatch ABI.
-#![allow(clippy::needless_pass_by_value)]
-
 use aether_actor::{ActorPath, ActorRef, actor};
 use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::{ExecutionResult, HarnessOp, SubstrateHarness};
@@ -17,7 +13,8 @@ use aether_window::{
 
 /// The scenario's subscriber: silent `Key` and `MouseMove` handlers, so its
 /// path narrows to a subscriber of each, that forward every event to the
-/// harness observer, where `count_observed` counts it.
+/// harness observer, where `count_observed` counts it. Each handler owns the
+/// event it was dispatched and drops it once forwarded.
 struct Relay;
 
 #[actor(singleton, root, depends(SubstrateHarnessObserver))]
@@ -33,12 +30,14 @@ impl NativeActor for Relay {
     fn on_key(&mut self, ctx: &mut NativeCtx<'_>, key: Key) {
         let _ = self;
         ctx.send::<SubstrateHarnessObserver>(&key);
+        drop(key);
     }
 
     #[handler::single]
     fn on_mouse_move(&mut self, ctx: &mut NativeCtx<'_>, mouse: MouseMove) {
         let _ = self;
         ctx.send::<SubstrateHarnessObserver>(&mouse);
+        drop(mouse);
     }
 }
 
