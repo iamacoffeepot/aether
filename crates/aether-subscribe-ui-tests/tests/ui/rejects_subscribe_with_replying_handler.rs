@@ -14,7 +14,7 @@ impl WasmActor for Subscriber {
 
     #[handler::single]
     fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) -> Key {
-        Key::default()
+        unimplemented!()
     }
 }
 
