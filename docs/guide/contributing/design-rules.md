@@ -851,3 +851,4 @@ line is edited or removed:
 - 2026-09-26 · #6865 · what a native publication records → its namespace only · follows [R-0026](#r-0026)
 - 2026-09-26 · #6865 · how Bloomery bundles publish → each under its own per-digest namespace (the module hash) · follows [R-0021](#r-0021)
 - 2026-09-27 · #6894 (ADR-0242) · how a kind's reach is carried → the `CrossesActors` and `CrossesWire` markers, folded from the fields by the derives; `ActorMail` only for a kind that crosses actors; `WireMail` on the typed wire doors · follows [R-0042](#r-0042)
+- 2026-09-27 · #6920 · where the dependency admission row lands → in #6920, with the fixtures that depend on unpublished code fixed there (a separate observer actor is declared, and a probe that depends on a guest in another module moves to its own fixture crate) · follows [R-0009](#r-0009), [R-0033](#r-0033)
