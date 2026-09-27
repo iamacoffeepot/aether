@@ -9,7 +9,7 @@ use aether_actor::export;
 use aether_bloomery_kinds::{Mode, OpaqueBytes, Ref, Refusal, Tree};
 use aether_bloomery_program::kinds::Detail;
 use aether_bloomery_program::{Async, Env, Program, Workspace, program};
-use aether_workspace::{Environment, Mounts, Network, Run, Scratch, Step, Steps, ToolName};
+use aether_bloomery_workspace::{Environment, Mounts, Network, Run, Scratch, Step, Steps, ToolName};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.workspace.run.input")]

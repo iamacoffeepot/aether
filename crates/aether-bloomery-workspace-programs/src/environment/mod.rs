@@ -17,7 +17,7 @@ mod toolchain;
 
 use aether_bloomery_kinds::{Detail, Mode, Name, Node, Refusal};
 use aether_bloomery_program::{Env, Program, Sync, program};
-use aether_workspace::{Environment, Provides};
+use aether_bloomery_workspace::{Environment, Provides};
 
 pub use input::MergeInput;
 

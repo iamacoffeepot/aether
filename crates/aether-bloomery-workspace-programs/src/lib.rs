@@ -3,7 +3,7 @@
 //!
 //! - [`environment`] holds `environment.merge`, the Pure program that places
 //!   the imported toolchain directory in the imported base userland and
-//!   declares the [`aether_workspace::Environment`] the result is
+//!   declares the [`aether_bloomery_workspace::Environment`] the result is
 //!   (decision 3).
 //! - [`proof`] holds `proof.clippy`, the Sampled program that runs clippy over
 //!   a source tree in that environment through the workspace and records

@@ -38,9 +38,9 @@ aether-rpc = { path = "../aether-rpc" }
 aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-driver = { path = "../aether-bloomery-driver" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
-# The `aether.workspace` actor, composed over the opened journal's artifact
+# The `aether.bloomery.workspace` actor, composed over the opened journal's artifact
 # store.
-aether-workspace = { path = "../aether-workspace" }
+aether-bloomery-workspace = { path = "../aether-bloomery-workspace" }
 clap = { workspace = true }
 # `BloomeryConfig` derives `aether_substrate::Config`; the macro emits a
 # `#[derive(confique::Config)]` layer struct reached only through
@@ -70,7 +70,7 @@ aether-fleet = { path = "../aether-fleet" }
 # `derive` for the crash scenario's local mirrors of the fixture's program inputs.
 aether-data = { path = "../aether-data", features = ["derive"] }
 # The workspace scenario's scripted Engine API daemon and the kinds its seed stages.
-aether-workspace = { path = "../aether-workspace", features = ["test-support"] }
+aether-bloomery-workspace = { path = "../aether-bloomery-workspace", features = ["test-support"] }
 
 # `confique` is reached only through the
 # `#[derive(aether_substrate::Config)]`-emitted paths on `BloomeryConfig`,

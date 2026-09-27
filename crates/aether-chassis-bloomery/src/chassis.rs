@@ -9,7 +9,7 @@
 //! for Sampled programs (ADR-0234 decision 7), composed with the capability's
 //! own deny-by-default allowlist, so a fetch reaches only the hosts an
 //! operator names with `--http-allowlist` / `AETHER_HTTP_ALLOWLIST` and every
-//! other fetch is answered with a refusal, and the `aether.workspace` actor
+//! other fetch is answered with a refusal, and the `aether.bloomery.workspace` actor
 //! (ADR-0237 decision 8), which imports digest-pinned images into the journal
 //! through the Docker Engine API at `--workspace-endpoint` /
 //! `AETHER_WORKSPACE_ENDPOINT`. A credential rides the HTTP capability:
@@ -25,6 +25,7 @@ use std::mem;
 use std::sync::Arc;
 
 use aether_bloomery_journal::{ArtifactStore, Journal, ReadCacheBudget};
+use aether_bloomery_workspace::{WorkspaceCapability, WorkspaceParams};
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
     chassis_residual_knobs, install_frame_size, with_rpc_server,
@@ -42,7 +43,6 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
 use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
-use aether_workspace::{WorkspaceCapability, WorkspaceParams};
 
 use crate::cli::BloomeryCli;
 use crate::config::{self, BloomeryConfig};

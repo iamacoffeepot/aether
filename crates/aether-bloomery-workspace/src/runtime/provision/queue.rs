@@ -126,7 +126,7 @@ impl RunQueue {
         let amounts = self.admission.amounts(&key);
         self.admission.enqueue(key, Waiting { run, hold: ctx.acquire_settlement_hold(), reply_to: ctx.reply_target() });
         tracing::info!(
-            target: "aether_workspace",
+            target: "aether_bloomery_workspace",
             %key,
             cores = amounts.cores.get(),
             memory_bytes = amounts.memory_bytes.get(),
@@ -159,7 +159,7 @@ impl RunQueue {
     fn log_admitted(&self, admitted: &Admitted) {
         let Admitted { key, allotment } = admitted;
         tracing::info!(
-            target: "aether_workspace",
+            target: "aether_bloomery_workspace",
             %key,
             cpus = %allotment.cpus,
             memory_bytes = allotment.memory_bytes,

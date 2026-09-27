@@ -23,7 +23,7 @@ mod run;
 
 use aether_bloomery_kinds::{Detail, Mode, Refusal};
 use aether_bloomery_program::{Async, Env, Program, Workspace, program};
-use aether_workspace::StepOutcome;
+use aether_bloomery_workspace::StepOutcome;
 
 pub use input::ClippyInput;
 pub use result::ClippyResult;

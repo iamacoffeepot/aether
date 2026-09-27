@@ -186,19 +186,19 @@ impl Runner {
 fn answer(ended: Result<Outcome, Stop>) -> RunResult {
     match ended {
         Ok(outcome) => {
-            tracing::info!(target: "aether_workspace", tree = %outcome.tree.digest(), steps = outcome.steps.len(), "ran");
+            tracing::info!(target: "aether_bloomery_workspace", tree = %outcome.tree.digest(), steps = outcome.steps.len(), "ran");
             RunResult::Ok(outcome)
         }
         Err(Stop::Refused(refusal)) => {
-            tracing::info!(target: "aether_workspace", ?refusal, "run refused");
+            tracing::info!(target: "aether_bloomery_workspace", ?refusal, "run refused");
             RunResult::Refused(*refusal)
         }
         Err(Stop::Exhausted(resource)) => {
-            tracing::info!(target: "aether_workspace", ?resource, "run exhausted its allotment");
+            tracing::info!(target: "aether_bloomery_workspace", ?resource, "run exhausted its allotment");
             RunResult::Exhausted(resource)
         }
         Err(Stop::Failed(error)) => {
-            tracing::warn!(target: "aether_workspace", %error, "run failed");
+            tracing::warn!(target: "aether_bloomery_workspace", %error, "run failed");
             RunResult::Failed { detail: RunError::cause(&error) }
         }
     }

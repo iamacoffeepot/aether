@@ -42,7 +42,7 @@ pub fn ensure(
     if let Some(labels) = inspect()? {
         return labelled(labels.get(LABEL), &hex).map(|()| reference);
     }
-    tracing::info!(target: "aether_workspace", image = %reference, "importing the environment image");
+    tracing::info!(target: "aether_bloomery_workspace", image = %reference, "importing the environment image");
     engine
         .import_image(REPOSITORY, &hex, &[format!("LABEL {LABEL}={hex}")], |out| {
             encode(root, &mut JournalSource::new(batch), out)

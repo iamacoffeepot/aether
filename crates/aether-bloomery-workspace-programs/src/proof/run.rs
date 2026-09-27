@@ -5,7 +5,7 @@
 //! estimate.
 
 use aether_bloomery_kinds::Refusal;
-use aether_workspace::{EnvVar, Mount, Mounts, Network, Run, Scratch, Step, Steps, ToolName, TreePath};
+use aether_bloomery_workspace::{EnvVar, Mount, Mounts, Network, Run, Scratch, Step, Steps, ToolName, TreePath};
 
 use super::{ClippyInput, refused};
 
@@ -88,7 +88,7 @@ fn path(value: &str) -> Result<TreePath, Refusal> {
 #[cfg(test)]
 mod tests {
     use aether_bloomery_kinds::{Digest, Ref};
-    use aether_workspace::Mounts;
+    use aether_bloomery_workspace::Mounts;
 
     use super::{ClippyInput, ENV, request};
 

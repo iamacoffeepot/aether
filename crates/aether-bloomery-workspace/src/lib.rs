@@ -6,7 +6,7 @@
 //! ([`Run`] / [`RunResult`], [`Import`] / [`ImportResult`]), the stored
 //! [`Environment`], the values they carry, the [`WorkspaceCapability`]
 //! marker, and the [`WorkspaceConfig`] domain struct. The runtime half, behind
-//! the `runtime` feature, is the `aether.workspace` actor that answers them
+//! the `runtime` feature, is the `aether.bloomery.workspace` actor that answers them
 //! (ADR-0237 decision 8): a root singleton that talks to the Docker Engine API
 //! through a private client and writes what it imports into the journal
 //! through the [`ArtifactStore`](aether_bloomery_journal::ArtifactStore) it is
@@ -67,7 +67,7 @@ pub use runtime::WorkspaceParams;
 #[cfg(all(unix, any(test, feature = "test-support")))]
 pub use runtime::testing;
 
-/// `aether.workspace` actor **identity** (ADR-0122 split). A ZST carrying only
+/// `aether.bloomery.workspace` actor **identity** (ADR-0122 split). A ZST carrying only
 /// the addressing and the per-handler markers `#[actor]` emits always-on. It is
 /// a root singleton, so a program binding can name it in `depends(...)`
 /// (ADR-0230). The state-bearing runtime lives behind `feature = "runtime"`.

@@ -1,5 +1,5 @@
 # The loopback registry the Bloomery recipes publish images to, so the
-# `aether.workspace` actor can import them by digest (ADR-0237 decision 3).
+# `aether.bloomery.workspace` actor can import them by digest (ADR-0237 decision 3).
 # Sourced by `environment/publish.sh`; it defines functions and variables
 # only, and runs nothing.
 #

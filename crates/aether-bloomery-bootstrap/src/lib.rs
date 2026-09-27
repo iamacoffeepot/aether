@@ -37,8 +37,8 @@ use std::mem;
 
 use aether_actor::{ActorInitError, ErasedActorRef, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_bloomery_kinds::{CallOutcome, PublishResult, ReadArtifact, ReadArtifactResult, ReadHead, ReadHeadResult};
+use aether_bloomery_workspace::{Import, ImportResult, WorkspaceCapability};
 use aether_data::ErasedActorPath;
-use aether_workspace::{Import, ImportResult, WorkspaceCapability};
 
 use config::Bootstrap;
 pub use config::BootstrapConfig;
