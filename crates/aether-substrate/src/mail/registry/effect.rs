@@ -1,6 +1,8 @@
 use std::any::TypeId;
 use std::error::Error;
 use std::fmt;
+#[cfg(feature = "wasm")]
+use std::iter;
 use std::process::abort;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +13,8 @@ use aether_data::{ErasedActorPath, Kind};
 use aether_data::{KindDescriptor, MailboxDescriptor, SchemaType};
 
 use crate::actor::native::offload::blocking::DeferredCompletion;
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
 
 use super::mailbox::MailboxEntry;
 use crate::mail::Mail;
@@ -398,6 +402,13 @@ pub enum RegistryEffect {
         descriptor: KindDescriptor,
         reject_conflict: bool,
     },
+    /// Publish a module's exported namespaces (ADR-0241 §3) once admission
+    /// (§4) accepts it against the publication table as this batch has
+    /// staged it. Staged only by [`RegistryBatch::publish_module`], ahead of
+    /// the module's `RegisterKind` effects, so a refusal registers none of
+    /// its kinds and a failure later in the batch publishes nothing.
+    #[cfg(feature = "wasm")]
+    PublishModule(Module),
 }
 
 impl RegistryEffect {
@@ -460,6 +471,9 @@ pub enum RegistryApplied {
     /// publishes the given contract.
     ContractPublished(MailboxId),
     Kind(KindId),
+    /// Outcome of [`RegistryEffect::PublishModule`]: admission accepted the
+    /// module, and every namespace it exports points at it.
+    Published,
 }
 
 #[derive(Debug)]
@@ -480,6 +494,9 @@ pub enum RegistryEffectError {
     /// A republish for a route that is neither `Live` nor `Alias`, so it
     /// publishes no contract to replace.
     ContractUnpublished(MailboxId),
+    /// A module publish admission refused (ADR-0241 §4).
+    #[cfg(feature = "wasm")]
+    Admission(super::AdmissionRefusal),
     ActivationRejected,
     OwnerClosed,
 }
@@ -497,6 +514,8 @@ impl fmt::Display for RegistryEffectError {
                 write!(formatter, "route {id} republished a contract that {contract_break}")
             }
             Self::ContractUnpublished(id) => write!(formatter, "route {id} publishes no contract to replace"),
+            #[cfg(feature = "wasm")]
+            Self::Admission(refusal) => refusal.fmt(formatter),
             Self::ActivationRejected => {
                 formatter.write_str("prepared actor activation could not reserve its lifecycle")
             }
@@ -520,16 +539,26 @@ pub struct RegistryBatch {
 
 impl RegistryBatch {
     /// Atomically register or match every descriptor. A conflict rejects the
-    /// complete batch and publishes no partial kind view.
+    /// complete batch and publishes no partial kind view. Crate-private: a
+    /// module's kinds register only through [`Self::publish_module`], behind
+    /// its admission.
     #[must_use]
-    pub fn register_kinds(descriptors: Vec<KindDescriptor>) -> Self {
+    pub(crate) fn register_kinds(descriptors: Vec<KindDescriptor>) -> Self {
+        Self { batch: EffectBatch::new(kind_effects(descriptors).collect()) }
+    }
+
+    /// Publish `module` (ADR-0241 §3): admission (§4) runs against the
+    /// publication table, then the module's kinds register, all in one owner
+    /// batch. A refusal, or a kind conflict, commits neither the publication
+    /// nor any kind. Publishing a module whose hash already holds every one of
+    /// its namespaces changes no publication and registers its kinds again,
+    /// which is idempotent.
+    #[cfg(feature = "wasm")]
+    #[must_use]
+    pub fn publish_module(module: &Module) -> Self {
+        let kinds = kind_effects(module.manifest().kinds().iter().cloned());
         Self {
-            batch: EffectBatch::new(
-                descriptors
-                    .into_iter()
-                    .map(|descriptor| RegistryEffect::RegisterKind { descriptor, reject_conflict: true })
-                    .collect(),
-            ),
+            batch: EffectBatch::new(iter::once(RegistryEffect::PublishModule(module.clone())).chain(kinds).collect()),
         }
     }
 
@@ -559,6 +588,11 @@ impl RegistryBatch {
     pub(crate) fn into_effects(self) -> EffectBatch {
         self.batch
     }
+}
+
+/// One conflict-rejecting `RegisterKind` effect per descriptor.
+fn kind_effects(descriptors: impl IntoIterator<Item = KindDescriptor>) -> impl Iterator<Item = RegistryEffect> {
+    descriptors.into_iter().map(|descriptor| RegistryEffect::RegisterKind { descriptor, reject_conflict: true })
 }
 
 /// Public failure vocabulary for a deferred native-actor registry batch.

@@ -74,6 +74,15 @@ and outbound sessions are addressed the same way. There are no route helpers,
 and the consumer never derives a session's mailbox from its name. Raw sockets
 stay in native state.
 
+Both of these are erased shapes on `main` that #6895 retires. The `consumer`
+field is an `ErasedActorPath`, and each session delivers to the consumer
+through the `ErasedActorRef` the capability proves; the consumer's write goes
+through `ctx.sender()`'s `ErasedActorRef`. Under the design rules, a path the
+capability will send to is a typed path
+([R-0040](../contributing/design-rules.md#r-0040)), and a reference that is
+sent through is a typed proof
+([R-0039](../contributing/design-rules.md#r-0039)).
+
 Listener/session names live under the engine's lineage. They are not globally
 unique across engines and should be discovered from result/notification data,
 not guessed from hashes.

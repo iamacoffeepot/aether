@@ -15,6 +15,8 @@ use crate::mail::registry::effect::{
     RegistryEffectError, StartingCancellation,
 };
 use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
+#[cfg(feature = "wasm")]
+use crate::mail::registry::publication::{Admitted, ModuleSurface, admit};
 use crate::mail::view::Update;
 use crate::mail::{KindId, MailboxId};
 
@@ -75,6 +77,11 @@ impl Registry {
         let mut prepared_births = FxHashMap::<MailboxId, PendingBirth>::default();
         let mut prepared_cancellations = HashSet::<(MailboxId, ActivationToken)>::new();
         let mut promotions = Vec::<(MailboxId, RouteEndpoint)>::new();
+        // The publication table as this batch has staged it: cloned at the
+        // batch's first admitted publish, installed only once the whole batch
+        // commits (ADR-0241 §4).
+        #[cfg(feature = "wasm")]
+        let mut staged_publications = None;
 
         for effect in batch.effects {
             match effect {
@@ -426,11 +433,31 @@ impl Registry {
                     }
                     applied.push(RegistryApplied::Kind(id));
                 }
+                #[cfg(feature = "wasm")]
+                RegistryEffect::PublishModule(module) => {
+                    let surface = ModuleSurface::of(&module);
+                    let table = staged_publications.as_ref().unwrap_or(&inner.publications);
+                    let admitted = admit(
+                        module.hash(),
+                        &surface,
+                        |namespace| table.holder(namespace),
+                        |kind| staged_kind(&staged_kinds, inner, kind).map(|slot| Arc::clone(&slot.name)),
+                    )
+                    .map_err(RegistryEffectError::Admission)?;
+                    if admitted == Admitted::Publish {
+                        staged_publications.get_or_insert_with(|| inner.publications.clone()).publish(module, surface);
+                    }
+                    applied.push(RegistryApplied::Published);
+                }
             }
         }
 
         inner.next_activation_token = next_activation_token;
         let mut continuations = commit_staged(inner, staged_routes, staged_kinds, staged_pending);
+        #[cfg(feature = "wasm")]
+        if let Some(publications) = staged_publications {
+            inner.publications = publications;
+        }
         // The promoted route is Live now, so the mail parked behind its
         // `Starting` reservation continues to the endpoint the caller thread
         // just wired — in the order the owner observed it, ahead of anything

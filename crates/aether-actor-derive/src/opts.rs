@@ -35,19 +35,19 @@ pub struct ActorOpts {
     /// ADR-0230: actor types this actor depends on, from one
     /// `depends(A, B, …)` list. The list becomes `Declared::Depends`, and
     /// each listed type emits `impl DependsOn<R> for Self` at its position in
-    /// it (ADR-0231 §10) plus one `Dependency` inputs-manifest record, in list
-    /// order; the host refuses the load while any entry has no `Live` route.
-    /// Only
-    /// keyless (`One` / `Embedded`) actors are declarable — a keyed `R` is a
+    /// it (ADR-0231 §10). The pre-`init` check reads that list on both
+    /// transports (on wasm through the `Dependency` records `export!` writes
+    /// from it) and refuses the birth while any entry has no `Live` route.
+    /// Only keyless (`One` / `Embedded`) actors are declarable — a keyed `R` is a
     /// trait-bound compile error on the emitted impl, not a macro error here.
     pub depends: Vec<syn::TypePath>,
     /// ADR-0114: the inline children this Wasm actor spawns through the typed
     /// verbs, from one `spawns(A, B, …)` list. The list becomes
     /// `Declared::Spawns`, and each listed type emits `impl Spawns<C> for
-    /// Self` at its position in it (ADR-0231 §10), which the verbs require, and a
-    /// `Rebuildable<M>` bound on the hidden `__aether_listed_children::<M>`,
-    /// which every `export!` listing this actor calls for its own module, so
-    /// that `export!` must list every declared child.
+    /// Self` at its position in it (ADR-0231 §10), which the verbs require.
+    /// Every `export!` listing this actor requires that list to be listed in
+    /// its own module (`ListedIn`), so that `export!` must list every declared
+    /// child.
     pub spawns: Vec<syn::TypePath>,
     /// ADR-0166: this instanced Wasm actor may be composed beneath any Wasm
     /// parent exported from the same resident module.
@@ -210,8 +210,7 @@ fn parse_type_list_once(
 /// Parse one `option(A, B, …)` type list — `depends` (ADR-0230) or
 /// `spawns` (ADR-0114): at least one actor type path, comma-separated,
 /// trailing comma allowed, each type named once. Declaration order is kept,
-/// so it is the order of the emitted impl items and, for `depends`, the
-/// `Dependency` records.
+/// so it is the order of the emitted impl items and of the `Declared` list.
 /// `first` and `second` are the example types the error messages show.
 fn parse_type_list(
     meta: &meta::ParseNestedMeta,

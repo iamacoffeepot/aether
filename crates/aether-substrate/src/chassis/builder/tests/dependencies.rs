@@ -4,19 +4,21 @@
 //! before `init` at every birth site — the passive boot, the spawner, and
 //! the pumped-slot boot — naming both actors. A dependency on a pumped slot
 //! reserved at the Claim stage passes, and the build fails if that slot is
-//! never booted.
+//! never booted. The check reads the actor's own `Declared::Depends` list, so
+//! a hand-written declaration is checked as an emitted one is.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use aether_actor::Addressable;
+use aether_actor::{Addressable, Declared};
 
-use crate::actor::native::SpawnError;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::spawn::Subname;
+use crate::actor::native::{Dispatch, SpawnError};
 use crate::chassis::builder::Builder;
+use crate::mail::KindId;
 use crate::testing::{TestChassis, bare_substrate};
-use crate::{BootError, NativeActor, NativeInitCtx};
+use crate::{BootError, Manual, NativeActor, NativeInitCtx};
 
 pod_kind!(Probe { tag: u32 }, "test.deps.probe", 0xDE90_0001_0000_0001);
 
@@ -89,6 +91,52 @@ impl NativeActor for LonelyDependent {
     fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
         let _ = self;
     }
+}
+
+static HAND_WRITTEN_INIT_RAN: AtomicBool = AtomicBool::new(false);
+
+/// A native root actor no `#[actor]` builds: its `Declared` impl is the only
+/// statement of its dependency on [`AudioDep`].
+struct HandWrittenDependent;
+
+impl Addressable for HandWrittenDependent {
+    const NAMESPACE: &'static str = "test.deps.hand_written";
+    type Resolver = aether_actor::One;
+}
+
+impl aether_actor::Root for HandWrittenDependent {}
+
+impl aether_actor::Lifecycle<Self> for HandWrittenDependent {
+    type Config = ();
+    type Params = ();
+    type InitError = BootError;
+    type InitCtx<'a> = NativeInitCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a, Self>;
+
+    fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        HAND_WRITTEN_INIT_RAN.store(true, Ordering::SeqCst);
+        Ok(Self)
+    }
+}
+
+impl Dispatch<Self> for HandWrittenDependent {
+    fn dispatch(
+        _state: &mut Self,
+        _ctx: &mut NativeCtx<'_, Self, Manual>,
+        _kind: KindId,
+        _payload: &[u8],
+    ) -> Option<()> {
+        None
+    }
+}
+
+impl Declared for HandWrittenDependent {
+    type Depends = (AudioDep, ());
+    type Spawns = ();
+}
+
+impl NativeActor for HandWrittenDependent {
+    type State = Self;
 }
 
 struct OrderedDependent;
@@ -164,8 +212,29 @@ fn missing_declared_dependency_fails_build_before_init() {
     assert_eq!(registry.lookup(LonelyDependent::NAMESPACE), None, "a failed build leaves nothing claimed");
 }
 
+/// A native actor written without `#[actor]` is refused at birth, before its
+/// `init`, while a dependency its hand-written `Declared::Depends` lists is
+/// not `Live`: the check reads the actor's own list, not something only the
+/// macro emits.
+#[test]
+fn hand_written_declaration_is_checked_at_birth() {
+    let (registry, mailer) = bare_substrate();
+
+    let err = Builder::<TestChassis>::new(registry, mailer)
+        .with_actor::<HandWrittenDependent>(())
+        .build_passive()
+        .expect_err("a hand-written dependent without its dependency must fail the build");
+
+    let BootError::DependencyNotLive { actor, namespace } = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(actor, HandWrittenDependent::NAMESPACE);
+    assert_eq!(namespace, AudioDep::NAMESPACE);
+    assert!(!HAND_WRITTEN_INIT_RAN.load(Ordering::SeqCst), "refused before init ran");
+}
+
 /// An actor with two declared dependencies is refused when either one is
-/// missing, whichever order the inventory lists its declarations in.
+/// missing, whichever position its declaration list gives each.
 #[test]
 fn each_declared_dependency_is_checked() {
     let (registry, mailer) = bare_substrate();

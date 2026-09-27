@@ -177,6 +177,35 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// warning and `None`.
     #[must_use]
     pub fn send_envelope_tracked_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> Option<MailId> {
+        self.push_envelope_tracked(target, kind, bytes, self.outbound_parent(), self.outbound_root())
+    }
+
+    /// [`Self::send_envelope_tracked_to`] under an explicit `root` in place of
+    /// this handler's in-flight lineage, with no parent: the send a later
+    /// turn makes on behalf of the chain a deferred reply holds open. `None`
+    /// mints a fresh root, as a chain-root send does. The body of
+    /// [`TaskDone::forward_tracked`](crate::actor::native::TaskDone::forward_tracked).
+    pub(crate) fn send_envelope_tracked_under(
+        &self,
+        target: ErasedActorRef,
+        kind: KindId,
+        bytes: &[u8],
+        root: Option<MailId>,
+    ) -> Option<MailId> {
+        self.push_envelope_tracked(target, kind, bytes, None, root)
+    }
+
+    /// The push behind both tracked envelope sends: refuse an engine-only
+    /// `kind`, resolve the bytes' tag-1 fields, and push under `(parent,
+    /// root)`.
+    fn push_envelope_tracked(
+        &self,
+        target: ErasedActorRef,
+        kind: KindId,
+        bytes: &[u8],
+        parent: Option<MailId>,
+        root: Option<MailId>,
+    ) -> Option<MailId> {
         if refuse_engine_only(kind) {
             return None;
         }
@@ -187,8 +216,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             bytes,
             attachments: attachments.as_deref().unwrap_or_default(),
             count: 1,
-            parent_mail: self.outbound_parent(),
-            inherited_root: self.outbound_root(),
+            parent_mail: parent,
+            inherited_root: root,
         }))
     }
 

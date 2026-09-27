@@ -47,8 +47,9 @@ impl Registry {
     /// conflict")` is unreachable by construction.
     ///
     /// Direct write path — takes a [`BootAuthority`] like its descriptor
-    /// sibling (iamacoffeepot/aether#4161); `load_component` stages a
-    /// `RegistryBatch::register_kinds` through the ADR-0165 owner instead.
+    /// sibling (iamacoffeepot/aether#4161); a load or replace stages a
+    /// `RegistryBatch::publish_module` through the ADR-0165 owner instead,
+    /// which registers the module's kinds behind its admission.
     pub fn register_kind(&self, authority: &BootAuthority, name: impl Into<String>) -> KindId {
         let descriptor = bytes_kind(name.into());
         // A fresh `Bytes` descriptor can only conflict with a prior
@@ -72,8 +73,9 @@ impl Registry {
     ///
     /// Used by substrate boot (`descriptors::all()`). Direct write path —
     /// takes a [`BootAuthority`] so only boot can name it
-    /// (iamacoffeepot/aether#4156); `load_component` stages a
-    /// `RegistryBatch::register_kinds` through the ADR-0165 owner instead.
+    /// (iamacoffeepot/aether#4156); a load or replace stages a
+    /// `RegistryBatch::publish_module` through the ADR-0165 owner instead,
+    /// which registers the module's kinds behind its admission.
     ///
     /// # Panics
     /// Panics if the inner routing lock is poisoned — fail-fast per

@@ -69,6 +69,10 @@ impl aether_actor::Lifecycle<Self> for EchoCap {
     }
 }
 
+impl aether_actor::Declared for EchoCap {
+    type Depends = ();
+    type Spawns = ();
+}
 impl NativeActor for EchoCap {
     type State = Self;
 }

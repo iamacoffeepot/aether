@@ -153,16 +153,14 @@ pub const fn inputs_dependency_len(_resolver: u8, namespace: &str) -> usize {
     U32_WIDTH + U8_WIDTH + str_len(namespace)
 }
 
-/// Serialize an `InputsRecord::Dependency` into a fixed-size array sized
-/// by `inputs_dependency_len`. Exact aether-wire shape for
-/// `InputsRecord::Dependency { resolver, namespace }` — one
-/// `#[actor(depends(R))]` declaration.
+/// Serialize an `InputsRecord::Dependency` into `out` at `cursor`, returning
+/// the new cursor; the record spans `inputs_dependency_len` bytes. Exact
+/// aether-wire shape for `InputsRecord::Dependency { resolver, namespace }` —
+/// one entry of an actor's `Declared::Depends` list, which `export!` walks
+/// record by record into one section.
 #[must_use]
-pub const fn write_inputs_dependency<const N: usize>(resolver: u8, namespace: &str) -> [u8; N] {
-    let mut out = [0u8; N];
-    let mut pos = write_u32_le(5, &mut out, 0); // variant selector: Dependency
-    pos = write_u8(resolver, &mut out, pos);
-    pos = write_str(namespace, &mut out, pos);
-    let _ = pos;
-    out
+pub const fn write_inputs_dependency(resolver: u8, namespace: &str, out: &mut [u8], cursor: usize) -> usize {
+    let pos = write_u32_le(5, out, cursor); // variant selector: Dependency
+    let pos = write_u8(resolver, out, pos);
+    write_str(namespace, out, pos)
 }

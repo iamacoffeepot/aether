@@ -87,6 +87,10 @@ impl aether_actor::Lifecycle<Self> for RingRelay {
         Ok(config)
     }
 }
+impl aether_actor::Declared for RingRelay {
+    type Depends = ();
+    type Spawns = ();
+}
 impl NativeActor for RingRelay {
     type State = Self;
 }
@@ -172,6 +176,10 @@ impl aether_actor::Lifecycle<Self> for HoldRelay {
     fn init((): Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self)
     }
+}
+impl aether_actor::Declared for HoldRelay {
+    type Depends = ();
+    type Spawns = ();
 }
 impl NativeActor for HoldRelay {
     type State = Self;

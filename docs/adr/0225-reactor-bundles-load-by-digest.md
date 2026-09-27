@@ -53,7 +53,10 @@ bundle side of that boundary.
    the raw sha256 of the WASM bytes. Reactor-set members are
    `Head<OpaqueBytes>`, so this is the digest a head resolves to. `config` is
    empty, and `export` is `Some("aether.bloomery.bundle")`. The root's
-   address is `aether.component/aether.embedded:<digest>`.
+   address is `aether.component/aether.embedded:<digest>`. The root is
+   declared at `aether.bloomery.bundle`, which `export` still names, and
+   publishes as `aether.bloomery.bundle.<module hash>`, because every bundle
+   is content-addressed ([ADR-0241](0241-code-is-published-not-loaded.md) §3).
 
 2. **The root is one actor.** It owns the views and calls each reactor's
    `evaluate` directly. There are no per-reactor peer actors, no per-event
@@ -132,7 +135,10 @@ bundle side of that boundary.
    `aether_bloomery_reactor::Root`, so the generated root stays a thin
    shell. Each role keeps its own state inside the root, so a poisoned
    reactor stays poisoned in the reactor state and the bundle's programs
-   keep answering.
+   keep answering. The root is declared at `aether.bloomery.bundle`, which
+   the export selector still names, and publishes as
+   `aether.bloomery.bundle.<module hash>`: the generator marks every bundle
+   content-addressed ([ADR-0241](0241-code-is-published-not-loaded.md) §3).
 
 9. **Retiring an instance only stops routing to it.** The driver stops
    routing events to a retired instance. The instance is never dropped,
