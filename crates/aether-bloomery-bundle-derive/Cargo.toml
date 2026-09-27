@@ -18,6 +18,8 @@ proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+# `CONTENT_ADDRESSED_SECTION`, the marker every generated root emits (ADR-0241 §3).
+aether-data = { path = "../aether-data" }
 
 [dev-dependencies]
 aether-actor = { path = "../aether-actor" }

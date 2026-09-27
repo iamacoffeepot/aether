@@ -88,8 +88,11 @@ Ordinary actors have no extra extension; `#[program]` adds
 `aether_bloomery_program` and `#[reactor]` adds `aether_bloomery_reactor`.
 `bundle` keeps ordinary actors in `exports` and replaces every program and
 reactor with one root exported as `aether.bloomery.bundle`
-(`BUNDLE_NAMESPACE`), at the first one's position. The bundle driver loads
-that root as `aether.component/aether.embedded:<key>-<digest>` (short path
+(`BUNDLE_NAMESPACE`), at the first one's position. Every bundle is
+content-addressed (see [Publishing a module](#publishing-a-module)), so the
+root publishes as `aether.bloomery.bundle.<module hash>` while
+`export: Some("aether.bloomery.bundle")` still selects it. The bundle driver
+loads that root as `aether.component/aether.embedded:<key>-<digest>` (short path
 `aether.component/:<key>-<digest>`), the name `UnitBundle::name` builds from
 the unit's key and the bundle digest (ADR-0240 D4). A module provides
 programs, reactors, or both; neither is a compile error. With programs, the
@@ -121,7 +124,7 @@ mailbox:
 
 | kind | does | reply |
 |---|---|---|
-| `aether.component.load` | compile + instantiate the wasm, register its kinds, publish a mailbox | `LoadResult` |
+| `aether.component.load` | compile, publish its module (admission), register its kinds, instantiate, publish a mailbox | `LoadResult` |
 | `aether.component.drop` | tear down the guest and clear its capabilities; leave the trampoline slot empty | `DropResult` |
 | `aether.component.replace` | hot-swap the wasm behind a stable mailbox | `ReplaceResult` |
 
@@ -150,9 +153,9 @@ receipt, and an address with no live component answers `Err` naming it.
 The engine compiles each distinct module, and parses its custom sections, once
 per content hash (the BLAKE3 hash of its wasm bytes). Every load, module boot,
 sibling spawn, and replace of the same bytes shares that one entry, which lives
-while any of them holds it. The wasm bytes are not kept once the module is
-built, and each `aether.asset.*` section is checked in as its own blob
-([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §2).
+while its publication or any of them holds it. The wasm bytes are not kept once
+the module is built, and each `aether.asset.*` section is checked in as its own
+blob ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §2).
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the
@@ -178,6 +181,49 @@ takes the **path** and reads the bytes for you (tool JSON never carries the wasm
 buffer; the wire kind does) and returns `{hash, name}` to load by. The component's
 kind vocabulary travels inside the wasm's `aether.kinds` custom section ([ADR-0028](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0028-component-embedded-kind-manifest.md)), so the loader declares nothing —
 the substrate reads the types directly off the binary.
+
+### Publishing a module
+
+The registry owner keeps a **publication table**: which code implements each
+namespace the engine publishes
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §3).
+Every native actor namespace linked into the binary is published when the
+registry is built. Every load and every replace publishes its module before
+anything spawns or is swapped, through one owner batch that runs admission (§4)
+and then registers the module's kinds, all or nothing. Admission reads
+manifests only and refuses the whole module at the first failing namespace:
+
+- **Namespace.** No exported namespace may be native. A module that holds one
+  of the candidate's exported namespaces is its predecessor, and the candidate
+  must export every namespace each predecessor exports: a namespace, once
+  published, stays published.
+- **Contract growth.** Each exported namespace keeps its predecessor's rows and
+  `#[fallback]`; rows may only be added. Each private child type
+  (`export!(private = [..])`) a predecessor declares must still be declared,
+  privately or as an export, with rows that only grow, so an inline child's
+  alias never advertises a row its code no longer handles.
+- **Same hash.** Publishing bytes whose hash already holds every one of its
+  namespaces changes nothing; its kinds register again, which is idempotent.
+
+**Content-addressed modules.** A module carrying the `aether.content_addressed`
+custom section (`CONTENT_ADDRESSED_SECTION`, one version byte whose presence is
+the whole signal) publishes each namespace it exports as `NS.<hash>`, its
+BLAKE3 module hash in 64 lowercase hex. Every build is then its own publication,
+so no build is another's predecessor and the rules above never compare two
+builds; loading the same bytes again is the same-hash no-op. Inside the module
+each type keeps its declared `NS`, which the export selector names. A
+content-addressed module may export no namespace longer than 191 bytes, so
+`NS.<hash>` stays one 256-byte segment; a longer one fails check-in, naming it.
+The bundle generator marks every bundle content-addressed, so a bundle root
+publishes as `aether.bloomery.bundle.<module hash>`, and each built bundle adds
+one publication.
+
+A refusal answers `LoadResult::Err` or `ReplaceResult::Err` with
+`module publish refused: <namespace> … (<rule>)`, and nothing is spawned or
+forwarded. A replace publishes too, so a replacement's new kinds register. A
+load that publishes and is then refused at spawn (an unmet dependency, a failed
+module boot) leaves its module published: publish and spawn are separate steps.
+A published module stays resident for the engine's life.
 
 ## Boot configuration across the boundary
 
@@ -350,6 +396,9 @@ its hooks ran does not undo them ([ADR-0016](https://github.com/iamacoffeepot/ae
 
 - candidate compile, manifest, or export-selection errors happen before the old
   instance is touched;
+- a candidate module that publish admission refuses (see
+  [Publishing a module](#publishing-a-module)) is never forwarded to the
+  trampoline;
 - a candidate whose hosted type drops or changes a handler row of the type the
   slot hosts, or drops its `#[fallback]`, is refused before the old instance is
   touched; added rows and an added fallback are allowed ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §5);

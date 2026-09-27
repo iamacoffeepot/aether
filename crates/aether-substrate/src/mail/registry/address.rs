@@ -122,9 +122,32 @@ impl From<ScopePathError> for AddressResolutionError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Cardinality {
+pub(super) enum Cardinality {
     Singleton,
     Instanced,
+}
+
+/// Every native actor namespace this binary links, with its cardinality: a
+/// singleton [`NameEntry`] or an instanced `":{subname}"` [`TemplateEntry`]
+/// under [`MAILBOX_DOMAIN`]. Only the native `#[actor]` derive submits these
+/// entries, so a guest type never appears here.
+///
+/// The one filter over the link-time name inventory: the address index reads
+/// it for cardinality, and the publication table (ADR-0241 §3) for the
+/// namespaces the binary publishes, so the two can never disagree about which
+/// namespaces are native.
+pub(super) fn native_cardinality_facts() -> impl Iterator<Item = (&'static str, Cardinality)> {
+    let singletons = name_entries()
+        .filter(|entry| entry.domain == MAILBOX_DOMAIN)
+        .map(|entry: &'static NameEntry| (entry.name, Cardinality::Singleton));
+    let instanced = template_entries()
+        .filter(|entry| {
+            entry.domain == MAILBOX_DOMAIN
+                && entry.template == ":{subname}"
+                && matches!(entry.param, ParamKind::Dynamic)
+        })
+        .map(|entry: &'static TemplateEntry| (entry.prefix, Cardinality::Instanced));
+    singletons.chain(instanced)
 }
 
 /// The declared children beneath one parent, keyed by namespace and split by
@@ -238,25 +261,10 @@ struct CardinalityFact<'a> {
 
 impl AddressIndex {
     pub(super) fn from_inventory() -> Result<Self, ActorAddressInventoryError> {
-        let singleton_facts =
-            name_entries().filter(|entry| entry.domain == MAILBOX_DOMAIN).map(|entry: &'static NameEntry| {
-                CardinalityFact { namespace: entry.name, cardinality: Cardinality::Singleton }
-            });
-        let instanced_facts = template_entries()
-            .filter(|entry| {
-                entry.domain == MAILBOX_DOMAIN
-                    && entry.template == ":{subname}"
-                    && matches!(entry.param, ParamKind::Dynamic)
-            })
-            .map(|entry: &'static TemplateEntry| CardinalityFact {
-                namespace: entry.prefix,
-                cardinality: Cardinality::Instanced,
-            });
-
         Self::build(
             root_entries().map(RootFact::from),
             child_entries().map(ChildFact::from),
-            singleton_facts.chain(instanced_facts),
+            native_cardinality_facts().map(|(namespace, cardinality)| CardinalityFact { namespace, cardinality }),
         )
     }
 

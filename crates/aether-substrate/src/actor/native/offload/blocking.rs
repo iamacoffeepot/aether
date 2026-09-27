@@ -47,7 +47,7 @@ use std::marker::PhantomData;
 use std::sync::{Mutex, Weak};
 use std::thread;
 
-use aether_actor::{ActorRef, HandlesKind, ReplyMode, Single};
+use aether_actor::{ActorRef, ErasedActorRef, HandlesKind, ReplyMode, Single};
 use aether_data::name_inventory::EngineOnlyKind;
 use aether_data::{ActorMail, Kind, KindId, MailId};
 
@@ -531,6 +531,34 @@ impl<O, C> TaskDone<O, C> {
     {
         ctx.push_handed_off(target.erase(), payload, self.hold_root(), self.reply_to);
         self.release();
+    }
+
+    /// Forward already-encoded `bytes` of `kind` to `target` as a tracked
+    /// request whose reply comes back to this actor, under the root the
+    /// carried hold keeps open, then release the hold. The forward takes its
+    /// settlement count before the release, so the caller's chain stays open
+    /// until `target` answers and this actor answers the caller from that
+    /// reply's turn, which inherits the same root.
+    ///
+    /// Returns the forward's [`MailId`], whose correlation keys the reply, or
+    /// hands the completion back unresolved when the send is refused (an
+    /// engine-only `kind`, ADR-0233, or bytes whose tag-1 fields do not
+    /// resolve), so the caller can still be answered.
+    ///
+    /// Its consumer is the component host, which forwards a replace to the
+    /// trampoline once the replacement module's publish commits (ADR-0241 §4).
+    pub fn forward_tracked<A, M: ReplyMode>(
+        mut self,
+        ctx: &NativeCtx<'_, A, M>,
+        target: ErasedActorRef,
+        kind: KindId,
+        bytes: &[u8],
+    ) -> Result<MailId, Self> {
+        let Some(mail_id) = ctx.send_envelope_tracked_under(target, kind, bytes, self.hold_root()) else {
+            return Err(self);
+        };
+        self.release();
+        Ok(mail_id)
     }
 
     /// Release the hold **without** sending any reply — the sanctioned
@@ -1285,6 +1313,42 @@ mod tests {
         assert_eq!(done.context(), "second");
         done.release_no_reply();
         assert_eq!(counter.held_open(root), 0, "terminal successor release closes the one continuous hold");
+    }
+
+    /// Catches a forward pushed on the completion turn's own unchained
+    /// lineage instead of the held root: the caller's chain would settle at
+    /// the release, before the forwarded request is answered.
+    #[test]
+    fn forward_tracked_sends_under_the_held_root_and_releases_the_hold() {
+        use crate::testing::registered_ref;
+
+        let (registry, mailer) = bare_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let root = root_id(19);
+        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
+        let actor_mailbox =
+            registry.register_inbox(&boot_authority(), "test.deferred_completion.forward", forward_to(wake_tx));
+        let (target_tx, target_rx) = mpsc::channel::<OwnedDispatch>();
+        let target = registered_ref(&registry, "test.deferred_completion.forward_target", forward_to(target_tx));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
+
+        let completion =
+            binding.dispatch_arm::<Answer, _>(Some(mailer.acquire_settlement_hold(root)), Source::NONE, ());
+        let id = completion.dispatch_id();
+        completion.complete(Answer { value: 1 });
+        assert_eq!(await_wake(&wake_rx), id);
+        let done = binding.dispatch_take::<Answer, ()>(id).expect("the completion remains takeable");
+
+        let ctx = NativeCtx::new(&binding, Source::NONE, None, None);
+        let forwarded = done
+            .forward_tracked(&ctx, target, Answer::ID, &Answer { value: 2 }.encode_into_bytes())
+            .unwrap_or_else(|_| panic!("an actor kind forwards"));
+        assert_eq!(counter.held_open(root), 0, "the forward discharges the hold");
+        binding.flush_outbound();
+
+        let delivered = target_rx.recv_timeout(Duration::from_secs(2)).expect("the forward is delivered");
+        assert_eq!(delivered.root, Some(root), "the forward joins the chain the hold kept open");
+        assert_eq!(delivered.mail_id, Some(forwarded));
     }
 
     #[test]

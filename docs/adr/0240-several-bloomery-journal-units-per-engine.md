@@ -400,29 +400,13 @@ This amends ADR-0226:
   uses. Roots are still never dropped by the driver, and the name is unique
   beneath `aether.component` because unit keys are unique per engine.
 
-A root keeps the `aether.embedded` namespace every loaded component has.
-A dedicated namespace (`aether.component/aether.bloomery.bundle:<key>-<digest>`)
-would put the reason in the address itself, but a load cannot choose its
-namespace:
-
-- The trampoline is one native type whose `NAMESPACE` is the constant
-  `EMBEDDED_SCOPE` (`crates/aether-component/src/trampoline/runtime/mod.rs:79`,
-  `crates/aether-actor/src/model/mod.rs:102`). A staged birth names its node
-  `ActorId::instanced(A::NAMESPACE, subname)`
-  (`crates/aether-substrate/src/actor/native/spawn/staged.rs:121-122`), and
-  `LoadComponent` carries only the subname and the export.
-- One Rust type owns one namespace (`try_claim_namespace` in
-  `crates/aether-substrate/src/actor/native/spawn/activation.rs:200`), so a
-  second namespace needs a second trampoline type.
-- The guest's `Embedded` resolver folds `instanced(EMBEDDED_SCOPE, …)`
-  (`crates/aether-actor/src/model/mod.rs:119`); the host's inline-child and
-  sibling spawns use `TRAMPOLINE_NAMESPACE`
-  (`crates/aether-substrate/src/actor/wasm/host_fns.rs`); and the registry
-  marks a mailbox a trampoline when its leaf segment starts with
-  `aether.embedded:` (`crates/aether-substrate/src/mail/registry/names.rs:61`).
-  A second trampoline type would have to be threaded through all three.
-
-The dedicated namespace is deferred (D9).
+The root's code publishes as `aether.bloomery.bundle.<module hash>`
+(ADR-0241 §3): every bundle is content-addressed, so every built bundle is its
+own publication, and two units on one bundle share that publication. A unit
+moving to a new bundle spawns the new root and closes its old one. The load
+name stays `UnitBundle::name(key, digest)` until ADR-0241 step 3 spawns the
+root as `aether.bloomery.bundle.<module hash>:<key>`, when `UnitBundle::name`
+retires and a unit key may take a whole 256-byte segment.
 
 ### D5. Shared code, per-unit instances (serves I-2, I-4, I-7)
 
@@ -608,7 +592,7 @@ units importing one environment converge on one image.
 | `UnitKey`, `UnitBundle::name` | in `aether-bloomery-kinds` beside `Digest` (D4). The driver's only way to name a bundle root. |
 | `aether-bloomery-journal`, `aether-bloomery-driver` | split per ADR-0122: an always-on, `no_std` identity (the marker, its handled kinds and contract rows, `UnitMember`) and a `runtime` feature carrying the actor, `aether-substrate`, and `rusqlite`. |
 | Bootstrap config | `journal` and `driver` paths are replaced by `units: Vec<UnitKey>`. At `wire` it writes each unit's `ActorPath<JournalActor>` and `ActorPath<BundleDriver>` from the types and the key and resolves each with `WasmCtx::resolve` to an `ActorRef`; every send is `send_to(ActorRef<R>, &K)`, kind-checked. That includes `aether.bloomery.driver.call`, which the driver answers from a manual handler (`on_call`, `crates/aether-bloomery-driver/src/actor/mod.rs`); a protocol-typed path could not carry it, which is why the bootstrap names the driver by actor type (ADR-0231 §3). Its journal sends, `ReadHead`, `Publish`, and `ReadArtifact`, land on single handlers (`crates/aether-bloomery-journal/src/actor.rs`). Its `Import`s name the unit's journal as `source`, `ActorPath::<JournalActor>::instance(&key).narrow::<ArtifactStorage>()` (D7). |
-| External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. An operator's `Import` names the unit's journal as its `source` (D7). A unit's bundle root is `aether.component/aether.embedded:<key>-<digest>`, or its short path `aether.component/:<key>-<digest>`. |
+| External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. An operator's `Import` names the unit's journal as its `source` (D7). A unit's bundle root is `aether.component/aether.embedded:<key>-<digest>`, or its short path `aether.component/:<key>-<digest>`; from ADR-0241 step 3 it is `aether.bloomery.bundle.<module hash>:<key>`. |
 
 `resolve` is one verb, and each arm lands with a named production consumer:
 the guest arm over an `ActorPath<R>` serves the bootstrap, and the native
@@ -630,12 +614,6 @@ consumers and for guests that are handed text.
   keeps the driver from dropping roots, so the dropping actor is the
   teardown's to name.
 - Authenticating journal writes (ADR-0226), now per unit.
-- A dedicated namespace for bundle roots,
-  `aether.component/aether.bloomery.bundle:<key>-<digest>`, so the address
-  itself shows why the root exists. A load cannot choose its namespace
-  today (D4 lists the code); it needs a second trampoline type and the
-  embedded resolver, inline-child spawns, and trampoline categorisation to
-  accept it.
 - A per-unit component host (rejected for now below). It is the route if
   dropping a unit by subtree ever matters.
 

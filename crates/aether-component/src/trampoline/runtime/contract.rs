@@ -50,17 +50,14 @@ pub(super) fn contract_refusal(
 
 /// The contract every actor type a module can spawn inline publishes, keyed
 /// by its actor-type tag (`ActorId::singleton(NAMESPACE)`): the exported
-/// groups, then the private children of `aether.kinds.inputs.private`. The
-/// implicit group of a single-actor module takes the module's namespace.
+/// groups, then the private children of `aether.kinds.inputs.private`, each
+/// under the namespace the manifest resolves for it.
 pub(super) fn inline_contracts(manifest: &ModuleManifest) -> Vec<(u64, RouteContract)> {
     manifest
-        .actors()
-        .iter()
-        .chain(manifest.private_actors())
-        .filter_map(|group| {
-            group.namespace.as_deref().or_else(|| manifest.namespace()).map(|namespace| {
-                (ActorId::singleton(namespace).0, RouteContract::from_capabilities(&group.capabilities))
-            })
+        .exported_groups()
+        .chain(manifest.private_groups())
+        .map(|(namespace, group)| {
+            (ActorId::singleton(namespace).0, RouteContract::from_capabilities(&group.capabilities))
         })
         .collect()
 }

@@ -78,7 +78,11 @@ Bloomery rewrite has not been deployed.
 5. **Addressing.** The driver loads each bundle once per engine with
    `aether.component.load` (`LoadComponent`), using `name` set to the
    bundle digest in lowercase hex and `export` set to the generated root
-   namespace `aether.bloomery.bundle`. The root's address is
+   namespace `aether.bloomery.bundle`. The root is declared at that
+   namespace, which `export` still names, and publishes as
+   `aether.bloomery.bundle.<module hash>`, because every bundle is
+   content-addressed ([ADR-0241](0241-code-is-published-not-loaded.md) §3).
+   The root's address is
    `aether.component/aether.embedded:<digest>`. For each `Invoke`, the
    root spawns an inline child
    ([ADR-0114](0114-inline-child-actors.md), `spawn_inline_child`) with

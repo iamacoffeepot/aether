@@ -44,8 +44,8 @@ use std::collections::HashMap;
 
 use aether_actor::{DependencyResolver, Embedded, One};
 use aether_data::{
-    ACTOR_LINEAGE_SECTION, ACTOR_LINEAGE_SECTION_VERSION, ActorLineageRecord, EnumVariant, INPUTS_SECTION,
-    INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION, KindDescriptor, KindLabels, KindShape,
+    ACTOR_LINEAGE_SECTION, ACTOR_LINEAGE_SECTION_VERSION, ActorLineageRecord, CONTENT_ADDRESSED_SECTION, EnumVariant,
+    INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION, KindDescriptor, KindLabels, KindShape,
     LABELS_SECTION_VERSION, LabelNode, NamedField, PRIVATE_INPUTS_SECTION, SchemaCell, SchemaShape, SchemaType,
     VariantLabel, canonical::kind_id_from_shape, wire,
 };
@@ -243,6 +243,24 @@ pub fn read_no_default_marker(wasm: &[u8]) -> bool {
             continue;
         };
         if reader.name() == NO_DEFAULT_SECTION {
+            return true;
+        }
+    }
+    false
+}
+
+/// Return whether the module carries the ADR-0241 §3
+/// [`CONTENT_ADDRESSED_SECTION`] marker, so each namespace it exports
+/// publishes qualified by the module's hash. The payload is a single version
+/// byte the host does not interpret; presence of the section is the whole
+/// signal.
+#[must_use]
+pub fn read_content_addressed_marker(wasm: &[u8]) -> bool {
+    for payload in Parser::new(0).parse_all(wasm) {
+        let Ok(Payload::CustomSection(reader)) = payload else {
+            continue;
+        };
+        if reader.name() == CONTENT_ADDRESSED_SECTION {
             return true;
         }
     }
