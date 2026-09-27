@@ -336,7 +336,9 @@ pub enum RegistryEffect {
     PublishAlias(PreparedAliasRoute),
     /// Retire one logical inline-child alias (ADR-0114 §2) when its child is
     /// despawned: the route goes `Dropped`, so the address stops resolving
-    /// to the host's slot and reports as retired rather than absent.
+    /// to the host's slot and reports as retired rather than absent. The
+    /// retired alias keeps its name for good: a later `PublishAlias` of the
+    /// same name conflicts with it (ADR-0079 §7).
     ///
     /// Deliberately narrower than [`Self::DropMailbox`], which this could
     /// otherwise reuse. The id crosses from a guest, so "this effect can only
@@ -377,7 +379,17 @@ pub enum RegistryEffect {
         id: MailboxId,
         contract: RouteContract,
     },
+    /// Retire a `Live` or `Alias` route to `Dropped`: the route keeps its
+    /// proven name, so a reference minted against it still names its path
+    /// (ADR-0230), and the name is never registered again (ADR-0079 §7).
     DropMailbox(MailboxId),
+    /// Remove a `Live` route record outright, so its name can be claimed
+    /// again. The edge for a claim whose birth unwound before any actor
+    /// could observe it (ADR-0079 §5: registration happens iff init
+    /// succeeds). Constructed only by `Registry::withdraw_claim`, which
+    /// takes a `BootAuthority`, so only pre-seal code reaches it; any other
+    /// route state refuses.
+    WithdrawClaim(MailboxId),
     InstallSeize {
         id: MailboxId,
         handle: SeizeHandle,
@@ -437,6 +449,9 @@ pub enum RegistryApplied {
     StartingCancellation(StartingCancellation),
     Mailbox(MailboxId),
     Dropped(String),
+    /// Outcome of [`RegistryEffect::WithdrawClaim`]: the claim's route
+    /// record is gone.
+    ClaimWithdrawn(MailboxId),
     /// Outcome of [`RegistryEffect::RetireAlias`]: `true` when a live alias
     /// route was retired, `false` when the id named no alias to retire.
     AliasRetired(bool),

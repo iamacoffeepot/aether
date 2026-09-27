@@ -327,7 +327,10 @@ impl<'a> DriverCtx<'a> {
                 slot
             }
             Err(e) => {
-                self.inner.unclaim_mailbox(mailbox_id);
+                // The passives are already dispatching and may hold a
+                // `depends` reference to this claim, so the route retires to
+                // `Dropped` and keeps the name that reference answers to.
+                self.inner.retire_claim(mailbox_id);
                 self.inner.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
                 return Err(e);
             }

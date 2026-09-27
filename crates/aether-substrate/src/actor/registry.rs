@@ -23,6 +23,7 @@
 #![allow(clippy::significant_drop_tightening)]
 
 use std::any::TypeId;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
@@ -234,20 +235,20 @@ impl ActorRegistry {
         }
     }
 
-    /// Insert a `Live` actor entry under `id`. Returns `Err(())` if a
-    /// `Live` entry already exists at `id` (caller must check
-    /// `is_tombstoned` separately for the retired-name case). Used by
-    /// the spawn primitive after init succeeds.
+    /// Insert a `Live` actor entry under `id`, which must be empty.
+    /// Returns `Err(())` for any occupied slot: a `Starting` or `Live`
+    /// entry is a collision, and a `Dead` one is a retired name, which is
+    /// never registered again (ADR-0079 §7). The spawn primitive already
+    /// refuses a tombstoned id before it gets here; this holds the same
+    /// rule in the actor registry itself. Used by the spawn primitive
+    /// after init succeeds.
     pub(crate) fn insert_live(&self, id: MailboxId, sender: Arc<Sender<Envelope>>, type_id: TypeId) -> Result<(), ()> {
-        let mut actors = self.actors.write().expect("actors lock poisoned; fail-fast per ADR-0063");
-        if matches!(actors.get(&id), Some(ActorEntry::Starting { .. } | ActorEntry::Live { .. })) {
-            Err(())
-        } else {
-            // `Dead` slot or empty: install the live entry. Phase 4
-            // populates `Dead` on close, but Phase 3 only ever sees
-            // empty slots.
-            actors.insert(id, ActorEntry::Live { sender, type_id });
-            Ok(())
+        match self.actors.write().expect("actors lock poisoned; fail-fast per ADR-0063").entry(id) {
+            Entry::Occupied(_) => Err(()),
+            Entry::Vacant(slot) => {
+                slot.insert(ActorEntry::Live { sender, type_id });
+                Ok(())
+            }
         }
     }
 
@@ -676,6 +677,22 @@ mod tests {
         let second = r.close_actor(target);
         assert!(first.is_empty(), "no monitors registered");
         assert!(second.is_empty(), "no replay of watchers on second call");
+    }
+
+    /// A closed actor's name is never registered again (ADR-0079 §7): a
+    /// regression that installs over the `Dead` slot would revive the id
+    /// under a new actor.
+    #[test]
+    fn insert_live_refuses_a_closed_slot() {
+        struct Stub;
+        let r = ActorRegistry::new();
+        let target = MailboxId(2);
+        insert_live_stub(&r, target);
+        let _ = r.close_actor(target);
+
+        let (tx, _rx) = mpsc::channel::<Envelope>();
+        assert!(r.insert_live(target, Arc::new(tx), TypeId::of::<Stub>()).is_err());
+        assert!(!r.is_live_at(target), "the closed slot stays dead");
     }
 
     /// Tripwire: a register that races a close never leaves a `monitors_of`

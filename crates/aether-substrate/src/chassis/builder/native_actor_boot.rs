@@ -206,10 +206,14 @@ where
             Err(e) => {
                 // A::init consumed `config` + `params`, so we can't restore
                 // the Claimed variant. Inline the same cleanup
-                // `cleanup_after_failure` would do for Claimed: release
-                // the mailbox + namespace claim, then let `resources`
-                // drop at end of scope (closing transport + sender).
-                ctx.unclaim_mailbox(resources.mailbox_id);
+                // `cleanup_after_failure` would do for Claimed: withdraw
+                // the mailbox claim and release the namespace claim, then
+                // let `resources` drop at end of scope (closing transport +
+                // sender). The failed init pass aborts the whole boot before
+                // any dispatcher runs or any `wire` mail carries the id, so
+                // nothing can still name the claim, and a corrected retry
+                // boots under the same name (ADR-0079 §5).
+                ctx.withdraw_claim(resources.mailbox_id);
                 ctx.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
                 drop(resources);
                 // State stays `Transitioning` — no further work for
@@ -344,10 +348,19 @@ where
             // of this match arm — dropping `transport` closes the
             // installed receiver, dropping `mailbox_sender` closes the
             // channel.
-            BootState::Claimed { resources, .. }
-            | BootState::Initialized { resources, .. }
-            | BootState::Wired { resources, .. } => {
-                ctx.unclaim_mailbox(resources.mailbox_id);
+            //
+            // Before `wire` ran, the boot is aborting ahead of its spawn
+            // pass: no dispatcher runs and no mail carries the id, so the
+            // claim is withdrawn and its name stays free for a retry.
+            BootState::Claimed { resources, .. } | BootState::Initialized { resources, .. } => {
+                ctx.withdraw_claim(resources.mailbox_id);
+                ctx.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
+            }
+            // After `wire`, mail stamped with the id may already sit in a
+            // draining peer's inbox, so the route retires to `Dropped` and
+            // keeps the name that mail's sender still answers to (#6656).
+            BootState::Wired { resources, .. } => {
+                ctx.retire_claim(resources.mailbox_id);
                 ctx.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
             }
         }

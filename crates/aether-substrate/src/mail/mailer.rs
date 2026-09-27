@@ -411,10 +411,11 @@ impl Mailer {
     /// # Panics
     ///
     /// When the route table holds no record for `reference`: the registry
-    /// mints a reference only for a route that holds a record, keeps that
-    /// route's proven name through `Dropped`, and removes a route only when
-    /// a `Starting` reservation is cancelled, so a missing record is a broken
-    /// invariant (ADR-0063).
+    /// mints a reference only for a route that holds a record and keeps that
+    /// route's proven name through `Dropped`. A route leaves the table only
+    /// when a `Starting` reservation is cancelled, or a claim is withdrawn
+    /// before any actor could have observed it; neither follows a mint that
+    /// survives, so a missing record is a broken invariant (ADR-0063).
     pub(crate) fn actor_path(&self, reference: ErasedActorRef) -> ErasedActorPath {
         self.registry
             .actor_path(reference)

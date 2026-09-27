@@ -46,8 +46,10 @@ impl fmt::Display for NameConflict {
 
 impl error::Error for NameConflict {}
 
-/// Reasons `Registry::drop_mailbox` can refuse. Distinct from the
-/// post-drop dispatch log, which the scheduler handles independently.
+/// Reasons `Registry::drop_mailbox` or `Registry::withdraw_claim` can
+/// refuse. Distinct from the post-drop dispatch log, which the scheduler
+/// handles independently. `AlreadyDropped` is also a withdrawal's refusal
+/// of a retired route, whose name stays spent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropError {
     UnknownId(MailboxId),

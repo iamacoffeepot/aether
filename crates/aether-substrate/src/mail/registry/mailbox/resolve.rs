@@ -320,9 +320,10 @@ impl Registry {
 
     /// The canonical path of the route `actor` proves, read from the
     /// published view. Every lifecycle answers, `Dropped` included: a route
-    /// keeps its proven name after its actor departs, a boot or spawn that
-    /// unwinds retires its route to `Dropped` rather than removing it, and
-    /// only a cancelled `Starting` reservation leaves the table.
+    /// keeps its proven name after its actor departs. A route leaves the
+    /// table only when a `Starting` reservation is cancelled, or a claim is
+    /// withdrawn before any actor could have observed it. Neither follows a
+    /// mint that survives.
     /// The crate-private path behind
     /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
     pub(crate) fn actor_path(&self, actor: ErasedActorRef) -> Option<ErasedActorPath> {

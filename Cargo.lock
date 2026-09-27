@@ -1010,6 +1010,7 @@ dependencies = [
  "aether-data",
  "aether-harness-fleet",
  "aether-kinds",
+ "aether-rpc",
  "aether-substrate",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",

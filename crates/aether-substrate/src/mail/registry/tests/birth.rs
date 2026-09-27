@@ -329,6 +329,30 @@ fn starting_tokens_are_unique_stale_safe_and_transactional() {
     assert_eq!(registry.lookup(name), Some(id), "stale cancellation cannot consume the newer reservation");
 }
 
+/// A retired name never reserves again (ADR-0079 §7): a regression that
+/// restores the same-name `Dropped` reuse arm lets the reservation through.
+#[test]
+fn reserving_over_a_dropped_route_of_the_same_name_is_refused() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
+    let name = "retired-reservation";
+    let id = registry.register_inbox(&auth(), name, noop_handler());
+    registry.drop_mailbox(&auth(), id).expect("the live route retires");
+
+    let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
+    owner.run_once();
+
+    assert!(matches!(reserved.wait_timeout(Duration::from_millis(100)).unwrap(), Err(RegistryEffectError::Name(_))));
+    assert!(matches!(registry.entry_at(id), Some(MailboxEntry::Dropped)), "the tombstone stays");
+}
+
 #[test]
 fn starting_parks_fifo_and_owner_close_routes_every_accepted_mail_once() {
     let registry = Arc::new(Registry::new());
