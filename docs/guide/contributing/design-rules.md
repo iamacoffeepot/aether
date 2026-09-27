@@ -270,6 +270,41 @@ no codec and a description is what crosses.
   (the decode-context axis, the three reach levels, and a kind's reach the
   narrowest of its fields: the direction is decided and the mechanism is
   pending there).
+- **Superseded by:** [R-0042](#r-0042)
+
+### R-0042: Give every kind an explicit reach and keep a raw mailbox id off the wire {#r-0042}
+
+A kind is placed on two axes. The first is whether its decode needs a decode
+context: a kind is contextual or non-contextual. The second is its reach,
+how far its bytes may travel, one of three levels, narrowest first:
+
+- **Actor:** bytes the same actor encodes and decodes, such as a stored
+  request context.
+- **Engine:** mail between actors in one engine session. Verified references
+  may travel here.
+- **Wire:** another process, saved state, or the wire. Basic types and some
+  special types travel here.
+
+A kind's reach is the narrowest reach among its fields, derived through
+marker traits its fields implement, with no per-kind flag or attribute. A raw
+`MailboxId` has engine reach, so a kind that carries one never reaches the
+wire; which kinds may carry one is the door rule's question
+([R-0041](#r-0041)). A description, an actor path, crosses where a reference
+cannot, and the receiver proves it again on its side.
+
+This rule records a direction that #6894 implements; it is not built on
+`main`. Until #6894 lands, no kind carries a reach, so proven references keep
+no codec and a description is what crosses.
+
+- **Why:** whether a proof survives the trip depends on where the bytes go,
+  so the kind's fields state how far they can go rather than every proof
+  being barred from every trip.
+- **Settled:** ADR-0230 §1 (proven references have no codec; a path crosses
+  and is re-proven); #6272 (ADR-0230's references made unexportable); #6894
+  (the decode-context axis, the three reach levels, and a kind's reach the
+  narrowest of its fields: the direction is decided and the mechanism is
+  pending there); #6890 (closed: a `MailboxId` has engine reach, so a kind
+  carrying one cannot reach the wire).
 
 ### R-0013: Model a closed set as a Rust enum {#r-0013}
 
@@ -318,6 +353,33 @@ the type appears in a signature.
   `AddressForm` deleted); #6846 (the remaining serialized positions); #6877
   (the substrate's own registry plumbing takes no seal); #6895 (sends go
   through typed proofs).
+- **Superseded by:** [R-0041](#r-0041)
+
+### R-0041: Keep MailboxId out of the public APIs other code is written against {#r-0041}
+
+The core engine crates, `aether-data`, `aether-actor`, `aether-substrate`,
+and their proc-macro crates `aether-data-derive`, `aether-actor-derive`, and
+`aether-derive`, hold and use a `MailboxId` in their own machinery, internal
+and public plumbing items alike: it is the registry's key, a routing input,
+and a field of the core's own engine-reach kinds ([R-0042](#r-0042)). There
+it takes no wrapper or seal ([R-0036](#r-0036)). The rule governs the public
+APIs that capabilities, components, harnesses, MCP, and tools are written
+against: an author-facing ctx verb, a kind they send or receive, anything
+they serialize, and a test of actor behaviour outside the core crates. None
+of these takes or returns a `MailboxId`; an actor there is named by a proof
+or a path. The rule is applied by its intent: the question is whether code
+written against the engine could use the id as a door, not whether the type
+appears in a public signature.
+
+- **Why:** a position is a hash of names, so code written against a public
+  API cannot tell a registered position from a computed one; inside the
+  core engine it is the key the proofs are checked against.
+- **Settled:** ADR-0230 §1 (a `MailboxId` is a registry key inside the
+  engine); #6854 (`Address` and `AddressForm` deleted); #6877 (the
+  registry plumbing takes no seal); #6895 (sends go through typed proofs);
+  #6890 (closed: the rule covers public APIs other code is written
+  against, not the core engine's machinery); #6903 (the line is the core
+  engine crates, not `aether-substrate`).
 
 ### R-0015: Hold proofs in stored state, never positions {#r-0015}
 
