@@ -233,6 +233,21 @@ def _format_section(text: str, *, has_more: bool) -> str:
     return stripped + ("\n\n" if has_more else "\n")
 
 
+def _pad_to_blank_line(tail: str) -> str:
+    """The layout bytes still missing to open a blank line before the next H2.
+
+    Adds only what is missing so a junction against preserved unmanaged bytes
+    (which may end with no newline at all, one, or already a blank line)
+    never alters those bytes, only the new characters inserted after them.
+    """
+
+    if tail == "" or tail.endswith("\n\n") or tail.endswith("\r\n\r\n"):
+        return ""
+    if tail.endswith("\n") or tail.endswith("\r"):
+        return "\n"
+    return "\n\n"
+
+
 def _assert_unmanaged_preserved(proposed_body: str, segments: Sequence[str]) -> None:
     if not proposed_body.startswith(segments[0]):
         raise ScopeFinishError("splice assertion failed: the prefix before the first managed heading changed")
@@ -284,19 +299,20 @@ def _splice(
     starts = [start for _, (start, _) in existing_sorted] + [len(fresh_body)]
     segments = [fresh_body[ends[index] : starts[index]] for index in range(len(existing_sorted) + 1)]
 
-    parts: list[str] = []
+    output = ""
     for slot in range(len(existing_sorted) + 1):
-        parts.append(segments[slot])
+        output += segments[slot]
         for name in insertions_by_slot.get(slot, []):
-            parts.append(formatted_by_name[name])
+            output += _pad_to_blank_line(output)
+            output += formatted_by_name[name]
         if slot < len(existing_sorted):
             existing_name = existing_sorted[slot][0]
             if existing_name in formatted_by_name:
-                parts.append(formatted_by_name[existing_name])
+                output += _pad_to_blank_line(output)
+                output += formatted_by_name[existing_name]
 
-    proposed_body = "".join(parts)
-    _assert_unmanaged_preserved(proposed_body, segments)
-    return proposed_body, dropped
+    _assert_unmanaged_preserved(output, segments)
+    return output, dropped
 
 
 def _title_candidates(title: str) -> list[str]:
@@ -339,10 +355,13 @@ def _check_targets(repo: Path, base: str, sections: dict[str, str]) -> tuple[set
 
     parsed: list[tuple[str, bool]] = []
     for span in raw_spans:
-        if span.endswith(" (create)"):
-            parsed.append((span[: -len(" (create)")], True))
+        candidate = span[: -len(" (create)")].strip() if span.endswith(" (create)") else ""
+        if candidate:
+            # A real creation citation, not prose quoting the bare " (create)"
+            # marker itself (this Plan's own step 2 does exactly that).
+            parsed.append((candidate.rstrip("/"), True))
         else:
-            parsed.append((span.split(":", 1)[0], False))
+            parsed.append((span.split(":", 1)[0].rstrip("/"), False))
 
     creation_paths = {path for path, is_creation in parsed if is_creation}
 
@@ -352,23 +371,36 @@ def _check_targets(repo: Path, base: str, sections: dict[str, str]) -> tuple[set
     except resolve_approval_tier.ResolverError as error:
         raise ScopeFinishError(f"cannot list tracked paths at {base}: {error}") from error
 
+    def _kept(path: str) -> bool:
+        if not path or "*" in path or resolve_approval_tier.SAFE_TARGET.fullmatch(path) is None:
+            return False
+        return path.split("/", 1)[0] in tracked_top_level
+
     existing: set[str] = set()
     create: set[str] = set()
     failures: list[str] = []
 
-    for path, is_creation in parsed:
-        if not path or "*" in path or resolve_approval_tier.SAFE_TARGET.fullmatch(path) is None:
-            failures.append(f"cited path absent at base: {path!r}")
-            continue
-        if path.split("/", 1)[0] not in tracked_top_level:
-            failures.append(f"cited path absent at base: {path!r}")
-            continue
+    seen: set[str] = set()
+    unique_paths = [path for path, _ in parsed if not (path in seen or seen.add(path))]
 
-        if path in creation_paths:
-            if path in tracked_paths:
+    for path in unique_paths:
+        is_creation = path in creation_paths
+        kept = _kept(path)
+
+        if is_creation:
+            # The author explicitly declared this a path, so it is scrutinized
+            # even when it is not "kept" as a plausible bare path citation.
+            if not kept:
+                failures.append(f"creation path is not a safe repository-relative path: {path!r}")
+            elif path in tracked_paths:
                 failures.append(f"creation already exists at base: {path!r}")
             else:
                 create.add(path)
+            continue
+
+        if not kept:
+            # A code span that never looked like a repository path — a type
+            # signature, a git ref, a JSON field name — is not a citation.
             continue
 
         if path in tracked_paths:

@@ -160,6 +160,6 @@ A child never mutates GitHub, creates another sweep, or implements. Reject malfo
 
 ## Completion
 
-Report the finishing script's digest, route, surface, and tier, plus written sections, declared surface, dependencies, ADR state, children, and Side-finding count. Point to `$settle <N>` as the next action when the Plan leaves a decision for the owner, otherwise to `$approve <N>`.
+Report the finishing script's digest, route, surface, and tier, plus written sections, dependencies, ADR state, children, and Side-finding count. Point to `$settle <N>` as the next action when the Plan leaves a decision for the owner, otherwise to `$approve <N>`.
 
 Do not write production code, create an implementation worktree, approve, dispatch implementation, open a pull request, or file Side findings from this skill.

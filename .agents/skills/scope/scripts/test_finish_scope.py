@@ -218,6 +218,37 @@ class FinishScopeTests(unittest.TestCase):
         self.assertLess(staged.index("## Implementation plan"), staged.index("## Depends on"))
         self.assertLess(staged.index("## Depends on"), staged.index("## Declared surface"))
 
+    def test_splice_with_no_existing_managed_sections_and_no_trailing_newline(self) -> None:
+        # Catches a managed heading being glued directly onto trailing prose
+        # with no newline, the common case when first scoping an issue that
+        # has no managed sections at all yet.
+        fresh_body = "## Description\n\nfoo"
+        sections = finish_scope._parse_sections_file(render_sections(BASE_SECTIONS))
+
+        proposed_body, dropped = finish_scope._splice(fresh_body, {}, sections)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("foo\n\n## Problem statement\n", proposed_body)
+        digest = finish_scope.plan_digest.digest_body(proposed_body)
+        self.assertEqual(
+            set(digest.sections), {"Problem statement", "Design notes", "Implementation plan", "Declared surface"}
+        )
+
+    def test_splice_keeps_blank_lines_around_a_trailing_unmanaged_heading(self) -> None:
+        # Catches losing the blank line before or after a trailing unmanaged
+        # H2 that follows the managed sections, or corrupting its own bytes,
+        # when a new managed section is appended after it.
+        fresh_body = "## Problem statement\n\nold\n\n## Notes\n\nuser trailing"
+        fresh_bounds = finish_scope.plan_digest.managed_span_bounds(fresh_body)
+        sections = finish_scope._parse_sections_file(
+            render_sections({"Problem statement": "new problem text.", "Design notes": "new design text."})
+        )
+
+        proposed_body, dropped = finish_scope._splice(fresh_body, fresh_bounds, sections)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("\n\n## Notes\n\nuser trailing\n\n## Design notes\n\nnew design text.\n", proposed_body)
+
     def test_concurrent_managed_edit_aborts_instead_of_overwriting(self) -> None:
         # Catches the script silently overwriting someone else's concurrent
         # managed-section edit instead of aborting.
@@ -317,11 +348,17 @@ class FinishScopeTests(unittest.TestCase):
                 self.assertEqual(exit_code, finish_scope.EXIT_INVALID)
                 self.assertTrue(any(expected in failure for failure in report["failures"]))
 
-    def test_non_path_code_span_is_flagged_as_a_missing_target(self) -> None:
-        # Catches a non-path code span such as `origin/main` being silently
-        # discarded instead of failing as a cited path absent at base.
+    def test_non_path_code_spans_are_silently_ignored(self) -> None:
+        # Catches a non-path code span such as `origin/main` or a bare
+        # `plan_digest.digest_body` symbol reference being wrongly flagged as
+        # a missing target instead of being silently ignored: only a span
+        # that is "kept" (SAFE_TARGET, no '*', top-level entry at base) is
+        # scrutinized further, per the Targets rule in the Plan's step 2.
         new_sections = dict(BASE_SECTIONS)
-        new_sections["Design notes"] = "### Chosen approach\n\nCompare against `origin/main`.\n"
+        new_sections["Design notes"] = (
+            BASE_SECTIONS["Design notes"].rstrip()
+            + "\n\nCompare against `origin/main` and call `plan_digest.digest_body` on it.\n"
+        )
         fresh_body = render_body(PREFIX, BASE_SECTIONS)
         snapshot = issue(506, fresh_body)
 
@@ -332,9 +369,9 @@ class FinishScopeTests(unittest.TestCase):
             github=FakeGitHubClient([snapshot]),
         )
 
-        self.assertEqual(report["outcome"], "invalid")
-        self.assertEqual(exit_code, finish_scope.EXIT_INVALID)
-        self.assertTrue(any("cited path absent at base: 'origin/main'" in failure for failure in report["failures"]))
+        self.assertEqual(report["outcome"], "validated", report["failures"])
+        self.assertEqual(exit_code, finish_scope.EXIT_OK)
+        self.assertEqual(report["failures"], [])
 
     def test_dry_run_never_calls_patch_body(self) -> None:
         # Catches a dry run (no --write) still sending the file-backed PATCH.
