@@ -19,8 +19,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, ErasedActorRef, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle,
-    SpawnError, Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, ErasedActorRef, Mail, Manual, OutboundReply, PriorState, RelativeMailbox,
+    ReplyHandle, SpawnError, Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
@@ -41,9 +41,6 @@ pub struct BehaviorHost {
     /// The running script, or `None` when the host runs wrapper-transparent
     /// (no script yet, or a disabled/failed one replaced by nothing).
     slot: Option<ScriptSlot>,
-    /// The wrapped child's alias id, recorded from the spawn `Ok` (or the
-    /// persisted bundle on reload). `None` ⇒ the host runs wrapper-less.
-    wrapped_child: Option<MailboxId>,
     /// A fresh script slot needs one widget `REPORT` replay as soon as the
     /// wrapped child is resident, so its mirror fills from ordinary lane mail.
     prime_pending: bool,
@@ -89,42 +86,35 @@ impl WasmActor for BehaviorHost {
             ScriptSource::FsRef { .. } | ScriptSource::None => None,
         };
         let script_source = config.script.clone();
-        Ok(BehaviorHost {
-            config,
-            engine,
-            slot,
-            wrapped_child: None,
-            prime_pending: false,
-            echo: EchoGuard::default(),
-            script_source,
-        })
+        Ok(BehaviorHost { config, engine, slot, prime_pending: false, echo: EchoGuard::default(), script_source })
     }
 
     /// Genuine first attach only (reload runs `init` + `on_rehydrate`, not
     /// `wire`): spawn the wrapped child by tag, kick an `FsRef` boot fetch,
     /// prime the widget with a re-emit request, and offer the ATTACH sentinel.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        match ctx.spawn_inline_child_by_tag(
+        if let Err(error) = ctx.spawn_inline_child_by_tag(
             ActorTypeTag(self.config.child.type_tag),
             Subname::Named(&self.config.child.subname),
             &self.config.child.config,
         ) {
-            Ok(reference) => self.wrapped_child = Some(reference.id()),
-            Err(SpawnError::UnknownActorTag(tag)) => {
-                tracing::warn!(
-                    target: "aether_behavior",
-                    type_tag = tag.0,
-                    subname = %self.config.child.subname,
-                    "wrapped child tag unknown to the module; running wrapper-less (fail-open)",
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_behavior",
-                    subname = %self.config.child.subname,
-                    ?error,
-                    "wrapped child spawn failed; running wrapper-less (fail-open)",
-                );
+            match error {
+                SpawnError::UnknownActorTag(tag) => {
+                    tracing::warn!(
+                        target: "aether_behavior",
+                        type_tag = tag.0,
+                        subname = %self.config.child.subname,
+                        "wrapped child tag unknown to the module; running wrapper-less (fail-open)",
+                    );
+                }
+                error => {
+                    tracing::warn!(
+                        target: "aether_behavior",
+                        subname = %self.config.child.subname,
+                        ?error,
+                        "wrapped child spawn failed; running wrapper-less (fail-open)",
+                    );
+                }
             }
         }
 
@@ -151,24 +141,23 @@ impl WasmActor for BehaviorHost {
     }
 
     /// Save the host bundle (script source + resident bytes + `state_save`
-    /// blob + wrapped-child id) into the host's own parent state. The wrapped
-    /// child persists itself through the composite walk (#2694).
+    /// blob) into the host's own parent state. The wrapped child persists
+    /// itself through the composite walk (#2694), and the host re-derives it
+    /// from its config's child subname, so the bundle names no position.
     fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        let script_bytes = self.slot.as_ref().map(|s| s.bytes().to_vec()).unwrap_or_default();
-        let script_state = self.slot.as_mut().map_or_else(Vec::new, ScriptSlot::save_state);
         let bundle = HostPersist {
-            script_source: self.script_source.clone(),
-            script_bytes,
-            script_state,
-            wrapped_child_id: self.wrapped_child.map_or(0, |id| id.0),
+            source: self.script_source.clone(),
+            bytes: self.slot.as_ref().map(|s| s.bytes().to_vec()).unwrap_or_default(),
+            state: self.slot.as_mut().map_or_else(Vec::new, ScriptSlot::save_state),
         };
         ctx.save_state(u32::from(HOST_PERSIST_VERSION), &bundle.encode());
     }
 
     /// Restore from the host bundle — re-instantiate the script from its
     /// resident bytes (no fs re-fetch), offer the saved state to the fresh
-    /// script, restore the wrapped-child id for the direction check, then offer
-    /// `ATTACH` when a script was restored. The wrapped child is **not**
+    /// script, then offer `ATTACH` when a script was restored. The wrapped
+    /// child needs no restore: the fallback's direction check derives it from
+    /// the inline registry by subname on each mail. The wrapped child is **not**
     /// re-spawned: the composite walk reconstructs it from its own real config
     /// + runtime state (#2694), and the reload `insert_child` carries no
     /// residency guard, so a host-side re-spawn would double-spawn. The
@@ -223,7 +212,8 @@ impl WasmActor for BehaviorHost {
     }
 
     /// Lane traffic: everything that is not the host's own control vocabulary.
-    /// Resolve the direction against the wrapped-child id, skip the interpreter
+    /// Resolve the direction by comparing the sender's proof with the proof of
+    /// the resident child under the config's subname, skip the interpreter
     /// for undeclared / suppressed kinds, and otherwise offer to the script and
     /// drain the verdict then effects.
     // The `#[fallback]` dispatch ABI hands `mail` by value; the read-only body
@@ -233,7 +223,8 @@ impl WasmActor for BehaviorHost {
     fn on_lane(&mut self, ctx: &mut WasmCtx<'_>, mail: Mail<'_>) {
         self.try_prime(&*ctx);
         let kind = mail.kind();
-        let is_up = self.lane_is_up(ctx.sender().map(ErasedActorRef::id));
+        let is_up =
+            lane_is_up(ctx.sender(), ctx.child(&self.config.child.subname).as_ref().map(RelativeMailbox::reference));
         let bytes = mail.bytes();
 
         // A configured down-lane frame trigger offers FRAME to the script
@@ -270,7 +261,7 @@ impl BehaviorHost {
     }
 
     fn prime_if_ready(&mut self, child_resident: bool, send_report: impl FnOnce()) {
-        if !self.prime_pending || self.wrapped_child.is_none() || !child_resident {
+        if !self.prime_pending || !child_resident {
             return;
         }
         send_report();
@@ -330,12 +321,6 @@ impl BehaviorHost {
         }
     }
 
-    /// Whether an inbound source is the wrapped child (up-lane); any other
-    /// source — the parent, or a sourceless dispatch — is down-lane.
-    fn lane_is_up(&self, source: Option<MailboxId>) -> bool {
-        matches!((source, self.wrapped_child), (Some(s), Some(w)) if s == w)
-    }
-
     fn offers_kind_to_script(&self, kind: KindId) -> bool {
         self.slot
             .as_ref()
@@ -362,9 +347,9 @@ impl BehaviorHost {
 
     /// The reload body, factored ctx-free so it structurally *cannot* spawn a
     /// child (spawn needs a ctx) — the defer-to-the-walk invariant is enforced
-    /// by the signature, not just discipline. Decodes the bundle, restores the
-    /// script from resident bytes + the saved state, and restores the
-    /// wrapped-child id. An undecodable blob boots fresh with a warning.
+    /// by the signature, not just discipline. Decodes the bundle and restores
+    /// the script from resident bytes + the saved state. An undecodable blob
+    /// boots fresh with a warning.
     fn apply_rehydrate(&mut self, prior_bytes: &[u8]) {
         let Some(bundle) = HostPersist::decode(prior_bytes) else {
             tracing::warn!(
@@ -373,13 +358,12 @@ impl BehaviorHost {
             );
             return;
         };
-        self.script_source = bundle.script_source;
-        self.wrapped_child = (bundle.wrapped_child_id != 0).then_some(MailboxId(bundle.wrapped_child_id));
-        if !bundle.script_bytes.is_empty() {
+        self.script_source = bundle.source;
+        if !bundle.bytes.is_empty() {
             match ScriptSlot::instantiate(
                 &self.engine,
-                &bundle.script_bytes,
-                Some(&bundle.script_state),
+                &bundle.bytes,
+                Some(&bundle.state),
                 self.config.fuel_per_call,
                 self.config.disable_after_traps,
             ) {
@@ -468,6 +452,13 @@ impl BehaviorHost {
     }
 }
 
+/// Whether an inbound `source` is the `wrapped` child (up-lane); any other
+/// source — the parent, or a sourceless dispatch — is down-lane, and so is
+/// every source while no wrapped child is resident.
+fn lane_is_up(source: Option<ErasedActorRef>, wrapped: Option<ErasedActorRef>) -> bool {
+    matches!((source, wrapped), (Some(s), Some(w)) if s == w)
+}
+
 /// Project a swap result into the wire `load_script_result` reply.
 fn load_result(result: Result<u64, String>) -> LoadScriptResult {
     match result {
@@ -538,7 +529,7 @@ impl<A> DrainSink for LaneSink<'_, '_, A> {
     }
 }
 
-fn resolve_child_path<'a, A>(ctx: &WasmCtx<'a, A>, path: &str) -> Option<aether_actor::RelativeMailbox<'a>> {
+fn resolve_child_path<'a, A>(ctx: &WasmCtx<'a, A>, path: &str) -> Option<RelativeMailbox<'a>> {
     let mut segments = path.split('/');
     let first = segments.next().filter(|segment| !segment.is_empty())?;
     segments.try_fold(ctx.child(first)?, |relative, segment| {
@@ -627,19 +618,25 @@ mod tests {
         ScriptSource::FsRef { namespace: namespace.to_string(), path: path.to_string() }
     }
 
+    /// A proof for position `id`, minted the one way a guest mints one: from
+    /// the dispatch source the host threaded, lifted by `ctx.sender()`.
+    fn proven(id: u64) -> ErasedActorRef {
+        let registry = Registry::new();
+        WasmCtx::__new(0x10, &registry, id).sender().expect("a threaded dispatch source mints a proof")
+    }
+
     // Tripwire: the fallback's lane direction — an inbound source equal to the
     // wrapped child is up-lane; the parent, or a sourceless dispatch, is
     // down-lane. A wrong direction would forward mail the opposite way.
     #[test]
-    fn lane_direction_resolves_against_wrapped_child() {
-        let mut host = host(ScriptSource::None);
-        host.wrapped_child = Some(MailboxId(0x00C0_FFEE));
-        assert!(host.lane_is_up(Some(MailboxId(0x00C0_FFEE))));
-        assert!(!host.lane_is_up(Some(MailboxId(0xBEEF))));
-        assert!(!host.lane_is_up(None));
-        // With no wrapped child every source reads down-lane.
-        host.wrapped_child = None;
-        assert!(!host.lane_is_up(Some(MailboxId(0x00C0_FFEE))));
+    fn lane_direction_resolves_against_resident_child() {
+        let wrapped = proven(0x00C0_FFEE);
+
+        assert!(lane_is_up(Some(wrapped), Some(wrapped)));
+        assert!(!lane_is_up(Some(proven(0xBEEF)), Some(wrapped)));
+        assert!(!lane_is_up(None, Some(wrapped)));
+        // With no resident wrapped child every source reads down-lane.
+        assert!(!lane_is_up(Some(wrapped), None));
     }
 
     // Tripwire: low-rate mirror kinds are still offered to SDK dispatch even
@@ -688,7 +685,6 @@ mod tests {
     #[test]
     fn read_result_success_primes_then_offers_attach_after_install() {
         let mut host = host(ScriptSource::None);
-        host.wrapped_child = Some(MailboxId(0x00C0_FFEE));
         let mut sink = RecordingSink::default();
         let mut reports = 0;
 
@@ -735,7 +731,6 @@ mod tests {
     #[test]
     fn set_script_success_primes_then_offers_attach_after_install() {
         let mut host = host(ScriptSource::None);
-        host.wrapped_child = Some(MailboxId(0x00C0_FFEE));
         let mut sink = RecordingSink::default();
         let mut reports = 0;
 
@@ -752,8 +747,8 @@ mod tests {
         assert_attach_offered(&sink);
     }
 
-    // Tripwire: `on_rehydrate`'s body restores the wrapped-child id + the
-    // script from resident bytes through a ctx-free path — so it structurally
+    // Tripwire: `on_rehydrate`'s body restores the script from resident bytes
+    // through a ctx-free path — so it structurally
     // cannot re-spawn the wrapped child (spawn needs a ctx), the defer-to-the-
     // walk invariant (#2694). A re-spawn would double-spawn against the
     // unguarded reload insert.
@@ -761,21 +756,14 @@ mod tests {
     fn rehydrate_restores_without_spawning() {
         let kind = KindId(0x5678);
         let script = fixed_output_wasm(kind, &forward_output(b"resident"));
-        let bundle = HostPersist {
-            script_source: ScriptSource::Inline(script.clone()),
-            script_bytes: script,
-            script_state: Vec::new(),
-            wrapped_child_id: 0x1234_5678,
-        };
+        let bundle = HostPersist { source: ScriptSource::Inline(script.clone()), bytes: script, state: Vec::new() };
 
-        // A host that booted with no script and no wrapped child.
+        // A host that booted with no script.
         let mut host = host(ScriptSource::None);
         assert!(host.slot.is_none());
-        assert!(host.wrapped_child.is_none());
 
         host.apply_rehydrate(&bundle.encode());
 
-        assert_eq!(host.wrapped_child, Some(MailboxId(0x1234_5678)));
         assert!(host.slot.is_some(), "the resident script re-instantiates on reload");
         assert!(matches!(host.script_source, ScriptSource::Inline(_)));
         assert!(host.prime_pending, "rehydrate arms mirror priming for the first resident lane frame");
@@ -786,12 +774,7 @@ mod tests {
     #[test]
     fn rehydrate_restored_script_offers_attach_and_defers_prime_until_child_resident() {
         let script = attach_script();
-        let bundle = HostPersist {
-            script_source: ScriptSource::Inline(script.clone()),
-            script_bytes: script,
-            script_state: Vec::new(),
-            wrapped_child_id: 0x1234_5678,
-        };
+        let bundle = HostPersist { source: ScriptSource::Inline(script.clone()), bytes: script, state: Vec::new() };
         let mut host = host(ScriptSource::None);
         let mut sink = RecordingSink::default();
         let mut reports = 0;
@@ -823,7 +806,6 @@ mod tests {
         let kind = KindId(0x6789);
         let resident = fixed_output_wasm(kind, &forward_output(b"resident"));
         let mut host = host(ScriptSource::Inline(resident));
-        host.wrapped_child = Some(MailboxId(0xBEEF));
 
         let before = host.slot.as_ref().map(|slot| slot.bytes().to_vec());
         let before_source = host.script_source.clone();
@@ -831,7 +813,6 @@ mod tests {
         let after = host.slot.as_ref().map(|slot| slot.bytes().to_vec());
 
         assert_eq!(after, before, "garbage rehydrate must keep the resident slot");
-        assert_eq!(host.wrapped_child, Some(MailboxId(0xBEEF)), "garbage rehydrate must not clobber the wrapped child");
         assert_eq!(host.script_source, before_source, "garbage rehydrate must keep the init-time script source");
     }
 

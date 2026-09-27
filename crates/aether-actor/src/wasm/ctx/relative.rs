@@ -7,6 +7,7 @@ use aether_data::{ActorMail, MailboxId};
 use super::WasmCtx;
 use crate::blob::guest::{EncodedGuestMail, encode_guest};
 use crate::model::ctx::reply_mode::ReplyMode;
+use crate::reference::ErasedActorRef;
 use crate::wasm::inline::{ChainMode, Registry};
 
 /// A type-erased sendable handle to a cluster relative — the parent,
@@ -41,6 +42,18 @@ pub struct RelativeMailbox<'a> {
 }
 
 impl RelativeMailbox<'_> {
+    /// The proof this relative resolved to — the by-tag counterpart of
+    /// [`InlineChild::erase`](super::InlineChild::erase). The relative came
+    /// from a lookup in the per-component inline registry, so it proves what
+    /// `ctx.child_as::<C>(name)?.erase()` proves, for a spawner that cannot
+    /// name `C`. The ADR-0137 behavior host spawns its wrapped child by type
+    /// tag and compares this proof with `ctx.sender()` to tell the up lane
+    /// from the down lane.
+    #[must_use]
+    pub const fn reference(&self) -> ErasedActorRef {
+        ErasedActorRef::new(self.id)
+    }
+
     /// Resolve a sendable handle to this relative's inline child whose
     /// subname is `name`, preserving the original addresser for any send
     /// through the returned handle. This is the multi-hop continuation of
