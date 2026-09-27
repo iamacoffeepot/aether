@@ -410,27 +410,6 @@ fn replicas_reply_shape_is_shared_caps_plus_instances() {
     assert_eq!(reply["capabilities"]["handlers"][0]["doc"], "One line.");
 }
 
-/// `replace_component` refuses a tagged mailbox address before any RPC:
-/// the replace target is the component's lineage, which a position does
-/// not name.
-#[tokio::test]
-async fn replace_component_tagged_mailbox_address_is_tool_error() {
-    let (_chassis, port) = boot_hub();
-    let mcp = connect_mcp(port);
-    let result = mcp
-        .replace_component(Parameters(ReplaceComponentArgs {
-            engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
-            address: "mbx-not-a-tagged-id".to_owned(),
-            selector: "any-selector".to_owned(),
-            config: None,
-            config_path: None,
-            export: None,
-            full: false,
-        }))
-        .await;
-    assert!(result.is_err(), "an mbx- address should be a tool error");
-}
-
 #[test]
 fn upload_binary_args_default_pin_is_false() {
     let args: UploadBinaryArgs =

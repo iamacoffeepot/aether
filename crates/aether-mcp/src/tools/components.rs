@@ -559,8 +559,8 @@ pub(super) async fn replace_component(mcp: &Mcp, args: ReplaceComponentArgs) -> 
     let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
     // The engine resolves the operator's spelling to the canonical lineage,
     // which is both the replace target the component host proves and the
-    // cache key; a tagged `mbx-…` id is refused.
-    let target = mcp.resolve_component_path(engine, &args.address, "replace_component").await?;
+    // cache key.
+    let target = mcp.resolve_engine_path(engine, &args.address).await.map_err(internal)?;
     let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
     // ADR-0116: resolve the selector hub-local to the replacement wasm
     // bytes (hash-primary, so a hash pins/rolls to an exact build).

@@ -398,31 +398,16 @@ async fn describe_kinds_live_path_surfaces_component_defined_kind() {
     );
 }
 
-/// `describe_component` refuses a tagged mailbox id and reads the component
-/// cache under the engine's canonical path: a seeded entry round-trips with
-/// no describe RPC.
+/// `describe_component` reads the component cache under the engine's
+/// canonical path: a seeded entry round-trips with no describe RPC.
 #[tokio::test]
 async fn describe_component_reads_the_cache() {
     let engine_id = "00000000-0000-0000-0000-000000000001";
     let canonical = "aether.component/aether.embedded:fake_component";
-    // A well-formed tagged mailbox id (arbitrary u64s don't carry the
-    // mailbox-domain bits `tagged_id::encode` needs).
-    let tagged = tagged_id::encode(with_tag(Tag::Mailbox, 1)).expect("a mailbox-tagged id encodes");
     let engine = EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
     let calls = Arc::new(Mutex::new(Vec::new()));
     let (_chassis, port) = boot_hub_with_address_route_loopback(engine, canonical, Arc::clone(&calls));
     let mcp = connect_mcp(port);
-
-    // A tagged id names no lineage to key the cache by, so it is refused
-    // before any RPC.
-    let refused = mcp
-        .describe_component(Parameters(DescribeComponentArgs {
-            engine_id: Some(engine_id.to_owned()),
-            address: tagged,
-            full: false,
-        }))
-        .await;
-    assert!(refused.is_err(), "a component addressed by tagged id should be a tool error");
 
     // Seed the cache with a handler that declares a `-> R` reply
     // contract (ADR-0109). `describe_component` surfaces the `reply`
