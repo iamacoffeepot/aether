@@ -1,6 +1,6 @@
 use aether_actor::ActorRef;
 use aether_data::{ErasedActorPath, Kind, LoadName};
-use aether_harness_substrate::{ExecutionResult, HarnessOp, SubstrateHarness, substrate_harness_observer_mailbox};
+use aether_harness_substrate::{ExecutionResult, HarnessOp, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SubstrateHarness};
 use aether_kinds::{Key, MouseMove};
 use aether_window::{
     CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
@@ -210,14 +210,14 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
         ])
         .expect("create routed windows");
 
-    let observer = substrate_harness_observer_mailbox();
+    let observer = ErasedActorPath::new(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME).expect("observer path");
     harness
         .execute(vec![
             (
                 "key-all",
                 HarnessOp::send_and_settle(
                     &synthetic,
-                    &SubscribeWindow { selector: WindowSelector::All, kind: Key::ID, mailbox: observer },
+                    &SubscribeWindow { selector: WindowSelector::All, kind: Key::ID, subscriber: observer.clone() },
                 ),
             ),
             (
@@ -227,7 +227,7 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
                     &SubscribeWindow {
                         selector: WindowSelector::One(second_path.clone()),
                         kind: Key::ID,
-                        mailbox: observer,
+                        subscriber: observer.clone(),
                     },
                 ),
             ),
@@ -246,7 +246,7 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
                     &SubscribeWindow {
                         selector: WindowSelector::One(second_path.clone()),
                         kind: MouseMove::ID,
-                        mailbox: observer,
+                        subscriber: observer.clone(),
                     },
                 ),
             ),
@@ -262,7 +262,7 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
                 "unsubscribe-all-selector",
                 HarnessOp::send_and_settle(
                     &synthetic,
-                    &UnsubscribeWindow { selector: WindowSelector::All, kind: Key::ID, mailbox: observer },
+                    &UnsubscribeWindow { selector: WindowSelector::All, kind: Key::ID, subscriber: observer.clone() },
                 ),
             ),
             ("key-first-after-unsubscribe", key_from(synthetic, &first_path, 33)),
@@ -274,7 +274,7 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
                     &UnsubscribeWindow {
                         selector: WindowSelector::One(second_path.clone()),
                         kind: Key::ID,
-                        mailbox: observer,
+                        subscriber: observer,
                     },
                 ),
             ),

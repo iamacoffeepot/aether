@@ -7,7 +7,7 @@ use super::{
 };
 use crate::kinds::{HttpHeader, HttpMethod};
 use aether_actor::ErasedActorRef;
-use aether_data::MailboxId;
+use aether_data::ErasedActorPath;
 use aether_substrate::mail::Source;
 use aether_substrate::mail::registry::{Registry, noop_handler};
 use aether_substrate::testing::{fresh_substrate, registered_ref, unrouted_binding};
@@ -50,7 +50,13 @@ fn disabled_http_server_err_replies_to_register_route() {
     let result = HttpServerCapability::on_register_route(
         &mut state,
         &mut ctx,
-        RegisterRoute { prefix: "/".to_string(), method: None, kind: KindId(0), mailbox: MailboxId(1), shared: false },
+        RegisterRoute {
+            prefix: "/".to_string(),
+            method: None,
+            kind: KindId(0),
+            handler: ErasedActorPath::new("test.http.handler").expect("fixture path"),
+            shared: false,
+        },
     );
     assert!(
         matches!(result, RegisterRouteResult::Err { .. }),

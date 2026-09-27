@@ -74,7 +74,7 @@ impl WindowSubscribers {
     ) -> Result<(), String> {
         let subscriber = ctx.sender().ok_or_else(|| {
             "aether.window.subscribe_self requires a local component sender; an external session or remote engine \
-             must use aether.window.subscribe with an explicit mailbox"
+             must use aether.window.subscribe with an explicit subscriber path"
                 .to_owned()
         })?;
         self.insert(selector, kind, subscriber);
@@ -94,7 +94,7 @@ impl WindowSubscribers {
     ) -> Result<(), String> {
         let subscriber = ctx.sender().ok_or_else(|| {
             "aether.window.unsubscribe_self requires a local component sender; an external session or remote engine \
-             must use aether.window.unsubscribe with an explicit mailbox"
+             must use aether.window.unsubscribe with an explicit subscriber path"
                 .to_owned()
         })?;
         self.remove(selector, kind, subscriber);
@@ -214,7 +214,7 @@ mod tests {
     /// The reflexive forms read their subscriber off the host-stamped
     /// envelope through `ctx.sender()`, so they are only meaningful for an
     /// in-process actor. A `Session` source (an external MCP session or a
-    /// remote engine) must use the explicit-mailbox `subscribe` /
+    /// remote engine) must use the explicit-subscriber-path `subscribe` /
     /// `unsubscribe` instead, and gets an `Err` plus an untouched route
     /// table rather than a silently mis-attributed subscription.
     #[test]

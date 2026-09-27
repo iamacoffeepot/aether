@@ -1013,7 +1013,7 @@ mod tests {
     use std::fmt::Debug;
     use std::sync::mpsc;
 
-    use aether_data::{ErasedActorPath, Kind, MailboxId};
+    use aether_data::{ErasedActorPath, Kind};
     use aether_kinds::mouse_button;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::SpawnError;
@@ -1096,29 +1096,26 @@ mod tests {
         let (registry, mailer) = bare_substrate();
         let binding = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-        let unknown = MailboxId(0xBAD);
+        let unknown = ErasedActorPath::new("test.window.unknown").expect("fixture path");
 
         assert!(matches!(
             DesktopWindowCapability::on_subscribe(
                 &mut state,
                 &mut ctx,
-                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: unknown },
+                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, subscriber: unknown },
             ),
-            SubscribeWindowResult::Err { error } if error == "unknown mailbox id 0x0000000000000bad"
+            SubscribeWindowResult::Err { error } if error.contains("`test.window.unknown`")
         ));
         assert!(state.subscribers.recipients(&path("main"), Key::ID).is_empty());
 
-        let subscriber = registry.register_inline(
-            &boot_authority(),
-            "test.window.dropped",
-            Arc::new(|_dispatch: MailDispatch<'_>| {}),
-        );
-        let dropped = subscriber.id();
+        let dropped = ErasedActorPath::new("test.window.dropped").expect("fixture path");
+        let subscriber =
+            registry.register_inline(&boot_authority(), dropped.as_str(), Arc::new(|_dispatch: MailDispatch<'_>| {}));
         assert!(matches!(
             DesktopWindowCapability::on_subscribe(
                 &mut state,
                 &mut ctx,
-                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, subscriber: dropped.clone() },
             ),
             SubscribeWindowResult::Ok
         ));
@@ -1128,9 +1125,9 @@ mod tests {
             DesktopWindowCapability::on_unsubscribe(
                 &mut state,
                 &mut ctx,
-                UnsubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+                UnsubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, subscriber: dropped },
             ),
-            SubscribeWindowResult::Err { error } if error == format!("mailbox {dropped:?} already dropped")
+            SubscribeWindowResult::Err { error } if error.contains("`test.window.dropped`")
         ));
         assert_eq!(state.subscribers.recipients(&path("main"), Key::ID), BTreeSet::from([subscriber]));
     }

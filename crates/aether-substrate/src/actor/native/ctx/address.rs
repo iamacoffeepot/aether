@@ -84,11 +84,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// The other two ask nothing of the registry. [`Self::send_to`] sends
     /// through a proof the actor already holds, and [`Self::actor_ref`] mints a
     /// declared dependency's proof from an answer the load already gave. This
-    /// one is for the id a caller put in a kind field — `SubscribeWindow`'s
-    /// `mailbox` is the motivating consumer — which nothing upstream proved,
-    /// so it pays one published-route read to find out. It runs once, at
-    /// receipt, and never on the send path; a handler that proves its
-    /// subscriber here keeps the proof, not the position.
+    /// one is for a position that reached the actor without a proof, which
+    /// nothing upstream proved, so it pays one published-route read to find
+    /// out. It runs once, at receipt, and never on the send path; a caller
+    /// that proves a position here keeps the proof, not the position. A
+    /// payload-borne actor is named by path, and proven through
+    /// [`Self::resolve_path`] instead.
     ///
     /// [`Self::sender`](super::NativeCtx::sender) remains the door for the
     /// host-stamped source — that answer is already known and costs no read.
@@ -114,7 +115,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// position.
     ///
     /// Its consumers are the component host's drop, replace, load-under, and
-    /// describe receipts, and the trampoline's replacement dependency check.
+    /// describe receipts; the trampoline's replacement dependency check; the
+    /// window manager's subscriber receipts; the HTTP server's route handler
+    /// receipts; and the lifecycle capability's subscriber receipts.
     pub fn resolve_path(&self, address: &ErasedActorPath) -> Result<ErasedActorRef, ResolvePathError> {
         self.binding.resolve_path(address)
     }

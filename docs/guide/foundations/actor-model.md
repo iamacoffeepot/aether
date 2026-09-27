@@ -523,8 +523,10 @@ pub trait WindowManagerSurface {
     fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers;
 
     #[handler::single]
-    fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
-        Self::subscribers(state).unsubscribe_all(mail.mailbox);
+    fn on_unsubscribe_all(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
+        if let Ok(subscriber) = ctx.resolve_path(&mail.subscriber) {
+            Self::subscribers(state).unsubscribe_all(subscriber);
+        }
     }
 }
 ```

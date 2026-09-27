@@ -228,7 +228,7 @@ Routes follow the component: they survive `replace_component` (the mailbox id
 is stable) and are released automatically when the component drops, or
 explicitly via `aether.http.server.unregister_route_self`. External callers
 (an MCP session, a test) use the `register_route` / `unregister_route` forms,
-which name the handler mailbox explicitly.
+which name the handler by actor path explicitly.
 
 The `kind` field names the kind the route's requests dispatch as.
 `HttpServerRequest::ID` keeps the generic shape. Registering a route-specific
@@ -237,27 +237,26 @@ kind — a struct with `aether.http.server.request`'s fields under its own
 `describe_component` entry and `actor_cost` row; the payload bytes are always
 request-shaped, so the route kind decodes them directly.
 
-### Registering a route for another mailbox
+### Registering a route for another actor
 
 `register_route_self` resolves the registrant from the sender's in-process
 `Source`; an MCP session or a test has no such source, so it uses the named
-form instead — `register_route` / `unregister_route`, which take the target
-`mailbox` explicitly. `RegisterRoute` carries `prefix`
+form instead — `register_route` / `unregister_route`, which take the
+handler's actor path as `handler`. `RegisterRoute` carries `prefix`
 (`String`), `method` (`Option<HttpMethod>` — a bare variant string like
 `"Get"`, or `null` to match every method; the seven variants are `Get`,
 `Post`, `Put`, `Delete`, `Patch`, `Head`, `Options`), `kind` (the route's
-request `KindId`), `mailbox` (the handler's `MailboxId`), and `shared` (the
+request `KindId`), `handler` (the handler's actor path), and `shared` (the
 ADR-0136 member-set flag — `false` claims the prefix exclusively, `true` joins
-the round-robin set on it). Over the MCP
-wire both tagged ids render as ADR-0064 strings — `knd-…` and `mbx-…`. The
-`kind` comes from `describe_kinds` (the `kind` for
+the round-robin set on it). Over the MCP wire the `kind` renders as an ADR-0064
+tagged string (`knd-…`) and comes from `describe_kinds` (the `kind` for
 `aether.http.server.request`, or a route-specific kind's own id). The
-`mailbox` has no documented operator source today: `load_component` returns
-the handler's lineage address and no mailbox id, and the field is an id, so
-hashing the address yourself lands on a mailbox that was never registered. A
-component registers its own routes with `register_route_self` (or the typed
-surface below); the named form remains for a caller that already holds the
-handler's tagged id:
+`handler` is the path `load_component` returned for the handler
+(`aether.component/aether.embedded:api`) or its short form
+(`aether.component/:api`). The server proves it on receipt, and a path that
+does not resolve to a live actor is answered `Err` naming it. A component
+registers its own routes with `register_route_self` (or the typed surface
+below); the named form is for a caller outside the handler:
 
 ```jsonc
 // send_mail → aether.http.server  (kind: aether.http.server.register_route)
@@ -265,7 +264,7 @@ handler's tagged id:
   "prefix": "/api",
   "method": "Get",
   "kind": "knd-…",     // aether.http.server.request's id, from describe_kinds
-  "mailbox": "mbx-…",  // the handler's tagged mailbox id
+  "handler": "aether.component/:api",  // the path load_component returned, or its short form
   "shared": false
 }
 ```
@@ -285,7 +284,7 @@ method-agnostic route at the same prefix release independently:
 {
   "prefix": "/api",
   "method": "Get",
-  "mailbox": "mbx-…"
+  "handler": "aether.component/:api"
 }
 ```
 

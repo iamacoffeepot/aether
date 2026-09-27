@@ -99,8 +99,8 @@ The request/reply families are:
 |---|---|---|
 | `list` | manager; no input | every live `WindowInfo`, ordered by path (window name order) |
 | `create` | manager; `WindowSpec` | the attached window's `WindowInfo` |
-| subscribe/unsubscribe | manager; selector, kind, and optional explicit mailbox | acknowledgement |
-| `unsubscribe_all` | manager; explicit mailbox | normal no-reply settlement |
+| subscribe/unsubscribe | manager; selector, kind, and optional explicit subscriber path | acknowledgement |
+| `unsubscribe_all` | manager; explicit subscriber path | normal no-reply settlement |
 | `close` | named child; no input | acknowledgement |
 | `set_mode` | named child; mode and optional windowed size | resolved mode and size |
 | `set_title` | named child; title | applied title |
@@ -390,7 +390,7 @@ let subscribe = HarnessOp::send_and_settle(
     &SubscribeWindow {
         selector: WindowSelector::One(window),
         kind: Key::ID,
-        mailbox: observer,
+        subscriber: observer,
     },
 );
 

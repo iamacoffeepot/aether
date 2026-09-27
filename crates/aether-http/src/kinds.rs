@@ -386,22 +386,25 @@ pub struct WebSocketClose {
 // ADR-0130 route-registration kinds. Mirrors the `aether.window`
 // subscribe family: `_self` variants resolve the registrant from the
 // inbound envelope's host-stamped `Source` (forgery-proof, in-process
-// by construction); the explicit-`mailbox` variants serve external
-// callers and are validated against the registry. A route carries the
-// `KindId` its requests dispatch as — the cap stamps that kind onto
-// the request-shaped payload, so the registered kind's schema must
-// decode `aether.http.server.request`'s byte layout
+// by construction); the explicit variants name the handler by actor
+// path, serve external callers, and prove that path at receipt
+// (ADR-0230 §3). A route carries the `KindId` its requests dispatch
+// as — the cap stamps that kind onto the request-shaped payload, so
+// the registered kind's schema must decode
+// `aether.http.server.request`'s byte layout
 // (`aether.http.server.request` itself is the generic choice).
 
 /// `aether.http.server.register_route` — claim a path-prefix route for
-/// `mailbox`. `prefix` is segment-boundary matched (`/api` matches
-/// `/api` and `/api/…`, never `/apiary`; `/` is the catch-all; a
-/// trailing slash is normalized off at registration). `method` filters
+/// `handler`, the actor path (canonical or short, such as the path
+/// `load_component` returns) of the actor that serves it. `prefix` is
+/// segment-boundary matched (`/api` matches `/api` and `/api/…`, never
+/// `/apiary`; `/` is the catch-all; a trailing slash is normalized off
+/// at registration). `method` filters
 /// the route to one HTTP method; `None` accepts every method. Among
 /// matching routes the longest prefix wins, and a method-specific
 /// route beats a method-agnostic one at equal prefix. A `(prefix,
-/// method)` key already claimed by a *different* mailbox is answered
-/// `Err`; the same mailbox re-claiming its own key is an idempotent
+/// method)` key already claimed by a *different* handler is answered
+/// `Err`; the same handler re-claiming its own key is an idempotent
 /// `Ok` (and updates `kind`). Reply: `RegisterRouteResult`.
 ///
 /// `shared` (ADR-0136) opts the registration into the key's member
@@ -416,13 +419,13 @@ pub struct RegisterRoute {
     pub prefix: String,
     pub method: Option<HttpMethod>,
     pub kind: aether_data::KindId,
-    pub mailbox: aether_data::MailboxId,
+    pub handler: aether_data::ErasedActorPath,
     pub shared: bool,
 }
 
 /// `aether.http.server.register_route_self` — reflexive counterpart of
 /// [`RegisterRoute`]: claim the route for the *sending* actor, with no
-/// explicit `mailbox` field. The cap resolves the registrant from the
+/// explicit `handler` field. The cap resolves the registrant from the
 /// inbound envelope's host-stamped `Source` (ADR-0083), so the
 /// registrant cannot be forged and the op is gated to in-process
 /// actors by construction — an external session or another engine gets
@@ -443,13 +446,15 @@ pub struct RegisterRouteSelf {
 }
 
 /// `aether.http.server.unregister_route` — release the `(prefix,
-/// method)` route held by `mailbox`. Idempotent: releasing a route
-/// that isn't held is still `Ok`. Reply: `RegisterRouteResult`.
+/// method)` route held by `handler`, an actor path proven at receipt.
+/// Idempotent: releasing a route that isn't held, or naming a path that
+/// does not resolve to a live actor, is still `Ok`. Reply:
+/// `RegisterRouteResult`.
 #[aether_data::kind(name = "aether.http.server.unregister_route")]
 pub struct UnregisterRoute {
     pub prefix: String,
     pub method: Option<HttpMethod>,
-    pub mailbox: aether_data::MailboxId,
+    pub handler: aether_data::ErasedActorPath,
 }
 
 /// `aether.http.server.unregister_route_self` — reflexive counterpart
@@ -463,10 +468,10 @@ pub struct UnregisterRouteSelf {
 }
 
 /// Reply to the route registration / unregistration kinds (ADR-0130).
-/// Failure modes: an invalid prefix (must start with `/`), an unknown
-/// or dropped registrant mailbox, a `(prefix, method)` key already
-/// claimed by another mailbox, or a `_self` op from a sender with no
-/// local mailbox.
+/// Failure modes: an invalid prefix (must start with `/`), a handler
+/// path that does not resolve to a live actor, a `(prefix, method)` key
+/// already claimed by another handler, or a `_self` op from a sender
+/// with no local mailbox.
 #[aether_data::kind(name = "aether.http.server.register_route_result")]
 pub enum RegisterRouteResult {
     Ok,
@@ -474,15 +479,15 @@ pub enum RegisterRouteResult {
 }
 
 /// `aether.http.server.unregister_routes_all` — release every route
-/// held by `mailbox` in one shot. The externally sendable bulk form;
-/// drop-time cleanup rides the ADR-0079 vacate/close `MonitorNotice`
-/// instead, so the route table stops dispatching at a dropped
-/// trampoline without anyone mailing this. Idempotent: a mailbox
-/// holding no routes is a no-op. Fire-and-forget; no reply.
-/// Fire-and-forget; one mailbox field.
-#[aether_data::kind(name = "aether.http.server.unregister_routes_all", copy, eq)]
+/// held by `handler`, an actor path proven at receipt, in one shot. The
+/// externally sendable bulk form; drop-time cleanup rides the ADR-0079
+/// vacate/close `MonitorNotice` instead, so the route table stops
+/// dispatching at a dropped trampoline without anyone mailing this.
+/// Idempotent: a handler holding no routes, or a path that does not
+/// resolve to a live actor, is a no-op. Fire-and-forget; no reply.
+#[aether_data::kind(name = "aether.http.server.unregister_routes_all", eq)]
 pub struct UnregisterRoutesAll {
-    pub mailbox: aether_data::MailboxId,
+    pub handler: aether_data::ErasedActorPath,
 }
 
 /// `aether.http.server.inbound_ready` — accept / reader sidecar →

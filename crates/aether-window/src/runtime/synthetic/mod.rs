@@ -344,7 +344,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    use aether_data::{Kind, MailboxId};
+    use aether_data::Kind;
     use aether_kinds::Key;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -427,29 +427,26 @@ mod tests {
         let binding = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
         let mut state = test_state();
-        let unknown = MailboxId(0xBAD);
+        let unknown = ErasedActorPath::new("test.synthetic.unknown").expect("fixture path");
 
         assert!(matches!(
             SyntheticWindowCapability::on_subscribe(
                 &mut state,
                 &mut ctx,
-                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: unknown },
+                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, subscriber: unknown },
             ),
-            SubscribeWindowResult::Err { error } if error == "unknown mailbox id 0x0000000000000bad"
+            SubscribeWindowResult::Err { error } if error.contains("`test.synthetic.unknown`")
         ));
         assert!(state.subscribers.recipients(&main_path(), Key::ID).is_empty());
 
-        let subscriber = registry.register_inline(
-            &boot_authority(),
-            "test.synthetic.dropped",
-            Arc::new(|_dispatch: MailDispatch<'_>| {}),
-        );
-        let dropped = subscriber.id();
+        let dropped = ErasedActorPath::new("test.synthetic.dropped").expect("fixture path");
+        let subscriber =
+            registry.register_inline(&boot_authority(), dropped.as_str(), Arc::new(|_dispatch: MailDispatch<'_>| {}));
         assert!(matches!(
             SyntheticWindowCapability::on_subscribe(
                 &mut state,
                 &mut ctx,
-                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, subscriber: dropped.clone() },
             ),
             SubscribeWindowResult::Ok
         ));
@@ -459,9 +456,9 @@ mod tests {
             SyntheticWindowCapability::on_unsubscribe(
                 &mut state,
                 &mut ctx,
-                UnsubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+                UnsubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, subscriber: dropped },
             ),
-            SubscribeWindowResult::Err { error } if error == format!("mailbox {dropped:?} already dropped")
+            SubscribeWindowResult::Err { error } if error.contains("`test.synthetic.dropped`")
         ));
         assert_eq!(state.subscribers.recipients(&main_path(), Key::ID), BTreeSet::from([subscriber]));
     }

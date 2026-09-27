@@ -1,5 +1,6 @@
 //! Lifecycle stage and subscription kind vocabulary.
 
+use aether_data::ErasedActorPath;
 use alloc::string::String;
 
 // ADR-0082 lifecycle stage kinds. Most are empty signals. `Tick` carries
@@ -118,23 +119,23 @@ pub struct LifecycleAdvanceComplete {
     pub next: u64,
 }
 
-/// Subscribe a mailbox to a lifecycle stage broadcast (ADR-0082 §7).
+/// Subscribe an actor to a lifecycle stage broadcast (ADR-0082 §7).
 /// `stage` is the [`KindId`](aether_data::KindId) of the stage kind
-/// (e.g. `<Tick as Kind>::ID.0`); `mailbox` is the subscriber's mailbox
-/// id. Substrate replies with [`LifecycleSubscribeResult`] —
-/// `Err { reason: UnsupportedStage }` when the chassis's lifecycle
-/// graph doesn't declare a state at that kind, fail-fast at wire time
-/// per ADR-0082 §7.
-#[repr(C)]
-#[aether_data::kind(name = "aether.lifecycle.subscribe", pod, default, eq)]
+/// (e.g. `<Tick as Kind>::ID.0`); `subscriber` names the subscribing
+/// actor by actor path, canonical or short, and the capability proves it
+/// at receipt (ADR-0230 §3). Substrate replies with
+/// [`LifecycleSubscribeResult`] — `Err` when the chassis's lifecycle
+/// graph doesn't declare a state at that kind (fail-fast at wire time per
+/// ADR-0082 §7) or when `subscriber` does not resolve to a live actor.
+#[aether_data::kind(name = "aether.lifecycle.subscribe", eq)]
 pub struct LifecycleSubscribe {
     pub stage: u64,
-    pub mailbox: u64,
+    pub subscriber: ErasedActorPath,
 }
 
 /// Reflexive counterpart of [`LifecycleSubscribe`]: subscribe the
 /// *sending* actor to a lifecycle stage broadcast, with no explicit
-/// `mailbox` field. The cap resolves the subscriber from the inbound
+/// `subscriber` field. The cap resolves the subscriber from the inbound
 /// envelope's host-stamped `Source` (ADR-0083) via
 /// `ctx.sender()`, so the subscriber cannot be forged and the
 /// op is gated to in-process actors by construction — an external
@@ -149,17 +150,19 @@ pub struct LifecycleSubscribeSelf {
     pub stage: u64,
 }
 
-/// Unsubscribe counterpart of [`LifecycleSubscribe`]. Idempotent on
-/// "not currently subscribed."
-#[repr(C)]
-#[aether_data::kind(name = "aether.lifecycle.unsubscribe", pod, default, eq)]
+/// Unsubscribe counterpart of [`LifecycleSubscribe`]: `subscriber` is
+/// the same actor path, proven at receipt. Idempotent on "not currently
+/// subscribed", which includes a `subscriber` that does not resolve to a
+/// live actor — a closed subscriber already left every stage through its
+/// `MonitorNotice`.
+#[aether_data::kind(name = "aether.lifecycle.unsubscribe", eq)]
 pub struct LifecycleUnsubscribe {
     pub stage: u64,
-    pub mailbox: u64,
+    pub subscriber: ErasedActorPath,
 }
 
 /// Reflexive counterpart of [`LifecycleUnsubscribe`]: unsubscribe the
-/// *sending* actor from a lifecycle stage, with no explicit `mailbox`
+/// *sending* actor from a lifecycle stage, with no explicit `subscriber`
 /// field. The cap resolves the subscriber from the inbound envelope's
 /// host-stamped `Source` (ADR-0083), the same gating as
 /// [`LifecycleSubscribeSelf`]. Idempotent on "not currently
@@ -170,20 +173,19 @@ pub struct LifecycleUnsubscribeSelf {
     pub stage: u64,
 }
 
-/// `aether.lifecycle.unsubscribe_all` — remove `mailbox` from every
-/// lifecycle stage's subscriber set in one shot. The externally
-/// sendable bulk form; drop-time cleanup rides the ADR-0079
+/// `aether.lifecycle.unsubscribe_all` — remove `subscriber` from every
+/// lifecycle stage's subscriber set in one shot. `subscriber` names the
+/// actor by actor path and is proven at receipt (ADR-0230 §3). The
+/// externally sendable bulk form; drop-time cleanup rides the ADR-0079
 /// vacate/close `MonitorNotice` instead, so the per-stage broadcast
 /// stops firing at a dropped trampoline without anyone mailing this —
 /// the lifecycle-family counterpart of `UnsubscribeAllWindows` for
-/// `aether.window`. Idempotent: a mailbox with no stage subscriptions
-/// is still a no-op. Fire-and-forget; no reply. Cast-shape (Pod), one
-/// `mailbox` field, matching the sibling lifecycle kinds' raw-`u64`
-/// shape.
-#[repr(C)]
-#[aether_data::kind(name = "aether.lifecycle.unsubscribe_all", pod, default, eq)]
+/// `aether.window`. Idempotent: an actor with no stage subscriptions, or
+/// a path that does not resolve to a live actor, is a no-op.
+/// Fire-and-forget; no reply.
+#[aether_data::kind(name = "aether.lifecycle.unsubscribe_all", eq)]
 pub struct LifecycleUnsubscribeAll {
-    pub mailbox: u64,
+    pub subscriber: ErasedActorPath,
 }
 
 /// Reply to [`LifecycleSubscribe`] / [`LifecycleUnsubscribe`].

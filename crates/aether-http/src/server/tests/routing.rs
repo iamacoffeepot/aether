@@ -4,7 +4,7 @@
 //! mid-connection registration, macro/hand-written composition, and
 //! self-unregistration.
 
-use aether_actor::Addressable;
+use aether_actor::ActorPath;
 use aether_data::Kind as KindTrait;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
@@ -226,12 +226,11 @@ fn route_registered_mid_connection_serves_next_request() {
 
     // Register /late at the wired handler while the connection is
     // parked between keep-alive requests.
-    let target = registry.lookup(<WiredRouteHandler as Addressable>::NAMESPACE).expect("wired handler registered");
     let payload = RegisterRoute {
         prefix: "/late".to_string(),
         method: None,
         kind: <RequestKind as KindTrait>::ID,
-        mailbox: target,
+        handler: ActorPath::<WiredRouteHandler>::root().as_erased().clone(),
         shared: false,
     }
     .encode_into_bytes();

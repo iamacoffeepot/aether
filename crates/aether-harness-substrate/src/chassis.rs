@@ -72,11 +72,13 @@ pub const SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_harn
 /// The observer is a raw inline handler, not an actor type, so no typed
 /// resolver answers for it — the harness registers the name and therefore
 /// owns the derivation, the way the registry owns the depth-1 fixed point it
-/// assigns. Scenarios that hand the observer to a capability as a
-/// subscription target need the id rather than the name.
+/// assigns. Its one consumer is the render wiring below, whose
+/// [`RenderHookWiring::observed_kinds`] still takes a position. A scenario
+/// that hands the observer to a capability as a subscription target names it
+/// by actor path, built from [`SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME`].
 #[must_use]
 #[allow(clippy::disallowed_methods)] // aether-suppression-request: the harness registers this raw inbox by name, so there is no actor type for a typed resolver to answer from; one gated derivation beside the name it registers
-pub fn substrate_harness_observer_mailbox() -> MailboxId {
+pub(crate) fn substrate_harness_observer_mailbox() -> MailboxId {
     MailboxId::from_name(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME)
 }
 

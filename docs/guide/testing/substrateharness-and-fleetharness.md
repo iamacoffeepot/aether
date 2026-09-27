@@ -251,7 +251,7 @@ let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
 HarnessOp::send_and_settle(&synthetic, &SubscribeWindow {
     selector: WindowSelector::All,
     kind: Key::ID,
-    mailbox: observer,
+    subscriber: observer,
 });
 ```
 

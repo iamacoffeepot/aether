@@ -1,6 +1,6 @@
 //! Public wire vocabulary for the `aether.window` manager.
 
-use aether_data::{ErasedActorPath, KindId, MailboxId};
+use aether_data::{ErasedActorPath, KindId};
 use aether_kinds::WindowMode;
 use serde::{Deserialize, Serialize};
 
@@ -316,12 +316,15 @@ mod internal {
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 pub(crate) use internal::RetireWindow;
 
-/// Subscribe an explicit mailbox to a kind for a window selector.
+/// Subscribe an explicit subscriber to a kind for a window selector.
+///
+/// `subscriber` names the actor by actor path, canonical or short; the
+/// manager proves it at receipt (ADR-0230 §3).
 #[aether_data::kind(name = "aether.window.subscribe", eq)]
 pub struct SubscribeWindow {
     pub selector: WindowSelector,
     pub kind: KindId,
-    pub mailbox: MailboxId,
+    pub subscriber: ErasedActorPath,
 }
 
 /// Subscribe the sending actor to a kind for a window selector.
@@ -331,12 +334,14 @@ pub struct SubscribeWindowSelf {
     pub kind: KindId,
 }
 
-/// Remove an explicit mailbox's subscription for a selector and kind.
+/// Remove an explicit subscriber's subscription for a selector and kind.
+/// `subscriber` is the actor path the subscription named, proven at
+/// receipt.
 #[aether_data::kind(name = "aether.window.unsubscribe", eq)]
 pub struct UnsubscribeWindow {
     pub selector: WindowSelector,
     pub kind: KindId,
-    pub mailbox: MailboxId,
+    pub subscriber: ErasedActorPath,
 }
 
 /// Remove the sending actor's subscription for a selector and kind.
@@ -353,13 +358,14 @@ pub enum SubscribeWindowResult {
     Err { error: String },
 }
 
-/// Remove one mailbox from every window-event subscription.
+/// Remove one subscriber from every window-event subscription.
 ///
-/// This is the externally sendable bulk form. Runtime monitor cleanup uses
-/// the same operation internally when a subscriber mailbox closes.
-#[aether_data::kind(name = "aether.window.unsubscribe_all", copy, eq)]
+/// This is the externally sendable bulk form; `subscriber` is an actor path
+/// proven at receipt. Runtime monitor cleanup uses the same operation
+/// internally when a subscriber closes.
+#[aether_data::kind(name = "aether.window.unsubscribe_all", eq)]
 pub struct UnsubscribeAllWindows {
-    pub mailbox: MailboxId,
+    pub subscriber: ErasedActorPath,
 }
 
 /// Raw, already-encoded window event injected through the synthetic runtime.

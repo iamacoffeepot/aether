@@ -1815,9 +1815,10 @@ mod tests {
         let captured: Arc<Mutex<Vec<CapturedRow>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
         let (registry, _) = tb.boot().handles_for_test();
-        let subscriber_mbox = registry.register_inline(
+        let subscriber = ErasedActorPath::new("issue_723_test_subscriber").expect("fixture path");
+        registry.register_inline(
             &boot_authority(),
-            "issue_723_test_subscriber",
+            subscriber.as_str(),
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 captured_for_handler.lock().expect("test setup: captured mutex is never poisoned").push((
                     dispatch.mail_id,
@@ -1840,7 +1841,7 @@ mod tests {
                 "subscribe",
                 HarnessOp::send_and_settle(
                     &tb.actor_ref::<aether_lifecycle::LifecycleCapability>(),
-                    &LifecycleSubscribe { stage: Tick::ID.0, mailbox: subscriber_mbox.id().0 },
+                    &LifecycleSubscribe { stage: Tick::ID.0, subscriber },
                 ),
             ),
             ("advance", HarnessOp::advance(1)),
@@ -1909,9 +1910,10 @@ mod tests {
         let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let observed_for_handler = Arc::clone(&observed);
         let (registry, _) = tb.boot().handles_for_test();
-        let observer_mailbox = registry.register_inline(
+        let shutdown_observer = ErasedActorPath::new("issue_1489_shutdown_observer").expect("fixture path");
+        registry.register_inline(
             &boot_authority(),
-            "issue_1489_shutdown_observer",
+            shutdown_observer.as_str(),
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 observed_for_handler
                     .lock()
@@ -1929,7 +1931,7 @@ mod tests {
                 "subscribe_shutdown",
                 HarnessOp::send_and_settle(
                     &tb.actor_ref::<aether_lifecycle::LifecycleCapability>(),
-                    &LifecycleSubscribe { stage: <Shutdown as DataKind>::ID.0, mailbox: observer_mailbox.id().0 },
+                    &LifecycleSubscribe { stage: <Shutdown as DataKind>::ID.0, subscriber: shutdown_observer },
                 ),
             ),
             ("quit", HarnessOp::send_and_settle(&tb.actor_ref::<aether_lifecycle::LifecycleCapability>(), &Quit {})),

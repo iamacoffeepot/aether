@@ -80,10 +80,12 @@ pub trait WindowManagerSurface {
     /// answer, not a reason to hide a window from the root's arithmetic.
     fn routable_windows(state: &Self::State) -> Vec<ErasedActorPath>;
 
-    /// Subscribe an explicit mailbox to one kind for one selector.
+    /// Subscribe an explicit subscriber path to one kind for one selector.
+    /// The path is proven at receipt (ADR-0230 §3); one that does not
+    /// resolve to a live actor is refused with the registry's diagnostic.
     #[handler::single]
     fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
-        match ctx.resolve_live(mail.mailbox) {
+        match ctx.resolve_path(&mail.subscriber) {
             Ok(subscriber) => {
                 Self::subscribers(state).subscribe(ctx, mail.selector, mail.kind, subscriber);
                 SubscribeWindowResult::Ok
@@ -105,14 +107,16 @@ pub trait WindowManagerSurface {
         }
     }
 
-    /// Drop an explicit mailbox's subscription to one kind for one selector.
+    /// Drop an explicit subscriber path's subscription to one kind for one
+    /// selector. The path is proven at receipt, and one that does not
+    /// resolve to a live actor is refused.
     #[handler::single]
     fn on_unsubscribe(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
         mail: UnsubscribeWindow,
     ) -> SubscribeWindowResult {
-        match ctx.resolve_live(mail.mailbox) {
+        match ctx.resolve_path(&mail.subscriber) {
             Ok(subscriber) => {
                 Self::subscribers(state).unsubscribe(mail.selector, mail.kind, subscriber);
                 SubscribeWindowResult::Ok
@@ -134,13 +138,13 @@ pub trait WindowManagerSurface {
         }
     }
 
-    /// Drop a mailbox from every window-event subscription it holds. The
-    /// mailbox is proven at receipt (ADR-0230); one that no longer proves is
-    /// a no-op, its subscriptions having already gone with its
-    /// `MonitorNotice`.
+    /// Drop an explicit subscriber path from every window-event subscription
+    /// it holds. The path is proven at receipt (ADR-0230 §3); one that does
+    /// not prove is a no-op, a closed subscriber's rows having already gone
+    /// with its `MonitorNotice`.
     #[handler::single]
     fn on_unsubscribe_all(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
-        if let Ok(subscriber) = ctx.resolve_live(mail.mailbox) {
+        if let Ok(subscriber) = ctx.resolve_path(&mail.subscriber) {
             Self::subscribers(state).unsubscribe_all(subscriber);
         }
     }
