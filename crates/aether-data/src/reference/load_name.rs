@@ -10,9 +10,9 @@ use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::segment::{SegmentFault, check_segment};
-use crate::Schema;
 use crate::schema::{LabelNode, SchemaType};
 use crate::wire::{Error as WireError, WireDecode, WireEncode};
+use crate::{CrossesActors, CrossesWire, Schema};
 
 /// A caller-supplied load name validated against the segment grammar. Unlike
 /// [`crate::Namespace`] this is display data the lineage fold has
@@ -62,6 +62,9 @@ impl Schema for LoadName {
     const LABEL: Option<&'static str> = None;
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
+
+impl CrossesActors for LoadName {}
+impl CrossesWire for LoadName {}
 
 impl WireEncode for LoadName {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {

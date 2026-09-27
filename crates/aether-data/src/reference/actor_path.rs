@@ -21,7 +21,7 @@ use super::segment::{SegmentFault, check_segment};
 use crate::hash::{MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError};
 use crate::schema::{LabelNode, SchemaType};
 use crate::wire::{Error as WireError, WireDecode, WireEncode};
-use crate::{CastEligible, Schema};
+use crate::{CastEligible, CrossesActors, CrossesWire, Schema};
 
 /// The retired separator of the old short form, refused wherever it appears.
 const RETIRED_SHORT_FORM: &str = "://";
@@ -202,6 +202,9 @@ impl Schema for ErasedActorPath {
     const LABEL: Option<&'static str> = None;
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
+
+impl CrossesActors for ErasedActorPath {}
+impl CrossesWire for ErasedActorPath {}
 
 impl CastEligible for ErasedActorPath {
     const ELIGIBLE: bool = false;

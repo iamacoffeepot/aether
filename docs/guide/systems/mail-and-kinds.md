@@ -119,7 +119,9 @@ one-shot request that needs to match a later reply should call
 `send_with_context(&request, &context)` and recover the bookkeeping in the
 reply handler with `ctx.take_context::<Context>()`. Contexts are `Kind`s, so the
 table stores schema-typed bytes, checks the `KindId` on take, and rides guest
-dehydrate/rehydrate automatically. A replacement that no longer declares a
+dehydrate/rehydrate automatically. A context holding a reply handle or a
+sender route has actor reach (ADR-0242): the table stores it, but it is never
+mail, so no actor can send it and no handler receives it. A replacement that no longer declares a
 carried context's kind (a changed schema is a new `KindId`) is refused, and the
 old guest keeps the context. A take of the wrong type returns `None` and
 leaves the context stored, so a reply handler that serves several context kinds

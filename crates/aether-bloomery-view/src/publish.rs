@@ -148,6 +148,9 @@ impl Schema for Heads {
     const LABEL_NODE: LabelNode = <HeadsSnapshot as Schema>::LABEL_NODE;
 }
 
+impl aether_data::CrossesActors for Heads {}
+impl aether_data::CrossesWire for Heads {}
+
 impl WireEncode for Heads {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         HeadsSnapshot::from(self).encode(out)

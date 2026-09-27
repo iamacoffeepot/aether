@@ -1,0 +1,78 @@
+error[E0277]: `aether_data::Source` has actor reach: it does not cross actors
+  --> tests/ui/rejects_actor_reach_send.rs:29:10
+   |
+29 |     send(&Context { label: String::new(), reply_to: None });
+   |     ---- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ has actor reach: its bytes stay in their own actor
+   |     |
+   |     required by a bound introduced by this call
+   |
+   = help: the trait `CrossesActors` is not implemented for `aether_data::Source`
+   = note: a kind's reach is its narrowest field's (ADR-0242)
+   = help: the following other types implement trait `CrossesActors`:
+             ()
+             BTreeMap<K, V>
+             Box<T>
+             Context
+             DagId
+             EngineId
+             ErasedActorPath
+             KindId
+           and $N others
+   = note: required for `std::option::Option<aether_data::Source>` to implement `CrossesActors`
+   = note: 1 redundant requirement hidden
+   = note: required for `Context` to implement `CrossesActors`
+note: required for `Context` to implement `ActorMail`
+  --> tests/ui/rejects_actor_reach_send.rs:14:8
+   |
+13 | #[aether_data::kind(name = "test.reach.context")]
+   | ------------------------------------------------- type parameter would need to implement `ActorMail`
+14 | struct Context {
+   |        ^^^^^^^
+   = help: consider manually implementing `ActorMail` to avoid undesired bounds
+note: required by a bound in `send`
+  --> tests/ui/rejects_actor_reach_send.rs:25:12
+   |
+25 | fn send<K: aether_data::ActorMail>(_: &K) {}
+   |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `send`
+
+error[E0277]: `aether_data::Source` has actor reach: it does not cross actors
+  --> tests/ui/rejects_actor_reach_send.rs:30:10
+   |
+30 |     send(&Pending::Idle);
+   |     ---- ^^^^^^^^^^^^^^ has actor reach: its bytes stay in their own actor
+   |     |
+   |     required by a bound introduced by this call
+   |
+   = help: the trait `CrossesActors` is not implemented for `aether_data::Source`
+   = note: a kind's reach is its narrowest field's (ADR-0242)
+   = help: the following other types implement trait `CrossesActors`:
+             ()
+             BTreeMap<K, V>
+             Box<T>
+             Context
+             DagId
+             EngineId
+             ErasedActorPath
+             KindId
+           and $N others
+note: required for `Pending` to implement `CrossesActors`
+  --> tests/ui/rejects_actor_reach_send.rs:20:6
+   |
+19 | #[aether_data::kind(name = "test.reach.pending")]
+   | ------------------------------------------------- type parameter would need to implement `CrossesActors`
+20 | enum Pending {
+   |      ^^^^^^^
+   = help: consider manually implementing `CrossesActors` to avoid undesired bounds
+note: required for `Pending` to implement `ActorMail`
+  --> tests/ui/rejects_actor_reach_send.rs:20:6
+   |
+19 | #[aether_data::kind(name = "test.reach.pending")]
+   | ------------------------------------------------- type parameter would need to implement `ActorMail`
+20 | enum Pending {
+   |      ^^^^^^^
+   = help: consider manually implementing `ActorMail` to avoid undesired bounds
+note: required by a bound in `send`
+  --> tests/ui/rejects_actor_reach_send.rs:25:12
+   |
+25 | fn send<K: aether_data::ActorMail>(_: &K) {}
+   |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `send`

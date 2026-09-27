@@ -1,5 +1,6 @@
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
+use syn::spanned::Spanned;
 use syn::{Attribute, Type};
 
 use crate::handler_parse::{HandlerClass, HandlerReply};
@@ -13,11 +14,13 @@ pub struct ReplyMarkerSite<'a> {
     pub cfgs: &'a [Attribute],
 }
 
-/// Emit the reply-contract marker that follows from one handler signature.
+/// Emit the reply-contract marker that follows from one handler signature,
+/// plus the requirement that the handler's kind crosses actors.
 ///
 /// `HandlesKind<K>` is emitted separately at every call site. This helper keeps
 /// the companion marker derived from the same parsed class / return shape on
-/// the wasm, native identity, and handler-set paths.
+/// the wasm, native identity, and handler-set paths, which is also why the
+/// reach requirement lives here: every handler passes through it.
 pub fn reply_marker_impl(
     class: HandlerClass,
     reply: &HandlerReply,
@@ -25,7 +28,8 @@ pub fn reply_marker_impl(
     site: &ReplyMarkerSite<'_>,
 ) -> TokenStream2 {
     let ReplyMarkerSite { impl_generics, self_ty, where_clause, cfgs } = site;
-    match (class, reply) {
+    let crosses = crosses_actors_requirement(kind_ty, site);
+    let marker = match (class, reply) {
         (HandlerClass::Single, HandlerReply::Sync(reply_ty) | HandlerReply::Deferred(reply_ty)) => quote! {
             #(#cfgs)*
             impl #impl_generics ::aether_actor::Replies<#kind_ty> for #self_ty #where_clause {
@@ -33,6 +37,29 @@ pub fn reply_marker_impl(
             }
         },
         (HandlerClass::Single, HandlerReply::None) | (HandlerClass::Manual, _) => quote! {},
+    };
+    quote! { #marker #crosses }
+}
+
+/// Require a handler's kind to cross actors (ADR-0242), so no handler receives
+/// a kind of actor reach, and one injected through a raw door finds no row.
+///
+/// The check is a generic function over the site's own generics, so a kind
+/// written in terms of them resolves, and it carries the kind's span, so the
+/// reach diagnostic points at the handler's kind parameter.
+fn crosses_actors_requirement(kind_ty: &Type, site: &ReplyMarkerSite<'_>) -> TokenStream2 {
+    let ReplyMarkerSite { impl_generics, where_clause, cfgs, .. } = site;
+    let call = quote_spanned! {kind_ty.span()=>
+        __aether_crosses::<#kind_ty>();
+    };
+    quote! {
+        #(#cfgs)*
+        const _: () = {
+            fn __aether_handler_kind_crosses_actors #impl_generics () #where_clause {
+                fn __aether_crosses<K: ?::core::marker::Sized + ::aether_actor::__macro_internals::CrossesActors>() {}
+                #call
+            }
+        };
     }
 }
 

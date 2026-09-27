@@ -775,6 +775,7 @@ mod tests {
     }
 
     impl ActorMail for Answer {}
+    impl aether_data::CrossesActors for Answer {}
 
     /// Forward every dispatched envelope onto `tx` so a test can observe
     /// the routed reply. The reply lands at the caller's

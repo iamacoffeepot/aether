@@ -434,6 +434,15 @@ refuses without one.
   registry, `ProtocolPathUnpublished` when no `Live` route stands at the
   path, and `UncoveredProtocolPath` naming the path and the first row that
   is missing or different.
+- A third operation proves a reference
+  ([ADR-0242](0242-a-kinds-reach-is-its-narrowest-fields.md) §6), and lands
+  with the first kind that carries a typed proof. A reference leaf is
+  contextual: it encodes its position under its own type id, and its decode
+  asks the context whether a route record stands at that position, the read
+  `Registry::stamped_sender` makes. An `ActorRef<R>` also checks the route's
+  leaf namespace, and a `ProtocolRef<P>` checks its rows as a
+  `ProtocolPath<P>` does. A kind holding one has engine reach, so its bytes
+  never leave the engine that proves them.
 - The plain shorthand (`decode_from_bytes`, `wire::decode_from_slice`)
   decodes with an empty context, so it refuses every `ProtocolPath<P>`.
   Serde carries no context, so `ProtocolPath<P>` has no `Deserialize`, and a

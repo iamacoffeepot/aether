@@ -17,9 +17,9 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Schema;
 use crate::schema::{LabelNode, NamedField, SchemaType};
 use crate::wire::{Error as WireError, WireDecode, WireEncode, decode_bytes, encode_bytes};
+use crate::{CrossesActors, CrossesWire, Schema};
 
 pub use uuid::Uuid;
 
@@ -37,6 +37,9 @@ impl Schema for EngineId {
     const LABEL: Option<&'static str> = Some("aether.engine_id");
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
+
+impl CrossesActors for EngineId {}
+impl CrossesWire for EngineId {}
 
 impl WireEncode for EngineId {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
@@ -68,6 +71,9 @@ impl Schema for SessionToken {
     const LABEL: Option<&'static str> = Some("aether.session_token");
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
+
+impl CrossesActors for SessionToken {}
+impl CrossesWire for SessionToken {}
 
 impl WireEncode for SessionToken {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
