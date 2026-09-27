@@ -7,10 +7,9 @@ engine backing into a `Shared` `Blob` (`__mint_shared_blob`, and the guest
 backing's `__mint_guest_blob`, ADR-0238 decision 4), or an ingress bridge's
 private stand-in (`__mint_ingress_ref`, ADR-0231 §4 "Ingress bridges: a
 private stand-in"), so only the paths in `ALLOWED_PATHS` may name them.
-Every other mention in tracked Rust source
-is a finding: nothing written in scanned source — no comment, attribute,
-marker, or flag — relaxes this scan, and widening the allowlist means editing
-this gate in a reviewed diff.
+Every other mention in tracked Rust source is a finding: nothing written in
+scanned source — no comment, attribute, marker, or flag — relaxes this scan,
+and widening the allowlist means editing this gate in a reviewed diff.
 """
 
 from __future__ import annotations

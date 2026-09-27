@@ -134,7 +134,7 @@ class ScannerTests(unittest.TestCase):
     def test_ingress_ref_mint_outside_the_allowlist_fails(self) -> None:
         self.repo.write(
             "crates/aether-http/src/server/runtime/state.rs",
-            "fn sneak(id: MailboxId) -> IngressRef {\n    aether_actor::__mint_ingress_ref(id)\n}\n",
+            "fn sneak(id: MailboxId) -> IngressRef {\n    super::ingress::__mint_ingress_ref(id)\n}\n",
         )
         self.repo.commit("sneaky ingress mint")
 
