@@ -15,7 +15,12 @@
 //! same `Shared` [`Blob`] a handler would get, minted by the store's one mint
 //! site.
 
+#[cfg(feature = "wasm")]
+use std::sync::Arc;
+
 use aether_data::Blob;
+#[cfg(feature = "wasm")]
+use aether_data::wire;
 
 use crate::store::{BlobEntry, BlobStore, SlabBuilder};
 
@@ -40,6 +45,14 @@ impl BlobCheckIn {
     #[must_use]
     pub fn check_in(&self, bytes: Box<[u8]>) -> Blob {
         self.store.check_in(bytes).into_blob()
+    }
+
+    /// The store entry behind `value`: the one a `Shared` value holds, or
+    /// `Owned` bytes checked in once. The module cache reads code through it,
+    /// and so never copies bytes the store already holds.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn entry(&self, value: &Blob) -> Result<Arc<BlobEntry>, wire::Error> {
+        self.store.entry_of(value)
     }
 
     /// Start checking in one member per length in `lens` as a single slab:

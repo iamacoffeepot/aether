@@ -24,6 +24,9 @@
 //!   ADR-0238).
 //! - [`kind_manifest`] — parses the `aether.kinds` custom section the
 //!   guest's [`aether_actor::export!`] macro emits.
+//! - [`module`] — code as a value (ADR-0241 §2): the engine's one
+//!   [`module::ModuleCache`] compiles a wasm blob and parses its sections
+//!   once per content hash into a [`module::Module`], whose assets are blobs.
 //!
 //! The `WasmTrampoline` actor itself lives in
 //! `aether_component::trampoline` (issue 654) — next to the
@@ -38,6 +41,7 @@ pub(crate) mod blob_table;
 pub mod component;
 pub mod host_fns;
 pub mod kind_manifest;
+pub mod module;
 pub(crate) mod reply_table;
 
 pub use component::{Component, ComponentCtx};

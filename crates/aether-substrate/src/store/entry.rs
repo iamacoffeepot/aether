@@ -1,5 +1,6 @@
 //! A resident entry, its storage and its dedup key.
 
+use std::any::Any;
 use std::fmt;
 use std::mem;
 use std::ops::Range;
@@ -7,7 +8,8 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use aether_data::{Blob, BlobBacking, BlobHash};
+use aether_data::wire::Error;
+use aether_data::{Blob, BlobBacking, BlobHash, BlobReader};
 
 use super::slab::Slab;
 use super::{Index, Shared, reclaim};
@@ -15,6 +17,31 @@ use super::{Index, Shared, reclaim};
 /// The BLAKE3 digest of `bytes` as the entry's identity and dedup key.
 pub(super) fn hash_of(bytes: &[u8]) -> BlobHash {
     BlobHash::from_bytes(*blake3::hash(bytes).as_bytes())
+}
+
+/// The store entry behind a `Shared` value, recovered by downcast (ADR-0238
+/// decision 4). `None` for `Owned` bytes, or a backing that is not a store
+/// entry.
+pub(super) fn store_entry(value: &Blob) -> Option<Arc<BlobEntry>> {
+    let backing: Arc<dyn BlobBacking> = Arc::clone(aether_data::__shared_backing(value)?);
+    let backing: Arc<dyn Any + Send + Sync> = backing;
+    backing.downcast::<BlobEntry>().ok()
+}
+
+/// Every byte of `value`, streamed into a buffer of its exact length.
+pub fn read_all(value: &Blob) -> Result<Box<[u8]>, Error> {
+    let reader = BlobReader::open(value);
+    let len = usize::try_from(reader.len()).map_err(|_| Error::Length)?;
+    let mut bytes = vec![0; len].into_boxed_slice();
+    let mut filled = 0;
+    while filled < len {
+        let copied = reader.read_range(filled as u64, &mut bytes[filled..]);
+        if copied == 0 {
+            return Err(Error::UnexpectedEof);
+        }
+        filled += copied;
+    }
+    Ok(bytes)
 }
 
 /// Immutable checked-in bytes, shared as an `Arc`. Reading them takes no lock.

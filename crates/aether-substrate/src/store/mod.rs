@@ -88,7 +88,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
-use aether_data::BlobHash;
+use aether_data::{Blob, BlobHash, wire};
 use rustc_hash::FxHashMap;
 
 mod entry;
@@ -99,6 +99,7 @@ mod slab;
 mod tests;
 
 pub use entry::BlobEntry;
+pub use entry::read_all;
 pub use slab::SlabBuilder;
 
 /// Buffers at or above this length are freed on the reclaim thread rather
@@ -187,6 +188,18 @@ impl BlobStore {
         let resident = self.shared.resident_bytes.fetch_add(len, Ordering::Relaxed) + len;
         gauge::observe(&self.shared, resident);
         entry
+    }
+
+    /// The entry behind `value`. A `Shared` value already holds its entry,
+    /// reached by downcast with no lookup and no copy; any other value's
+    /// bytes are checked in once, as [`Self::check_in`] does (ADR-0238
+    /// decision 4). The envelope encoder and the module cache both reach a
+    /// value's bytes through this one path.
+    pub(crate) fn entry_of(&self, value: &Blob) -> Result<Arc<BlobEntry>, wire::Error> {
+        match entry::store_entry(value) {
+            Some(found) => Ok(found),
+            None => Ok(self.check_in(read_all(value)?)),
+        }
     }
 
     /// A builder for one slab of exactly the sum of `lens`, with one region

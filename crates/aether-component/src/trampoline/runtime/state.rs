@@ -3,9 +3,9 @@ use std::sync::Arc;
 use aether_kinds::ComponentCapabilities;
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, CorrelationCursor, PendingReplies};
-use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
+use aether_substrate::actor::wasm::module::{Module, ModuleCache};
 use aether_substrate::mail::outbound::HubOutbound;
-use wasmtime::{Engine, Linker, Module};
+use wasmtime::{Engine, Linker};
 
 use crate::trampoline::WasmTrampoline;
 
@@ -43,23 +43,17 @@ pub struct WasmTrampolineState {
     /// re-instantiates the same exported type from the new wasm
     /// and re-reads that type's capability group.
     pub(crate) type_tag: Option<u64>,
-    /// ADR-0097: the resident `Module`, retained so a sibling spawn
-    /// re-instantiates it (a cheap `Arc` clone — wasmtime shares the
-    /// compiled code) without a re-compile, and refreshed on replace.
-    /// ADR-0240 D5: this `Arc` is also what keeps the host's
-    /// content-hash-keyed module cache entry alive — the cache holds only a
-    /// `Weak<Module>`, so a trampoline dropping this field is part of what
-    /// lets the cache prune a module no one still hosts.
-    pub(crate) module: Arc<Module>,
-    /// ADR-0097: every exported type's capability group (see
-    /// [`super::WasmTrampolineConfig::actor_caps`]). A spawned sibling looks
-    /// up its own handler set here by actor-type tag.
-    pub(crate) actor_caps: Vec<ActorInputs>,
-    /// ADR-0163 §3 (#3984): the resident module's raw wasm bytes, retained
-    /// so a `spawn_child::<Sibling>` from this module can index its own
-    /// asset load window, and refreshed on replace. Shared `Arc` — indexed,
-    /// never mutated.
-    pub(crate) wasm_bytes: Arc<[u8]>,
+    /// The resident [`Module`], retained so a sibling spawn re-instantiates
+    /// its compiled code and reads its own capability group from the
+    /// manifest (ADR-0097) and opens its own asset load window over the
+    /// module's asset blobs (ADR-0163 §3), and refreshed on replace. A cheap
+    /// clone of the engine module cache's entry, which it keeps alive
+    /// (ADR-0240 D5, ADR-0241 §2).
+    pub(crate) module: Module,
+    /// The engine's one module cache: a replace checks its replacement in
+    /// here, so a replacement already live anywhere in the engine is not
+    /// compiled again.
+    pub(crate) modules: ModuleCache,
     /// ADR-0139 §3 (#6400, #6422): the correlation cursor of the last guest
     /// to leave this slot, which the next occupant resumes, so the mailbox's
     /// request ids and reply-lineage ids both stay monotonic across replace

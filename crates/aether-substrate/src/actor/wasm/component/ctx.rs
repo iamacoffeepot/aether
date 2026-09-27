@@ -190,7 +190,7 @@ pub struct ComponentCtx {
     /// so the guest's `init` and `wire` can pull assets); the
     /// `asset_fetch_p32` / `asset_catalog_p32` host fns serve the guest's
     /// `AssetWindow` / `AssetCatalog` surfaces from it. Closed after the
-    /// guest's `wire` returns — the payload pin and ranges are dropped, so
+    /// guest's `wire` returns — the window lets go of the asset blobs, so
     /// `asset_fetch` traps thereafter, while the catalog metadata is
     /// retained for the instance's life so `asset_catalog` still answers.
     /// `None` on the test paths that build a bare ctx.
@@ -377,7 +377,7 @@ impl ComponentCtx {
     }
 
     /// Close the asset load window when the guest's `wire` returns
-    /// (ADR-0163 §3): drop the payload pin and byte ranges so
+    /// (ADR-0163 §3): let go of the asset blobs so
     /// `asset_fetch` no longer serves, retaining the catalog metadata for
     /// the instance's life so `asset_catalog` still answers. Idempotent; a
     /// no-op when no window was installed.

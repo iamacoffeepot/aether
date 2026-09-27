@@ -4,23 +4,28 @@ use std::sync::Arc;
 
 use aether_kinds::ComponentCapabilities;
 use aether_substrate::actor::wasm::component::ComponentCtx;
-use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
+use aether_substrate::actor::wasm::module::{Module, ModuleCache};
 use aether_substrate::mail::outbound::HubOutbound;
-use wasmtime::{Engine, Linker, Module};
+use wasmtime::{Engine, Linker};
 
 /// Configuration handed to [`Lifecycle::init`](aether_actor::Lifecycle::init) by the spawn
-/// path. Carries the wasmtime engine / linker plus the parsed
-/// module bytes; `init` instantiates the `Component` against the
+/// path. Carries the wasmtime engine / linker plus the checked-in
+/// module; `init` instantiates the `Component` against the
 /// trampoline's binding.
 pub struct WasmTrampolineConfig {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
-    /// The compiled module this trampoline instantiates. Shared with the
-    /// host's `ModuleCache` (ADR-0240 D5): holding this `Arc` is what keeps
-    /// the cache's entry for this content hash alive, so it stays cheap to
-    /// re-instantiate for a sibling spawn or a same-hash load until every
-    /// holder drops.
-    pub module: Arc<Module>,
+    /// The module this trampoline instantiates: its compiled code, its
+    /// manifest (every exported type's capability group, read by a
+    /// `spawn_child::<Sibling>` request for the spawned sibling's own
+    /// handler set), and its asset blobs, which `init` opens the load window
+    /// over (ADR-0163 §3). Holding it keeps the engine module cache's entry
+    /// for this content hash alive (ADR-0240 D5, ADR-0241 §2), so a sibling
+    /// spawn or a same-hash load reuses it until every holder drops.
+    pub module: Module,
+    /// The engine's one module cache, through which a replace checks its
+    /// replacement module in (ADR-0241 §2).
+    pub modules: ModuleCache,
     pub outbound: Arc<HubOutbound>,
     /// Component capabilities parsed from the wasm's
     /// `aether.kinds.inputs` custom section, surfaced through
@@ -40,18 +45,4 @@ pub struct WasmTrampolineConfig {
     /// module has. Stored on the trampoline so a later
     /// `ReplaceComponent` rebuilds the same export.
     pub type_tag: Option<u64>,
-    /// ADR-0097: every exported type's capability group, parsed once
-    /// at load. The trampoline keeps it so a `spawn_child::<Sibling>`
-    /// host-fn request can register the spawned sibling's *own*
-    /// handler set (looked up by actor-type tag), and so each
-    /// spawned sibling carries the same map for its own spawns.
-    pub actor_caps: Vec<ActorInputs>,
-    /// ADR-0163 §3 (#3984): the module's raw wasm bytes, retained so
-    /// `WasmTrampoline::init` can index an asset load window over its
-    /// `aether.asset.*` sections (installed on the `ComponentCtx` before
-    /// `Component::instantiate`, closed once `wire` returns) and so a later
-    /// `spawn_child::<Sibling>` from the same resident module can index its
-    /// own window. Shared `Arc` — the module bytes are indexed, never
-    /// mutated.
-    pub wasm_bytes: Arc<[u8]>,
 }

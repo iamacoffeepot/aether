@@ -20,6 +20,7 @@ use aether_actor::ReplyMode;
 use aether_data::{ActorLineageRecord, ErasedActorPath};
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::wasm::kind_manifest::{ActorInputs, Dependency};
+use aether_substrate::actor::wasm::module::ModuleManifest;
 
 /// The refusal error naming the actor and its missing dependency. One
 /// constructor for all four refusal sites, so the load, boot, and
@@ -104,15 +105,15 @@ fn inline_spawnable<'a>(
 /// it live.
 pub(super) fn inline_dependency_refusal<A, M: ReplyMode>(
     ctx: &NativeCtx<'_, A, M>,
-    actors: &[ActorInputs],
-    private: &[ActorInputs],
-    lineage: &[ActorLineageRecord],
-    module_namespace: Option<&str>,
+    manifest: &ModuleManifest,
 ) -> Option<String> {
+    let private = manifest.private_actors();
     let private_groups = private.iter().filter_map(|group| Some((group.namespace.as_deref()?, group)));
-    inline_spawnable(actors, private, lineage, module_namespace).chain(private_groups).find_map(|(namespace, group)| {
-        ctx.missing_dependency(None, &group.dependencies).map(|missing| dependency_refusal(namespace, missing))
-    })
+    inline_spawnable(manifest.actors(), private, manifest.lineage(), manifest.namespace())
+        .chain(private_groups)
+        .find_map(|(namespace, group)| {
+            ctx.missing_dependency(None, &group.dependencies).map(|missing| dependency_refusal(namespace, missing))
+        })
 }
 
 #[cfg(test)]

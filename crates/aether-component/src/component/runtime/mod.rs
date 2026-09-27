@@ -21,9 +21,7 @@ use aether_actor::{RegistryChanged, runtime};
 mod config;
 mod dependencies;
 mod load;
-mod module_cache;
 
-use self::module_cache::ModuleCache;
 use super::{ComponentHostCapability, LoadResult};
 use crate::trampoline::WasmTrampoline;
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
@@ -51,12 +49,14 @@ use aether_data::{MailboxCategory, Source};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use aether_data::BlobHash;
 use wasmtime::{Engine, Linker};
 
 use aether_substrate::actor::native::{
     Erased, NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
 };
 use aether_substrate::actor::wasm::component::ComponentCtx;
+use aether_substrate::actor::wasm::module::{Module, ModuleCache};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::RegistrySubscription;
@@ -92,15 +92,18 @@ pub struct ComponentHostCapabilityState {
     /// Monotonic counter for `component_N` default names when an agent passes
     /// `name: None` and the wasm doesn't declare an `aether.namespace`.
     pub default_name_counter: u64,
-    /// Every compiled module currently held by a live user, keyed by content
-    /// hash (ADR-0240 D5), so a burst of loads of one artifact (`replicas: N`,
-    /// a boot manifest naming several of its exports) pays cranelift once
-    /// instead of once per load. Nothing is evicted by count or capacity —
-    /// an entry lives only as long as some trampoline, in-flight load, or
-    /// staged boot plan still holds its `Arc<Module>`.
-    pub module_cache: ModuleCache,
-    /// ADR-0147 module-boot bookkeeping: content hash (sha256 hex of the wasm
-    /// bytes) → the module's boot singleton. A module that declares a `boot =`
+    /// The engine's one module cache (ADR-0240 D5, ADR-0241 §2), built here
+    /// on the engine every load instantiates against and handed to every
+    /// trampoline, so a load, a boot, a sibling spawn and a replace of the
+    /// same bytes all share one compiled, parsed entry per content hash — a
+    /// burst of loads of one artifact (`replicas: N`, a boot manifest naming
+    /// several of its exports) pays cranelift once instead of once per load.
+    /// Nothing is evicted by count or capacity — an entry lives only as long
+    /// as some trampoline, in-flight load or replace, or staged boot plan
+    /// still holds its `Module`.
+    pub modules: ModuleCache,
+    /// ADR-0147 module-boot bookkeeping: content hash (the ADR-0238 BLAKE3
+    /// hash of the wasm bytes, [`Module::hash`]) → the module's boot singleton. A module that declares a `boot =`
     /// slot instantiates exactly one boot actor per `(engine, content hash)`;
     /// this table is the per-engine half of that pairing (the state itself is
     /// the per-substrate-process singleton every load runs through). Refcounted
@@ -108,7 +111,7 @@ pub struct ComponentHostCapabilityState {
     /// so the common case costs nothing. Changed only through
     /// `register_boot` / `unregister_boot`, which keep [`Self::boot_actors`]
     /// in lockstep.
-    boot_registry: HashMap<String, BootEntry>,
+    boot_registry: HashMap<BlobHash, BootEntry>,
     /// ADR-0147: every live module boot's reference — the reverse index of
     /// [`Self::boot_registry`], so the drop guard refusing a drop addressed at
     /// a boot actor is one lookup rather than a scan over every module.
@@ -116,19 +119,19 @@ pub struct ComponentHostCapabilityState {
     /// Actor-local reservations for module boots that have been staged but are
     /// not authoritative `Live` yet. Same-hash loads and replacements retain
     /// their own move-only deferred replies here and join the first boot result.
-    pending_boots: HashMap<String, load::PendingBoot>,
+    pending_boots: HashMap<BlobHash, load::PendingBoot>,
     /// ADR-0147: a loaded non-boot actor → the content hash of the module it
     /// came from. The key is the actor's proof, taken from its spawn outcome or
     /// proven once at the receipt of a drop / replace (ADR-0230). Populated only
     /// for actors sourced from a module that declares a boot slot, so a drop /
     /// replace can find and decrement the right boot refcount. A bootless module
     /// inserts nothing.
-    pub boot_hash_by_actor: HashMap<ErasedActorRef, String>,
+    pub boot_hash_by_actor: HashMap<ErasedActorRef, BlobHash>,
     /// ADR-0147: in-flight `aether.component.replace` forwards awaiting their
     /// trampoline `ReplaceResult`, keyed by the forward's correlation id. The
     /// boot-refcount transfer for a replace is committed only after the swap
     /// succeeds (`finish_replace`), so the caller's reply target and the
-    /// replacement wasm are parked here across the hop. Empty except while a
+    /// replacement module are parked here across the hop. Empty except while a
     /// replace is settling.
     pub pending_replace: HashMap<u64, PendingReplace>,
     /// Last replace/drop operation sequence allocated for each actor, keyed by
@@ -148,16 +151,17 @@ pub struct ComponentHostCapabilityState {
 /// ADR-0147: a parked `aether.component.replace` forward. `source` is the
 /// original caller's reply target (the trampoline's `ReplaceResult` is routed
 /// to the cap instead, then re-replied here); `actor` — the target proven at
-/// the replace's receipt — and `new_wasm` are what `commit_replacement_boot`
+/// the replace's receipt — and `module` are what `commit_replacement_boot`
 /// needs to commit the boot-refcount transfer once the swap is confirmed
-/// successful. `boot_operation` is
+/// successful. Holding `module` across the hop also keeps its cache entry
+/// live, so the trampoline's own check-in of the forwarded bytes is a hit. `boot_operation` is
 /// reserved when the request is forwarded; it becomes dominant only if that
 /// request succeeds, so a later failed request cannot suppress this one.
 #[derive(Clone)]
 pub struct PendingReplace {
     pub source: Source,
     pub actor: ErasedActorRef,
-    pub new_wasm: Arc<[u8]>,
+    pub module: Module,
     pub boot_operation: u64,
 }
 
@@ -195,13 +199,13 @@ impl NativeActor for ComponentHostCapability {
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<ComponentHostCapabilityState, BootError> {
         Ok(ComponentHostCapabilityState {
+            modules: ModuleCache::new(Arc::clone(&params.engine)),
             engine: params.engine,
             linker: params.linker,
             outbound: params.hub_outbound,
             registry_subscription: None,
             last_egressed_inventory: None,
             default_name_counter: 0,
-            module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
             boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
@@ -498,6 +502,7 @@ mod tests {
             registered_binding(&registry, &mailer, "test.component.inventory-subscriber", noop_handler());
         let mut state = ComponentHostCapabilityState {
             linker: Arc::new(Linker::new(&engine)),
+            modules: ModuleCache::new(Arc::clone(&engine)),
             engine,
             outbound,
             registry_subscription: Some(
@@ -506,7 +511,6 @@ mod tests {
             ),
             last_egressed_inventory: None,
             default_name_counter: 0,
-            module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
             boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
