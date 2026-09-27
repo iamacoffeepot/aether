@@ -264,7 +264,7 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     assert!(registry.entry_at(id).is_none(), "compatibility entry does not project Starting as live");
     assert!(registry.route_lookup(KindId(1), id).is_starting(), "dispatch lookup identifies Starting privately");
     assert!(registry.route_lookup(KindId(1), id).seize_handle().is_none(), "Starting has no seize handle");
-    assert!(registry.list_mailbox_descriptors().iter().all(|descriptor| descriptor.id != id));
+    assert!(registry.list_mailbox_descriptors().iter().all(|descriptor| descriptor.name != name));
     assert_eq!(registry.mailbox_generation(), initial_mailbox_generation, "Starting is not public inventory");
     assert!(wakes.recv_timeout(Duration::from_millis(20)).is_err(), "Starting emits no public inventory event");
     assert!(registry.route_generation() > initial_route_generation, "Starting advances only the keyed generation");

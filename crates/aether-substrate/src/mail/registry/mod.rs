@@ -51,7 +51,7 @@ pub use handlers::{InboxHandler, InlineHandler, noop_handler};
 pub use mailbox::{AdoptRefused, ChildRefused, MailboxEntry, Registry, ResolveLiveError, RouteResolution};
 pub(crate) use mailbox::{CapturedDisposition, RouteContinuation, RouteEndpoint, SeizeCell};
 pub use metrics::RegistryQueueMetrics;
-pub(crate) use names::{canonical_mailbox_id, lineage_mailbox_id};
+pub(crate) use names::{CHASSIS_SENTINEL_NAME, canonical_mailbox_id, lineage_mailbox_id};
 pub(crate) use owner::ParkAdmission;
 pub(crate) use owner::RegistryOwnerLease;
 pub(crate) use relay::RouteRelayHandle;

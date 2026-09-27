@@ -176,10 +176,12 @@ only re-spells leaves: it never renames, drops, or adds a field, so the
 `replies` projection recognizes errors the same way.
 
 `send_mail_traced` is the same idea with a shared trace root. Every item in the
-batch lands under one chassis-level trace root. The settled default returns a
+batch lands under one shared trace root. The settled default returns a
 compact one-line-per-node `tree`, a matching `node_count`, and `mails: null`;
-each line names `sender → recipient`, kind, and handler duration, with indentation
-for causal depth. Pass `trace: "nodes"` to restore the complete `mails` node values;
+each line names `sender → recipient` by canonical actor path, then the kind and
+handler duration, with indentation for causal depth. A retired actor keeps its
+path, and `(no route)` marks an endpoint the engine held no route record for;
+the root and every node's mail ids name their minting actor by path too. Pass `trace: "nodes"` to restore the complete `mails` node values;
 that form omits `tree` and carries the same `node_count`. Both forms also carry
 the complete flat reply list and rely on the generic response spill rather than
 truncating. Its `format` is the same reply mask as `send_mail`'s, applied to

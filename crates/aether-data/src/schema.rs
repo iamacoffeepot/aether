@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::ids::{KindId, MailboxId};
+use crate::ids::KindId;
 use core::ops::Deref;
 
 /// One entry in `Hello.kinds`: a kind-name plus its schema. The hub
@@ -29,16 +29,10 @@ pub struct KindDescriptor {
 /// One entry in `Hello.mailboxes` (and the `MailboxesChanged` frame).
 /// Like [`KindDescriptor`] for kinds: an authoritative snapshot of the
 /// substrate's mailbox table, shipped to the hub at handshake and
-/// re-shipped after each runtime mailbox add. The hub caches the list
-/// and uses `(name, category)` to render type-prefixed labels in
-/// trace tool output (issue iamacoffeepot/aether#731).
-///
-/// `id` is the deterministic [`MailboxId`] hash of `name` (ADR-0029);
-/// shipped explicitly so the hub doesn't have to re-hash and so a
-/// future categorisation change can't drift the id space.
+/// re-shipped after each runtime mailbox add. An entry names its actor by
+/// canonical path and carries no mailbox id (ADR-0230 §1).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailboxDescriptor {
-    pub id: MailboxId,
     pub name: String,
     /// Optional coarse classification of the mailbox's role. `None`
     /// means "uncategorised registered mailbox" — the hub falls back
@@ -64,9 +58,8 @@ pub enum MailboxCategory {
     /// apart for filtering / coloring if needed.
     Trampoline,
     /// The chassis-router short-circuit sentinel (`aether.chassis`).
-    /// Reachable as a routing target id but never registered with a
-    /// real handler — the snapshot includes a synthetic entry so the
-    /// hub can resolve trace `sender` fields that name the chassis.
+    /// Reachable as a routing target but never registered with a real
+    /// handler — the snapshot includes a synthetic entry for it.
     /// Renders as `chassis:NAME`.
     ChassisSentinel,
 }

@@ -28,15 +28,15 @@ fn static_kind_name_resolves_known_substrate_kind() {
 }
 
 fn compact_mail_id(sender: &str, correlation_id: u64) -> MailIdJson {
-    MailIdJson { sender: sender.to_owned(), correlation_id }
+    MailIdJson { sender: Some(sender.to_owned()), correlation_id }
 }
 
 fn compact_node(correlation_id: u64, parent: Option<u64>) -> MailNodeJson {
     MailNodeJson {
         mail_id: compact_mail_id("aether.sender", correlation_id),
         parent: parent.map(|id| compact_mail_id("aether.sender", id)),
-        sender: "aether.sender".to_owned(),
-        recipient: format!("aether.recipient.{correlation_id}"),
+        sender: Some("aether.sender".to_owned()),
+        recipient: Some(format!("aether.recipient.{correlation_id}")),
         kind: format!("aether.test.kind.{correlation_id}"),
         t_construct_start: 500,
         t_sent: 1_000,
@@ -66,6 +66,16 @@ fn compact_tree_marks_in_flight_nodes() {
     node.t_finished = None;
 
     assert_eq!(render_compact_tree(&[node]), ["aether.sender → aether.recipient.1  aether.test.kind.1  in-flight"]);
+}
+
+/// An endpoint the engine held no route record for renders as a marker,
+/// never as an empty name that would read like a malformed line.
+#[test]
+fn compact_tree_marks_an_endpoint_with_no_route() {
+    let mut node = compact_node(1, None);
+    node.recipient = None;
+
+    assert_eq!(render_compact_tree(&[node]), ["aether.sender → (no route)  aether.test.kind.1  +3µs"]);
 }
 
 #[test]

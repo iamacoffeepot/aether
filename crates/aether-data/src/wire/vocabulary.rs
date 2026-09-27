@@ -320,7 +320,6 @@ impl<'de> WireDecode<'de> for KindDescriptor {
 
 impl WireEncode for MailboxDescriptor {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        self.id.encode(out)?;
         self.name.encode(out)?;
         self.category.encode(out)
     }
@@ -328,11 +327,7 @@ impl WireEncode for MailboxDescriptor {
 
 impl<'de> WireDecode<'de> for MailboxDescriptor {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
-        Ok(Self {
-            id: crate::MailboxId::decode(cursor)?,
-            name: String::decode(cursor)?,
-            category: Option::decode(cursor)?,
-        })
+        Ok(Self { name: String::decode(cursor)?, category: Option::decode(cursor)? })
     }
 }
 

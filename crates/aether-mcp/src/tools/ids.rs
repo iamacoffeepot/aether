@@ -1,8 +1,9 @@
 use super::{
-    EngineId, EngineNames, KindId, MailId, MailIdJson, MailNodeJson, MailNodeWire, MailboxId, McpError, Tag, Uuid,
-    descriptors, kind_id_from_parts, tagged_id,
+    EngineId, EngineNames, KindId, MailIdJson, MailNodeJson, MailNodeWire, MailboxId, McpError, Tag, Uuid, descriptors,
+    kind_id_from_parts, tagged_id,
 };
 use aether_data::ErasedActorPath;
+use aether_kinds::trace::TraceMailId;
 use std::collections::{HashMap, HashSet};
 
 /// Parse a UUID-string `engine_id` (from `list_engines` /
@@ -96,27 +97,28 @@ pub(super) fn render_id(id: u64, names: Option<&EngineNames>) -> String {
     names.map_or_else(|| tagged_id::encode(id).unwrap_or_else(|| format!("{id:#x}")), |names| names.render(id))
 }
 
-/// Reverse-render a [`MailboxId`] through the engine's name map (or the
-/// hex tag on a miss / no map). Chassis-minted ids always carry tag bits,
-/// so the hex fallback never reaches the `{:#x}` arm in practice.
-pub(super) fn mailbox_id_to_tagged(id: MailboxId, names: Option<&EngineNames>) -> String {
-    render_id(id.0, names)
-}
-
 pub(super) fn kind_id_to_tagged(id: KindId, names: Option<&EngineNames>) -> String {
     render_id(id.0, names)
 }
 
-pub(super) fn mail_id_to_json(id: MailId, names: Option<&EngineNames>) -> MailIdJson {
-    MailIdJson { sender: mailbox_id_to_tagged(id.sender, names), correlation_id: id.correlation_id }
+/// An exported trace identity as MCP JSON: the sender's actor path as text.
+pub(super) fn mail_id_to_json(id: &TraceMailId) -> MailIdJson {
+    MailIdJson { sender: path_text(id.sender.as_ref()), correlation_id: id.correlation_id }
 }
 
+/// An actor path an export named, as text; `None` stays `None`.
+fn path_text(path: Option<&ErasedActorPath>) -> Option<String> {
+    path.map(ToString::to_string)
+}
+
+/// One trace node as MCP JSON. Actors are already named by path in the
+/// export; only the kind id reverses through the engine's name map.
 pub(super) fn mail_node_to_json(node: MailNodeWire, names: Option<&EngineNames>) -> MailNodeJson {
     MailNodeJson {
-        mail_id: mail_id_to_json(node.mail_id, names),
-        parent: node.parent.map(|p| mail_id_to_json(p, names)),
-        sender: mailbox_id_to_tagged(node.sender, names),
-        recipient: mailbox_id_to_tagged(node.recipient, names),
+        mail_id: mail_id_to_json(&node.mail_id),
+        parent: node.parent.as_ref().map(mail_id_to_json),
+        sender: path_text(node.sender.as_ref()),
+        recipient: path_text(node.recipient.as_ref()),
         kind: kind_id_to_tagged(node.kind, names),
         t_construct_start: node.t_construct_start.0,
         t_sent: node.t_sent.0,
@@ -125,6 +127,10 @@ pub(super) fn mail_node_to_json(node: MailNodeWire, names: Option<&EngineNames>)
         thread_name: node.thread_name,
     }
 }
+
+/// What the compact tree prints for an endpoint the export could not name:
+/// its position held no route record.
+const NO_ROUTE: &str = "(no route)";
 
 /// Render resolved trace nodes as a compact causal tree. Adjacency reuses the
 /// existing named [`MailIdJson`] identity; indices distinguish malformed
@@ -164,8 +170,8 @@ pub(super) fn render_compact_tree(nodes: &[MailNodeJson]) -> Vec<String> {
             lines.push(format!(
                 "{}{sender} → {recipient}  {kind}  {timing}",
                 "  ".repeat(depth),
-                sender = node.sender,
-                recipient = node.recipient,
+                sender = node.sender.as_deref().unwrap_or(NO_ROUTE),
+                recipient = node.recipient.as_deref().unwrap_or(NO_ROUTE),
                 kind = node.kind,
             ));
 
@@ -181,15 +187,10 @@ pub(super) fn render_compact_tree(nodes: &[MailNodeJson]) -> Vec<String> {
     lines
 }
 
-/// The mailbox / kind / thread ids in one `MailNodeWire` that reverse
-/// through the inventory (ADR-0088 §8): the two mailbox endpoints, the
-/// kind, and both `MailId` senders. `correlation_id` is a `Uuid`, not a
-/// tagged id, so it's excluded. Thread ids ride in `thread_name` already
-/// resolved substrate-side, so they aren't re-resolved here.
+/// The ids in one `MailNodeWire` that reverse through the inventory
+/// (ADR-0088 §8): only the kind. Actors are named by path in the export
+/// itself, and thread ids ride in `thread_name` already resolved
+/// substrate-side.
 pub(super) fn node_reversible_ids(node: &MailNodeWire) -> Vec<u64> {
-    let mut ids = vec![node.sender.0, node.recipient.0, node.kind.0, node.mail_id.sender.0];
-    if let Some(parent) = &node.parent {
-        ids.push(parent.sender.0);
-    }
-    ids
+    vec![node.kind.0]
 }

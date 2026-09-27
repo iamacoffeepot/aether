@@ -6,8 +6,7 @@ use std::time::Duration;
 
 use aether_data::{Kind, MailboxCategory};
 
-use crate::mail::MailboxId;
-use crate::mail::registry::{Registry, canonical_mailbox_id, noop_handler};
+use crate::mail::registry::{Registry, noop_handler};
 use crate::testing::boot_authority as auth;
 
 use super::support::inventory_subscription_fixture;
@@ -48,23 +47,6 @@ fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
         snap.iter().find(|d| d.name == "user_thing").unwrap().category.is_none(),
         "non-aether names categorise as None",
     );
-
-    // The synthetic chassis sentinel uses the canonical id —
-    // hub-side resolution of trace senders against this id finds
-    // the right name without re-hashing.
-    let chassis = snap.iter().find(|d| d.name == "aether.chassis").unwrap();
-    assert_eq!(chassis.id, MailboxId::CHASSIS_MAILBOX_ID);
-}
-
-/// Each registered descriptor's id matches the deterministic hash
-/// of its name (ADR-0029) — same id space the hub already knows.
-#[test]
-fn list_mailbox_descriptors_ids_match_name_hashes() {
-    let r = Registry::new();
-    let id = r.register_inbox(&auth(), "aether.audio", noop_handler());
-    let entry = r.list_mailbox_descriptors().into_iter().find(|d| d.name == "aether.audio").expect("audio entry");
-    assert_eq!(entry.id, id);
-    assert_eq!(entry.id, canonical_mailbox_id("aether.audio"));
 }
 
 #[test]

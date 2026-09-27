@@ -71,8 +71,6 @@ pub(super) fn throughput_from_nodes(mails: &[MailNodeWire]) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use aether_data::MailboxId;
-
     use super::*;
 
     #[test]
@@ -85,13 +83,12 @@ mod tests {
     /// (must be `Ping`) and `t_finished` drive `throughput_from_nodes`; every
     /// other field is filler.
     fn finished_ping(correlation: u64, t_finished_nanos: u64) -> MailNodeWire {
-        use aether_data::MailId;
-        use aether_kinds::trace::Nanos;
+        use aether_kinds::trace::{Nanos, TraceMailId};
         MailNodeWire {
-            mail_id: MailId { sender: MailboxId(0), correlation_id: correlation },
+            mail_id: TraceMailId { sender: None, correlation_id: correlation },
             parent: None,
-            sender: MailboxId(0),
-            recipient: MailboxId(0),
+            sender: None,
+            recipient: None,
             kind: Ping::ID,
             t_construct_start: Nanos(0),
             t_sent: Nanos(0),

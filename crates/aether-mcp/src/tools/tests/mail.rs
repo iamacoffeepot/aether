@@ -3,7 +3,7 @@ use super::super::mail::{finish_traced_dispatch, settle_mail_item};
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
-use aether_kinds::trace::{Nanos, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult};
+use aether_kinds::trace::{Nanos, TraceEvent, TraceMailId, TraceRingEntry, TraceTail, TraceTailResult};
 use std::collections::VecDeque;
 use tokio::task::yield_now;
 use tokio::time::timeout;
@@ -275,30 +275,27 @@ async fn fire_and_forget_awaits_resolution_but_not_application_settlement() {
     drop(calls);
 }
 
-/// Issue 6570: the trace walk turns each frontier layer's ids into the
-/// engine's canonical paths with one `aether.inventory.resolve` per layer,
-/// and tails each ring by that path. The first layer's ring reports a `Sent`
-/// to a second actor, so a second layer must follow. Fails if the walk sends
-/// a tagged id's text as the path, or stops after the first layer.
+/// The trace walk tails each ring by the actor path the export named: the
+/// seed by the root's sender path, then the child by the path the seed's
+/// `Sent` names as its recipient. Fails if the walk still turns positions
+/// into paths through `aether.inventory.resolve` (a Resolve naming a
+/// mailbox id), or stops after the seed.
 #[tokio::test]
-async fn traced_walk_tails_each_layer_by_the_engine_paths() {
-    let seed = with_tag(Tag::Mailbox, 0x10);
-    let child = with_tag(Tag::Mailbox, 0x20);
-    let seed_tag = tagged_id::encode(seed).expect("the seed id encodes");
-    let child_tag = tagged_id::encode(child).expect("the child id encodes");
+async fn traced_walk_tails_each_actor_by_the_path_its_sent_named() {
     let seed_path = "aether.test.seed";
     let child_path = "aether.test/aether.test.child:walked";
+    let path = |text| ErasedActorPath::new(text).expect("fixture is an actor path");
 
-    let root = MailId { sender: MailboxId(seed), correlation_id: 1 };
+    let root = TraceMailId { sender: Some(path(seed_path)), correlation_id: 1 };
     let sent = TraceRingEntry {
         sequence: 0,
-        root,
+        root: root.clone(),
         event: TraceEvent::Sent {
-            mail_id: root,
-            root,
+            mail_id: root.clone(),
+            root: root.clone(),
             parent_mail: None,
-            sender: root.sender,
-            recipient: MailboxId(child),
+            sender: root.sender.clone(),
+            recipient: Some(path(child_path)),
             kind: KindId(1),
             t_construct_start: Nanos(1),
             t: Nanos(1),
@@ -315,7 +312,7 @@ async fn traced_walk_tails_each_layer_by_the_engine_paths() {
     let (_chassis, port) = boot_hub_with_address_route(AddressRouteLoopbackParams {
         engine,
         canonical_path: String::new(),
-        names: HashMap::from([(seed_tag.clone(), seed_path.to_owned()), (child_tag.clone(), child_path.to_owned())]),
+        names: HashMap::new(),
         calls: Arc::clone(&calls),
         replies: Arc::new(Mutex::new(VecDeque::from([tail(vec![sent]), tail(Vec::new())]))),
     });
@@ -326,29 +323,22 @@ async fn traced_walk_tails_each_layer_by_the_engine_paths() {
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
     let tails: Vec<ErasedActorPath> =
         calls.iter().filter(|call| call.kind == TraceTail::ID).map(|call| call.recipient.clone()).collect();
-    let resolves: Vec<Vec<String>> = calls
+    let resolved: Vec<String> = calls
         .iter()
         .filter(|call| call.kind == Resolve::ID)
-        .map(|call| Resolve::decode_from_bytes(&call.payload).expect("resolve request decodes").ids)
+        .flat_map(|call| Resolve::decode_from_bytes(&call.payload).expect("resolve request decodes").ids)
         .collect();
     drop(calls);
-    assert_eq!(
-        tails,
-        vec![
-            ErasedActorPath::new(seed_path).expect("fixture is an actor path"),
-            ErasedActorPath::new(child_path).expect("fixture is an actor path"),
-        ],
-        "each layer's ring is tailed by the path the engine named",
-    );
-    assert_eq!(resolves.get(..2), Some(&[vec![seed_tag], vec![child_tag]][..]), "one resolve per layer");
+    assert_eq!(tails, vec![path(seed_path), path(child_path)], "each ring is tailed by the path the trace named");
+    assert!(resolved.iter().all(|id| !id.starts_with("mbx-")), "the walk resolves no mailbox position: {resolved:?}");
 }
 
 fn traced_response_node() -> MailNodeJson {
     MailNodeJson {
-        mail_id: MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 },
+        mail_id: MailIdJson { sender: Some("aether.chassis".to_owned()), correlation_id: 1 },
         parent: None,
-        sender: "aether.chassis".to_owned(),
-        recipient: "aether.fs".to_owned(),
+        sender: Some("aether.chassis".to_owned()),
+        recipient: Some("aether.fs".to_owned()),
         kind: "aether.fs.list".to_owned(),
         t_construct_start: 1,
         t_sent: 1,
@@ -363,7 +353,7 @@ fn traced_response_serializes_compact_and_full_settled_shapes_precisely() {
     let compact = serde_json::to_value(SendMailTracedResponse {
         engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
         status: "settled".to_owned(),
-        root: Some(MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 }),
+        root: Some(MailIdJson { sender: Some("aether.chassis".to_owned()), correlation_id: 1 }),
         mails: None,
         tree: Some(vec!["aether.chassis → aether.fs  aether.fs.list  +0µs".to_owned()]),
         node_count: Some(1),
@@ -378,7 +368,7 @@ fn traced_response_serializes_compact_and_full_settled_shapes_precisely() {
     let full = serde_json::to_value(SendMailTracedResponse {
         engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
         status: "settled".to_owned(),
-        root: Some(MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 }),
+        root: Some(MailIdJson { sender: Some("aether.chassis".to_owned()), correlation_id: 1 }),
         mails: Some(vec![traced_response_node()]),
         tree: None,
         node_count: Some(1),
@@ -412,7 +402,7 @@ fn traced_response_omits_projection_fields_on_timeout_and_dispatch() {
     let dispatched = serde_json::to_value(SendMailTracedResponse {
         engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
         status: "dispatched".to_owned(),
-        root: Some(MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 }),
+        root: Some(MailIdJson { sender: Some("aether.chassis".to_owned()), correlation_id: 1 }),
         mails: None,
         tree: None,
         node_count: None,

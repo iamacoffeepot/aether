@@ -40,7 +40,7 @@ use crate::mail::registry::{
 };
 use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::thread_name;
-use crate::runtime::trace::{SentRecord, SettlementHold, TraceHandle};
+use crate::runtime::trace::{SentRecord, SettlementHold, TraceHandle, render_mail_id};
 use crate::scheduler::pending_depth;
 use crate::store::BlobStore;
 use aether_actor::ErasedActorRef;
@@ -48,7 +48,7 @@ use aether_codec::frame::max_frame_size;
 use aether_data::tagged_id::{self, Tag};
 use aether_data::{ErasedActorPath, Kind, KindDescriptor, KindId};
 use aether_kinds::ComponentCapabilities;
-use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
+use aether_kinds::trace::{Nanos, TraceMailId, TraceTail, TraceTailResult};
 use std::sync::OnceLock;
 
 pub struct Mailer {
@@ -429,6 +429,26 @@ impl Mailer {
         self.registry.stamped_sender(position)
     }
 
+    /// Answer an `aether.trace.tail` against the chassis-host ring, the ring
+    /// that holds the `Sent` of every root minted off any actor's dispatch.
+    /// It belongs to no actor, so `route_mail`'s chassis arm answers the
+    /// tail mail through this, and an in-process walk calls it directly.
+    /// The root is proven and the records rendered through this engine's
+    /// registry, exactly as a per-actor tail does.
+    #[must_use]
+    pub fn chassis_host_trace_tail(&self, request: &TraceTail) -> TraceTailResult {
+        self.trace_handle.chassis_host_tail(request, &self.registry)
+    }
+
+    /// Render a root this engine minted as its exported identity: the
+    /// minting actor's canonical path and the correlation counter. The
+    /// in-process harness renders the roots it injects through this, so it
+    /// can walk and compare them in the same form a trace export names.
+    #[must_use]
+    pub fn trace_mail_id(&self, id: aether_data::MailId) -> TraceMailId {
+        render_mail_id(&self.registry, id)
+    }
+
     /// Prove an address that arrived in a payload: [`Registry::resolve_address`]
     /// expands and resolves it, and the answered position is proven at once
     /// through [`Registry::resolve_live`]. The crate-private path behind
@@ -770,14 +790,13 @@ fn route_mail(mail: Mail, mailer: &Mailer) {
         // via `record_sent` directly.
         if mail.kind == TraceTail::ID {
             // ADR-0086 Phase 3b: the chassis-host trace ring holds the
-            // off-actor root `Sent`s — every injected root carries
-            // `sender = CHASSIS_MAILBOX_ID`, so the guided walk seeds at
-            // `root.sender`, which lands here over the wire. Answer the
-            // tail and reply to the caller. (In-process callers reach
-            // the same ring via `TraceHandle::chassis_host_tail`.)
+            // off-actor root `Sent`s — every injected root names the
+            // sender `aether.chassis`, so the guided walk seeds there.
+            // Answer the tail and reply to the caller. (In-process callers
+            // reach the same ring via `Mailer::chassis_host_trace_tail`.)
             let result = TraceTail::decode_from_bytes(mail.payload.bytes()).map_or_else(
                 || TraceTailResult::Err { error: "undecodable TraceTail to chassis-host ring".to_owned() },
-                |request| trace_handle.chassis_host_tail(&request),
+                |request| mailer.chassis_host_trace_tail(&request),
             );
             match mail.reply_to.addr {
                 SourceAddr::Session(_) | SourceAddr::EngineMailbox { .. } => {
@@ -1230,13 +1249,14 @@ mod tests {
 
     /// ADR-0086 Phase 3b: `aether.trace.tail` to `CHASSIS_MAILBOX_ID`
     /// answers from the chassis-host ring and replies to the inbound's
-    /// `Component` target — the hop the MCP's `send_mail_traced` guided
-    /// walk takes to fetch the off-actor root `Sent` over the wire (the
-    /// in-process harness reaches the same ring via
-    /// `TraceHandle::chassis_host_tail`). Seeds the ring with one
-    /// chassis-root `Sent`, queries it, and asserts the recorded reply
-    /// is a `TraceTailResult::Ok` carrying that `Sent`, correlation
-    /// echoed.
+    /// `Component` target — the hop a guided walk takes to fetch the
+    /// off-actor root `Sent` (the in-process harness reaches the same ring
+    /// via `Mailer::chassis_host_trace_tail`). Seeds the ring with one
+    /// chassis-root `Sent`, queries it by the rendered root, and asserts
+    /// the recorded reply is a `TraceTailResult::Ok` carrying that `Sent`
+    /// with its sender rendered as `aether.chassis`, correlation echoed.
+    /// Catches a tail arm that fails to prove the rendered root back into
+    /// the ring's own id, which would filter every entry out.
     #[test]
     fn chassis_host_trace_tail_replies_to_component_target() {
         use aether_kinds::trace::{TraceEvent, TraceTail, TraceTailResult};
@@ -1249,12 +1269,15 @@ mod tests {
         // An off-actor chassis-root mail records its `Sent` in the
         // chassis-host ring (the recipient is unregistered and the mail
         // itself warn-drops, but the off-actor `Sent` still lands).
-        let root =
-            mailer.push_minted_root(mailer.mint_chassis_root(MailboxId(0x1234), KindId(0xFEED)), vec![], Source::NONE);
+        let root = mailer.trace_mail_id(mailer.push_minted_root(
+            mailer.mint_chassis_root(MailboxId(0x1234), KindId(0xFEED)),
+            vec![],
+            Source::NONE,
+        ));
 
         // Query the chassis-host ring for that root, replying to a
         // `Component` target (the MCP RPC-server reply hop).
-        let request = TraceTail { max: 0, since: None, root: Some(root) };
+        let request = TraceTail { max: 0, since: None, root: Some(root.clone()) };
         mailer.push(
             Mail::new(MailboxId::CHASSIS_MAILBOX_ID, TraceTail::ID, request.encode_into_bytes(), 1)
                 .with_reply_to(Source::with_correlation(SourceAddr::Component(recorder_id), 0xCAFE)),
@@ -1267,7 +1290,8 @@ mod tests {
         assert_eq!(*correlation, 0xCAFE, "correlation echoed onto the reply");
         match TraceTailResult::decode_from_bytes(payload).unwrap() {
             TraceTailResult::Ok { entries, .. } => assert!(
-                entries.iter().any(|e| e.root == root && matches!(e.event, TraceEvent::Sent { .. })),
+                entries.iter().any(|e| e.root == root
+                    && matches!(&e.event, TraceEvent::Sent { sender: Some(sender), .. } if sender.as_str() == "aether.chassis")),
                 "the chassis-host root Sent came back: {entries:?}",
             ),
             TraceTailResult::Err { error } => panic!("expected Ok, got Err {error}"),

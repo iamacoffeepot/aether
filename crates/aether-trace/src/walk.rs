@@ -4,23 +4,26 @@
 //! guided fan-out across the per-actor trace rings (ADR-0086 Phase 3a),
 //! stitched client-side.
 //!
-//! The walk self-directs. It seeds at the root mail's `sender` — the
-//! chassis-host pseudo-mailbox ([`MailboxId::CHASSIS_MAILBOX_ID`])
-//! for an injected root, an actor otherwise — to pick up the root's own
-//! `Sent`, then follows every `Sent` event's `recipient`. Each
-//! recipient's ring holds that mail's `Received` / `Finished` plus any
-//! onward `Sent`s, so the frontier expands purely from observed
-//! recipients: the walk visits exactly the actors participating in the
-//! tree and never enumerates the full actor set. (That bound is what
-//! lets a query during a barrier touch O(tree) actors rather than
-//! O(live actors) — ADR-0086 Phase 3b cost note.)
+//! The walk self-directs, and it follows actor paths: every trace export
+//! names actors by canonical path (ADR-0230 §1). It seeds at the root
+//! mail's `sender` path — `aether.chassis`, the chassis-host ring, for an
+//! injected root, an actor otherwise — to pick up the root's own `Sent`,
+//! then follows every `Sent` event's `recipient` path. Each recipient's
+//! ring holds that mail's `Received` / `Finished` plus any onward
+//! `Sent`s, so the frontier expands purely from observed recipients: the
+//! walk visits exactly the actors participating in the tree and never
+//! enumerates the full actor set. (That bound is what lets a query during
+//! a barrier touch O(tree) actors rather than O(live actors) — ADR-0086
+//! Phase 3b cost note.) A retired actor's records still name its path, so
+//! the walk reaches its ring for as long as the ring answers. An endpoint
+//! the export could not name (`None`, a position with no route record) is
+//! not followed.
 //!
 //! Transport is the caller's: the MCP issues `aether.trace.tail` over
-//! the wire (addressing each mailbox by id, routing
-//! `CHASSIS_MAILBOX_ID` to the chassis-host ring), the in-process
-//! harness calls the per-actor ring tail / `chassis_host_tail`
-//! directly. [`TreeWalk`] owns the seed, frontier, dedup, and stitch;
-//! the caller owns only the fetch.
+//! the wire addressed by each path, and the in-process harness tails the
+//! chassis-host ring directly and every other ring through the proof it
+//! holds for that path. [`TreeWalk`] owns the seed, frontier, dedup, and
+//! stitch; the caller owns only the fetch.
 //!
 //! Thread-name resolution is the caller's too (ADR-0102). A
 //! [`MailNodeWire::thread_name`] is recovered from the event's `Copy`
@@ -35,59 +38,62 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use aether_data::{KindId, MailId, MailboxId, ThreadId};
-use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, Nanos, TraceEvent, TraceRingEntry};
+use aether_data::{ErasedActorPath, KindId, ThreadId};
+use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, Nanos, TraceEvent, TraceMailId, TraceRingEntry};
 
 /// A guided breadth-first walk of one root's mail tree across per-actor
 /// trace rings. Construct with [`TreeWalk::new`], then drive the loop:
-/// call [`TreeWalk::next_mailbox`] for the next ring to query, fetch
-/// that mailbox's `root`-filtered tail, feed the entries to
-/// [`TreeWalk::absorb`]. When `next_mailbox` returns `None` the frontier
+/// call [`TreeWalk::next_actor`] for the path of the next ring to query,
+/// fetch that actor's `root`-filtered tail, feed the entries to
+/// [`TreeWalk::absorb`]. When `next_actor` returns `None` the frontier
 /// is exhausted; [`TreeWalk::finish`] stitches the collected events into
 /// a [`DescribeTreeResult`].
 pub struct TreeWalk {
-    root: MailId,
-    visited: BTreeSet<MailboxId>,
-    frontier: VecDeque<MailboxId>,
+    root: TraceMailId,
+    visited: BTreeSet<ErasedActorPath>,
+    frontier: VecDeque<ErasedActorPath>,
     collected: Vec<TraceRingEntry>,
 }
 
 impl TreeWalk {
     /// Begin a walk for `root`, seeding the frontier with the root
-    /// mail's `sender` (where the root's own `Sent` lives).
+    /// mail's `sender` path (where the root's own `Sent` lives). A root
+    /// with no sender path seeds nothing, so [`Self::finish`] answers
+    /// `Err { not_found }`.
     #[must_use]
-    pub fn new(root: MailId) -> Self {
-        let mut frontier = VecDeque::new();
-        frontier.push_back(root.sender);
+    pub fn new(root: TraceMailId) -> Self {
+        let frontier = root.sender.iter().cloned().collect();
         Self { root, visited: BTreeSet::new(), frontier, collected: Vec::new() }
     }
 
-    /// The next mailbox whose trace ring should be queried, or `None`
-    /// when the frontier is exhausted. Skips mailboxes already visited
-    /// (a diamond in the mail graph enqueues the same recipient twice).
-    pub fn next_mailbox(&mut self) -> Option<MailboxId> {
-        while let Some(mbx) = self.frontier.pop_front() {
-            if self.visited.insert(mbx) {
-                return Some(mbx);
+    /// The path of the next actor whose trace ring should be queried, or
+    /// `None` when the frontier is exhausted. Skips actors already
+    /// visited (a diamond in the mail graph enqueues the same recipient
+    /// twice).
+    pub fn next_actor(&mut self) -> Option<ErasedActorPath> {
+        while let Some(actor) = self.frontier.pop_front() {
+            if self.visited.insert(actor.clone()) {
+                return Some(actor);
             }
         }
         None
     }
 
-    /// Feed the entries returned for the mailbox handed out by the most
-    /// recent [`Self::next_mailbox`]. Entries for other roots are
+    /// Feed the entries returned for the actor handed out by the most
+    /// recent [`Self::next_actor`]. Entries for other roots are
     /// ignored (a `root`-filtered tail keeps the fetch cheap, but the
     /// guard is belt-and-braces). Each in-tree `Sent` enqueues its
-    /// recipient onto the frontier.
+    /// recipient path onto the frontier; a recipient the export could not
+    /// name is not followed.
     pub fn absorb(&mut self, entries: impl IntoIterator<Item = TraceRingEntry>) {
         for entry in entries {
             if entry.root != self.root {
                 continue;
             }
-            if let TraceEvent::Sent { recipient, .. } = entry.event
-                && !self.visited.contains(&recipient)
+            if let TraceEvent::Sent { recipient: Some(recipient), .. } = &entry.event
+                && !self.visited.contains(recipient)
             {
-                self.frontier.push_back(recipient);
+                self.frontier.push_back(recipient.clone());
             }
             self.collected.push(entry);
         }
@@ -120,7 +126,7 @@ impl TreeWalk {
 /// every node's `thread_name` to `None`. See [`stitch_with`] for the
 /// resolver-injecting form and the full contract.
 #[must_use]
-pub fn stitch(root: MailId, entries: impl IntoIterator<Item = TraceRingEntry>) -> DescribeTreeResult {
+pub fn stitch(root: TraceMailId, entries: impl IntoIterator<Item = TraceRingEntry>) -> DescribeTreeResult {
     stitch_with(root, entries, |_| None)
 }
 
@@ -141,7 +147,11 @@ pub fn stitch(root: MailId, entries: impl IntoIterator<Item = TraceRingEntry>) -
 /// but no `Finished`; the only caller today walks post-settlement, so
 /// it sees `0`.
 #[must_use]
-pub fn stitch_with<F>(root: MailId, entries: impl IntoIterator<Item = TraceRingEntry>, resolve: F) -> DescribeTreeResult
+pub fn stitch_with<F>(
+    root: TraceMailId,
+    entries: impl IntoIterator<Item = TraceRingEntry>,
+    resolve: F,
+) -> DescribeTreeResult
 where
     F: Fn(ThreadId) -> Option<String>,
 {
@@ -175,7 +185,7 @@ pub fn fold_nodes_with<F>(entries: impl IntoIterator<Item = TraceRingEntry>, res
 where
     F: Fn(ThreadId) -> Option<String>,
 {
-    let mut nodes: BTreeMap<MailId, PartialNode> = BTreeMap::new();
+    let mut nodes: BTreeMap<TraceMailId, PartialNode> = BTreeMap::new();
     for entry in entries {
         match entry.event {
             TraceEvent::Sent { mail_id, parent_mail, sender, recipient, kind, t_construct_start, t, .. } => {
@@ -236,9 +246,9 @@ struct PartialNode {
 }
 
 struct SentFields {
-    parent: Option<MailId>,
-    sender: MailboxId,
-    recipient: MailboxId,
+    parent: Option<TraceMailId>,
+    sender: Option<ErasedActorPath>,
+    recipient: Option<ErasedActorPath>,
     kind: KindId,
     t_construct_start: Nanos,
     t_sent: Nanos,
@@ -249,24 +259,33 @@ mod tests {
     use super::*;
     use aether_kinds::trace::MailNodeWire;
 
-    fn mid(sender: u64, cid: u64) -> MailId {
-        MailId { sender: MailboxId(sender), correlation_id: cid }
+    fn path(text: &str) -> ErasedActorPath {
+        ErasedActorPath::new(text).expect("fixture is an actor path")
     }
 
-    fn sent(mail_id: MailId, root: MailId, recipient: u64) -> TraceRingEntry {
+    fn mid(sender: &str, cid: u64) -> TraceMailId {
+        TraceMailId { sender: Some(path(sender)), correlation_id: cid }
+    }
+
+    fn sent(mail_id: &TraceMailId, root: &TraceMailId, recipient: &str) -> TraceRingEntry {
         sent_parent(mail_id, root, None, recipient)
     }
 
-    fn sent_parent(mail_id: MailId, root: MailId, parent: Option<MailId>, recipient: u64) -> TraceRingEntry {
+    fn sent_parent(
+        mail_id: &TraceMailId,
+        root: &TraceMailId,
+        parent: Option<&TraceMailId>,
+        recipient: &str,
+    ) -> TraceRingEntry {
         TraceRingEntry {
             sequence: 0,
-            root,
+            root: root.clone(),
             event: TraceEvent::Sent {
-                mail_id,
-                root,
-                parent_mail: parent,
-                sender: mail_id.sender,
-                recipient: MailboxId(recipient),
+                mail_id: mail_id.clone(),
+                root: root.clone(),
+                parent_mail: parent.cloned(),
+                sender: mail_id.sender.clone(),
+                recipient: Some(path(recipient)),
                 kind: KindId(0xAB),
                 // iamacoffeepot/aether#1158: fixture construct-start ==
                 // flush-begin (eager-path equivalent, construct ≈ 0).
@@ -289,12 +308,12 @@ mod tests {
         (id == ThreadId::from_name(FIXTURE_THREAD_NAME)).then(|| FIXTURE_THREAD_NAME.to_string())
     }
 
-    fn received(mail_id: MailId, root: MailId) -> TraceRingEntry {
+    fn received(mail_id: &TraceMailId, root: &TraceMailId) -> TraceRingEntry {
         TraceRingEntry {
             sequence: 0,
-            root,
+            root: root.clone(),
             event: TraceEvent::Received {
-                mail_id,
+                mail_id: mail_id.clone(),
                 t: Nanos(mail_id.correlation_id + 1),
                 // iamacoffeepot/aether#1134: fixture deposit just before
                 // receive (correlation_id) at depth 0 (warm chain).
@@ -305,19 +324,30 @@ mod tests {
         }
     }
 
-    fn finished(mail_id: MailId, root: MailId) -> TraceRingEntry {
+    fn finished(mail_id: &TraceMailId, root: &TraceMailId) -> TraceRingEntry {
         TraceRingEntry {
             sequence: 0,
-            root,
-            event: TraceEvent::Finished { mail_id, t: Nanos(mail_id.correlation_id + 2) },
+            root: root.clone(),
+            event: TraceEvent::Finished { mail_id: mail_id.clone(), t: Nanos(mail_id.correlation_id + 2) },
         }
     }
 
-    fn ok(result: DescribeTreeResult) -> (MailId, u32, Vec<MailNodeWire>) {
+    fn ok(result: DescribeTreeResult) -> (TraceMailId, u32, Vec<MailNodeWire>) {
         match result {
             DescribeTreeResult::Ok { root, in_flight, mails } => (root, in_flight, mails),
             DescribeTreeResult::Err { not_found } => panic!("expected Ok, got Err {not_found:?}"),
         }
+    }
+
+    /// Drive `walk` against a fake substrate of per-actor rings, returning
+    /// the actors visited in order.
+    fn drive(walk: &mut TreeWalk, rings: &BTreeMap<ErasedActorPath, Vec<TraceRingEntry>>) -> Vec<ErasedActorPath> {
+        let mut visited = Vec::new();
+        while let Some(actor) = walk.next_actor() {
+            walk.absorb(rings.get(&actor).cloned().unwrap_or_default());
+            visited.push(actor);
+        }
+        visited
     }
 
     /// Stitch is order-independent: feeding `Finished` before its
@@ -326,15 +356,15 @@ mod tests {
     /// fixture `ThreadId` back to its display name (ADR-0088 §7).
     #[test]
     fn stitch_folds_events_per_mail_id_regardless_of_order() {
-        let root = mid(1, 1);
-        let entries = vec![finished(root, root), received(root, root), sent(root, root, 2)];
-        let (got_root, in_flight, mails) = ok(stitch_with(root, entries, fixture_resolver));
+        let root = mid("aether.test.a", 1);
+        let entries = vec![finished(&root, &root), received(&root, &root), sent(&root, &root, "aether.test.b")];
+        let (got_root, in_flight, mails) = ok(stitch_with(root.clone(), entries, fixture_resolver));
         assert_eq!(got_root, root);
         assert_eq!(in_flight, 0, "node has a Finished");
         assert_eq!(mails.len(), 1);
         let node = &mails[0];
         assert_eq!(node.mail_id, root);
-        assert_eq!(node.recipient, MailboxId(2));
+        assert_eq!(node.recipient, Some(path("aether.test.b")));
         assert_eq!(node.t_sent, Nanos(1));
         assert_eq!(node.t_received, Some(Nanos(2)));
         assert_eq!(node.t_finished, Some(Nanos(3)));
@@ -347,8 +377,8 @@ mod tests {
     /// MCP / wasm path, where no reverse-lookup registry is reachable.
     #[test]
     fn stitch_without_resolver_leaves_thread_name_none() {
-        let root = mid(1, 1);
-        let entries = vec![sent(root, root, 2), received(root, root), finished(root, root)];
+        let root = mid("aether.test.a", 1);
+        let entries = vec![sent(&root, &root, "aether.test.b"), received(&root, &root), finished(&root, &root)];
         let (_, _, mails) = ok(stitch(root, entries));
         assert_eq!(mails.len(), 1);
         assert_eq!(mails[0].thread_name, None);
@@ -358,10 +388,10 @@ mod tests {
     /// reports `Err { not_found }`, matching the observer.
     #[test]
     fn stitch_missing_root_sent_is_not_found() {
-        let root = mid(1, 1);
+        let root = mid("aether.test.a", 1);
         // Only Received/Finished for the root, no Sent.
-        let entries = vec![received(root, root), finished(root, root)];
-        match stitch(root, entries) {
+        let entries = vec![received(&root, &root), finished(&root, &root)];
+        match stitch(root.clone(), entries) {
             DescribeTreeResult::Err { not_found } => assert_eq!(not_found, root),
             ok @ DescribeTreeResult::Ok { .. } => panic!("expected Err, got {ok:?}"),
         }
@@ -370,13 +400,13 @@ mod tests {
     /// A node still in flight (Sent, no Finished) is counted.
     #[test]
     fn stitch_counts_unfinished_nodes_as_in_flight() {
-        let root = mid(1, 1);
-        let child = mid(2, 1);
+        let root = mid("aether.test.a", 1);
+        let child = mid("aether.test.b", 1);
         let entries = vec![
-            sent(root, root, 2),
-            received(root, root),
-            finished(root, root),
-            sent_parent(child, root, Some(root), 3), // child sent, never finished
+            sent(&root, &root, "aether.test.b"),
+            received(&root, &root),
+            finished(&root, &root),
+            sent_parent(&child, &root, Some(&root), "aether.test.c"), // child sent, never finished
         ];
         let (_, in_flight, mails) = ok(stitch(root, entries));
         assert_eq!(mails.len(), 2);
@@ -390,50 +420,49 @@ mod tests {
     /// sender's ring, each `Received`/`Finished` in the recipient's.
     #[test]
     fn guided_walk_reconstructs_tree_across_rings() {
-        // Mailbox ids: 0 = chassis-host, 10 = observer, 20/21 = leaves,
-        // 30 = a grandchild reached only by following 20's onward send.
-        let chassis = 0u64;
-        let observer = 10u64;
-        let leaf_a = 20u64;
-        let leaf_b = 21u64;
-        let grandchild = 30u64;
+        let chassis = "aether.chassis";
+        let observer = "aether.test.observer";
+        let leaf_a = "aether.test.leaf/aether.test.leaf:a";
+        let leaf_b = "aether.test.leaf/aether.test.leaf:b";
+        let grandchild = "aether.test.grandchild";
 
-        let root = MailId { sender: MailboxId(chassis), correlation_id: 1 };
+        let root = mid(chassis, 1);
         let child_a = mid(observer, 2);
         let child_b = mid(observer, 3);
         let gc = mid(leaf_a, 4);
 
-        // Per-mailbox rings. Sent in the sender's ring; Received +
+        // Per-actor rings. Sent in the sender's ring; Received +
         // Finished in the recipient's ring.
-        let mut rings: BTreeMap<MailboxId, Vec<TraceRingEntry>> = BTreeMap::new();
-        // chassis-host: the root's Sent (chassis -> observer).
-        rings.entry(MailboxId(chassis)).or_default().push(sent(root, root, observer));
-        // observer: root's Received/Finished + the two children's Sents.
-        rings.entry(MailboxId(observer)).or_default().extend([
-            received(root, root),
-            finished(root, root),
-            sent_parent(child_a, root, Some(root), leaf_a),
-            sent_parent(child_b, root, Some(root), leaf_b),
+        let rings = BTreeMap::from([
+            // chassis-host: the root's Sent (chassis -> observer).
+            (path(chassis), vec![sent(&root, &root, observer)]),
+            // observer: root's Received/Finished + the two children's Sents.
+            (
+                path(observer),
+                vec![
+                    received(&root, &root),
+                    finished(&root, &root),
+                    sent_parent(&child_a, &root, Some(&root), leaf_a),
+                    sent_parent(&child_b, &root, Some(&root), leaf_b),
+                ],
+            ),
+            // leaf_a: child_a's Received/Finished + an onward Sent to gc.
+            (
+                path(leaf_a),
+                vec![
+                    received(&child_a, &root),
+                    finished(&child_a, &root),
+                    sent_parent(&gc, &root, Some(&child_a), grandchild),
+                ],
+            ),
+            // leaf_b: child_b's Received/Finished, no onward send.
+            (path(leaf_b), vec![received(&child_b, &root), finished(&child_b, &root)]),
+            // grandchild: gc's Received/Finished.
+            (path(grandchild), vec![received(&gc, &root), finished(&gc, &root)]),
         ]);
-        // leaf_a: child_a's Received/Finished + an onward Sent to gc.
-        rings.entry(MailboxId(leaf_a)).or_default().extend([
-            received(child_a, root),
-            finished(child_a, root),
-            sent_parent(gc, root, Some(child_a), grandchild),
-        ]);
-        // leaf_b: child_b's Received/Finished, no onward send.
-        rings.entry(MailboxId(leaf_b)).or_default().extend([received(child_b, root), finished(child_b, root)]);
-        // grandchild: gc's Received/Finished.
-        rings.entry(MailboxId(grandchild)).or_default().extend([received(gc, root), finished(gc, root)]);
 
-        // Drive the walk against the fake substrate.
-        let mut walk = TreeWalk::new(root);
-        let mut visited_order = Vec::new();
-        while let Some(mbx) = walk.next_mailbox() {
-            visited_order.push(mbx);
-            let entries = rings.get(&mbx).cloned().unwrap_or_default();
-            walk.absorb(entries);
-        }
+        let mut walk = TreeWalk::new(root.clone());
+        let visited_order = drive(&mut walk, &rings);
         let (got_root, in_flight, mails) = ok(walk.finish());
 
         assert_eq!(got_root, root);
@@ -441,55 +470,69 @@ mod tests {
         // Four mails: root + two children + one grandchild.
         assert_eq!(mails.len(), 4, "root, child_a, child_b, grandchild");
 
-        let by_id: BTreeMap<MailId, &MailNodeWire> = mails.iter().map(|n| (n.mail_id, n)).collect();
+        let by_id: BTreeMap<&TraceMailId, &MailNodeWire> = mails.iter().map(|n| (&n.mail_id, n)).collect();
         assert_eq!(by_id[&root].parent, None);
-        assert_eq!(by_id[&child_a].parent, Some(root));
-        assert_eq!(by_id[&child_b].parent, Some(root));
-        assert_eq!(by_id[&gc].parent, Some(child_a));
+        assert_eq!(by_id[&child_a].parent.as_ref(), Some(&root));
+        assert_eq!(by_id[&child_b].parent.as_ref(), Some(&root));
+        assert_eq!(by_id[&gc].parent.as_ref(), Some(&child_a));
         // Every node carries Received + Finished — the walk visited
         // every recipient ring.
         assert!(mails.iter().all(|n| n.t_received.is_some() && n.t_finished.is_some()));
 
-        // The walk visited only the five participating mailboxes, never
-        // an actor outside the tree.
+        // The walk visited only the five participating actors, never an
+        // actor outside the tree.
         assert_eq!(visited_order.len(), 5);
-        let visited: BTreeSet<MailboxId> = visited_order.into_iter().collect();
-        assert_eq!(visited, [chassis, observer, leaf_a, leaf_b, grandchild].into_iter().map(MailboxId).collect());
+        let visited: BTreeSet<ErasedActorPath> = visited_order.into_iter().collect();
+        assert_eq!(visited, rings.into_keys().collect());
     }
 
     /// A diamond (two parents send to the same recipient) visits the
     /// shared recipient's ring exactly once.
     #[test]
     fn guided_walk_dedups_diamond_recipient() {
-        let root = mid(0, 1);
-        let child_a = mid(10, 2);
-        let child_b = mid(10, 3);
-        let shared = 40u64;
+        let root = mid("aether.test.seed", 1);
+        let child_a = mid("aether.test.middle", 2);
+        let child_b = mid("aether.test.middle", 3);
+        let shared = "aether.test.shared";
 
-        let mut rings: BTreeMap<MailboxId, Vec<TraceRingEntry>> = BTreeMap::new();
-        rings.entry(MailboxId(0)).or_default().push(sent(root, root, 10));
-        rings.entry(MailboxId(10)).or_default().extend([
-            received(root, root),
-            finished(root, root),
-            sent_parent(child_a, root, Some(root), shared),
-            sent_parent(child_b, root, Some(root), shared),
-        ]);
-        // The shared recipient receives both children.
-        rings.entry(MailboxId(shared)).or_default().extend([
-            received(child_a, root),
-            finished(child_a, root),
-            received(child_b, root),
-            finished(child_b, root),
+        let rings = BTreeMap::from([
+            (path("aether.test.seed"), vec![sent(&root, &root, "aether.test.middle")]),
+            (
+                path("aether.test.middle"),
+                vec![
+                    received(&root, &root),
+                    finished(&root, &root),
+                    sent_parent(&child_a, &root, Some(&root), shared),
+                    sent_parent(&child_b, &root, Some(&root), shared),
+                ],
+            ),
+            // The shared recipient receives both children.
+            (
+                path(shared),
+                vec![
+                    received(&child_a, &root),
+                    finished(&child_a, &root),
+                    received(&child_b, &root),
+                    finished(&child_b, &root),
+                ],
+            ),
         ]);
 
         let mut walk = TreeWalk::new(root);
-        let mut visits = 0;
-        while let Some(mbx) = walk.next_mailbox() {
-            visits += 1;
-            walk.absorb(rings.get(&mbx).cloned().unwrap_or_default());
-        }
+        let visits = drive(&mut walk, &rings).len();
         let (_, _, mails) = ok(walk.finish());
-        assert_eq!(visits, 3, "chassis, observer, shared — shared once");
+        assert_eq!(visits, 3, "seed, middle, shared — shared once");
         assert_eq!(mails.len(), 3, "root + two children");
+    }
+
+    /// A root whose sender the export could not name seeds nothing, so the
+    /// walk queries no ring and reports the root not found rather than
+    /// tailing a guessed actor.
+    #[test]
+    fn a_root_with_no_sender_path_is_not_found() {
+        let root = TraceMailId { sender: None, correlation_id: 1 };
+        let mut walk = TreeWalk::new(root.clone());
+        assert_eq!(walk.next_actor(), None);
+        assert!(matches!(walk.finish(), DescribeTreeResult::Err { not_found } if not_found == root));
     }
 }

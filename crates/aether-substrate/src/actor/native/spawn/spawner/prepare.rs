@@ -16,7 +16,6 @@ use std::sync::mpsc;
 
 use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
-use aether_actor::trace::ActorTraceRing;
 use aether_actor::{Instanced, validate_namespace_segment};
 use aether_data::{ActorId, ErasedActorPath, Tag, fold_lineage, with_tag};
 
@@ -31,6 +30,7 @@ use crate::mail::cost::{CostCell, CostCells};
 use crate::mail::registry::effect::{PreparedCostCells, PreparedMail, PreparedSpawnCommit};
 use crate::mail::{KindId, Mail, MailboxId};
 use crate::runtime::effect_chain::EffectChain;
+use crate::runtime::trace::ActorTraceRing;
 
 use super::super::{SpawnError, Subname};
 use super::Spawner;

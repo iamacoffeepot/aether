@@ -52,7 +52,7 @@ use crate::runtime::thread_name;
 use aether_actor::local::ActorSlots;
 
 use crate::actor::native::local;
-use aether_kinds::trace::TraceEvent;
+use crate::runtime::trace::TraceRecord;
 use std::ops::Deref;
 use std::sync::PoisonError;
 
@@ -572,7 +572,7 @@ where
         if let Some((mail_id, root)) = traced {
             th.push_trace_ring(
                 root,
-                TraceEvent::Received {
+                TraceRecord::Received {
                     mail_id,
                     t: t_received,
                     // iamacoffeepot/aether#1134: surface the deposit instant +
@@ -603,7 +603,7 @@ where
         // dispatch arms for `aether.log.tail` + `aether.trace.tail` +
         // `aether.cost.tail`. See the helper docs in `dispatch`.
         let typed_arm_ran = if super::dispatch::dispatch_log_tail_if_matching(&mut ctx, kind, payload)
-            || super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, kind, payload)
+            || super::dispatch::dispatch_trace_tail_if_matching(binding, &mut ctx, kind, payload)
             || super::dispatch::dispatch_cost_tail_if_matching(binding, &mut ctx, kind, payload)
         {
             false
@@ -621,7 +621,7 @@ where
         drop(ctx);
         let t_finished = th.now_nanos();
         if let Some((mail_id, root)) = traced {
-            th.push_trace_ring(root, TraceEvent::Finished { mail_id, t: t_finished });
+            th.push_trace_ring(root, TraceRecord::Finished { mail_id, t: t_finished });
         }
         // iamacoffeepot/aether#1128: fold this handler's execution time into
         // its per-handler EWMA (lock-free through the per-actor cache;

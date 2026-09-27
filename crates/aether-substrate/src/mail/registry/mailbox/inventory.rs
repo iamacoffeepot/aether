@@ -11,7 +11,7 @@ use crate::mail::mailer::Mailer;
 #[cfg(test)]
 use crate::mail::registry::effect::RegistryInventory;
 use crate::mail::registry::effect::{ChangeSubscriber, RegistrySubscription, subscriber};
-use crate::mail::registry::names::categorise_mailbox_name;
+use crate::mail::registry::names::{CHASSIS_SENTINEL_NAME, categorise_mailbox_name};
 use crate::mail::{KindId, MailboxId};
 
 use super::Registry;
@@ -20,23 +20,21 @@ use super::route::{RouteLifecycle, RouteRecord};
 
 pub(super) fn live_inventory(mailboxes: &FxHashMap<MailboxId, RouteRecord>) -> Vec<MailboxDescriptor> {
     let mut inventory = mailboxes
-        .iter()
-        .filter(|(_, route)| match &route.lifecycle {
+        .values()
+        .filter(|route| match &route.lifecycle {
             RouteLifecycle::Live { .. } => true,
             RouteLifecycle::Alias { target_parent, .. } => mailboxes
                 .get(target_parent)
                 .is_some_and(|target| matches!(&target.lifecycle, RouteLifecycle::Live { .. })),
             RouteLifecycle::Starting { .. } | RouteLifecycle::Dropped => false,
         })
-        .map(|(id, route)| MailboxDescriptor {
-            id: *id,
+        .map(|route| MailboxDescriptor {
             name: route.canonical_name.to_string(),
             category: categorise_mailbox_name(route.canonical_name.as_str()),
         })
         .collect::<Vec<_>>();
     inventory.push(MailboxDescriptor {
-        id: MailboxId::CHASSIS_MAILBOX_ID,
-        name: "aether.chassis".to_owned(),
+        name: CHASSIS_SENTINEL_NAME.to_owned(),
         category: Some(MailboxCategory::ChassisSentinel),
     });
     inventory.sort_by(|left, right| left.name.cmp(&right.name));
@@ -90,7 +88,7 @@ impl Registry {
 
     /// Snapshot of every mailbox descriptor currently registered, plus
     /// a synthetic entry for the chassis-router sentinel
-    /// (`aether.chassis` / [`MailboxId::CHASSIS_MAILBOX_ID`]). Sorted
+    /// (`aether.chassis`). Sorted
     /// by name. Used by the hub-client handshake to ship the
     /// authoritative inventory in `Hello.mailboxes`, and by the
     /// component cap to re-ship via `MailboxesChanged` after a load

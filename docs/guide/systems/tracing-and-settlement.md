@@ -53,8 +53,8 @@ hub, a capability's worker thread reacting to a socket read. Mail sent from
 *inside* a handler inherits its trigger's root instead of starting a new one. So
 one external stimulus and the entire cascade it sets off all carry the same root
 id, and the whole chain is identified by that single originating mail. (Chains
-that the chassis itself originates are marked by a sender of `aether.chassis` —
-the tagged id `mbx-aaaa-aaaa-aaaa` you'll see at the top of a trace tree.)
+that the chassis itself originates are marked by the sender path
+`aether.chassis`, which you'll see at the top of a trace tree.)
 
 **A chain is settled when it is closed.** Under each root the engine keeps two
 counts: `in_flight` — mail sent but not yet finished handling — and `held_open`
@@ -210,9 +210,16 @@ A node still missing `t_finished` is mail that hasn't finished handling yet.
 actor holds its own **trace ring** — the same per-actor storage the
 [log rings](logging.md) use
 ([ADR-0081](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0081-decentralized-per-actor-log-storage.md) / [ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md)) — recording the events that passed through it. A tree is
-rebuilt by a **guided walk**: start at the root's sender, read its ring
+rebuilt by a **guided walk**: start at the root's sender path, read its ring
 (`aether.trace.tail`, the sibling of the `aether.log.tail` behind `actor_logs`),
-follow each onward `Sent` to the recipient's ring, and stitch. `send_mail_traced`
+follow each onward `Sent` to the ring of the recipient path it names, and stitch.
+A ring holds mailbox positions in memory, but every tail renders them as
+canonical actor paths
+([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)
+§1), so each node names its sender and recipient by path. A retired actor keeps
+its path — a closed actor's route keeps its name, and a name is never reused —
+so its nodes still name it; only a position the engine never held a route
+record for renders as no path. `send_mail_traced`
 runs that walk and hands back the stitched tree — and over MCP that's the surface,
 since there's no standalone per-actor trace tool the way `actor_logs` exposes the
 log rings. The tree it returns carries `t_construct_start`, `t_sent`,
@@ -262,7 +269,8 @@ It dispatches a batch under one shared root and, once that whole chain settles,
 returns the combined trace tree, the correlated replies, and a `status`:
 
 - `"settled"` — the chain closed. By default `mails` is `null`, `tree` holds one
-  indented line per node (`sender → recipient`, kind, and handler duration),
+  indented line per node (`sender → recipient` by actor path, kind, and
+  handler duration; `(no route)` marks an endpoint with no route record),
   `node_count` states how many nodes were rendered, and `in_flight` reads `0`.
   Pass `trace: "nodes"` to restore the complete `mails` nodes with `parent` edges
   and all timestamps; that mode omits `tree` and carries the same `node_count`.

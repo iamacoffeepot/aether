@@ -31,6 +31,7 @@ use crate::runtime::lifecycle::PanicAborter;
 use aether_actor::{CallerScope, ErasedActorRef, RequestContextTable};
 use aether_data::{ErasedActorPath, KindDescriptor};
 use aether_kinds::ComponentCapabilities;
+use aether_kinds::trace::TraceMailId;
 
 impl NativeBinding {
     /// Build a fresh transport. Pair `self_mailbox` with the id the
@@ -284,6 +285,12 @@ impl NativeBinding {
     /// [`NativeCtx::tagged_id_name`](crate::actor::native::ctx::NativeCtx::tagged_id_name).
     pub(crate) fn tagged_id_name(&self, tagged: &str) -> Option<String> {
         self.mailer.tagged_id_name(tagged)
+    }
+
+    /// A mail id rendered as its exported trace identity. The path behind
+    /// [`NativeCtx::in_flight_trace_mail_id`](crate::actor::native::ctx::NativeCtx::in_flight_trace_mail_id).
+    pub(crate) fn trace_mail_id(&self, id: MailId) -> TraceMailId {
+        self.mailer.trace_mail_id(id)
     }
 
     /// The canonical path of the live actor an address names. The path behind

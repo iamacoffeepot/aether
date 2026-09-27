@@ -30,10 +30,12 @@ impl NativeActor for TraceDispatchCapability {
     /// # Agent
     /// Atomic batched dispatch with shared trace root, backing the
     /// MCP `send_mail_traced` tool. Captures this handler's inbound
-    /// `MailId` as the batch root, dispatches every spec inheriting
+    /// mail as the batch root, dispatches every spec inheriting
     /// the chain (so all children appear under one tree), and
     /// replies synchronously with [`DispatchTracedAck`] carrying the
-    /// root. The caller waits for the wire `ReplyEnd` (chain
+    /// root rendered with its minter's path — the actor whose ring holds
+    /// the root's `Sent`, where the walk seeds. The caller waits for the
+    /// wire `ReplyEnd` (chain
     /// settled), then reconstructs the populated tree by walking the
     /// per-actor trace rings from this root (`aether.trace.tail`,
     /// stitched client-side — ADR-0086 Phase 3b). Issue 749.
@@ -58,7 +60,7 @@ impl NativeActor for TraceDispatchCapability {
     ) -> DispatchTracedAck {
         // The RPC bridge always stamps the batch, so its own id is the root
         // every child descends from; a batch without one has no root to ack.
-        let Some(root) = ctx.in_flight_mail_id() else {
+        let Some(root) = ctx.in_flight_trace_mail_id() else {
             return DispatchTracedAck::Err { error: "dispatch_traced arrived without a causal chain".to_owned() };
         };
         // Prove every recipient before any child moves (ADR-0230 §3). A
@@ -122,11 +124,12 @@ mod tests {
     /// bundle pattern), delivers each via `deliver_forwarded` so
     /// children inherit the chain, and
     /// replies synchronously with `DispatchTracedAck::Ok { root }`
-    /// carrying the inbound mail id.
+    /// carrying the inbound mail id rendered with its minter's path.
     #[test]
     fn on_dispatch_traced_resolves_each_envelope_and_acks_with_root() {
         use aether_data::ErasedActorPath;
         use aether_kinds::NamedMail;
+        use aether_kinds::trace::TraceMailId;
         use std::sync::Mutex;
 
         type Capture = (KindId, Option<MailId>, Option<MailId>, Vec<u8>);
@@ -206,10 +209,18 @@ mod tests {
             "envelope B missing or chain not inherited; captured: {snapshot:?}"
         );
 
+        // The ack renders the in-flight id's minter, the chassis here, not
+        // the trace cap that dispatched the batch: the minter's ring holds
+        // the root's `Sent`, so a walk seeded anywhere else finds no root.
         match ack {
-            DispatchTracedAck::Ok { root } => {
-                assert_eq!(root, inbound, "Ok ack must echo the in-flight inbound mail id as the chassis root");
-            }
+            DispatchTracedAck::Ok { root } => assert_eq!(
+                root,
+                TraceMailId {
+                    sender: Some(ErasedActorPath::new("aether.chassis").expect("a well-formed actor path")),
+                    correlation_id: inbound.correlation_id,
+                },
+                "Ok ack must name the in-flight inbound's minter and correlation",
+            ),
             DispatchTracedAck::Err { error } => {
                 panic!("expected Ok ack, got Err: {error}")
             }

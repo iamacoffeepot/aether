@@ -208,10 +208,7 @@ fn driver_claim_reserved_at_claim_is_recovered_at_start() {
         .expect("build succeeds — the driver recovered its Claim-stage reservation at Start");
 
     let expected_id = registry_probe
-        .list_mailbox_descriptors()
-        .into_iter()
-        .find(|descriptor| descriptor.name == "test.reserve_recover.window")
-        .map(|descriptor| descriptor.id)
+        .lookup("test.reserve_recover.window")
         .expect("the reserved namespace is registered on the chassis registry");
     let recovered_id = recovered.lock().expect("recovered mutex is never poisoned").expect("boot recovered a claim");
     assert_eq!(recovered_id, expected_id, "the recovered claim addresses the reserved mailbox");

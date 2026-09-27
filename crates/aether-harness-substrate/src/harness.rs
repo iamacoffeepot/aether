@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind, KindId, LoadName, ReplyContract, SessionToken, Uuid};
 #[cfg(test)]
-use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
+use aether_kinds::trace::{DescribeTreeResult, TraceMailId, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, CostTail, CostTailResult};
 use aether_kinds::{LoadComponent, LoadResult, LogTail, LogTailResult, Tick};
 #[cfg(test)]
@@ -49,7 +49,7 @@ use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Ro
 use aether_fs::NamespaceRoots;
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 #[cfg(test)]
-use aether_substrate::mail::MailboxId;
+use aether_substrate::runtime::trace::chassis_host_path;
 use aether_substrate::{
     Builder, ChildRefused, EgressEvent, NativeActor, PassiveChassis, ReplyTarget, RingCapacities, RouteReadProbe,
     SchedulerTuning, SubstrateBoot, mail::MailId,
@@ -1081,7 +1081,8 @@ impl SubstrateHarness {
     }
 
     /// iamacoffeepot/aether#1057: inject a chassis-root mail and return its
-    /// `MailId` plus a settlement [`Receiver`] that fires when the whole
+    /// root, rendered as the [`TraceMailId`] a trace export names it by,
+    /// plus a settlement [`Receiver`] that fires when the whole
     /// causal tree drains. Unlike [`Self::settle_bytes`] this does NOT
     /// block — the mail-latency harness injects many roots back-to-back
     /// (to build inbox queueing) and waits on the collected receivers
@@ -1094,8 +1095,10 @@ impl SubstrateHarness {
         recipient: ErasedActorRef,
         kind: KindId,
         payload: Vec<u8>,
-    ) -> (MailId, Receiver<()>) {
-        self.passive.send_tracked(recipient, kind, payload, None)
+    ) -> (TraceMailId, Receiver<()>) {
+        let (root, settled) = self.passive.send_tracked(recipient, kind, payload, None);
+        let (_, mailer) = self.boot().handles_for_test();
+        (mailer.trace_mail_id(root), settled)
     }
 
     /// The lifetime-guard boot, for this crate's `#[cfg(test)]` fixtures,
@@ -1114,44 +1117,49 @@ impl SubstrateHarness {
     #[cfg(test)]
     pub(crate) fn chassis_host_trace_tail(&self, request: &TraceTail) -> TraceTailResult {
         let (_, mailer) = self.boot().handles_for_test();
-        mailer.trace_handle().chassis_host_tail(request)
+        mailer.chassis_host_trace_tail(request)
     }
 
     /// ADR-0086 Phase 3: reconstruct `root`'s trace tree via the
     /// decentralized guided walk over per-actor rings — the in-process
     /// counterpart to the MCP's over-the-wire walk (there is no central
     /// observer post-3c; the rings are the source of truth). Seeds at
-    /// `root.sender`
-    /// (`CHASSIS_MAILBOX_ID` for an injected root, an actor otherwise),
-    /// then fans out across each `Sent`'s recipient. The chassis-host ring
-    /// belongs to no actor, so it is read directly (the same ring the
-    /// mailer's chassis arm answers `aether.trace.tail` from). Every other
-    /// ring is tailed with `aether.trace.tail` through the proof in
-    /// `actors` whose position the walk reported; a position no proof in
-    /// `actors` names contributes no entries, as an unreachable ring would.
-    /// The `root` filter on every tail isolates the tree from the
-    /// trace-query traffic itself.
+    /// `root.sender` (`aether.chassis` for an injected root, an actor
+    /// otherwise), then fans out across each `Sent`'s recipient path. The
+    /// chassis-host ring belongs to no actor, so it is read directly (the
+    /// same ring the mailer's chassis arm answers `aether.trace.tail`
+    /// from). Every other ring is tailed with `aether.trace.tail` through
+    /// the proof in `actors` whose route carries the path the walk
+    /// reported; a path no proof in `actors` names contributes no entries,
+    /// as an unreachable ring would. The `root` filter on every tail
+    /// isolates the tree from the trace-query traffic itself.
     #[cfg(test)]
-    pub(crate) fn describe_tree_walked(&mut self, root: MailId, actors: &[ErasedActorRef]) -> DescribeTreeResult {
+    pub(crate) fn describe_tree_walked(&mut self, root: TraceMailId, actors: &[ErasedActorRef]) -> DescribeTreeResult {
         // The in-process harness reaches the substrate's reverse-lookup
         // registry directly, so it resolves each node's thread name
         // (ADR-0102: the resolver is the caller's; the MCP path passes
         // none).
         use aether_substrate::runtime::thread_name;
 
+        let (registry, _) = self.boot().handles_for_test();
+        let chassis_host = chassis_host_path();
+        let request = TraceTail { max: 0, since: None, root: Some(root.clone()) };
+
         let mut walk = TreeWalk::new(root);
-        while let Some(mailbox) = walk.next_mailbox() {
-            let request = TraceTail { max: 0, since: None, root: Some(root) };
+        while let Some(path) = walk.next_actor() {
             // A send error or an undecodable reply yields no entries; the
             // walk still completes from the rings that do answer.
-            let result = if mailbox == MailboxId::CHASSIS_MAILBOX_ID {
+            let result = if path == chassis_host {
                 Some(self.chassis_host_trace_tail(&request))
             } else {
-                actors.iter().find(|actor| actor.id() == mailbox).and_then(|&actor| {
-                    self.request_bytes(actor, TraceTail::ID, request.encode_into_bytes())
-                        .ok()
-                        .and_then(|reply| TraceTailResult::decode_from_bytes(&reply))
-                })
+                actors
+                    .iter()
+                    .find(|actor| registry.mailbox_name(actor.id()).is_some_and(|name| name == path.as_str()))
+                    .and_then(|&actor| {
+                        self.request_bytes(actor, TraceTail::ID, request.encode_into_bytes())
+                            .ok()
+                            .and_then(|reply| TraceTailResult::decode_from_bytes(&reply))
+                    })
             };
             if let Some(TraceTailResult::Ok { entries, .. }) = result {
                 walk.absorb(entries);
@@ -1679,6 +1687,7 @@ fn correlation_of(event: &EgressEvent) -> Option<u64> {
 #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
+    use aether_substrate::mail::MailboxId;
 
     /// Issue 4454: a silent exact lifecycle chain must never climb toward
     /// the coarse default ceiling. Once its one-shot settlement signal

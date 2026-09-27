@@ -1,10 +1,10 @@
 use super::bytes::{render_bytes_reply, reply_inline_max_bytes};
 use super::reply_format::ReplyFormat;
 use super::{
-    Kind, KindDescriptor, KindId, MailId, McpError, ReplyEnvelope, ReplyEventJson, ReplyProjection, descriptors,
-    internal_msg, kind_id_from_parts, tagged_id,
+    Kind, KindDescriptor, KindId, McpError, ReplyEnvelope, ReplyEventJson, ReplyProjection, descriptors, internal_msg,
+    kind_id_from_parts, tagged_id,
 };
-use aether_kinds::trace::DispatchTracedAck;
+use aether_kinds::trace::{DispatchTracedAck, TraceMailId};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use std::collections::HashMap;
@@ -142,7 +142,7 @@ pub(super) fn project_replies(replies: Vec<ReplyEventJson>, projection: ReplyPro
 /// reply event the trace cap emits on the dispatch cid; later events are
 /// downstream cap replies handled separately. An absent or undecodable
 /// ack, or an `Err` ack, is a tool error.
-pub(super) fn decode_traced_ack(events: &[ReplyEnvelope]) -> Result<MailId, McpError> {
+pub(super) fn decode_traced_ack(events: &[ReplyEnvelope]) -> Result<TraceMailId, McpError> {
     let ack_env = events.first().ok_or_else(|| internal_msg("send_mail_traced: no ack reply from the trace cap"))?;
     let ack = DispatchTracedAck::decode_from_bytes(&ack_env.payload)
         .ok_or_else(|| internal_msg("undecodable DispatchTracedAck"))?;

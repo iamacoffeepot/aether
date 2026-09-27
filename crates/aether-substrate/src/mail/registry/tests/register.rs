@@ -161,8 +161,9 @@ fn drop_mailbox_retires_the_name_for_good() {
 
     assert!(r.try_register_inbox(&auth(), "loaded", noop_handler()).is_err(), "a retired name never registers again");
     assert!(matches!(r.entry_at(id), Some(MailboxEntry::Dropped)), "the refused re-register leaves the tombstone");
+    let retired = r.mailbox_name(id).expect("the Dropped route keeps its name");
     assert!(
-        r.list_mailbox_descriptors().iter().all(|descriptor| descriptor.id != id),
+        r.list_mailbox_descriptors().iter().all(|descriptor| descriptor.name != retired),
         "a retained Dropped route is absent from public live inventory"
     );
 }

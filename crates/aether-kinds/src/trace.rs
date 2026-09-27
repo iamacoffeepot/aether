@@ -12,11 +12,15 @@
 //!   pair (ADR-0080 §12). Post-ADR-0086 Phase 3c these land in the
 //!   producing actor's per-actor ring ([`TraceRingEntry`]), queried via
 //!   [`TraceTail`] and stitched client-side; there is no central fold.
+//! - [`TraceMailId`] — the exported identity of one mail. The engine's
+//!   rings hold mailbox positions in memory, and every export renders
+//!   them as canonical actor paths (ADR-0230 §1), so no record here
+//!   carries a mailbox id.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::{KindId, MailId, MailboxId, ThreadId};
+use aether_data::{ErasedActorPath, KindId, MailId, ThreadId};
 use serde::{Deserialize, Serialize};
 
 use crate::NamedMail;
@@ -39,27 +43,44 @@ pub const TRACE_MAILBOX_NAME: &str = "aether.trace";
 )]
 pub struct Nanos(pub u64);
 
+/// The exported identity of one mail: the canonical path of the actor that
+/// minted it, and that actor's correlation counter at mint time.
+///
+/// `sender` is `aether.chassis` for chassis-originated mail, the path of
+/// the minting actor otherwise, including an actor that has since retired:
+/// a closed actor's route keeps its name, and a name is never reused. It is
+/// `None` only when the minting position has no route record at all.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, aether_data::Schema)]
+pub struct TraceMailId {
+    pub sender: Option<ErasedActorPath>,
+    pub correlation_id: u64,
+}
+
 /// ADR-0080 §2: one trace event emitted at a producer site.
 ///
 /// `Sent` carries the full causal-graph context: the outgoing mail's
 /// own `mail_id`, the chain `root` it inherits or originates, the
 /// optional `parent_mail` at the sender (None for chassis-root), the
-/// producer mailbox, the recipient mailbox, the kind, and the
-/// timestamp. `Received` and `Finished` only carry `mail_id` + `t`;
+/// producer's and the recipient's canonical actor paths, the kind, and
+/// the timestamp. An endpoint is `None` when its position has no route
+/// record. `Received` and `Finished` only carry `mail_id` + `t`;
 /// the guided walk (`trace_walk`) joins them to the originating `Sent`
 /// by the mail-id key while stitching the per-actor ring slices.
 ///
-/// Wire shape: structured. The dispatcher delivers this through normal
-/// mail routing; no cast-shape optimisation because the variant tag +
-/// `Option<MailId>` would force padding gymnastics anyway.
+/// Wire shape: structured. A ring's tail renders each record into this
+/// shape at export; the ring itself holds positions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
 pub enum TraceEvent {
     Sent {
-        mail_id: MailId,
-        root: MailId,
-        parent_mail: Option<MailId>,
-        sender: MailboxId,
-        recipient: MailboxId,
+        mail_id: TraceMailId,
+        root: TraceMailId,
+        parent_mail: Option<TraceMailId>,
+        /// The producer's canonical actor path, `None` when its position
+        /// has no route record.
+        sender: Option<ErasedActorPath>,
+        /// The recipient's canonical actor path, `None` when its position
+        /// has no route record.
+        recipient: Option<ErasedActorPath>,
         kind: KindId,
         /// iamacoffeepot/aether#1158: the instant the producer's
         /// outbound burst **opened** — the first buffered send of the
@@ -82,7 +103,7 @@ pub enum TraceEvent {
         t: Nanos,
     },
     Received {
-        mail_id: MailId,
+        mail_id: TraceMailId,
         t: Nanos,
         /// iamacoffeepot/aether#1134, re-anchored by
         /// iamacoffeepot/aether#1150: the instant the consumer side first
@@ -126,7 +147,7 @@ pub enum TraceEvent {
         thread_id: Option<ThreadId>,
     },
     Finished {
-        mail_id: MailId,
+        mail_id: TraceMailId,
         t: Nanos,
     },
     /// ADR-0080 §12 / iamacoffeepot/aether#716: a thread-spawn primitive
@@ -137,7 +158,7 @@ pub enum TraceEvent {
     /// before the worker thread is spawned, so by the time `Finished`
     /// lands for the parent handler the hold is already visible.
     HoldOpen {
-        root: MailId,
+        root: TraceMailId,
         t: Nanos,
     },
     /// Companion to [`Self::HoldOpen`]. Pushed by `SettlementHold`'s
@@ -145,7 +166,7 @@ pub enum TraceEvent {
     /// the root's `held_open` counter and may fire `Settled` if both
     /// counters reached zero.
     Release {
-        root: MailId,
+        root: TraceMailId,
         t: Nanos,
     },
 }
@@ -163,8 +184,8 @@ pub enum TraceEvent {
 /// the MCP layer can name/decode it uniformly).
 #[aether_data::kind(name = "aether.trace.describe_tree_result", eq)]
 pub enum DescribeTreeResult {
-    Ok { root: MailId, in_flight: u32, mails: Vec<MailNodeWire> },
-    Err { not_found: MailId },
+    Ok { root: TraceMailId, in_flight: u32, mails: Vec<MailNodeWire> },
+    Err { not_found: TraceMailId },
 }
 
 /// One node in a [`DescribeTreeResult`]: a single mail folded from its
@@ -173,10 +194,14 @@ pub enum DescribeTreeResult {
 /// MCP layer renders them into the trace tree.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
 pub struct MailNodeWire {
-    pub mail_id: MailId,
-    pub parent: Option<MailId>,
-    pub sender: MailboxId,
-    pub recipient: MailboxId,
+    pub mail_id: TraceMailId,
+    pub parent: Option<TraceMailId>,
+    /// The producer's canonical actor path, `None` when its position has
+    /// no route record.
+    pub sender: Option<ErasedActorPath>,
+    /// The recipient's canonical actor path, `None` when its position has
+    /// no route record.
+    pub recipient: Option<ErasedActorPath>,
     pub kind: KindId,
     /// iamacoffeepot/aether#1158: the instant the producer's outbound
     /// burst opened (the first buffered send of the flush window), seeded
@@ -228,12 +253,12 @@ pub struct MailNodeWire {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
 pub struct TraceRingEntry {
     pub sequence: u64,
-    pub root: MailId,
+    pub root: TraceMailId,
     pub event: TraceEvent,
 }
 
 /// ADR-0086 Phase 3: `aether.trace.tail` — query one actor's
-/// `ActorTraceRing`. Routed to a specific actor by `MailboxId`; the
+/// `ActorTraceRing`. Routed to a specific actor by its path; the
 /// framework dispatch loop services it directly (every native actor and
 /// every wasm trampoline answers without the author writing a handler),
 /// the same surface [`crate::LogTail`] established for log rings. The
@@ -246,12 +271,14 @@ pub struct TraceRingEntry {
 ///   entries with `sequence > n` (the per-ring cursor).
 /// - `root: None` returns every event in the ring; `Some(r)` returns
 ///   only the events tagged with root `r` — the targeted/guided-walk
-///   strategy that touches only the actors in one tree.
+///   strategy that touches only the actors in one tree. The responder
+///   proves `r` once on receipt: a root whose sender path names no actor
+///   the engine ever registered answers [`TraceTailResult::Err`].
 #[aether_data::kind(name = "aether.trace.tail")]
 pub struct TraceTail {
     pub max: u32,
     pub since: Option<u64>,
-    pub root: Option<MailId>,
+    pub root: Option<TraceMailId>,
 }
 
 /// Reply to [`TraceTail`]. `Ok::entries` slices the responder's ring
@@ -317,14 +344,16 @@ pub struct DispatchTraced {
 }
 
 /// Issue 749: synchronous reply to [`DispatchTraced`]. `Ok` carries
-/// the chassis-root [`MailId`] every dispatched envelope inherited, so
-/// the caller can walk the per-actor trace rings from that root once
+/// the root [`TraceMailId`] every dispatched envelope inherited. Its
+/// `sender` names the actor that minted the root, whose ring holds the
+/// root's `Sent`, so the caller can walk the per-actor trace rings from
+/// that root once
 /// the wire `ReplyEnd` signals chain settlement. `Err` aborts the batch
 /// before any mail moved — typically a bad recipient or kind name in
 /// the batch (matches `CaptureFrameResult::Err`'s bundle-resolution
 /// failure shape).
 #[aether_data::kind(name = "aether.trace.dispatch_traced_ack")]
 pub enum DispatchTracedAck {
-    Ok { root: MailId },
+    Ok { root: TraceMailId },
     Err { error: String },
 }

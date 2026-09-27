@@ -196,10 +196,8 @@ mod tests {
 
     use aether_actor::local::ActorSlots;
     use aether_actor::log::ActorLogRing;
-    use aether_actor::trace::ActorTraceRing;
     use aether_actor::{Addressable, HandlesKind, Local as _, MailSender, Manual, One};
     use aether_data::{ErasedActorPath, Kind, KindId, MailId, MailboxId, Source, SourceAddr};
-    use aether_kinds::trace::TraceEvent;
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
 
     use crate::Erased;
@@ -217,6 +215,7 @@ mod tests {
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::{InboxHandler, Registry};
     use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
+    use crate::runtime::trace::{ActorTraceRing, TraceRecord};
     use crate::scheduler::{Pool, PoolConfig, PoolHandle};
     use crate::{BootError, NativeInitCtx};
 
@@ -723,12 +722,12 @@ mod tests {
             .expect("the slot remains live");
         let sent: Vec<(Option<MailId>, Option<MailId>)> = trace
             .iter()
-            .filter_map(|entry| match &entry.event {
-                TraceEvent::Sent { mail_id, root, parent_mail, sender, recipient, kind, .. }
-                    if *sender == self_id && *recipient == peer_id && *kind == Poke::ID =>
+            .filter_map(|entry| match entry.record {
+                TraceRecord::Sent(sent)
+                    if sent.sender == self_id && sent.recipient == peer_id && sent.kind == Poke::ID =>
                 {
-                    assert!(parent_mail.is_none(), "host-turn Sent traces have no parent");
-                    Some((Some(*mail_id), Some(*root)))
+                    assert!(sent.parent_mail.is_none(), "host-turn Sent traces have no parent");
+                    Some((Some(sent.mail_id), Some(sent.root)))
                 }
                 _ => None,
             })

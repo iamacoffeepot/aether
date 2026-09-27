@@ -284,26 +284,39 @@ impl Registry {
         }
     }
 
+    /// The position of the route standing under exactly the canonical
+    /// `path`, in any lifecycle, `Dropped` included.
+    ///
+    /// The path is folded as written, never expanded, and the route at the
+    /// fold must carry `path` as its canonical name, which refuses a fold
+    /// collision and a short path. Never registered and a name mismatch
+    /// answer `None`. A name is never reused, so the position answered is
+    /// the one the path named when any record naming it was written.
+    ///
+    /// Consumers: [`Self::live_route`], and the trace export's receipt of a
+    /// `TraceTail` root, which must accept a retired minter so the roots it
+    /// minted stay queryable.
+    pub(crate) fn route_position(&self, path: &ErasedActorPath) -> Option<MailboxId> {
+        let id = lineage_mailbox_id(path.as_str());
+        (self.routes.load().entry_for(&id)?.canonical_name == *path).then_some(id)
+    }
+
     /// The position of the `Live` route standing under exactly the canonical
-    /// `path`, from one read of the published view (ADR-0231 §3's receipt of
-    /// a typed path).
+    /// `path` (ADR-0231 §3's receipt of a typed path).
     ///
     /// A typed path is canonical and within the depth and byte caps by
-    /// construction, so it is folded as written, never expanded. The route at
-    /// the fold must carry `path` as its canonical name, which refuses a fold
-    /// collision, and must resolve `Live`: an inline alias answers `Live`
-    /// while its target parent is `Live`. Never registered, `Starting`,
-    /// `Dropped`, and a name mismatch all answer `None`.
+    /// construction, so [`Self::route_position`] folds it as written and
+    /// refuses a fold collision; the route it names must then resolve
+    /// `Live`: an inline alias answers `Live` while its target parent is
+    /// `Live`. Never registered, `Starting`, `Dropped`, and a name mismatch
+    /// all answer `None`.
     ///
     /// Consumers: `Registry::resolve_protocol`, the native receipt of a
     /// protocol path, and the registry's [`PublishedRoutes`] impl, which a
     /// `ProtocolPath` decode reads.
     pub(crate) fn live_route(&self, path: &ErasedActorPath) -> Option<MailboxId> {
-        let id = lineage_mailbox_id(path.as_str());
+        let id = self.route_position(path)?;
         let routes = self.routes.load();
-        if routes.entry_for(&id)?.canonical_name != *path {
-            return None;
-        }
 
         match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
             ResolvedRoute::Live { .. } => Some(id),
@@ -327,7 +340,15 @@ impl Registry {
     /// The crate-private path behind
     /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
     pub(crate) fn actor_path(&self, actor: ErasedActorRef) -> Option<ErasedActorPath> {
-        self.routes.load().entry_for(&actor.id()).map(|route| route.canonical_name.clone())
+        self.route_path(actor.id())
+    }
+
+    /// The canonical name the route record at `position` holds, in every
+    /// lifecycle, `Dropped` included; `None` for a position with no route
+    /// record. The positional body of [`Self::actor_path`], for the trace
+    /// export, whose rings hold positions rather than proofs.
+    pub(crate) fn route_path(&self, position: MailboxId) -> Option<ErasedActorPath> {
+        self.routes.load().entry_for(&position).map(|route| route.canonical_name.clone())
     }
 }
 

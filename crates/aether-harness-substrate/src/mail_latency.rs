@@ -29,8 +29,10 @@ use std::thread::{self, available_parallelism};
 use std::time::{Duration, Instant};
 
 use aether_actor::{ActorRef, ErasedActorRef};
-use aether_data::{Kind, KindId, MailId, ReplyContract};
-use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult};
+use aether_data::{Kind, KindId, ReplyContract};
+use aether_kinds::trace::{
+    DescribeTreeResult, MailNodeWire, TraceEvent, TraceMailId, TraceRingEntry, TraceTail, TraceTailResult,
+};
 use aether_kinds::{ComponentCapabilities, HandlerCapability};
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
@@ -416,7 +418,7 @@ fn emit_settlement_settles_with_holds() {
 
 /// Query one actor's per-actor trace ring over the mail wire
 /// (`aether.trace.tail`), filtered to `root`. Returns the ring slice.
-fn trace_tail(tb: &mut SubstrateHarness, actor: ErasedActorRef, root: MailId) -> Vec<TraceRingEntry> {
+fn trace_tail(tb: &mut SubstrateHarness, actor: ErasedActorRef, root: TraceMailId) -> Vec<TraceRingEntry> {
     let req = TraceTail { max: 0, since: None, root: Some(root) }.encode_into_bytes();
     let reply = tb.request_bytes(actor, TraceTail::ID, req).expect("aether.trace.tail reply");
     match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
@@ -448,7 +450,7 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
     assert_settled(&rx, "mlat.trace_ring_dual_write");
 
     // The recipient relay's own ring holds the mail's Received + Finished.
-    let relay = trace_tail(&mut tb, relays[0].erase(), root);
+    let relay = trace_tail(&mut tb, relays[0].erase(), root.clone());
     assert!(
         relay.iter().any(|e| matches!(e.event, TraceEvent::Received { .. })),
         "relay ring missing Received; got {relay:?}"
@@ -463,7 +465,7 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
     );
 
     // The off-actor injected Sent landed in the chassis-host ring.
-    let host = match tb.chassis_host_trace_tail(&TraceTail { max: 0, since: None, root: Some(root) }) {
+    let host = match tb.chassis_host_trace_tail(&TraceTail { max: 0, since: None, root: Some(root.clone()) }) {
         TraceTailResult::Ok { entries, .. } => entries,
         TraceTailResult::Err { error } => panic!("chassis-host trace.tail error: {error}"),
     };
@@ -679,7 +681,7 @@ fn guided_walk_reconstructs_causal_tree() {
 ///   `parent.t_finished`: parallelism lets a child be received before
 ///   its parent's handler returns.)
 fn assert_causal_order(mails: &[MailNodeWire]) {
-    let by_id: BTreeMap<MailId, &MailNodeWire> = mails.iter().map(|n| (n.mail_id, n)).collect();
+    let by_id: BTreeMap<&TraceMailId, &MailNodeWire> = mails.iter().map(|n| (&n.mail_id, n)).collect();
     for n in mails {
         if let Some(received) = n.t_received {
             assert!(
@@ -706,9 +708,9 @@ fn assert_causal_order(mails: &[MailNodeWire]) {
                 );
             }
         }
-        if let Some(parent_id) = n.parent {
+        if let Some(parent_id) = &n.parent {
             let parent =
-                by_id.get(&parent_id).unwrap_or_else(|| panic!("parent {parent_id:?} of {:?} absent", n.mail_id));
+                by_id.get(parent_id).unwrap_or_else(|| panic!("parent {parent_id:?} of {:?} absent", n.mail_id));
             if let Some(parent_received) = parent.t_received {
                 assert!(
                     parent_received.0 <= n.t_sent.0,

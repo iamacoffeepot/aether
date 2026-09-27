@@ -30,11 +30,14 @@ use crate::{EngineId, MailboxId, Schema, SessionToken};
 /// `Option<MailId>` — so "no inbound mail" is structurally distinct from
 /// "chassis as sender".
 ///
-/// Serde-serializable so the ADR-0080 `TraceEvent` (and its
-/// structured `TraceRingEntry`, the per-actor ring's wire element)
-/// can carry `MailId` when a trace ring is queried over the wire. The
-/// substrate's host-side `Envelope` and `Mail` types do not serialize,
-/// so the field additions on those remain wire-free.
+/// Its serde and wire codec serve one use only: the engine-only
+/// settlement notices (`aether.trace.settled` and the render cap's
+/// `PreSettled`), which carry a root `MailId` until their own export
+/// question is settled. Trace records never carry one: a ring holds
+/// `MailId`s in memory and its export renders each as an
+/// `aether_kinds::trace::TraceMailId`, naming the sender by actor path
+/// (ADR-0230 §1). The substrate's host-side `Envelope` and `Mail` types
+/// do not serialize, so the field additions on those remain wire-free.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MailId {
     pub sender: MailboxId,

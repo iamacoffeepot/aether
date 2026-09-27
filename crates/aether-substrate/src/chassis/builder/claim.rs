@@ -11,6 +11,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use aether_data::MailboxCategory;
+
 use super::passive_boot::PassiveBoot;
 use super::references::ComposedReferences;
 use crate::chassis::ctx::{ChassisCtx, ChassisCtxParts, FallbackRouter, MailboxClaim};
@@ -109,7 +111,7 @@ fn claimed_namespaces(registry: &Registry) -> BTreeSet<String> {
     registry
         .list_mailbox_descriptors()
         .into_iter()
-        .filter(|descriptor| descriptor.id != MailboxId::CHASSIS_MAILBOX_ID)
+        .filter(|descriptor| descriptor.category != Some(MailboxCategory::ChassisSentinel))
         .map(|descriptor| descriptor.name)
         .collect()
 }

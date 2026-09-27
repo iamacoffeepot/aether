@@ -51,11 +51,11 @@ use std::time::{Duration, Instant};
 
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::ErasedActorPath;
-use aether_data::{EngineId, Kind, KindId, MailId, Uuid};
+use aether_data::{EngineId, Kind, KindId, Uuid};
 use aether_fleet::{FleetConfig, FleetServer, RestartPolicy};
 use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
-use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
+use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME, TraceMailId};
 use aether_kinds::{
     BinarySelector, ComponentCapabilities, ComponentSelector, DeadEngineDescriptor, EngineDescriptor,
     ListComponentBinaries, ListComponentBinariesResult, ListComponents, ListComponentsResult, ListEngineBinaries,
@@ -998,8 +998,8 @@ impl FleetHarness {
     }
 
     /// Route a one-entry traced batch (`DispatchTraced`) to a forked
-    /// engine's `aether.trace` mailbox and return the chassis-root
-    /// [`MailId`] every dispatched envelope inherited plus the reply
+    /// engine's `aether.trace` mailbox and return the root
+    /// [`TraceMailId`] every dispatched envelope inherited plus the reply
     /// envelopes collected across the settlement window. Mirrors
     /// `aether-mcp`'s `send_mail_traced`, minus the round-2 trace-tree
     /// stitch: Tier-A asserts settlement (the `call` read
@@ -1013,7 +1013,7 @@ impl FleetHarness {
     /// split off and decoded for the `root`, and the trailing events are
     /// the dispatched mail's correlated replies. Panics on an
     /// `Err`/undecodable ack, mirroring `single_reply`.
-    pub fn send_traced<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> (MailId, Vec<ReplyEnvelope>)
+    pub fn send_traced<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> (TraceMailId, Vec<ReplyEnvelope>)
     where
         K: Kind,
     {

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::wire::DecodeCtx;
 use aether_data::{Kind, MailId, RequestId};
+use aether_kinds::trace::TraceMailId;
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::inbox::InboundMail;
@@ -110,6 +111,18 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn in_flight_mail_id(&self) -> Option<MailId> {
         self.in_flight_mail_id
+    }
+
+    /// The [`Self::in_flight_mail_id`] rendered as its exported trace
+    /// identity: the canonical path of the actor that minted it, whose
+    /// ring holds its `Sent`, and its correlation counter. `None` when the
+    /// ctx was built without an inbound.
+    ///
+    /// Consumer: the trace cap's `on_dispatch_traced`, which acks the root
+    /// of the batch it dispatched in this form.
+    #[must_use]
+    pub fn in_flight_trace_mail_id(&self) -> Option<TraceMailId> {
+        self.in_flight_mail_id.map(|id| self.binding.trace_mail_id(id))
     }
 
     /// ADR-0080 §5: the root [`MailId`] of the causal chain this

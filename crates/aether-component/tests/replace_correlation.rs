@@ -161,8 +161,8 @@ fn a_replaced_guest_never_reuses_a_reply_mail_id() {
     };
     let reply_ids: Vec<_> = entries
         .iter()
-        .filter_map(|entry| match entry.event {
-            TraceEvent::Sent { mail_id, kind, .. } if kind == CarriedRequestResult::ID => Some(mail_id),
+        .filter_map(|entry| match &entry.event {
+            TraceEvent::Sent { mail_id, kind, .. } if *kind == CarriedRequestResult::ID => Some(mail_id.clone()),
             _ => None,
         })
         .collect();

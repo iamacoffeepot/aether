@@ -728,18 +728,18 @@ impl Mcp {
         }
     }
 
-    /// Reverse-render every id in a settled trace tree to a real name
-    /// (ADR-0088 §8). Builds the engine's reverse map if needed, collects
-    /// the ids that the static map misses, resolves them in one batched
-    /// `aether.inventory.resolve` query, then renders each `MailNodeWire`
-    /// through the now-populated map — falling back to the ADR-0064 hex
-    /// tag for any id that resolves to nothing. `Handle` ids stay hex
-    /// (they never enter the reverse map).
+    /// Render a settled trace tree for MCP. Actors arrive already named by
+    /// canonical path, so only kind ids reverse to names (ADR-0088 §8):
+    /// build the engine's reverse map if needed, collect the kind ids the
+    /// static map misses, resolve them in one batched
+    /// `aether.inventory.resolve` query, then render each `MailNodeWire`
+    /// through the now-populated map — falling back to the ADR-0064 tag
+    /// for any kind that resolves to nothing.
     pub(super) async fn render_mail_nodes(&self, engine: EngineId, nodes: Vec<MailNodeWire>) -> Vec<MailNodeJson> {
         self.ensure_names(engine).await;
 
-        // Collect the mailbox / kind / thread ids that the static map
-        // misses, so one batched resolve covers the whole tree.
+        // Collect the kind ids that the static map misses, so one batched
+        // resolve covers the whole tree.
         let mut misses: Vec<u64> = Vec::new();
         {
             let cache = self.names.lock().expect("reverse-name cache mutex is never poisoned");

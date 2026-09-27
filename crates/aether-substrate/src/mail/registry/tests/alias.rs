@@ -60,8 +60,9 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
     assert!(alias_completion.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
     assert!(registry.route_lookup(KindId(7), alias_id).is_starting());
     assert!(registry.entry_at(alias_id).is_none(), "compatibility projection does not expose the Starting parent");
+    let alias_label = registry.mailbox_name(alias_id).expect("the alias route holds a record");
     assert!(
-        registry.inventory().mailboxes.iter().all(|descriptor| descriptor.id != alias_id),
+        registry.inventory().mailboxes.iter().all(|descriptor| descriptor.name != alias_label),
         "an alias following a Starting parent is not announced as live"
     );
     assert_eq!(
@@ -80,7 +81,7 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
     assert!(matches!(registry.entry_at(alias_id), Some(MailboxEntry::Inbox { .. })));
     assert_eq!(registry.lookup(&alias_name), Some(alias_id));
     assert!(
-        registry.inventory().mailboxes.iter().any(|descriptor| descriptor.id == alias_id),
+        registry.inventory().mailboxes.iter().any(|descriptor| descriptor.name == alias_label),
         "parent promotion announces its logical aliases in the same inventory publication"
     );
 }

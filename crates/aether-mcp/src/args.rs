@@ -1163,8 +1163,8 @@ pub struct SendMailTracedResponse {
     /// the `settlement_timeout_millis` window, or `"dispatched"` when
     /// `fire_and_forget` was set (ack only, no settlement wait).
     pub status: String,
-    /// Chassis-root `MailId` every spec inherited. Populated on
-    /// `settled` and `dispatched`, `null` on `timeout`.
+    /// Root mail id every spec inherited, its sender named by actor path.
+    /// Populated on `settled` and `dispatched`, `null` on `timeout`.
     pub root: Option<MailIdJson>,
     /// Complete mail nodes in a settled `trace: "nodes"` response. Order is
     /// unspecified — agents reconstruct chains via `parent` edges. `null`
@@ -1190,30 +1190,33 @@ pub struct SendMailTracedResponse {
     pub replies: Option<Vec<ReplyEventJson>>,
 }
 
-/// `MailId` rendered for MCP: the sender mailbox as a tagged-id
-/// string (ADR-0064) plus the per-actor correlation counter.
+/// A trace mail id rendered for MCP: the minting actor's canonical path
+/// plus its per-actor correlation counter.
 #[derive(Debug, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 pub struct MailIdJson {
-    /// Tagged mailbox id (`mbx-…`) of the producer that minted this
-    /// `MailId`. `mbx-aaaa-aaaa-aaaa` is the `aether.chassis` sender,
-    /// the marker for chassis-originated roots (ADR-0080 §1).
-    pub sender: String,
+    /// Canonical actor path of the producer that minted this mail id,
+    /// retired actors included. `aether.chassis` marks a
+    /// chassis-originated root (ADR-0080 §1). `null` when the minting
+    /// position held no route record.
+    pub sender: Option<String>,
     /// Per-actor monotonic counter at mint time. Combined with
     /// `sender` it uniquely identifies the mail across the substrate.
     pub correlation_id: u64,
 }
 
 /// One mail node in a `send_mail_traced` tree (`MailNodeWire`
-/// transcoded for MCP — tagged-id strings, JSON-shaped timestamps).
+/// transcoded for MCP — actor paths, kind names, JSON-shaped timestamps).
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct MailNodeJson {
     pub mail_id: MailIdJson,
     /// `null` for chassis-root mail (no producer-side parent).
     pub parent: Option<MailIdJson>,
-    /// Tagged mailbox id (`mbx-…`) of the producer.
-    pub sender: String,
-    /// Tagged mailbox id (`mbx-…`) of the recipient.
-    pub recipient: String,
+    /// Canonical actor path of the producer, retired actors included;
+    /// `null` when its position held no route record.
+    pub sender: Option<String>,
+    /// Canonical actor path of the recipient, retired actors included;
+    /// `null` when its position held no route record.
+    pub recipient: Option<String>,
     /// Tagged kind id (`knd-…`) of the payload schema.
     pub kind: String,
     /// iamacoffeepot/aether#1158: the instant the producer's outbound

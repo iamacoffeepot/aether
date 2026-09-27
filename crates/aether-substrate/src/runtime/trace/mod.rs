@@ -5,16 +5,18 @@
 //! [`TraceHandle::record_finished`], plus
 //! [`TraceHandle::acquire_settlement_hold`]) do two independent jobs:
 //!
-//! - **Trace** — `record_sent` pushes a [`TraceEvent::Sent`] into the
-//!   producing actor's per-actor [`ActorTraceRing`] (via
-//!   [`TraceHandle::push_trace_ring`]); the dispatch loop pushes the
+//! - **Trace** — `record_sent` pushes a `Sent` record into the
+//!   producing actor's per-actor `ActorTraceRing` (via
+//!   `TraceHandle::push_trace_ring`); the dispatch loop pushes the
 //!   matching `Received` / `Finished` into the recipient actor's ring.
 //!   Mail produced outside any actor's dispatch (chassis-root / injected
 //!   mail — `Tick`, MCP sends, test injects) falls back to the
 //!   chassis-host ring on this handle. A trace tree is reconstructed by
 //!   walking the rings (`aether.trace.tail`) and stitching client-side
 //!   (ADR-0086 Phase 3b) — there is no central queue, drainer, or
-//!   observer fold (those retired in Phase 3c).
+//!   observer fold (those retired in Phase 3c). The rings hold mailbox
+//!   positions; a tail renders them as canonical actor paths through the
+//!   registry (the `export` submodule, ADR-0230 §1).
 //! - **Settlement** — every hook funnels its root into the emit-time
 //!   [`SettlementTable`], and on the `(in_flight, held_open)`
 //!   zero-transition fires `Settled` synchronously through the chassis
@@ -34,15 +36,24 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use aether_data::{KindId, MailId, MailboxId};
-use aether_kinds::trace::{Nanos, TraceEvent, TraceTail, TraceTailResult};
+use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 
 use aether_actor::Local;
-use aether_actor::trace::ActorTraceRing;
 
 use crate::chassis::settlement::SettlementRegistry;
 use crate::chassis::settlement_table::SettlementTable;
+use crate::mail::registry::Registry;
 
-/// One `Sent` trace event's fields, stamped at flush (issue 1150).
+mod export;
+mod ring;
+
+pub use export::chassis_host_path;
+pub(crate) use export::{TailQuery, render_mail_id};
+pub(crate) use ring::{ActorTraceRing, TraceRecord};
+pub use ring::{DEFAULT_TAIL_MAX, DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP, MAX_TAIL_MAX};
+
+/// One `Sent` trace record's fields, stamped at flush (issue 1150). The
+/// ring stores it as written: positions, rendered only at export.
 #[derive(Clone, Copy)]
 pub(crate) struct SentRecord {
     pub(crate) mail_id: MailId,
@@ -155,7 +166,7 @@ impl TraceHandle {
         }
     }
 
-    /// ADR-0086 Phase 3: push a trace event into the per-actor
+    /// ADR-0086 Phase 3: push a trace record into the per-actor
     /// [`ActorTraceRing`]. Lands in the current actor's ring when one is
     /// stamped — `Sent` on the sender's dispatch (this hook runs inside
     /// the sender's handler), `Received` / `Finished` on the
@@ -173,41 +184,47 @@ impl TraceHandle {
     /// the oldest entry once its chain has settled. This is the one
     /// direction trace consults settlement (a cheap `is_live` probe);
     /// settlement never depends on trace (ADR-0086).
-    pub fn push_trace_ring(&self, root: MailId, event: TraceEvent) {
-        // Move the event into whichever ring applies. `try_with_mut`
+    pub(crate) fn push_trace_ring(&self, root: MailId, record: TraceRecord) {
+        // Push the record into whichever ring applies. `try_with_mut`
         // skips the closure entirely when no actor is stamped, leaving
-        // `slot` populated for the chassis-host fallback — so the event
-        // moves exactly once with no clone.
+        // `slot` populated for the chassis-host fallback — so the record
+        // lands exactly once.
         let settlement = &self.settlement_counter;
-        let mut slot = Some(event);
+        let mut slot = Some(record);
         ActorTraceRing::try_with_mut(|ring| {
-            if let Some(event) = slot.take() {
-                ring.push(root, event, |front_root| settlement.is_live(front_root));
+            if let Some(record) = slot.take() {
+                ring.push(root, record, |front_root| settlement.is_live(front_root));
             }
         });
-        if let Some(event) = slot.take() {
+        if let Some(record) = slot.take() {
             self.chassis_host_ring
                 .lock()
                 .expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063")
-                .push(root, event, |front_root| settlement.is_live(front_root));
+                .push(root, record, |front_root| settlement.is_live(front_root));
         }
     }
 
     /// Read the chassis-host ring (ADR-0086 Phase 3). The trace-tree
     /// coordinator queries the per-actor rings via `aether.trace.tail`
     /// mail, but the chassis-host ring belongs to no actor, so it is
-    /// read directly through this handle. Returns the same
-    /// `TraceTailResult` shape for a uniform stitch.
+    /// read directly through this handle. Proves `request`'s root and
+    /// renders the returned records through `registry`, returning the
+    /// same `TraceTailResult` shape as a per-actor tail for a uniform
+    /// stitch. Reached through `Mailer::chassis_host_trace_tail`.
     ///
     /// # Panics
     /// Panics if the chassis-host ring mutex is poisoned (fail-fast per
     /// ADR-0063).
     #[must_use]
-    pub fn chassis_host_tail(&self, request: &TraceTail) -> TraceTailResult {
-        self.chassis_host_ring
-            .lock()
-            .expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063")
-            .tail(request)
+    pub(crate) fn chassis_host_tail(&self, request: &TraceTail, registry: &Registry) -> TraceTailResult {
+        match TailQuery::prove(request, registry) {
+            Ok(query) => self
+                .chassis_host_ring
+                .lock()
+                .expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063")
+                .tail(&query, registry),
+            Err(error) => TraceTailResult::Err { error },
+        }
     }
 
     /// Boot-time anchor for [`Self::now_nanos`]. Exposed for fixtures
@@ -265,7 +282,7 @@ impl TraceHandle {
         self.record_sent_inflight(root);
     }
 
-    /// iamacoffeepot/aether#1150: push the `Sent` trace event with an
+    /// iamacoffeepot/aether#1150: push the `Sent` trace record with an
     /// explicit timestamp, leaving the settlement counter untouched.
     /// Split from `record_sent` so the buffered send path can
     /// defer the timestamp to flush-begin (the frame's first flush
@@ -279,11 +296,7 @@ impl TraceHandle {
     /// flush window). `t − t_construct_start` is the **construct** span;
     /// on the eager path the caller passes `t_construct_start == t`.
     pub(crate) fn record_sent_event_at(&self, sent: SentRecord) {
-        let SentRecord { mail_id, root, parent_mail, sender, recipient, kind, t_construct_start, t } = sent;
-        self.push_trace_ring(
-            root,
-            TraceEvent::Sent { mail_id, root, parent_mail, sender, recipient, kind, t_construct_start, t },
-        );
+        self.push_trace_ring(sent.root, TraceRecord::Sent(sent));
     }
 
     /// iamacoffeepot/aether#1150: the eager half of the producer `Sent`

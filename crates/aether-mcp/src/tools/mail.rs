@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::iter;
 use std::time::Duration;
 
-use aether_data::{EngineId, ErasedActorPath, Kind, MailId, tagged_id};
-use aether_kinds::trace::{DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult};
+use aether_data::{EngineId, ErasedActorPath, Kind};
+use aether_kinds::trace::{
+    DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceMailId, TraceTail, TraceTailResult,
+};
 use aether_trace::walk::TreeWalk;
 use rmcp::ErrorData as McpError;
 
@@ -186,15 +187,10 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
             });
         }
         let root = decode_traced_ack(&events)?;
-        let root_json = {
-            mcp.ensure_names(engine).await;
-            let cache = mcp.names.lock().expect("reverse-name cache mutex is never poisoned");
-            mail_id_to_json(root, cache.get(&engine))
-        };
         return json(&SendMailTracedResponse {
             engine_id,
             status: "dispatched".into(),
-            root: Some(root_json),
+            root: Some(mail_id_to_json(&root)),
             mails: None,
             tree: None,
             node_count: None,
@@ -203,7 +199,7 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
         });
     }
 
-    // Round 1: ack carries the chassis-root MailId; ReplyEnd
+    // Round 1: ack carries the root's trace identity; ReplyEnd
     // closes when the chain settles substrate-side. `call_collecting`
     // keeps every correlated `ReplyEvent` (the ack plus any cap
     // replies) instead of `call_one`'s single-event discard.
@@ -235,69 +231,49 @@ pub(super) async fn finish_traced_dispatch(
     mcp: &Mcp,
     engine: EngineId,
     engine_id: String,
-    root: MailId,
+    root: TraceMailId,
     replies: Vec<ReplyEventJson>,
     trace: TraceShape,
 ) -> Result<String, McpError> {
     // Round 2: reconstruct the tree by a guided walk over the
-    // per-actor trace rings (ADR-0086 Phase 3b), one frontier layer at a
-    // time. The walk reports ids from the `Sent`s it absorbed; a `Call`
-    // names its recipient by path, so each layer's ids are turned into the
-    // engine's canonical paths with one `aether.inventory.resolve`, and
-    // each ring is then tailed with `aether.trace.tail` addressed by that
-    // path. The walk touches only the actors in the tree; the rings are
-    // in-memory and the chain has already settled, so each hop is
-    // microseconds. An id the engine names no path for, and a failed or
-    // undecodable per-ring reply, contribute no entries — the walk
-    // completes from the rings that answer. A failed `resolve` ends the
-    // walk with the layers already absorbed.
+    // per-actor trace rings (ADR-0086 Phase 3b). The export names every
+    // actor by its canonical path, so the walk hands out paths and each
+    // ring is tailed with `aether.trace.tail` addressed by that path, with
+    // no id to resolve first. The walk touches only the actors in the
+    // tree; the rings are in-memory and the chain has already settled, so
+    // each hop is microseconds. A failed or undecodable per-ring reply
+    // contributes no entries — the walk completes from the rings that
+    // answer.
+    let request = TraceTail { max: 0, since: None, root: Some(root.clone()) };
     let mut walk = TreeWalk::new(root);
-    loop {
-        let tagged: Vec<String> =
-            iter::from_fn(|| walk.next_mailbox()).filter_map(|mailbox| tagged_id::encode(mailbox.0)).collect();
-        if tagged.is_empty() {
-            break;
-        }
-        let Ok(paths) = mcp.engine_paths(engine, tagged).await else {
-            break;
+    while let Some(path) = walk.next_actor() {
+        let entries = match mcp
+            .session
+            .call_one(engine_envelope_to(engine, path, &request))
+            .await
+            .ok()
+            .and_then(|reply| TraceTailResult::decode_from_bytes(&reply.payload))
+        {
+            Some(TraceTailResult::Ok { entries, .. }) => entries,
+            Some(TraceTailResult::Err { .. }) | None => Vec::new(),
         };
-        for path in paths.into_iter().flatten() {
-            let request = TraceTail { max: 0, since: None, root: Some(root) };
-            let entries = match mcp
-                .session
-                .call_one(engine_envelope_to(engine, path, &request))
-                .await
-                .ok()
-                .and_then(|reply| TraceTailResult::decode_from_bytes(&reply.payload))
-            {
-                Some(TraceTailResult::Ok { entries, .. }) => entries,
-                Some(TraceTailResult::Err { .. }) | None => Vec::new(),
-            };
-            walk.absorb(entries);
-        }
+        walk.absorb(entries);
     }
 
     match walk.finish() {
         DescribeTreeResult::Ok { root, in_flight, mails } => {
-            // Reverse mailbox / kind ids to real names through the
-            // engine's inventory map (ADR-0088 §8). `render_mail_nodes`
-            // builds + resolves the map; the root id then renders
-            // through the now-populated cache (its sender is the
-            // chassis mailbox — a static name).
+            // Reverse kind ids to real names through the engine's
+            // inventory map (ADR-0088 §8); actors already carry paths.
             let mails = mcp.render_mail_nodes(engine, mails).await;
             let node_count = mails.len();
             let (mails, tree) = match trace {
                 TraceShape::Nodes => (Some(mails), None),
                 TraceShape::Tree => (None, Some(render_compact_tree(&mails))),
             };
-            let root = {
-                let cache = mcp.names.lock().expect("reverse-name cache mutex is never poisoned");
-                mail_id_to_json(root, cache.get(&engine))
-            };
             json(&SendMailTracedResponse {
                 engine_id,
                 status: "settled".into(),
-                root: Some(root),
+                root: Some(mail_id_to_json(&root)),
                 mails,
                 tree,
                 node_count: Some(node_count),
