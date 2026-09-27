@@ -98,8 +98,10 @@ The engine keeps one **publication table**: `NS → (Module, group)`. At most
 one implementation is published per namespace per engine.
 
 - **Native code publishes at boot.** Each native actor's link-time inventory
-  entry is its publication, with its `Dispatch::capabilities()` as its rows.
-  It has no blob; its code is the binary.
+  entry is its publication. It has no blob; its code is the binary. The table
+  records its namespace only: its rows, `Dispatch::capabilities()`, already
+  stand on every route it publishes at birth, and join the table with their
+  first reader.
 - **A module publishes as one set.** A publish admits every namespace the
   module exports, all or nothing. Its private and inline child types are not
   published: they belong to the module and cannot be spawned from outside it.
@@ -124,7 +126,7 @@ one admission step when a module is published:
 | Check | Rule | Replaces |
 |---|---|---|
 | Namespace | each exported NS is not yet published, or published by this module's predecessor; a republish exports every NS its predecessor did; never native | `try_claim_namespace` by `TypeId`; ADR-0240 D4 |
-| Contract growth | for a republish, each NS's rows only grow and a fallback is kept (`first_contract_break`) | trampoline `check_contract` and the registry `RepublishContract` guard (ADR-0231 §5) |
+| Contract growth | for a republish, each NS's rows only grow and a fallback is kept (`first_contract_break`), and each private child type the predecessor declares is still declared, privately or as an export, with rows that only grow | trampoline `check_contract` and the registry `RepublishContract` guard (ADR-0231 §5); #6845's unchecked inline-child rows |
 | Same type | a namespace's implementation is replaced only by the same namespace | `ReplaceComponent.export: Some(other)`; #6850's replace refusal |
 | Dependencies | every `depends(R)` names a published `R` | the load, boot, replace, and module-wide inline checks |
 | Kinds | the module's kinds register in the same owner batch | `RegistryBatch::register_kinds` at load |
@@ -150,7 +152,9 @@ its derive.
   requires of native dependencies.
 - An inline or private child is `parent/<child NS>:key`. It is still hosted
   in its parent's instance, and its contract rows come from the parent's
-  module.
+  module. Admission holds its rows to the growth rule (§4), so its alias's
+  published rows stay true across a republish, and the swap (§7) publishes the
+  successor's added rows.
 - Several instances of one component are `NS:key1`, `NS:key2`. MCP and
   package `replicas` become N spawns of one namespace; the `base-i` load
   names retire.
@@ -317,8 +321,16 @@ Each step lands on its own:
 
 1. **Module cache**: `Module` built from a `Blob`, compiled and parsed once
    per hash, assets checked in as blobs; `ModuleCache` and every section re-parse move onto it.
-2. **Publication table and admission**: native publications at boot; module
-   publish with the §4 checks.
+2. **Publication table and admission**: native publications at boot, by
+   namespace; module publish with the namespace, contract-growth, and kind
+   checks, in one registry-owner batch the component host stages on every load
+   and replace. Admission runs beside the per-site checks: the same-type rule
+   lands, and the trampoline's `check_contract` and the `RepublishContract`
+   guard retire, with step 4; the dependency row lands, and
+   `try_claim_namespace` by `TypeId` retires, with step 3, when guests spawn
+   under their own namespaces. The `Publish` mail door (§9) and the module
+   cache's move to the registry owner land with step 5, when a remote caller
+   first publishes by mail.
 3. **Forwarding host and native naming for guests**: guests spawn as
    `NS` / `NS:key` / `parent/NS:key`; `Embedded` retires.
 4. **Republish replaces replace**; `DropComponent` closes the instance and

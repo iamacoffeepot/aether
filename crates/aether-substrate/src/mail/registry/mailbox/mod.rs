@@ -16,6 +16,8 @@ use rustc_hash::FxHashMap;
 use crate::mail::registry::effect::{ChangeSubscriber, RegistryInventory};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::owner::RegistryOwnerHandle;
+#[cfg(feature = "wasm")]
+use crate::mail::registry::publication::PublicationTable;
 use crate::mail::registry::{ActorAddressInventoryError, address::AddressIndex};
 use crate::mail::view::{DoubleBuffer, View, ViewPublisher};
 use crate::mail::{KindId, MailboxId};
@@ -158,6 +160,11 @@ struct Inner {
     /// Every insert into `kinds` mirrors into `name_index`; every slot
     /// has exactly one entry here.
     name_index: HashMap<String, KindId>,
+    /// Which code implements each published namespace (ADR-0241 §3): every
+    /// native namespace the binary links from construction, and each module
+    /// the owner's publish arm admitted. Written only by that arm's commit.
+    #[cfg(feature = "wasm")]
+    publications: PublicationTable,
     route_publisher: DoubleBuffer<MailboxId, RouteRecord>,
     kind_publisher: ViewPublisher<KindTable>,
     inventory_publisher: ViewPublisher<RegistryInventory>,
@@ -186,6 +193,8 @@ impl Registry {
                 next_activation_token: 0,
                 kinds: FxHashMap::default(),
                 name_index: HashMap::default(),
+                #[cfg(feature = "wasm")]
+                publications: PublicationTable::from_inventory(),
                 route_publisher,
                 kind_publisher,
                 inventory_publisher,

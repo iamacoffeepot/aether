@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use aether_actor::{ErasedActorRef, MailSender, Manual, OutboundReply, ReplyMode, Single};
-use aether_data::{BlobHash, ErasedActorPath, Kind, KindDescriptor};
+use aether_data::{BlobHash, ErasedActorPath, Kind, Source};
 use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult};
 
 use aether_substrate::actor::native::{
@@ -96,9 +96,26 @@ impl PreparedBoot {
     }
 }
 
+/// A module publish (ADR-0241 §3) staged through the registry owner, and what
+/// continues once admission accepts the module and its kinds register. One
+/// context for both, because task completions route by output type.
+pub(super) enum ModulePublication {
+    /// A load: the prepared load spawns once the publish commits.
+    Load(Arc<PreparedLoad>),
+    /// A replace: forwarded to its trampoline once the publish commits.
+    Replace(ReplacePublication),
+}
+
+/// A replace whose replacement module publish is staged through the registry
+/// owner. Nothing is forwarded to the trampoline until the publish commits;
+/// a refusal answers the original `source` instead.
 #[derive(Clone)]
-pub(super) struct KindRegistration {
-    load: Arc<PreparedLoad>,
+pub(super) struct ReplacePublication {
+    source: Source,
+    actor: ErasedActorRef,
+    module: Module,
+    /// The encoded `ReplaceComponent` the trampoline is forwarded.
+    bytes: Arc<[u8]>,
 }
 
 #[derive(Clone)]
@@ -172,14 +189,16 @@ impl ComponentHostCapabilityState {
         payload: LoadComponent,
         placement: LoadPlacement,
     ) {
-        let (descriptors, load) = match self.prepare_load(ctx, payload, placement) {
-            Ok(prepared) => prepared,
+        let load = match self.prepare_load(ctx, payload, placement) {
+            Ok(load) => load,
             Err(result) => {
                 ctx.reply(&result);
                 return;
             }
         };
-        let _ = ctx.stage_registry_batch(RegistryBatch::register_kinds(descriptors), KindRegistration { load });
+        // ADR-0241 §3/§4: publish the module before anything spawns. The
+        // owner runs admission and registers the module's kinds in one batch.
+        let _ = ctx.stage_registry_batch(RegistryBatch::publish_module(&load.module), ModulePublication::Load(load));
     }
 
     #[allow(
@@ -191,7 +210,7 @@ impl ComponentHostCapabilityState {
         ctx: &NativeCtx<'_, A, M>,
         payload: LoadComponent,
         placement: LoadPlacement,
-    ) -> Result<(Vec<KindDescriptor>, Arc<PreparedLoad>), LoadResult> {
+    ) -> Result<Arc<PreparedLoad>, LoadResult> {
         let LoadComponent { wasm, name, config, export } = payload;
 
         // ADR-0241 §2: check the bytes in and take the module from the
@@ -206,7 +225,7 @@ impl ComponentHostCapabilityState {
 
         // ADR-0230 §3: an actor the module can spawn inline runs before the
         // host sees it, so its declared dependencies are checked here, before
-        // kind registration, the module boot actor, or the requested actor.
+        // the module publishes, the module boot actor, or the requested actor.
         if let Some(error) = inline_dependency_refusal(ctx, manifest) {
             return Err(LoadResult::Err { error });
         }
@@ -265,7 +284,6 @@ impl ComponentHostCapabilityState {
         };
 
         capabilities.assets = manifest.asset_catalog().to_vec();
-        let descriptors = manifest.kinds().to_vec();
         let name =
             name.or(selected_namespace).or_else(|| manifest.namespace().map(str::to_owned)).unwrap_or_else(|| {
                 let counter = self.default_name_counter;
@@ -273,24 +291,32 @@ impl ComponentHostCapabilityState {
                 format!("component_{counter}")
             });
 
-        Ok((
-            descriptors,
-            Arc::new(PreparedLoad { capabilities, dependencies, type_tag, module, config, name, placement }),
-        ))
+        Ok(Arc::new(PreparedLoad { capabilities, dependencies, type_tag, module, config, name, placement }))
     }
 
-    pub(super) fn finish_kind_registration(
+    /// Continue a load or a replace once its module publish settles. A
+    /// refusal (admission or a kind conflict) answers the caller: a load
+    /// spawns nothing, and a replace is never forwarded.
+    pub(super) fn finish_publish(
         &mut self,
         ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
-        done: TaskDone<RegistryBatchResult, KindRegistration>,
+        done: TaskDone<RegistryBatchResult, ModulePublication>,
     ) {
-        if let Err(error) = done.output() {
-            let error = format!("kind registration failed: {error}");
-            done.resolve_with(ctx, move |_, _| LoadResult::Err { error });
-            return;
+        let refusal = done.output().as_ref().err().map(|error| format!("module publish refused: {error}"));
+        match (done.context(), refusal) {
+            (ModulePublication::Load(_), Some(error)) => done.resolve_with(ctx, move |_, _| LoadResult::Err { error }),
+            (ModulePublication::Replace(_), Some(error)) => {
+                done.resolve_with(ctx, move |_, _| ReplaceResult::Err { error });
+            }
+            (ModulePublication::Load(load), None) => {
+                let load = Arc::clone(load);
+                self.continue_load(ctx, done.into_deferred_reply(), load);
+            }
+            (ModulePublication::Replace(replace), None) => {
+                let replace = replace.clone();
+                self.forward_replace(ctx, done, replace);
+            }
         }
-        let load = Arc::clone(&done.context().load);
-        self.continue_load(ctx, done.into_deferred_reply(), load);
     }
 
     fn continue_load(
@@ -588,14 +614,14 @@ impl ComponentHostCapabilityState {
                 return;
             }
         };
-        let bytes = payload.encode_into_bytes();
+        let bytes = Arc::from(payload.encode_into_bytes());
 
         // ADR-0241 §2: the replacement module comes from the engine's one
         // cache, checked in before forwarding, so its sections parse once and
         // bytes that do not check in answer here, with the error the
-        // trampoline would give. `PendingReplace` holds the module across the
-        // hop, so the trampoline's own check-in of the forwarded bytes is a
-        // cache hit.
+        // trampoline would give. `ReplacePublication` and then
+        // `PendingReplace` hold the module across the hops, so the
+        // trampoline's own check-in of the forwarded bytes is a cache hit.
         let module = match self.modules.check_in(&ctx.blob_check_in(), &ctx.check_in(payload.wasm.into_boxed_slice())) {
             Ok(module) => module,
             Err(error) => {
@@ -611,13 +637,36 @@ impl ComponentHostCapabilityState {
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;
         }
+        // ADR-0241 §4: a replace republishes its module, so admission runs
+        // and the replacement's kinds register before the trampoline sees it.
+        let batch = RegistryBatch::publish_module(&module);
+        let _ = ctx.stage_registry_batch(
+            batch,
+            ModulePublication::Replace(ReplacePublication { source, actor, module, bytes }),
+        );
+    }
+
+    /// Forward a replace to its trampoline once the replacement module's
+    /// publish commits, under the caller's chain. The forward's
+    /// `ReplaceResult` comes back to [`Self::finish_replace`].
+    fn forward_replace(
+        &mut self,
+        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
+        done: TaskDone<RegistryBatchResult, ModulePublication>,
+        replace: ReplacePublication,
+    ) {
+        let ReplacePublication { source, actor, module, bytes } = replace;
         let boot_operation = self.next_boot_operation(actor);
-        let Some(mail_id) = ctx.send_envelope_tracked_to(actor, ReplaceComponent::ID, &bytes) else {
-            let error = "the replace request was refused as engine-only mail".to_owned();
-            ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
-            return;
-        };
-        self.pending_replace.insert(mail_id.correlation_id, PendingReplace { source, actor, module, boot_operation });
+        match done.forward_tracked(ctx, actor, ReplaceComponent::ID, &bytes) {
+            Ok(mail_id) => {
+                self.pending_replace
+                    .insert(mail_id.correlation_id, PendingReplace { source, actor, module, boot_operation });
+            }
+            Err(done) => {
+                let error = "the replace request was refused as engine-only mail".to_owned();
+                done.resolve_with(ctx, move |_, _| ReplaceResult::Err { error });
+            }
+        }
     }
 
     pub fn finish_replace(&mut self, ctx: &mut NativeCtx<'_, ComponentHostCapability, Manual>, result: ReplaceResult) {

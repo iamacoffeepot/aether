@@ -34,10 +34,11 @@ use aether_test_fixtures_kinds::{CarriedReplyMatched, CarriedRequestResult, Rele
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
 const REQUESTER: &str = "test.carry.requester";
 const HOLDER: &str = "test.carry.holder";
+const RESHAPED_REQUESTER: &str = "test.carry.reshaped_requester";
 
 /// Load the holder and the requester, send request 1, replace the `swapped`
-/// export in place with the one `replacement_crate` builds, send request 2,
-/// then release both parked replies. With `release_before_swap`, the holder
+/// export in place with the `export` of the module `replacement_crate`
+/// builds, send request 2, then release both parked replies. With `release_before_swap`, the holder
 /// also releases between request 1 and the swap, so the pre-swap instance
 /// answers the tag-1 handle itself. Returns the harness to count matched
 /// replies on, the holder's reference and the swap's result, or `None` when a
@@ -45,6 +46,7 @@ const HOLDER: &str = "test.carry.holder";
 fn release_across_swap(
     replacement_crate: &str,
     swapped: &str,
+    export: &str,
     release_before_swap: bool,
 ) -> Option<(SubstrateHarness, ErasedActorRef, ReplaceResult)> {
     let wasm_path = require_wasm(FIXTURE_CRATE)?;
@@ -85,7 +87,7 @@ fn release_across_swap(
                     wasm: replacement,
                     drain_timeout_ms: None,
                     config: Vec::new(),
-                    export: Some(swapped.to_owned()),
+                    export: Some(export.to_owned()),
                 },
             ),
         ),
@@ -107,7 +109,7 @@ fn a_replaced_guest_never_reuses_a_pending_request_id() {
     // Catches: the replacement's correlation counter restarting at 1, so its
     // first request overwrites the rehydrated context of the still-pending
     // request 1 and the late reply to that old request takes it.
-    let Some((harness, _, swap)) = release_across_swap(FIXTURE_CRATE, REQUESTER, false) else {
+    let Some((harness, _, swap)) = release_across_swap(FIXTURE_CRATE, REQUESTER, REQUESTER, false) else {
         return;
     };
     assert_replaced(&swap);
@@ -126,7 +128,7 @@ fn a_replaced_guest_answers_a_carried_reply_handle_to_its_own_requester() {
     // arriving after the swap takes the carried handle's number — the carried
     // reply goes out with that request's correlation and the second reply
     // finds no entry and is dropped.
-    let Some((harness, _, swap)) = release_across_swap(FIXTURE_CRATE, HOLDER, false) else {
+    let Some((harness, _, swap)) = release_across_swap(FIXTURE_CRATE, HOLDER, HOLDER, false) else {
         return;
     };
     assert_replaced(&swap);
@@ -144,7 +146,7 @@ fn a_replaced_guest_never_reuses_a_reply_mail_id() {
     // Catches: the replacement's reply-lineage counter restarting at `1 << 63`,
     // so its first reply reuses the `MailId` of its predecessor's first reply
     // and the trace fold, which keys nodes by `MailId`, merges the two.
-    let Some((mut harness, holder, swap)) = release_across_swap(FIXTURE_CRATE, HOLDER, true) else {
+    let Some((mut harness, holder, swap)) = release_across_swap(FIXTURE_CRATE, HOLDER, HOLDER, true) else {
         return;
     };
     assert_replaced(&swap);
@@ -176,7 +178,9 @@ fn a_replace_that_reshapes_a_carried_context_kind_is_refused() {
     // Catches: the replace carrying the tag-1 context into a requester whose
     // reshaped `CarriedContext` has a different `KindId`, so its `take_context`
     // misses the carried entry and the tag-1 request never completes.
-    let Some((harness, _, swap)) = release_across_swap("aether_test_fixtures_carry_reshaped", REQUESTER, false) else {
+    let Some((harness, _, swap)) =
+        release_across_swap("aether_test_fixtures_carry_reshaped", REQUESTER, RESHAPED_REQUESTER, false)
+    else {
         return;
     };
 

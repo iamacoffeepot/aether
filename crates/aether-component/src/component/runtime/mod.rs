@@ -224,9 +224,10 @@ impl NativeActor for ComponentHostCapability {
     /// Load a fresh wasm component into the substrate.
     ///
     /// # Agent
-    /// Pass the wasm bytes plus an optional `name`. On Ok the cap
-    /// registers the kinds the wasm declared in its `aether.kinds`
-    /// section, picks a final name (caller value > wasm's
+    /// Pass the wasm bytes plus an optional `name`. The cap publishes the
+    /// module (ADR-0241 §3): admission checks its exported namespaces and
+    /// their contracts, and the kinds the wasm declared in its `aether.kinds`
+    /// section register. On Ok it picks a final name (caller value > wasm's
     /// `aether.namespace` > `component_N`), spawns a
     /// [`WasmTrampoline`] under
     /// `aether.embedded:NAME`, and hands the trampoline the owed reply: the
@@ -234,9 +235,9 @@ impl NativeActor for ComponentHostCapability {
     /// where `path` is its full lineage address — agents send subsequent mail
     /// to that address, and an actor requester keeps the reply's stamped
     /// sender as its reference.
-    /// Errors (bad wire bytes, kind conflict, name conflict,
-    /// invalid wasm, instantiation trap) come back from the host as
-    /// `LoadResult::Err`.
+    /// Errors (bad wire bytes, a publish admission refuses, kind conflict,
+    /// name conflict, invalid wasm, instantiation trap) come back from the
+    /// host as `LoadResult::Err`.
     #[handler::manual]
     fn on_load_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LoadComponent) {
         state.begin_load(ctx, payload);
@@ -255,13 +256,16 @@ impl NativeActor for ComponentHostCapability {
         state.begin_load_under(ctx, payload);
     }
 
+    /// A load's or a replace's module publish settled (ADR-0241 §3/§4): a
+    /// load continues to the module boot and the requested actor, a replace
+    /// is forwarded to its trampoline, and a refusal answers the caller.
     #[handler(task)]
-    fn on_kind_registration_done(
+    fn on_module_published(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_, Self, Single>,
-        done: TaskDone<RegistryBatchResult, load::KindRegistration>,
+        done: TaskDone<RegistryBatchResult, load::ModulePublication>,
     ) {
-        state.finish_kind_registration(ctx, done);
+        state.finish_publish(ctx, done);
     }
 
     #[handler(task)]
@@ -361,8 +365,12 @@ impl NativeActor for ComponentHostCapability {
     /// trampoline currently hosts.
     #[handler::single]
     fn on_replace_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
-        // ADR-0147: forward the replace to the trampoline but intercept its
-        // `ReplaceResult` at this cap (`begin_replace`), so the boot-refcount
+        // ADR-0241 §4: the replacement module publishes first, so admission
+        // refuses a republish that drops a namespace or narrows a contract
+        // before the trampoline is touched, and the replacement's kinds
+        // register. ADR-0147: once the publish commits, forward the replace
+        // to the trampoline but intercept its `ReplaceResult` at this cap
+        // (`forward_replace`), so the boot-refcount
         // transfer is committed only after the swap actually succeeds
         // (`finish_replace` / `on_replace_result`). Committing it here — before
         // the fire-and-forget replace resolves — would desync the refcount on a

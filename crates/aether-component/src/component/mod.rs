@@ -9,6 +9,12 @@
 //! agent. The cap holds no per-component bookkeeping; the
 //! trampoline manages its own lifecycle as an instanced [`NativeActor`].
 //!
+//! Every load and replace first publishes its module (ADR-0241 §3): one
+//! registry-owner batch runs admission (§4) and registers the module's kinds,
+//! all or nothing. A load spawns, and a replace is forwarded to its
+//! trampoline, only once that batch commits; a refusal answers the caller
+//! with `module publish refused: …`.
+//!
 //! Pre-Phase-4 the cap also owned the wasm dispatcher infrastructure
 //! (the retired `ComponentEntry`, `dispatcher_loop`, `kill_actor`,
 //! `splice_inbox`, etc.) and installed itself as the `Mailer`'s

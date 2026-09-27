@@ -5,9 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# Issue 6429 replace TARGET: the bundle's `test.carry.requester` with its
+# Issue 6429 replace TARGET: the bundle's `test.carry.requester` rows under its
+# own `test.carry.reshaped_requester` namespace, with the
 # `aether.test_fixtures.carried_context` kind reshaped (an added `generation`
-# field changes `Kind::ID`). Replacing the bundle's requester with this one,
+# field changes `Kind::ID`). Swapping the bundle's requester to this export,
 # while a context is carried, must be refused. Standalone because a changed
 # context schema needs a separately compiled module.
 [lib]
