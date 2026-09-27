@@ -32,7 +32,7 @@ pub struct Demo {
     subject: LoadMesh,
 }
 
-#[actor(depends(MeshViewer))]
+#[actor(root, depends(MeshViewer))]
 impl WasmActor for Demo {
     const NAMESPACE: &'static str = "aether.demo";
 

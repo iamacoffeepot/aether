@@ -26,7 +26,12 @@ pub struct ActorOpts {
     /// `runtime`. Only consulted on the struct-hosted path; the impl-hosted
     /// path ignores it.
     pub runtime_module: Option<syn::Path>,
-    /// ADR-0166: this actor may be placed at the actor-tree root.
+    /// ADR-0166: this actor may be placed at the actor-tree root. On a wasm
+    /// actor (ADR-0241 §5) it is a host-placement permission recorded as a
+    /// `Root` record in the lineage section, which the component host checks
+    /// before it loads, boots, or replaces-with-boot the type; it emits no
+    /// `Root` marker impl, because a loaded guest's address is still its
+    /// host's.
     pub root: bool,
     /// ADR-0166: actor types that may directly parent this actor. Repetition
     /// is intentional so one child identity can be permitted beneath several

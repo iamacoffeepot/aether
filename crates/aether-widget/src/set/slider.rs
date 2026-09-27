@@ -192,7 +192,7 @@ impl WidgetDefaults for SliderWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `SliderConfig` again to reconfigure the range or theme in place.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SliderWidget {
     type Config = SliderConfig;
     const NAMESPACE: &'static str = "aether.widget.slider";

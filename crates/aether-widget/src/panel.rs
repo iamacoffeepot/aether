@@ -1222,6 +1222,7 @@ fn spawn_behavior_host<A>(
 /// `editor_region`.
 #[actor(
     instanced,
+    root,
     child_of(EditorRegion),
     depends(WindowCapability, LifecycleCapability, RenderCapability, TextCapability),
     spawns(

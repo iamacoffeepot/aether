@@ -17,7 +17,7 @@ use aether_kinds::Ping;
 /// Default export: spawns the composable `Needy` inline once wired.
 pub struct Holder;
 
-#[actor(spawns(Needy))]
+#[actor(root, spawns(Needy))]
 impl WasmActor for Holder {
     const NAMESPACE: &'static str = "test.inline_dependency.holder";
 

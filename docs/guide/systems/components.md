@@ -24,7 +24,7 @@ because the actor lives across an FFI boundary and is loaded into a running engi
 
 ## `export!` and the FFI boundary
 
-Authoring a component is authoring an actor (`#[actor] impl WasmActor for C`), plus
+Authoring a component is authoring an actor (`#[actor(root)] impl WasmActor for C`), plus
 one line that doesn't exist on the native side:
 
 ```rust
@@ -168,6 +168,18 @@ capabilities. A selector naming a type the module doesn't export is a clean load
 error. A single-actor module is unambiguous, so an omitted selector is the whole
 story there.
 
+A load places the selected type at the component host, and a module boot type is
+always placed there, so each must declare **`root`** — `#[actor(root)]`, or
+`#[actor(instanced, root)]` for an instanced type
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§5; see [Declaring placement](../foundations/actor-model.md#declaring-placement)).
+The host reads the permission from the module's `aether.actor.lineage` section: a
+load whose selected type or boot type has no `Root` record, and a replace whose
+replacement module's boot type has none, answer `Err` naming the type and the
+placements it does declare, before the module publishes or anything is staged. A
+type whose only placement is a parent — `child_of(P)` or `composable` — is reached
+through that parent, never loaded at the host.
+
 Dropping does not make the lineage a fresh reusable component name. The empty
 trampoline remains registered at that address for the engine lifetime; terminate
 the engine when the whole slot must disappear.
@@ -289,7 +301,7 @@ each declared child, because that list is the set a hot reload rebuilds. A
 child the host should never load by selector goes under `private = [..]`:
 
 ```rust
-#[actor(spawns(Panel))]
+#[actor(root, spawns(Panel))]
 impl WasmActor for RootManager { /* … spawns Panel inline … */ }
 
 aether_actor::export!(default = RootManager, public = [Sibling], private = [Panel]);
@@ -365,7 +377,7 @@ ctx is typed by the actor like a handler's (`WasmCtx<'_>` reads as
 `WasmCtx<'_, Self>`):
 
 ```rust
-#[actor]
+#[actor(root)]
 impl WasmActor for MyComponent {
     // init / wire / #[handler::<class>]s as usual …
 
@@ -439,7 +451,7 @@ An actor that cannot run without other actors lists them in one `depends(...)`
 on `#[actor]` ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)):
 
 ```rust
-#[actor(depends(RenderCapability, ParentPeerTarget))]
+#[actor(root, depends(RenderCapability, ParentPeerTarget))]
 impl WasmActor for MeshViewer {
     // …
 }

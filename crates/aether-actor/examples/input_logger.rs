@@ -22,7 +22,7 @@ use aether_window::WindowCapability;
 
 pub struct InputLogger;
 
-#[actor(depends(WindowCapability))]
+#[actor(root, depends(WindowCapability))]
 impl WasmActor for InputLogger {
     const NAMESPACE: &'static str = "example.input_logger";
 

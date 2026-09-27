@@ -23,7 +23,7 @@ use aether_test_fixtures_kinds::Mat4SourceTrigger;
 /// exact `f32` equality.
 pub struct MatSource;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for MatSource {
     const NAMESPACE: &'static str = "test.mat4_source";
 

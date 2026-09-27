@@ -66,7 +66,7 @@ pub struct Probe {
     tick_count: u64,
 }
 
-#[actor(depends(LifecycleCapability, WindowCapability, SubstrateHarnessObserver))]
+#[actor(root, depends(LifecycleCapability, WindowCapability, SubstrateHarnessObserver))]
 impl WasmActor for Probe {
     const NAMESPACE: &'static str = "test.probe";
 
@@ -149,7 +149,7 @@ pub struct ProbeWithConfig {
     label: String,
 }
 
-#[actor]
+#[actor(root)]
 impl WasmActor for ProbeWithConfig {
     type Config = ProbeConfig;
     const NAMESPACE: &'static str = "test.probe_with_config";

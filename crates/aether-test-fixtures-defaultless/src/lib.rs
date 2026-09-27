@@ -25,7 +25,7 @@ use aether_kinds::Ping;
 /// no default, so it is reachable only by its `NAMESPACE` export selector.
 pub struct Alpha;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for Alpha {
     const NAMESPACE: &'static str = "test.defaultless.alpha";
 
@@ -40,7 +40,7 @@ impl WasmActor for Alpha {
 /// Second exported type, selectable by its `NAMESPACE`.
 pub struct Beta;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for Beta {
     const NAMESPACE: &'static str = "test.defaultless.beta";
 

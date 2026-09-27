@@ -124,7 +124,7 @@ block, and each **`#[handler::<class>]`** method *is* a handler — the macro in
 the kind it handles from the method's **third parameter**:
 
 ```rust
-#[actor(depends(LifecycleCapability, RenderCapability))]
+#[actor(root, depends(LifecycleCapability, RenderCapability))]
 impl WasmActor for Hello {
     const NAMESPACE: &'static str = "example.hello";
 
@@ -193,6 +193,20 @@ A child-only actor therefore cannot cross one of those root placement surfaces,
 but remains valid through typed child placement such as
 `NativeCtx::spawn_child`, where its declared `ChildOf<Parent>` edge is checked
 instead. No runtime metadata lookup is involved in either check.
+
+A wasm actor declares placement with the same arguments — `root`,
+`instanced, root`, `instanced, child_of(P)`, or `instanced, root, child_of(P)`
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§5) — but the permission is checked at run time, from the module's
+`aether.actor.lineage` section. `root` writes a `Root` record for every
+cardinality, and it is the permission the component host checks when it loads
+the type at itself, boots it as its module's boot type, or replaces an actor
+with a module whose boot type it is: each is refused with the operation's
+`Err`, naming the type and the placements it does declare, before the module
+publishes or anything is staged. A `child_of(P)` or `composable` record never
+satisfies it. A loaded guest's address is still its host's
+(`aether.component/aether.embedded:NAME`), so a wasm `root` emits no `Root`
+marker impl: `ActorPath::<G>::root()` would name a route that never registers.
 
 These are placement permissions, not runtime facts. They do not say that an
 instance is live, that a parent owns or supervises a child, or that the actor
@@ -486,7 +500,7 @@ impl WidgetDefaults for ToggleWidget {
     fn cancel_activation(&mut self) { self.arms.clear(); }
 }
 
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, root, composable, handler_set(WidgetDefaults))]
 impl WasmActor for ToggleWidget {
     // only toggle-specific handlers here
 }
@@ -599,7 +613,7 @@ An actor can take typed **boot configuration**. Declare a `Config` associated ty
 and the chassis threads a decoded value into `init` as its leading argument:
 
 ```rust
-#[actor]
+#[actor(root)]
 impl WasmActor for ProbeWithConfig {
     type Config = ProbeConfig;
     const NAMESPACE: &'static str = "probe_with_config";

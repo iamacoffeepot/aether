@@ -27,7 +27,7 @@ struct CarriedContext {
 /// Sends nothing: the refusal scenario never needs the replacement to send.
 pub struct CarryRequester;
 
-#[actor(depends(SubstrateHarnessObserver))]
+#[actor(root, depends(SubstrateHarnessObserver))]
 impl WasmActor for CarryRequester {
     const NAMESPACE: &'static str = "test.carry.reshaped_requester";
 

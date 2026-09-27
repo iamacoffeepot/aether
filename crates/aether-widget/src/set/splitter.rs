@@ -260,7 +260,7 @@ impl WidgetDefaults for SplitterWidget {
 /// # Agent
 /// Not loaded directly — the root spawns it as an inline child. Re-send
 /// `SplitterConfig` to move the split from the host's side.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SplitterWidget {
     type Config = SplitterConfig;
     const NAMESPACE: &'static str = "aether.widget.splitter";

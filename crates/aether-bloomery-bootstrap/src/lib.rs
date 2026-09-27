@@ -52,7 +52,7 @@ pub struct EnvironmentBootstrap {
     run: Run,
 }
 
-#[actor(depends(WorkspaceCapability))]
+#[actor(root, depends(WorkspaceCapability))]
 impl WasmActor for EnvironmentBootstrap {
     type Config = BootstrapConfig;
     const NAMESPACE: &'static str = "aether.bloomery.bootstrap";

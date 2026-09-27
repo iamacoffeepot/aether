@@ -321,6 +321,7 @@ impl ScrollWidget {
 /// hit testing. The actor emits `ScrollOutcome` and any exact residual upward.
 #[actor(
     instanced,
+    root,
     composable,
     spawns(
         LabelWidget,

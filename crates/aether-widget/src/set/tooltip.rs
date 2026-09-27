@@ -466,7 +466,7 @@ impl WidgetDefaults for TooltipWidget {
 /// Hide it with `aether.widget.set_state`. A line's `icon` is a texture id
 /// the host got from `aether.render.create_texture`; register the image first
 /// and pass the texture's own pixel size, not the size you want it drawn at.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for TooltipWidget {
     type Config = TooltipConfig;
     const NAMESPACE: &'static str = "aether.widget.tooltip";

@@ -21,6 +21,7 @@ use aether_actor::{RegistryChanged, runtime};
 mod config;
 mod dependencies;
 mod load;
+mod placement;
 
 use super::{ComponentHostCapability, LoadResult};
 use crate::trampoline::WasmTrampoline;

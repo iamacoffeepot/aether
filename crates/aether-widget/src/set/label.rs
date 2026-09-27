@@ -181,7 +181,7 @@ fn align_x(align: TextAlign, frame_width: f32, text_width: Option<f32>) -> f32 {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `LabelConfig` again to change the text or theme in place.
-#[actor(instanced, composable, depends(TextCapability))]
+#[actor(instanced, root, composable, depends(TextCapability))]
 impl WasmActor for LabelWidget {
     type Config = LabelConfig;
     const NAMESPACE: &'static str = "aether.widget.label";

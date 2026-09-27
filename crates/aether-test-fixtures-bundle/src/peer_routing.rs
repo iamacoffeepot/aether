@@ -30,7 +30,7 @@ impl WasmActor for ParentPeerCaller {
 
 pub struct ParentPeerTarget;
 
-#[actor(depends(SubstrateHarnessObserver))]
+#[actor(root, depends(SubstrateHarnessObserver))]
 impl WasmActor for ParentPeerTarget {
     const NAMESPACE: &'static str = "test.parent_peer.target";
 

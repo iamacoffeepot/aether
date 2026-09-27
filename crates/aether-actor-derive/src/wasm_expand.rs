@@ -34,12 +34,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             "`composable` requires explicit instanced Wasm cardinality; use `#[actor(instanced, composable)]`",
         ));
     }
-    if opts.root {
-        return Err(syn::Error::new_spanned(
-            self_ty,
-            "`root` is unavailable to Wasm actors; loaded modules are embedded entries, not actor-tree roots (ADR-0166)",
-        ));
-    }
     if !opts.child_of.is_empty() && !matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
         return Err(syn::Error::new_spanned(
             self_ty,
@@ -398,11 +392,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
         }
     };
-    let root_impl = opts.root.then(|| {
-        quote! {
-            impl #impl_generics ::aether_actor::Root for #self_ty #where_clause {}
-        }
-    });
     let module_child_impl = opts.composable.then(|| {
         quote! {
             impl #impl_generics ::aether_actor::ModuleChild for #self_ty #where_clause {}
@@ -684,7 +673,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
 
     Ok(quote! {
         #actor_impl
-        #root_impl
         #module_child_impl
         #(#child_impls)*
         #declared

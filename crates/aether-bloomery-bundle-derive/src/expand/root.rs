@@ -30,9 +30,9 @@ pub fn expand_root(root: &Ident, pieces: &[RolePieces]) -> TokenStream2 {
     let items = pieces.iter().map(|piece| &piece.items);
     let spawns: Vec<&Ident> = pieces.iter().flat_map(|piece| &piece.spawns).collect();
     let actor = if spawns.is_empty() {
-        quote! { #[::aether_actor::actor] }
+        quote! { #[::aether_actor::actor(root)] }
     } else {
-        quote! { #[::aether_actor::actor(spawns(#(#spawns),*))] }
+        quote! { #[::aether_actor::actor(root, spawns(#(#spawns),*))] }
     };
     quote! {
         struct #root {

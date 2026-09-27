@@ -124,7 +124,7 @@ pub struct CameraController {
     shadow: Shadow,
 }
 
-#[actor(depends(WindowCapability, LifecycleCapability, CameraComponent))]
+#[actor(root, depends(WindowCapability, LifecycleCapability, CameraComponent))]
 impl WasmActor for CameraController {
     type Config = ControllerConfig;
     const NAMESPACE: &'static str = "aether.kit.camera-controller";

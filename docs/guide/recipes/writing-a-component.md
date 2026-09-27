@@ -44,7 +44,7 @@ use aether_kinds::{Ping, Pong};
 
 pub struct Echo;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for Echo {
     const NAMESPACE: &'static str = "example.echo";
 

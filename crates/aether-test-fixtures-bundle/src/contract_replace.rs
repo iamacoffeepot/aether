@@ -15,7 +15,7 @@ use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, InlineProbe, Sub
 
 pub struct ContractBase;
 
-#[actor(depends(SubstrateHarnessObserver))]
+#[actor(root, depends(SubstrateHarnessObserver))]
 impl WasmActor for ContractBase {
     const NAMESPACE: &'static str = "test.contract.base";
 
@@ -36,7 +36,7 @@ impl WasmActor for ContractBase {
 
 pub struct ContractDropped;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for ContractDropped {
     const NAMESPACE: &'static str = "test.contract.dropped";
 
@@ -50,7 +50,7 @@ impl WasmActor for ContractDropped {
 
 pub struct ContractChanged;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for ContractChanged {
     const NAMESPACE: &'static str = "test.contract.changed";
 
@@ -67,7 +67,7 @@ impl WasmActor for ContractChanged {
 
 pub struct ContractExtended;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for ContractExtended {
     const NAMESPACE: &'static str = "test.contract.extended";
 
@@ -89,7 +89,7 @@ impl WasmActor for ContractExtended {
 
 pub struct ContractFallback;
 
-#[actor(depends(SubstrateHarnessObserver))]
+#[actor(root, depends(SubstrateHarnessObserver))]
 impl WasmActor for ContractFallback {
     const NAMESPACE: &'static str = "test.contract.fallback";
 

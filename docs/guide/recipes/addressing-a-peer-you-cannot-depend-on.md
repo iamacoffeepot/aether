@@ -40,7 +40,7 @@ announces itself from `wire`
 (`crates/aether-widget/src/editor_region.rs`):
 
 ```rust
-#[actor(instanced, depends(EditorShell))]
+#[actor(instanced, root, depends(EditorShell))]
 impl WasmActor for EditorRegion {
     type Config = PanelConfig;
     const NAMESPACE: &'static str = "aether.widget.editor_region";

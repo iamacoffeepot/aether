@@ -25,7 +25,7 @@ pub struct QuietProbe {
     asset: AssetProbeResult,
 }
 
-#[actor(depends(LifecycleCapability))]
+#[actor(root, depends(LifecycleCapability))]
 impl WasmActor for QuietProbe {
     const NAMESPACE: &'static str = "test.quiet_probe";
 

@@ -582,7 +582,7 @@ impl WidgetDefaults for DropdownWidget {
 /// closes an open list. Send it [`SetSelection`] to move the choice. It reports the width its widest option needs on its draw list's
 /// `intrinsic` once the theme font's metrics resolve, so a host can size the
 /// cell it sits in to the control rather than to a share of the row.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for DropdownWidget {
     type Config = DropdownConfig;
     const NAMESPACE: &'static str = "aether.widget.dropdown";

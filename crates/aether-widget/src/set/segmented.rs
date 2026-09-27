@@ -257,7 +257,7 @@ impl WidgetDefaults for SegmentedWidget {
 
 /// A segmented widget. Spawned inline by a panel root with a
 /// [`SegmentedConfig`]; reports [`SegmentedSelected`] on selection changes.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SegmentedWidget {
     type Config = SegmentedConfig;
     const NAMESPACE: &'static str = "aether.widget.segmented";

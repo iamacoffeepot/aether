@@ -294,10 +294,10 @@ pub fn build_actor_lineage_manifest_consts(self_ty: &Type, opts: &ActorOpts) -> 
         ::aether_actor::__macro_internals::ACTOR_LINEAGE_SECTION_VERSION
     };
 
-    // A root record is an address anchor, so mirror native `RootEntry`:
-    // an instanced namespace cannot identify the one actor an anchor needs.
-    let anchors = opts.root && !matches!(opts.cardinality, Some(ActorCardinality::Instanced));
-    if anchors {
+    // A root record is the host-placement permission the component host
+    // checks at load, boot, and replace (ADR-0241 §5), not an address anchor,
+    // so it is written for every cardinality that declares `root`.
+    if opts.root {
         len_terms.push(quote! {
             1 + ::aether_actor::__macro_internals::actor_lineage_root_len(
                 #actor_tag,
@@ -612,7 +612,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn instanced_root_does_not_emit_a_lineage_anchor() {
+    fn instanced_root_emits_a_root_record() {
         let self_ty = syn::parse_quote!(Probe);
         let singleton = build_actor_lineage_manifest_consts(
             &self_ty,
@@ -626,6 +626,6 @@ mod tests {
         .to_string();
 
         assert!(singleton.contains("write_actor_lineage_root"));
-        assert!(!instanced.contains("write_actor_lineage_root"));
+        assert!(instanced.contains("write_actor_lineage_root"));
     }
 }

@@ -40,7 +40,7 @@ pub struct Counter {
     count: u32,
 }
 
-#[actor]
+#[actor(root)]
 impl WasmActor for Counter {
     const NAMESPACE: &'static str = "test.stateful.counter";
 
@@ -85,7 +85,7 @@ impl WasmActor for Counter {
 /// `#[fallback]` so its capability group is observably distinct.
 pub struct Sidecar;
 
-#[actor(instanced)]
+#[actor(instanced, root)]
 impl WasmActor for Sidecar {
     const NAMESPACE: &'static str = "test.stateful.sidecar";
 
@@ -105,7 +105,7 @@ pub struct RehydrateTrap {
     count: u32,
 }
 
-#[actor]
+#[actor(root)]
 impl WasmActor for RehydrateTrap {
     const NAMESPACE: &'static str = "test.stateful.rehydrate_trap";
 
