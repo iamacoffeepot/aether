@@ -2,49 +2,49 @@
 //! amendment): load the `matrix_sweep` cluster fixture + a cross-cluster
 //! `source_observer`, drive the sweep over the real `WireFrame::Call` wire,
 //! read back the structured `MatrixReport`, and assert every cell — delivery
-//! AND the source the recipient read (`ctx.sender()`).
+//! AND the sender verdict each recipient computed in the guest by comparing
+//! `ctx.sender()` with the proof it holds of the expected sender.
 //!
-//! Cells asserted from the report (in-cluster, in-place dispatch):
+//! In-cluster cells (in-place dispatch):
 //!
-//! - parent → child[a]: child[a] received it; its source is the parent id,
-//!   anchored by the observer witness below.
-//! - child[a] → parent: the parent received it; its source is child[a]'s id
-//!   (the in-place "from" half — Task 1).
-//! - child[a] → sibling child[b]: child[b] received it; its source is
-//!   child[a]'s id.
-//! - child[a] → self: child[a] re-received it; its source is its own id.
+//! - parent → child[a]: child[a] received it; its sender is the proof of its
+//!   parent.
+//! - child[a] → parent: the parent received it; its sender is the proof of
+//!   child[a] (the in-place "from" half — Task 1).
+//! - child[a] → sibling child[b]: child[b] received it; its sender is the
+//!   proof of child[a].
+//! - child[a] → self: child[a] re-received it; its sender is its own proof.
 //!
-//! Cells asserted out-of-band through the `source_observer`'s log:
+//! Cross-cluster cells, counted by where the `source_observer`'s replies
+//! land. The observer replies to the origin the host stamped on each query
+//! and sets `had_sender` from its `ctx.sender()`:
 //!
-//! - cross-cluster, during the in-place drain: mailed by child[a] during the
-//!   `RunMatrix` drain, the observer logs the source it read — child[a]'s id.
-//!   The drain re-stamps the host's dispatch identity to the member it
-//!   dispatches (validated host-side to the cluster), so a member's own
-//!   cross-cluster send carries the member as origin.
 //! - the parent witness: the parent queries the observer once before the
-//!   fan-out, so the observer logs the host-stamped parent id. No actor reads
-//!   its own position (ADR-0230), so this is the independent anchor for the
-//!   parent → child[a] source child[a] recorded in place.
+//!   fan-out, so exactly one reply lands on the parent.
+//! - during the in-place drain: child[a] queries the observer, and the drain
+//!   re-stamps the host's dispatch identity to the member it dispatches
+//!   (validated host-side to the cluster), so exactly one reply lands on a
+//!   child. A mis-stamp as the cluster's inbound parent shows as two replies
+//!   on the parent and none on a child.
 //!
 //! What this layer proves vs. the unit tests: `FleetHarness` proves to-and-from
-//! delivery and the source the recipient reads, end-to-end over the real RPC
+//! delivery and the sender each recipient reads, end-to-end over the real RPC
 //! stack. The in-place *mechanism* (whether a send ran in place vs. via the
 //! scheduler) is not externally observable over the wire — that is covered by
 //! the Task 1 unit tests in `aether-actor` (`drained_child_reads_*`). The
-//! cells here distinguish the directions and the resolved sources, which is
+//! cells here distinguish the directions and the resolved senders, which is
 //! what the wire layer can witness.
 
 mod tests {
     use aether_data::Kind;
-    use aether_kinds::{LogEntry, LogTailResult};
     use aether_test_fixtures_kinds::{CollectMatrix, MatrixReport, RunMatrix};
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// Drive the full cluster-addressing matrix over the wire and assert
-    /// every cell: in-cluster delivery + the source each recipient read,
-    /// plus the cross-cluster boundary cell observed via the observer's
-    /// log.
+    /// every cell: in-cluster delivery + the sender verdict each recipient
+    /// computed, plus the cross-cluster cells counted by where the
+    /// observer's replies landed.
     #[test]
     fn fleetharness_matrix_sweep_covers_every_addressing_cell() {
         if !dist_component_available("aether_test_fixtures_bundle") {
@@ -57,7 +57,7 @@ mod tests {
         // plus two inline children). The observer loads first and under its
         // own namespace: the parent declares it as a dependency, so its route
         // has to be `Live` before the parent's load is accepted.
-        let observer = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.source_observer");
+        harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.source_observer");
         let parent_addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.matrix.parent").addr;
 
         // Drive the sweep: the parent fans out every in-cluster direction
@@ -79,76 +79,47 @@ mod tests {
         assert_eq!(report_env.kind, MatrixReport::ID, "the CollectMatrix reply should be a MatrixReport");
         let report = MatrixReport::decode_from_bytes(&report_env.payload).expect("the reply decodes as MatrixReport");
 
-        let child_a_id = report.child_a_id;
-        let parent_source = report.parent_to_child_source;
-        assert_ne!(child_a_id, 0, "the parent recorded child[a]'s id");
-
-        // Cell: parent -> child[a] (in place). child[a] received it and read
-        // a source distinct from itself; the observer witness below ties that
-        // source to the id the host registered for the parent.
+        // Cell: parent -> child[a] (in place).
         assert_eq!(report.parent_to_child_arrived, 1, "parent -> child[a] should be delivered");
-        assert_ne!(parent_source, 0, "child[a] should read a peer source for parent -> child[a]");
-        assert_ne!(
-            parent_source, child_a_id,
-            "child[a] should read the parent, not itself, as the source of parent -> child[a]",
+        assert_eq!(
+            report.parent_to_child_sender_matched, 1,
+            "child[a] should read its parent's proof as the sender of parent -> child[a]",
         );
 
-        // Cell: child[a] -> parent (in place). The parent received it and
-        // read child[a]'s id as its source (the Task 1 in-place "from").
+        // Cell: child[a] -> parent (in place, the Task 1 in-place "from").
         assert_eq!(report.child_to_parent_arrived, 1, "child[a] -> parent should be delivered");
         assert_eq!(
-            report.child_to_parent_source, child_a_id,
-            "the parent should read child[a]'s id as the source of child[a] -> parent",
+            report.child_to_parent_sender_matched, 1,
+            "the parent should read child[a]'s proof as the sender of child[a] -> parent",
         );
 
-        // Cell: child[a] -> sibling child[b] (in place). child[b] received
-        // it and read child[a]'s id as its source.
+        // Cell: child[a] -> sibling child[b] (in place).
         assert_eq!(report.child_to_sibling_arrived, 1, "child[a] -> sibling child[b] should be delivered");
         assert_eq!(
-            report.child_to_sibling_source, child_a_id,
-            "child[b] should read child[a]'s id as the source of child[a] -> sibling",
+            report.child_to_sibling_sender_matched, 1,
+            "child[b] should read child[a]'s proof as the sender of child[a] -> sibling",
         );
 
-        // Cell: child[a] -> self (in place). child[a] re-received it and
-        // read its own id as its source.
+        // Cell: child[a] -> self (in place).
         assert_eq!(report.child_to_self_arrived, 1, "child[a] -> self should be delivered");
         assert_eq!(
-            report.child_to_self_source, child_a_id,
-            "child[a] should read its own id as the source of child[a] -> self",
+            report.child_to_self_sender_matched, 1,
+            "child[a] should read its own proof as the sender of child[a] -> self",
         );
-
-        let entries = match harness.log_tail(engine, &observer.addr, None, None) {
-            LogTailResult::Ok { entries, .. } => entries,
-            LogTailResult::Err { error } => panic!("log_tail on observer failed: {error}"),
-        };
-        let logged: Vec<&LogEntry> = entries.iter().filter(|e| e.message.starts_with("source_mailbox=")).collect();
 
         // Parent witness: the parent's own cross-cluster query, sent before
-        // the fan-out, carries the host-stamped parent id. It must equal the
-        // source child[a] read in place for parent -> child[a].
-        let parent_expected = format!("source_mailbox={parent_source}");
-        assert!(
-            logged.iter().any(|e| e.message == parent_expected),
-            "the observer should log the parent's host-stamped id {parent_source} — the source \
-                 child[a] read for parent -> child[a];\n\
-                 expected message: {parent_expected:?}\n\
-                 logged source_mailbox entries: {logged:?}",
-        );
-
-        // Cross-cluster cell: the observer, mailed by child[a] during the
-        // RunMatrix drain, logged the source it read. The drain re-stamps
-        // the host's dispatch identity to the member it dispatches before
-        // that member's own sends fire, so the host stamps child[a] (not
-        // the cluster's inbound parent) as the origin of this send.
-        let expected = format!("source_mailbox={child_a_id}");
-        assert!(
-            logged.iter().any(|e| e.message == expected),
-            "the cross-cluster observer should log child[a]'s id {child_a_id} as the source \
-                 of a send made during the in-place drain — the drain re-stamps the dispatch \
-                 identity to the dispatched member — not the cluster's inbound parent id \
-                 {parent_source};\n\
-                 expected message: {expected:?}\n\
-                 logged source_mailbox entries: {logged:?}",
+        // the fan-out, is stamped with the parent, so its reply lands there.
+        // Cross-cluster cell: the drain re-stamps the host's dispatch identity
+        // to the member it dispatches before that member's own sends fire, so
+        // child[a]'s query is stamped with child[a] and its reply lands on a
+        // child. A drain that stamped the cluster's inbound parent instead
+        // would read 2 and 0.
+        assert_eq!(
+            (report.observer_reports_to_parent, report.observer_reports_to_child),
+            (1, 1),
+            "the observer should reply once to the parent (its own query) and once to child[a] \
+             (the query child[a] sent during the in-place drain), each with a sender proof; \
+             (to_parent, to_child)",
         );
     }
 }

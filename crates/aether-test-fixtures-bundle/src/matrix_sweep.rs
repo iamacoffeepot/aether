@@ -5,24 +5,35 @@
 //! wire) the parent drives every in-cluster addressing direction in place,
 //! plus one cross-cluster send made *during the in-place drain*; each
 //! participant records the cell it observed — whether the mail arrived and
-//! what `ctx.sender()` it read. A follow-up `CollectMatrix` query
-//! reads the cluster's shared observation log and replies a `MatrixReport`.
+//! whether `ctx.sender()` was the proof of the actor that sent it. A
+//! follow-up `CollectMatrix` query reads the cluster's shared observation log
+//! and replies a `MatrixReport`.
 //!
-//! Matrix cells (each asserts delivery AND the source the recipient read):
+//! Matrix cells (each asserts delivery AND a sender verdict). The recipient
+//! compares `ctx.sender()` with the proof it holds of the expected sender, so
+//! the verdict is computed in the guest and no position leaves the cluster:
 //!
-//! - parent → child\[a\] (in place): child\[a\]'s source is the parent's id.
-//! - child\[a\] → parent (in place): the parent's source is child\[a\]'s id.
-//! - child\[a\] → sibling child\[b\] (in place): child\[b\]'s source is child\[a\]'s id.
-//! - child\[a\] → self (in place): child\[a\]'s source is its own id.
-//! - cross-cluster (child\[a\] → a second loaded component, *during the drain*):
-//!   observed out-of-band by the observer (read via `log_tail`). The observer
-//!   reads child\[a\]'s id: the member's ctx-mediated send threads its own id
-//!   as the send's `from`, so the host stamps the member as origin (validated
-//!   host-side to the cluster), not the cluster's inbound parent.
+//! - parent → child\[a\] (in place): child\[a\]'s sender is `ctx.parent()`'s
+//!   proof.
+//! - child\[a\] → parent (in place): the parent's sender is
+//!   `ctx.child_as::<MatrixChild>("a")`'s proof.
+//! - child\[a\] → sibling child\[b\] (in place): child\[b\]'s sender is
+//!   `ctx.sibling_as::<MatrixChild>("a")`'s proof.
+//! - child\[a\] → self (in place): child\[a\]'s sender is
+//!   `ctx.sibling_as::<MatrixChild>("a")`'s proof, its own.
+//! - cross-cluster (child\[a\] → a second loaded component, *during the
+//!   drain*): the observer replies a `SourceReport` to the origin the host
+//!   stamped, and child\[a\] counts the arrival. The member's ctx-mediated
+//!   send threads its own id as the send's `from`, so the host stamps the
+//!   member as origin (validated host-side to the cluster), not the
+//!   cluster's inbound parent; a mis-stamp would land the reply on the
+//!   parent instead.
 //! - cross-cluster (the parent → the same observer, before the fan-out): the
-//!   witness for the parent's id. No actor reads its own position (ADR-0230),
-//!   so the test anchors the parent → child\[a\] source against the id the
-//!   host stamped on the parent's own send.
+//!   parent's own query brings exactly one reply back to the parent.
+//!
+//! A report counts only when its `had_sender` is set, so an observer whose
+//! `ctx.sender()` read `None` for this component-origin mail shows as a
+//! missing report.
 //!
 //! The observation log is a cluster-shared `static` with the same
 //! single-run-token `UnsafeCell` + blanket `Sync` discipline the inline
@@ -40,33 +51,35 @@
 use core::cell::UnsafeCell;
 
 use aether_actor::{
-    ActorInitError, ActorRef, Erased, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, ActorRef, Erased, ErasedActorRef, InlineChild, Manual, OutboundReply, RelativeMailbox, Subname,
+    WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF, MATRIX_CELL_CHILD_TO_SIBLING,
-    MATRIX_CELL_PARENT_TO_CHILD, MatrixPing, MatrixReport, RunMatrix, SourceQuery,
+    MATRIX_CELL_PARENT_TO_CHILD, MatrixPing, MatrixReport, RunMatrix, SourceQuery, SourceReport,
 };
 
 use super::source_observer::SourceObserver;
 
-/// One cell's recorded observation: whether the mail arrived and the raw
-/// `MailboxId` the recipient read from `ctx.sender()`.
+/// One cell's recorded observation: whether the mail arrived and whether the
+/// recipient's `ctx.sender()` was the proof of the expected sender.
 #[derive(Clone, Copy, Default)]
 struct Cell {
     arrived: bool,
-    source: u64,
+    sender_matched: bool,
 }
 
 /// The cluster-shared observation log. Indexed by the `MATRIX_CELL_*`
-/// markers (1-based; index 0 is unused), plus the child\[a\] id the parent
-/// reads off its spawn-registry handle so the test can assert the child-origin
-/// sources against the actual folded address, plus the cross-cluster observer reference the
-/// parent minted from its declared dependency. The reference is shared through
-/// the log rather than threaded on `MatrixPing` because a proven reference has
-/// no codec (ADR-0230); it never leaves this module instance.
+/// markers (1-based; index 0 is unused), plus the observer reports that
+/// landed on the parent and on a child, plus the cross-cluster observer
+/// reference the parent minted from its declared dependency. The reference is
+/// shared through the log rather than threaded on `MatrixPing` because a
+/// proven reference has no codec (ADR-0230); it never leaves this module
+/// instance.
 struct MatrixLog {
     cells: [Cell; 5],
-    child_a_id: u64,
+    reports_to_parent: u32,
+    reports_to_child: u32,
     observer: Option<ActorRef<SourceObserver>>,
 }
 
@@ -85,28 +98,44 @@ struct LogSlot {
 unsafe impl Sync for LogSlot {}
 
 static MATRIX_LOG: LogSlot = LogSlot {
-    inner: UnsafeCell::new(MatrixLog { cells: [Cell { arrived: false, source: 0 }; 5], child_a_id: 0, observer: None }),
+    inner: UnsafeCell::new(MatrixLog {
+        cells: [Cell { arrived: false, sender_matched: false }; 5],
+        reports_to_parent: 0,
+        reports_to_child: 0,
+        observer: None,
+    }),
 };
 
-/// Record `(arrived, source)` for `cell` (a `MATRIX_CELL_*` marker) into the
-/// shared log.
-fn record_cell(cell: u32, source: u64) {
+/// Record `cell` (a `MATRIX_CELL_*` marker) as arrived into the shared log,
+/// with whether its sender matched the expected proof.
+fn record_cell(cell: u32, sender_matched: bool) {
     // SAFETY: see `LogSlot`'s `Sync` impl — single-threaded guest, borrow
     // taken fresh and released before return.
     let log = unsafe { &mut *MATRIX_LOG.inner.get() };
     if let Some(slot) = log.cells.get_mut(cell as usize) {
         slot.arrived = true;
-        slot.source = source;
+        slot.sender_matched = sender_matched;
     }
 }
 
-/// Record the child\[a\] id the parent read off its spawn-registry handle at
-/// sweep start, so the test can assert each child-origin source against the
-/// real folded address.
-fn record_child_a(child_a_id: u64) {
+/// Count one observer report with a sender proof that landed on the parent.
+fn record_report_to_parent() {
     // SAFETY: see `LogSlot`'s `Sync` impl.
     let log = unsafe { &mut *MATRIX_LOG.inner.get() };
-    log.child_a_id = child_a_id;
+    log.reports_to_parent += 1;
+}
+
+/// Count one observer report with a sender proof that landed on a child.
+fn record_report_to_child() {
+    // SAFETY: see `LogSlot`'s `Sync` impl.
+    let log = unsafe { &mut *MATRIX_LOG.inner.get() };
+    log.reports_to_child += 1;
+}
+
+/// Whether `sender` is present and equals the `expected` proof. A missing
+/// expectation never matches.
+fn sender_matches(sender: Option<ErasedActorRef>, expected: Option<ErasedActorRef>) -> bool {
+    sender.is_some() && sender == expected
 }
 
 /// Record the cross-cluster observer reference the parent minted from its
@@ -137,20 +166,22 @@ fn snapshot_report() -> MatrixReport {
     let c2self = cell(MATRIX_CELL_CHILD_TO_SELF);
     MatrixReport {
         parent_to_child_arrived: u32::from(p2c.arrived),
-        parent_to_child_source: p2c.source,
+        parent_to_child_sender_matched: u32::from(p2c.sender_matched),
         child_to_parent_arrived: u32::from(c2p.arrived),
-        child_to_parent_source: c2p.source,
+        child_to_parent_sender_matched: u32::from(c2p.sender_matched),
         child_to_sibling_arrived: u32::from(c2s.arrived),
-        child_to_sibling_source: c2s.source,
+        child_to_sibling_sender_matched: u32::from(c2s.sender_matched),
         child_to_self_arrived: u32::from(c2self.arrived),
-        child_to_self_source: c2self.source,
-        child_a_id: log.child_a_id,
+        child_to_self_sender_matched: u32::from(c2self.sender_matched),
+        observer_reports_to_parent: log.reports_to_parent,
+        observer_reports_to_child: log.reports_to_child,
     }
 }
 
 /// Entry export — the loaded component and cluster root. Spawns the two
 /// inline children in `wire`, drives the sweep on `RunMatrix`, records the
-/// child\[a\] → parent cell when it arrives, and answers `CollectMatrix`.
+/// child\[a\] → parent cell when it arrives, counts the observer reports
+/// that land on it, and answers `CollectMatrix`.
 pub struct MatrixParent;
 
 // The cross-cluster recipient is a declared dependency, which is what turns
@@ -173,9 +204,9 @@ impl WasmActor for MatrixParent {
         let _ = ctx.spawn_inline_child::<MatrixParent, MatrixChild>(Subname::Named("b"), &());
     }
 
-    /// Drive the sweep: record the proven observer reference and child\[a\]'s
-    /// id, query the observer once so it logs the host-stamped parent id (the
-    /// witness the test anchors the parent-origin source against), then send
+    /// Drive the sweep: record the proven observer reference, query the
+    /// observer once so its reply comes back to the parent (the witness that
+    /// the host stamps the parent as the origin of its own send), then send
     /// the fan-out ping to child\[a\] in place. Child\[a\]'s handler drives the
     /// child-origin cells (child → parent / sibling / self) and the
     /// cross-cluster send. Everything settles in this one receive's drain. The
@@ -184,7 +215,6 @@ impl WasmActor for MatrixParent {
     #[handler::single]
     fn on_run_matrix(&mut self, ctx: &mut WasmCtx<'_, MatrixParent>, _msg: RunMatrix) {
         record_observer(ctx.actor_ref::<SourceObserver>());
-        record_child_a(ctx.child_as::<MatrixChild>("a").expect("inline child a is resident").id().0);
         ctx.send::<SourceObserver>(&SourceQuery);
 
         let child_a = ctx.child("a").expect("inline child a is resident");
@@ -192,10 +222,21 @@ impl WasmActor for MatrixParent {
     }
 
     /// child\[a\] → parent: a ping addressed to the parent's own id. Record the
-    /// cell with the source the parent read (the membrane's own-id path).
+    /// cell with whether the parent's sender is its proof of child\[a\] (the
+    /// membrane's own-id path).
     #[handler::manual]
     fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, ping: MatrixPing) {
-        record_cell(ping.cell, ctx.sender().map_or(0, |sender| sender.id().0));
+        let expected = ctx.child_as::<MatrixChild>("a").map(InlineChild::erase);
+        record_cell(ping.cell, sender_matches(ctx.sender(), expected));
+    }
+
+    /// The observer's reply to the parent's own query, routed to the origin
+    /// the host stamped on it.
+    #[handler::single]
+    fn on_source_report(&mut self, _ctx: &mut WasmCtx<'_>, report: SourceReport) {
+        if report.had_sender {
+            record_report_to_parent();
+        }
     }
 
     /// Read the cluster's shared observation log and reply the structured
@@ -221,12 +262,21 @@ impl WasmActor for MatrixChild {
         Ok(MatrixChild)
     }
 
-    /// Record the ping's cell with the source the child read, then — when the
-    /// ping is the fan-out ping (parent → child\[a\]) — drive the child-origin
-    /// cells and the cross-cluster send, all in place.
+    /// Record the ping's cell with whether the child's sender is the proof of
+    /// the cell's expected sender — the parent for the fan-out ping, child\[a\]
+    /// for the sibling and self pings — then, when the ping is the fan-out ping
+    /// (parent → child\[a\]), drive the child-origin cells and the
+    /// cross-cluster send, all in place.
     #[handler::manual]
     fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, ping: MatrixPing) {
-        record_cell(ping.cell, ctx.sender().map_or(0, |sender| sender.id().0));
+        let expected = match ping.cell {
+            MATRIX_CELL_PARENT_TO_CHILD => ctx.parent().as_ref().map(RelativeMailbox::reference),
+            MATRIX_CELL_CHILD_TO_SIBLING | MATRIX_CELL_CHILD_TO_SELF => {
+                ctx.sibling_as::<MatrixChild>("a").map(InlineChild::erase)
+            }
+            _ => None,
+        };
+        record_cell(ping.cell, sender_matches(ctx.sender(), expected));
 
         if ping.fan_out == 0 {
             return;
@@ -254,10 +304,20 @@ impl WasmActor for MatrixChild {
         // left in the cluster-shared log, so it still takes the host send
         // path. The send threads this child's own id (`ctx.mailbox`, ==
         // child[a] during the drain) as the `from`, so the observer's
-        // `sender()` reads child[a]'s id — the host stamps the
-        // guest-carried, in-cluster-validated origin (issue 1987).
+        // `sender()` proves child[a] and its reply lands back here — the
+        // host stamps the guest-carried, in-cluster-validated origin (issue
+        // 1987).
         if let Some(observer) = observer() {
             ctx.send_to(observer, &SourceQuery);
+        }
+    }
+
+    /// The observer's reply to child\[a\]'s cross-cluster query, routed to
+    /// the origin the host stamped on it.
+    #[handler::single]
+    fn on_source_report(&mut self, _ctx: &mut WasmCtx<'_>, report: SourceReport) {
+        if report.had_sender {
+            record_report_to_child();
         }
     }
 }
