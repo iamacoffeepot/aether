@@ -285,8 +285,8 @@ pub struct CollectFailureEvidenceArgs {
     pub operation: Option<String>,
     /// Up to eight live actor addresses — each a canonical ADR-0099 lineage
     /// or an unambiguous ADR-0166 short path, the same spelling every other
-    /// tool's `address` accepts. Each receives a
-    /// log tail capped at 100 entries and its complete current cost table.
+    /// tool's `address` accepts. Each receives a log tail capped at 100
+    /// entries and its complete current cost table.
     #[serde(default)]
     pub actor_addresses: Vec<String>,
     /// Up to eight live component addresses to describe in full, in the same
@@ -762,8 +762,8 @@ pub struct DescribeComponentArgs {
     /// Address of the component to describe: its full ADR-0099 lineage
     /// (returned by `load_component`, or retained/derived from an explicit
     /// boot spec) or an unambiguous ADR-0166 short path. `spawn_substrate`
-    /// returns engine information only and
-    /// `list_components` reports stored artifacts. The engine resolves the
+    /// returns engine information only and `list_components` reports stored
+    /// artifacts. The engine resolves the
     /// address to its canonical lineage, the cache key; a cache miss asks
     /// the substrate live, while a cache hit does not prove current liveness.
     pub address: String,
@@ -815,10 +815,9 @@ pub struct ActorLogsArgs {
     pub engine_id: Option<String>,
     /// Address of the actor to query (e.g. `"aether.audio"`,
     /// `"aether.component/aether.embedded:aether.camera"`, or an unambiguous
-    /// ADR-0166 short path). The substrate's
-    /// dispatch loop services `aether.log.tail` for every actor
-    /// automatically; agents don't need to know which actor
-    /// implements the handler.
+    /// ADR-0166 short path). The substrate's dispatch loop services
+    /// `aether.log.tail` for every actor automatically; agents don't need to
+    /// know which actor implements the handler.
     pub address: String,
     /// Cap on returned entries. Defaults to 100; clamped to 1000.
     /// Use the response's `next_since` to walk past the cap on the
@@ -893,8 +892,8 @@ pub struct ActorCostArgs {
     pub engine_id: Option<String>,
     /// Address of the actor to query (e.g. `"aether.audio"`,
     /// `"aether.component/aether.embedded:aether.camera"`, or an unambiguous
-    /// ADR-0166 short path). Every actor serves
-    /// `aether.cost.tail` via the substrate's framework dispatch arm.
+    /// ADR-0166 short path). Every actor serves `aether.cost.tail` via the
+    /// substrate's framework dispatch arm.
     pub address: String,
     /// Optional kind-id filter (tagged `knd-XXXX-XXXX-XXXX` or raw
     /// decimal). Omitted dumps every handler row the actor declares.
