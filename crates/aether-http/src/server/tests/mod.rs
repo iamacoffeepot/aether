@@ -13,7 +13,9 @@
 // `Builder::new` rather than the `composed` boot seam production chassis use.
 #![allow(clippy::disallowed_methods)]
 
-mod handlers;
+// The runtime's own unit tests narrow a handler path from one of these
+// fixtures, so the module is named from anywhere under `server`.
+pub(in crate::server) mod handlers;
 mod keep_alive;
 mod requests;
 mod routing;

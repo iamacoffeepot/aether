@@ -4,7 +4,7 @@
 //! mid-connection registration, macro/hand-written composition, and
 //! self-unregistration.
 
-use aether_actor::Addressable;
+use aether_actor::ActorPath;
 use aether_data::Kind as KindTrait;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::kinds::{HttpServerRequest as RequestKind, RegisterRoute};
+use crate::kinds::{HttpRoute, RegisterRoute, UnregisterRoute};
 use crate::server::HttpServerCapability;
 
 use super::handlers::{
@@ -190,7 +190,10 @@ fn method_specific_route_beats_agnostic() {
 /// A route registered mid-connection is visible to the very next
 /// request on an already-kept-alive socket (ADR-0135 §2): the reader
 /// re-reads the shared route table per request head, so registration
-/// granularity is next-request, not next-connection.
+/// granularity is next-request, not next-connection. It also drives the
+/// explicit receipts end to end — a `RegisterRoute` naming its handler by
+/// canonical path serves requests, and the matching `UnregisterRoute`
+/// releases exactly that key, so the prefix falls back to the catch-all.
 ///
 /// Tripwire: a reader-side route *snapshot* taken at connection
 /// adoption would serve the catch-all forever on a long-lived
@@ -225,13 +228,13 @@ fn route_registered_mid_connection_serves_next_request() {
     assert!(first.contains("x-aether-path: /late"), "pre-registration request takes the echo catch-all: {first:?}");
 
     // Register /late at the wired handler while the connection is
-    // parked between keep-alive requests.
-    let target = registry.lookup(<WiredRouteHandler as Addressable>::NAMESPACE).expect("wired handler registered");
+    // parked between keep-alive requests. The handler is named by its
+    // canonical path, narrowed to `HttpRoute` by the `on_extra` row.
+    let handler = ActorPath::<WiredRouteHandler>::root();
     let payload = RegisterRoute {
         prefix: "/late".to_string(),
         method: None,
-        kind: <RequestKind as KindTrait>::ID,
-        mailbox: target,
+        handler: handler.narrow::<HttpRoute>(),
         shared: false,
     }
     .encode_into_bytes();
@@ -254,6 +257,33 @@ fn route_registered_mid_connection_serves_next_request() {
         assert!(
             Instant::now() < deadline,
             "mid-connection registration should reach the next request within 10s; \
+             last: {response:?}",
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    // Release the same key by the holder's plain path: the route drops and
+    // /late falls back to the echo catch-all, which stamps the path header.
+    let payload = UnregisterRoute { prefix: "/late".to_string(), method: None, handler: handler.as_erased().clone() }
+        .encode_into_bytes();
+    let (_, released) = chassis.send_tracked(
+        chassis.actor_ref::<HttpServerCapability>().erase(),
+        <UnregisterRoute as KindTrait>::ID,
+        payload,
+        None,
+    );
+    released.recv_timeout(Duration::from_secs(10)).expect("the route release settles");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
+        let response = read_one_response(&mut stream, &mut carry);
+        if response.contains("x-aether-path: /late") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "releasing the route should return /late to the echo catch-all within 10s; \
              last: {response:?}",
         );
         thread::sleep(Duration::from_millis(25));

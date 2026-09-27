@@ -3,9 +3,11 @@
 //! substrate core dispatches none of them, so they live with the
 //! capabilities that own them rather than in `aether-kinds`. The module
 //! is always-on and wasm-safe — the types depend only on
-//! `aether_data::{Kind, Schema}` and serde, so the
+//! `aether_data::{Kind, Schema}`, serde, and `aether_actor`'s protocol and
+//! typed-path vocabulary (all three unconditional dependencies), so the
 //! `default-features = false` wasm consumers keep compiling.
 
+use aether_actor::ProtocolPath;
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
@@ -181,6 +183,25 @@ pub struct HttpServerResponse {
     pub headers: Vec<HttpHeader>,
     #[serde(with = "aether_data::bytes")]
     pub body: Vec<u8>,
+}
+
+/// The contract an explicitly registered route handler covers (ADR-0231 §2):
+/// one row, [`HttpServerRequest`] answered with [`HttpServerResponse`]. It is
+/// what [`RegisterRoute`]'s `handler` path claims, so a route registered by
+/// path always dispatches as `aether.http.server.request`.
+///
+/// A manual row covers no protocol row (ADR-0231 §6), so a handler that
+/// answers by hand is not nameable here: a streaming handler replying
+/// [`HttpResponseStreamOpen`], a websocket handler replying
+/// [`WebSocketAccept`], or an ADR-0154 deferred route. Nor is a
+/// `#[http::router]` group, whose requests dispatch as the kind the macro
+/// mints for it. Each of those registers itself with [`RegisterRouteSelf`],
+/// which takes the registrant from the envelope's stamped sender and claims
+/// nothing about the rows it publishes — the routed dispatch is ADR-0231 §4's
+/// ingress bridge, whose kind is chosen at run time.
+#[aether_actor::protocol]
+pub trait HttpRoute {
+    fn request(mail: HttpServerRequest) -> HttpServerResponse;
 }
 
 // ADR-0128 HTTP server response streaming. A handler opts into streaming by
@@ -386,54 +407,71 @@ pub struct WebSocketClose {
 // ADR-0130 route-registration kinds. Mirrors the `aether.window`
 // subscribe family: `_self` variants resolve the registrant from the
 // inbound envelope's host-stamped `Source` (forgery-proof, in-process
-// by construction); the explicit-`mailbox` variants serve external
-// callers and are validated against the registry. A route carries the
-// `KindId` its requests dispatch as — the cap stamps that kind onto
-// the request-shaped payload, so the registered kind's schema must
-// decode `aether.http.server.request`'s byte layout
-// (`aether.http.server.request` itself is the generic choice).
+// by construction); the explicit variants serve external callers and
+// name the handler by its canonical path, proven against the engine.
+//
+// A `_self` route carries the `KindId` its requests dispatch as — the cap
+// stamps that kind onto the request-shaped payload, so the registered
+// kind's schema must decode `aether.http.server.request`'s byte layout
+// (`aether.http.server.request` itself is the generic choice). A route
+// registered by path dispatches as `aether.http.server.request`, which is
+// what its `HttpRoute` path already proved, so the explicit form names no
+// kind at all.
 
-/// `aether.http.server.register_route` — claim a path-prefix route for
-/// `mailbox`. `prefix` is segment-boundary matched (`/api` matches
+/// `aether.http.server.register_route` — claim a path-prefix route for the
+/// actor at `handler`. `prefix` is segment-boundary matched (`/api` matches
 /// `/api` and `/api/…`, never `/apiary`; `/` is the catch-all; a
 /// trailing slash is normalized off at registration). `method` filters
 /// the route to one HTTP method; `None` accepts every method. Among
 /// matching routes the longest prefix wins, and a method-specific
 /// route beats a method-agnostic one at equal prefix. A `(prefix,
-/// method)` key already claimed by a *different* mailbox is answered
-/// `Err`; the same mailbox re-claiming its own key is an idempotent
-/// `Ok` (and updates `kind`). Reply: `RegisterRouteResult`.
+/// method)` key already claimed by a *different* handler is answered
+/// `Err`; the same handler re-claiming its own key is an idempotent
+/// `Ok`. Reply: `RegisterRouteResult`.
+///
+/// `handler` is the canonical path of an actor covering [`HttpRoute`]
+/// (ADR-0231 §3): in code `ActorPath::<R>::root().narrow::<HttpRoute>()`,
+/// which compiles only when `R` answers `aether.http.server.request` with
+/// `aether.http.server.response`; over MCP the `path` a component load
+/// returns, whose decode refuses a path no such live route stands at. The
+/// route therefore dispatches as `aether.http.server.request`, and this kind
+/// names no dispatch kind of its own. A handler that answers by hand — a
+/// streaming, websocket, or deferred one, or a `#[http::router]` group —
+/// covers no protocol and registers itself with [`RegisterRouteSelf`].
 ///
 /// `shared` (ADR-0136) opts the registration into the key's member
-/// *set*: N handler instances that all register `shared: true` with the
-/// same dispatch `kind` jointly serve the route, each request picked
-/// round-robin across live members. `false` is the exclusive claim
-/// described above. Mixing the two on one key, or joining with a
-/// different `kind`, is a conflict `Err` — spreading is something
-/// instances opt into together, never an accident.
-#[aether_data::kind(name = "aether.http.server.register_route")]
+/// *set*: N handler instances that all register `shared: true` jointly serve
+/// the route, each request picked round-robin across live members. `false` is
+/// the exclusive claim described above. Mixing the two on one key is a
+/// conflict `Err` — spreading is something instances opt into together, never
+/// an accident — and so is joining a set whose members dispatch some other
+/// kind, since an explicit member always joins as
+/// `aether.http.server.request`.
+#[aether_data::kind(name = "aether.http.server.register_route", no_serde)]
 pub struct RegisterRoute {
     pub prefix: String,
     pub method: Option<HttpMethod>,
-    pub kind: aether_data::KindId,
-    pub mailbox: aether_data::MailboxId,
+    pub handler: ProtocolPath<HttpRoute>,
     pub shared: bool,
 }
 
 /// `aether.http.server.register_route_self` — reflexive counterpart of
 /// [`RegisterRoute`]: claim the route for the *sending* actor, with no
-/// explicit `mailbox` field. The cap resolves the registrant from the
+/// explicit `handler` path. The cap resolves the registrant from the
 /// inbound envelope's host-stamped `Source` (ADR-0083), so the
 /// registrant cannot be forged and the op is gated to in-process
 /// actors by construction — an external session or another engine gets
 /// an `Err` reply, pushing it onto the named [`RegisterRoute`] form.
-/// This is the common "route to me" case, sent from `wire`. Reply:
+/// This is the common "route to me" case, sent from `wire`, and the only
+/// form for a handler that answers by hand: `kind` names whatever the
+/// registrant's own row is, so a streaming, websocket, deferred, or
+/// `#[http::router]`-minted route registers here. Reply:
 /// `RegisterRouteResult`.
 ///
 /// `shared` (ADR-0136) opts into the key's member set exactly as on
 /// [`RegisterRoute`]: instanced handlers that all register `shared:
-/// true` jointly serve the route round-robin; `false` is the exclusive
-/// claim.
+/// true` with the same dispatch `kind` jointly serve the route
+/// round-robin; `false` is the exclusive claim.
 #[aether_data::kind(name = "aether.http.server.register_route_self")]
 pub struct RegisterRouteSelf {
     pub prefix: String,
@@ -443,13 +481,25 @@ pub struct RegisterRouteSelf {
 }
 
 /// `aether.http.server.unregister_route` — release the `(prefix,
-/// method)` route held by `mailbox`. Idempotent: releasing a route
-/// that isn't held is still `Ok`. Reply: `RegisterRouteResult`.
+/// method)` route held by the actor at `handler`. Idempotent: releasing a
+/// route that isn't held is still `Ok`, and so is a path no live route stands
+/// at — a departed holder's routes already went with its `MonitorNotice`.
+/// Reply: `RegisterRouteResult`.
+///
+/// `handler` names identity only, so it is a plain [`ErasedActorPath`]
+/// (ADR-0231 §3, proven with `resolve_path`) rather than an [`HttpRoute`]
+/// path: the server never sends to a holder it is releasing, and a typed path
+/// could not name a holder that claimed the route through
+/// [`RegisterRouteSelf`] with a minted kind. `resolve_path` fills a short
+/// path's holes, so `aether.component/:api` releases as well as the canonical
+/// spelling does.
+///
+/// [`ErasedActorPath`]: aether_data::ErasedActorPath
 #[aether_data::kind(name = "aether.http.server.unregister_route")]
 pub struct UnregisterRoute {
     pub prefix: String,
     pub method: Option<HttpMethod>,
-    pub mailbox: aether_data::MailboxId,
+    pub handler: aether_data::ErasedActorPath,
 }
 
 /// `aether.http.server.unregister_route_self` — reflexive counterpart
@@ -463,26 +513,16 @@ pub struct UnregisterRouteSelf {
 }
 
 /// Reply to the route registration / unregistration kinds (ADR-0130).
-/// Failure modes: an invalid prefix (must start with `/`), an unknown
-/// or dropped registrant mailbox, a `(prefix, method)` key already
-/// claimed by another mailbox, or a `_self` op from a sender with no
-/// local mailbox.
+/// Failure modes: an invalid prefix (must start with `/`), a `handler` path
+/// no live route stands at, a `(prefix, method)` key already claimed by
+/// another handler, or a `_self` op from a sender with no local mailbox.
+/// A `handler` path whose live route does not cover [`HttpRoute`] never
+/// reaches the receipt at all: the decode refuses the mail, which is logged
+/// at warn and gets no reply of any kind.
 #[aether_data::kind(name = "aether.http.server.register_route_result")]
 pub enum RegisterRouteResult {
     Ok,
     Err { error: String },
-}
-
-/// `aether.http.server.unregister_routes_all` — release every route
-/// held by `mailbox` in one shot. The externally sendable bulk form;
-/// drop-time cleanup rides the ADR-0079 vacate/close `MonitorNotice`
-/// instead, so the route table stops dispatching at a dropped
-/// trampoline without anyone mailing this. Idempotent: a mailbox
-/// holding no routes is a no-op. Fire-and-forget; no reply.
-/// Fire-and-forget; one mailbox field.
-#[aether_data::kind(name = "aether.http.server.unregister_routes_all", copy, eq)]
-pub struct UnregisterRoutesAll {
-    pub mailbox: aether_data::MailboxId,
 }
 
 /// `aether.http.server.inbound_ready` — accept / reader sidecar →

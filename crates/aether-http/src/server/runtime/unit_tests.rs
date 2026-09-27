@@ -7,7 +7,6 @@ use super::{
 };
 use crate::kinds::{HttpHeader, HttpMethod};
 use aether_actor::ErasedActorRef;
-use aether_data::MailboxId;
 use aether_substrate::mail::Source;
 use aether_substrate::mail::registry::{Registry, noop_handler};
 use aether_substrate::testing::{fresh_substrate, registered_ref, unrouted_binding};
@@ -40,7 +39,9 @@ fn conn_header(value: &str) -> Vec<HttpHeader> {
 #[test]
 fn disabled_http_server_err_replies_to_register_route() {
     use super::{HttpServerCapability, HttpServerConfig, HttpSupervisorState};
-    use crate::kinds::RegisterRoute;
+    use crate::kinds::{HttpRoute, RegisterRoute};
+    use crate::server::tests::handlers::EchoHttpHandler;
+    use aether_actor::ActorPath;
 
     let (_registry, mailer) = fresh_substrate();
     let binding = unrouted_binding(&mailer);
@@ -50,7 +51,12 @@ fn disabled_http_server_err_replies_to_register_route() {
     let result = HttpServerCapability::on_register_route(
         &mut state,
         &mut ctx,
-        RegisterRoute { prefix: "/".to_string(), method: None, kind: KindId(0), mailbox: MailboxId(1), shared: false },
+        RegisterRoute {
+            prefix: "/".to_string(),
+            method: None,
+            handler: ActorPath::<EchoHttpHandler>::root().narrow::<HttpRoute>(),
+            shared: false,
+        },
     );
     assert!(
         matches!(result, RegisterRouteResult::Err { .. }),
