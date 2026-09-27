@@ -32,9 +32,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// prints the text. The kind-field, encode, and serialize traits delegate to
 /// [`ErasedActorPath`]'s. Each type writes its own decodes beside it, over
 /// [`decode_canonical`] (and, for `ActorPath`, [`deserialize_canonical`]).
-/// Invoked beside each
-/// type, whose module is a child of this one, so the trait names resolve
-/// through `super::`.
+/// Invoked beside each type, whose module is a child of this one, so the
+/// trait names resolve through `super::`.
 macro_rules! typed_path_traits {
     ($name:ident<$param:ident>) => {
         impl<$param> Clone for $name<$param> {
@@ -260,6 +259,7 @@ mod tests {
         );
         assert!(Carries::decode_from_bytes(&wire(CANONICAL)).is_none(), "the shorthand has no context");
     }
+
     /// An `ActorPath<R>` that exists names an `R`: a decode that claimed `R`
     /// for any text, read the root step instead of the leaf, or compared the
     /// leaf by prefix would hand a receiver a path naming another actor.

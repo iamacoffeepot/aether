@@ -233,6 +233,7 @@ fn published_rows_answer_only_the_live_route_under_the_path() {
     let live = "test.published_rows.live";
     let live_id = registry.try_register_inbox(&auth(), live, noop_handler()).expect("the route name is free");
     registry.publish_contract(&auth(), live_id, contract(&rows)).expect("an empty contract takes any rows");
+
     let closure = "test.published_rows.closure";
     registry.try_register_inbox(&auth(), closure, noop_handler()).expect("the route name is free");
 
@@ -246,10 +247,12 @@ fn published_rows_answer_only_the_live_route_under_the_path() {
     starting_token(
         &reserved.wait_timeout(Duration::from_millis(100)).expect("reservation completes").expect("reserves"),
     );
+
     let dropped = "test.published_rows.dropped";
     let dropped_id = registry.try_register_inbox(&auth(), dropped, noop_handler()).expect("the route name is free");
     registry.publish_contract(&auth(), dropped_id, contract(&rows)).expect("an empty contract takes any rows");
     registry.drop_mailbox(&auth(), dropped_id).expect("the live route retires");
+
     let folded = "test.published_rows.folded";
     let impostor = registry
         .try_register_inbox_with_id(&auth(), lineage_mailbox_id(folded), "test.published_rows.impostor", noop_handler())

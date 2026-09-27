@@ -6,8 +6,8 @@
 //! the reply / emit surfaces. [`blob_mail`] follows a `Blob` field through
 //! the typed sends in `send` and the inbound decode in `inbound`, across
 //! actors, and [`protocol_path_mail`] follows a `ProtocolPath` field through
-//! the inbound decode's registry proof. [`support`] holds the stub actors, peers, and kinds more than one
-//! of them shares.
+//! the inbound decode's registry proof. [`support`] holds the stub actors,
+//! peers, and kinds more than one of them shares.
 
 mod address;
 mod blob_mail;
