@@ -59,27 +59,33 @@ There is no guest-only topology, no guest-only resolver, and no route field
 that says "guest". `WasmCtx` stays as the in-wasm SDK; its verbs become host
 functions that call the same operations `NativeCtx` calls.
 
-### 2. Code is a `Module`: a compiled cache entry linked to a `Blob`
+### 2. Code is a `Module`: a compiled cache entry made from a `Blob`
 
-A module's bytes are a `Blob`. The engine keeps one **module cache** keyed by
-the blob's hash. An entry links the blob to what the engine derives from it
-once:
+Code arrives as a `Blob` of wasm bytes. The engine keeps one **module cache**
+keyed by that blob's hash. Checking a blob in derives everything the engine
+needs from it once, and then lets the bytes go:
 
 ```rust
 pub struct Module {
-    blob: Blob,                       // the wasm bytes; identity = blob hash
+    hash: BlobHash,                   // identity: the hash of the wasm bytes it was made from
     compiled: Arc<wasmtime::Module>,  // compiled once per hash per engine
     manifest: Arc<ModuleManifest>,    // parsed once: exports, rows, depends, links, lineage, boot, kinds
+    assets: Arc<[(AssetName, Blob)]>, // each `aether.asset.*` section, checked in as its own blob
 }
 ```
 
-`Module` is a value with the same shape as `Blob`. In process it is shared
-by hash and carries its compiled form and parsed manifest. On every other
-path (the RPC wire, a file, the journal) it is written as its blob's bytes.
-An engine that receives the bytes checks them in, compiles once, and parses
-the manifest once. An entry lives while anything holds it: a publication, a
-running instance, or a held `Module` value. Nothing re-parses a section per
-load or per replace.
+The wasm bytes are used once, to compile and to parse, and are not retained.
+Nothing re-parses a section per load or per replace: every reader today that
+re-reads the bytes (a replace's predecessor kinds and boot namespace, the
+inline contracts, the asset window) reads the manifest or an asset blob
+instead. An entry lives while anything holds it: a publication, a running
+instance, or a held `Module`.
+
+A `Module` never leaves its engine. Compiled code is tied to the engine's
+wasmtime version, configuration, and target, so the portable form of code is
+its source bytes, and those live with whoever supplied them: the hub's store,
+the Bloomery journal, a package file. Standing code up on another engine is a
+`Publish` there from that source (§9).
 
 The hash is the ADR-0238 blob hash (BLAKE3). The hub's store and the
 Bloomery journal keep their own content keys for their own records and
@@ -153,12 +159,11 @@ its derive.
   `aether.component/:NAME` has no successor; a guest is addressed by its own
   namespace.
 
-### 6. Standing an actor up carries its module
+### 6. A spawn shares the compiled module
 
 Spawning an instance of a published guest type looks up its `Module` and
-starts a host on it. The spawn carries the `Module` value, so the code
-travels with the stand-up the way a `Blob` travels with mail: shared by hash
-in process, written as bytes across the wire, compiled once on arrival.
+starts a host on it, sharing the compiled code with every other instance of
+that hash.
 
 The host is one native actor type, parameterised by the published group, that
 owns one wasm instance and forwards dispatch into it. It is the trampoline
@@ -176,7 +181,7 @@ change, and the hosted type cannot change because the namespace is the type.
 
 A rehydrate failure in one instance restarts that instance on the new module
 from `init`, with its state dropped and a `MonitorNotice`, so that every
-instance of a namespace always runs the published module (open question 2).
+instance of a namespace always runs the published module.
 
 ### 8. Despawn and unpublish are separate
 
@@ -187,17 +192,39 @@ instance of a namespace always runs the published module (open question 2).
   instance of its namespaces is live.
 - A boot actor (ADR-0147) is a root singleton the module declares. It is
   spawned when the module is first published and despawned when the module
-  is unpublished (open question 3).
+  is unpublished (open question 1).
 
 ### 9. The mail surface
 
 Remote callers (MCP, RPC, the Bloomery driver, chassis autoload) publish and
-spawn by mail. The verbs are `Publish { module: Module }` and
-`Spawn { namespace, key, parent, config }`, answered by the registry owner's
-engine mailbox. `LoadComponent` becomes a convenience that publishes and
-spawns in one call. `ReplaceComponent` becomes `Publish` of a successor.
-`DropComponent` becomes `Despawn`. `LoadResult.path` is the spawned actor's
-own canonical path.
+spawn by mail, answered by the registry owner's engine mailbox: a front door
+to an engine system, not an address parent.
+
+- `Publish { code: Blob }` checks the bytes in, builds the `Module`, and runs
+  admission. Publishing a module whose namespaces already point at the same
+  hash is a no-op.
+- `Spawn { namespace, key, parent, config }` asks for an instance to exist.
+  If it is already live, the reply names it and nothing is re-initialised;
+  if it is not, that is the signal to stand it up. It covers native and guest
+  types alike: a native type is spawned from its boot-time publication, which
+  gives outside callers a way to start a native instance by mail that they
+  lack today.
+- `Despawn { path }` ends one instance.
+
+`LoadComponent` becomes a convenience that publishes and spawns in one call.
+`ReplaceComponent` becomes `Publish` of a successor. `DropComponent` becomes
+`Despawn`. `LoadResult.path` is the spawned actor's own canonical path.
+Bloomery restart adoption (ADR-0226 D9) becomes a `Spawn` that finds its
+instance live.
+
+### 10. Guest crates split identity from runtime
+
+A crate whose guest types other crates name splits them as ADR-0122 splits a
+native capability. The identity half is always compiled: the `Addressable`
+marker for each type, with its `NAMESPACE`, cardinality, placement, and
+contract rows. The runtime half, behind a feature, holds the `#[actor]` impl
+and `export!`. A caller names a guest type through its identity and never
+links its code; the kind crates of ADR-0066 are where these markers live.
 
 ## Superseded and amended
 
@@ -217,7 +244,7 @@ own canonical path.
 | 0165 | Accepted | line 206: guests are hosted by the forwarding host, not `WasmTrampoline` |
 | 0224 / 0226 / 0240 | Proposed | a bundle's root is a published namespace; 0226 D9 adoption keys on a live `NS:key`, not `SubnameInUse`; 0240 D4, D5, D8 edited in place |
 | 0230 / 0231 | Proposed | edited in place: no route actor-type tag; the link check and replace growth move to admission |
-| 0238 blob store | Proposed | edited in place: `Module` joins `Blob` as a value with a local form |
+| 0238 blob store | Proposed | no decision changes: code arrives and leaves as a `Blob`; a module's assets are blobs |
 
 ## Consequences
 
@@ -229,8 +256,8 @@ own canonical path.
 - One admission check replaces checks spread over the component host, the
   trampoline, and the registry, and it runs once per publish instead of per
   load and per replace.
-- Code is parsed and compiled once per hash per engine, and travels between
-  engines the way every other large value does.
+- Code is parsed and compiled once per hash per engine, and its bytes are not
+  held after that; a module's assets are blobs shared like any other.
 - The hosted type cannot change on replace, by construction.
 - The Bloomery driver publishes bundles it already fetches as `Blob`s from
   the journal, with no separate path.
@@ -240,9 +267,8 @@ own canonical path.
 - A large migration: `aether.component/` appears on 78 lines in 41 crate
   files and `aether.embedded` on 111 lines in 53, plus the guide, CLAUDE.md,
   the MCP tools, and both harnesses.
-- A guest crate that other crates name needs an identity/runtime split like
-  ADR-0122's, so callers can name its types without linking its code (open
-  question 1).
+- A guest crate that other crates name gains an identity/runtime split like
+  ADR-0122's (§10).
 - A republish touches every live instance of a namespace, so its cost grows
   with the instance count.
 
@@ -255,8 +281,8 @@ own canonical path.
 
 Each step lands on its own:
 
-1. **Module cache**: `Module` value over `Blob`, compiled and parsed once
-   per hash; `ModuleCache` and every section re-parse move onto it.
+1. **Module cache**: `Module` built from a `Blob`, compiled and parsed once
+   per hash, assets checked in as blobs; `ModuleCache` and every section re-parse move onto it.
 2. **Publication table and admission**: native publications at boot; module
    publish with the §4 checks; #6851's link record becomes the manifest's
    links section.
@@ -275,21 +301,9 @@ step 3.
 
 ## Open questions
 
-1. **Naming a guest type without linking it.** Require an identity/runtime
-   split for guest crates (identity: `Addressable` markers with `NAMESPACE`,
-   cardinality, and rows; runtime: the `#[actor]` impl and `export!`), or
-   generate markers from a module's manifest? Recommended: the split, which
-   ADR-0066 and ADR-0122 already use for native caps.
-2. **A failed rehydrate during a republish.** Restart that instance on the
-   new module from `init` (recommended: every instance of a namespace runs
-   the published module), or roll the whole republish back across every
-   instance already swapped?
-3. **Boot actors.** Spawn at first publish and despawn at unpublish
+1. **Boot actors.** Spawn at first publish and despawn at unpublish
    (recommended), or fold boot into ordinary root singletons the module
-   declares?
-4. **Where the mail verbs land.** The registry owner's engine mailbox
-   (recommended; an engine system with a front door, not a parent), or a
-   dedicated capability?
+   declares and let callers `Spawn` them?
 
 ## Alternatives considered
 
