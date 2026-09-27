@@ -60,7 +60,7 @@ use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect,
     FrameReduction, FrameVerdict, ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers,
-    MouseButton, MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick, WindowId,
+    MouseButton, MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick,
 };
 use aether_math::Rgba;
 use aether_render::RenderCapability;
@@ -76,7 +76,10 @@ use aether_widget::{
 };
 use aether_window::SyntheticWindowCapability;
 
-const TEST_WINDOW_ID: WindowId = WindowId(1);
+/// The window the injected input events name.
+fn test_window() -> aether_data::ErasedActorPath {
+    aether_window::window_path(&LoadName::new("main").expect("a valid window name"))
+}
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window
 /// point), matching `widget_set` / `widget_text_alignment`.
@@ -291,7 +294,10 @@ fn load_editor_region(
     harness
         .execute(vec![(
             "region-wired",
-            HarnessOp::send_and_settle(&region, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+            HarnessOp::send_and_settle(
+                &region,
+                &Modifiers { window: test_window(), shift: false, ctrl: false, alt: false, meta: false },
+            ),
         )])
         .expect("the editor region wires");
 
@@ -420,12 +426,12 @@ fn tick_to_panel() -> NamedMail {
 
 /// A left mouse-button press at `(x, y)`.
 fn press(x: f32, y: f32) -> MouseButton {
-    MouseButton { window: TEST_WINDOW_ID, button: LEFT, x, y }
+    MouseButton { window: test_window(), button: LEFT, x, y }
 }
 
 /// A left mouse-button release at `(x, y)`.
 fn release(x: f32, y: f32) -> MouseButtonRelease {
-    MouseButtonRelease { window: TEST_WINDOW_ID, button: LEFT, x, y }
+    MouseButtonRelease { window: test_window(), button: LEFT, x, y }
 }
 
 fn button_child(subname: &str, label: &str, state: WidgetControlState) -> WidgetChildSpec {
@@ -902,13 +908,10 @@ fn assert_stationary_hover_survives_focus_traversal(
     // only a root-issued HoverLost may clear that fact.
     harness
         .execute(vec![
-            (
-                "focus_hovered_button",
-                HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }),
-            ),
+            ("focus_hovered_button", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
             (
                 "focus_away_without_motion",
-                HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }),
+                HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB }),
             ),
             ("capture_stationary_hover", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
@@ -1256,7 +1259,7 @@ fn slider_drag_renders_fill_at_track_fraction() {
     harness
         .execute(vec![
             ("drag_press", HarnessOp::send_and_settle(&panel, &press(110.0, 52.0))),
-            ("drag_move", HarnessOp::send_and_settle(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 })),
+            ("drag_move", HarnessOp::send_and_settle(&panel, &MouseMove { window: test_window(), x: 160.0, y: 52.0 })),
             ("drag_release", HarnessOp::send_and_settle(&panel, &release(160.0, 52.0))),
         ])
         .expect("slider drag");
@@ -1313,30 +1316,30 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
     // typing `Z`, distinguishes capture (`Z`) from a lost drag (`Zabcd`).
     harness
         .execute(vec![
-            ("press", HarnessOp::window_event(&synthetic, TEST_WINDOW_ID, &press(PANEL_X + PAD, PANEL_Y + 12.0))),
+            ("press", HarnessOp::window_event(&synthetic, test_window(), &press(PANEL_X + PAD, PANEL_Y + 12.0))),
             (
                 "cross-region-drag",
                 HarnessOp::window_event(
                     &synthetic,
-                    TEST_WINDOW_ID,
-                    &MouseMove { window: TEST_WINDOW_ID, x: 150.0, y: PANEL_Y + 12.0 },
+                    test_window(),
+                    &MouseMove { window: test_window(), x: 150.0, y: PANEL_Y + 12.0 },
                 ),
             ),
             (
                 "cross-region-release",
-                HarnessOp::window_event(&synthetic, TEST_WINDOW_ID, &release(150.0, PANEL_Y + 12.0)),
+                HarnessOp::window_event(&synthetic, test_window(), &release(150.0, PANEL_Y + 12.0)),
             ),
             (
                 "replace-selection",
                 HarnessOp::window_event(
                     &synthetic,
-                    TEST_WINDOW_ID,
-                    &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() },
+                    test_window(),
+                    &TextInput { window: test_window(), text: "Z".to_owned() },
                 ),
             ),
             (
                 "commit",
-                HarnessOp::window_event(&synthetic, TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER }),
+                HarnessOp::window_event(&synthetic, test_window(), &Key { window: test_window(), code: KEY_ENTER }),
             ),
         ])
         .expect("route real panel drag through editor shell");
@@ -1457,7 +1460,7 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
         .execute(vec![
             ("focus", HarnessOp::send_and_settle(&panel, &press(50.0, text_top + 10.0))),
             ("focus_up", HarnessOp::send_and_settle(&panel, &release(50.0, text_top + 10.0))),
-            ("type", HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "hix".to_owned() })),
+            ("type", HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "hix".to_owned() })),
             ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
@@ -1470,7 +1473,7 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
     harness
         .execute(vec![(
             "backspace",
-            HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_BACKSPACE }),
+            HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_BACKSPACE }),
         )])
         .expect("backspace");
 
@@ -1495,7 +1498,7 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
     );
 
     harness
-        .execute(vec![("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER }))])
+        .execute(vec![("commit", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER }))])
         .expect("commit");
 
     let log = panel_log_messages(&mut harness, panel);
@@ -1595,13 +1598,13 @@ fn focus_ring_follows_tab() {
 
     // Tab from no focus lands on the first focusable widget — the slider.
     harness
-        .execute(vec![("tab1", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }))])
+        .execute(vec![("tab1", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB }))])
         .expect("first tab");
     let on_slider = coverage(&capture(&mut harness, slider_edge()).results[0]);
 
     // Tab again advances focus to the radio group.
     harness
-        .execute(vec![("tab2", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }))])
+        .execute(vec![("tab2", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB }))])
         .expect("second tab");
     let verdict = capture(
         &mut harness,
@@ -1701,7 +1704,7 @@ fn hovering_overflowing_text_reveals_it_on_an_overlay_plate() {
             .count()
     };
 
-    let hover = |x: f32, y: f32| MouseMove { window: TEST_WINDOW_ID, x, y };
+    let hover = |x: f32, y: f32| MouseMove { window: test_window(), x, y };
     let (wide_top, _) = row_band(0, 1.0);
     let narrow_top = wide_top + ROW_HEIGHT + GAP;
     let field_top = narrow_top + ROW_HEIGHT + GAP;
@@ -1782,7 +1785,7 @@ fn a_press_on_nothing_focusable_clears_focus() {
     };
 
     harness
-        .execute(vec![("tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }))])
+        .execute(vec![("tab", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB }))])
         .expect("focus the slider");
     let focused = coverage(&capture(&mut harness, ring_edge()).results[0]);
 
@@ -1847,7 +1850,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
             ("focus_up", HarnessOp::send_and_settle(&panel, &release(50.0, text_top + 10.0))),
             (
                 "type",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: typed_text.to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: typed_text.to_owned() }),
             ),
             ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
@@ -1894,11 +1897,11 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                 "shift",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &Modifiers { window: TEST_WINDOW_ID, shift: true, ..Modifiers::default() },
+                    &Modifiers { window: test_window(), shift: true, ctrl: false, alt: false, meta: false },
                 ),
             ),
-            ("extend1", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
-            ("extend2", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
+            ("extend1", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_RIGHT })),
+            ("extend2", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_RIGHT })),
         ])
         .expect("measured place + Shift-extend");
 
@@ -1938,7 +1941,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                 HarnessOp::send_and_settle(
                     &panel,
                     &ImePreedit {
-                        window: TEST_WINDOW_ID,
+                        window: test_window(),
                         text: "üx".to_owned(),
                         cursor_begin: Some(0),
                         cursor_end: Some(2),
@@ -1991,7 +1994,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         .execute(vec![
             (
                 "commit_text",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "Z".to_owned() }),
             ),
             ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
@@ -2023,7 +2026,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     );
 
     harness
-        .execute(vec![("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER }))])
+        .execute(vec![("commit", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER }))])
         .expect("commit");
 
     let log = panel_log_messages(&mut harness, panel);
@@ -2074,26 +2077,23 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
         .execute(vec![
             ("focus", HarnessOp::send_and_settle(&panel, &press(content_x, PANEL_Y + 10.0))),
             ("focus_up", HarnessOp::send_and_settle(&panel, &release(content_x, PANEL_Y + 10.0))),
-            (
-                "line0",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "imx".to_owned() }),
-            ),
-            ("enter0", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
-            ("line1", HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "é".to_owned() })),
-            ("enter1", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("line0", HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "imx".to_owned() })),
+            ("enter0", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
+            ("line1", HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "é".to_owned() })),
+            ("enter1", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
             (
                 "line2",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "short".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "short".to_owned() }),
             ),
-            ("enter2", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("enter2", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
             (
                 "line3",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "last".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "last".to_owned() }),
             ),
-            ("enter3", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("enter3", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
             (
                 "line4",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "tail".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "tail".to_owned() }),
             ),
             ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle_glyphs", HarnessOp::advance(2)),
@@ -2112,12 +2112,12 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
                 "shift",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &Modifiers { window: TEST_WINDOW_ID, shift: true, ..Modifiers::default() },
+                    &Modifiers { window: test_window(), shift: true, ctrl: false, alt: false, meta: false },
                 ),
             ),
-            ("up", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
-            ("down", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
-            ("up_again", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("up", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
+            ("down", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
+            ("up_again", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
         ])
         .expect("measured multiline selection");
 
@@ -2220,7 +2220,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
                 HarnessOp::send_and_settle(
                     &panel,
                     &ImePreedit {
-                        window: TEST_WINDOW_ID,
+                        window: test_window(),
                         text: "üx".to_owned(),
                         cursor_begin: Some(0),
                         cursor_end: Some(2),
@@ -2298,16 +2298,16 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
         .execute(vec![
             (
                 "commit_preedit",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "Z".to_owned() }),
             ),
             (
                 "ctrl",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
+                    &Modifiers { window: test_window(), shift: false, ctrl: true, alt: false, meta: false },
                 ),
             ),
-            ("commit_area", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("commit_area", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
         ])
         .expect("commit multiline replacement");
 
@@ -2337,20 +2337,20 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
     harness
         .execute(vec![
             // Focus skips hidden + disabled and lands on the invalid slider.
-            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
             // Exercise sibling→sibling hover before settling on the button.
             (
                 "hover_slider",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &MouseMove { window: TEST_WINDOW_ID, x: PANEL_X + 20.0, y: slider_y + ROW_HEIGHT * 0.5 },
+                    &MouseMove { window: test_window(), x: PANEL_X + 20.0, y: slider_y + ROW_HEIGHT * 0.5 },
                 ),
             ),
             (
                 "hover_button",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &MouseMove { window: TEST_WINDOW_ID, x: PANEL_X + 20.0, y: hover_y + ROW_HEIGHT * 0.5 },
+                    &MouseMove { window: test_window(), x: PANEL_X + 20.0, y: hover_y + ROW_HEIGHT * 0.5 },
                 ),
             ),
             ("capture", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
@@ -2377,7 +2377,7 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
                 "hover_empty",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &MouseMove { window: TEST_WINDOW_ID, x: WINDOW_WIDTH as f32 - 2.0, y: WINDOW_HEIGHT as f32 - 2.0 },
+                    &MouseMove { window: test_window(), x: WINDOW_WIDTH as f32 - 2.0, y: WINDOW_HEIGHT as f32 - 2.0 },
                 ),
             ),
             (
@@ -2440,7 +2440,7 @@ fn a_pointer_press_leaves_no_focus_ring_while_tab_traversal_draws_one() {
             ("press", HarnessOp::send_and_settle(&panel, &press(PANEL_X + 20.0, pressed_y + ROW_HEIGHT * 0.5))),
             ("release", HarnessOp::send_and_settle(&panel, &release(PANEL_X + 20.0, pressed_y + ROW_HEIGHT * 0.5))),
             // Tab then walks focus onto the second, which is the case a ring is for.
-            ("tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("tab", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
             ("capture", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("pointer then keyboard focus");
@@ -2473,15 +2473,15 @@ fn drive_toggle_and_segmented(harness: &mut SubstrateHarness, panel: ActorRef<Wi
         .execute(vec![
             ("toggle_press", HarnessOp::send_and_settle(&panel, &press(PANEL_X + 12.0, toggle_y))),
             ("toggle_release", HarnessOp::send_and_settle(&panel, &release(PANEL_X + 12.0, toggle_y))),
-            ("space_press", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_SPACE })),
+            ("space_press", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_SPACE })),
             (
                 "space_release",
-                HarnessOp::send_and_settle(&panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_SPACE }),
+                HarnessOp::send_and_settle(&panel, &KeyRelease { window: test_window(), code: KEY_SPACE }),
             ),
-            ("enter_press", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("enter_press", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
             (
                 "enter_release",
-                HarnessOp::send_and_settle(&panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_ENTER }),
+                HarnessOp::send_and_settle(&panel, &KeyRelease { window: test_window(), code: KEY_ENTER }),
             ),
         ])
         .expect("toggle pointer and keyboard activation");
@@ -2490,8 +2490,8 @@ fn drive_toggle_and_segmented(harness: &mut SubstrateHarness, panel: ActorRef<Wi
         .execute(vec![
             ("segment_press", HarnessOp::send_and_settle(&panel, &press(middle_x, segment_y))),
             ("segment_release", HarnessOp::send_and_settle(&panel, &release(middle_x, segment_y))),
-            ("segment_right", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
-            ("segment_left", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_LEFT })),
+            ("segment_right", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_RIGHT })),
+            ("segment_left", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_LEFT })),
         ])
         .expect("segmented pointer and arrow selection");
 }
@@ -2506,46 +2506,52 @@ fn drive_numeric_lifecycle(harness: &mut SubstrateHarness, panel: ActorRef<Widge
                 "ctrl_on",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
+                    &Modifiers { window: test_window(), shift: false, ctrl: true, alt: false, meta: false },
                 ),
             ),
-            ("select_all", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            ("select_all", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_A })),
             (
                 "ctrl_off",
-                HarnessOp::send_and_settle(&panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+                HarnessOp::send_and_settle(
+                    &panel,
+                    &Modifiers { window: test_window(), shift: false, ctrl: false, alt: false, meta: false },
+                ),
             ),
             (
                 "type_numeric",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "12.4".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "12.4".to_owned() }),
             ),
-            ("move_left", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_LEFT })),
-            ("backspace", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_BACKSPACE })),
+            ("move_left", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_LEFT })),
+            ("backspace", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_BACKSPACE })),
             (
                 "replace_decimal",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: ".".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: ".".to_owned() }),
             ),
-            ("commit_numeric", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
-            ("step_up", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
-            ("step_down", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("commit_numeric", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_ENTER })),
+            ("step_up", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_UP })),
+            ("step_down", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
             (
                 "clipboard_ctrl_on",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
+                    &Modifiers { window: test_window(), shift: false, ctrl: true, alt: false, meta: false },
                 ),
             ),
-            ("clipboard_select", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
-            ("copy", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_C })),
+            ("clipboard_select", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_A })),
+            ("copy", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_C })),
         ])
         .expect("numeric typed, step, and copy lifecycle");
     assert_eq!(clipboard_text(harness), "12.5", "Ctrl+C copies the selected canonical buffer");
     harness
         .execute(vec![
-            ("cut", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_X })),
-            ("paste", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_V })),
+            ("cut", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_X })),
+            ("paste", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_V })),
             (
                 "clipboard_ctrl_off",
-                HarnessOp::send_and_settle(&panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+                HarnessOp::send_and_settle(
+                    &panel,
+                    &Modifiers { window: test_window(), shift: false, ctrl: false, alt: false, meta: false },
+                ),
             ),
         ])
         .expect("numeric cut and paste lifecycle");
@@ -2561,17 +2567,20 @@ fn drive_blur_and_blocked_states(harness: &mut SubstrateHarness, panel: ActorRef
                 "invalid_ctrl_on",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
+                    &Modifiers { window: test_window(), shift: false, ctrl: true, alt: false, meta: false },
                 ),
             ),
-            ("invalid_select", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            ("invalid_select", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_A })),
             (
                 "invalid_ctrl_off",
-                HarnessOp::send_and_settle(&panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+                HarnessOp::send_and_settle(
+                    &panel,
+                    &Modifiers { window: test_window(), shift: false, ctrl: false, alt: false, meta: false },
+                ),
             ),
             (
                 "invalid_text",
-                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "-".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: test_window(), text: "-".to_owned() }),
             ),
             (
                 "blur_press",
@@ -2588,7 +2597,7 @@ fn drive_blur_and_blocked_states(harness: &mut SubstrateHarness, panel: ActorRef
                 "readonly_release",
                 HarnessOp::send_and_settle(&panel, &release(PANEL_X + segment_width * 2.5, readonly_y)),
             ),
-            ("readonly_right", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
+            ("readonly_right", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_RIGHT })),
         ])
         .expect("blur and blocked state mutations");
 }
@@ -2892,21 +2901,21 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
                 "inner_only",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 },
+                    &MouseWheel { window: test_window(), delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 },
                 ),
             ),
             (
                 "split_inner_outer",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -30.0, x: 20.0, y: 20.0 },
+                    &MouseWheel { window: test_window(), delta_x: 0.0, delta_y: -30.0, x: 20.0, y: 20.0 },
                 ),
             ),
             (
                 "terminal_residual",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 },
+                    &MouseWheel { window: test_window(), delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 },
                 ),
             ),
         ])
@@ -2974,21 +2983,21 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
                 "reverse_both",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: 80.0, x: 20.0, y: 20.0 },
+                    &MouseWheel { window: test_window(), delta_x: 0.0, delta_y: 80.0, x: 20.0, y: 20.0 },
                 ),
             ),
             (
                 "horizontal_independent",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: -50.0, delta_y: 0.0, x: 20.0, y: 20.0 },
+                    &MouseWheel { window: test_window(), delta_x: -50.0, delta_y: 0.0, x: 20.0, y: 20.0 },
                 ),
             ),
             (
                 "sibling_viewport",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -12.0, x: 20.0, y: 80.0 },
+                    &MouseWheel { window: test_window(), delta_x: 0.0, delta_y: -12.0, x: 20.0, y: 80.0 },
                 ),
             ),
         ])
@@ -3051,13 +3060,13 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     };
     harness
         .execute(vec![
-            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("page", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
+            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("page", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_PAGE_DOWN })),
             (
                 "hover_selected",
                 HarnessOp::send_and_settle(
                     &panel,
-                    &MouseMove { window: TEST_WINDOW_ID, x: PANEL_X + 20.0, y: PANEL_Y + ROW_HEIGHT * 4.5 },
+                    &MouseMove { window: test_window(), x: PANEL_X + 20.0, y: PANEL_Y + ROW_HEIGHT * 4.5 },
                 ),
             ),
             ("warn", HarnessOp::send_and_settle(&list, &SetWidgetState { state: warning })),
@@ -3100,7 +3109,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         harness
             .execute(vec![(
                 "tail_page",
-                HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN }),
+                HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_PAGE_DOWN }),
             )])
             .expect("page toward virtual-list tail");
     }
@@ -3110,8 +3119,8 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         .count();
     harness
         .execute(vec![
-            ("tail_noop_one", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
-            ("tail_noop_two", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
+            ("tail_noop_one", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_PAGE_DOWN })),
+            ("tail_noop_two", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_PAGE_DOWN })),
             ("tail_capture", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("tail clamp and capture");

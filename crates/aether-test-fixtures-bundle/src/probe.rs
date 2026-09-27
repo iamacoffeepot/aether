@@ -52,6 +52,7 @@
 // `self`; it keeps `&mut self` to match the `#[handler]` dispatch ABI.
 // `ProbeWithConfig::on_config_query` takes `&mut self` for the same reason.
 #![allow(clippy::unused_self)]
+#![allow(clippy::needless_pass_by_value)] // aether-suppression-request: the ADR-0033 dispatch ABI hands a handler its decoded mail by value, and the window input kinds stopped being `Copy` when their window field became an actor path — the same allow `http_handler`, `inline_child`, and `tcp_load_probe` already carry
 
 use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Key, TextInput, Tick};

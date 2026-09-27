@@ -5,7 +5,8 @@
 //! A typed path is an [`ErasedActorPath`] under a compile-time claim: that an
 //! `R` lives at the text, or an actor covering the protocol `P`. The claim is
 //! written by type constructors whose bounds check the topology
-//! (`ActorPath::<R>::instance`, `ActorPath::<C>::child`), and narrowed only
+//! (`ActorPath::<R>::root`, `ActorPath::<R>::instance`,
+//! `ActorPath::<C>::child`), and narrowed only
 //! where the compiler proves coverage. It crosses the wire as the path text
 //! alone; a decoded path is canonical, a decoded `ActorPath<R>`'s leaf names
 //! an `R`, and a decoded `ProtocolPath<P>` is checked at decode against the

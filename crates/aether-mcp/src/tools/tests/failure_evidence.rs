@@ -153,19 +153,22 @@ async fn invalid_and_oversized_requests_make_no_observations() {
 async fn invalid_frame_boundaries_make_no_observations() {
     let mut invalid_window = args();
     invalid_window.frame =
-        Some(FailureEvidenceFrameArgs { window_id: "not-a-window".into(), scale: None, max_dimension: None });
-    assert_invalid_without_observations(invalid_window, "window_id").await;
+        Some(FailureEvidenceFrameArgs { window: "not-a-window".into(), scale: None, max_dimension: None });
+    assert_invalid_without_observations(invalid_window, "window:").await;
 
     for scale in [0.0, -0.1, 1.1, f32::INFINITY, f32::NAN] {
         let mut request = args();
-        request.frame =
-            Some(FailureEvidenceFrameArgs { window_id: "17".into(), scale: Some(scale), max_dimension: None });
+        request.frame = Some(FailureEvidenceFrameArgs {
+            window: "aether.window/:main".into(),
+            scale: Some(scale),
+            max_dimension: None,
+        });
         assert_invalid_without_observations(request, "scale must be finite and in (0.0, 1.0]").await;
     }
 
     let mut zero_dimension = args();
     zero_dimension.frame =
-        Some(FailureEvidenceFrameArgs { window_id: "17".into(), scale: None, max_dimension: Some(0) });
+        Some(FailureEvidenceFrameArgs { window: "aether.window/:main".into(), scale: None, max_dimension: Some(0) });
     assert_invalid_without_observations(zero_dimension, "max_dimension must be greater than zero").await;
 }
 
@@ -178,15 +181,18 @@ fn exact_string_and_frame_boundaries_are_accepted() {
     request.component_addresses = vec!["c".repeat(MAX_ADDRESS_BYTES)];
     request.kinds = vec!["k".repeat(MAX_KIND_NAME_BYTES)];
     request.frame = Some(FailureEvidenceFrameArgs {
-        window_id: "17".into(),
+        window: "aether.window/:main".into(),
         scale: Some(f32::MIN_POSITIVE),
         max_dimension: Some(1),
     });
     validate_failure_evidence_args(&mut request).expect("documented byte and frame boundaries are inclusive");
 
     let mut full_scale = args();
-    full_scale.frame =
-        Some(FailureEvidenceFrameArgs { window_id: "17".into(), scale: Some(1.0), max_dimension: Some(u32::MAX) });
+    full_scale.frame = Some(FailureEvidenceFrameArgs {
+        window: "aether.window/:main".into(),
+        scale: Some(1.0),
+        max_dimension: Some(u32::MAX),
+    });
     validate_failure_evidence_args(&mut full_scale).expect("full scale and maximum dimension are valid");
 }
 
@@ -386,10 +392,10 @@ fn oversized_json_uses_the_whole_response_spill_before_images() {
 
 #[test]
 fn frame_argument_builder_forbids_mutation_checks_and_host_writes() {
-    let capture = failure_evidence_capture_args(ENGINE_ID.into(), "mbx-AAAA-AAAA-AAAA".into(), Some(0.5), Some(320));
+    let capture = failure_evidence_capture_args(ENGINE_ID.into(), "aether.window/:main".into(), Some(0.5), Some(320));
 
     assert_eq!(capture.engine_id.as_deref(), Some(ENGINE_ID));
-    assert_eq!(capture.window_id, "mbx-AAAA-AAAA-AAAA");
+    assert_eq!(capture.window, "aether.window/:main");
     assert!(capture.mails.is_empty());
     assert!(capture.after_mails.is_empty());
     assert!(capture.checks.is_empty());
@@ -426,7 +432,8 @@ fn frame_projection_requires_exactly_one_inline_image() {
 #[tokio::test]
 async fn multiple_frame_images_are_recorded_as_an_error_and_not_emitted() {
     let mut request = args();
-    request.frame = Some(FailureEvidenceFrameArgs { window_id: "42".into(), scale: None, max_dimension: None });
+    request.frame =
+        Some(FailureEvidenceFrameArgs { window: "aether.window/:main".into(), scale: None, max_dimension: None });
     let mut source = FakeSource::with_replies([
         json_reply(serde_json::json!({"alive": []})),
         FakeReply {
@@ -459,8 +466,11 @@ async fn multiple_frame_images_are_recorded_as_an_error_and_not_emitted() {
 #[tokio::test]
 async fn frame_is_non_mutating_and_json_precedes_the_inline_png() {
     let mut request = args();
-    request.frame =
-        Some(FailureEvidenceFrameArgs { window_id: "42".into(), scale: Some(0.5), max_dimension: Some(320) });
+    request.frame = Some(FailureEvidenceFrameArgs {
+        window: "aether.window/:main".into(),
+        scale: Some(0.5),
+        max_dimension: Some(320),
+    });
     let image = ContentBlock::image("cG5n", "image/png");
     let mut source = FakeSource::with_replies([
         json_reply(serde_json::json!({"alive": []})),
@@ -487,7 +497,7 @@ async fn frame_is_non_mutating_and_json_precedes_the_inline_png() {
         source.calls[1],
         FailureEvidenceQuery::Frame {
             engine_id: ENGINE_ID.into(),
-            window_id: "42".into(),
+            window: "aether.window/:main".into(),
             scale: Some(0.5),
             max_dimension: Some(320),
         }

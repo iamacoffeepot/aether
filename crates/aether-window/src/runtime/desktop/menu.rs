@@ -9,28 +9,32 @@
 //!
 //! muda's item ids are opaque strings on a process-wide event channel, while
 //! [`WindowMenuActivated`](crate::WindowMenuActivated) is per window and
-//! carries the caller's own `u32`. The bridge is the `"<window>:<item>"`
-//! encoding below: every id this module mints carries the pair, and a click on
-//! anything else — a muda predefined item, a menu some other library installed
-//! — parses to `None` and is dropped rather than mis-attributed.
+//! carries the caller's own `u32`. The bridge is the `"<item>:<window path>"`
+//! encoding below: every id this module mints carries the pair, the item first
+//! because a path holds `:` itself, and a click on anything else — a muda
+//! predefined item, a menu some other library installed — parses to `None` or
+//! to a window the manager does not hold, and is dropped rather than
+//! mis-attributed.
 
-use crate::WindowId;
+use aether_data::ErasedActorPath;
 
 /// The muda item id for one caller-numbered item in one window's menu.
 /// Only the platforms that install a menu build one; the parser below is
 /// unconditional because a foreign id can arrive from any menu library.
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-pub(super) fn menu_item_id(window: WindowId, item: u32) -> String {
-    format!("{}:{item}", window.0)
+pub(super) fn menu_item_id(window: &ErasedActorPath, item: u32) -> String {
+    format!("{item}:{window}")
 }
 
 /// Recover the window and caller item number from a muda item id.
 ///
-/// `None` for any id this module did not mint — muda's channel is
-/// process-wide, so a foreign id is expected traffic, not an error.
-pub(super) fn parse_menu_item_id(raw: &str) -> Option<(WindowId, u32)> {
-    let (window, item) = raw.split_once(':')?;
-    Some((WindowId(window.parse().ok()?), item.parse().ok()?))
+/// `None` for an id that is not an item number and an actor path — muda's
+/// channel is process-wide, so a foreign id is expected traffic, not an error.
+/// A foreign id that happens to parse names a window the manager does not
+/// hold, and the manager drops it there.
+pub(super) fn parse_menu_item_id(raw: &str) -> Option<(ErasedActorPath, u32)> {
+    let (item, window) = raw.split_once(':')?;
+    Some((ErasedActorPath::new(window).ok()?, item.parse().ok()?))
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -41,8 +45,10 @@ mod platform {
     use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use winit::window::Window;
 
+    use aether_data::ErasedActorPath;
+
     use super::menu_item_id;
-    use crate::{WindowId, WindowMenu};
+    use crate::WindowMenu;
 
     thread_local! {
         /// The bar currently installed, kept alive for as long as the platform
@@ -79,7 +85,7 @@ mod platform {
         Ok(app)
     }
 
-    fn build(app_name: &str, window: WindowId, menus: &[WindowMenu]) -> Result<Menu, String> {
+    fn build(app_name: &str, window: &ErasedActorPath, menus: &[WindowMenu]) -> Result<Menu, String> {
         let bar = Menu::new();
 
         #[cfg(target_os = "macos")]
@@ -128,7 +134,7 @@ mod platform {
     pub(in crate::runtime::desktop) fn apply_menu(
         app_name: &str,
         native: &Window,
-        window: WindowId,
+        window: &ErasedActorPath,
         menus: &[WindowMenu],
     ) -> Result<(), String> {
         let bar = build(app_name, window, menus)?;
@@ -180,14 +186,15 @@ mod platform {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod platform {
+    use aether_data::ErasedActorPath;
     use winit::window::Window;
 
-    use crate::{WindowId, WindowMenu};
+    use crate::WindowMenu;
 
     pub(in crate::runtime::desktop) fn apply_menu(
         _app_name: &str,
         _native: &Window,
-        _window: WindowId,
+        _window: &ErasedActorPath,
         _menus: &[WindowMenu],
     ) -> Result<(), String> {
         Err("no native menu bar on this platform — muda drives macOS and Windows only; draw an in-window menu bar \
@@ -204,22 +211,24 @@ pub(super) use platform::{apply_menu, drain_menu_activations};
 
 #[cfg(test)]
 mod tests {
+    use aether_data::LoadName;
+
     use super::{menu_item_id, parse_menu_item_id};
-    use crate::WindowId;
 
     /// muda's event channel is process-wide and its ids are opaque strings, so
     /// this encoding is the only thing that tells a click on *our* item from a
     /// click on a predefined item, a menu another library installed, or an
-    /// item minted for a different window. A drop-on-unrecognised parse is
-    /// what keeps a foreign id from being read as window 0 / item 0 — which is
-    /// a real window and a real item number.
+    /// item minted for a different window. The window path holds `:` itself,
+    /// so the item leads and the split is at the first `:`; a parse that split
+    /// anywhere else would hand back a truncated path or no item at all.
     #[test]
     fn only_ids_this_module_minted_resolve_to_a_window_and_item() {
-        for (window, item) in [(WindowId(0), 0), (WindowId(u64::MAX), u32::MAX), (WindowId(0xA37E), 12)] {
-            assert_eq!(parse_menu_item_id(&menu_item_id(window, item)), Some((window, item)));
+        for (name, item) in [("main", 0), ("tools", u32::MAX), ("palette", 12)] {
+            let window = crate::window_path(&LoadName::new(name).expect("fixture window name"));
+            assert_eq!(parse_menu_item_id(&menu_item_id(&window, item)), Some((window, item)));
         }
 
-        for foreign in ["", "quit", "3", "3:", ":7", "3:7:9", "-3:7", "3:-7", "3:notanumber"] {
+        for foreign in ["", "quit", "3", "3:", ":aether.window", "-3:aether.window", "x:aether.window", "3:two words"] {
             assert_eq!(parse_menu_item_id(foreign), None, "foreign menu id {foreign:?} must not resolve");
         }
     }

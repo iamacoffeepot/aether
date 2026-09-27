@@ -73,10 +73,10 @@ has not been created yet, the first such capture only triggers texture creation;
 wait for that settled result and repeat the capture.
 
 ```jsonc
-// capture_frame — window_id is required; it is the tagged mbx- string
-// aether.window.list reports for the target window.
+// capture_frame — window is required; it is the window's actor path
+// as aether.window.list reports it.
 {
-  "window_id": "mbx-…",
+  "window": "aether.window/aether.window.instance:main",
   "mails": [
     { "address": "aether.text", "kind_name": "aether.text.draw",
       "params": { "font_id": 0, "text": "hello aether", "size_pixels": 32.0,

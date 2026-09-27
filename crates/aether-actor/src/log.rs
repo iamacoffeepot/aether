@@ -122,15 +122,14 @@ impl ActorLogRing {
 
     /// Push one event onto the ring, stamping it with the next-
     /// available `sequence` + caller-supplied `timestamp_unix_ms`.
-    /// `origin` is left `None` here — the entry's *owner* is the
-    /// actor; the aggregator stamps `origin = Some(responder)` at
-    /// merge time (`EngineLogs` fan-out) so the wire reply carries
-    /// attribution without each ring duplicating its own id.
-    /// Evicts the oldest entry when the ring is at cap.
+    /// The entry's owner is the actor whose ring it lands in, which is
+    /// also the responder a tail reply comes from, so the entry carries
+    /// no attribution of its own. Evicts the oldest entry when the ring
+    /// is at cap.
     pub fn push(&mut self, level: u8, target: String, message: String, timestamp_unix_ms: u64) {
         let sequence = self.sequence;
         self.sequence += 1;
-        let entry = LogEntry { timestamp_unix_ms, level, target, message, sequence, origin: None };
+        let entry = LogEntry { timestamp_unix_ms, level, target, message, sequence };
         if self.ring.len() == self.ring_cap {
             self.ring.pop_front();
         }
@@ -514,9 +513,6 @@ mod tests {
         assert_eq!(entries[2].sequence, 3);
         assert_eq!(next_since, 3);
         assert_eq!(truncated_before, None);
-        // ADR-0081 contract: tail entries carry origin = None; the
-        // aggregator stamps it at merge time.
-        assert_eq!(entries[0].origin, None);
     }
 
     #[test]

@@ -7,6 +7,8 @@
 //! shell-first: a probe loaded before the shell exists announces into nothing
 //! and is never routed to.
 
+#![allow(clippy::needless_pass_by_value)] // aether-suppression-request: the ADR-0033 dispatch ABI hands a handler its decoded mail by value, and the window input kinds stopped being `Copy` when their window field became an actor path — the same allow `http_handler`, `inline_child`, and `tcp_load_probe` already carry
+
 use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,

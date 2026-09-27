@@ -2,7 +2,7 @@ use super::{
     EngineId, EngineNames, KindId, MailId, MailIdJson, MailNodeJson, MailNodeWire, MailboxId, McpError, Tag, Uuid,
     descriptors, kind_id_from_parts, tagged_id,
 };
-use aether_kinds::WindowId;
+use aether_data::ErasedActorPath;
 use std::collections::{HashMap, HashSet};
 
 /// Parse a UUID-string `engine_id` (from `list_engines` /
@@ -21,20 +21,22 @@ pub(super) fn parse_mailbox_id(s: &str) -> Result<MailboxId, McpError> {
         .map_err(|e| McpError::invalid_params(format!("mailbox_id: {e}"), None))
 }
 
-/// Parse a `capture_frame` `window_id`: the tagged `mbx-…` string
-/// `aether.window.list` reports, or a raw decimal `u64`.
+/// Parse a `capture_frame` `window`: the window's actor path as
+/// `aether.window.list` reports it, or its short form.
 ///
-/// A window id is a mailbox id — the window actor's ADR-0099 lineage fold
-/// (ADR-0164) — so it carries the mailbox tag. The decimal form stays
-/// accepted for a synthetic or harness-scale id, but a real one must
-/// arrive tagged: near 2^60 it is not a value a JSON number can carry to a
-/// consumer that parses it as a double (iamacoffeepot/aether#4344).
-pub(super) fn parse_window_id(s: &str) -> Result<WindowId, McpError> {
-    if let Ok(id) = tagged_id::decode_with_tag(s, Tag::Mailbox) {
-        return Ok(WindowId(id));
-    }
-    s.parse::<u64>().map(WindowId).map_err(|_| {
-        McpError::invalid_params(format!("window_id: not a tagged `mbx-…` id or a decimal u64: {s:?}"), None)
+/// A window is a child of the window manager, so its path has more than one
+/// step; a one-step path, which is what a tagged `mbx-…` id or a decimal
+/// parses as, can never name one. The engine proves the path when the
+/// capture arrives.
+pub(super) fn parse_window_path(s: &str) -> Result<ErasedActorPath, McpError> {
+    ErasedActorPath::new(s).ok().filter(|path| path.as_str().contains('/')).ok_or_else(|| {
+        McpError::invalid_params(
+            format!(
+                "window: expected the window's actor path as aether.window.list reports it \
+                 (aether.window/aether.window.instance:NAME) or its short form (aether.window/:NAME), got {s:?}"
+            ),
+            None,
+        )
     })
 }
 

@@ -13,7 +13,9 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::window::{Window, WindowId as WinitWindowId};
 
-use crate::{WindowId, WindowMode, WindowSpec};
+use aether_data::ErasedActorPath;
+
+use crate::{WindowMode, WindowSpec};
 
 use super::{
     DesktopWindowCapabilityState, DesktopWindowLifecycle, WindowHostAction, WindowHostEffect, menu, resolve_fullscreen,
@@ -23,13 +25,13 @@ use crate::DesktopWindowCapability;
 /// Semantic seam between the window application and chassis-owned render,
 /// settlement, and process-lifecycle integration.
 pub trait DesktopWindowIntegration {
-    fn attach_window(&mut self, id: WindowId, window: Arc<Window>) -> Result<(), String>;
+    fn attach_window(&mut self, path: ErasedActorPath, window: Arc<Window>) -> Result<(), String>;
 
-    fn detach_window(&mut self, id: WindowId);
+    fn detach_window(&mut self, path: &ErasedActorPath);
 
-    fn windows_dirty(&mut self, windows: &[WindowId]);
+    fn windows_dirty(&mut self, windows: &[ErasedActorPath]);
 
-    fn window_occluded(&mut self, _id: WindowId, _occluded: bool) {}
+    fn window_occluded(&mut self, _path: &ErasedActorPath, _occluded: bool) {}
 
     fn request_shutdown(&mut self);
 
@@ -58,7 +60,7 @@ pub enum DesktopWindowUserEvent {
 pub struct DesktopWindowApplication<I> {
     window_slot: PumpedSlot<DesktopWindowCapability>,
     integration: I,
-    pending_dirty: BTreeSet<WindowId>,
+    pending_dirty: BTreeSet<ErasedActorPath>,
     shutdown_requested: bool,
 }
 
@@ -102,16 +104,17 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         event_loop: &ActiveEventLoop,
         actions: Vec<WindowHostAction>,
         effects: Vec<WindowHostEffect>,
-    ) -> (BTreeSet<WindowId>, bool) {
+    ) -> (BTreeSet<ErasedActorPath>, bool) {
         let mut dirty = BTreeSet::new();
         let mut should_shutdown = false;
         self.apply_effects(effects, &mut dirty, &mut should_shutdown);
 
         for action in actions {
             match action {
-                WindowHostAction::Create { id, .. } => match action.realize(event_loop) {
+                WindowHostAction::Create { ref path, .. } => match action.realize(event_loop) {
                     Ok(Some(window)) => {
-                        let staged = self.window_slot.host_turn(|state, _ctx| state.stage_created_window(id, window));
+                        let staged =
+                            self.window_slot.host_turn(|state, _ctx| state.stage_created_window(path.clone(), window));
                         match staged {
                             Some(Ok(created)) => {
                                 self.apply_effects(vec![created], &mut dirty, &mut should_shutdown);
@@ -119,7 +122,7 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
                             Some(Err(error)) => {
                                 let effects = self
                                     .window_slot
-                                    .host_turn(|state, _ctx| state.fail_window_creation(id, error))
+                                    .host_turn(|state, _ctx| state.fail_window_creation(path, error))
                                     .unwrap_or_default();
                                 self.apply_effects(effects, &mut dirty, &mut should_shutdown);
                             }
@@ -130,16 +133,21 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
                     Err(error) => {
                         let effects = self
                             .window_slot
-                            .host_turn(|state, _ctx| state.fail_window_creation(id, error))
+                            .host_turn(|state, _ctx| state.fail_window_creation(path, error))
                             .unwrap_or_default();
                         self.apply_effects(effects, &mut dirty, &mut should_shutdown);
                     }
                 },
-                WindowHostAction::Close { id } => {
-                    should_shutdown |=
-                        apply_simple_effect(&mut self.integration, WindowHostEffect::Closing { id }, &mut dirty);
-                    let effects =
-                        self.window_slot.host_turn(|state, ctx| state.finish_window_close(id, ctx)).unwrap_or_default();
+                WindowHostAction::Close { path } => {
+                    should_shutdown |= apply_simple_effect(
+                        &mut self.integration,
+                        WindowHostEffect::Closing { path: path.clone() },
+                        &mut dirty,
+                    );
+                    let effects = self
+                        .window_slot
+                        .host_turn(|state, ctx| state.finish_window_close(&path, ctx))
+                        .unwrap_or_default();
                     self.apply_effects(effects, &mut dirty, &mut should_shutdown);
                 }
             }
@@ -151,17 +159,17 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
     fn apply_effects(
         &mut self,
         effects: Vec<WindowHostEffect>,
-        dirty: &mut BTreeSet<WindowId>,
+        dirty: &mut BTreeSet<ErasedActorPath>,
         should_shutdown: &mut bool,
     ) {
         let mut effects = VecDeque::from(effects);
         while let Some(effect) = effects.pop_front() {
             match effect {
-                WindowHostEffect::Created { id, window } => {
-                    let attachment = self.integration.attach_window(id, Arc::clone(&window));
+                WindowHostEffect::Created { path, window } => {
+                    let attachment = self.integration.attach_window(path.clone(), Arc::clone(&window));
                     let follow_up = self
                         .window_slot
-                        .host_turn(|state, ctx| state.finish_window_attachment(id, attachment, ctx))
+                        .host_turn(|state, ctx| state.finish_window_attachment(&path, attachment, ctx))
                         .unwrap_or_default();
                     effects.extend(follow_up);
                 }
@@ -260,8 +268,8 @@ impl<I: DesktopWindowIntegration> ApplicationHandler<DesktopWindowUserEvent> for
         self.turn(event_loop, event == DesktopWindowUserEvent::Quit, false, |_, _| {});
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WinitWindowId, event: WindowEvent) {
-        self.turn(event_loop, false, false, |state, ctx| state.window_event(window_id, event, ctx));
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, winit_id: WinitWindowId, event: WindowEvent) {
+        self.turn(event_loop, false, false, |state, ctx| state.window_event(winit_id, event, ctx));
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -271,31 +279,31 @@ impl<I: DesktopWindowIntegration> ApplicationHandler<DesktopWindowUserEvent> for
 
 #[derive(Default)]
 struct WindowSnapshot {
-    live: Vec<WindowId>,
-    visible: Vec<(WindowId, Arc<Window>)>,
+    live: Vec<ErasedActorPath>,
+    visible: Vec<(ErasedActorPath, Arc<Window>)>,
 }
 
 impl WindowSnapshot {
-    fn frame_windows(&self, dirty: &BTreeSet<WindowId>, force: bool) -> Vec<WindowId> {
+    fn frame_windows(&self, dirty: &BTreeSet<ErasedActorPath>, force: bool) -> Vec<ErasedActorPath> {
         if force {
             return self.live.clone();
         }
-        self.visible.iter().map(|(id, _)| *id).filter(|id| dirty.contains(id)).collect()
+        self.visible.iter().map(|(path, _)| path).filter(|path| dirty.contains(path)).cloned().collect()
     }
 }
 
 impl DesktopWindowCapabilityState {
     fn application_snapshot(&self) -> WindowSnapshot {
         let mut snapshot = WindowSnapshot::default();
-        for (id, state) in &self.windows {
+        for (path, state) in &self.windows {
             if state.lifecycle != DesktopWindowLifecycle::Live {
                 continue;
             }
-            snapshot.live.push(*id);
+            snapshot.live.push(path.clone());
             if !state.occluded
-                && let Some(window) = self.native_windows.get(id)
+                && let Some(window) = self.native_windows.get(path)
             {
-                snapshot.visible.push((*id, Arc::clone(window)));
+                snapshot.visible.push((path.clone(), Arc::clone(window)));
             }
         }
         snapshot
@@ -364,15 +372,15 @@ impl WindowHostAction {
 fn apply_simple_effect<I: DesktopWindowIntegration>(
     integration: &mut I,
     effect: WindowHostEffect,
-    dirty: &mut BTreeSet<WindowId>,
+    dirty: &mut BTreeSet<ErasedActorPath>,
 ) -> bool {
     match effect {
         WindowHostEffect::Created { .. } => unreachable!("created effects require actor completion"),
-        WindowHostEffect::Closing { id } => integration.detach_window(id),
-        WindowHostEffect::Dirty { id } => {
-            dirty.insert(id);
+        WindowHostEffect::Closing { path } => integration.detach_window(&path),
+        WindowHostEffect::Dirty { path } => {
+            dirty.insert(path);
         }
-        WindowHostEffect::Occluded { id, occluded } => integration.window_occluded(id, occluded),
+        WindowHostEffect::Occluded { path, occluded } => integration.window_occluded(&path, occluded),
         WindowHostEffect::LastWindowClosed => return true,
     }
     false
@@ -384,30 +392,36 @@ mod tests {
 
     use super::*;
 
+    fn window(name: &str) -> ErasedActorPath {
+        crate::window_path(&aether_data::LoadName::new(name).expect("fixture window name"))
+    }
+
+    /// The window name a spy records: the key after the path's last `:`.
+    fn name(path: &ErasedActorPath) -> &str {
+        path.as_str().rsplit_once(':').map_or(path.as_str(), |(_, name)| name)
+    }
+
     #[derive(Default)]
     struct SpyIntegration {
         calls: Vec<String>,
     }
 
     impl DesktopWindowIntegration for SpyIntegration {
-        fn attach_window(&mut self, id: WindowId, _window: Arc<Window>) -> Result<(), String> {
-            self.calls.push(format!("attach:{}", id.0));
+        fn attach_window(&mut self, path: ErasedActorPath, _window: Arc<Window>) -> Result<(), String> {
+            self.calls.push(format!("attach:{}", name(&path)));
             Ok(())
         }
 
-        fn detach_window(&mut self, id: WindowId) {
-            self.calls.push(format!("detach:{}", id.0));
+        fn detach_window(&mut self, path: &ErasedActorPath) {
+            self.calls.push(format!("detach:{}", name(path)));
         }
 
-        fn windows_dirty(&mut self, windows: &[WindowId]) {
-            self.calls.push(format!(
-                "dirty:{}",
-                windows.iter().map(|window| window.0.to_string()).collect::<Vec<_>>().join(","),
-            ));
+        fn windows_dirty(&mut self, windows: &[ErasedActorPath]) {
+            self.calls.push(format!("dirty:{}", windows.iter().map(name).collect::<Vec<_>>().join(",")));
         }
 
-        fn window_occluded(&mut self, id: WindowId, occluded: bool) {
-            self.calls.push(format!("occluded:{}:{occluded}", id.0));
+        fn window_occluded(&mut self, path: &ErasedActorPath, occluded: bool) {
+            self.calls.push(format!("occluded:{}:{occluded}", name(path)));
         }
 
         fn request_shutdown(&mut self) {
@@ -434,27 +448,27 @@ mod tests {
         let mut integration = SpyIntegration::default();
         let mut dirty = BTreeSet::new();
 
-        apply_simple_effect(&mut integration, WindowHostEffect::Closing { id: WindowId(4) }, &mut dirty);
+        apply_simple_effect(&mut integration, WindowHostEffect::Closing { path: window("d") }, &mut dirty);
         let should_shutdown = apply_simple_effect(&mut integration, WindowHostEffect::LastWindowClosed, &mut dirty);
         if should_shutdown {
             let mut shutdown_requested = false;
             request_shutdown_once(&mut integration, &mut shutdown_requested);
         }
 
-        assert_eq!(integration.calls, ["detach:4", "shutdown"]);
+        assert_eq!(integration.calls, ["detach:d", "shutdown"]);
     }
 
     #[test]
-    fn dirty_windows_coalesce_in_identity_order() {
+    fn dirty_windows_coalesce_in_path_order() {
         let mut integration = SpyIntegration::default();
         let mut dirty = BTreeSet::new();
-        for id in [WindowId(8), WindowId(2), WindowId(8)] {
-            apply_simple_effect(&mut integration, WindowHostEffect::Dirty { id }, &mut dirty);
+        for name in ["h", "b", "h"] {
+            apply_simple_effect(&mut integration, WindowHostEffect::Dirty { path: window(name) }, &mut dirty);
         }
 
         integration.windows_dirty(&dirty.into_iter().collect::<Vec<_>>());
 
-        assert_eq!(integration.calls, ["dirty:2,8"]);
+        assert_eq!(integration.calls, ["dirty:b,h"]);
     }
 
     #[test]
@@ -464,11 +478,11 @@ mod tests {
 
         apply_simple_effect(
             &mut integration,
-            WindowHostEffect::Occluded { id: WindowId(3), occluded: true },
+            WindowHostEffect::Occluded { path: window("c"), occluded: true },
             &mut dirty,
         );
 
-        assert_eq!(integration.calls, ["occluded:3:true"]);
+        assert_eq!(integration.calls, ["occluded:c:true"]);
     }
 
     #[test]

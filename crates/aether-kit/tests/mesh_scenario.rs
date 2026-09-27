@@ -29,7 +29,7 @@ use aether_harness_substrate_capture::test_helpers::{
     envelope, init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
 };
 use aether_harness_substrate_capture::visual::{Image, decode_png, differs_from_background};
-use aether_kinds::{LoadComponent, MeshLoadResult, Render, WindowId, WindowSize};
+use aether_kinds::{LoadComponent, MeshLoadResult, Render, WindowSize};
 use aether_kit::camera::{CameraComponent, CameraOrbitSet, OrbitParams};
 use aether_kit::mesh::{LoadMesh, MeshViewer};
 use core::f32::consts::FRAC_PI_2;
@@ -49,7 +49,9 @@ const COMPONENT_NAME: &str = "mv";
 const CAMERA_COMPONENT_NAME: &str = "aether.kit.camera";
 const OUTLINE_WINDOW_WIDTH: u32 = 768;
 const OUTLINE_WINDOW_HEIGHT: u32 = 576;
-const OUTLINE_WINDOW_ID: WindowId = WindowId(1);
+fn test_window() -> ErasedActorPath {
+    aether_window::window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
+}
 
 const BOX_DSL: &[u8] = b"(box 1 1 1 :color 0)\n";
 const QUAD_OBJ: &[u8] = b"\
@@ -174,7 +176,7 @@ fn edge_on_outline_stays_visible_and_keeps_apparent_width() {
                 HarnessOp::send_and_settle(
                     &camera,
                     &WindowSize {
-                        window: OUTLINE_WINDOW_ID,
+                        window: test_window(),
                         width: OUTLINE_WINDOW_WIDTH,
                         height: OUTLINE_WINDOW_HEIGHT,
                         scale_factor: 1.0,

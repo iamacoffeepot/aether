@@ -17,7 +17,7 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_BACKQUOTE, KEY_TAB};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, LoadComponent, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
-    TextInput, WindowId,
+    TextInput,
 };
 use aether_render::HeadlessRenderCapability;
 use aether_test_fixtures_kinds::{
@@ -27,7 +27,10 @@ use aether_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputL
 use aether_window::SyntheticWindowCapability;
 use support::widget_caps;
 
-const TEST_WINDOW_ID: WindowId = WindowId(1);
+/// The window the injected input events name.
+fn test_window() -> aether_data::ErasedActorPath {
+    aether_window::window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
+}
 
 /// A GPU-free bench with the component host and everything the widget module
 /// declares: the headless render stub, text (its fs from the sandbox roots) and
@@ -98,7 +101,7 @@ fn drain(harness: &mut SubstrateHarness, probe: ErasedActorRef, label: &'static 
 }
 
 fn input<K: Kind>(synthetic: ActorRef<SyntheticWindowCapability>, mail: &K) -> HarnessOp {
-    HarnessOp::window_event(&synthetic, TEST_WINDOW_ID, mail)
+    HarnessOp::window_event(&synthetic, test_window(), mail)
 }
 
 #[test]
@@ -123,26 +126,26 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
 
     harness
         .execute(vec![
-            ("press-a", input(synthetic, &MouseButton { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 })),
-            ("drag-b", input(synthetic, &MouseMove { window: TEST_WINDOW_ID, x: 140.0, y: 25.0 })),
+            ("press-a", input(synthetic, &MouseButton { window: test_window(), button: 0, x: 20.0, y: 20.0 })),
+            ("drag-b", input(synthetic, &MouseMove { window: test_window(), x: 140.0, y: 25.0 })),
             (
                 "release-other-b",
-                input(synthetic, &MouseButtonRelease { window: TEST_WINDOW_ID, button: 1, x: 140.0, y: 25.0 }),
+                input(synthetic, &MouseButtonRelease { window: test_window(), button: 1, x: 140.0, y: 25.0 }),
             ),
             (
                 "release-owner-b",
-                input(synthetic, &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 140.0, y: 25.0 }),
+                input(synthetic, &MouseButtonRelease { window: test_window(), button: 0, x: 140.0, y: 25.0 }),
             ),
-            ("move-b", input(synthetic, &MouseMove { window: TEST_WINDOW_ID, x: 150.0, y: 30.0 })),
+            ("move-b", input(synthetic, &MouseMove { window: test_window(), x: 150.0, y: 30.0 })),
             (
                 "release-without-owner-b",
-                input(synthetic, &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 150.0, y: 30.0 }),
+                input(synthetic, &MouseButtonRelease { window: test_window(), button: 0, x: 150.0, y: 30.0 }),
             ),
             (
                 "filtered-wheel-b",
                 input(
                     synthetic,
-                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -12.0, x: 150.0, y: 30.0 },
+                    &MouseWheel { window: test_window(), delta_x: 0.0, delta_y: -12.0, x: 150.0, y: 30.0 },
                 ),
             ),
         ])
@@ -152,8 +155,9 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
         drain(&mut harness, region_a, "drain-a"),
         DrainEditorInputsResult {
             region_name: "region-a".to_owned(),
+            // No `Modifiers` has arrived yet, so focusing region-a primes it
+            // with none: the shell caches no modifier state before the first.
             inputs: vec![
-                ObservedEditorInput::Modifiers { shift: false, ctrl: false, alt: false, meta: false },
                 ObservedEditorInput::PointerPress { button: 0, x_pixels: 20.0, y_pixels: 20.0 },
                 ObservedEditorInput::PointerMotion { x_pixels: 140.0, y_pixels: 25.0 },
                 ObservedEditorInput::PointerRelease { button: 1, x_pixels: 140.0, y_pixels: 25.0 },
@@ -199,45 +203,48 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
 
     harness
         .execute(vec![
-            ("focus-a", input(synthetic, &MouseButton { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 })),
-            (
-                "release-a",
-                input(synthetic, &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 }),
-            ),
+            ("focus-a", input(synthetic, &MouseButton { window: test_window(), button: 0, x: 20.0, y: 20.0 })),
+            ("release-a", input(synthetic, &MouseButtonRelease { window: test_window(), button: 0, x: 20.0, y: 20.0 })),
         ])
         .expect("prime focus");
     let _initial_a = drain(&mut harness, region_a, "drain-initial-a");
 
     harness
         .execute(vec![
-            ("key-a", input(synthetic, &Key { window: TEST_WINDOW_ID, code: 65 })),
-            ("text-a", input(synthetic, &TextInput { window: TEST_WINDOW_ID, text: "a".to_owned() })),
-            ("activate-b", input(synthetic, &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE })),
+            ("key-a", input(synthetic, &Key { window: test_window(), code: 65 })),
+            ("text-a", input(synthetic, &TextInput { window: test_window(), text: "a".to_owned() })),
+            ("activate-b", input(synthetic, &Key { window: test_window(), code: KEY_BACKQUOTE })),
             (
                 "ime-b",
                 input(
                     synthetic,
                     &ImePreedit {
-                        window: TEST_WINDOW_ID,
+                        window: test_window(),
                         text: "composition".to_owned(),
                         cursor_begin: Some(1),
                         cursor_end: Some(3),
                     },
                 ),
             ),
-            ("text-b", input(synthetic, &TextInput { window: TEST_WINDOW_ID, text: "b".to_owned() })),
+            ("text-b", input(synthetic, &TextInput { window: test_window(), text: "b".to_owned() })),
             (
                 "ctrl-b",
                 input(
                     synthetic,
-                    &Modifiers { window: TEST_WINDOW_ID, shift: false, ctrl: true, alt: false, meta: false },
+                    &Modifiers { window: test_window(), shift: false, ctrl: true, alt: false, meta: false },
                 ),
             ),
-            ("cycle-a", input(synthetic, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("cycle-release", input(synthetic, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("clear-modifiers", input(synthetic, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() })),
-            ("plain-tab", input(synthetic, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("plain-tab-release", input(synthetic, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("cycle-a", input(synthetic, &Key { window: test_window(), code: KEY_TAB })),
+            ("cycle-release", input(synthetic, &KeyRelease { window: test_window(), code: KEY_TAB })),
+            (
+                "clear-modifiers",
+                input(
+                    synthetic,
+                    &Modifiers { window: test_window(), shift: false, ctrl: false, alt: false, meta: false },
+                ),
+            ),
+            ("plain-tab", input(synthetic, &Key { window: test_window(), code: KEY_TAB })),
+            ("plain-tab-release", input(synthetic, &KeyRelease { window: test_window(), code: KEY_TAB })),
         ])
         .expect("route keyboard sequence");
 
@@ -259,8 +266,9 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
         drain(&mut harness, region_b, "drain-focus-b"),
         DrainEditorInputsResult {
             region_name: "focus-b".to_owned(),
+            // Activation focuses focus-b before any `Modifiers` has arrived,
+            // so there is no cached state to prime it with.
             inputs: vec![
-                ObservedEditorInput::Modifiers { shift: false, ctrl: false, alt: false, meta: false },
                 ObservedEditorInput::KeyPress { code: KEY_BACKQUOTE },
                 ObservedEditorInput::ImePreedit {
                     text: "composition".to_owned(),

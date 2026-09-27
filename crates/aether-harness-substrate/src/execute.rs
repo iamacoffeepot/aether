@@ -28,9 +28,9 @@ use std::time::{Duration, Instant};
 
 use aether_actor::{ActorRef, ErasedActorRef, HandlesKind};
 use aether_component::ComponentHostCapability;
-use aether_data::{Kind, KindId};
+use aether_data::{ErasedActorPath, Kind, KindId};
 use aether_kinds::{LoadComponent, LoadComponentUnder, NamedMail};
-use aether_window::{InjectWindowEvent, SyntheticWindowCapability, WindowId};
+use aether_window::{InjectWindowEvent, SyntheticWindowCapability};
 
 use super::diagnostics::{self, CompletedStep};
 use super::harness::{SubstrateHarness, SubstrateHarnessError};
@@ -248,14 +248,19 @@ impl HarnessOp {
         Self::CaptureWithMails { pre, after }
     }
 
-    /// Inject any typed event as originating from `window`, through the
+    /// Inject any typed event as originating from the window at `window`, a
+    /// window's canonical path (`aether_window::window_path`), through the
     /// synthetic window capability `synthetic` proves — the reference
     /// [`SubstrateHarness::actor_ref`] returns for it.
     ///
     /// `K` is inferred from `event`; the synthetic runtime forwards its
     /// already-encoded payload without a maintained window-event kind list.
     #[must_use]
-    pub fn window_event<K: Kind>(synthetic: &ActorRef<SyntheticWindowCapability>, window: WindowId, event: &K) -> Self {
+    pub fn window_event<K: Kind>(
+        synthetic: &ActorRef<SyntheticWindowCapability>,
+        window: ErasedActorPath,
+        event: &K,
+    ) -> Self {
         let injection = InjectWindowEvent { window, kind: K::ID, payload: event.encode_into_bytes() };
         Self::send_and_settle(synthetic, &injection)
     }
@@ -337,11 +342,11 @@ impl HarnessOp {
     /// # use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     /// # use aether_window::{ListWindows, ListWindowsResult, SyntheticWindowCapability};
     /// # let harness = SubstrateHarness::start().expect("boot");
-    /// # let surviving = aether_window::WindowId(0);
+    /// # let surviving = aether_window::window_path(&aether_data::LoadName::new("main").expect("name"));
     /// let window = harness.actor_ref::<SyntheticWindowCapability>();
     /// HarnessOp::poll_until(&window, &ListWindows, move |reply: &ListWindowsResult| {
     ///     matches!(reply, ListWindowsResult::Ok { windows }
-    ///         if windows.iter().map(|window| window.id).eq([surviving]))
+    ///         if windows.iter().map(|window| &window.path).eq([&surviving]))
     /// });
     /// ```
     ///

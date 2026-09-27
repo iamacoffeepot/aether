@@ -168,10 +168,10 @@ quad and capture in one call, with the dispatch staged in the same `mails`
 bundle so the freshly written pixels appear in the captured frame:
 
 ```jsonc
-// capture_frame — window_id is required; it is the tagged mbx- string
-// aether.window.list reports for the target window.
+// capture_frame — window is required; it is the window's actor path
+// as aether.window.list reports it.
 {
-  "window_id": "mbx-…",
+  "window": "aether.window/aether.window.instance:main",
   "mails": [
     { "address": "aether.render", "kind_name": "aether.render.program.dispatch",
       "params": { "program_id": 0, "bindings": [SOURCE_ID, OUTPUT_ID], "geometries": [],
@@ -334,10 +334,10 @@ Stage the dispatch and an overlay quad in one `capture_frame` so the freshly
 drawn pixels land in the captured frame:
 
 ```jsonc
-// capture_frame — window_id is required; it is the tagged mbx- string
-// aether.window.list reports for the target window.
+// capture_frame — window is required; it is the window's actor path
+// as aether.window.list reports it.
 {
-  "window_id": "mbx-…",
+  "window": "aether.window/aether.window.instance:main",
   "mails": [
     { "address": "aether.render", "kind_name": "aether.render.program.dispatch",
       "params": { "program_id": 0, "bindings": [TARGET_ID], "geometries": [GEOMETRY_ID],

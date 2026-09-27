@@ -14,7 +14,8 @@ use std::path::Path;
 
 use std::time::Instant;
 
-use aether_kinds::{FrameCheck, SimilarityCheck, WindowId};
+use aether_data::ErasedActorPath;
+use aether_kinds::{FrameCheck, SimilarityCheck};
 use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::chassis::inbox::InboundMail;
 use aether_substrate::mail::BoundaryMail;
@@ -67,8 +68,9 @@ pub fn resolve_reference(
 /// un-fired `record_finished` keeps the inbound's chain open until the
 /// reply lands (ADR-0080 §6, ADR-0106).
 pub struct PendingCapture {
-    /// Selected desktop target. `None` is the explicit surfaceless path.
-    pub window: Option<WindowId>,
+    /// Selected desktop target, the window's canonical path. `None` is the
+    /// explicit surfaceless path.
+    pub window: Option<ErasedActorPath>,
     pub reply: InboundMail,
     pub after_mails: Vec<BoundaryMail>,
     /// `FrameCheck` verdict requests, scored on the read-back RGBA in

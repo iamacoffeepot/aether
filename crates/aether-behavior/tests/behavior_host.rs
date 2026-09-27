@@ -31,12 +31,12 @@ use std::fs;
 
 use aether_actor::ActorRef;
 use aether_clipboard::{ClipboardCapability, ClipboardParams};
-use aether_data::{Kind, LoadName};
+use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_DOWN, KEY_TAB};
 use aether_kinds::mouse_button::LEFT;
-use aether_kinds::{Key, LoadComponent, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick, WindowId};
+use aether_kinds::{Key, LoadComponent, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick};
 use aether_render::HeadlessRenderCapability;
 use aether_text::TextCapability;
 use aether_widget::set::RadioGroupWidget;
@@ -74,7 +74,9 @@ const CAP: f32 = 20.0;
 
 /// Slack for the float comparisons against the clamp cap.
 const EPS: f32 = 0.5;
-const TEST_WINDOW_ID: WindowId = WindowId(1);
+fn test_window() -> ErasedActorPath {
+    ErasedActorPath::new("aether.window/aether.window.instance:main").expect("a well-formed window path")
+}
 
 fn key(name: &str) -> LoadName {
     LoadName::new(name).expect("a valid instance key")
@@ -180,12 +182,12 @@ fn load_panel_with_host_spec(
 
 /// A left mouse-button press at `(x, y)`.
 fn press(x: f32, y: f32) -> MouseButton {
-    MouseButton { window: TEST_WINDOW_ID, button: LEFT, x, y }
+    MouseButton { window: test_window(), button: LEFT, x, y }
 }
 
 /// A left mouse-button release at `(x, y)`.
 fn release(x: f32, y: f32) -> MouseButtonRelease {
-    MouseButtonRelease { window: TEST_WINDOW_ID, button: LEFT, x, y }
+    MouseButtonRelease { window: test_window(), button: LEFT, x, y }
 }
 
 /// One slider drag session: press mid-track, drag to the far right, release.
@@ -196,7 +198,7 @@ fn release(x: f32, y: f32) -> MouseButtonRelease {
 fn drag(panel: ActorRef<WidgetPanel>) -> Vec<(&'static str, HarnessOp)> {
     vec![
         ("press", HarnessOp::send_and_settle(&panel, &press(110.0, 22.0))),
-        ("move", HarnessOp::send_and_settle(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 200.0, y: 22.0 })),
+        ("move", HarnessOp::send_and_settle(&panel, &MouseMove { window: test_window(), x: 200.0, y: 22.0 })),
         ("release", HarnessOp::send_and_settle(&panel, &release(200.0, 22.0))),
     ]
 }
@@ -391,8 +393,8 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
     harness
         .execute(vec![
             ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
-            ("tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("down", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("tab", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("down", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
         ])
         .expect("spawn + Tab + Down");
     let (phase1, cursor) = read_panel_log(&mut harness, panel, None);
@@ -410,7 +412,7 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
     harness
         .execute(vec![
             ("disable", HarnessOp::send_and_settle(&wrapped, &SetWidgetState { state: disabled })),
-            ("blocked", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("blocked", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
         ])
         .expect("disable wrapped radio + Down");
     let (phase2, cursor) = read_panel_log(&mut harness, panel, Some(cursor));
@@ -425,8 +427,8 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
     harness
         .execute(vec![
             ("enable", HarnessOp::send_and_settle(&wrapped, &SetWidgetState { state: WidgetControlState::default() })),
-            ("refocus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("down", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("refocus", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_TAB })),
+            ("down", HarnessOp::send_and_settle(&panel, &Key { window: test_window(), code: KEY_DOWN })),
         ])
         .expect("re-enable wrapped radio + Down");
     let (phase3, _) = read_panel_log(&mut harness, panel, Some(cursor));

@@ -64,7 +64,7 @@ runtime = [
     "dep:confique",
 ]
 # The pumped render runtime's desktop target support: the state-bearing
-# `RenderCapabilityState` owns a surface + swapchain per engine `WindowId`.
+# `RenderCapabilityState` owns a surface + swapchain per engine window path.
 # Pulls the runtime half plus winit for owned native window handles. Default
 # features stay `runtime`-only, so headless / harness / wasm consumers never
 # build winit.

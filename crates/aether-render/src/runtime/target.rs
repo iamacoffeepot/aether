@@ -1,5 +1,5 @@
-//! Per-window render targets and the map that keys them by [`WindowId`]
-//! (ADR-0161).
+//! Per-window render targets and the map that keys them by the window's
+//! canonical actor path (ADR-0161).
 //!
 //! Desktop-only: a surfaceless runtime has no window to attach, so the whole
 //! module sits behind the parent's `#[cfg(feature = "desktop")]` gate on
@@ -7,8 +7,8 @@
 //!
 //! Two things live here, and the split matters. [`WindowTargets`] is generic
 //! over the target type and knows only about *identity* — attach refuses a
-//! duplicate id, detach hands the target back, and capture selection resolves
-//! an id to a target or explains why it cannot. [`RenderTarget`] is the
+//! duplicate path, detach hands the target back, and capture selection resolves
+//! a path to a target or explains why it cannot. [`RenderTarget`] is the
 //! concrete per-window state: the retained window handle, its swapchain, and
 //! the occlusion flag.
 //!
@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use aether_kinds::WindowId;
+use aether_data::ErasedActorPath;
 use winit::window::Window;
 
 use super::pipeline::RenderGpu;
@@ -29,7 +29,7 @@ use super::surface::{acquire_surface_texture, attach_surface, boot_surface, buil
 /// — no duplicate attach, detach returns the target, capture selection
 /// resolves or explains — are stated once and read without wgpu in the way.
 pub struct WindowTargets<T> {
-    entries: BTreeMap<WindowId, T>,
+    entries: BTreeMap<ErasedActorPath, T>,
 }
 
 impl<T> Default for WindowTargets<T> {
@@ -39,24 +39,24 @@ impl<T> Default for WindowTargets<T> {
 }
 
 impl<T> WindowTargets<T> {
-    /// Insert a target for `id`, building it only after the duplicate check
-    /// passes. `build` returns the target plus a caller-chosen extra, so a
-    /// first attachment can hand back the GPU it had to boot along the way.
+    /// Insert a target for `window`, building it only after the duplicate
+    /// check passes. `build` returns the target plus a caller-chosen extra, so
+    /// a first attachment can hand back the GPU it had to boot along the way.
     pub fn attach_with<R>(
         &mut self,
-        id: WindowId,
+        window: ErasedActorPath,
         build: impl FnOnce() -> Result<(T, R), String>,
     ) -> Result<R, String> {
-        if self.entries.contains_key(&id) {
-            return Err(format!("render target for window {} is already attached", id.0));
+        if self.entries.contains_key(&window) {
+            return Err(format!("render target for window {window} is already attached"));
         }
         let (target, result) = build()?;
-        self.entries.insert(id, target);
+        self.entries.insert(window, target);
         Ok(result)
     }
 
-    pub fn detach(&mut self, id: WindowId) -> Option<T> {
-        self.entries.remove(&id)
+    pub fn detach(&mut self, window: &ErasedActorPath) -> Option<T> {
+        self.entries.remove(window)
     }
 
     #[must_use]
@@ -65,38 +65,43 @@ impl<T> WindowTargets<T> {
     }
 
     /// Build a complete replacement map without mutating the live targets.
-    /// The lowest [`WindowId`] is always passed to `build_first`; every later
+    /// The lowest window path is always passed to `build_first`; every later
     /// target sees the caller-chosen context that first build returned. A
     /// failure at any point drops only the staged values.
     fn stage_replacement_with<U, C>(
         &self,
-        build_first: impl FnOnce(WindowId, &T) -> Result<(U, C), String>,
-        mut build_later: impl FnMut(WindowId, &T, &C) -> Result<U, String>,
+        build_first: impl FnOnce(&ErasedActorPath, &T) -> Result<(U, C), String>,
+        mut build_later: impl FnMut(&ErasedActorPath, &T, &C) -> Result<U, String>,
     ) -> Result<(WindowTargets<U>, C), String> {
         let mut live = self.entries.iter();
-        let Some((&first_id, first_target)) = live.next() else {
+        let Some((first_window, first_target)) = live.next() else {
             return Err("desktop device replacement requires at least one retained window target".to_owned());
         };
-        let (first_target, context) = build_first(first_id, first_target)?;
+        let (first_target, context) = build_first(first_window, first_target)?;
         let mut staged = BTreeMap::new();
-        staged.insert(first_id, first_target);
+        staged.insert(first_window.clone(), first_target);
 
-        for (&id, target) in live {
-            staged.insert(id, build_later(id, target, &context)?);
+        for (window, target) in live {
+            staged.insert(window.clone(), build_later(window, target, &context)?);
         }
 
         Ok((WindowTargets { entries: staged }, context))
     }
 
-    /// The attached target for `id`, if there is one. `None` is the ordinary
-    /// case for a window in a fan-out list that has since detached, so callers
-    /// skip it rather than treating it as an error.
-    pub fn get_mut(&mut self, id: WindowId) -> Option<&mut T> {
-        self.entries.get_mut(&id)
+    /// The attached target for `window`, if there is one. `None` is the
+    /// ordinary case for a window in a fan-out list that has since detached,
+    /// so callers skip it rather than treating it as an error.
+    pub fn get_mut(&mut self, window: &ErasedActorPath) -> Option<&mut T> {
+        self.entries.get_mut(window)
     }
 
-    pub fn set_occluded(&mut self, id: WindowId, occluded: bool, update: impl FnOnce(&mut T, bool)) -> bool {
-        let Some(target) = self.entries.get_mut(&id) else {
+    pub fn set_occluded(
+        &mut self,
+        window: &ErasedActorPath,
+        occluded: bool,
+        update: impl FnOnce(&mut T, bool),
+    ) -> bool {
+        let Some(target) = self.entries.get_mut(window) else {
             return false;
         };
         update(target, occluded);
@@ -108,10 +113,10 @@ impl<T> WindowTargets<T> {
     /// the caller may fall through to its surfaceless path.
     pub fn validate_capture_selection(
         &self,
-        window: Option<WindowId>,
+        window: Option<&ErasedActorPath>,
         is_occluded: impl Fn(&T) -> bool,
     ) -> Result<bool, String> {
-        let Some(id) = window else {
+        let Some(window) = window else {
             if self.entries.is_empty() {
                 return Ok(false);
             }
@@ -120,9 +125,9 @@ impl<T> WindowTargets<T> {
             );
         };
         let target =
-            self.entries.get(&id).ok_or_else(|| format!("capture_frame failed: unknown window target {}", id.0))?;
+            self.entries.get(window).ok_or_else(|| format!("capture_frame failed: unknown window target {window}"))?;
         if is_occluded(target) {
-            return Err(format!("capture_frame failed: window target {} is occluded", id.0));
+            return Err(format!("capture_frame failed: window target {window} is occluded"));
         }
         Ok(true)
     }
@@ -163,7 +168,7 @@ impl RenderTarget {
         vertex_buffer_bytes: usize,
     ) -> Result<(WindowTargets<Self>, FirstWindowGpu), String> {
         targets.stage_replacement_with(
-            |_id, live| {
+            |_window, live| {
                 let size = live.window.inner_size();
                 let (mut target, first_gpu) = Self::boot_first(
                     Arc::clone(&live.window),
@@ -174,7 +179,7 @@ impl RenderTarget {
                 target.occluded = live.occluded;
                 Ok((target, first_gpu.expect("boot_first always returns the selected desktop GPU")))
             },
-            |_id, live, first_gpu| {
+            |_window, live, first_gpu| {
                 let size = live.window.inner_size();
                 let (mut target, install) = Self::attach_to_booted_gpu(
                     &first_gpu.context,
@@ -268,8 +273,12 @@ mod tests {
         occluded: bool,
     }
 
+    fn window(name: &str) -> ErasedActorPath {
+        ErasedActorPath::new(&format!("aether.window/aether.window.instance:{name}")).expect("fixture window path")
+    }
+
     /// Target bookkeeping is transactional: failed and duplicate attachments
-    /// do not replace entries; occlusion and removal stay local to one id.
+    /// do not replace entries; occlusion and removal stay local to one window.
     ///
     /// Instantiated over `bool` rather than `RenderTarget` — every rule under
     /// test is about identity and ordering, so a target type that needs no GPU
@@ -277,66 +286,66 @@ mod tests {
     #[test]
     fn window_target_bookkeeping_is_transactional_and_target_local() {
         let mut targets = WindowTargets::<bool>::default();
-        let failed: Result<(), String> = targets.attach_with(WindowId(1), || Err("surface failed".to_owned()));
+        let failed: Result<(), String> = targets.attach_with(window("a"), || Err("surface failed".to_owned()));
         assert!(failed.is_err());
         assert!(targets.entries.is_empty(), "a failed builder must not insert a target");
 
-        targets.attach_with(WindowId(1), || Ok((false, ()))).expect("first target attaches");
+        targets.attach_with(window("a"), || Ok((false, ()))).expect("first target attaches");
         let duplicate: Result<(), String> =
-            targets.attach_with(WindowId(1), || panic!("duplicate validation must run before the target builder"));
-        assert!(duplicate.expect_err("duplicate id is rejected").contains("already attached"));
-        targets.attach_with(WindowId(2), || Ok((false, ()))).expect("second target attaches");
+            targets.attach_with(window("a"), || panic!("duplicate validation must run before the target builder"));
+        assert!(duplicate.expect_err("duplicate window is rejected").contains("already attached"));
+        targets.attach_with(window("b"), || Ok((false, ()))).expect("second target attaches");
 
-        assert!(targets.set_occluded(WindowId(1), true, |target, value| *target = value));
-        assert!(targets.entries[&WindowId(1)]);
-        assert!(!targets.entries[&WindowId(2)]);
-        assert!(targets.validate_capture_selection(Some(WindowId(1)), |target| *target).is_err());
-        assert_eq!(targets.validate_capture_selection(Some(WindowId(2)), |target| *target), Ok(true));
-        assert!(targets.validate_capture_selection(Some(WindowId(99)), |target| *target).is_err());
+        assert!(targets.set_occluded(&window("a"), true, |target, value| *target = value));
+        assert!(targets.entries[&window("a")]);
+        assert!(!targets.entries[&window("b")]);
+        assert!(targets.validate_capture_selection(Some(&window("a")), |target| *target).is_err());
+        assert_eq!(targets.validate_capture_selection(Some(&window("b")), |target| *target), Ok(true));
+        assert!(targets.validate_capture_selection(Some(&window("zz")), |target| *target).is_err());
         assert!(targets.validate_capture_selection(None, |target| *target).is_err());
 
-        assert_eq!(targets.detach(WindowId(1)), Some(true));
-        assert!(targets.entries.contains_key(&WindowId(2)), "detaching one target leaves the other live");
+        assert_eq!(targets.detach(&window("a")), Some(true));
+        assert!(targets.entries.contains_key(&window("b")), "detaching one target leaves the other live");
     }
 
     #[test]
-    fn staged_replacement_uses_canonical_first_id_and_preserves_target_state() {
+    fn staged_replacement_uses_canonical_first_window_and_preserves_target_state() {
         let mut targets = WindowTargets::default();
-        for (id, occluded) in [(8, true), (2, false), (5, true)] {
-            targets.attach_with(WindowId(id), || Ok((TestTarget { occluded }, ()))).expect("test target attaches");
+        for (name, occluded) in [("h", true), ("b", false), ("e", true)] {
+            targets.attach_with(window(name), || Ok((TestTarget { occluded }, ()))).expect("test target attaches");
         }
         let build_order = RefCell::new(Vec::new());
-        let (staged, first_id) = targets
+        let (staged, first) = targets
             .stage_replacement_with(
-                |id, live| {
-                    build_order.borrow_mut().push(id);
-                    Ok((live.clone(), id))
+                |path, live| {
+                    build_order.borrow_mut().push(path.clone());
+                    Ok((live.clone(), path.clone()))
                 },
-                |id, live, selected| {
-                    assert_eq!(*selected, WindowId(2), "later targets share the canonical first context");
-                    build_order.borrow_mut().push(id);
+                |path, live, selected| {
+                    assert_eq!(*selected, window("b"), "later targets share the canonical first context");
+                    build_order.borrow_mut().push(path.clone());
                     Ok(live.clone())
                 },
             )
             .expect("complete replacement stages");
 
-        assert_eq!(first_id, WindowId(2));
-        assert_eq!(build_order.into_inner(), [WindowId(2), WindowId(5), WindowId(8)]);
+        assert_eq!(first, window("b"));
+        assert_eq!(build_order.into_inner(), [window("b"), window("e"), window("h")]);
         assert_eq!(staged.entries, targets.entries, "keys and occlusion flags survive replacement");
     }
 
     #[test]
     fn later_staging_failure_leaves_live_target_map_unchanged() {
         let mut targets = WindowTargets::default();
-        for (id, occluded) in [(2, false), (5, true), (8, false)] {
-            targets.attach_with(WindowId(id), || Ok((TestTarget { occluded }, ()))).expect("test target attaches");
+        for (name, occluded) in [("b", false), ("e", true), ("h", false)] {
+            targets.attach_with(window(name), || Ok((TestTarget { occluded }, ()))).expect("test target attaches");
         }
         let before = targets.entries.clone();
 
         let result = targets.stage_replacement_with(
-            |_id, live| Ok((live.clone(), ())),
-            |id, live, _context| {
-                if id == WindowId(8) {
+            |_path, live| Ok((live.clone(), ())),
+            |path, live, _context| {
+                if *path == window("h") {
                     Err("later surface failed".to_owned())
                 } else {
                     Ok(live.clone())

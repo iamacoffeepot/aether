@@ -230,7 +230,7 @@ pub(super) enum EditCommand {
 /// reports the physical modifiers and nothing more. Accepting either is what a
 /// reader on either platform expects, and it costs nothing, because no control
 /// in the set binds the two modifiers to different meanings.
-fn edit_chord(modifiers: Modifiers) -> bool {
+fn edit_chord(modifiers: &Modifiers) -> bool {
     modifiers.ctrl || modifiers.meta
 }
 
@@ -238,13 +238,11 @@ fn edit_chord(modifiers: Modifiers) -> bool {
 /// Cmd/meta jumps to the line edge (the macOS convention), Ctrl or Alt steps a
 /// word (the Windows/Linux and macOS conventions respectively), bare arrows
 /// step one character.
-fn arrow_step(modifiers: Modifiers) -> EditStep {
-    if modifiers.meta {
-        EditStep::LineEdge
-    } else if modifiers.ctrl || modifiers.alt {
-        EditStep::Word
-    } else {
-        EditStep::Character
+fn arrow_step(modifiers: Option<&Modifiers>) -> EditStep {
+    match modifiers {
+        Some(held) if held.meta => EditStep::LineEdge,
+        Some(held) if held.ctrl || held.alt => EditStep::Word,
+        _ => EditStep::Character,
     }
 }
 
@@ -255,9 +253,12 @@ fn arrow_step(modifiers: Modifiers) -> EditStep {
 /// Nothing here is suppressed on repeat: an editing key held down is meant to
 /// keep editing, which is exactly the difference between this and the button's
 /// [`ActivationArms::press_key`], where a repeat must not fire a second click.
-pub(super) fn edit_command(code: u32, modifiers: Modifiers) -> Option<EditCommand> {
-    let chord = edit_chord(modifiers);
-    let extend = modifiers.shift;
+///
+/// `modifiers` is the latest `Modifiers` the control received, `None` before
+/// the first, which reads as no modifier held.
+pub(super) fn edit_command(code: u32, modifiers: Option<&Modifiers>) -> Option<EditCommand> {
+    let chord = modifiers.is_some_and(edit_chord);
+    let extend = modifiers.is_some_and(|held| held.shift);
     let command = match code {
         KEY_A if chord => EditCommand::SelectAll,
         KEY_C if chord => EditCommand::Copy,
@@ -517,9 +518,9 @@ fn arm_text_drag(state: &InteractionState, dragging: &mut bool, press: MouseButt
     Some(press.x)
 }
 
-fn update_text_modifiers(state: &InteractionState, modifiers: &mut Modifiers, next: Modifiers) {
+fn update_text_modifiers(state: &InteractionState, modifiers: &mut Option<Modifiers>, next: Modifiers) {
     if state.is_available() {
-        *modifiers = next;
+        *modifiers = Some(next);
     }
 }
 
@@ -1654,7 +1655,7 @@ fn fit_row_widths(mut natural: Vec<f32>, row_width: f32, gap: f32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_kinds::WindowId;
+    use crate::test_support::test_window;
 
     #[test]
     fn a_requested_selection_is_none_for_empty_and_clamped_for_nonempty() {
@@ -1793,7 +1794,7 @@ mod tests {
     /// positional bools.
     fn mods(held: &str) -> Modifiers {
         Modifiers {
-            window: WindowId(1),
+            window: test_window(),
             ctrl: held.contains("ctrl"),
             meta: held.contains("meta"),
             alt: held.contains("alt"),
@@ -1807,55 +1808,56 @@ mod tests {
         // a widget cannot ask the substrate which platform it is on, so both
         // must resolve to the same command everywhere.
         for chord in [mods("ctrl"), mods("meta")] {
-            assert_eq!(edit_command(KEY_A, chord), Some(EditCommand::SelectAll));
-            assert_eq!(edit_command(KEY_C, chord), Some(EditCommand::Copy));
-            assert_eq!(edit_command(KEY_X, chord), Some(EditCommand::Cut));
-            assert_eq!(edit_command(KEY_V, chord), Some(EditCommand::Paste));
+            assert_eq!(edit_command(KEY_A, Some(&chord)), Some(EditCommand::SelectAll));
+            assert_eq!(edit_command(KEY_C, Some(&chord)), Some(EditCommand::Copy));
+            assert_eq!(edit_command(KEY_X, Some(&chord)), Some(EditCommand::Cut));
+            assert_eq!(edit_command(KEY_V, Some(&chord)), Some(EditCommand::Paste));
         }
         let bare = mods("");
-        assert_eq!(edit_command(KEY_A, bare), None, "a bare `a` is a typed character, not select-all");
-        assert_eq!(edit_command(KEY_V, bare), None);
+        assert_eq!(edit_command(KEY_A, Some(&bare)), None, "a bare `a` is a typed character, not select-all");
+        assert_eq!(edit_command(KEY_A, None), None, "before any `Modifiers` arrives, no chord is held");
+        assert_eq!(edit_command(KEY_V, Some(&bare)), None);
     }
 
     #[test]
     fn deletion_and_caret_motion_resolve_to_the_step_the_modifiers_name() {
         let bare = mods("");
-        assert_eq!(edit_command(KEY_BACKSPACE, bare), Some(EditCommand::DeleteBackward));
-        assert_eq!(edit_command(KEY_DELETE, bare), Some(EditCommand::DeleteForward));
+        assert_eq!(edit_command(KEY_BACKSPACE, Some(&bare)), Some(EditCommand::DeleteBackward));
+        assert_eq!(edit_command(KEY_DELETE, Some(&bare)), Some(EditCommand::DeleteForward));
         assert_eq!(
-            edit_command(KEY_LEFT, bare),
+            edit_command(KEY_LEFT, Some(&bare)),
             Some(EditCommand::MoveLeft { step: EditStep::Character, extend: false })
         );
         assert_eq!(
-            edit_command(KEY_RIGHT, mods("shift")),
+            edit_command(KEY_RIGHT, Some(&mods("shift"))),
             Some(EditCommand::MoveRight { step: EditStep::Character, extend: true }),
             "Shift extends whatever the step is",
         );
         assert_eq!(
-            edit_command(KEY_LEFT, mods("alt")),
+            edit_command(KEY_LEFT, Some(&mods("alt"))),
             Some(EditCommand::MoveLeft { step: EditStep::Word, extend: false }),
             "Alt+Left is a word step",
         );
         assert_eq!(
-            edit_command(KEY_LEFT, mods("ctrl")),
+            edit_command(KEY_LEFT, Some(&mods("ctrl"))),
             Some(EditCommand::MoveLeft { step: EditStep::Word, extend: false }),
             "Ctrl+Left is the same word step on the other platforms",
         );
         assert_eq!(
-            edit_command(KEY_RIGHT, mods("meta")),
+            edit_command(KEY_RIGHT, Some(&mods("meta"))),
             Some(EditCommand::MoveRight { step: EditStep::LineEdge, extend: false }),
             "Cmd+Right is the line edge, not a word",
         );
         assert_eq!(
-            edit_command(KEY_HOME, bare),
+            edit_command(KEY_HOME, Some(&bare)),
             Some(EditCommand::MoveLeft { step: EditStep::LineEdge, extend: false })
         );
         assert_eq!(
-            edit_command(KEY_END, mods("ctrl")),
+            edit_command(KEY_END, Some(&mods("ctrl"))),
             Some(EditCommand::MoveRight { step: EditStep::DocumentEdge, extend: false }),
             "the chord widens Home/End to the whole buffer",
         );
-        assert_eq!(edit_command(KEY_ENTER, bare), None, "Enter is each control's own");
+        assert_eq!(edit_command(KEY_ENTER, Some(&bare)), None, "Enter is each control's own");
     }
 
     #[test]

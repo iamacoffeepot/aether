@@ -34,7 +34,7 @@ or cache a hand-maintained list of recognized input kinds.
 
 ## Event vocabulary
 
-Every event below carries its source `WindowId`:
+Every event below carries its source window's actor path in `window`:
 
 | Kind | Additional data |
 |---|---|
@@ -202,14 +202,15 @@ selector-aware fan-out as desktop:
 
 ```rust
 let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
-let event = Key { window, code: keycode::KEY_W };
+let window = aether_window::window_path(&LoadName::new("main")?);
+let event = Key { window: window.clone(), code: keycode::KEY_W };
 let op = HarnessOp::window_event(&synthetic, window, &event);
 ```
 
 `window_event` accepts any `K: Kind`, encodes it once, and wraps it for the
 synthetic runtime with `K::ID`, sent through the synthetic window capability's
 reference. Neither the harness nor the window actor
-declares a list of injectable kinds. The event's embedded `WindowId` should
+declares a list of injectable kinds. The event's embedded `window` path should
 match the source passed to `window_event`.
 
 This is test injection, not a production headless fallback and not a route for
@@ -221,7 +222,7 @@ the deterministic runtime; unsupported production profiles fail fast.
 For another window-originated stream:
 
 ```text
-define Kind { window: WindowId, ... }
+define Kind { window: ErasedActorPath, ... }
     → translate the native event in aether-window
     → publish K::ID through WindowSelector routing
 ```

@@ -55,7 +55,8 @@ pub struct TextFieldWidget {
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
-    modifiers: Modifiers,
+    /// The latest `Modifiers`, `None` until the first arrives.
+    modifiers: Option<Modifiers>,
     /// Whether a left-button drag is in progress (a pointer move only extends
     /// the selection while the button is held, never on a bare hover).
     dragging: bool,
@@ -140,7 +141,7 @@ impl WasmActor for TextFieldWidget {
             theme: config.theme,
             state: InteractionState::new(config.state),
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
-            modifiers: Modifiers::default(),
+            modifiers: None,
             dragging: false,
             paste_pending: false,
             font_metrics: FontMetricsAdapter::new(desired_font_id),
@@ -206,7 +207,7 @@ impl WasmActor for TextFieldWidget {
             }
             return;
         }
-        if let Some(command) = edit_command(key.code, self.modifiers) {
+        if let Some(command) = edit_command(key.code, self.modifiers.as_ref()) {
             run_edit_key(ctx, &mut self.edit, &mut self.paste_pending, command, self.state.can_mutate());
         }
     }
@@ -314,7 +315,7 @@ mod tests {
             theme: Theme::DEFAULT,
             state: InteractionState::new(WidgetControlState::default()),
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 100.0, height: 24.0 },
-            modifiers: Modifiers::default(),
+            modifiers: None,
             dragging: false,
             paste_pending: false,
             font_metrics: FontMetricsAdapter::new(7),

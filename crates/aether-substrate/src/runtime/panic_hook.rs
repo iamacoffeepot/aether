@@ -527,7 +527,6 @@ mod tests {
             target: "panic_hook_test".to_owned(),
             message: message.to_owned(),
             sequence,
-            origin: None,
         }
     }
 

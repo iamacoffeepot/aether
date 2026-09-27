@@ -41,10 +41,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aether_actor::{ErasedActorRef, ReplyMode, runtime};
-use aether_data::MailboxId;
+use aether_data::{ErasedActorPath, MailboxId};
 pub use aether_data::{Kind, KindId};
 
-use aether_kinds::{CaptureFrame, CaptureFrameResult, WindowId};
+use aether_kinds::{CaptureFrame, CaptureFrameResult};
 
 use aether_substrate::Manual;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -325,7 +325,7 @@ impl RenderCapabilityState {
     /// Every fallible operation completes before insertion, so failure leaves
     /// both the target map and shared GPU state unchanged.
     #[cfg(feature = "desktop")]
-    pub fn attach_window(&mut self, id: WindowId, window: Arc<Window>) -> Result<(), String> {
+    pub fn attach_window(&mut self, path: ErasedActorPath, window: Arc<Window>) -> Result<(), String> {
         if self.offscreen_size.is_some() {
             return Err("cannot attach a window target to an explicitly surfaceless render runtime".to_owned());
         }
@@ -336,11 +336,11 @@ impl RenderCapabilityState {
         let install = if let (Some(gpu), Some(context)) = (self.gpu.as_ref(), self.desktop_gpu.as_ref()) {
             let device = Arc::clone(&gpu.device);
             let format = gpu.color_format;
-            self.targets.attach_with(id, || {
+            self.targets.attach_with(path, || {
                 RenderTarget::attach_to_booted_gpu(context, &device, window, (size.width, size.height), format)
             })?
         } else if self.gpu.is_none() && self.desktop_gpu.is_none() {
-            self.targets.attach_with(id, || {
+            self.targets.attach_with(path, || {
                 RenderTarget::boot_first(window, (size.width, size.height), wireframe.as_deref(), vertex_buffer_bytes)
             })?
         } else {
@@ -359,25 +359,25 @@ impl RenderCapabilityState {
     /// Detach one window surface. A capture selected for that target fails
     /// immediately; captures for other targets and the shared scene survive.
     #[cfg(feature = "desktop")]
-    pub fn detach_window(&mut self, id: WindowId) -> bool {
-        let removed = self.targets.detach(id).is_some();
+    pub fn detach_window(&mut self, path: &ErasedActorPath) -> bool {
+        let removed = self.targets.detach(path).is_some();
         if removed {
-            self.fail_capture_for_detached_window(id);
+            self.fail_capture_for_detached_window(path);
         }
         removed
     }
 
     #[cfg(feature = "desktop")]
-    fn fail_capture_for_detached_window(&mut self, id: WindowId) {
-        if self.pending_capture.as_ref().is_some_and(|pending| pending.window == Some(id)) {
+    fn fail_capture_for_detached_window(&mut self, path: &ErasedActorPath) {
+        if self.pending_capture.as_ref().is_some_and(|pending| pending.window.as_ref() == Some(path)) {
             let pending = self.pending_capture.take().expect("just checked Some");
             pending.reply.reply(&CaptureFrameResult::Err {
-                error: format!("capture_frame failed: window target {} detached before capture", id.0),
+                error: format!("capture_frame failed: window target {path} detached before capture"),
             });
         }
     }
 
-    fn validate_capture_target(&self, window: Option<WindowId>) -> Result<(), String> {
+    fn validate_capture_target(&self, window: Option<&ErasedActorPath>) -> Result<(), String> {
         #[cfg(feature = "desktop")]
         {
             if self.targets.validate_capture_selection(window, |target| target.occluded)? {
@@ -385,8 +385,8 @@ impl RenderCapabilityState {
             }
         }
         #[cfg(not(feature = "desktop"))]
-        if let Some(id) = window {
-            return Err(format!("capture_frame failed: window target {} is unavailable on this render runtime", id.0));
+        if let Some(window) = window {
+            return Err(format!("capture_frame failed: window target {window} is unavailable on this render runtime"));
         }
         if self.offscreen_size.is_some() {
             Ok(())
@@ -763,7 +763,18 @@ fn discard_replay_cache<T>(last: &mut Vec<T>) {
     last.clear();
 }
 
-fn deduplicate_windows(windows: Vec<WindowId>) -> BTreeSet<WindowId> {
+/// The canonical path of the live actor `window` names, or the capture error
+/// naming `window` when it does not prove.
+fn canonical_window<M: ReplyMode, A>(
+    ctx: &NativeCtx<'_, A, M>,
+    window: &ErasedActorPath,
+) -> Result<ErasedActorPath, String> {
+    ctx.resolve_path(window)
+        .map(|target| ctx.actor_path(target))
+        .map_err(|error| format!("capture_frame failed: window {window} does not resolve: {error}"))
+}
+
+fn deduplicate_windows(windows: Vec<ErasedActorPath>) -> BTreeSet<ErasedActorPath> {
     windows.into_iter().collect()
 }
 
@@ -1085,22 +1096,23 @@ impl NativeActor for RenderCapability {
     fn on_occluded(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Occluded) {
         #[cfg(feature = "desktop")]
         let became_occluded =
-            state.targets.set_occluded(mail.window, mail.occluded, |target, occluded| target.occluded = occluded)
+            state.targets.set_occluded(&mail.window, mail.occluded, |target, occluded| target.occluded = occluded)
                 && mail.occluded;
         #[cfg(not(feature = "desktop"))]
         let became_occluded = false;
 
-        if became_occluded && state.pending_capture.as_ref().is_some_and(|pending| pending.window == Some(mail.window))
+        if became_occluded
+            && state.pending_capture.as_ref().is_some_and(|pending| pending.window.as_ref() == Some(&mail.window))
         {
             let pending = state.pending_capture.take().expect("just checked Some");
             pending.reply.reply(&CaptureFrameResult::Err {
-                error: format!("capture_frame failed: window target {} became occluded before capture", mail.window.0),
+                error: format!("capture_frame failed: window target {} became occluded before capture", mail.window),
             });
         }
     }
 
     /// `Frame` commits the application-scoped scene once, deduplicates its
-    /// dirty window ids, then records and presents that committed scene at
+    /// dirty window paths, then records and presents that committed scene at
     /// each live non-occluded target's dimensions. A target whose record
     /// fails drops that target's frame and nothing else — the fan-out still
     /// owes every window behind it its turn. An empty target list is
@@ -1156,7 +1168,7 @@ impl NativeActor for RenderCapability {
         let device = Arc::clone(&state.gpu.as_ref().expect("recovery published a GPU").device);
 
         #[cfg(feature = "desktop")]
-        for window in windows.iter().copied() {
+        for window in &windows {
             let prepared = {
                 let Some(target) = state.targets.get_mut(window) else {
                     continue;
@@ -1169,7 +1181,7 @@ impl NativeActor for RenderCapability {
             let capture = state
                 .pending_capture
                 .as_ref()
-                .is_some_and(|pending| pending.is_ready() && pending.window == Some(window));
+                .is_some_and(|pending| pending.is_ready() && pending.window.as_ref() == Some(window));
             let meta = match state.record_target_frame(width, height, surface_texture, capture) {
                 Ok(meta) => meta,
                 // A record failure disposes of *this* target's frame only —
@@ -1178,7 +1190,7 @@ impl NativeActor for RenderCapability {
                 Err(RenderError::VertexBufferOverflow { vertex_bytes, cap }) => {
                     tracing::warn!(
                         target: "aether_substrate::render",
-                        window = window.0,
+                        %window,
                         vertex_bytes,
                         cap,
                         "dropping this window's frame: vertex bytes exceed the buffer; remaining windows still present",
@@ -1209,8 +1221,9 @@ impl NativeActor for RenderCapability {
         }
     }
 
-    /// `CaptureFrame` — validate the explicit desktop/offscreen selection,
-    /// enforce the one global in-flight limit, then park the mail-driven
+    /// `CaptureFrame` — canonicalize and validate the explicit
+    /// desktop/offscreen selection, enforce the one global in-flight limit,
+    /// then park the mail-driven
     /// capture state machine until the selected target's next dirty frame.
     ///
     /// A render handler must **never** block on a pre-mail settlement (the
@@ -1234,7 +1247,17 @@ impl NativeActor for RenderCapability {
             reply.reply(&CaptureFrameResult::Err { error: format!("capture_frame failed: {error}") });
             return;
         }
-        if let Err(error) = state.validate_capture_target(mail.window) {
+        // Prove the requested window once, at receipt, and keep its canonical
+        // path, so a short path selects the same target as the path
+        // `aether.window.list` reports (ADR-0166).
+        let window = match mail.window.as_ref().map(|window| canonical_window(ctx, window)).transpose() {
+            Ok(window) => window,
+            Err(error) => {
+                reply.reply(&CaptureFrameResult::Err { error });
+                return;
+            }
+        };
+        if let Err(error) = state.validate_capture_target(window.as_ref()) {
             reply.reply(&CaptureFrameResult::Err { error });
             return;
         }
@@ -1284,7 +1307,7 @@ impl NativeActor for RenderCapability {
         }
 
         state.pending_capture = Some(PendingCapture {
-            window: mail.window,
+            window,
             reply,
             after_mails: after,
             checks: mail.checks,
@@ -1324,6 +1347,10 @@ mod tests {
     };
     use std::sync::mpsc;
 
+    fn window(name: &str) -> ErasedActorPath {
+        ErasedActorPath::new(&format!("aether.window/aether.window.instance:{name}")).expect("fixture window path")
+    }
+
     fn test_staged_texture(pixels: Vec<u8>) -> StagedTexture {
         StagedTexture {
             width: 2,
@@ -1343,7 +1370,7 @@ mod tests {
     /// ctx carries (no route), taken out of the ctx.
     fn parked_capture(
         mailer: &Arc<Mailer>,
-        window: Option<WindowId>,
+        window: Option<ErasedActorPath>,
         pre_remaining: usize,
         deadline: Instant,
     ) -> PendingCapture {
@@ -1474,12 +1501,12 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = headless_state();
         state.pending_capture =
-            Some(parked_capture(&mailer, Some(WindowId(7)), 1, Instant::now() + FRAME_SETTLEMENT_CAP));
+            Some(parked_capture(&mailer, Some(window("left")), 1, Instant::now() + FRAME_SETTLEMENT_CAP));
 
-        state.fail_capture_for_detached_window(WindowId(8));
+        state.fail_capture_for_detached_window(&window("right"));
         assert!(state.pending_capture.is_some(), "a different target's capture survives");
 
-        state.fail_capture_for_detached_window(WindowId(7));
+        state.fail_capture_for_detached_window(&window("left"));
         assert!(state.pending_capture.is_none(), "the detached target's capture is cleared");
         assert!(capture_err(&rx).contains("detached"));
     }
@@ -1491,17 +1518,46 @@ mod tests {
         assert!(state.validate_capture_target(None).is_err(), "an unconfigured runtime is not implicitly offscreen");
         state.offscreen_size = Some((64, 48));
         assert!(state.validate_capture_target(None).is_ok(), "None explicitly selects the configured offscreen target");
-        assert!(state.validate_capture_target(Some(WindowId(3))).is_err(), "unknown window ids stay explicit");
+        assert!(state.validate_capture_target(Some(&window("main"))).is_err(), "unknown windows stay explicit");
     }
 
     #[test]
-    fn frame_window_ids_are_deduplicated_in_identity_order() {
+    fn frame_windows_are_deduplicated_in_path_order() {
         assert_eq!(
-            deduplicate_windows(vec![WindowId(8), WindowId(2), WindowId(8), WindowId(5)])
+            deduplicate_windows(vec![window("h"), window("b"), window("h"), window("e")])
                 .into_iter()
                 .collect::<Vec<_>>(),
-            [WindowId(2), WindowId(5), WindowId(8)],
+            [window("b"), window("e"), window("h")],
         );
+    }
+
+    /// A capture names its window by path and the handler proves it at
+    /// receipt: a path with no live actor behind it is refused by name
+    /// before any target selection, rather than reaching selection as an
+    /// unknown target or parking a capture no frame will complete.
+    #[test]
+    fn capture_of_an_unresolvable_window_path_replies_err_naming_it() {
+        let (mailer, rx) = test_mailer_and_rx();
+        let mut state = headless_state();
+        state.offscreen_size = Some((64, 48));
+        let binding = ctx_binding(&mailer);
+        let mut ctx = manual_dispatch_ctx(&binding, session_sender());
+
+        RenderCapability::on_capture_frame(
+            &mut state,
+            &mut ctx,
+            CaptureFrame {
+                window: Some(window("gone")),
+                mails: Vec::new(),
+                after_mails: Vec::new(),
+                checks: Vec::new(),
+                similarity: None,
+            },
+        );
+
+        assert!(state.pending_capture.is_none(), "an unproven window parks no capture");
+        let error = capture_err(&rx);
+        assert!(error.contains("aether.window/aether.window.instance:gone") && error.contains("does not resolve"));
     }
 
     #[test]

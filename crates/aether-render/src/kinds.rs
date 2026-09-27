@@ -12,8 +12,8 @@
 //! `aether.text.draw` kind in `aether-kinds` consumes them — so the quad
 //! draw kinds below import them from there.
 
-use aether_data::MailId;
-use aether_kinds::{ClipRect, QuadSpace, WindowId};
+use aether_data::{ErasedActorPath, MailId};
+use aether_kinds::{ClipRect, QuadSpace};
 use aether_math::{Rgb, Rgba};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -29,10 +29,11 @@ use serde::{Deserialize, Serialize};
 #[aether_data::kind(name = "aether.render.frame", default, eq, engine_only)]
 pub struct Frame {
     pub replay_cache_when_idle: bool,
-    /// Engine window targets dirtied by this application turn. The render
-    /// actor deduplicates the list before presenting; an empty list is the
-    /// explicit surfaceless harness path.
-    pub windows: Vec<WindowId>,
+    /// Engine window targets dirtied by this application turn, each the
+    /// window's canonical actor path. The render actor deduplicates the list
+    /// before presenting; an empty list is the explicit surfaceless harness
+    /// path.
+    pub windows: Vec<ErasedActorPath>,
 }
 
 /// Chassis-internal pre-mail-settlement notice (ADR-0161 §Decision 4). One
@@ -55,9 +56,9 @@ pub struct PreSettled {
 /// actor, issue 1317). Chassis-internal — the driver is its sole sender.
 /// Engine-only mail (ADR-0233): the desktop driver pushes it from host code
 /// through the mailer.
-#[aether_data::kind(name = "aether.render.occluded", copy, default, eq, engine_only)]
+#[aether_data::kind(name = "aether.render.occluded", eq, engine_only)]
 pub struct Occluded {
-    pub window: WindowId,
+    pub window: ErasedActorPath,
     pub occluded: bool,
 }
 

@@ -31,9 +31,10 @@ const RETIRED_SHORT_FORM: &str = "://";
 /// (`aether.component/:probe`), valid by construction on every path in:
 /// [`new`](Self::new), wire decode, and `Deserialize` all run the same check.
 ///
-/// Equality is textual. A short path and its canonical expansion are unequal
-/// values, because only the engine can tell that they name the same actor.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// Equality and order are textual. A short path and its canonical expansion
+/// are unequal values, because only the engine can tell that they name the
+/// same actor.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ErasedActorPath(Box<str>);
 
 /// How an [`ErasedActorPath`] is written.

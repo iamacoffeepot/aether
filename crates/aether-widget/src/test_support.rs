@@ -2,6 +2,7 @@
 
 use aether_actor::wasm::inline::Registry;
 use aether_actor::{ErasedActorRef, WasmCtx};
+use aether_data::{ErasedActorPath, LoadName};
 
 /// The position the synthetic ctx dispatches for. Only its distinctness from
 /// the ids the tests prove matters.
@@ -15,4 +16,10 @@ const SHELL_MAILBOX: u64 = 0x5E11;
 pub fn proven(id: u64) -> ErasedActorRef {
     let registry = Registry::new();
     WasmCtx::__new(SHELL_MAILBOX, &registry, id).sender().expect("a threaded dispatch source mints a proof")
+}
+
+/// The window the tables' synthetic input events name. No table reads it, so
+/// one window serves every test.
+pub fn test_window() -> ErasedActorPath {
+    aether_window::window_path(&LoadName::new("main").expect("a valid window name"))
 }

@@ -171,7 +171,8 @@ pub struct NumericWidget {
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
-    modifiers: Modifiers,
+    /// The latest `Modifiers`, `None` until the first arrives.
+    modifiers: Option<Modifiers>,
     dragging: bool,
     paste_pending: bool,
     /// Which stepper button the pointer is over, for its hover overlay.
@@ -198,7 +199,7 @@ impl NumericWidget {
             theme: config.theme,
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             state: InteractionState::new(config.state),
-            modifiers: Modifiers::default(),
+            modifiers: None,
             dragging: false,
             paste_pending: false,
             hovered_stepper: None,
@@ -641,7 +642,7 @@ impl WasmActor for NumericWidget {
                 }
             }
             code => {
-                let Some(command) = edit_command(code, self.modifiers) else {
+                let Some(command) = edit_command(code, self.modifiers.as_ref()) else {
                     return;
                 };
                 if run_edit_key(ctx, &mut self.edit, &mut self.paste_pending, command, self.state.can_mutate())
@@ -689,14 +690,14 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        release_left(&mut self.dragging, false, release);
+        release_left(&mut self.dragging, false, release.clone());
         release_left(&mut self.pressed_stepper, None, release);
     }
 
     #[handler::single]
     fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
         if self.state.is_available() {
-            self.modifiers = modifiers;
+            self.modifiers = Some(modifiers);
         }
     }
 
