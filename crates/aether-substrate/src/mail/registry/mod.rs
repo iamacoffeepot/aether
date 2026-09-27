@@ -7,6 +7,9 @@
 // `Mutex` — there is no reader half, because every table read loads a
 // published view instead (ADR-0165). Successful writes synchronously
 // publish point-in-time route and kind views while holding that guard.
+// Beside them, the publication table (ADR-0241 §3) records which code
+// implements each published namespace; the owner's publish arm admits a
+// module against it.
 //
 // Before the ADR-0165 runtime seal two writers share that guard: the
 // registry owner draining its queue, and the boot path applying directly
@@ -27,6 +30,8 @@ mod metrics;
 mod names;
 #[allow(dead_code, reason = "owner submission is installed now and consumed by staged-writer arc follow-ups")]
 mod owner;
+#[cfg(feature = "wasm")]
+mod publication;
 mod relay;
 
 #[cfg(test)]
@@ -54,5 +59,7 @@ pub use metrics::RegistryQueueMetrics;
 pub(crate) use names::{CHASSIS_SENTINEL_NAME, canonical_mailbox_id, lineage_mailbox_id};
 pub(crate) use owner::ParkAdmission;
 pub(crate) use owner::RegistryOwnerLease;
+#[cfg(feature = "wasm")]
+pub use publication::AdmissionRefusal;
 pub(crate) use relay::RouteRelayHandle;
 pub(crate) use relay::RouteRelayLease;

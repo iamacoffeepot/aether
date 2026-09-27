@@ -62,6 +62,10 @@ impl aether_actor::Lifecycle<Self> for TickSource {
         ctx.send_to(state.lifecycle, &LifecycleCapability::subscribe_request::<Tick>());
     }
 }
+impl aether_actor::Declared for TickSource {
+    type Depends = ();
+    type Spawns = ();
+}
 impl NativeActor for TickSource {
     type State = Self;
 }

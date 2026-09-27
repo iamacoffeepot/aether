@@ -106,6 +106,10 @@ fn failed_singleton_init_releases_namespace_and_sink() {
             Err(BootError::Other(Box::new(io::Error::other("intentional init failure for Phase 7 cleanup test"))))
         }
     }
+    impl aether_actor::Declared for FailingCap {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for FailingCap {
         type State = Self;
     }

@@ -1,8 +1,15 @@
 //! The one generated bundle root: one field, init, and handlers per present role.
+//!
+//! Every bundle is content-addressed (ADR-0241 §3): the root emits the
+//! [`CONTENT_ADDRESSED_SECTION`] marker, so the engine publishes it as
+//! `aether.bloomery.bundle.<module hash>` and every built bundle is its own
+//! publication.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::Ident;
+
+use aether_data::CONTENT_ADDRESSED_SECTION;
 
 pub struct RolePieces {
     pub field_name: Ident,
@@ -45,6 +52,12 @@ pub fn expand_root(root: &Ident, pieces: &[RolePieces]) -> TokenStream2 {
 
             #(#handlers)*
         }
+
+        // ADR-0241 §3: one version byte whose presence marks the module
+        // content-addressed.
+        #[cfg(target_family = "wasm")]
+        #[unsafe(link_section = #CONTENT_ADDRESSED_SECTION)]
+        static __AETHER_BLOOMERY_BUNDLE_CONTENT_ADDRESSED: [u8; 1] = [1u8];
 
         #(#items)*
     }

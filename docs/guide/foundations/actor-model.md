@@ -389,6 +389,18 @@ match ctx.resolve(&run.source) {
 The guest arm, `resolve` over an `ActorPath<R>`, lands with the Bloomery
 bootstrap (#6829).
 
+A kind or config field naming an actor its receiver will later send to, such
+as a subscriber, a handler, a callback, or a source, is a typed path, never an
+`ErasedActorPath`
+([design rule R-0040](../contributing/design-rules.md#r-0040)). It is an
+`ActorPath<R>` when the holder needs one concrete actor type, and a
+`ProtocolPath<P>` when it needs only a protocol, such as a subscriber the
+publisher cannot name. The receiver proves it once on receipt, by its decode,
+and stores the typed proof `resolve` returns. Sending through an erased
+reference is being removed (#6895), so an `ErasedActorPath` is left to name,
+render, compare, or monitor an actor, and to name a recipient at the untyped
+MCP and RPC boundary.
+
 ### Helpers that only send
 
 The class marker rides on the context type — a single handler's `WasmCtx<'_>`

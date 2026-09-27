@@ -62,6 +62,10 @@ fn ctx_spawn_child_routes_through_handler() {
             Ok(Self { received })
         }
     }
+    impl aether_actor::Declared for ChildCap {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for ChildCap {
         type State = Self;
     }
@@ -105,6 +109,10 @@ fn ctx_spawn_child_routes_through_handler() {
         ) -> Result<Self, BootError> {
             Ok(Self { spawn_count, failure_count, child_received, registry })
         }
+    }
+    impl aether_actor::Declared for ParentCap {
+        type Depends = ();
+        type Spawns = ();
     }
     impl NativeActor for ParentCap {
         type State = Self;
@@ -273,6 +281,10 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
             Err(BootError::Other(Box::new(io::Error::other("intentional staged child init failure"))))
         }
     }
+    impl aether_actor::Declared for FailingChild {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for FailingChild {
         type State = Self;
     }
@@ -308,6 +320,10 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
         fn init((): (), (attempts, observed): Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { attempts, observed })
         }
+    }
+    impl aether_actor::Declared for ParentCap {
+        type Depends = ();
+        type Spawns = ();
     }
     impl NativeActor for ParentCap {
         type State = Self;
@@ -391,6 +407,10 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
             Ok(Self)
         }
     }
+    impl aether_actor::Declared for Child {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for Child {
         type State = Self;
     }
@@ -429,6 +449,10 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
         ) -> Result<Self, BootError> {
             Ok(Self { init_count, invalid_subname_observed })
         }
+    }
+    impl aether_actor::Declared for ActualParent {
+        type Depends = ();
+        type Spawns = ();
     }
     impl NativeActor for ActualParent {
         type State = Self;

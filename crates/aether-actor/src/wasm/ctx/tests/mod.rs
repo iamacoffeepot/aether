@@ -51,6 +51,10 @@ impl crate::Lifecycle<Self> for FailingChild {
     }
 }
 
+impl crate::Declared for FailingChild {
+    type Depends = ();
+    type Spawns = ();
+}
 impl WasmActor for FailingChild {
     type State = Self;
     type Persist = ();
@@ -106,6 +110,10 @@ impl crate::Lifecycle<Self> for SucceedingChild {
     }
 }
 
+impl crate::Declared for SucceedingChild {
+    type Depends = ();
+    type Spawns = ();
+}
 impl WasmActor for SucceedingChild {
     type State = Self;
     type Persist = ();
@@ -183,6 +191,10 @@ impl crate::Lifecycle<Self> for StubChild {
     }
 }
 
+impl crate::Declared for StubChild {
+    type Depends = ();
+    type Spawns = ();
+}
 impl WasmActor for StubChild {
     type State = Self;
     type Persist = ();

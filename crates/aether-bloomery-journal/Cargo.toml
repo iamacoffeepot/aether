@@ -4,15 +4,28 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Append-only journal root: a SQLite log of typed Storage events plus digest-named artifact files (ADR-0220)."
+description = "Append-only journal root: a SQLite log of typed Storage events plus digest-named artifact files (ADR-0220), split into an always-on journal actor identity and a runtime feature carrying the store and the actor."
+
+# The ADR-0122 identity/runtime split rides the `runtime` feature. The identity
+# half (the `JournalActor` marker, the read-page and watcher limits, and the
+# artifact vocabulary re-exported from `aether-bloomery-kinds`) is `no_std` and
+# compiles always-on, so a wasm guest names the journal actor with
+# `default-features = false`. The `runtime` feature adds the SQLite event log,
+# the digest-named artifact files, the streaming artifact store, and the
+# `aether.bloomery.journal` actor's substrate-typed state.
+[features]
+default = ["runtime"]
+runtime = ["dep:aether-substrate", "dep:rusqlite", "dep:tempfile"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
-aether-substrate = { path = "../aether-substrate" }
-rusqlite = { workspace = true }
-tempfile = "3"
+# Native-only runtime half: the actor runtime, the SQLite event log, and the
+# temp files each blob is written through before its rename.
+aether-substrate = { path = "../aether-substrate", optional = true }
+rusqlite = { workspace = true, optional = true }
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }

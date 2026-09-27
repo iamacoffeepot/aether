@@ -70,6 +70,10 @@ fn instanced_can_spawn_grandchild() {
             Ok(Self { received: params })
         }
     }
+    impl aether_actor::Declared for Grandchild {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for Grandchild {
         type State = Self;
     }
@@ -113,6 +117,10 @@ fn instanced_can_spawn_grandchild() {
         ) -> Result<Self, BootError> {
             Ok(Self { grandchild_received, spawned_name })
         }
+    }
+    impl aether_actor::Declared for Parent {
+        type Depends = ();
+        type Spawns = ();
     }
     impl NativeActor for Parent {
         type State = Self;
@@ -272,6 +280,10 @@ fn spawn_finish_with_name_returns_the_registered_top_level_name() {
             Ok(Self)
         }
     }
+    impl aether_actor::Declared for NamedReturn {
+        type Depends = ();
+        type Spawns = ();
+    }
     impl NativeActor for NamedReturn {
         type State = Self;
     }
@@ -324,6 +336,10 @@ impl aether_actor::Lifecycle<Self> for KeyedUnit {
     fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self)
     }
+}
+impl aether_actor::Declared for KeyedUnit {
+    type Depends = ();
+    type Spawns = ();
 }
 impl NativeActor for KeyedUnit {
     type State = Self;

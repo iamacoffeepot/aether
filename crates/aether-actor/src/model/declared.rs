@@ -14,6 +14,11 @@
 //! or names a position that holds a different entry or none (`E0277`), so a
 //! marker that compiles is backed by a declaration.
 //!
+//! The checks read the same lists: the pre-`init` dependency check on both
+//! transports walks [`Declared::Depends`] as a [`DependencyList`], and
+//! `export!`'s inline-child coverage check bounds [`Declared::Spawns`]. So a
+//! hand-written [`Declared`] impl is checked exactly as an emitted one is.
+//!
 //! A position is [`Here`] (the list's head) or [`There<I>`] (position `I` of
 //! the tail). The expansion writes each entry's position; no one else needs
 //! to. A contract row list keeps every handler's slot whatever the enabled
@@ -21,12 +26,15 @@
 //! with [`Gap`], which only [`There`] steps over, so every other handler's
 //! position is the same in every configuration.
 
+use core::iter;
 use core::marker::PhantomData;
 
-use aether_data::Kind;
+use aether_data::__derive_runtime::canonical::{inputs_dependency_len, write_inputs_dependency};
+use aether_data::{INPUTS_SECTION_VERSION, Kind};
 
 use super::contract::ReplyShape;
 use super::protocol::Row;
+use super::{CallerAddressable, DependencyResolver, Singleton};
 
 /// The first position of a declaration list: its head.
 ///
@@ -53,6 +61,10 @@ mod sealed {
     /// Private supertrait sealing [`super::RowIndex`] to its two structural
     /// impls.
     pub trait RowSealed<L, K> {}
+
+    /// Private supertrait sealing [`super::DependencyList`] to its two
+    /// structural impls.
+    pub trait DependencySealed {}
 }
 
 /// `I: ListIndex<L, T>` holds when position `I` of the declaration list `L`
@@ -105,15 +117,119 @@ impl<H, Tail, K, I: RowIndex<Tail, K>> RowIndex<(H, Tail), K> for There<I> {
 /// `#[actor(spawns(..))]`, each as a type-level list `(E1, (E2, (…, ())))` in
 /// declaration order.
 ///
-/// `#[actor]` emits the one impl per actor, from the same parsed lists as the
-/// dependency records the pre-`init` check reads. Each
+/// These lists are what the checks read. The native birth check reads
+/// [`Depends`](Declared::Depends) through [`declared_dependencies`], and
+/// `export!` writes a guest's dependency records from it, so the pre-`init`
+/// check on both transports refuses the birth while a listed dependency is
+/// not `Live`. `export!`'s inline-child coverage check reads
+/// [`Spawns`](Declared::Spawns). Whatever an impl lists is exactly what is
+/// checked.
+///
+/// `#[actor]` emits the one impl per actor. Each
 /// [`DependsOn<R>`](crate::DependsOn) and [`Spawns<C>`](crate::Spawns) impl
 /// names its entry's position in these lists, so none compiles without its
 /// entry here. A type that no `#[actor]` expansion built writes this impl
-/// itself, as it writes its own dispatch.
+/// itself, as it writes its own dispatch; `NativeActor` and
+/// [`WasmActor`](crate::WasmActor) both require it.
 pub trait Declared {
     /// The declared dependencies, in `depends(..)` order.
-    type Depends;
+    type Depends: DependencyList;
     /// The declared inline children, in `spawns(..)` order; `()` on native.
     type Spawns;
+}
+
+/// A declared dependency list `(R1, (R2, (…, ())))` (ADR-0231 §10): each
+/// entry a keyless actor with a [`DependencyResolver`] strategy, the same
+/// bound [`DependsOn<R>`](crate::DependsOn) carries.
+///
+/// Sealed, and implemented only structurally: `()` is the empty list, and
+/// `(R, Tail)` holds when `R` is declarable and `Tail` is a list. Its one
+/// item is the list's first [`DependencyLink`], which the pre-`init` checks
+/// walk.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a declared dependency list",
+    note = "a dependency list is `()` or `(R, Tail)`, where `R` is a keyless actor with a `One` or `Embedded` resolver"
+)]
+pub trait DependencyList: sealed::DependencySealed {
+    /// The list's first entry, or `None` for the empty list.
+    #[doc(hidden)]
+    const FIRST: Option<&'static DependencyLink>;
+}
+
+impl sealed::DependencySealed for () {}
+
+impl DependencyList for () {
+    const FIRST: Option<&'static DependencyLink> = None;
+}
+
+impl<R, Tail> sealed::DependencySealed for (R, Tail)
+where
+    R: Singleton + CallerAddressable,
+    R::Resolver: DependencyResolver,
+    Tail: DependencyList,
+{
+}
+
+impl<R, Tail> DependencyList for (R, Tail)
+where
+    R: Singleton + CallerAddressable,
+    R::Resolver: DependencyResolver,
+    Tail: DependencyList,
+{
+    const FIRST: Option<&'static DependencyLink> = Some(&DependencyLink {
+        resolver: <R::Resolver as DependencyResolver>::TAG,
+        namespace: R::NAMESPACE,
+        next: Tail::FIRST,
+    });
+}
+
+/// One entry of a [`DependencyList`]: the dependency's resolver tag and
+/// namespace, then the next entry. Built only by the list's `(R, Tail)` impl,
+/// so every link names a declarable actor.
+#[derive(Debug)]
+pub struct DependencyLink {
+    resolver: u8,
+    namespace: &'static str,
+    next: Option<&'static Self>,
+}
+
+/// `A`'s declared dependencies as `(resolver tag, namespace)` pairs, in
+/// `depends(..)` order: the list the native birth check reads.
+pub fn declared_dependencies<A: Declared>() -> impl Iterator<Item = (u8, &'static str)> {
+    iter::successors(<A::Depends as DependencyList>::FIRST, |link| link.next)
+        .map(|link| (link.resolver, link.namespace))
+}
+
+/// The byte length of the version-framed `Dependency` records
+/// [`write_dependency_records`] writes for the list starting at `first`.
+#[doc(hidden)]
+#[must_use]
+pub const fn dependency_records_len(first: Option<&'static DependencyLink>) -> usize {
+    let mut len = 0;
+    let mut next = first;
+    while let Some(link) = next {
+        len += 1 + inputs_dependency_len(link.resolver, link.namespace);
+        next = link.next;
+    }
+    len
+}
+
+/// Write one version-framed `Dependency` record per entry of the list
+/// starting at `first` into `out` at `cursor`, in list order, returning the
+/// new cursor. `export!` writes a guest's dependency records with it, so the
+/// host's pre-`init` check reads the same list the native birth check does.
+#[doc(hidden)]
+#[must_use]
+pub const fn write_dependency_records(
+    first: Option<&'static DependencyLink>,
+    out: &mut [u8],
+    mut cursor: usize,
+) -> usize {
+    let mut next = first;
+    while let Some(link) = next {
+        out[cursor] = INPUTS_SECTION_VERSION;
+        cursor = write_inputs_dependency(link.resolver, link.namespace, out, cursor + 1);
+        next = link.next;
+    }
+    cursor
 }

@@ -2,24 +2,26 @@
 //! correctly surfaces the inbound mail's component origin.
 //!
 //! Uses the `source_observer` test-fixture component, whose `on_source_query`
-//! manual handler reads `ctx.sender()` and answers `SourceReport` through it
-//! (or by reply, when there is no component sender).
+//! manual handler reads `ctx.sender()` and replies a `SourceReport` carrying
+//! whether it returned a proof. The reply lands on the origin the host stamped
+//! on the query, the one `sender()` reads.
 //!
 //! Two invariants are checked:
 //!
 //! 1. **Session source returns `None`**: the harness sends `SourceQuery`
 //!    directly (as a Session origin) via `send_and_await_reply`; the decoded reply
-//!    must carry `mailbox_id: 0`.
+//!    must carry `had_sender: false`.
 //!
 //! 2. **Component source returns the sender**: the observer is loaded under
 //!    its default name and a `source_forwarder` — which declares the observer
 //!    as a dependency, so the load order is load-bearing — beside it. The
 //!    harness triggers the forwarder with the fieldless `SendSourceQuery`; the
 //!    forwarder sends `SourceQuery` through the reference it minted from that
-//!    declaration (component-origin mail). The observer sends its report back
-//!    through `ctx.sender()`, and the forwarder logs its arrival. After the
-//!    chain settles, `log_tail` on the forwarder confirms the report reached
-//!    it — so the observer's sender was the forwarder.
+//!    declaration (component-origin mail). The observer replies its report to
+//!    the stamped origin, and the forwarder logs its arrival with the report's
+//!    `had_sender` verdict. After the chain settles, `log_tail` on the
+//!    forwarder confirms the report reached it with `had_sender=true` — so the
+//!    observer's sender was a proof of the forwarder.
 //!
 //! This file is an integration test that requires a pre-built
 //! `source_observer.wasm` fixture. CI builds component wasm before invoking
@@ -71,7 +73,7 @@ fn load_source_observer(
 
 /// Session-source case: the harness sends `SourceQuery` directly to the reader.
 /// `sender()` must return `None` (no component origin) → `SourceReport
-/// { mailbox_id: 0 }`.
+/// { had_sender: false }`.
 #[test]
 fn session_source_returns_none() {
     let Some(wasm_path) = require_wasm(SOURCE_OBSERVER) else {
@@ -87,17 +89,13 @@ fn session_source_returns_none() {
 
     let report = result.reply::<SourceReport>("query").expect("decode SourceReport");
 
-    assert_eq!(
-        report.mailbox_id, 0,
-        "session-origin sender() must be None (mailbox_id 0), got {:#x}",
-        report.mailbox_id,
-    );
+    assert!(!report.had_sender, "session-origin sender() must be None");
 }
 
 /// Component-source case: a forwarder component sends `SourceQuery` to the
 /// observer through the reference its declared dependency minted.
-/// `sender()` must return the forwarder, so the report the observer sends
-/// through it arrives at the forwarder. Verified by the forwarder's log.
+/// `sender()` must return a proof, and the observer's reply to the stamped
+/// origin must arrive at the forwarder. Verified by the forwarder's log.
 #[test]
 fn component_source_returns_sender_mailbox() {
     let Some(wasm_path) = require_wasm(SOURCE_OBSERVER) else {
@@ -119,13 +117,15 @@ fn component_source_returns_sender_mailbox() {
 
     let logs = harness.log_tail(sender, None, None);
     let found = match &logs {
-        LogTailResult::Ok { entries, .. } => entries.iter().any(|e| e.message == "source_report_received"),
+        LogTailResult::Ok { entries, .. } => {
+            entries.iter().any(|e| e.message == "source_report_received had_sender=true")
+        }
         LogTailResult::Err { error } => panic!("log_tail on forwarder failed: {error}"),
     };
 
     assert!(
         found,
-        "the reader's report did not reach the forwarder through its sender;\n\
+        "the reader's report did not reach the forwarder with a sender proof;\n\
          reader: {reader_path}\n\
          sender: {sender_path}\n\
          forwarder log entries: {logs:?}",

@@ -4,6 +4,7 @@
 - **Date:** 2026-09-23
 - **Amended:** 2026-09-23 — §3's flat subscribe names its publisher: `ctx.subscribe::<LifecycleCapability, Tick>()`, both type parameters caller-chosen and checked by the existing `Publishes<K>` marker, because the `PublishedBy` link cannot be implemented under Rust's orphan rule. Window events subscribe every window by default.
 - **Amended:** 2026-09-23 — typed flat sends take the payload as `&impl SendableTo<R>`, so the turbofish names only `R`; the native ctx's erased `send_with_context` is renamed, and the held-reference context verbs are `send_to_with_context` / `send_detached_to_with_context`; the ctx for `unwire` and `on_rehydrate` is typed by `Self` too; the per-cap handle facades and `MailboxForward` are deleted.
+- **Amended:** 2026-09-26 — §1: `send_to` and its context-carrying siblings take only an `ActorRef<R>` or a `ProtocolRef<P>`; the sentence on an `ErasedActorRef` passed to `send_to` no longer holds, because erased actor sending is being removed (#6895; the owner: "We ARE going to remove erased actor sending you do know that right").
 
 Amends [ADR-0230](0230-proven-actor-references.md) §5 (what replaces the
 deleted `ctx.actor::<R>()` handle at the call site),

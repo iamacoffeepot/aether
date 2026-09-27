@@ -79,6 +79,10 @@ impl aether_actor::Lifecycle<Self> for Spawned {
         Ok(Self)
     }
 }
+impl aether_actor::Declared for Spawned {
+    type Depends = ();
+    type Spawns = ();
+}
 impl NativeActor for Spawned {
     type State = Self;
 }
@@ -182,6 +186,10 @@ fn post_seal_pumped_boot_publishes_the_endpoint_the_caller_wired() {
         fn init((): Self::Config, params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { seen: params })
         }
+    }
+    impl aether_actor::Declared for Pumped {
+        type Depends = ();
+        type Spawns = ();
     }
     impl NativeActor for Pumped {
         type State = Self;

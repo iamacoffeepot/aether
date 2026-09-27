@@ -150,13 +150,13 @@ The rules:
 | 1 | Static reply check on typed sends | not built |
 | 2 | `#[protocol]` and `CoveredBy` | built: `Row`, `RowReply`, `RowSet`, `CoversRows`, `Protocol`, `CoveredBy` (`crates/aether-actor/src/model/protocol.rs`) and `#[protocol]` (`crates/aether-actor-derive/src/protocol.rs`), over the per-handler `Contract<K>` rows and per-actor `Contracts::CONTRACTS`; `includes` and protocol-to-protocol coverage are not built |
 | 3 | `ProtocolRef<P>`, `ProtocolPath<P>`, contextual decode, `resolve` | `ProtocolPath<P>` and `ActorPath::narrow` built (`crates/aether-actor/src/path/`), with the path text as their only wire form. `ProtocolPath<P>`'s decode proves coverage against the live route at its path through `Kind::decode_with` and `DecodeCtx` (`crates/aether-data/src/wire/context.rs`, over the registry's `PublishedRoutes` answer in `crates/aether-substrate/src/mail/registry/mailbox/resolve.rs`), and it has no `Deserialize`; `ActorPath<R>`'s decode checks its leaf namespace, and the type constructors `ActorPath::<R>::instance` and `ActorPath::<C>::child` replace the declared links. `ProtocolRef<P>` built (`crates/aether-actor/src/reference/protocol_ref.rs`), a `Target` for each kind `P` lists through a row index the compiler infers (`RowAt`, `crates/aether-actor/src/model/protocol.rs`), with the native liveness-only `resolve` over a `ProtocolPath<P>` (`Registry::resolve_protocol`, `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). Not built: the guest's published-routes answer (ADR-0241), so a guest refuses a `ProtocolPath<P>` at decode; reference narrowing |
-| 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the erased send verb's removal and the cast are not |
+| 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the erased send verb's removal (#6895) and the cast are not |
 | 5 | Replace preserves contracts | built, the fallback rule included: `crates/aether-data/src/contract.rs`, `crates/aether-substrate/src/mail/registry/contract.rs`, `crates/aether-component/src/trampoline/runtime/contract.rs` |
 | 6 | Manual rows | built: `Undeclared` row, `ReplyContract::Manual` on both manifests |
 | 7 | Ctx typed by its actor | built, every ctx on both transports |
 | 8 | Silent subscribers and watchers | built for the wasm `subscribe` (`crates/aether-actor/src/wasm/ctx/subscribe.rs`); the `monitor` bound and subscriber references are not |
 | 9 | Relays | `forward_to` and `DeferredReply::hand_off` exist; the typed target is not built |
-| 10 | Markers exist only at a declared position | built: `Here`, `There<I>`, `Gap`, `ListIndex`, `RowIndex`, `Declared` (`crates/aether-actor/src/model/declared.rs`), `Contracts::Rows` and the `Index` of `Contract<K>`, `DependsOn<R>`, `Spawns<C>`, and `Rebuildable<M>`, emitted by `#[actor]` (`crates/aether-actor-derive/src/reply_markers.rs`, `wasm_expand.rs`, `native_expand.rs`, `handler_set.rs`) and `export!` (`crates/aether-actor/src/wasm/mod.rs`); a type no `#[actor]` built still writes its own declaration impl (#6870) |
+| 10 | Markers exist only at a declared position | built: `Here`, `There<I>`, `Gap`, `ListIndex`, `RowIndex`, `Declared` (`crates/aether-actor/src/model/declared.rs`), `Contracts::Rows` and the `Index` of `Contract<K>`, `DependsOn<R>`, `Spawns<C>`, and `Rebuildable<M>`, emitted by `#[actor]` (`crates/aether-actor-derive/src/reply_markers.rs`, `wasm_expand.rs`, `native_expand.rs`, `handler_set.rs`) and `export!` (`crates/aether-actor/src/wasm/mod.rs`). The checks read the declaration lists: the native birth check (`crates/aether-substrate/src/actor/native/dependencies.rs`) and `export!`'s guest `Dependency` records read `Declared::Depends` through `DependencyList`, and `export!`'s inline-child coverage check reads `Declared::Spawns` through `ListedIn`, so a hand-written `Declared` is checked as an emitted one is. A type no `#[actor]` built still writes its own `Contracts` and dispatch (#6887, #6888) |
 
 ### 1. The static reply check
 
@@ -511,11 +511,16 @@ is kept per route. A replace never makes a resolve fail, because §5 refuses
 a replace that drops or changes a row; a resolve fails on liveness only.
 Every refusal names the path, never a position.
 
-An untyped `ErasedActorPath` (a config field, an MCP tool argument, an RPC
-`Call`) stays untyped: `resolve_path` proves it to an `ErasedActorRef`,
+A path in a kind or config that its receiver will send to is a typed path,
+an `ActorPath<R>` or a `ProtocolPath<P>` by what the holder needs, and it
+arrives typed; it is never an `ErasedActorPath`. An `ErasedActorPath` at the
+untyped boundary, an MCP tool argument or an RPC `Call` recipient, is
+delivered through the boundary's stand-in (§4). An `ErasedActorPath` that
+only names an actor is proven, where a proof is needed, by `resolve_path`,
 after filling a short path's holes from the generated root and child
-declarations, a static inventory rather than the live tree, and the cast
-(§4) types it.
+declarations, a static inventory rather than the live tree; the
+`ErasedActorRef` it returns serves identity and monitoring, and sends
+nothing.
 
 Each arm lands with its consumer. The native arm over a `ProtocolPath<P>`
 serves the Bloomery workspace's receipt of a request's storage source, and
@@ -590,9 +595,8 @@ impl ErasedActorRef {
 ```
 
 The cast is the fallback for references that arrive untyped: the envelope
-sender (`ctx.sender()`), a path proven through `resolve_path`, including one
-an MCP tool or an RPC `Call` put in a payload, and a native `resolve_live`
-answer. It runs once, at receipt, in the handler that received the reference,
+sender (`ctx.sender()`) and a native `resolve_live` answer. It runs once,
+at receipt, in the handler that received the reference,
 and reads the same published rows the contextual decode reads.
 
 | `T` | Succeeds when the published rows show |
@@ -758,7 +762,9 @@ silent or manual.
 - The publisher holds each subscriber as `ProtocolRef<Subscriber<K>>`, cast
   from the subscribe request's sender (§4). The cast is the runtime twin of
   the `subscribe` bound, for a request from a non-actor or an erased sender,
-  and fan-out sends through those references.
+  and fan-out sends through those references. A subscriber named explicitly
+  in a request, rather than by its sender, is a typed path (§3), never an
+  `ErasedActorPath`.
 
 ### 9. Relays
 
@@ -803,8 +809,15 @@ pub trait Contracts {
 }
 
 pub trait Declared {
-    type Depends; // (R1, (R2, ())) from depends(..)
-    type Spawns;  // (C1, (C2, ())) from spawns(..); () on native
+    type Depends: DependencyList; // (R1, (R2, ())) from depends(..)
+    type Spawns;                  // (C1, (C2, ())) from spawns(..); () on native
+}
+
+/// Sealed; `()`, and `(R, Tail)` when `R: Singleton + CallerAddressable`,
+/// `R::Resolver: DependencyResolver`, and `Tail: DependencyList`.
+pub trait DependencyList {
+    #[doc(hidden)]
+    const FIRST: Option<&'static DependencyLink>;
 }
 
 pub trait Contract<K: Kind>: Contracts {
@@ -876,16 +889,32 @@ names an index.
   child it retires, is the worked case: a `pub struct` in a private
   `mod internal`, re-exported `pub(crate)`, so it enters the public window
   instance actors' `Rows` while no other crate has a path to it.
-- **What stays.** `CONTRACTS`, the native `DependencyEntry` inventory, and
-  the wasm `InputsRecord::Dependency` records are emitted from the same parsed
-  lists as `Rows` and `Depends`, in the same expansion.
+- **The checks read the lists.** `Declared` is a supertrait of `NativeActor`
+  and `WasmActor`, so every birth site has it. `DependencyList` is sealed,
+  and its `FIRST` is a chain of opaque `DependencyLink`s, each a resolver tag
+  and a namespace, built only by the `(R, Tail)` impl. The native birth check
+  walks `<A as Declared>::Depends` through `declared_dependencies::<A>()`.
+  `export!` writes a guest's `InputsRecord::Dependency` records at compile
+  time from each listed type's `Declared::Depends`, after that type's
+  manifest records, and the host reads them as before. `export!`'s coverage
+  check requires each listed type's `Declared::Spawns` to be
+  `ListedIn<__AetherModule>`, a sealed trait that holds for `()` and for
+  `(C, Tail)` when `C: Rebuildable<__AetherModule>`; it is sealed so the
+  invoking crate cannot implement it for a list of its own unlisted
+  children. `CONTRACTS` stays emitted beside `Rows`. The native
+  `DependencyEntry` inventory, the dependency records `#[actor]` wrote into
+  the inherent manifest, and the hidden `__aether_listed_children` are gone,
+  and a generic native actor may declare `depends(..)`, since no monomorphic
+  inventory entry is needed.
 
 The boundary is the declaration impl. A type that no `#[actor]` expansion
 built writes its own `Contracts` / `Declared` impl, as it writes its own
-`Dispatch` or `WasmDispatch`, and can list an entry its hand-written dispatch
-or records do not back. Closing that case, with the native birth check
-reading `<A as Declared>::Depends` and dispatch derived from the row list, is
-#6870.
+`Dispatch` or `WasmDispatch`. Its dependencies and inline children are closed:
+what its `Declared` impl lists is exactly what the birth check and the
+coverage check read. Its rows are not yet: a hand-written `Contracts::Rows`,
+`HandlesKind<K>`, or `Replies<K>` can claim a kind its hand-written dispatch
+does not serve. Deriving dispatch from the row list is #6887, and reading
+`HandlesKind<K>` and `Replies<K>` off the rows is #6888.
 
 ## Scenario sweep
 
@@ -920,7 +949,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | `ActorPath<R>` held or received | `ctx.resolve`: `NotLive` refuses, else an `ActorRef<R>`, which sends every kind `R` handles, manual rows included; no row comparison |
 | `ProtocolPath<P>` decoded from mail, config, or saved state | a contextual decode (`decode_with`) against the engine: refused unless the rows the live route at the path published cover `P`; a decode without a context is refused at decode |
 | `ProtocolPath<P>` held or received, narrowed or decoded | `ctx.resolve`: `NotLive` refuses, else a `ProtocolRef<P>`; no row comparison |
-| `ErasedActorPath` received untyped (config, MCP, RPC) | `resolve_path` to an `ErasedActorRef`, then `cast::<T>()` |
+| `ErasedActorPath` received untyped (config, MCP, RPC) | a field its receiver sends to is never one: it is a typed path (§3); at the MCP/RPC boundary, delivered through the stand-in (§4); otherwise `resolve_path` to an `ErasedActorRef` for naming, identity, or monitoring |
 | `ErasedActorRef` (`ctx.sender()`, `resolve_path`, `resolve_live`) | no send; reply, monitor, key, or `cast::<T>()` first |
 | by path over the wire (MCP, RPC `Call`, `NamedMail` bundles) | exempt from §1; the boundary proves the path (ADR-0230 §3) and delivers through its stand-in |
 
@@ -972,6 +1001,9 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | a manual row where a protocol expects a single or silent row | not covered, statically and at run time |
 | a hand-written `Contract<K>`, `DependsOn<R>`, `Spawns<C>`, or `Rebuildable<M>` for an actor `#[actor]` built or a module `export!` built | compile error: `E0119` when it repeats an emitted impl, else `E0277` on its `Index` bound (§10) |
 | a public actor handling a crate-private kind, or declaring a crate-private dependency or inline child | compile error `E0446` at the `#[actor]`; declare the type `pub` inside a private module (§10) |
+| a type no `#[actor]` built, whose hand-written `Declared::Depends` lists `R` | refused at birth, before `init`, while `R` is not `Live` (§10) |
+| a type no `#[actor]` built, whose hand-written `Declared::Spawns` lists a child the `export!` that lists the type does not list | compile error at the `export!`, naming `private = [..]` (§10) |
+| a type no `#[actor]` built, whose hand-written `Contracts::Rows` lists a row no dispatch arm serves | not yet closed (#6887) |
 
 ## Consequences
 
@@ -1144,7 +1176,27 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   `handle` a sealed dispatcher calls, the actor-framework `Handler<M>`
   shape). The only shape that also closes a type with no `#[actor]`, but it
   rewrites dispatch on both transports and every hand-written test actor;
-  #6870.
+  #6887.
+- **Keep the `DependencyEntry` inventory and check that it agrees with
+  `Declared`.** Two coupled mechanisms for one fact, and a link-time
+  inventory answering an engine check. A hand-written type submits no entry,
+  so the agreement check would itself need the list.
+- **An `A: Declared` bound at each birth site instead of a supertrait.**
+  Every generic caller up the chain (builder, harness, spawner, pumped slot)
+  would repeat it, and a test actor pays the same one impl either way.
+- **Have `#[actor]` compute the guest's dependency records from
+  `Declared::Depends` into the inherent manifest.** The inherent manifest is
+  itself hand-writable, so the section would still carry whatever the type
+  chose to write. `export!` reading the trait list is the check reading the
+  list.
+- **Check a guest's dependencies from inside the guest at `init`, through a
+  host import.** It adds guest ABI for a fact the host already reads without
+  running the guest (ADR-0230 §3), and it moves the refusal after
+  instantiation.
+- **Leave `ListedIn` unsealed.** The invoking crate could then implement it
+  for a list of its own unlisted children, and the coverage check would pass.
+- **Keep rejecting generic native `depends(..)`.** Once the inventory is gone,
+  the rule has no reason left and only blocks a shape the traits support.
 
 ## Amendments
 
@@ -1184,7 +1236,11 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   list an adopter's `Contracts::Rows` ends with (§10).
 - **ADR-0230 §3.** `DependsOn<R>` is a safe trait whose impl names `R`'s
   position in the actor's `Declared::Depends` list; a hand-written impl is
-  refused with `E0119` or `E0277` rather than `E0200` (§10).
+  refused with `E0119` or `E0277` rather than `E0200`. The pre-`init` check
+  reads that list on both transports: the native birth check walks it, and
+  `export!` writes a guest's `Dependency` records from it (§10).
 - **ADR-0114 §5.** `Rebuildable<M>` and `Spawns<C>` are safe traits whose
   impls name a position in `export!`'s module list and the spawner's
-  `spawns(..)` list, and `export!`'s module type is private (§10).
+  `spawns(..)` list, and `export!`'s module type is private. The coverage
+  check reads each listed type's `Declared::Spawns` list through the sealed
+  `ListedIn` (§10).

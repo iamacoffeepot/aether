@@ -288,18 +288,20 @@ pub struct TagSpawnReport {
 pub struct SendSourceQuery;
 
 /// Issue 1958: unit query sent to a `source_observer` fixture. Its
-/// `Manual`-class handler reads `ctx.sender()` and broadcasts a
-/// `SourceReport` to the substrate-harness observer mailbox.
+/// `Manual`-class handler reads `ctx.sender()` and replies a
+/// [`SourceReport`].
 #[aether_data::kind(name = "aether.test_fixtures.source_query", default)]
 pub struct SourceQuery;
 
-/// Issue 1958: broadcast emitted by the `source_observer` fixture after
-/// reading `ctx.sender()`. `mailbox_id` is the raw `MailboxId`
-/// of the sender (`0` when the source was a Session / `EngineMailbox` /
-/// `None`, i.e. when `sender()` returned `None`).
-#[aether_data::kind(name = "aether.test_fixtures.source_report", eq)]
+/// Issue 1958: the `source_observer` fixture's reply to a [`SourceQuery`].
+/// The reply lands on the origin the host stamped on the query, the same
+/// origin `ctx.sender()` reads, so where it lands is half the observation.
+/// The other half rides in the report as a verdict, never a position.
+#[aether_data::kind(name = "aether.test_fixtures.source_report", copy, default, eq)]
 pub struct SourceReport {
-    pub mailbox_id: u64,
+    /// Whether the observer's `ctx.sender()` returned a proof: `true` for a
+    /// component origin, `false` for a Session / `EngineMailbox` origin.
+    pub had_sender: bool,
 }
 
 /// Issue 2791: trigger for the request-correlation fixture. The fixture
@@ -403,10 +405,11 @@ pub struct TcpLoadSnapshot {
 /// the parent drives every in-cluster addressing direction (parent → child,
 /// child → parent, child → sibling, child → self) and one cross-cluster send,
 /// and each participant records the cell it observed (did the mail arrive,
-/// what `ctx.sender()` did it read). The cross-cluster recipient is a
-/// declared dependency of the cluster's parent rather than an address on this
-/// kind: the parent mints its reference from that declaration (ADR-0230) and
-/// records it for the fanning-out child, so the driver is fieldless.
+/// and was `ctx.sender()` the proof of the actor that sent it). The
+/// cross-cluster recipient is a declared dependency of the cluster's parent
+/// rather than an address on this kind: the parent mints its reference from
+/// that declaration (ADR-0230) and records it for the fanning-out child, so
+/// the driver is fieldless.
 #[aether_data::kind(name = "aether.test_fixtures.run_matrix", default)]
 pub struct RunMatrix;
 
@@ -436,33 +439,38 @@ pub struct CollectMatrix;
 
 /// Issue 1977 structured matrix report — the `matrix_sweep` fixture's reply
 /// to [`CollectMatrix`]. Each `*_arrived` flag is `1` when that cell's mail
-/// was delivered (the recipient's handler ran), and each `*_source` is the
-/// raw `MailboxId` the recipient read from `ctx.sender()` for that
-/// cell (`0` for none). The cross-cluster cell is observed out-of-band by the
-/// separate observer component (read via `log_tail`), so it carries no field
-/// here. Structured-shaped.
+/// was delivered (the recipient's handler ran). Each `*_sender_matched` flag
+/// is `1` when the recipient's `ctx.sender()` equalled the proof it holds of
+/// the actor expected to send that cell, compared inside the guest so no
+/// position leaves the cluster. The two `observer_reports_to_*` counts are the
+/// cross-cluster cells: the `source_observer` replies each report to the
+/// origin the host stamped on the query, and only a report whose
+/// `had_sender` is set is counted. Structured-shaped.
 #[aether_data::kind(name = "aether.test_fixtures.matrix_report", default, eq)]
 pub struct MatrixReport {
     /// parent → child a (in place): did child a receive the ping.
     pub parent_to_child_arrived: u32,
-    /// parent → child a: the source child a read (expected: the parent id).
-    pub parent_to_child_source: u64,
+    /// parent → child a: was child a's sender the proof of its parent.
+    pub parent_to_child_sender_matched: u32,
     /// child a → parent (in place): did the parent receive the ping.
     pub child_to_parent_arrived: u32,
-    /// child a → parent: the source the parent read (expected: child a id).
-    pub child_to_parent_source: u64,
+    /// child a → parent: was the parent's sender the proof of child a.
+    pub child_to_parent_sender_matched: u32,
     /// child a → sibling child b (in place): did child b receive the ping.
     pub child_to_sibling_arrived: u32,
-    /// child a → sibling: the source child b read (expected: child a id).
-    pub child_to_sibling_source: u64,
+    /// child a → sibling: was child b's sender the proof of child a.
+    pub child_to_sibling_sender_matched: u32,
     /// child a → self (in place): did child a receive its own ping.
     pub child_to_self_arrived: u32,
-    /// child a → self: the source child a read (expected: child a id).
-    pub child_to_self_source: u64,
-    /// child a's folded `MailboxId` raw value, read from the parent's
-    /// spawn-registry handle, so the test can assert the child-origin sources
-    /// equal the actual child id.
-    pub child_a_id: u64,
+    /// child a → self: was child a's sender the proof of child a.
+    pub child_to_self_sender_matched: u32,
+    /// Observer reports that landed on the parent. The parent's own query
+    /// before the fan-out brings back exactly one.
+    pub observer_reports_to_parent: u32,
+    /// Observer reports that landed on a child. Child a's query during the
+    /// in-place drain brings back exactly one when the drain stamps child a,
+    /// not the parent, as that send's origin.
+    pub observer_reports_to_child: u32,
 }
 
 /// [`MatrixPing::cell`] marker — parent to child a (in place).
