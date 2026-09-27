@@ -296,8 +296,8 @@ pub trait Rebuildable<M: ListedModule> {
 /// that forwards to either verb repeats the bound.
 ///
 /// A hand-written impl does not compile (ADR-0231 §10): the one
-/// [`Declared`](crate::Declared) impl `#[actor]` emits lists the declared
-/// children as [`Declared::Spawns`](crate::Declared::Spawns), from the same
+/// [`Declared`] impl `#[actor]` emits lists the declared
+/// children as [`Declared::Spawns`], from the same
 /// parsed `spawns(..)` list as the bound the `export!` coverage check reads,
 /// and each impl names `C`'s position there as [`Index`](Spawns::Index). An
 /// impl for an undeclared child either repeats an emitted impl (`E0119`) or
