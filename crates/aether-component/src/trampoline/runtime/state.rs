@@ -45,9 +45,8 @@ pub struct WasmTrampolineState {
     pub(crate) type_tag: Option<u64>,
     /// The resident [`Module`], retained so a replace checks its replacement
     /// against the resident manifest (ADR-0231 §5), and refreshed on
-    /// replace. A cheap
-    /// clone of the engine module cache's entry, which it keeps alive
-    /// (ADR-0240 D5, ADR-0241 §2).
+    /// replace. A cheap clone of the engine module cache's entry, which it
+    /// keeps alive (ADR-0240 D5, ADR-0241 §2).
     pub(crate) module: Module,
     /// The engine's one module cache: a replace checks its replacement in
     /// here, so a replacement already live anywhere in the engine is not

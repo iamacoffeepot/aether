@@ -130,8 +130,8 @@ impl Resolve for Embedded {
 }
 
 /// Keyed embedded resolution (ADR-0119, ADR-0114): an instanced embedded
-/// child spawned inline under the embed scope, keyed by a runtime `subname` rather than the actor's own
-/// `NAMESPACE`. Folds `instanced(EMBEDDED_SCOPE, subname)` onto the caller's
+/// child spawned inline under the embed scope, keyed by a runtime `subname`
+/// rather than the actor's own `NAMESPACE`. Folds `instanced(EMBEDDED_SCOPE, subname)` onto the caller's
 /// carry. Keyed (`Args<'a> = &'a str`), so it is an [`Instanced`].
 pub struct EmbeddedMany;
 
@@ -603,8 +603,8 @@ impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {
 /// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
 /// Derived from the resolver (ADR-0119): a keyed [`Resolver`](Addressable::Resolver)
 /// (`Args<'a> = &'a str` — [`Many`], or [`EmbeddedMany`] for instanced
-/// embedded children) makes the actor an `Instanced`, reached through the reference
-/// its spawn returned. The blanket impl supplies it; nobody writes
+/// embedded children) makes the actor an `Instanced`, reached through the
+/// reference its spawn returned. The blanket impl supplies it; nobody writes
 /// `impl Instanced`.
 pub trait Instanced: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>> {}
 impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>>> Instanced for T {}

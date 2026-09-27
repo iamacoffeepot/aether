@@ -1,8 +1,8 @@
 //! Component-lifecycle scenarios (issue 430, rehomed per issue #3769):
 //! load + list, multi-actor export selection (ADR-0096 / ADR-0138), drop,
 //! and `replace_component` with its dehydrate / rehydrate state carry
-//! (ADR-0022 / ADR-0101 / ADR-0113), each driven through a [`SubstrateHarness`] composed with
-//! just the component host.
+//! (ADR-0022 / ADR-0101 / ADR-0113), each driven through a
+//! [`SubstrateHarness`] composed with just the component host.
 //!
 //! `require_wasm` locates the fixture's
 //! `target/wasm32-unknown-unknown/<profile>/<crate>.wasm` under the

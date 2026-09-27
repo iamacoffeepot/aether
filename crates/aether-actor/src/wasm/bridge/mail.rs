@@ -126,8 +126,9 @@ pub fn reply_correlation() -> u64 {
 /// ADR-0114: register an inline child's alias route and return its
 /// `MailboxId`. The legacy host folds the alias id onto the component root
 /// and registers a route to that trampoline's own slot, so the co-located
-/// child is addressable like any actor with no new trampoline. `is_counter` selects `Subname::Counter` (the host
-/// appends a monotonic discriminator) vs a caller-supplied name;
+/// child is addressable like any actor with no new trampoline.
+/// `is_counter` selects `Subname::Counter` (the host appends a monotonic
+/// discriminator) vs a caller-supplied name;
 /// `subname` is the bare `Named` segment (empty for `Counter`). No
 /// config crosses here — the guest runs the child's `init` in-process
 /// (see [`crate::WasmCtx::spawn_inline_child`]). The returned id is the

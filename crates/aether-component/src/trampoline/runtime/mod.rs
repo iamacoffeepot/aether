@@ -144,8 +144,9 @@ impl NativeActor for WasmTrampoline {
 
     /// Register the guest's accept set and cost rows from this actor's
     /// [`GuestHost`] declaration, then fire the wasm guest's `wire` hook.
-    /// Every birth of a trampoline — a load or a module boot — runs this hook, so the declaration is the accept set's one writer and
-    /// the set is in place before the guest's `wire` sends anything.
+    /// Every birth of a trampoline — a load or a module boot — runs this
+    /// hook, so the declaration is the accept set's one writer and the set
+    /// is in place before the guest's `wire` sends anything.
     ///
     /// Issue 640 Phase 2: the guest's `wire` fires post-registration. The
     /// cap-side spawn flow registers the trampoline mailbox in step 5–7; this
