@@ -106,8 +106,11 @@ one implementation is published per namespace per engine.
 - **A guest never publishes over a native namespace.** A namespace the
   binary published is refused to every module.
 - **Republishing** points a module's namespaces at a new module. The set of
-  exported namespaces may grow; a namespace with live instances may not
-  disappear.
+  exported namespaces may grow and never shrinks: a namespace, once
+  published, stays published for the engine's lifetime, and its successor
+  must export it. Otherwise a namespace with no live instance could drop out
+  and return with fewer rows, and the rows-only-grow rule (§4) would hold
+  only while an instance happened to be live.
 
 The table is an engine system owned by the registry owner, which already
 applies route contracts (`RepublishContract`). It is not an actor and has no
@@ -120,7 +123,7 @@ one admission step when a module is published:
 
 | Check | Rule | Replaces |
 |---|---|---|
-| Namespace | each exported NS is not yet published, or published by this module's predecessor; never native | `try_claim_namespace` by `TypeId`; ADR-0240 D4 |
+| Namespace | each exported NS is not yet published, or published by this module's predecessor; a republish exports every NS its predecessor did; never native | `try_claim_namespace` by `TypeId`; ADR-0240 D4 |
 | Contract growth | for a republish, each NS's rows only grow and a fallback is kept (`first_contract_break`) | trampoline `check_contract` and the registry `RepublishContract` guard (ADR-0231 §5) |
 | Same type | a namespace's implementation is replaced only by the same namespace | `ReplaceComponent.export: Some(other)`; #6850's replace refusal |
 | Dependencies | every `depends(R)` names a published `R` | the load, boot, replace, and module-wide inline checks |
