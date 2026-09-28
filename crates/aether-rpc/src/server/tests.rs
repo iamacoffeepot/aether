@@ -39,7 +39,7 @@ struct CompleteEngineRouteForTest {
     value: u64,
 }
 
-#[aether_data::kind(name = "aether.rpc.test.engine_route_reply", copy, eq)]
+#[aether_data::kind(name = "aether.rpc.test.engine_route_result", copy, eq)]
 struct EngineRouteReplyForTest {
     value: u64,
 }
