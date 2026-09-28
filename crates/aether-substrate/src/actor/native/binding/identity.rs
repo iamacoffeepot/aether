@@ -13,7 +13,6 @@ pub(super) enum BindingIdentity {
     Untyped {
         mailbox: MailboxId,
         parent: Option<MailboxId>,
-        carry: u64,
     },
 }
 
@@ -23,14 +22,6 @@ impl BindingIdentity {
             Self::Typed(identity) => identity.mailbox(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Untyped { mailbox, .. } => *mailbox,
-        }
-    }
-
-    pub(super) fn carry(&self) -> u64 {
-        match self {
-            Self::Typed(identity) => identity.carry(),
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Untyped { carry, .. } => *carry,
         }
     }
 

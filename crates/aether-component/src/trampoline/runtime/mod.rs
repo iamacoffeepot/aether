@@ -87,8 +87,9 @@ impl NativeActor for WasmTrampoline {
         // returns (below).
         substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(&config.module));
         // ADR-0231 §4: an inline child the guest spawns publishes its own
-        // type's rows, read from this module's exported and private groups.
-        substrate_ctx.install_inline_contracts(contract::inline_contracts(config.module.manifest()));
+        // namespace and rows, read from this module's exported and private
+        // groups.
+        substrate_ctx.install_inline_children(contract::inline_children(config.module.manifest()));
         // ADR-0090 (issue 1257): thread the load mail's config bytes
         // into the guest's typed `init`. An empty slice ("no config")
         // is decoded uniformly by a `Config = ()` guest via

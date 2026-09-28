@@ -486,7 +486,7 @@ pub fn __alloc_inline_child_alias(
     is_counter: bool,
     subname: &str,
 ) -> Result<aether_data::MailboxId, SpawnError> {
-    __validate_inline_child_alias(bridge::mail::spawn_inline_child_scoped(parent, tag, is_counter, subname))
+    __validate_inline_child_alias(bridge::mail::spawn_inline_child(parent, tag, is_counter, subname))
 }
 
 pub mod guest_alloc;

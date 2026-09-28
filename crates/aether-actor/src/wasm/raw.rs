@@ -82,28 +82,25 @@ unsafe extern "C" {
     pub fn log_event(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
     /// ADR-0114: register an inline child's alias route and return its
     /// `MailboxId`. The host folds the alias id `with_tag(Mailbox,
-    /// fold_lineage(parent_carry, instanced(aether.embedded, subname)))`
+    /// fold_lineage(parent, instanced(aether.embedded, subname)))`
     /// and synchronously registers an alias `MailboxEntry` routing to the
     /// component root's own dispatcher slot — the child is co-located
     /// in the parent's wasm instance, so there is no new trampoline and no
-    /// config (the guest runs `init` in-process). `is_counter` is `1` for
-    /// `Subname::Counter` (the host appends a monotonic discriminator) or
-    /// `0` for a caller-supplied name; `subname_ptr/len` is the bare
-    /// `Named` segment (empty for `Counter`), copied out of guest memory
-    /// before the call returns. The returned id is the ADR-0099 §3 lineage
-    /// fold of the component root seed with the child's node; `0` on a
-    /// host-side error (no memory, OOB, bad UTF-8, no binding/spawner).
+    /// config (the guest runs `init` in-process). `parent` is the executing
+    /// actor's current mailbox and is validated host-side before it becomes
+    /// the alias routing seed and rendered-name parent (issue 4490). `tag`
+    /// is the child's actor-type tag, `ActorId::singleton(NAMESPACE)`, from
+    /// which the host picks the namespace and contract rows the alias
+    /// publishes (ADR-0231 §4); a tag the resident module does not declare
+    /// allocates no alias. `is_counter` is `1` for `Subname::Counter` (the
+    /// host appends a monotonic discriminator) or `0` for a caller-supplied
+    /// name; `subname_ptr/len` is the bare `Named` segment (empty for
+    /// `Counter`), copied out of guest memory before the call returns. The
+    /// returned id is the ADR-0099 §3 lineage fold of `parent` with the
+    /// child's node; `0` on a host-side error (no memory, OOB, bad UTF-8, no
+    /// spawner, an unresolvable parent, or an undeclared tag).
     #[link_name = "spawn_inline_child_p32"]
-    pub fn spawn_inline_child(is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
-    /// Issue 4490: scoped inline-child alias allocation. `parent` is the
-    /// executing actor's current mailbox and is validated host-side before it
-    /// becomes the alias routing seed and rendered-name parent. `tag` is the
-    /// child's actor-type tag, `ActorId::singleton(NAMESPACE)`, from which the
-    /// host picks the contract rows the alias publishes (ADR-0231 §4). The
-    /// remaining arguments and failure sentinel match [`spawn_inline_child`].
-    #[link_name = "spawn_inline_child_scoped_p32"]
-    pub fn spawn_inline_child_scoped(parent: u64, tag: u64, is_counter: u32, subname_ptr: u32, subname_len: u32)
-    -> u64;
+    pub fn spawn_inline_child(parent: u64, tag: u64, is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
     /// ADR-0114 teardown (#4228): retire the alias route
     /// [`spawn_inline_child`] registered, because the child it addressed was
     /// despawned. `alias` is that call's returned `MailboxId` raw value. The
@@ -248,7 +245,7 @@ pub unsafe fn reply_correlation() -> u64 {
 }
 
 /// Host-side stub for the FFI `aether::spawn_inline_child` import
-/// (ADR-0114). Always panics — callers outside the FFI guest are
+/// (ADR-0114, issue 4490). Always panics — callers outside the FFI guest are
 /// misusing the SDK.
 ///
 /// # Safety
@@ -259,28 +256,14 @@ pub unsafe fn reply_correlation() -> u64 {
 /// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_family = "wasm"))]
 #[must_use]
-pub unsafe fn spawn_inline_child(_is_counter: u32, _subname_ptr: u32, _subname_len: u32) -> u64 {
-    panic!("aether-actor: spawn_inline_child called outside the FFI guest");
-}
-
-/// Host-side stub for the scoped inline-child import (issue 4490).
-/// Always panics — callers outside the FFI guest are misusing the SDK.
-///
-/// # Safety
-/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
-///
-/// # Panics
-/// Always panics — fail-fast per ADR-0063.
-#[cfg(not(target_family = "wasm"))]
-#[must_use]
-pub unsafe fn spawn_inline_child_scoped(
+pub unsafe fn spawn_inline_child(
     _parent: u64,
     _tag: u64,
     _is_counter: u32,
     _subname_ptr: u32,
     _subname_len: u32,
 ) -> u64 {
-    panic!("aether-actor: spawn_inline_child_scoped called outside the FFI guest");
+    panic!("aether-actor: spawn_inline_child called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::asset_fetch` import (ADR-0163).

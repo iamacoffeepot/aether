@@ -1206,11 +1206,16 @@ fn instantiate_with_ctx(wat: &str, ctx: ComponentCtx) -> Component {
     Component::instantiate(&engine, &linker, &module, ctx, &[], None).unwrap()
 }
 
-fn wat_scoped_inline_spawn(parent: MailboxId) -> String {
+/// The inline-child actor-type tag these tests declare through
+/// [`ComponentCtx::install_inline_children`]; a test that installs nothing
+/// passes it as an undeclared tag.
+const TEST_INLINE_TAG: u64 = 0xF00D_CAFE;
+
+fn wat_inline_spawn(parent: MailboxId, tag: u64) -> String {
     format!(
         r#"
         (module
-            (import "aether" "spawn_inline_child_scoped_p32"
+            (import "aether" "spawn_inline_child_p32"
                 (func $spawn_inline (param i64 i64 i32 i32 i32) (result i64)))
             (memory (export "memory") 1)
             {WAT_REALLOC}
@@ -1218,7 +1223,7 @@ fn wat_scoped_inline_spawn(parent: MailboxId) -> String {
             (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
                 i32.const 200
                 i64.const {parent}
-                i64.const 0
+                i64.const {tag}
                 i32.const 0
                 i32.const 32
                 i32.const 4
@@ -1227,7 +1232,14 @@ fn wat_scoped_inline_spawn(parent: MailboxId) -> String {
                 i32.const 0))
         "#,
         parent = parent.0,
+        tag = tag,
     )
+}
+
+/// The single declared inline-child type these tests install, keyed by
+/// [`TEST_INLINE_TAG`].
+fn test_inline_child_type() -> InlineChildType {
+    InlineChildType { namespace: Arc::from("test.inline.child"), contract: RouteContract::empty() }
 }
 
 #[test]
@@ -1570,13 +1582,13 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
     assert_eq!(folded, from_path, "the host-fn alias fold matches the rendered-name parse → fold");
 }
 
-/// Issue 4490: the scoped inline spawn import accepts a freshly prepared
-/// inline actor as the executing parent and extends that actor's lineage.
-/// With the parent alias still owner-unpublished, the host function stages
-/// the child alias beneath it, routed to the physical trampoline root, and
-/// returns the predicted id.
+/// Issue 4490: the inline spawn import accepts a freshly prepared inline
+/// actor as the executing parent and extends that actor's lineage. With the
+/// parent alias still owner-unpublished, the host function stages the child
+/// alias beneath it, routed to the physical trampoline root, and returns the
+/// predicted id.
 #[test]
-fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
+fn inline_spawns_extend_the_executing_inline_actor() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let root_name = "aether.component/aether.embedded:nested-root";
@@ -1590,7 +1602,8 @@ fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
     let parent = lineage_mailbox_id(&parent_name);
     let mut ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), root, None);
     ctx.stage_alias(PreparedAliasRoute::new(parent, parent_name.clone(), root, RouteContract::empty()));
-    let mut component = instantiate_with_ctx(&wat_scoped_inline_spawn(parent), ctx);
+    ctx.install_inline_children([(TEST_INLINE_TAG, test_inline_child_type())]);
+    let mut component = instantiate_with_ctx(&wat_inline_spawn(parent, TEST_INLINE_TAG), ctx);
 
     component
         .deliver(&inbound(parent, aether_data::KindId(0), Vec::new(), Source::NONE))
@@ -1607,9 +1620,11 @@ fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
 }
 
 /// The new scalar is guest-controlled input, not authority. A foreign
-/// mailbox must allocate no alias, and the import returns the zero sentinel.
+/// mailbox must allocate no alias, and the import returns the zero sentinel —
+/// even though `TEST_INLINE_TAG` is declared, so the zero comes from the
+/// parent check, not the tag lookup.
 #[test]
-fn scoped_wasm_spawns_reject_a_foreign_parent() {
+fn inline_spawns_reject_a_foreign_parent() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let root_name = "aether.component/aether.embedded:scoped-root";
@@ -1619,12 +1634,38 @@ fn scoped_wasm_spawns_reject_a_foreign_parent() {
         .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
         .expect("register component root");
     let foreign = lineage_mailbox_id("aether.component/aether.embedded:foreign");
-    let ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), root, None);
-    let mut component = instantiate_with_ctx(&wat_scoped_inline_spawn(foreign), ctx);
+    let mut ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), root, None);
+    ctx.install_inline_children([(TEST_INLINE_TAG, test_inline_child_type())]);
+    let mut component = instantiate_with_ctx(&wat_inline_spawn(foreign, TEST_INLINE_TAG), ctx);
 
     component
         .deliver(&inbound(root, aether_data::KindId(0), Vec::new(), Source::NONE))
         .expect("deliver rejected spawn turn");
+
+    assert!(component.drain_pending_aliases().is_empty());
+    assert_eq!(component.read_u32(200), 0);
+    assert_eq!(component.read_u32(204), 0);
+}
+
+/// ADR-0231 §4: a tag the resident module does not declare allocates no
+/// alias, even for a valid parent — the host returns the zero sentinel
+/// before touching the subname or the spawner's counter.
+#[test]
+fn inline_spawns_refuse_an_undeclared_tag() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let root_name = "aether.component/aether.embedded:undeclared-root";
+    let root = lineage_mailbox_id(root_name);
+    let (_captured, root_handler) = lineage_capture_handler();
+    registry
+        .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
+        .expect("register component root");
+    let ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), root, None);
+    let mut component = instantiate_with_ctx(&wat_inline_spawn(root, TEST_INLINE_TAG), ctx);
+
+    component
+        .deliver(&inbound(root, aether_data::KindId(0), Vec::new(), Source::NONE))
+        .expect("deliver undeclared-tag spawn turn");
 
     assert!(component.drain_pending_aliases().is_empty());
     assert_eq!(component.read_u32(200), 0);

@@ -285,8 +285,8 @@ impl WasmTrampolineState {
         // (replace re-runs `init`, not `wire`).
         substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(&module));
         // ADR-0231 §4: an inline child the replacement spawns publishes its
-        // own type's rows, read from the replacement module.
-        substrate_ctx.install_inline_contracts(contract::inline_contracts(manifest));
+        // own namespace and rows, read from the replacement module.
+        substrate_ctx.install_inline_children(contract::inline_children(manifest));
 
         // #6134: instantiate the candidate while the old guest is still
         // installed and wired. `init` cannot send mail, so starting it early

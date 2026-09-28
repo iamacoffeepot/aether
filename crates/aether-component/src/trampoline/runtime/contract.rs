@@ -11,14 +11,17 @@
 //! refused after the old instance's hooks ran, and the old instance is
 //! reinstalled.
 //!
-//! Inline-child contracts (ADR-0231 §4): the contract each actor type a module
-//! can spawn inline publishes on its alias, keyed by actor-type tag.
+//! Inline-child types (ADR-0231 §4): the namespace and contract each actor
+//! type a module can spawn inline publishes on its alias, keyed by
+//! actor-type tag.
 
 use std::collections::HashSet;
 use std::fmt::Display;
+use std::sync::Arc;
 
 use aether_data::ActorId;
 use aether_kinds::ComponentCapabilities;
+use aether_substrate::actor::wasm::component::InlineChildType;
 use aether_substrate::actor::wasm::module::ModuleManifest;
 use aether_substrate::mail::KindId;
 use aether_substrate::mail::registry::{ContractBreak, RouteContract};
@@ -48,16 +51,19 @@ pub(super) fn contract_refusal(
     }
 }
 
-/// The contract every actor type a module can spawn inline publishes, keyed
-/// by its actor-type tag (`ActorId::singleton(NAMESPACE)`): the exported
-/// groups, then the private children of `aether.kinds.inputs.private`, each
-/// under the namespace the manifest resolves for it.
-pub(super) fn inline_contracts(manifest: &ModuleManifest) -> Vec<(u64, RouteContract)> {
+/// The type every actor a module can spawn inline publishes on its alias,
+/// keyed by its actor-type tag (`ActorId::singleton(NAMESPACE)`): the
+/// exported groups, then the private children of
+/// `aether.kinds.inputs.private`, each under the namespace the manifest
+/// resolves for it.
+pub(super) fn inline_children(manifest: &ModuleManifest) -> Vec<(u64, InlineChildType)> {
     manifest
         .exported_groups()
         .chain(manifest.private_groups())
         .map(|(namespace, group)| {
-            (ActorId::singleton(namespace).0, RouteContract::from_capabilities(&group.capabilities))
+            let namespace: Arc<str> = namespace.into();
+            let contract = RouteContract::from_capabilities(&group.capabilities);
+            (ActorId::singleton(&namespace).0, InlineChildType { namespace, contract })
         })
         .collect()
 }
