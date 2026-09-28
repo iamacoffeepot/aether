@@ -14,7 +14,7 @@ use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
 pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyTarget};
 use crate::proxy::{describe_exit, read_reported_port, startup_exit_status, terminate_child_group};
 pub use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
-pub use aether_actor::{ActorRef, Manual, Single};
+pub use aether_actor::{ActorRef, Single};
 use aether_actor::{ReplyMode, runtime};
 pub use aether_data::{EngineId, Uuid};
 use aether_kinds::{
@@ -28,9 +28,7 @@ pub use aether_kinds::{
 };
 pub use aether_substrate::Subname;
 use aether_substrate::actor::native::SpawnError;
-pub use aether_substrate::actor::native::{
-    DeferredReply, NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone,
-};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 pub use std::collections::HashMap;
 pub use std::collections::VecDeque;
@@ -938,9 +936,9 @@ impl NativeActor for FleetServer {
     /// pre-allocation failure (a selector miss) carries `None`. Process preparation remains synchronous, but success is
     /// replied only after the registry owner authoritatively activates the
     /// staged proxy.
-    #[handler::manual]
-    fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: SpawnEngine) {
-        let owed: DeferredReply = ctx.defer_reply_to(ctx.reply_target());
+    #[handler::single]
+    fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SpawnEngine) -> Pending<SpawnEngineResult> {
+        let (pending, held) = ctx.hold::<SpawnEngineResult>();
 
         // Resolve the registry selector to stored content bytes before
         // any side effect, so a miss returns without burning an engine id
@@ -948,14 +946,14 @@ impl NativeActor for FleetServer {
         let Some(artifact) = resolve_selector(&mut state.store, &mail.selector) else {
             // Pre-allocation failure: no engine id minted yet, so there
             // is nothing to correlate or reap — `engine_id` is `None`.
-            owed.reply(
+            held.answer(
                 ctx,
                 &SpawnEngineResult::Err {
                     engine_id: None,
                     error: format!("no binary in the registry matched selector {:?}", mail.selector),
                 },
             );
-            return;
+            return pending;
         };
 
         // Each post-allocation failure records a `SpawnFailed` death and
@@ -971,8 +969,8 @@ impl NativeActor for FleetServer {
             Ok(prepared) => prepared,
             // No child ran, so no port was reported.
             Err(PrepareFailure { engine_id, error }) => {
-                owed.reply(ctx, &state.fail_spawn(engine_id, 0, error));
-                return;
+                held.answer(ctx, &state.fail_spawn(engine_id, 0, error));
+                return pending;
             }
         };
 
@@ -983,8 +981,8 @@ impl NativeActor for FleetServer {
         // waits for the substrate to report its port, dials it, and, on
         // failure, terminates the child it was handed. So once it returns
         // the report is on disk if there is one. A successful init
-        // transfers the original caller obligation into the staged birth;
-        // only its later task completion may commit the engine.
+        // transfers the held reply into the staged birth; only its later
+        // task completion may commit the engine and answer the caller.
         let result = ctx
             .spawn_child::<FleetProxy>(
                 Subname::Named(&subname),
@@ -997,7 +995,7 @@ impl NativeActor for FleetServer {
                 (),
             )
             .continue_from(
-                owed,
+                held,
                 FleetSpawnContext { engine_id, supervision: Supervision::new(recipe), origin: SpawnOrigin::Requested },
             );
         let rpc_port = reported_port(&port_file);
@@ -1006,11 +1004,13 @@ impl NativeActor for FleetServer {
             Ok(_) => state.begin_pending_spawn(engine_id, rpc_port, artifact.hash),
             // A startup exit of any kind is terminal: the reply names its
             // exit code or signal and carries the child's stderr.
-            Err((e, owed)) => {
+            Err((e, held)) => {
                 let error = spawn_failure_detail("spawned", &e, stderr);
-                owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, error));
+                held.answer(ctx, &state.fail_spawn(engine_id, rpc_port, error));
             }
         }
+
+        pending
     }
 
     /// Settle one staged proxy birth. Only an authoritative apply with no
