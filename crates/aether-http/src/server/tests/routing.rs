@@ -1,8 +1,8 @@
 //! Route registration and selection (ADR-0130 / ADR-0131 / ADR-0154): a
-//! `wire`-registered prefix dispatching as its minted kind, typed extractors,
-//! path templates, deferred routes, longest-prefix and method precedence,
-//! mid-connection registration, macro/hand-written composition, and
-//! self-unregistration.
+//! `wire`-registered prefix dispatching to its router, typed extractors,
+//! path templates, deferred routes, the router's group selection,
+//! longest-prefix and method precedence, mid-connection registration,
+//! macro/hand-written composition, and self-unregistration.
 
 use aether_actor::ActorPath;
 use aether_substrate::chassis::builder::Builder;
@@ -13,12 +13,13 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::kinds::{HttpRoute, RegisterRoute, UnregisterRoute};
+use crate::kinds::{HttpRouter, RegisterRoute, UnregisterRoute};
 use crate::server::HttpServerCapability;
 
 use super::handlers::{
     ApiRouteHandler, ApiV2Handler, BookRouteHandler, DeferRouteHandler, EchoHttpHandler, EchoPeer, ExtractRouteHandler,
-    FixedBodyHttpHandler, MethodAnyHandler, MethodPostHandler, SilentPeer, TmpRouteHandler, WiredRouteHandler,
+    FixedBodyHttpHandler, MethodAnyHandler, MethodPostHandler, NestedRouteHandler, SilentPeer, TmpRouteHandler,
+    WiredRouteHandler,
 };
 use super::support::{
     body_of, config_for, keep_alive_config_for, poll_body, port_of, read_one_response, round_trip, round_trip_live,
@@ -40,13 +41,12 @@ macro_rules! routed_chassis {
     }};
 }
 
-/// A `wire`-registered route dispatches as the registered kind — the
-/// handler's typed `#[handler]` decodes the request-shaped payload under
-/// the minted kind and echoes the path — a deeper path under the claimed
-/// prefix is not swallowed but 404s (#3697), and an unrouted path falls
-/// back to the `/` catch-all route (ADR-0130).
+/// A `wire`-registered route dispatches to its router — the router's
+/// generated handler decodes the request and the route echoes the path — a
+/// deeper path under the claimed prefix is not swallowed but 404s (#3697),
+/// and an unrouted path falls back to the `/` catch-all route (ADR-0130).
 #[test]
-fn routed_prefix_dispatches_as_registered_kind() {
+fn routed_prefix_dispatches_to_its_router() {
     let chassis = routed_chassis!(ApiRouteHandler);
     let port = port_of(&chassis);
 
@@ -142,6 +142,38 @@ fn deferred_route_forwards_and_answers_on_reply() {
     }
 }
 
+/// A router whose one claim carries a deferred route (`/echo`) and a
+/// synchronous one (`/echo/{word}`) answers both through its one manual
+/// handler. Catches glue that drops a synchronous arm's reply, which the
+/// server would answer `502` once the chain settled response-less.
+#[test]
+fn a_router_mixing_synchronous_and_deferred_routes_on_one_claim_answers_both() {
+    let chassis = routed_chassis!(DeferRouteHandler, EchoPeer, SilentPeer);
+    let port = port_of(&chassis);
+
+    poll_body(port, b"GET /echo/ada HTTP/1.1\r\nHost: localhost\r\n\r\n", "now:ada");
+
+    let deferred = round_trip(port, b"GET /echo HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert_eq!(body_of(&deferred), "echoed:hi", "the deferred arm on the same claim still answers: {deferred:?}");
+}
+
+/// The router picks its route group by the server's rule before trying
+/// templates: `/a/b/c` reaches the router through the `/a/b` key, so it is
+/// answered from the `/a/b` group, which has no template for it, and `404`s.
+/// Catches glue that tries every template across groups, which would answer
+/// it from the looser `/a/{x}/{y}` template.
+#[test]
+fn a_router_answers_from_the_group_whose_key_the_server_chose() {
+    let chassis = routed_chassis!(NestedRouteHandler);
+    let port = port_of(&chassis);
+
+    poll_body(port, b"GET /a/b HTTP/1.1\r\nHost: localhost\r\n\r\n", "a/b");
+    poll_body(port, b"GET /a/x/y HTTP/1.1\r\nHost: localhost\r\n\r\n", "a:x:y");
+
+    let nested = round_trip(port, b"GET /a/b/c HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(nested.starts_with("HTTP/1.1 404 "), "the /a/b group has no template for /a/b/c: {nested:?}");
+}
+
 /// Longest registered prefix wins among overlapping routes (an exact
 /// `/api/v2` request beats the `/api` route), matching stops at segment
 /// boundaries (`/apiary` is not under `/api`), and a deeper path under the
@@ -199,10 +231,11 @@ fn method_specific_route_beats_agnostic() {
 /// connection; this test's second-phase request would never flip to
 /// the routed body.
 ///
-/// The `/late` target is [`WiredRouteHandler`] (its generic `on_extra`
-/// serves `HttpServerRequest` and its `wire` claims only `/wired…`,
-/// never `/`), so the sole `/` catch-all here is [`EchoHttpHandler`] —
-/// two handlers both claiming `/` would be a registration conflict.
+/// The `/late` target is [`WiredRouteHandler`] (a router whose `wire`
+/// claims only `/wired…`, never `/`, and which has no route for `/late`, so
+/// it answers its `404`), so the sole `/` catch-all here is
+/// [`EchoHttpHandler`] — two handlers both claiming `/` would be a
+/// registration conflict.
 #[test]
 fn route_registered_mid_connection_serves_next_request() {
     let (registry, mailer) = fresh_substrate();
@@ -228,12 +261,12 @@ fn route_registered_mid_connection_serves_next_request() {
 
     // Register /late at the wired handler while the connection is
     // parked between keep-alive requests. The handler is named by its
-    // canonical path, narrowed to `HttpRoute` by the `on_extra` row.
+    // canonical path, narrowed to `HttpRouter` by its router's row.
     let handler = ActorPath::<WiredRouteHandler>::root();
     let mail = RegisterRoute {
         prefix: "/late".to_string(),
         method: None,
-        handler: handler.narrow::<HttpRoute>(),
+        handler: handler.narrow::<HttpRouter>(),
         shared: false,
     };
     let (_, registered) = chassis.send_tracked(chassis.actor_ref::<HttpServerCapability>(), &mail, None);
@@ -244,7 +277,7 @@ fn route_registered_mid_connection_serves_next_request() {
     loop {
         stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
         let response = read_one_response(&mut stream, &mut carry);
-        if body_of(&response) == "wired-raw" {
+        if body_of(&response) == "no matching route" {
             break;
         }
         assert!(
@@ -279,8 +312,10 @@ fn route_registered_mid_connection_serves_next_request() {
 
 /// A macro route composes with a hand-written `wire`: the macro appends
 /// its `/wired` registration to the author's `wire` without displacing
-/// the raw `/wired-extra` claim already there, so both dispatch (ADR-0131
-/// append path).
+/// the raw `/wired-extra` claim already there, so both reach the router
+/// (ADR-0131 append path). The router has no route for `/wired-extra` and
+/// answers its `404`, which only a live `/wired-extra` claim routes to it;
+/// without the claim the path would take the `/` catch-all.
 #[test]
 fn hand_written_wire_and_macro_route_compose() {
     let chassis = routed_chassis!(WiredRouteHandler);
@@ -289,7 +324,7 @@ fn hand_written_wire_and_macro_route_compose() {
     // The macro-appended registration reaches the cap.
     poll_body(port, b"GET /wired HTTP/1.1\r\nHost: localhost\r\n\r\n", "wired-macro");
     // The author's own `wire` registration survived the append.
-    poll_body(port, b"GET /wired-extra HTTP/1.1\r\nHost: localhost\r\n\r\n", "wired-raw");
+    poll_body(port, b"GET /wired-extra HTTP/1.1\r\nHost: localhost\r\n\r\n", "no matching route");
 }
 
 /// `unregister_route_self` releases the sender's route: the first

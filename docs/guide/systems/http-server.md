@@ -48,12 +48,14 @@ Handlers declare interest by mail during wiring and unregister during teardown.
 A route key includes the method and path pattern. Registration results surface
 invalid patterns and ownership conflicts explicitly.
 
-An actor registers itself with `register_route_self`, naming the kind its
-requests dispatch as — whatever `#[http::router]` minted for the group, or the
-generic `aether.http.server.request`. Another actor is registered by its
-canonical path, which must answer `aether.http.server.request` with
-`aether.http.server.response`; that route dispatches as
-`aether.http.server.request` and names no kind of its own.
+Every route holder covers one protocol, `HttpRouter`: a manual row taking
+`aether.http.server.request`, so the holder's request handler is
+`#[handler::manual]` and replies through its obligation, whatever it replies
+(a buffered response, a stream open, a websocket accept, or a deferred reply).
+An actor registers itself with `register_route_self`, and the server casts the
+sender to `HttpRouter`, refusing one that does not cover it. Another actor is
+registered by its canonical path, a `ProtocolPath<HttpRouter>`. Neither form
+names a kind: every route dispatches as `aether.http.server.request`.
 
 Two target modes exist:
 
@@ -65,8 +67,9 @@ Shared and exclusive claimants cannot silently mix for the same key. Dead
 members are removed; lifecycle cleanup is part of route ownership, not a caller
 convention.
 
-`#[http::router]` derives registration from typed `#[route]` methods. The
-actor must declare `depends(HttpServerCapability)`, because the injected `wire`
+`#[http::router]` derives registration from typed `#[route]` methods and
+emits the router's one manual `aether.http.server.request` handler. The actor
+must declare `depends(HttpServerCapability)`, because the injected `wire`
 registration mails the server; without it, the actor fails to compile at
 `#[http::router]`.
 `#[http::router(shared)]` opts every generated claim into the shared set. Use
@@ -77,7 +80,13 @@ effects tolerate per-request distribution.
 
 The typed layer parses a raw request into route parameters, query/body/header
 extractors, and a handler-specific context. A route method returns a type that
-can be rendered into the server reply contract.
+can be rendered into the server reply contract. The generated handler first
+picks the route group whose claim the server picked, by the same rule
+(`route_rank`: the longest matching prefix, method-specific over
+method-agnostic), then tries only that group's templates, so a request the
+server sent to `/a/b` is never answered by a looser `/a` template. A router is
+one handler, so its `describe_component` entry and `actor_cost` row are per
+router, not per route.
 
 Treat the macros as the public authoring surface and the raw kinds as the
 portable protocol. When debugging expansion or adding an extractor, read both
@@ -110,7 +119,9 @@ not remain held for the full lifetime of a download.
 Request streaming is a structural handler opt-in, not the default for every
 upload. After route selection, the capability checks whether that handler's
 accept set includes `aether.http.server.request_stream_open`; a handler that
-only accepts the ordinary request kind receives a buffered body. For an opted-in
+only accepts the ordinary request kind receives a buffered body. A streaming
+handler is still a route holder, so it covers `HttpRouter` too; a websocket
+upgrade reaches it as an ordinary request. For an opted-in
 handler, the capability sends `request_stream_open`, then chunks only as the
 handler grants `request_credit`. The handler learns the stream id at open;
 `request_stream_end` marks the last body bytes and retains the reply correlation

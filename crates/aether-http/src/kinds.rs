@@ -7,7 +7,7 @@
 //! typed-path vocabulary (all three unconditional dependencies), so the
 //! `default-features = false` wasm consumers keep compiling.
 
-use aether_actor::ProtocolPath;
+use aether_actor::{ProtocolPath, Undeclared};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
@@ -185,23 +185,21 @@ pub struct HttpServerResponse {
     pub body: Vec<u8>,
 }
 
-/// The contract an explicitly registered route handler covers (ADR-0231 §2):
-/// one row, [`HttpServerRequest`] answered with [`HttpServerResponse`]. It is
-/// what [`RegisterRoute`]'s `handler` path claims, so a route registered by
-/// path always dispatches as `aether.http.server.request`.
+/// The contract every route holder covers (ADR-0231 §2, §6): one manual row,
+/// [`HttpServerRequest`] answered by hand. Both registration forms prove it,
+/// [`RegisterRoute`] through its `handler` path and [`RegisterRouteSelf`]
+/// through a cast of the stamped sender, and every route holds a reference
+/// to it, so the server delivers a request only to an actor that takes one.
 ///
-/// A manual row covers no protocol row (ADR-0231 §6), so a handler that
-/// answers by hand is not nameable here: a streaming handler replying
-/// [`HttpResponseStreamOpen`], a websocket handler replying
-/// [`WebSocketAccept`], or an ADR-0154 deferred route. Nor is a
-/// `#[http::router]` group, whose requests dispatch as the kind the macro
-/// mints for it. Each of those registers itself with [`RegisterRouteSelf`],
-/// which takes the registrant from the envelope's stamped sender and claims
-/// nothing about the rows it publishes — the routed dispatch is ADR-0231 §4's
-/// ingress bridge, whose kind is chosen at run time.
+/// A router promises no reply shape: whatever it answers, an
+/// [`HttpServerResponse`], an [`HttpResponseStreamOpen`], a
+/// [`WebSocketAccept`], or an ADR-0154 deferred reply, it answers through its
+/// reply obligation. A manual row is covered only by a manual handler, so a
+/// holder's `HttpServerRequest` handler is `#[handler::manual]`, and a
+/// `#[http::router]` actor's generated handler is one.
 #[aether_actor::protocol]
-pub trait HttpRoute {
-    fn request(mail: HttpServerRequest) -> HttpServerResponse;
+pub trait HttpRouter {
+    fn request(mail: HttpServerRequest) -> Undeclared;
 }
 
 // ADR-0128 HTTP server response streaming. A handler opts into streaming by
@@ -409,14 +407,8 @@ pub struct WebSocketClose {
 // inbound envelope's host-stamped `Source` (forgery-proof, in-process
 // by construction); the explicit variants serve external callers and
 // name the handler by its canonical path, proven against the engine.
-//
-// A `_self` route carries the `KindId` its requests dispatch as — the cap
-// stamps that kind onto the request-shaped payload, so the registered
-// kind's schema must decode `aether.http.server.request`'s byte layout
-// (`aether.http.server.request` itself is the generic choice). A route
-// registered by path dispatches as `aether.http.server.request`, which is
-// what its `HttpRoute` path already proved, so the explicit form names no
-// kind at all.
+// Either way the holder covers `HttpRouter`, so every route dispatches as
+// `aether.http.server.request` and neither form names a kind.
 
 /// `aether.http.server.register_route` — claim a path-prefix route for the
 /// actor at `handler`. `prefix` is segment-boundary matched (`/api` matches
@@ -429,29 +421,23 @@ pub struct WebSocketClose {
 /// `Err`; the same handler re-claiming its own key is an idempotent
 /// `Ok`. Reply: `RegisterRouteResult`.
 ///
-/// `handler` is the canonical path of an actor covering [`HttpRoute`]
-/// (ADR-0231 §3): in code `ActorPath::<R>::root().narrow::<HttpRoute>()`,
-/// which compiles only when `R` answers `aether.http.server.request` with
-/// `aether.http.server.response`; over MCP the `path` a component load
-/// returns, whose decode refuses a path no such live route stands at. The
-/// route therefore dispatches as `aether.http.server.request`, and this kind
-/// names no dispatch kind of its own. A handler that answers by hand — a
-/// streaming, websocket, or deferred one, or a `#[http::router]` group —
-/// covers no protocol and registers itself with [`RegisterRouteSelf`].
+/// `handler` is the canonical path of an actor covering [`HttpRouter`]
+/// (ADR-0231 §3): in code `ActorPath::<R>::root().narrow::<HttpRouter>()`,
+/// which compiles only when `R` takes `aether.http.server.request` in a
+/// manual handler; over MCP the `path` a component load returns, whose
+/// decode refuses a path no such live route stands at.
 ///
 /// `shared` (ADR-0136) opts the registration into the key's member
 /// *set*: N handler instances that all register `shared: true` jointly serve
 /// the route, each request picked round-robin across live members. `false` is
 /// the exclusive claim described above. Mixing the two on one key is a
 /// conflict `Err` — spreading is something instances opt into together, never
-/// an accident — and so is joining a set whose members dispatch some other
-/// kind, since an explicit member always joins as
-/// `aether.http.server.request`.
+/// an accident.
 #[aether_data::kind(name = "aether.http.server.register_route", no_serde)]
 pub struct RegisterRoute {
     pub prefix: String,
     pub method: Option<HttpMethod>,
-    pub handler: ProtocolPath<HttpRoute>,
+    pub handler: ProtocolPath<HttpRouter>,
     pub shared: bool,
 }
 
@@ -462,21 +448,19 @@ pub struct RegisterRoute {
 /// registrant cannot be forged and the op is gated to in-process
 /// actors by construction — an external session or another engine gets
 /// an `Err` reply, pushing it onto the named [`RegisterRoute`] form.
-/// This is the common "route to me" case, sent from `wire`, and the only
-/// form for a handler that answers by hand: `kind` names whatever the
-/// registrant's own row is, so a streaming, websocket, deferred, or
-/// `#[http::router]`-minted route registers here. Reply:
-/// `RegisterRouteResult`.
+/// This is the common "route to me" case, sent from `wire`, and the form
+/// `#[http::router]` emits. The cap casts the sender to [`HttpRouter`], and
+/// a sender whose rows do not cover it gets an `Err` naming the missing row.
+/// Reply: `RegisterRouteResult`.
 ///
 /// `shared` (ADR-0136) opts into the key's member set exactly as on
 /// [`RegisterRoute`]: instanced handlers that all register `shared:
-/// true` with the same dispatch `kind` jointly serve the route
-/// round-robin; `false` is the exclusive claim.
+/// true` jointly serve the route round-robin; `false` is the exclusive
+/// claim.
 #[aether_data::kind(name = "aether.http.server.register_route_self")]
 pub struct RegisterRouteSelf {
     pub prefix: String,
     pub method: Option<HttpMethod>,
-    pub kind: aether_data::KindId,
     pub shared: bool,
 }
 
@@ -487,12 +471,11 @@ pub struct RegisterRouteSelf {
 /// Reply: `RegisterRouteResult`.
 ///
 /// `handler` names identity only, so it is a plain [`ErasedActorPath`]
-/// (ADR-0231 §3, proven with `resolve_path`) rather than an [`HttpRoute`]
-/// path: the server never sends to a holder it is releasing, and a typed path
-/// could not name a holder that claimed the route through
-/// [`RegisterRouteSelf`] with a minted kind. `resolve_path` fills a short
-/// path's holes, so `aether.component/:api` releases as well as the canonical
-/// spelling does.
+/// (ADR-0231 §3, proven with `resolve_path`) rather than an [`HttpRouter`]
+/// path: the server never sends to a holder it is releasing, so a release
+/// needs the holder's identity and nothing its rows promise. `resolve_path`
+/// fills a short path's holes, so `aether.component/:api` releases as well as
+/// the canonical spelling does.
 ///
 /// [`ErasedActorPath`]: aether_data::ErasedActorPath
 #[aether_data::kind(name = "aether.http.server.unregister_route")]
@@ -516,9 +499,10 @@ pub struct UnregisterRouteSelf {
 /// Failure modes: an invalid prefix (must start with `/`), a `handler` path
 /// no live route stands at, a `(prefix, method)` key already claimed by
 /// another handler, or a `_self` op from a sender with no local mailbox.
-/// A `handler` path whose live route does not cover [`HttpRoute`] never
+/// A `handler` path whose live route does not cover [`HttpRouter`] never
 /// reaches the receipt at all: the decode refuses the mail, which is logged
-/// at warn and gets no reply of any kind.
+/// at warn and gets no reply of any kind. A `_self` registrant that does not
+/// cover it is answered `Err`.
 #[aether_data::kind(name = "aether.http.server.register_route_result")]
 pub enum RegisterRouteResult {
     Ok,

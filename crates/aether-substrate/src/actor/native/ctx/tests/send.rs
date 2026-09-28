@@ -206,6 +206,50 @@ fn typed_detached_send_returns_emitted_id_and_mail_sender_delegates() {
     assert_eq!(delegated.root, delegated.mail_id, "compatibility delegation roots the emitted mail");
 }
 
+/// A payload encoded off the sending thread reaches a manual protocol row as
+/// the kind its `Encoded<K>` names, byte for byte, on a fresh chain. Catches
+/// the verb stamping a kind other than `K`, sending bytes other than the
+/// encode, or inheriting the handler's chain the way `send_to` does.
+#[test]
+fn encoded_detached_send_delivers_the_encoded_kind_through_a_manual_protocol_row() {
+    use crate::mail::registry::{OwnedDispatch, Registry};
+    use crate::testing::{bare_substrate, boot_authority};
+    use aether_data::{Encoded, Kind};
+    use std::sync::mpsc;
+
+    let (registry, mailer) = bare_substrate();
+    let (tx, rx) = mpsc::channel::<Envelope>();
+    let recipient = registry.register_inbox(
+        &boot_authority(),
+        "test.encoded_detached.sink",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            dispatch.discharge();
+            let _ = tx.send(dispatch);
+        }),
+    );
+    let target = Registry::declared_dependency::<ManualCastRelay>(recipient).narrow::<CastRelay>();
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00BE_EF09)));
+    let payload = Encoded::new(&CastOnly { code: 12 });
+
+    let emitted_id = {
+        let ctx: NativeCtx<'_, Erased, Single> = NativeCtx::new(
+            &binding,
+            Source::NONE,
+            Some(MailId::new(MailboxId(0x66), 29)),
+            Some(MailId::new(MailboxId(0x77), 31)),
+        );
+        ctx.send_encoded_detached_to(target, &payload).expect("an ordinary kind sends")
+    };
+
+    let sent = rx.try_recv().expect("the encoded send routed at flush");
+    assert_eq!(sent.recipient, recipient, "the send addresses the protocol reference's target");
+    assert_eq!(sent.kind, CastOnly::ID, "the kind is the one the payload was encoded as");
+    assert_eq!(bytemuck::pod_read_unaligned::<CastOnly>(sent.payload.bytes()).code, 12, "the payload decodes as sent");
+    assert_eq!(sent.mail_id, Some(emitted_id), "the verb returns the push's id");
+    assert!(sent.parent_mail.is_none(), "the encoded send carries no parent edge");
+    assert_eq!(sent.root, Some(emitted_id), "the encoded send roots its own chain");
+}
+
 /// The actor the flat-send test's ctx is typed by: it declares the stub actor
 /// as a dependency.
 struct Dependent;

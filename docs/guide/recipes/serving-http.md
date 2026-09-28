@@ -71,19 +71,21 @@ aether-http = { path = "../aether-http", default-features = false }
 
 ## 3. Write the handler
 
-A handler is a wasm component with one `#[handler::single]` for
-`aether.http.server.request`. It replies `aether.http.server.response` with a
-status code, optional headers, and a byte body. The server writes the formatted
+A handler is a wasm component with one `#[handler::manual]` for
+`aether.http.server.request`: every route holder covers the `HttpRouter`
+protocol, whose one row is manual, so the handler replies through
+`ctx.reply(&…)` rather than a return value. It replies
+`aether.http.server.response` with a status code, optional headers, and a byte
+body. The server writes the formatted
 HTTP/1.1 response to the client socket. On HTTP/1.1 the connection is kept alive
 by default and serves the next request on the same socket; a client that sends
 `Connection: close` (and HTTP/1.0, which closes by default) terminates it, and
 an idle kept-alive connection is closed after `keep_alive_timeout_millis`.
 
 ```rust
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_http::HttpServerCapability;
 use aether_http::kinds::{HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
-use aether_data::Kind as _;
 
 pub struct Web;
 
@@ -102,37 +104,37 @@ impl WasmActor for Web {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/".to_string(),
             method: None,
-            kind: HttpServerRequest::ID,
             shared: false,
         });
     }
 
-    #[handler::single]
-    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
+    #[handler::manual]
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, req: HttpServerRequest) {
         let (status, body): (u16, &[u8]) = match req.path.as_str() {
             "/" => (200, b"hello"),
             _ => (404, b"not found"),
         };
-        HttpServerResponse {
+        ctx.reply(&HttpServerResponse {
             status,
             headers: Vec::new(),
             body: body.to_vec(),
-        }
+        });
     }
 }
 
 aether_actor::export!(public = [Web]);
 ```
 
-`#[handler::single]` replies by *returning* its kind, as above.
-`#[handler::manual]` opts into the `Manual` ctx (`WasmCtx<'_, Self, Manual>`)
-whose `ctx.reply(&…)` sends the reply explicitly — reach for it when one handler
-needs to reply one of *several* kinds (see "Mixing buffered and streamed routes"
-below), since a single return type can't express that choice. A handler may
-omit its actor, and the macro types the ctx by it — `WasmCtx<'_>` reads as
-`WasmCtx<'_, Self>`, reaching only the actors the component declares with
-`depends(R)`. The actor is the first parameter, the reply mode the second
-(`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
+`#[handler::manual]` takes the `Manual` ctx (`WasmCtx<'_, Self, Manual>`),
+whose `ctx.reply(&…)` sends the reply explicitly, so one handler can reply any
+of the server's reply kinds (see "Mixing buffered and streamed routes" below).
+The `register_route_self` registration casts the sender to `HttpRouter`; a
+component with no manual `aether.http.server.request` handler is answered
+`register_route_result::Err`. A handler may omit its actor, and the macro types
+the ctx by it — `WasmCtx<'_>` reads as `WasmCtx<'_, Self>`, reaching only the
+actors the component declares with `depends(R)`. The actor is the first
+parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`); spell
+`WasmCtx<'_, Erased>` for the untyped view.
 
 The component registers at `aether.component/aether.embedded:web` (its
 `NAMESPACE` const rendered through the ADR-0099 lineage). Its `wire` hook
@@ -204,15 +206,13 @@ catch-all (as the §3 handler does) — then everything unmatched goes there.
 
 ```rust
 use aether_http::HttpServerCapability;
-use aether_http::kinds::{HttpServerRequest, RegisterRouteSelf};
-use aether_data::Kind as _;
+use aether_http::kinds::RegisterRouteSelf;
 
 // In an `#[actor(depends(HttpServerCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
         prefix: "/api".to_string(),
         method: None,                        // or Some(HttpMethod::Get)
-        kind: HttpServerRequest::ID,
         shared: false,                       // true joins an ADR-0136 member set
     });
 }
@@ -231,12 +231,9 @@ component drops, or explicitly via
 a test) use the `register_route` / `unregister_route` forms, which name the
 handler by its canonical path.
 
-The `kind` field names the kind the route's requests dispatch as.
-`HttpServerRequest::ID` keeps the generic shape. Registering a route-specific
-kind — a struct with `aether.http.server.request`'s fields under its own
-`#[kind(name = …)]` — routes each prefix to its own `#[handler::single]`, with its own
-`describe_component` entry and `actor_cost` row; the payload bytes are always
-request-shaped, so the route kind decodes them directly.
+Every route dispatches as `aether.http.server.request` to the holder's one
+manual handler, so a component serving several prefixes tells them apart by
+`req.path` (or through the typed surface below, which does that for it).
 
 ### Registering a route for another actor
 
@@ -248,25 +245,18 @@ by its canonical actor path. `RegisterRoute` carries `prefix` (`String`),
 to match every method; the seven variants are `Get`, `Post`, `Put`, `Delete`,
 `Patch`, `Head`, `Options`), `handler` (the path text), and `shared` (the
 ADR-0136 member-set flag — `false` claims the prefix exclusively, `true` joins
-the round-robin set on it). There is no `kind` field: a route registered by
-path always dispatches as `aether.http.server.request`.
+the round-robin set on it).
 
 The `handler` path must be canonical — the `path` a `load_component` reply
 returns, `aether.component/aether.embedded:api` for a component loaded as
-`api`. The named actor has to answer `aether.http.server.request` with
-`aether.http.server.response` from a `#[handler::single]`: the path is
-`ProtocolPath<HttpRoute>`, so a path whose live route does not publish that
-row is refused when the mail is decoded — logged at warn, with no
-`register_route_result` reply at all, rather than accepted and then answering
-`502` on every request. In Rust the same path is written
-`ActorPath::<Handler>::root().narrow::<HttpRoute>()`, which will not compile
-unless `Handler` has the row.
-
-A handler that answers by hand cannot be named this way, because a manual row
-covers no protocol (ADR-0231 §6): a streaming handler replying
-`HttpResponseStreamOpen`, a websocket handler replying `WebSocketAccept`, a
-deferred route, and every `#[http::router]` group register themselves with
-`register_route_self`, whose `kind` names whatever they minted.
+`api`. The named actor has to take `aether.http.server.request` in a
+`#[handler::manual]`: the path is `ProtocolPath<HttpRouter>`, so a path whose
+live route does not publish that manual row is refused when the mail is
+decoded — logged at warn, with no `register_route_result` reply at all, rather
+than accepted and then answering `502` on every request. In Rust the same path
+is written `ActorPath::<Handler>::root().narrow::<HttpRouter>()`, which will
+not compile unless `Handler` has the row. Every route holder has it, including
+a streaming, websocket, or deferred handler and a `#[http::router]` actor.
 
 ```jsonc
 // send_mail → aether.http.server  (kind: aether.http.server.register_route)
@@ -287,9 +277,8 @@ answers it `Err`.
 Releasing the route mirrors the registration, keeping `method` so a
 method-specific route and a method-agnostic route at the same prefix release
 independently. Its `handler` is a plain actor path rather than a protocol one
-— a release needs only the identity the route table is keyed by, and it must
-be able to name a holder that claimed the route through `register_route_self`
-with a minted kind — so a short path like `aether.component/:api` works too:
+— a release needs only the identity the route table is keyed by — so a short
+path like `aether.component/:api` works too:
 
 ```jsonc
 // send_mail → aether.http.server  (kind: aether.http.server.unregister_route)
@@ -304,9 +293,10 @@ with a minted kind — so a short path like `aether.component/:api` works too:
 
 The typed surface writes that whole registration for you (ADR-0131). Put
 `#[http::router]` on the actor's impl block, above `#[actor]`, and
-`#[http::route(<Method|any>, "<prefix>")]` on a method; the macros mint the
-route's request-shaped kind, inject the `register_route_self` send into `wire`,
-and turn the method into the route's `#[handler::single]`. A routed method takes an
+`#[http::route(<Method|any>, "<prefix>")]` on a method; the macros inject the
+`register_route_self` send into `wire` and emit the router's one
+`#[handler::manual]` for `aether.http.server.request`, which picks the route and
+replies what the method returns. A routed method takes an
 `http::Ctx<'_, C>` — the transport ctx (`WasmCtx` here) plus the request and
 matched route, dereffing to the ctx so mail sends read as usual — and returns
 `HttpServerResponse`. The actor must declare `depends(HttpServerCapability)`
@@ -382,7 +372,7 @@ and its siblings, on both transports — and a route that sends to `R` needs
 
 Drop to the raw `register_route_self` surface above for a streaming route
 (`HttpResponseStreamOpen`) — the typed surface returns `HttpServerResponse`, so
-a streamed response keeps its own hand-written `#[handler::single]`.
+a streamed response keeps its own hand-written `#[handler::manual]`.
 
 ### Scaling one handler to N instances
 
@@ -451,7 +441,7 @@ mail with `ctx.sender()` and hands it to `from_credit`, so the credit handler is
 an ordinary `#[handler::single]`:
 
 ```rust
-use aether_actor::{WasmCtx, WasmInitCtx};
+use aether_actor::{Manual, OutboundReply, WasmCtx, WasmInitCtx};
 use aether_http::ResponseStream;
 use aether_http::kinds::{
     HttpResponseStreamOpen, HttpServerRequest, HttpStreamCredit,
@@ -473,11 +463,11 @@ impl WasmActor for Feed {
     }
 
     // Open the stream. The body arrives later, one chunk per unit of credit.
-    #[handler::single]
-    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
+    #[handler::manual]
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _req: HttpServerRequest) {
         self.next = 0;
         self.done = false;
-        HttpResponseStreamOpen { status: 200, headers: Vec::new() }
+        ctx.reply(&HttpResponseStreamOpen { status: 200, headers: Vec::new() });
     }
 
     // Spend the granted credit, then terminate once the body is exhausted.
@@ -515,17 +505,15 @@ purely opt-in per reply.
 ## Mixing buffered and streamed routes
 
 "Stream one route, buffer the rest" is a single handler choosing between two
-reply kinds per request — a `#[handler::single]`'s return type can only be one
-kind, so this is exactly the case that needs `#[handler::manual]` and its
-`Manual` ctx, whose `ctx.reply(&…)` sends the reply explicitly instead of
-returning it:
+reply kinds per request. The request handler is `#[handler::manual]` already,
+so its `ctx.reply(&…)` sends whichever one the request calls for:
 
 ```rust
-use aether_actor::{Erased, Manual, OutboundReply, WasmCtx};
+use aether_actor::{Manual, OutboundReply, WasmCtx};
 use aether_http::kinds::{HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse};
 
 #[handler::manual]
-fn on_request(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, req: HttpServerRequest) {
+fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, req: HttpServerRequest) {
     match req.path.as_str() {
         "/download" => ctx.reply(&HttpResponseStreamOpen {
             status: 200,
@@ -540,16 +528,13 @@ fn on_request(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, req: HttpServerR
 }
 ```
 
-Use `#[handler::manual]` + `ctx.reply` when a single route chooses between
-reply shapes; return from a `#[handler::single]` otherwise.
-
 ## Verify against current code
 
 This recipe names the env keys and kind names live in the source. Before
 following it, confirm `AETHER_HTTP_SERVER_ENABLED`, `HttpServerRequest`,
 `HttpServerResponse`, `HttpServerConfig`, the `--http-server-*` argv flags
 (`cli_prefix = "http-server"` on `HttpServerConfig`), `RegisterRoute` /
-`UnregisterRoute` / `HttpRoute` / `HttpMethod`, the `http::{router, route,
+`UnregisterRoute` / `HttpRouter` / `HttpMethod`, the `http::{router, route,
 FromRequest, Ctx}` authoring surface, and `http::ResponseStream` still exist
 where named — grep the crates, and if a name has drifted, fix the recipe as
 part of your work.

@@ -32,7 +32,7 @@ use aether_actor::{
     CallerAddressable, DependencyResolver, DependsOn, ErasedActorRef, MailSender, Manual, OutboundReply, ReplyMode,
     SendableTo, Singleton, Target,
 };
-use aether_data::{ActorMail, Kind, KindId, MailId, RequestId};
+use aether_data::{ActorMail, Encoded, Kind, KindId, MailId, RequestId};
 
 use crate::actor::native::binding::OutboundSend;
 use crate::actor::native::envelope::Envelope;
@@ -195,9 +195,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.push_envelope_tracked(target, kind, bytes, None, root)
     }
 
-    /// The push behind both tracked envelope sends: refuse an engine-only
-    /// `kind`, resolve the bytes' tag-1 fields, and push under `(parent,
-    /// root)`.
+    /// The push behind the tracked and detached envelope sends: refuse an
+    /// engine-only `kind`, then [`Self::push_encoded`].
     fn push_envelope_tracked(
         &self,
         target: ErasedActorRef,
@@ -209,6 +208,20 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         if refuse_engine_only(kind) {
             return None;
         }
+        self.push_encoded(target, kind, bytes, parent, root)
+    }
+
+    /// Resolve the tag-1 fields of `bytes`, a `kind` mail, and push them to
+    /// `target` under `(parent, root)`: the push shared by the raw envelope
+    /// verbs and [`Self::send_encoded_detached_to`].
+    fn push_encoded(
+        &self,
+        target: ErasedActorRef,
+        kind: KindId,
+        bytes: &[u8],
+        parent: Option<MailId>,
+        root: Option<MailId>,
+    ) -> Option<MailId> {
         let attachments = self.resolve_forward(kind, bytes)?;
         Some(self.binding.push_envelope_buffered(OutboundSend {
             recipient: target.id().0,
@@ -242,19 +255,31 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// bytes' tag-1 fields resolve, or refuse, as they do there.
     #[must_use]
     pub fn send_envelope_detached_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> Option<MailId> {
-        if refuse_engine_only(kind) {
-            return None;
-        }
-        let attachments = self.resolve_forward(kind, bytes)?;
-        Some(self.binding.push_envelope_buffered(OutboundSend {
-            recipient: target.id().0,
-            kind: kind.0,
-            bytes,
-            attachments: attachments.as_deref().unwrap_or_default(),
-            count: 1,
-            parent_mail: None,
-            inherited_root: None,
-        }))
+        self.push_envelope_tracked(target, kind, bytes, None, None)
+    }
+
+    /// Dispatch a payload encoded elsewhere to the actor `target` proves on a
+    /// fresh causal chain, as [`Self::send_envelope_detached_to`] does, and
+    /// return the minted [`MailId`], the new chain's root.
+    ///
+    /// The kind comes from `K` and the bytes from [`Encoded<K>`], whose only
+    /// producer is an encode of a `K`, so the pair cannot disagree. The
+    /// target is kind-checked through [`Target`] as [`Self::send_to`]'s is: a
+    /// [`ProtocolRef<P>`](aether_actor::ProtocolRef) compiles only for a kind
+    /// `P` lists, a manual row included. `K: ActorMail` keeps engine-only mail
+    /// out at compile time, so no runtime refusal repeats it. The bytes'
+    /// tag-1 fields resolve, or refuse with `None`, as the raw verbs' do.
+    ///
+    /// It serves a sender that encodes off the thread that sends: the HTTP
+    /// server's reader encodes each buffered request and its dispatch shard
+    /// sends the bytes to the route holder (ADR-0135 §2).
+    #[must_use]
+    pub fn send_encoded_detached_to<K: ActorMail, I>(
+        &self,
+        target: impl Target<K, I>,
+        payload: &Encoded<K>,
+    ) -> Option<MailId> {
+        self.push_encoded(target.erased(), K::ID, payload.as_bytes(), None, None)
     }
 
     /// Send `payload` through the held reference `target`, inheriting this

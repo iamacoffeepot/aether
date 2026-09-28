@@ -2,7 +2,7 @@
 //! echoing the request, one that replies a fixed non-empty body, and one that
 //! drops the request without replying (the `502` safety-net path).
 
-use aether_actor::actor;
+use aether_actor::{Manual, OutboundReply, actor};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
@@ -34,12 +34,8 @@ impl NativeActor for EchoHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
-    fn on_request(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        request: HttpServerRequest,
-    ) -> HttpServerResponse {
+    #[handler::manual]
+    fn on_request(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, request: HttpServerRequest) {
         let headers = vec![
             HttpHeader { name: "x-aether-method".to_string(), value: format!("{:?}", request.method) },
             HttpHeader { name: "x-aether-path".to_string(), value: request.path.clone() },
@@ -47,7 +43,7 @@ impl NativeActor for EchoHttpHandler {
             HttpHeader { name: "x-aether-peer-addr".to_string(), value: request.peer_addr.clone() },
             HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() },
         ];
-        HttpServerResponse { status: 200, headers, body: request.body }
+        ctx.reply(&HttpServerResponse { status: 200, headers, body: request.body });
     }
 }
 
@@ -74,17 +70,13 @@ impl NativeActor for FixedBodyHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
-    fn on_request(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _request: HttpServerRequest,
-    ) -> HttpServerResponse {
-        HttpServerResponse {
+    #[handler::manual]
+    fn on_request(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _request: HttpServerRequest) {
+        ctx.reply(&HttpServerResponse {
             status: 200,
             headers: vec![HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() }],
             body: b"fixed body".to_vec(),
-        }
+        });
     }
 }
 
@@ -109,8 +101,8 @@ impl NativeActor for SilentHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
-    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) {
+    #[handler::manual]
+    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_, Self, Manual>, _request: HttpServerRequest) {
         // Intentionally drops the request without replying.
     }
 }

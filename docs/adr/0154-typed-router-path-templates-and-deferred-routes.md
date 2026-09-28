@@ -3,6 +3,7 @@
 - **Status:** Accepted (shipped — typed path templates and deferred routes in `crates/aether-http/src/typed.rs` and `crates/aether-http/src/defer.rs`)
 - **Date:** 2026-07-19
 - **Amended:** 2026-09-23 (#6468) — a deferred route forwards to a declared dependency of the router actor: `ctx.defer(&request).to::<R>()` sends through the router's own `send_with_context::<R>`, bounded `A: DependsOn<R>` (ADR-0232 §1), and no longer resolves `R` through the component-host carry. A loaded embedded component is therefore not a deferral target.
+- **Amended:** 2026-09-28 (#6935) — The one-reply-class-per-group rule is removed. A router compiles to one `#[handler::manual]` handler (ADR-0131), so synchronous and deferred routes may share a `(prefix, method)` claim: a synchronous route's response and a deferred route's `Outcome::Reply` both reply through the handler's obligation, and `Outcome::Deferred` leaves the answer to the `#[http::reply]` route.
 
 Amends **ADR-0131** (the typed route-authoring surface): the route macro grows from a `(prefix, method)` dispatcher that must reply synchronously into one that owns the whole route tree — nested path templates with captures, and routes that answer a downstream reply instead of returning inline. Builds on the guest-side extraction principle of **ADR-0130**, the handler classes of **ADR-0134**, and the kind-typed request contexts of **ADR-0139**; takes the data-phase reasoning of **ADR-0133** as the reason a deferred reply cannot simply ride the request chain.
 

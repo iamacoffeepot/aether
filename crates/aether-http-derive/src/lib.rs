@@ -8,19 +8,26 @@
 //! `#[runtime]`). Attribute macros expand outer first, so `router` runs first:
 //! it consumes the `#[http::route(<Method|any>, "<template>")]` attributes on
 //! the methods, groups the routes sharing a `(static-head, method)` claim,
-//! mints one hidden request-shaped route kind per group, emits one
-//! `#[handler]` per group that matches the request's path segments against
-//! every template in the group (binding `{capture}` segments through
-//! `FromPathSegment` and running `FromRequest` extractors), injects the
-//! `RegisterRouteSelf` registration into `wire`, and hands `#[actor]` an
-//! ordinary impl block.
+//! emits one `#[handler::manual]` over `HttpServerRequest` for the whole
+//! router (the one row of the `HttpRouter` protocol every route holder
+//! covers), injects one `RegisterRouteSelf` registration per group into
+//! `wire`, and hands `#[actor]` an ordinary impl block.
+//!
+//! The generated handler picks the group the server picked: among the groups
+//! whose claim matches the request, the one `route_rank` ranks highest, the
+//! rule the server's route table applies to its keys. It then tries only that
+//! group's templates, most specific first, matching path segments, binding
+//! `{capture}` segments through `FromPathSegment`, and running `FromRequest`
+//! extractors. Every answer, a route's response, a bind failure's, or the
+//! `404` when no group or template matches, goes through the handler's reply
+//! obligation.
 //!
 //! A template's static head, its leading run of literal segments, is what is
 //! claimed with the capability, which keys routes by `(prefix, method)`.
 //! Capture and sub-path matching run in the generated guest-side glue, so the
 //! capability never grows a routing trie (ADR-0154). Routes sharing a claim
-//! collapse into one registration and one dispatcher, most specific template
-//! first, `404` when none match.
+//! collapse into one registration. A synchronous route and a deferred one may
+//! share a claim, since the handler replies by hand either way.
 //!
 //! Bare `#[http::router]` registers every route exclusively.
 //! `#[http::router(shared)]` registers them all `shared: true` instead
@@ -57,8 +64,8 @@ use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Expr, ExprLit, FnArg, GenericArgument, Ident, ImplItem, ImplItemFn, ItemImpl, Lit, LitStr, Pat, PatType,
-    PathArguments, ReturnType, Type, TypePath, parse_macro_input, parse_quote, parse_quote_spanned,
+    Attribute, FnArg, GenericArgument, Ident, ImplItem, ImplItemFn, ItemImpl, LitStr, Pat, PatType, PathArguments,
+    ReturnType, Type, TypePath, parse_macro_input, parse_quote, parse_quote_spanned,
 };
 
 /// `#[http::route(<Method|any>, "<template>")]` — a marker attribute
@@ -289,7 +296,6 @@ struct Routed {
     params: Vec<Param>,
     /// `true` when the method returns `http::Outcome` (deferred-capable,
     /// ADR-0154 §2); `false` for a synchronous `HttpServerResponse` route.
-    /// Every route sharing a `(static-head, method)` claim must agree.
     returns_outcome: bool,
     /// `#[doc]` attributes carried onto the glue handler for
     /// `describe_component` prose.
@@ -333,46 +339,24 @@ enum CallStyle {
     State(Box<Type>),
 }
 
-/// A `(static-head, method)` group of routes: one cap registration, one
-/// minted kind, one dispatcher glue. The receiver / ctx shape is taken
-/// from the group's first route (all routes on one impl share a
-/// transport), and its routes are held most-specific-first for dispatch.
+/// A `(static-head, method)` group of routes: one cap registration and one
+/// arm of the router's handler, its routes held most-specific-first.
 struct Group<'a> {
     /// The grouping key: `(static_head, method-ident string)`.
     key: (String, String),
     /// The static head registered with the cap.
     static_head: String,
-    /// The `Option<HttpMethod>` filter token for the registration and the
-    /// `Route` handed to the handler.
+    /// The `Option<HttpMethod>` filter token for the registration, the
+    /// handler's group selection, and the `Route` handed to the route.
     method_expr: TokenStream2,
     /// The group's routes, sorted most-literal-first.
     routes: Vec<&'a Routed>,
-    /// Minted route-kind struct identifier (a sibling item).
-    kind_struct: Ident,
-    /// Minted route-kind wire name (`"{NAMESPACE}.route.{slug}_{method}"`).
-    kind_name: LitStr,
-    /// The generated dispatcher's name.
-    glue_name: Ident,
-    /// The receiver parameter copied onto the glue.
-    first_arg: FnArg,
-    /// The call style shared by the group's routes.
-    call_style: CallStyle,
-    /// The transport ctx type `C`, with its actor filled in when the
-    /// author omitted it.
-    ctx_c: Type,
-    /// `true` when the group's routes return `http::Outcome` — the glue
-    /// is `manual`-class and may hold the reply (ADR-0154 §2). All routes
-    /// in a group agree (mixed is a compile error).
-    deferred: bool,
 }
 
 fn expand_router(mut item: ItemImpl, shared: bool) -> syn::Result<TokenStream2> {
     if !item.generics.params.is_empty() {
         return Err(syn::Error::new(item.generics.span(), "#[http::router] does not support generic impl blocks"));
     }
-
-    let namespace = read_namespace(&item)?;
-    let self_ident = self_type_ident(&item.self_ty)?;
 
     // Collect routed + reply methods, stripping the `#[http::route]` /
     // `#[http::reply]` markers so each survives as a plain helper `#[actor]`
@@ -392,29 +376,27 @@ fn expand_router(mut item: ItemImpl, shared: bool) -> syn::Result<TokenStream2> 
         }
     }
 
-    if routed.is_empty() {
+    let Some(first) = routed.first() else {
         return Err(syn::Error::new(
             item.span(),
             "#[http::router] found no #[http::route(...)] methods on the impl block",
         ));
-    }
+    };
 
-    let groups = build_groups(&routed, &self_ident, &namespace)?;
+    let groups = build_groups(&routed)?;
 
-    let minted = groups.iter().map(emit_minted_kind).collect::<Vec<_>>();
-    let mut glue = groups.iter().map(emit_group_glue).collect::<Vec<_>>();
+    let mut glue = vec![emit_router_glue(&groups, first)];
     glue.extend(reply_routes.iter().map(emit_reply_glue));
     for handler in glue {
         item.items.push(parse_quote!(#handler));
     }
 
-    inject_registration(&mut item, &groups, shared)?;
+    inject_registration(&mut item, &groups, first, shared)?;
 
     let depends_check = emit_depends_check(&item.self_ty);
 
     Ok(quote! {
         #depends_check
-        #(#minted)*
         #item
     })
 }
@@ -441,46 +423,6 @@ fn emit_depends_check(self_ty: &Type) -> TokenStream2 {
             router_actor_must_declare_depends_http_server_capability::<#self_ty>
         };
     }
-}
-
-/// Read the required `const NAMESPACE: &'static str = "…"` literal.
-fn read_namespace(item: &ItemImpl) -> syn::Result<LitStr> {
-    for impl_item in &item.items {
-        let ImplItem::Const(konst) = impl_item else {
-            continue;
-        };
-        if konst.ident != "NAMESPACE" {
-            continue;
-        }
-        // A `macro_rules` `:literal` metavariable reaches a proc macro
-        // wrapped in an invisible `Expr::Group`; peel it before matching.
-        let Expr::Lit(ExprLit { lit: Lit::Str(value), .. }) = peel_group(&konst.expr) else {
-            return Err(syn::Error::new(
-                konst.expr.span(),
-                "#[http::router] needs `const NAMESPACE` to be a string literal",
-            ));
-        };
-        return Ok(value.clone());
-    }
-    Err(syn::Error::new(
-        item.span(),
-        "#[http::router] requires `const NAMESPACE: &'static str = \"…\"` on the impl block",
-    ))
-}
-
-/// The last path segment of the impl's self type, used to name the
-/// minted sibling structs uniquely per actor.
-fn self_type_ident(ty: &Type) -> syn::Result<Ident> {
-    let Type::Path(TypePath { path, .. }) = ty else {
-        return Err(syn::Error::new(
-            ty.span(),
-            "#[http::router] expects a named self type (e.g. `impl WasmActor for MyActor`)",
-        ));
-    };
-    path.segments
-        .last()
-        .map(|seg| seg.ident.clone())
-        .ok_or_else(|| syn::Error::new(ty.span(), "#[http::router] could not name the self type"))
 }
 
 /// If `method` carries `#[http::route(...)]`, strip it and build the
@@ -538,45 +480,18 @@ fn take_routed(method: &mut ImplItemFn) -> syn::Result<Option<Routed>> {
     }))
 }
 
-/// Group routes by `(static-head, method)`, minting one kind + glue name
-/// per group and sorting each group's routes most-literal-first.
-fn build_groups<'a>(routed: &'a [Routed], self_ident: &Ident, namespace: &LitStr) -> syn::Result<Vec<Group<'a>>> {
-    let mut groups: Vec<Group<'a>> = Vec::new();
+/// Group routes by `(static-head, method)`, sorting each group's routes
+/// most-literal-first.
+fn build_groups(routed: &[Routed]) -> syn::Result<Vec<Group<'_>>> {
+    let mut groups: Vec<Group<'_>> = Vec::new();
     for route in routed {
         let key = (route.template.static_head.clone(), route.method_ident.to_string());
         if let Some(group) = groups.iter_mut().find(|group| group.key == key) {
-            // Routes sharing a claim compile into one dispatcher, so they
-            // share a reply class (ADR-0154 §2): all synchronous or all
-            // deferred, never mixed.
-            if route.returns_outcome != group.deferred {
-                return Err(syn::Error::new(
-                    route.fn_name.span(),
-                    "routes sharing a (prefix, method) claim must all return HttpServerResponse \
-                     or all return http::Outcome — they compile into one dispatcher",
-                ));
-            }
             group.routes.push(route);
             continue;
         }
-        let slug = slug_of(&route.template.static_head);
-        let method_lower = route.method_ident.to_string().to_lowercase();
-        let kind_struct = format_ident!("{}Route{}{}", self_ident, to_camel(&slug), to_camel(&method_lower));
-        let kind_name = LitStr::new(&format!("{}.route.{slug}_{method_lower}", namespace.value()), self_ident.span());
-        let glue_name = format_ident!("__aether_route_{slug}_{method_lower}");
         let method_expr = method_filter_token(&route.method_ident)?;
-        groups.push(Group {
-            key,
-            static_head: route.template.static_head.clone(),
-            method_expr,
-            routes: vec![route],
-            kind_struct,
-            kind_name,
-            glue_name,
-            first_arg: route.first_arg.clone(),
-            call_style: route.call_style.clone(),
-            ctx_c: route.ctx_c.clone(),
-            deferred: route.returns_outcome,
-        });
+        groups.push(Group { key, static_head: route.template.static_head.clone(), method_expr, routes: vec![route] });
     }
     for group in &mut groups {
         // Order most-specific first: an exact (capture-bearing) template
@@ -590,26 +505,6 @@ fn build_groups<'a>(routed: &'a [Routed], self_ident: &Ident, namespace: &LitStr
         });
     }
     Ok(groups)
-}
-
-/// Sanitize a static head into an identifier-safe slug for kind naming:
-/// non-alphanumerics collapse to single underscores, edges trimmed, the
-/// `/` catch-all becomes `root`.
-fn slug_of(head: &str) -> String {
-    let mut slug = String::with_capacity(head.len());
-    for ch in head.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch);
-        } else if !slug.ends_with('_') {
-            slug.push('_');
-        }
-    }
-    let trimmed = slug.trim_matches('_');
-    if trimmed.is_empty() {
-        "root".to_string()
-    } else {
-        trimmed.to_string()
-    }
 }
 
 /// True for `#[http::route]` / `#[route]` (matched on the last path
@@ -850,107 +745,97 @@ fn parse_return_kind(output: &ReturnType) -> syn::Result<bool> {
     }
 }
 
-/// The `#[doc(hidden)]` single-field wrapper kind for one route group.
-/// Its wire encoding is field-concatenation, so it decodes an
-/// `HttpServerRequest` payload byte-for-byte however that type grows
-/// (ADR-0131) — while the ordinary derives keep ID derivation, the
-/// `aether.kinds` link-sections, and the descriptor inventory.
-fn emit_minted_kind(group: &Group<'_>) -> TokenStream2 {
-    let Group { kind_struct, kind_name, .. } = group;
-    quote! {
-        #[doc(hidden)]
-        #[derive(
-            ::aether_data::Kind,
-            ::aether_data::Schema,
-            ::serde::Serialize,
-            ::serde::Deserialize,
-        )]
-        #[kind(name = #kind_name)]
-        pub struct #kind_struct {
-            pub request: ::aether_http::kinds::HttpServerRequest,
+/// The router's one `#[handler::manual]` over `HttpServerRequest`, the row
+/// of the `HttpRouter` protocol its registrations prove. It picks the group
+/// whose claim the server picked, by `route_rank` over the groups' claims,
+/// then tries that group's templates most-specific first: matching literals,
+/// binding captures through `FromPathSegment`, running `FromRequest`
+/// extractors, and calling the matched route. A request no group or template
+/// matches answers `404`. Every answer goes through the reply obligation.
+fn emit_router_glue(groups: &[Group<'_>], first: &Routed) -> TokenStream2 {
+    let glue_first = match &first.call_style {
+        CallStyle::SelfReceiver => {
+            let first_arg = &first.first_arg;
+            quote! { #first_arg }
         }
-    }
-}
-
-/// The `#[handler]` glue for one route group: decode the minted kind,
-/// split the request path into segments, and try each template in the
-/// group (most-specific first) — matching literals, binding captures
-/// through `FromPathSegment`, running `FromRequest` extractors, and
-/// calling the matched user method. A request matching no template
-/// answers `404`.
-fn emit_group_glue(group: &Group<'_>) -> TokenStream2 {
-    let Group { routes, kind_struct, glue_name, first_arg, call_style, ctx_c, deferred, .. } = group;
-
-    let glue_first = match call_style {
-        CallStyle::SelfReceiver => quote! { #first_arg },
         CallStyle::State(state_ty) => quote! { __aether_state: #state_ty },
     };
-    let docs = routes.iter().flat_map(|route| route.docs.iter());
-    let arms = routes.iter().map(|route| emit_route_arm(route, group)).collect::<Vec<_>>();
-
-    let preamble = quote! {
-        let __aether_request = __aether_mail.request;
-        let __aether_path = __aether_request.path.clone();
-        let __aether_segs: ::std::vec::Vec<&str> =
-            __aether_path.split('/').filter(|__aether_seg| !__aether_seg.is_empty()).collect();
-    };
-    let not_found = quote! {
-        ::aether_http::kinds::HttpServerResponse {
-            status: 404,
-            headers: ::std::vec::Vec::new(),
-            body: ::std::vec::Vec::from(&b"no matching route"[..]),
-        }
-    };
-
-    if *deferred {
-        // A deferred group is `manual`-class: an arm replies inline for
-        // `Outcome::Reply`, holds for `Outcome::Deferred`, and the
-        // no-match fallthrough answers `404` through the taken obligation.
+    let glue_ctx = manual_ctx_type(&first.ctx_c);
+    let docs = groups.iter().flat_map(|group| group.routes.iter()).flat_map(|route| route.docs.iter());
+    let claim_count = groups.len();
+    let claims = groups.iter().map(|group| {
+        let static_head = LitStr::new(&group.static_head, Span::call_site());
+        let method_expr = &group.method_expr;
+        quote! { (#static_head, #method_expr) }
+    });
+    let arms = groups.iter().enumerate().map(|(index, group)| {
+        let routes = group.routes.iter().map(|route| emit_route_arm(route, group, &first.call_style));
         quote! {
-            #(#docs)*
-            #[handler::manual]
-            fn #glue_name(#glue_first, __aether_ctx: &mut #ctx_c, __aether_mail: #kind_struct) {
-                #preamble
-                #(#arms)*
-                __aether_ctx.take_inbound().reply(&#not_found);
+            if __aether_group == ::core::option::Option::Some(#index) {
+                #(#routes)*
             }
         }
-    } else {
-        quote! {
-            #(#docs)*
-            #[handler::single]
-            fn #glue_name(
-                #glue_first,
-                __aether_ctx: &mut #ctx_c,
-                __aether_mail: #kind_struct,
-            ) -> ::aether_http::kinds::HttpServerResponse {
-                #preamble
-                #(#arms)*
-                #not_found
-            }
+    });
+
+    quote! {
+        #(#docs)*
+        #[handler::manual]
+        fn __aether_route(
+            #glue_first,
+            __aether_ctx: &mut #glue_ctx,
+            __aether_request: ::aether_http::kinds::HttpServerRequest,
+        ) {
+            let __aether_path = __aether_request.path.clone();
+            let __aether_segs: ::std::vec::Vec<&str> =
+                __aether_path.split('/').filter(|__aether_seg| !__aether_seg.is_empty()).collect();
+            let __aether_claims: [(&str, ::core::option::Option<::aether_http::kinds::HttpMethod>); #claim_count] =
+                [#(#claims),*];
+            let __aether_group = __aether_claims
+                .iter()
+                .enumerate()
+                .filter_map(|(__aether_index, (__aether_prefix, __aether_filter))| {
+                    ::aether_http::route_rank(
+                        __aether_prefix,
+                        *__aether_filter,
+                        &__aether_path,
+                        __aether_request.method,
+                    )
+                    .map(|__aether_rank| (__aether_rank, __aether_index))
+                })
+                .max_by_key(|(__aether_rank, _)| *__aether_rank)
+                .map(|(_, __aether_index)| __aether_index);
+            #(#arms)*
+            ::aether_http::answer_now(
+                __aether_ctx,
+                &::aether_http::kinds::HttpServerResponse {
+                    status: 404,
+                    headers: ::std::vec::Vec::new(),
+                    body: ::std::vec::Vec::from(&b"no matching route"[..]),
+                },
+            );
         }
     }
 }
 
-/// One route's match arm inside its group's dispatcher: a length + literal
-/// guard, then capture and extractor binding, then the call.
-fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
+/// One route's match arm inside its group: a length + literal guard, then
+/// capture and extractor binding, then the call, each answer replied through
+/// the handler's obligation.
+fn emit_route_arm(route: &Routed, group: &Group<'_>, call_style: &CallStyle) -> TokenStream2 {
     let seglen = route.template.segments.len();
     // Every route matches its exact segment structure (#3697) — a route
     // claims its own path, not the subtree beneath it, so it never swallows a
     // deeper path (the rule capture templates already used). The cap still
     // registers the template's static head as a prefix (ADR-0130), so the cap
-    // routes the whole subtree to this dispatcher; the dispatcher then answers
-    // only the exact path and 404s the rest.
+    // routes the whole subtree to this router; the router then answers only
+    // the exact path and 404s the rest.
     let len_check = quote! { __aether_segs.len() == #seglen };
-    // On a bind failure (unparseable capture / rejected extractor), a
-    // synchronous glue returns the response; a deferred (`manual`) glue has
-    // no return value, so it replies through the taken obligation and
-    // returns unit. Both use the `__aether_response` bound by the `Err` arm.
-    let on_fail = if group.deferred {
-        quote! { { __aether_ctx.take_inbound().reply(&__aether_response); return; } }
-    } else {
-        quote! { return __aether_response }
+    // A bind failure (unparseable capture / rejected extractor) replies its
+    // response through the obligation and ends the handler.
+    let on_fail = quote! {
+        {
+            ::aether_http::answer_now(__aether_ctx, &__aether_response);
+            return;
+        }
     };
     let literal_checks = route.template.segments.iter().enumerate().filter_map(|(index, seg)| match seg {
         Segment::Literal(text) => {
@@ -987,7 +872,7 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
                 &__aether_request,
             ) {
                 ::core::result::Result::Ok(__aether_value) => __aether_value,
-                ::core::result::Result::Err(__aether_response) => return __aether_response,
+                ::core::result::Result::Err(__aether_response) => #on_fail,
             };
         }),
         Param::Path { .. } => None,
@@ -995,15 +880,23 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
 
     let param_idents = route.params.iter().map(Param::ident).collect::<Vec<_>>();
     let fn_name = &route.fn_name;
-    let invoke = match &group.call_style {
+    let invoke = match call_style {
         CallStyle::SelfReceiver => quote! { self.#fn_name(__aether_http_ctx #(, #param_idents)*) },
         CallStyle::State(_) => quote! { Self::#fn_name(__aether_state, __aether_http_ctx #(, #param_idents)*) },
     };
-    // A synchronous route returns the response, which the glue returns; a
+    // The handler's ctx is manual. A route whose ctx is manual too (a
+    // deferred route holds its reply) takes it as is; any other route takes
+    // its single view, which cannot reply, and the glue answers for it.
+    let route_ctx = if ctx_is_manual(&route.ctx_c) {
+        quote! { __aether_ctx }
+    } else {
+        quote! { __aether_ctx.as_single() }
+    };
+    // A synchronous route returns the response, which the glue replies; a
     // deferred route returns `Outcome`, which the glue answers inline
     // (`Reply`) or lets stand (`Deferred` — `defer` already forwarded the
     // inherited send, so the reply route answers when the peer replies).
-    let call_and_tail = if group.deferred {
+    let call_and_tail = if route.returns_outcome {
         quote! {
             match #invoke {
                 ::aether_http::Outcome::Reply(__aether_response) => {
@@ -1014,7 +907,11 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
             return;
         }
     } else {
-        quote! { return #invoke; }
+        quote! {
+            let __aether_response = #invoke;
+            ::aether_http::answer_now(__aether_ctx, &__aether_response);
+            return;
+        }
     };
 
     let static_head = LitStr::new(&group.static_head, Span::call_site());
@@ -1024,7 +921,7 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
             #(#path_binds)*
             #(#req_binds)*
             let __aether_http_ctx = ::aether_http::Ctx::new(
-                __aether_ctx,
+                #route_ctx,
                 __aether_request,
                 ::aether_http::Route {
                     prefix: #static_head,
@@ -1069,13 +966,12 @@ fn emit_reply_glue(reply: &ReplyRoute) -> TokenStream2 {
 /// `#[http::router(shared)]` opt-in (ADR-0136) straight into the wire
 /// field — every group on a `shared` impl registers `shared: true`.
 fn registration_send(group: &Group<'_>, ctx: &Ident, shared: bool) -> TokenStream2 {
-    let Group { method_expr, kind_struct, .. } = group;
+    let method_expr = &group.method_expr;
     let static_head = LitStr::new(&group.static_head, Span::call_site());
     quote! {
         #ctx.send::<::aether_http::HttpServerCapability>(&::aether_http::kinds::RegisterRouteSelf {
             prefix: #static_head.to_string(),
             method: #method_expr,
-            kind: <#kind_struct as ::aether_data::Kind>::ID,
             shared: #shared,
         });
     }
@@ -1109,6 +1005,44 @@ fn fill_actor(ty: &mut Type) {
         }
         PathArguments::Parenthesized(_) => {}
     }
+}
+
+/// Whether a filled transport ctx type names the manual reply mode, as a
+/// deferred route's `NativeCtx<'_, Self, Manual>` does: its second type
+/// argument's last segment is `Manual`. The match is syntactic, like
+/// [`fill_actor`]'s.
+fn ctx_is_manual(ty: &Type) -> bool {
+    let Type::Path(TypePath { path, .. }) = ty else {
+        return false;
+    };
+    let Some(PathArguments::AngleBracketed(args)) = path.segments.last().map(|seg| &seg.arguments) else {
+        return false;
+    };
+    args.args.iter().filter(|arg| matches!(arg, GenericArgument::Type(_))).nth(1).is_some_and(|mode| match mode {
+        GenericArgument::Type(Type::Path(TypePath { path, .. })) => {
+            path.segments.last().is_some_and(|seg| seg.ident == "Manual")
+        }
+        _ => false,
+    })
+}
+
+/// The router handler's ctx: the first route's transport ctx, whose actor
+/// [`fill_actor`] filled, in the manual reply mode `#[handler::manual]`
+/// takes. `NativeCtx<'_, Self>` becomes `NativeCtx<'_, Self, Manual>`; a
+/// ctx that names a mode has it replaced.
+fn manual_ctx_type(ty: &Type) -> Type {
+    let mut ty = ty.clone();
+    let manual: GenericArgument = parse_quote!(::aether_actor::Manual);
+    if let Type::Path(TypePath { path, .. }) = &mut ty
+        && let Some(seg) = path.segments.last_mut()
+        && let PathArguments::AngleBracketed(args) = &mut seg.arguments
+    {
+        match args.args.iter_mut().filter(|arg| matches!(arg, GenericArgument::Type(_))).nth(1) {
+            Some(mode) => *mode = manual,
+            None => args.args.push(manual),
+        }
+    }
+    ty
 }
 
 /// Strip a transport ctx type down to its base by dropping any non-lifetime
@@ -1152,10 +1086,10 @@ fn synthesized_wire_ctx_type(base: Type) -> Type {
 /// Inject the per-group `RegisterRouteSelf` registrations into `wire` —
 /// appended to an author-written `wire` body, or synthesized as a new
 /// `wire` when the impl has none. Receiver and ctx shapes are copied
-/// from the routed methods, so one rewrite serves both transports.
+/// from the first routed method, so one rewrite serves both transports.
 /// `shared` is the impl-level `#[http::router(shared)]` flag (ADR-0136),
 /// applied uniformly to every group registration this impl emits.
-fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], shared: bool) -> syn::Result<()> {
+fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], first: &Routed, shared: bool) -> syn::Result<()> {
     let existing = item.items.iter_mut().find_map(|impl_item| match impl_item {
         ImplItem::Fn(method) if method.sig.ident == "wire" => Some(method),
         _ => None,
@@ -1171,14 +1105,13 @@ fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], shared: bool) 
     }
 
     // Synthesize a fresh `wire`, copying the receiver + ctx shape from
-    // the first group (all routes on one impl share a transport). `wire`
+    // the first route (all routes on one impl share a transport). `wire`
     // is a `Lifecycle` method with the base (default reply-class) ctx, so
     // strip any reply-class type arg a deferred route carries
     // (`NativeCtx<'_, Self, Manual>` → `NativeCtx<'_>`). `#[actor]` then
     // types the base ctx by the router's actor.
-    let template = &groups[0];
-    let first_arg = &template.first_arg;
-    let ctx_c = synthesized_wire_ctx_type(base_ctx_type(&template.ctx_c));
+    let first_arg = &first.first_arg;
+    let ctx_c = synthesized_wire_ctx_type(base_ctx_type(&first.ctx_c));
     let ctx = format_ident!("__aether_ctx");
     let sends = groups.iter().map(|group| registration_send(group, &ctx, shared)).collect::<Vec<_>>();
     let wire: ImplItemFn = parse_quote! {
@@ -1205,65 +1138,12 @@ fn wire_ctx_ident(wire: &ImplItemFn) -> syn::Result<Ident> {
     Ok(ident.ident.clone())
 }
 
-/// Peel invisible `Expr::Group` wrappers a `macro_rules` `:literal` /
-/// `:expr` metavariable carries when it reaches a proc macro.
-fn peel_group(expr: &Expr) -> &Expr {
-    let mut current = expr;
-    while let Expr::Group(group) = current {
-        current = &group.expr;
-    }
-    current
-}
-
-/// Convert a `snake_case` identifier to `CamelCase` for minting a
-/// struct name (`on_users` → `OnUsers`).
-fn to_camel(snake: &str) -> String {
-    let mut camel = String::with_capacity(snake.len());
-    let mut upper_next = true;
-    for ch in snake.chars() {
-        if ch == '_' {
-            upper_next = true;
-        } else if upper_next {
-            camel.extend(ch.to_uppercase());
-            upper_next = false;
-        } else {
-            camel.push(ch);
-        }
-    }
-    camel
-}
-
-// The proc-macro logic here (kind minting, route grouping, segment
-// matching, extraction ordering, wire synthesis) is exercised end-to-end
+// The proc-macro logic here (route grouping, group selection, segment
+// matching, extraction ordering, wire synthesis) is exercised end to end
 // through the http server's native route fixtures and the
-// `RoutedHttpHandler` wasm fixture — a routed dispatch decoding a request
-// under the minted kind, nested templates sharing a prefix, a path-param
-// parse failure early-returning its 400, and registration reaching the
-// cap over the wire — rather than by unit tests over token output here,
-// which would only restate the `quote!` blocks. The pure string helpers
-// carry the tripwire tests below.
-#[cfg(test)]
-mod tests {
-    use super::{slug_of, to_camel};
-
-    // Tripwire: minted struct names are built from this snake→camel
-    // fold; a regression that mangled multi-segment names would collide
-    // sibling kinds silently.
-    #[test]
-    fn camel_folds_snake_segments() {
-        assert_eq!(to_camel("on_users"), "OnUsers");
-        assert_eq!(to_camel("list"), "List");
-        assert_eq!(to_camel("get_api_v2"), "GetApiV2");
-    }
-
-    // Tripwire: the group kind name / glue name derive from this slug of
-    // the static head; a regression that let a non-alphanumeric or an
-    // empty head through would mint an invalid identifier or collide the
-    // catch-all with another group.
-    #[test]
-    fn slug_sanitizes_static_head() {
-        assert_eq!(slug_of("/drafts"), "drafts");
-        assert_eq!(slug_of("/api/v2"), "api_v2");
-        assert_eq!(slug_of("/"), "root");
-    }
-}
+// `RoutedHttpHandler` wasm fixture — a routed dispatch decoding the request,
+// nested templates sharing a prefix, nested claims picking their group, a
+// synchronous and a deferred route sharing a claim, a path-param parse
+// failure early-returning its 400, and registration reaching the cap over
+// the wire — rather than by unit tests over token output here, which would
+// only restate the `quote!` blocks.

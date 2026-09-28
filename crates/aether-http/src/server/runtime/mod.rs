@@ -26,7 +26,7 @@
 // `init`'s signature, `HttpServerCapability` is the impl's `Self` type, and
 // `HttpServerHandle` is the boot artifact `init` publishes.
 use super::{HttpDispatchShard, HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle};
-use aether_actor::{ErasedActorRef, ReplyMode, Single, runtime};
+use aether_actor::{ErasedActorRef, ProtocolRef, ReplyMode, Single, runtime};
 
 pub use std::collections::{HashMap, HashSet, VecDeque};
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -35,7 +35,7 @@ pub use std::sync::{Arc, RwLock, mpsc};
 pub use std::thread;
 pub use std::time::Duration;
 
-pub use aether_data::{Kind, KindId};
+pub use aether_data::{Encoded, Kind};
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
     ActorProbe, NativeActor, NativeCtx, NativeInitCtx, SelfWake, SpawnOutcome, TaskDone,
@@ -50,7 +50,9 @@ pub use crate::kinds::{
     HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse,
     HttpStreamCredit, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
-use crate::kinds::{RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf};
+use crate::kinds::{
+    HttpRouter, RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf,
+};
 use aether_kinds::MonitorNotice;
 pub use aether_kinds::trace::Settled;
 // `state.rs` reaches `MonitorHandle` through the module-root glob like the
@@ -300,20 +302,18 @@ impl NativeActor for HttpServerCapability {
 
     /// Claim a route for an explicitly named handler (ADR-0130).
     ///
-    /// The handler arrives as a `ProtocolPath<HttpRoute>`, so the contextual
-    /// decode already proved that the live route at the path answers
-    /// `aether.http.server.request` with `aether.http.server.response`
-    /// (ADR-0231 §3); `resolve` proves it still stands there, and the route
-    /// holds the erased twin of that proof — the identity the table, the
-    /// monitors, and a departure are keyed by, and what the reader's
-    /// pre-encoded dispatch sends through.
+    /// The handler arrives as a `ProtocolPath<HttpRouter>`, so the contextual
+    /// decode already proved that the live route at the path takes
+    /// `aether.http.server.request` in a manual handler (ADR-0231 §3);
+    /// `resolve` proves it still stands there, and the route holds that
+    /// proof. Its erased twin is the identity the table, the monitors, and a
+    /// departure are keyed by.
     ///
     /// # Agent
     /// `RegisterRoute { prefix, method, handler, shared }`. The external
     /// form — an MCP session or test names the handler by its canonical
-    /// path, and its requests dispatch as `aether.http.server.request`. An
-    /// in-process actor registering itself sends `register_route_self`
-    /// instead, which is also the form for a handler that answers by hand.
+    /// path. An in-process actor registering itself sends
+    /// `register_route_self` instead.
     #[handler::single]
     fn on_register_route(
         state: &mut Self::State,
@@ -324,18 +324,12 @@ impl NativeActor for HttpServerCapability {
             return disabled_route_result();
         }
         let handler = match ctx.resolve(&payload.handler) {
-            Ok(handler) => handler.erase(),
+            Ok(handler) => handler,
             Err(error) => return RegisterRouteResult::Err { error: error.to_string() },
         };
-        let result = state.register_route(
-            &payload.prefix,
-            payload.method,
-            <HttpServerRequest as Kind>::ID,
-            handler,
-            payload.shared,
-        );
+        let result = state.register_route(&payload.prefix, payload.method, handler, payload.shared);
         if matches!(result, RegisterRouteResult::Ok) {
-            state.watch(ctx, handler);
+            state.watch(ctx, handler.erase());
         }
         result
     }
@@ -343,10 +337,12 @@ impl NativeActor for HttpServerCapability {
     /// Claim a route for the *sending* actor (ADR-0130), resolved from
     /// the inbound envelope's host-stamped `Source` — forgery-proof
     /// and gated to in-process actors by construction, mirroring
-    /// `aether.window.subscribe_self`.
+    /// `aether.window.subscribe_self`. The sender is cast to `HttpRouter`
+    /// once, here, so the route holds the same proof an explicit
+    /// registration holds; a sender whose rows do not cover it is refused.
     ///
     /// # Agent
-    /// `RegisterRouteSelf { prefix, method, kind }`, typically sent
+    /// `RegisterRouteSelf { prefix, method, shared }`, typically sent
     /// from a component's `wire` hook. An external session or remote
     /// engine has no local mailbox and gets an `Err` reply — use
     /// `register_route` with an explicit handler path instead.
@@ -359,22 +355,28 @@ impl NativeActor for HttpServerCapability {
         if !state.config.enabled {
             return disabled_route_result();
         }
-        match ctx.sender() {
-            Some(sender) => {
-                let result =
-                    state.register_route(&payload.prefix, payload.method, payload.kind, sender, payload.shared);
-                if matches!(result, RegisterRouteResult::Ok) {
-                    state.watch(ctx, sender);
-                }
-                result
-            }
-            None => RegisterRouteResult::Err {
+        let Some(sender) = ctx.sender() else {
+            return RegisterRouteResult::Err {
                 error: "aether.http.server.register_route_self requires a local sender; an \
                         external session or remote engine must use \
                         aether.http.server.register_route with an explicit handler path"
                     .to_string(),
-            },
+            };
+        };
+        let Some(handler) = ctx.cast::<HttpRouter>(sender) else {
+            return RegisterRouteResult::Err {
+                error: format!(
+                    "{} does not cover HttpRouter: a route holder takes aether.http.server.request \
+                     in a #[handler::manual] handler",
+                    ctx.actor_path(sender),
+                ),
+            };
+        };
+        let result = state.register_route(&payload.prefix, payload.method, handler, payload.shared);
+        if matches!(result, RegisterRouteResult::Ok) {
+            state.watch(ctx, sender);
         }
+        result
     }
 
     /// Release an explicitly named handler's route (ADR-0130). Idempotent.

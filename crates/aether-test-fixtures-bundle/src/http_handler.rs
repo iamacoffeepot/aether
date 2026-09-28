@@ -24,9 +24,9 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use aether_actor::{ActorInitError, DependsOn, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, DependsOn, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_component::ComponentHostCapability;
-use aether_data::{ErasedActorPath, Kind};
+use aether_data::ErasedActorPath;
 use aether_http as http;
 use aether_http::HttpServerCapability;
 use aether_http::kinds::{
@@ -42,12 +42,7 @@ use aether_kinds::DropComponent;
 /// catch-all fixture in this module; the routed fixtures register their
 /// specific prefixes instead.
 fn bind_catch_all<A: DependsOn<HttpServerCapability>>(ctx: &mut WasmCtx<'_, A>) {
-    ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
-        prefix: "/".to_string(),
-        method: None,
-        kind: <HttpServerRequest as Kind>::ID,
-        shared: false,
-    });
+    ctx.send::<HttpServerCapability>(&RegisterRouteSelf { prefix: "/".to_string(), method: None, shared: false });
 }
 
 pub struct HttpHandler;
@@ -71,13 +66,13 @@ impl WasmActor for HttpHandler {
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches it on
     /// every inbound request; this actor binds the `/` catch-all in `wire`.
-    #[handler::single]
-    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
-        HttpServerResponse {
+    #[handler::manual]
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, req: HttpServerRequest) {
+        ctx.reply(&HttpServerResponse {
             status: 200,
             headers: Vec::new(),
             body: format!("hello from aether: {}", req.path).into_bytes(),
-        }
+        });
     }
 }
 
@@ -196,9 +191,9 @@ impl WasmActor for StreamingHttpHandler {
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches it on
     /// every inbound request; this actor binds the `/` catch-all in `wire`.
-    #[handler::single]
-    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
-        HttpResponseStreamOpen { status: 200, headers: Vec::new() }
+    #[handler::manual]
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _req: HttpServerRequest) {
+        ctx.reply(&HttpResponseStreamOpen { status: 200, headers: Vec::new() });
     }
 
     /// Spend the granted credit: emit up to `credit.credit` more chunks, then
@@ -255,9 +250,9 @@ impl WasmActor for WebSocketHandler {
     /// Not sent manually — the `aether.http.server` cap dispatches an
     /// `HttpServerRequest` for a websocket upgrade; replying `WebSocketAccept`
     /// completes the handshake, `HttpServerResponse` declines it.
-    #[handler::single]
-    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> WebSocketAccept {
-        WebSocketAccept { subprotocol: None, headers: Vec::new() }
+    #[handler::manual]
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _req: HttpServerRequest) {
+        ctx.reply(&WebSocketAccept { subprotocol: None, headers: Vec::new() });
     }
 
     /// Echo one inbound message back to the peer by its `stream_id`
@@ -330,8 +325,9 @@ impl WasmActor for WebSocketHandler {
 
 /// Routed sibling of [`HttpHandler`] for the ADR-0130 drop-purge e2e
 /// test, authored through the typed route surface (`#[http::router]` /
-/// `#[http::route]`, ADR-0131): the macro mints each route's kind and
-/// injects the `register_route_self` registration, so this fixture is
+/// `#[http::route]`, ADR-0131): the macro emits the router's one manual
+/// request handler and injects the `register_route_self` registration, so
+/// this fixture is
 /// the wasm32 + `Lifecycle<S>` universality proof for the macro layer.
 /// It replies a fixed tag for `/routed`, and `/routed/drop` is a second
 /// exact route (#3697 — routes match their own path, no prefix-swallow)
@@ -418,7 +414,6 @@ impl WasmActor for RoutedStreamingHttpHandler {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/routed-stream".to_string(),
             method: None,
-            kind: <HttpServerRequest as Kind>::ID,
             shared: false,
         });
     }
@@ -430,9 +425,9 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// Not sent manually — the `aether.http.server` cap dispatches it on a
     /// request matching the `/routed-stream` route this actor claimed in
     /// `wire`.
-    #[handler::single]
-    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
-        HttpResponseStreamOpen { status: 200, headers: Vec::new() }
+    #[handler::manual]
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _req: HttpServerRequest) {
+        ctx.reply(&HttpResponseStreamOpen { status: 200, headers: Vec::new() });
     }
 
     /// Spend the granted credit exactly as [`StreamingHttpHandler`] does. On

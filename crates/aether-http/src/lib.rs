@@ -45,16 +45,17 @@ pub use kinds::*;
 // to — consumers write `#[http::router]` / `#[http::route]` next to
 // `http::FromRequest` / `http::Ctx` / `http::Route`.
 pub use aether_http_derive::{reply, route, router};
-pub use typed::{Ctx, FromPathSegment, FromRequest, Outcome, Path, Route};
+pub use typed::{Ctx, FromPathSegment, FromRequest, Outcome, Path, Route, answer_now, route_matches, route_rank};
 
-// Deferred-route glue helpers the `#[http::route]` / `#[http::reply]` macros
-// emit calls to (ADR-0154): `answer_deferred` (answer a held request from its
-// downstream reply, recovering the requester via `take_context`) and
-// `answer_now` (the synchronous `Outcome::Reply` arm). Re-exported here so the
-// macro emits one `::aether_http::…` path a consumer resolves
-// through its existing dependency. Runtime-only — `reply_to` is native.
+// Deferred-route glue helper the `#[http::reply]` macro emits calls to
+// (ADR-0154): `answer_deferred` answers a held request from its downstream
+// reply, recovering the requester via `take_context`. Re-exported here so the
+// macro emits one `::aether_http::…` path a consumer resolves through its
+// existing dependency. Runtime-only — `reply_to` is native. The synchronous
+// `answer_now` every router arm replies through is wasm-safe and lives in
+// `typed`.
 #[cfg(feature = "runtime")]
-pub use defer::{DeferredRequest, answer_deferred, answer_now};
+pub use defer::{DeferredRequest, answer_deferred};
 
 // ADR-0133 reply-based data-phase stream handles. Wasm-safe like `typed`,
 // so a `default-features = false` guest that streams gets them without the

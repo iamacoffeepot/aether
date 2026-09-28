@@ -39,6 +39,7 @@ mod blob;
 pub mod bytes;
 pub mod canonical;
 pub mod contract;
+mod encoded;
 pub mod hash;
 pub mod ids;
 pub mod mail;
@@ -57,6 +58,7 @@ pub mod wire_id;
 pub use blob::{__mint_shared_blob, __shared_backing};
 pub use blob::{Blob, BlobBacking, BlobHash, BlobReader, MAX_READ_BYTES};
 pub use contract::first_contract_break;
+pub use encoded::Encoded;
 pub use hash::{
     FIELD_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError,
     THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN, VARIANT_DOMAIN, fnv1a_64_bytes, fnv1a_64_fold, fnv1a_64_prefixed,

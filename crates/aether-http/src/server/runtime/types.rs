@@ -123,13 +123,13 @@ pub enum ReaderControl {
 
 /// A complete, size-bounded buffered request the reader resolved and
 /// encoded (ADR-0135 §2): `payload` is the ready-to-send
-/// `HttpServerRequest` (or routed-kind) wire image; the shard's dispatch
-/// is send + settlement-subscribe + in-flight insert.
+/// `HttpServerRequest`, typed by the kind it encodes, and `handler` the
+/// route holder's `HttpRouter` proof; the shard's dispatch is send +
+/// settlement-subscribe + in-flight insert.
 pub struct PreparedRequest {
     pub conn_id: ConnId,
-    pub payload: Vec<u8>,
-    pub handler: ErasedActorRef,
-    pub kind: KindId,
+    pub payload: Encoded<HttpServerRequest>,
+    pub handler: ProtocolRef<HttpRouter>,
     pub method: HttpMethod,
     pub keep_alive: bool,
     /// `Some` on a websocket upgrade handshake (ADR-0129) the
