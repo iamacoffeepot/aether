@@ -8,7 +8,7 @@ use std::sync::{Arc, Weak};
 use super::NativeBinding;
 use crate::mail::{KindId, Mail, Source};
 use crate::runtime::trace::SettlementHold;
-use aether_data::Kind;
+use aether_data::{Kind, RequestId, wire};
 
 /// ADR-0093 hold-until-resolve dispatch: the `&self`-interior-mutability
 /// bridge between [`super::ctx::NativeCtx`](crate::actor::native::ctx::NativeCtx)'s dispatch primitive and the
@@ -208,6 +208,68 @@ impl NativeBinding {
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
             .dispatch_settle_held_for_actor_close();
         drop(holds);
+    }
+
+    /// Park the held entry `id` in the request context stored under
+    /// `request` (ADR-0243 §4). Takes the ledger lock for this one
+    /// operation; its caller holds `request_contexts`, the one nesting the
+    /// lock order allows.
+    ///
+    /// # Errors
+    /// [`wire::Error::HeldUnclaimed`] when `id` names no held entry.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn dispatch_park(
+        &self,
+        id: super::offload::blocking::DispatchId,
+        request: RequestId,
+        reply: KindId,
+        context_name: &'static str,
+    ) -> Result<(), wire::Error> {
+        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_park(
+            id,
+            request,
+            reply,
+            context_name,
+        )
+    }
+
+    /// Claim the parked entry `id` back to held for a decode of the context
+    /// stored under `request`. Takes the ledger lock for this one operation.
+    ///
+    /// # Errors
+    /// [`wire::Error::HeldUnclaimed`] when `id` is not parked under both
+    /// `request` and `reply`.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn dispatch_unpark(
+        &self,
+        id: super::offload::blocking::DispatchId,
+        request: RequestId,
+        reply: KindId,
+    ) -> Result<(), wire::Error> {
+        self.inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_unpark(id, request, reply)
+    }
+
+    /// The kind name of the context stored under `request` while it still
+    /// carries a parked `Held` (ADR-0243 §7). Takes the ledger lock for this
+    /// one read.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn parked_context(&self, request: RequestId) -> Option<&'static str> {
+        self.inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_parked_context(request)
     }
 
     /// The named ledger entry's state, for tests.

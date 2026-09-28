@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicU32;
 use aether_actor::{Addressable, HandlesKind, Manual};
 use aether_data::{Kind, KindId};
 
-use crate::actor::native::{Dispatch, NativeActor, NativeCtx, NativeInitCtx};
+use crate::actor::native::{Dispatch, Held, NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::error::BootError;
 
 /// Hand-rolled `Addressable` impl referenced only by the `_assert_actor_send`
@@ -97,4 +97,18 @@ impl HandlesKind<CastOnly> for EmbeddedPeer {}
 #[aether_data::kind(name = "test.native_request_context", partial_eq)]
 pub(super) struct NativeRequestContext {
     pub(super) value: u32,
+}
+
+/// The reply a [`HeldContext`]'s debt answers.
+#[aether_data::kind(name = "test.native_held_reply", copy, partial_eq)]
+pub(super) struct TestReply {
+    pub(super) value: u32,
+}
+
+/// A request context carrying a held reply (ADR-0243 §4), which parks in the
+/// ledger when stored and comes back live when taken.
+#[aether_data::kind(name = "test.native_held_context")]
+pub(super) struct HeldContext {
+    pub(super) held: Held<TestReply>,
+    pub(super) tag: u32,
 }

@@ -49,7 +49,7 @@ use std::thread;
 
 use aether_actor::{ActorRef, ErasedActorRef, HandlesKind, ReplyMode, Single};
 use aether_data::name_inventory::EngineOnlyKind;
-use aether_data::{ActorMail, Kind, KindId, MailId};
+use aether_data::{ActorMail, Kind, KindId, MailId, RequestId, wire};
 
 use crate::mail::Source;
 use crate::runtime::trace::SettlementHold;
@@ -242,6 +242,18 @@ enum EntryState {
     /// Armed by [`NativeCtx::hold`] with no worker: the `Held` ticket that
     /// names this entry answers it, from any handler on the actor.
     Held,
+    /// A held entry whose ticket sits in the encoded bytes of a stored
+    /// request context (ADR-0243 §4). Only a decode of that context under
+    /// the same `request` and `reply` claims it back to [`Self::Held`].
+    Parked {
+        /// The request whose context carries the ticket.
+        request: RequestId,
+        /// The reply kind the ticket answers.
+        reply: KindId,
+        /// The stored context's kind name, for the untaken-reply failure
+        /// (ADR-0243 §7).
+        context_name: &'static str,
+    },
 }
 
 /// Per-actor in-flight ledger for hold-until-resolve dispatch (ADR-0093
@@ -260,11 +272,14 @@ enum EntryState {
 pub(crate) struct InflightTable {
     next_id: u64,
     entries: HashMap<DispatchId, InflightEntry>,
+    /// The parked entries of each request whose stored context carries
+    /// tickets, so a reply's dispatch tail finds an untaken one in one probe.
+    parked: HashMap<RequestId, Vec<DispatchId>>,
 }
 
 impl InflightTable {
     pub(crate) fn new() -> Self {
-        Self { next_id: 0, entries: HashMap::new() }
+        Self { next_id: 0, entries: HashMap::new(), parked: HashMap::new() }
     }
 
     /// Mint the next monotonic [`DispatchId`]. Called on the actor
@@ -657,8 +672,8 @@ impl InflightTable {
     /// obligation the entry's `Held` ticket named.
     ///
     /// # Panics
-    /// Panics when `id` names no held entry: an unknown id, or an entry a
-    /// worker already answers.
+    /// Panics when `id` names no held entry: an unknown id, an entry a
+    /// worker already answers, or one parked in a stored context.
     fn attach_worker(&mut self, id: DispatchId, context: Box<dyn Any + Send>) {
         self.entries
             .get_mut(&id)
@@ -667,11 +682,12 @@ impl InflightTable {
             .state = EntryState::Worker { context, output: None };
     }
 
-    /// Remove every entry no worker answers and hand back their holds, for
-    /// the actor-close tail to release with no reply (ADR-0243 §1). Worker
-    /// entries stay: their workers' fills and wakes still find them, and the
-    /// binding's drop settles them as before.
+    /// Remove every entry no worker answers, parked ones included, and hand
+    /// back their holds, for the actor-close tail to release with no reply
+    /// (ADR-0243 §1). Worker entries stay: their workers' fills and wakes
+    /// still find them, and the binding's drop settles them as before.
     fn settle_held_for_actor_close(&mut self) -> Vec<Option<SettlementHold>> {
+        self.parked.clear();
         self.entries
             .extract_if(|_, entry| !matches!(entry.state, EntryState::Worker { .. }))
             .map(|(_, entry)| entry.hold)
@@ -685,6 +701,60 @@ impl InflightTable {
         self.entries.get(&id).map(|entry| match entry.state {
             EntryState::Worker { .. } => "worker",
             EntryState::Held => "held",
+            EntryState::Parked { .. } => "parked",
+        })
+    }
+
+    /// Park the held entry `id` in the context stored under `request`
+    /// (ADR-0243 §4): it answers `reply` and waits for that context's take.
+    ///
+    /// # Errors
+    /// [`wire::Error::HeldUnclaimed`] when `id` names no held entry.
+    fn park(
+        &mut self,
+        id: DispatchId,
+        request: RequestId,
+        reply: KindId,
+        context_name: &'static str,
+    ) -> Result<(), wire::Error> {
+        let entry = self
+            .entries
+            .get_mut(&id)
+            .filter(|entry| matches!(entry.state, EntryState::Held))
+            .ok_or(wire::Error::HeldUnclaimed { ticket: id.0, reply })?;
+        entry.state = EntryState::Parked { request, reply, context_name };
+        self.parked.entry(request).or_default().push(id);
+        Ok(())
+    }
+
+    /// Claim the parked entry `id` back to held for a decode of the context
+    /// stored under `request`.
+    ///
+    /// # Errors
+    /// [`wire::Error::HeldUnclaimed`] when `id` is not parked under both
+    /// `request` and `reply`.
+    fn unpark(&mut self, id: DispatchId, request: RequestId, reply: KindId) -> Result<(), wire::Error> {
+        let entry = self
+            .entries
+            .get_mut(&id)
+            .filter(|entry| matches!(entry.state, EntryState::Parked { request: r, reply: k, .. } if r == request && k == reply))
+            .ok_or(wire::Error::HeldUnclaimed { ticket: id.0, reply })?;
+        entry.state = EntryState::Held;
+        if let Some(ids) = self.parked.get_mut(&request) {
+            ids.retain(|parked| *parked != id);
+            if ids.is_empty() {
+                self.parked.remove(&request);
+            }
+        }
+        Ok(())
+    }
+
+    /// The kind name of the context stored under `request` while it still
+    /// carries a parked ticket.
+    fn parked_context(&self, request: RequestId) -> Option<&'static str> {
+        self.parked.get(&request)?.iter().find_map(|id| match self.entries.get(id)?.state {
+            EntryState::Parked { context_name, .. } => Some(context_name),
+            _ => None,
         })
     }
 
@@ -833,6 +903,29 @@ impl InflightTable {
 
     pub(crate) fn dispatch_settle_held_for_actor_close(&mut self) -> Vec<Option<SettlementHold>> {
         self.settle_held_for_actor_close()
+    }
+
+    pub(crate) fn dispatch_park(
+        &mut self,
+        id: DispatchId,
+        request: RequestId,
+        reply: KindId,
+        context_name: &'static str,
+    ) -> Result<(), wire::Error> {
+        self.park(id, request, reply, context_name)
+    }
+
+    pub(crate) fn dispatch_unpark(
+        &mut self,
+        id: DispatchId,
+        request: RequestId,
+        reply: KindId,
+    ) -> Result<(), wire::Error> {
+        self.unpark(id, request, reply)
+    }
+
+    pub(crate) fn dispatch_parked_context(&self, request: RequestId) -> Option<&'static str> {
+        self.parked_context(request)
     }
 
     #[cfg(test)]

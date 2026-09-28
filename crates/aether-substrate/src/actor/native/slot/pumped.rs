@@ -201,6 +201,7 @@ mod tests {
     use super::*;
     use crate::testing::boot_authority;
 
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
@@ -260,6 +261,12 @@ mod tests {
     #[aether_data::kind(name = "test.pumped.hold", copy, partial_eq)]
     struct HoldReq {
         seq: u32,
+    }
+
+    /// A request context whose debt the reply handler never takes.
+    #[aether_data::kind(name = "test.pumped.stash")]
+    struct Stash {
+        held: Held<Pong>,
     }
 
     /// A pure addressing identity for the peer `on_emit` sends to (test 6).
@@ -617,6 +624,38 @@ mod tests {
 
         slot.shutdown();
         assert_eq!(counter.held_open(root), 0, "shutdown released the parked hold without a reply");
+    }
+
+    /// Catches an untaken-reply check that runs before the handler, reads
+    /// the wrong request id, or is skipped when no typed arm takes the
+    /// context: a reply whose stored context still holds a parked `Held`
+    /// fails fast once its handler returns, naming the context kind.
+    #[test]
+    fn untaken_held_context_on_reply_fails_fast_naming_the_kind() {
+        let fx = fixtures();
+        let self_id = MailboxId(0x_0DED_0013);
+        let (_peer_id, _peer_rx) = caller_inbox(&fx, Peer::NAMESPACE);
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
+
+        let request = slot
+            .host_turn(|_state, ctx| {
+                let (_pending, held) = ctx.hold::<Pong>();
+                ctx.send_with_context::<Peer>(&Poke { note: 1 }, Stash { held })
+            })
+            .expect("the actor is live");
+
+        let reply_to = Source::with_correlation(SourceAddr::None, request.correlation_id);
+        let bytes = Defer { seq: 1 }.encode_into_bytes();
+        fx.mailer.push(Mail::new(self_id, Defer::ID, bytes, 1).with_reply_to(reply_to).with_lineage(None, None, None));
+
+        let payload =
+            catch_unwind(AssertUnwindSafe(|| slot.drain_available())).expect_err("the untaken context fails fast");
+        let message =
+            payload.downcast_ref::<&str>().copied().or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert!(
+            message.is_some_and(|message| message.contains(Stash::NAME)),
+            "the panic names the stored context kind, got {message:?}",
+        );
     }
 
     /// ADR-0160 §1: a handler that retains its inbound (`take_inbound`) and

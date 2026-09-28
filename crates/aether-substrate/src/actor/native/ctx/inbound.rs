@@ -186,6 +186,11 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// A wrong-kind take leaves the context stored, so a handler that serves
     /// several context kinds tries each type in turn. A decode failure
     /// consumes it.
+    ///
+    /// A context holding a `Held` is claimed live (ADR-0243 §4): the taken
+    /// `Held` answers the caller it was armed for. A reply whose handler
+    /// leaves such a context untaken fails fast once the handler returns,
+    /// naming the context kind (ADR-0243 §7).
     pub fn take_context<C: Kind>(&mut self) -> Option<C> {
         let request = self.in_reply_to()?;
         self.binding.take_request_context(request)

@@ -1,9 +1,13 @@
 //! The reply path native actors take (ADR-0080 §5) and the typed
 //! request-context table replies are matched against (ADR-0139).
 
+use std::sync::Arc;
+
 use super::NativeBinding;
+use super::offload::blocking::DispatchId;
 use crate::mail::attachments::EncodedMail;
 use crate::mail::{MailId, Source};
+use aether_data::wire::{self, HeldClaim, HeldLedger};
 use aether_data::{ActorMail, Kind, KindId, RequestId};
 
 impl NativeBinding {
@@ -63,13 +67,32 @@ impl NativeBinding {
     /// with this actor's canonical name when the table passes a new
     /// high-water mark (ADR-0139 §4).
     ///
+    /// The context moves in (ADR-0243 §4): each `Held` it carries parks in
+    /// this actor's in-flight ledger as it encodes, and the value then drops
+    /// with its tickets owned by the stored bytes. A no-correlation request
+    /// stores nothing, so the context drops here as an ordinary value, outside
+    /// the table lock, and a live `Held` inside fails fast rather than parking
+    /// with no context to carry it.
+    ///
+    /// Lock order: `request_contexts` → `inflight`. Parking takes the ledger
+    /// lock while the table lock is held; nothing takes the table lock while
+    /// holding the ledger lock.
+    ///
     /// # Panics
-    /// Panics if the request-context mutex is poisoned.
-    pub fn store_request_context<C: Kind>(&self, request: RequestId, context: &C) {
+    /// Panics if the request-context mutex is poisoned, and when the context
+    /// fails to encode.
+    pub fn store_request_context<C: Kind>(self: &Arc<Self>, request: RequestId, context: C) {
+        if request.0 == Source::NO_CORRELATION {
+            tracing::warn!(kind = C::NAME, "request context not stored: request has no correlation id");
+            drop(context);
+            return;
+        }
+
+        let mut ledger = NativeParkLedger { binding: self, request, context_name: C::NAME };
         let high_water = {
             let mut table =
                 self.request_contexts.lock().expect("request context table poisoned; fail-fast per ADR-0063");
-            table.insert(request, context);
+            table.insert_with(request, context, &mut ledger);
             table.high_water()
         };
         if let Some(live) = high_water {
@@ -85,12 +108,44 @@ impl NativeBinding {
         }
     }
 
-    /// Remove and decode request context for an inbound reply.
+    /// Remove and decode request context for an inbound reply. Each `Held`
+    /// the context carries is claimed back from this actor's in-flight
+    /// ledger as it decodes, so it comes back live. A wrong-kind take leaves
+    /// the entry stored and claims nothing.
+    ///
+    /// Lock order: `request_contexts` → `inflight`, as for
+    /// [`Self::store_request_context`].
     ///
     /// # Panics
     /// Panics if the request-context mutex is poisoned.
-    pub fn take_request_context<C: Kind>(&self, request: RequestId) -> Option<C> {
-        self.request_contexts.lock().expect("request context table poisoned; fail-fast per ADR-0063").take(request)
+    pub fn take_request_context<C: Kind>(self: &Arc<Self>, request: RequestId) -> Option<C> {
+        let mut ledger = NativeParkLedger { binding: self, request, context_name: C::NAME };
+        self.request_contexts
+            .lock()
+            .expect("request context table poisoned; fail-fast per ADR-0063")
+            .take_with(request, &mut ledger)
+    }
+}
+
+/// This actor's in-flight ledger as the [`HeldLedger`] one request context's
+/// encode or decode is granted (ADR-0243 §4). Built per store or take and
+/// holding nothing between calls: a park moves the ticket's entry to parked
+/// under `request`, and a claim moves it back to held and hands the decode
+/// the weak ledger link a live `Held` keeps.
+struct NativeParkLedger<'b> {
+    binding: &'b Arc<NativeBinding>,
+    request: RequestId,
+    context_name: &'static str,
+}
+
+impl HeldLedger for NativeParkLedger<'_> {
+    fn park(&mut self, ticket: u64, reply: KindId) -> Result<(), wire::Error> {
+        self.binding.dispatch_park(DispatchId(ticket), self.request, reply, self.context_name)
+    }
+
+    fn claim(&mut self, ticket: u64, reply: KindId) -> Result<HeldClaim, wire::Error> {
+        self.binding.dispatch_unpark(DispatchId(ticket), self.request, reply)?;
+        Ok(HeldClaim(Box::new(Arc::downgrade(self.binding))))
     }
 }
 
@@ -102,7 +157,6 @@ mod tests {
     use crate::chassis::inbox::ReplyLineage;
     use crate::mail::{MailboxId, SourceAddr};
     use crate::testing::{bare_substrate, boot_authority};
-    use std::sync::Arc;
     use std::sync::mpsc;
 
     /// #1695 / ADR-0080 §5/§6: a synchronous `ctx.reply` from a handler
