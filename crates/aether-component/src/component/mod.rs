@@ -64,9 +64,9 @@ pub use runtime::ComponentHostParams;
 #[cfg(feature = "runtime")]
 pub(crate) use runtime::replacement_refusal;
 
-// `LoadResult` is named by the runtime half's own code, not by the emitted
-// markers, so it keeps the runtime gate the rest of that half rides.
-#[cfg(feature = "runtime")]
+// `LoadResult` is named by the emitted reply rows (the load handlers return
+// `Pending<LoadResult>`) as well as by the runtime half's own code, so it is
+// imported in every build.
 use aether_kinds::LoadResult;
 
 // The `#[actor]` attribute sits on the capability struct (the struct-hosted

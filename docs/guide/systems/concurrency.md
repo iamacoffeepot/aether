@@ -143,7 +143,9 @@ held.answer(ctx, &WatchHeadResult { head });               // reply, then drop t
 in-flight ledger, the same table `dispatch_blocking` fills, and returns the
 `Pending<R>` receipt with a move-only `Held<R>` ticket. `answer` replies to the
 captured caller with its correlation, whichever turn runs it, and only an `R`
-compiles. A second `hold` in one dispatch panics. Dropping a `Held` unanswered
+compiles. A `Held` also stages onto a successor that takes the owed reply
+(`continue_from`, `stage_registry_batch_from`), whose completion then answers
+the same caller. A second `hold` in one dispatch panics. Dropping a `Held` unanswered
 releases the hold and panics; an actor that closes with tickets still parked
 settles them silently.
 

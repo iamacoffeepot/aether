@@ -8,7 +8,7 @@ use aether_data::{BlobHash, ErasedActorPath, Kind, Source};
 use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult};
 
 use aether_substrate::actor::native::{
-    DeferredReply, IntoDeferredReply, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
+    DeferredReply, Held, IntoDeferredReply, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
     spawn::Subname,
 };
 use aether_substrate::actor::wasm::kind_manifest::Dependency;
@@ -161,11 +161,21 @@ pub(super) enum SpawnContext {
 }
 
 impl ComponentHostCapabilityState {
-    pub fn begin_load<A>(&mut self, ctx: &mut NativeCtx<'_, A, Manual>, payload: LoadComponent) {
-        self.begin_load_at(ctx, payload, LoadPlacement::ComponentHost);
+    pub fn begin_load<A, M: ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        held: Held<LoadResult>,
+        payload: LoadComponent,
+    ) {
+        self.begin_load_at(ctx, held, payload, LoadPlacement::ComponentHost);
     }
 
-    pub fn begin_load_under<A>(&mut self, ctx: &mut NativeCtx<'_, A, Manual>, payload: LoadComponentUnder) {
+    pub fn begin_load_under<A, M: ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        held: Held<LoadResult>,
+        payload: LoadComponentUnder,
+    ) {
         // ADR-0230 §1: the parent must be `Live`. A `Starting` parent resolves
         // as an address but does not prove, so a child is never staged beneath
         // an unborn parent; the proof carries the parent's own canonical path.
@@ -175,31 +185,40 @@ impl ComponentHostCapabilityState {
         let parent = match resolved {
             Ok(parent) => parent,
             Err(error) => {
-                ctx.reply(&LoadResult::Err {
-                    error: format!("component parent {:?} did not resolve: {error}", payload.parent),
-                });
+                held.answer(
+                    ctx,
+                    &LoadResult::Err {
+                        error: format!("component parent {:?} did not resolve: {error}", payload.parent),
+                    },
+                );
                 return;
             }
         };
-        self.begin_load_at(ctx, payload.load, LoadPlacement::Under { parent });
+        self.begin_load_at(ctx, held, payload.load, LoadPlacement::Under { parent });
     }
 
-    fn begin_load_at<A>(
+    fn begin_load_at<A, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, Manual>,
+        ctx: &mut NativeCtx<'_, A, M>,
+        held: Held<LoadResult>,
         payload: LoadComponent,
         placement: LoadPlacement,
     ) {
         let load = match self.prepare_load(ctx, payload, placement) {
             Ok(load) => load,
             Err(result) => {
-                ctx.reply(&result);
+                held.answer(ctx, &result);
                 return;
             }
         };
         // ADR-0241 §3/§4: publish the module before anything spawns. The
-        // owner runs admission and registers the module's kinds in one batch.
-        let _ = ctx.stage_registry_batch(RegistryBatch::publish_module(&load.module), ModulePublication::Load(load));
+        // owner runs admission and registers the module's kinds in one batch,
+        // and its completion takes over the held reply (ADR-0243 §1).
+        let _ = ctx.stage_registry_batch_from(
+            held,
+            RegistryBatch::publish_module(&load.module),
+            ModulePublication::Load(load),
+        );
     }
 
     #[allow(
@@ -623,7 +642,12 @@ impl ComponentHostCapabilityState {
         }
     }
 
-    pub fn begin_replace<A>(&mut self, ctx: &mut NativeCtx<'_, A>, payload: ReplaceComponent) {
+    pub fn begin_replace<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        held: Held<ReplaceResult>,
+        payload: ReplaceComponent,
+    ) {
         let source = ctx.reply_target();
         // ADR-0230: prove the target address at receipt. A dropped
         // trampoline keeps its `Live` route (vacate, not close), so a replace
@@ -633,7 +657,7 @@ impl ComponentHostCapabilityState {
             Ok(proven) => proven,
             Err(error) => {
                 let error = format!("no component to replace at {}: {error}", payload.target);
-                ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
+                held.answer(ctx, &ReplaceResult::Err { error });
                 return;
             }
         };
@@ -648,7 +672,7 @@ impl ComponentHostCapabilityState {
         let module = match self.modules.check_in(&ctx.blob_check_in(), &ctx.check_in(payload.wasm.into_boxed_slice())) {
             Ok(module) => module,
             Err(error) => {
-                ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
+                held.answer(ctx, &ReplaceResult::Err { error });
                 return;
             }
         };
@@ -657,7 +681,7 @@ impl ComponentHostCapabilityState {
         // The module-wide inline check runs here; the trampoline checks the
         // dependencies of the type the replacement will host.
         if let Some(error) = inline_dependency_refusal(ctx, module.manifest()) {
-            ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
+            held.answer(ctx, &ReplaceResult::Err { error });
             return;
         }
         // ADR-0241 §5: the replacement's module boot is host-placed, so a
@@ -665,13 +689,14 @@ impl ComponentHostCapabilityState {
         // anything is staged, rather than failing the boot after the swap.
         let manifest = module.manifest();
         if let Some(error) = manifest.boot().and_then(|boot_ns| root_refusal(manifest.lineage(), boot_ns)) {
-            ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
+            held.answer(ctx, &ReplaceResult::Err { error });
             return;
         }
         // ADR-0241 §4: a replace republishes its module, so admission runs
         // and the replacement's kinds register before the trampoline sees it.
         let batch = RegistryBatch::publish_module(&module);
-        let _ = ctx.stage_registry_batch(
+        let _ = ctx.stage_registry_batch_from(
+            held,
             batch,
             ModulePublication::Replace(ReplacePublication { source, actor, module, bytes }),
         );
