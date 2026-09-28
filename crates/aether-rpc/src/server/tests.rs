@@ -51,12 +51,13 @@ struct EngineRouteBarrierForTest;
 struct StopEngineRouteForTest;
 
 struct ManualEngineRouteConfig {
-    registrations: mpsc::Sender<crate::RegisterEngineRouteResult>,
+    registrations: mpsc::Sender<(EngineId, crate::RegisterEngineRouteResult)>,
     forwards: mpsc::Sender<()>,
 }
 
 struct ManualEngineRoute {
-    registrations: mpsc::Sender<crate::RegisterEngineRouteResult>,
+    registrations: mpsc::Sender<(EngineId, crate::RegisterEngineRouteResult)>,
+    registration_requests: VecDeque<EngineId>,
     forwards: mpsc::Sender<()>,
     pending: VecDeque<Source>,
 }
@@ -67,18 +68,24 @@ impl NativeActor for ManualEngineRoute {
     const NAMESPACE: &'static str = "aether.rpc.test.manual_engine_route";
 
     fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { registrations: config.registrations, forwards: config.forwards, pending: VecDeque::new() })
+        Ok(Self {
+            registrations: config.registrations,
+            registration_requests: VecDeque::new(),
+            forwards: config.forwards,
+            pending: VecDeque::new(),
+        })
     }
 
     #[handler::single]
-    #[allow(clippy::unused_self)]
     fn on_register(&mut self, ctx: &mut NativeCtx<'_>, mail: RegisterEngineRouteForTest) {
+        self.registration_requests.push_back(mail.engine_id);
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: mail.engine_id });
     }
 
     #[handler::single]
     fn on_registration_result(&mut self, _ctx: &mut NativeCtx<'_>, mail: crate::RegisterEngineRouteResult) {
-        self.registrations.send(mail).expect("registration result receiver stays live");
+        let engine_id = self.registration_requests.pop_front().expect("registration request precedes its result");
+        self.registrations.send((engine_id, mail)).expect("registration result receiver stays live");
     }
 
     #[handler::manual]
@@ -95,55 +102,71 @@ impl NativeActor for ManualEngineRoute {
     }
 
     #[handler::single]
-    #[allow(clippy::unused_self)]
-    fn on_barrier(&mut self, _ctx: &mut NativeCtx<'_>, _mail: EngineRouteBarrierForTest) {}
+    fn on_barrier(&mut self, _ctx: &mut NativeCtx<'_>, _mail: EngineRouteBarrierForTest) {
+        assert_eq!(self.pending.len(), 1, "the post-forward barrier observes one pending remote call");
+    }
 
     #[handler::single]
-    #[allow(clippy::unused_self)]
     fn on_stop(&mut self, ctx: &mut NativeCtx<'_>, _mail: StopEngineRouteForTest) {
+        assert_eq!(self.pending.len(), 1, "the route stops with the second remote call pending");
         ctx.shutdown();
     }
 }
 
+struct WrongEngineRouteConfig {
+    registrations: mpsc::Sender<(EngineId, crate::RegisterEngineRouteResult)>,
+    forwards: mpsc::Sender<()>,
+}
+
 struct WrongEngineRoute {
-    registrations: mpsc::Sender<crate::RegisterEngineRouteResult>,
+    registrations: mpsc::Sender<(EngineId, crate::RegisterEngineRouteResult)>,
+    registration_requests: VecDeque<EngineId>,
+    forwards: mpsc::Sender<()>,
 }
 
 #[aether_actor::actor(instanced, root, depends(RpcServerCapability))]
 impl NativeActor for WrongEngineRoute {
-    type Config = mpsc::Sender<crate::RegisterEngineRouteResult>;
+    type Config = WrongEngineRouteConfig;
     const NAMESPACE: &'static str = "aether.rpc.test.wrong_engine_route";
 
-    fn init(registrations: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { registrations })
+    fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self {
+            registrations: config.registrations,
+            registration_requests: VecDeque::new(),
+            forwards: config.forwards,
+        })
     }
 
     #[handler::single]
-    #[allow(clippy::unused_self)]
     fn on_register(&mut self, ctx: &mut NativeCtx<'_>, mail: RegisterEngineRouteForTest) {
+        self.registration_requests.push_back(mail.engine_id);
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: mail.engine_id });
     }
 
     #[handler::single]
     fn on_registration_result(&mut self, _ctx: &mut NativeCtx<'_>, mail: crate::RegisterEngineRouteResult) {
-        self.registrations.send(mail).expect("registration result receiver stays live");
+        let engine_id = self.registration_requests.pop_front().expect("registration request precedes its result");
+        self.registrations.send((engine_id, mail)).expect("registration result receiver stays live");
     }
 
     // A real handler for the right kind with the wrong contract: silent does
     // not cover EngineRoute's explicit manual row.
     #[handler::single]
-    #[allow(clippy::unused_self)]
-    fn on_forward(&mut self, _ctx: &mut NativeCtx<'_>, _mail: crate::ForwardEnvelope) {}
+    fn on_forward(&mut self, _ctx: &mut NativeCtx<'_>, _mail: crate::ForwardEnvelope) {
+        self.forwards.send(()).expect("wrong-route observer stays live");
+    }
 }
 
 fn request_manual_route_registration(
     chassis: &PassiveChassis<TestChassis>,
     route: ActorRef<ManualEngineRoute>,
     engine_id: EngineId,
-    results: &mpsc::Receiver<crate::RegisterEngineRouteResult>,
+    results: &mpsc::Receiver<(EngineId, crate::RegisterEngineRouteResult)>,
 ) -> crate::RegisterEngineRouteResult {
     let (_, settled) = chassis.send_tracked(route, &RegisterEngineRouteForTest { engine_id }, None);
-    let result = results.recv_timeout(Duration::from_secs(2)).expect("manual route registration answers");
+    let (answered_engine, result) =
+        results.recv_timeout(Duration::from_secs(2)).expect("manual route registration answers");
+    assert_eq!(answered_engine, engine_id, "registration result is correlated with its request");
     settled.recv_timeout(Duration::from_secs(2)).expect("manual route registration chain settles");
     result
 }
@@ -152,10 +175,12 @@ fn request_wrong_route_registration(
     chassis: &PassiveChassis<TestChassis>,
     route: ActorRef<WrongEngineRoute>,
     engine_id: EngineId,
-    results: &mpsc::Receiver<crate::RegisterEngineRouteResult>,
+    results: &mpsc::Receiver<(EngineId, crate::RegisterEngineRouteResult)>,
 ) -> crate::RegisterEngineRouteResult {
     let (_, settled) = chassis.send_tracked(route, &RegisterEngineRouteForTest { engine_id }, None);
-    let result = results.recv_timeout(Duration::from_secs(2)).expect("wrong route registration answers");
+    let (answered_engine, result) =
+        results.recv_timeout(Duration::from_secs(2)).expect("wrong route registration answers");
+    assert_eq!(answered_engine, engine_id, "registration result is correlated with its request");
     settled.recv_timeout(Duration::from_secs(2)).expect("wrong route registration chain settles");
     result
 }
@@ -243,6 +268,31 @@ fn complete_handshake(stream: &mut TcpStream) {
     )
     .expect("test: write_frame Hello to rpc server");
     let _: WireFrame = read_frame(stream).expect("test: read_frame after Hello returns HelloAck");
+}
+
+fn assert_unknown_engine(stream: &mut TcpStream, engine: EngineId, cid: u64) {
+    use crate::{MailEnvelope, RpcError};
+    use aether_data::Kind;
+
+    write_frame(
+        &mut *stream,
+        &WireFrame::Call {
+            cid: Some(cid),
+            envelope: MailEnvelope {
+                to: Recipient {
+                    engine: Some(engine),
+                    path: ErasedActorPath::new(ABSENT).expect("the absent fixture is a path"),
+                },
+                kind: <EngineRouteReplyForTest as Kind>::ID,
+                payload: EngineRouteReplyForTest { value: 1 }.encode_into_bytes(),
+            },
+        },
+    )
+    .expect("write call for an engine without a route");
+    assert_eq!(
+        read_frame::<_, WireFrame>(stream).expect("engine without a route answers"),
+        WireFrame::ReplyEnd { cid, result: Err(RpcError::UnknownEngine { engine }) },
+    );
 }
 
 /// Boot a `RpcServerCapability` bound to OS-picked port, connect a
@@ -512,32 +562,9 @@ fn call_carrying_an_engine_only_kind_closes_with_err_before_dispatch() {
 /// routes were registered.
 #[test]
 fn engine_call_without_a_route_closes_with_unknown_engine() {
-    use crate::server::test_echo::TestEchoRequest;
-    use crate::{MailEnvelope, RpcError};
-    use aether_data::{EngineId, Kind, Uuid};
-
     let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(5));
     complete_handshake(&mut stream);
-
-    let engine = EngineId(Uuid::from_u128(9));
-    write_frame(
-        &mut stream,
-        &WireFrame::Call {
-            cid: Some(11),
-            envelope: MailEnvelope {
-                to: Recipient {
-                    engine: Some(engine),
-                    path: ErasedActorPath::new(ABSENT).expect("the absent fixture is a path"),
-                },
-                kind: <TestEchoRequest as Kind>::ID,
-                payload: TestEchoRequest { value: 1 }.encode_into_bytes(),
-            },
-        },
-    )
-    .expect("test: write_frame Call to rpc server");
-
-    let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
-    assert_eq!(end, WireFrame::ReplyEnd { cid: 11, result: Err(RpcError::UnknownEngine { engine }) });
+    assert_unknown_engine(&mut stream, EngineId(Uuid::from_u128(9)), 11);
 }
 
 /// Engine route registration proves the registrant's manual forwarding row
@@ -552,7 +579,7 @@ fn engine_route_registration_is_typed_and_preserves_ownership_precedence() {
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
-            RpcServerConfig { port: None, port_file: None },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("rpc server boots");
@@ -578,8 +605,13 @@ fn engine_route_registration_is_typed_and_preserves_ownership_precedence() {
         .finish()
         .expect("beta route spawns");
     let (wrong_results_tx, wrong_results_rx) = mpsc::channel();
+    let (wrong_forwards_tx, wrong_forwards_rx) = mpsc::channel();
     let wrong = chassis
-        .spawn_actor_for_test::<WrongEngineRoute>(Subname::Named("wrong"), wrong_results_tx, ())
+        .spawn_actor_for_test::<WrongEngineRoute>(
+            Subname::Named("wrong"),
+            WrongEngineRouteConfig { registrations: wrong_results_tx, forwards: wrong_forwards_tx },
+            (),
+        )
         .finish()
         .expect("wrong-contract route spawns");
 
@@ -639,6 +671,14 @@ fn engine_route_registration_is_typed_and_preserves_ownership_precedence() {
             crate::RegisterEngineRouteResult::Ok
         ),
         "a failed cast changes no route or owner state",
+    );
+
+    let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(2));
+    complete_handshake(&mut stream);
+    assert_unknown_engine(&mut stream, unused_engine, 91);
+    assert!(
+        matches!(wrong_forwards_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "the incompatible actor never receives forwarding after its failed admission",
     );
 }
 
