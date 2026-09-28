@@ -45,7 +45,8 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell, UnsafeCell};
 use core::num::NonZeroU64;
 
-use aether_data::{Blob, Kind, MailboxId, RequestId};
+use aether_data::wire::{DecodeCtx, Encoder, LedgerEncoder};
+use aether_data::{Blob, Kind, KindId, MailboxId, RequestId, Source};
 
 use crate::blob::guest::EncodedGuestMail;
 use crate::mail::{Mail, NO_REPLY_HANDLE};
@@ -57,6 +58,9 @@ use crate::wasm::ctx::{ActorTypeTag, SpawnError, WasmCtx};
 
 mod bundle;
 pub mod compose;
+mod tickets;
+
+use tickets::{ClaimLedger, ContextLedger, DehydrateLedger, HeldTickets};
 
 /// One inline child's slot. `actor` is `None` while the child is taken
 /// out for dispatch (the slot-shaped take / reinsert) and `Some` at rest.
@@ -261,6 +265,13 @@ pub struct Registry {
     /// instead of aliasing; every borrow is taken inside one method below and
     /// released before it returns.
     request_contexts: RefCell<RequestContextTable>,
+    /// ADR-0243 §6: every held-reply ticket this instance owns and where it
+    /// sits, plus the requests whose stored context parked one. The ctx,
+    /// the request-context codec and the dehydrate encoder reach it only
+    /// through this registry. A `RefCell` under the same single-thread
+    /// argument as `request_contexts`; every borrow is released before the
+    /// method that took it returns.
+    held: RefCell<HeldTickets>,
     /// The `export!`-installed by-tag spawn resolver (issue 2692), or `None`
     /// on a raw registry never wired by `export!` (a host-unit registry).
     /// Set once from each init shim — the resolver enumerates the module's
@@ -297,18 +308,22 @@ impl Registry {
             entry_actor_tag: Cell::new(None),
             queue: UnsafeCell::new(VecDeque::new()),
             request_contexts: RefCell::new(RequestContextTable::new()),
+            held: RefCell::new(HeldTickets::new()),
             spawn_resolver: Cell::new(None),
         }
     }
 
     /// Store a typed request context under `request` (ADR-0139), warning
-    /// when the table passes a new high-water mark. The warning names no
-    /// actor: a guest's `tracing` event lands in its own log ring
-    /// (ADR-0081 §7), which already attributes it.
-    pub(crate) fn insert_request_context<C: Kind>(&self, request: RequestId, context: &C) {
+    /// when the table passes a new high-water mark. Each held ticket in the
+    /// context parks as it encodes (ADR-0243 §4), and the request is then
+    /// recorded for the untaken-reply check. The warning names no actor: a
+    /// guest's `tracing` event lands in its own log ring (ADR-0081 §7), which
+    /// already attributes it.
+    pub(crate) fn insert_request_context<C: Kind>(&self, request: RequestId, context: C) {
         let high_water = {
             let mut table = self.request_contexts.borrow_mut();
-            table.insert(request, context);
+            let mut held = self.held.borrow_mut();
+            table.insert_with(request, context, &mut ContextLedger::new(&mut held, request, C::NAME));
             table.high_water()
         };
         if let Some(live) = high_water {
@@ -319,10 +334,102 @@ impl Registry {
         }
     }
 
-    /// Remove and decode the typed request context stored under `request`;
-    /// a wrong-kind take leaves it stored (ADR-0139 §4).
+    /// Remove and decode the typed request context stored under `request`,
+    /// claiming each held ticket in it back to live; a wrong-kind take leaves
+    /// it stored (ADR-0139 §4).
     pub(crate) fn take_request_context<C: Kind>(&self, request: RequestId) -> Option<C> {
-        self.request_contexts.borrow_mut().take(request)
+        let mut held = self.held.borrow_mut();
+        let context = self.request_contexts.borrow_mut().take_with(request, &mut ClaimLedger::new(&mut held));
+        if context.is_some() {
+            held.taken(request);
+        }
+        context
+    }
+
+    /// Record a freshly minted held reply as live (ADR-0243 §6).
+    pub(crate) fn arm_held(&self, ticket: u32, reply: KindId) {
+        self.held.borrow_mut().arm(ticket, reply);
+    }
+
+    /// Forget a held reply that was just answered.
+    pub(crate) fn release_held(&self, ticket: u32) {
+        self.held.borrow_mut().release(ticket);
+    }
+
+    /// Frame `value` for `save_state` as `K::ID` then its wire bytes,
+    /// parking each held ticket in it as saved (ADR-0243 §6).
+    ///
+    /// # Panics
+    ///
+    /// When `value` does not encode: a length past the `u32` ceiling, or a
+    /// ticket this instance does not hold live (ADR-0063).
+    pub(crate) fn encode_saved_state<K: Kind>(&self, value: &K) -> Vec<u8> {
+        let mut held = self.held.borrow_mut();
+        let mut ledger = DehydrateLedger::new(&mut held);
+        let mut enc = LedgerEncoder::new(&mut ledger);
+        enc.out().extend_from_slice(&K::ID.0.to_le_bytes());
+        if let Err(error) = value.encode_with(&mut enc) {
+            panic!("aether-actor: saved state `{}` failed to encode: {error}", K::NAME);
+        }
+        enc.into_bytes()
+    }
+
+    /// Decode saved-state bytes as `K`, claiming each held ticket in them
+    /// back to live in this instance (ADR-0243 §6).
+    pub(crate) fn decode_saved_state<K: Kind>(&self, payload: &[u8]) -> Option<K> {
+        let mut held = self.held.borrow_mut();
+        let mut ledger = ClaimLedger::new(&mut held);
+        K::decode_with(payload, &mut DecodeCtx::empty().held(&mut ledger))
+            .inspect_err(|error| tracing::warn!(kind = K::NAME, %error, "prior state decode refused"))
+            .ok()
+    }
+
+    /// Whether a held reply is still live after `on_dehydrate`: one the
+    /// dehydrate neither saved nor answered. The `export!` `on_dehydrate`
+    /// shim then refuses the replace (ADR-0243 §6).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __held_unsaved(&self) -> bool {
+        self.held.borrow().any_live()
+    }
+
+    /// Return every ticket a dehydrate saved to live. The `export!`
+    /// `on_dehydrate` shim calls it before the hooks run, so a ticket saved
+    /// by a replace that was later rolled back is checked again, and after a
+    /// refusal, because this instance keeps running with those values.
+    #[doc(hidden)]
+    pub fn __revert_dehydrate(&self) {
+        self.held.borrow_mut().revert_saved();
+    }
+
+    /// The untaken-reply check (ADR-0243 §7), run by the `export!` `receive`
+    /// shim after the top-level dispatch: the reply being dispatched must
+    /// have taken a stored context that parked a held ticket. With no such
+    /// context stored it returns before reading the host correlation, so an
+    /// actor that holds nothing pays no host call.
+    ///
+    /// # Panics
+    ///
+    /// When it did not, naming the stored context's kind.
+    #[doc(hidden)]
+    pub fn __check_held_contexts_taken(&self) {
+        if !self.held.borrow().any_untaken() {
+            return;
+        }
+        let correlation = mail::reply_correlation();
+        if correlation != Source::NO_CORRELATION {
+            self.check_held_context_taken(RequestId(correlation));
+        }
+    }
+
+    pub(crate) fn check_held_context_taken(&self, request: RequestId) {
+        if let Some(context) = self.held.borrow().untaken(request) {
+            panic!(
+                "aether-actor: the reply to request {} left its context `{context}` untaken, and that context holds \
+                 a held reply; take it with `take_context`",
+                request.0
+            );
+        }
     }
 
     /// Wrap the dehydrating guest's user state with the request-context

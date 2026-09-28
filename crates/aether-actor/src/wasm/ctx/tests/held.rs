@@ -1,0 +1,218 @@
+//! ADR-0243 §6–§7: the guest's typed deferred reply — the `hold` pair, the
+//! fail-fast drops, the ledger-granting context and saved-state codecs, and
+//! the dehydrate and untaken-reply guards.
+//!
+//! The host build has no FFI, so a `Held` here is never answered: each test
+//! that ends with a live ticket releases it from the registry and forgets the
+//! value, which is what `Held::answer` does after its send.
+
+extern crate std;
+
+use std::panic;
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::mem;
+use core::panic::AssertUnwindSafe;
+
+use aether_data::{Kind, RequestId, wire};
+
+use super::{NO_INBOUND_SOURCE, Registry, WasmCtx};
+use crate::mail::{PriorState, ReplyHandle};
+use crate::model::ctx::{Erased, Manual};
+use crate::request_context::split_state_envelope;
+use crate::wasm::ctx::{CapturedState, Held, WasmDropCtx};
+
+#[aether_data::kind(name = "test.held.answer")]
+struct Answer {
+    value: u32,
+}
+
+#[aether_data::kind(name = "test.held.context")]
+struct HeldContext {
+    debt: Held<Answer>,
+    tag: u32,
+}
+
+#[aether_data::kind(name = "test.held.state")]
+struct HeldState {
+    debt: Held<Answer>,
+}
+
+#[aether_data::kind(name = "test.held.plain_state", eq)]
+struct PlainState {
+    count: u32,
+    label: String,
+}
+
+const ACTOR: u64 = 0x10;
+
+/// A ctx dispatching mail whose reply handle is `handle`.
+fn ctx_for(registry: &Registry, handle: u32) -> WasmCtx<'_, Erased, Manual> {
+    let mut ctx = WasmCtx::__new(ACTOR, registry, NO_INBOUND_SOURCE);
+    ctx.__set_reply_to(Some(ReplyHandle::__from_raw(handle)));
+    ctx
+}
+
+/// Hold a reply on `handle` and return its ticket, the receipt defused as the
+/// `#[actor]` macro defuses it.
+fn hold_on(registry: &Registry, handle: u32) -> Held<Answer> {
+    let (pending, held) = ctx_for(registry, handle).as_single().hold::<Answer>();
+    pending.__defuse();
+    held
+}
+
+/// Stand in for `Held::answer` on the host: release the ticket and forget the
+/// value.
+fn discharge(registry: &Registry, held: Held<Answer>) {
+    registry.release_held(held.ticket());
+    mem::forget(held);
+}
+
+/// Two holds in one dispatch would owe two replies to one request.
+#[test]
+#[should_panic(expected = "`hold` called twice in one dispatch")]
+fn second_hold_panics() {
+    let registry = Registry::new();
+    let mut ctx = ctx_for(&registry, 5);
+    let single = ctx.as_single();
+
+    let (pending, held) = single.hold::<Answer>();
+    pending.__defuse();
+    mem::forget(held);
+    let _ = single.hold::<Answer>();
+}
+
+/// A handler that holds and discards its receipt would report a reply it
+/// never declares; the dropped receipt must fail fast.
+#[test]
+#[should_panic(expected = "a `Pending` receipt was dropped")]
+fn unreturned_pending_panics() {
+    let registry = Registry::new();
+    let (pending, held) = ctx_for(&registry, 5).as_single().hold::<Answer>();
+    mem::forget(held);
+    drop(pending);
+}
+
+/// The receipt the macro defuses must not trap, or every deferred handler
+/// would.
+#[test]
+fn defused_pending_is_silent() {
+    let registry = Registry::new();
+    let held = hold_on(&registry, 5);
+    discharge(&registry, held);
+}
+
+/// A ticket dropped live loses the requester's reply; it must fail fast.
+#[test]
+#[should_panic(expected = "was dropped unanswered")]
+fn unanswered_held_panics() {
+    let registry = Registry::new();
+    drop(hold_on(&registry, 5));
+}
+
+/// A stored context parks its ticket, so the value it leaves behind drops
+/// silently; without the flag every correct park would trap.
+#[test]
+fn parked_held_is_silent() {
+    let registry = Registry::new();
+    let debt = hold_on(&registry, 5);
+    registry.insert_request_context(RequestId(7), HeldContext { debt, tag: 1 });
+
+    assert!(!registry.__held_unsaved(), "the parked ticket is owned by the stored context, not live");
+    let context = registry.take_request_context::<HeldContext>(RequestId(7)).expect("the context takes back");
+    discharge(&registry, context.debt);
+}
+
+/// A plain encode grants no ledger: it must refuse the ticket and leave it
+/// armed, so a stray encode can never defuse a debt.
+#[test]
+fn plain_encode_refuses_and_leaves_held_armed() {
+    let registry = Registry::new();
+    let context = HeldContext { debt: hold_on(&registry, 5), tag: 1 };
+
+    let encoded = panic::catch_unwind(AssertUnwindSafe(|| context.encode_into_bytes()));
+    assert!(encoded.is_err(), "a plain encode refuses a held ticket");
+    assert!(!context.debt.is_parked(), "the refused ticket stays armed");
+    discharge(&registry, context.debt);
+}
+
+/// A context take claims its ticket back live and answerable, and the same
+/// ticket cannot be claimed a second time.
+#[test]
+fn context_round_trip_claims_the_ticket() {
+    let registry = Registry::new();
+    registry.insert_request_context(RequestId(7), HeldContext { debt: hold_on(&registry, 5), tag: 3 });
+    let (version, snapshot) = registry.compose_request_context_state(None).expect("a stored context snapshots");
+
+    let context = registry.take_request_context::<HeldContext>(RequestId(7)).expect("the context takes back");
+    assert_eq!((context.debt.ticket(), context.tag), (5, 3));
+    assert!(!context.debt.is_parked(), "the claimed ticket is live again");
+    assert!(registry.__held_unsaved(), "the registry tracks the claimed ticket as live");
+
+    registry.restore_request_contexts(split_state_envelope(version, &snapshot).0);
+    assert!(
+        registry.take_request_context::<HeldContext>(RequestId(7)).is_none(),
+        "a ticket already live cannot be claimed again",
+    );
+    discharge(&registry, context.debt);
+}
+
+/// A reply that leaves a held context untaken strands its debt; the check
+/// must name the stored kind, and a context holding no ticket is exempt.
+#[test]
+#[should_panic(expected = "left its context `test.held.context` untaken")]
+fn untaken_held_context_panics_naming_its_kind() {
+    let registry = Registry::new();
+    registry.insert_request_context(RequestId(8), PlainState { count: 1, label: String::new() });
+    registry.check_held_context_taken(RequestId(8));
+
+    registry.insert_request_context(RequestId(7), HeldContext { debt: hold_on(&registry, 5), tag: 1 });
+    registry.check_held_context_taken(RequestId(7));
+}
+
+/// A ticket saved through the dehydrate ctx passes the guard, a live unsaved
+/// one refuses it, a refusal reverts the saved ones to live, and the saved
+/// bytes claim back in a replacement's registry exactly once.
+#[test]
+fn dehydrate_refuses_live_unsaved_and_reverts() {
+    let registry = Registry::new();
+    let saved = hold_on(&registry, 5);
+    let unsaved = hold_on(&registry, 6);
+
+    let mut capture = CapturedState::default();
+    WasmDropCtx::__new_capturing(ACTOR, &mut capture, &registry).save_state_kind(0, &HeldState { debt: saved });
+    assert!(registry.__held_unsaved(), "the unsaved ticket refuses the dehydrate");
+
+    discharge(&registry, unsaved);
+    assert!(!registry.__held_unsaved(), "a saved ticket passes");
+    registry.__revert_dehydrate();
+    assert!(registry.__held_unsaved(), "a refused dehydrate returns its saved tickets to live");
+
+    let (version, bytes) = capture.take().expect("the dehydrate saved state");
+    let successor = Registry::new();
+    // SAFETY: `bytes` outlives both `PriorState` values built over it.
+    let prior = || unsafe { PriorState::__from_ptr(version, bytes.as_ptr().addr(), bytes.len()) };
+    let state = prior().__with_registry(&successor).decode_kind::<HeldState>().expect("the saved ticket claims");
+    assert_eq!(state.debt.ticket(), 5);
+    assert!(successor.__held_unsaved(), "the claimed ticket is live in the successor");
+    assert!(prior().__with_registry(&successor).decode_kind::<HeldState>().is_none(), "a second claim refuses");
+    discharge(&successor, state.debt);
+}
+
+/// An existing serde state kind frames as `K::ID` then its serde wire bytes,
+/// the layout older SDKs write and read.
+#[test]
+fn save_state_kind_bytes_match_serde() {
+    let registry = Registry::new();
+    let value = PlainState { count: 7, label: String::from("seven") };
+
+    let mut capture = CapturedState::default();
+    WasmDropCtx::__new_capturing(ACTOR, &mut capture, &registry).save_state_kind(0, &value);
+
+    // Tripwire: the saved-state framing is the cross-SDK replace format; a
+    // drift here breaks replace between old and new guests.
+    let mut expected = Vec::from(PlainState::ID.0.to_le_bytes());
+    expected.extend(wire::to_vec(&value).expect("serde wire encodes"));
+    assert_eq!(capture.take(), Some((0, expected)));
+}

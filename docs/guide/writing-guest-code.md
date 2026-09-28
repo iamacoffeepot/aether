@@ -17,6 +17,46 @@ cluster; loaded on its own with `load_component`, it becomes an independent
 instance with its own lineage. Both are the same authoring surface — the actor
 you write, [compiled to wasm](recipes/writing-a-component.md).
 
+## Deferred replies
+
+A `#[handler::single]` that answers later returns `Pending<R>`, so its row still
+declares the reply kind `R`
+([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)).
+`ctx.hold::<R>()` returns the pair: the handler returns the `Pending<R>` receipt,
+and keeps the `Held<R>` ticket to answer from any later handler with
+`held.answer(ctx, &reply)`. The host keeps the request's reply handle and holds
+its settlement open until the ticket answers.
+
+```rust
+#[handler::single]
+fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) -> Pending<MeshLoadResult> {
+    let (pending, held) = ctx.hold::<MeshLoadResult>();
+    let read = Read { addr: NamespaceAddr::new(&msg.namespace, &msg.path) };
+    let _ = ctx.send_with_context::<FsCapability>(&read, MeshLoadContext { held, path: msg.path });
+    pending
+}
+
+#[handler::single]
+fn on_read(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
+    let Some(context) = ctx.take_context::<MeshLoadContext>() else { return };
+    context.held.answer(ctx, &MeshLoadResult::from(result));
+}
+```
+
+A `Held<R>` is move-only. Park it in actor state, in a request context passed by
+value to `send_with_context`, or in the state `on_dehydrate` saves with
+`save_state_kind`; a take or `PriorState::decode_kind` claims it back. Misuse
+fails fast:
+
+- a second `hold` in one dispatch panics, since one request owes one reply;
+- a `Pending` dropped instead of returned panics;
+- a `Held` dropped unanswered panics, unless it was parked in a context or saved
+  state, or its mail had no reply target;
+- a reply whose stored context holds a `Held` must take that context, or the
+  guest panics after the handler returns, naming the context kind;
+- `on_dehydrate` refuses the replace while a `Held` is still live and unsaved,
+  and the host keeps the old instance running.
+
 ## Where to read more
 
 - The full end-to-end loop for a component — crate setup, the `#[actor]` block,

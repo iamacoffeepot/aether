@@ -116,8 +116,11 @@ that blocks waiting for a reply a handler never agreed to send.
 
 **When several requests are in flight, carry a typed request context.** A
 one-shot request that needs to match a later reply should call
-`send_with_context(&request, &context)` and recover the bookkeeping in the
-reply handler with `ctx.take_context::<Context>()`. Contexts are `Kind`s, so the
+`send_with_context(&request, context)` and recover the bookkeeping in the
+reply handler with `ctx.take_context::<Context>()`. The context moves into the
+table, so a guest's context may hold a `Held<R>` deferred reply
+([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)):
+storing parks it and the take claims it back. Contexts are `Kind`s, so the
 table stores schema-typed bytes, checks the `KindId` on take, and rides guest
 dehydrate/rehydrate automatically. A context holding a reply handle or a
 sender route has actor reach (ADR-0242): the table stores it, but it is never
@@ -132,8 +135,9 @@ drops a context: it grows past its preallocated room and logs a warning at each
 new high-water mark, so a peer that never replies shows up in the actor's log.
 A reply handle kept in a context stays answerable across `replace_component`: the mailbox's
 pending replies move to the replacement with it. Only a `#[handler::manual]`
-handler can read and keep its reply handle; a single handler's handle is freed
-when it returns. A component whose held handles keep growing logs a warning
+handler can read and keep its raw reply handle; a single handler's handle is
+freed when it returns, unless the handler returns `Pending<R>` and keeps the
+typed `Held<R>` that answers it. A component whose held handles keep growing logs a warning
 naming it.
 
 The lower-level `send_tracked(&request)` / `ctx.in_reply_to()` pair is still

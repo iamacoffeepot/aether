@@ -88,20 +88,28 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// with [`Self::take_context`]. Inherits the handler's causal chain like
     /// [`Self::send`] and returns the minted id.
     ///
+    /// The context moves into the table (ADR-0243 §4), so it may carry a
+    /// [`Held`](crate::Held) reply: storing parks the ticket, and the reply
+    /// handler's take claims it back. An inline-cluster local route mints no
+    /// correlation, so nothing is stored and the context is dropped; a live
+    /// `Held` in it then panics as an unanswered drop.
+    ///
     /// Its consumer is the fs demux fixture's context flow, whose two reads
     /// carry distinct typed contexts.
     #[must_use]
     pub fn send_with_context<R: Singleton + CallerAddressable>(
         &mut self,
         payload: &impl SendableTo<R>,
-        context: &impl Kind,
+        context: impl Kind,
     ) -> RequestId
     where
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
         let request = self.push_tracked(self.actor_ref::<R>(), payload);
-        if request.0 != Source::NO_CORRELATION {
+        if request.0 == Source::NO_CORRELATION {
+            drop(context);
+        } else {
             self.inline.insert_request_context(request, context);
         }
         request

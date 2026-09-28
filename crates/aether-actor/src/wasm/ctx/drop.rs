@@ -11,6 +11,7 @@ use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::persistence::Persistence;
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::{mail, persist};
+use crate::wasm::inline::Registry;
 use alloc::vec::Vec;
 
 /// A `save_state` deposit captured in memory instead of forwarded to the
@@ -49,6 +50,10 @@ pub struct WasmDropCtx<'a> {
     /// the parent's and each child's bundle and pack one composite. `None`
     /// is the ordinary path — `save_state` forwards to the host.
     capture: Option<&'a mut CapturedState>,
+    /// The per-component registry, whose held-reply ledger
+    /// [`Self::save_state_kind`] grants to the state encode, so a `Held` in
+    /// the saved state parks instead of refusing (ADR-0243 §6).
+    inline: &'a Registry,
     _borrow: PhantomData<&'a ()>,
 }
 
@@ -57,8 +62,8 @@ impl<'a> WasmDropCtx<'a> {
     /// Forwards `save_state` to the host import.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(mailbox: u64) -> Self {
-        Self { mailbox, capture: None, _borrow: PhantomData }
+    pub fn __new(mailbox: u64, inline: &'a Registry) -> Self {
+        Self { mailbox, capture: None, inline, _borrow: PhantomData }
     }
 
     /// Not part of the public API; called only by the dehydrate compose
@@ -67,8 +72,8 @@ impl<'a> WasmDropCtx<'a> {
     /// before a single real host `save_state`.
     #[doc(hidden)]
     #[must_use]
-    pub(crate) fn __new_capturing(mailbox: u64, capture: &'a mut CapturedState) -> Self {
-        Self { mailbox, capture: Some(capture), _borrow: PhantomData }
+    pub(crate) fn __new_capturing(mailbox: u64, capture: &'a mut CapturedState, inline: &'a Registry) -> Self {
+        Self { mailbox, capture: Some(capture), inline, _borrow: PhantomData }
     }
 
     /// Deposit a migration bundle. Mirrors [`Persistence::save_state`].
@@ -90,12 +95,18 @@ impl<'a> WasmDropCtx<'a> {
     }
 
     /// Persist a typed kind value. Mirrors
-    /// [`Persistence::save_state_kind`].
-    pub fn save_state_kind<K>(&mut self, version: u32, value: &K)
-    where
-        K: Kind + aether_data::Schema + serde::Serialize,
-    {
-        <Self as Persistence>::save_state_kind::<K>(self, version, value);
+    /// [`Persistence::save_state_kind`], and grants the held-reply ledger:
+    /// each [`Held`](crate::Held) in `value` parks as saved, for the
+    /// replacement's [`PriorState::decode_kind`](crate::PriorState::decode_kind)
+    /// to claim back (ADR-0243 §6).
+    ///
+    /// # Panics
+    ///
+    /// When `value` does not encode: a length past the `u32` ceiling, or a
+    /// `Held` this instance does not hold live.
+    pub fn save_state_kind<K: Kind>(&mut self, version: u32, value: &K) {
+        let bytes = self.inline.encode_saved_state(value);
+        self.save_state(version, &bytes);
     }
 }
 
@@ -120,5 +131,11 @@ impl Persistence for WasmDropCtx<'_> {
         // the bundle through `Persistence::save_state_kind`, which calls
         // this trait method, so a capturing ctx must intercept here too.
         WasmDropCtx::save_state(self, version, bytes);
+    }
+
+    // The generated `on_dehydrate` saves `type State` through this trait
+    // method, so the ledger-granting inherent form must apply here too.
+    fn save_state_kind<K: Kind>(&mut self, version: u32, value: &K) {
+        WasmDropCtx::save_state_kind(self, version, value);
     }
 }
