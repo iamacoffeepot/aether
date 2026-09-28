@@ -637,7 +637,8 @@ mod tests {
                 body: vec![],
                 timeout_ms: Some(5000),
             },
-        );
+        )
+        .__defuse();
         // The worker runs the stub fetch off-thread and pushes the completion
         // wake; route it through the cap's `#[handler(task)]` arm.
         drive_task_completion::<HttpCapability>(&mut state, &transport, &rx);
@@ -673,7 +674,8 @@ mod tests {
                 body: vec![],
                 timeout_ms: None,
             },
-        );
+        )
+        .__defuse();
         drive_task_completion::<HttpCapability>(&mut state, &transport, &rx);
         match decode_session_reply::<FetchResult>(&rx) {
             FetchResult::Err { request_id, url, error } => {
@@ -705,7 +707,8 @@ mod tests {
                 body: vec![],
                 timeout_ms: None,
             },
-        );
+        )
+        .__defuse();
         // Drain the completion so the off-thread worker has run before we read
         // the recorded request.
         drive_task_completion::<HttpCapability>(&mut state, &transport, &rx);

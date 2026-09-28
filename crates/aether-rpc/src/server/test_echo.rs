@@ -25,7 +25,7 @@
 // test substrate's registry walk.
 use aether_actor::actor;
 use aether_substrate::actor::native::TaskQueue;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 use aether_substrate::chassis::error::BootError;
 use std::thread;
 use std::time::Duration;
@@ -108,19 +108,21 @@ impl NativeActor for DeferredEchoActor {
         Ok(Self { tasks: TaskQueue::new(4) })
     }
 
-    /// Submit the echo off-thread via the ADR-0093 dispatch primitive.
+    /// Submit the echo off-thread via the ADR-0093 dispatch primitive and
+    /// return the queue's receipt, so the handler's row is
+    /// `DeferredEchoReply`, the reply it sends later (ADR-0243 §7).
     /// The worker sleeps briefly so the handler reliably returns
     /// (queuing its `Finished`) before the reply lands — the window the
     /// bug used to settle in. The framework-held `SettlementHold` keeps
     /// the chain open until the deferred re-reply.
     #[handler::single]
-    fn on_deferred_echo(&mut self, ctx: &mut NativeCtx<'_>, mail: DeferredEchoRequest) {
+    fn on_deferred_echo(&mut self, ctx: &mut NativeCtx<'_>, mail: DeferredEchoRequest) -> Pending<DeferredEchoReply> {
         let value = mail.value;
         self.tasks.submit(ctx, move || {
             // Brief blocking work standing in for a provider call.
             thread::sleep(Duration::from_millis(50));
             DeferredEchoReply { value }
-        });
+        })
     }
 
     /// ADR-0093 completion: re-reply to the original caller (drops the

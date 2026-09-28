@@ -273,7 +273,8 @@ mod tests {
         let held = {
             let mut ctx =
                 NativeCtx::new(&binding, Source::with_correlation(SourceAddr::Component(caller), 77), None, Some(root));
-            let (_pending, held) = ctx.hold::<Answer>();
+            let (pending, held) = ctx.hold::<Answer>();
+            pending.__defuse();
             held
         };
         assert_eq!(counter.held_open(root), 1, "the held entry keeps the caller's chain open");
@@ -296,7 +297,8 @@ mod tests {
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
         let root = root_id(2);
 
-        let held = NativeCtx::new(&binding, Source::NONE, None, Some(root)).hold::<Answer>().1;
+        let (pending, held) = NativeCtx::new(&binding, Source::NONE, None, Some(root)).hold::<Answer>();
+        pending.__defuse();
         let id = held.dispatch_id();
 
         let payload = catch_unwind(AssertUnwindSafe(|| drop(held))).expect_err("an unanswered Held fails fast");
@@ -320,7 +322,8 @@ mod tests {
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
         let root = root_id(3);
 
-        let held = NativeCtx::new(&binding, Source::NONE, None, Some(root)).hold::<Answer>().1;
+        let (pending, held) = NativeCtx::new(&binding, Source::NONE, None, Some(root)).hold::<Answer>();
+        pending.__defuse();
         let id = held.dispatch_id();
 
         let owed = held.into_deferred_reply();

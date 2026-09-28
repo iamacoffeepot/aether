@@ -195,7 +195,7 @@ mod tests {
         // Three submits against a bound of 2: two dispatch, one queues.
         for cid in 1..=3 {
             let mut ctx = NativeCtx::new(&binding, session_reply_to(cid), None, Some(root_id(cid)));
-            q.submit(&mut ctx, move || Answer { value: cid });
+            q.submit(&mut ctx, move || Answer { value: cid }).__defuse();
         }
         assert_eq!(q.in_flight(), 2, "two dispatched under the bound of 2");
         assert_eq!(q.pending(), 1, "the third request queued");
@@ -224,7 +224,7 @@ mod tests {
         let root_b = root_id(2);
         {
             let mut ctx = NativeCtx::new(&binding, session_reply_to(1), None, Some(root_a));
-            q.submit(&mut ctx, || Answer { value: 1 });
+            q.submit(&mut ctx, || Answer { value: 1 }).__defuse();
         }
         let queued = {
             let mut ctx = NativeCtx::new(&binding, session_reply_to(2), None, Some(root_b));
@@ -256,6 +256,7 @@ mod tests {
             Some("worker"),
             "the drained worker answers the entry the queued receipt named"
         );
+        queued.__defuse();
         assert_eq!(
             counter.held_open(root_b),
             1,
