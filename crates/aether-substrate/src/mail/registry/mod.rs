@@ -30,7 +30,6 @@ mod metrics;
 mod names;
 #[allow(dead_code, reason = "owner submission is installed now and consumed by staged-writer arc follow-ups")]
 mod owner;
-#[cfg(feature = "wasm")]
 mod publication;
 mod relay;
 
@@ -61,5 +60,7 @@ pub(crate) use owner::ParkAdmission;
 pub(crate) use owner::RegistryOwnerLease;
 #[cfg(feature = "wasm")]
 pub use publication::AdmissionRefusal;
+pub use publication::NativeHoldRefusal;
+pub(crate) use publication::NativeType;
 pub(crate) use relay::RouteRelayHandle;
 pub(crate) use relay::RouteRelayLease;

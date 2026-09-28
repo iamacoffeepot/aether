@@ -1,4 +1,4 @@
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
@@ -321,11 +321,12 @@ impl<C: Chassis> PassiveChassis<C> {
     /// 3. hand the owner the wired endpoint, which publishes the route `Live`
     ///    and releases everything parked behind step 1 in the order it arrived.
     ///
-    /// Errors if `A::NAMESPACE` is already owned by a different actor type, if
-    /// the owner refuses either ack, if `A::init` returns `Err`, or if an
-    /// earlier boot of the same reservation already failed; in each failure
-    /// the namespace claim is released and any accepted `Starting` reservation
-    /// is cancelled before returning. A failed boot of a Claim-stage
+    /// Errors if the publication table refuses `A` its namespace (another
+    /// type sharing it was born first), if the owner refuses either ack, if
+    /// `A::init` returns `Err`, or if an earlier boot of the same reservation
+    /// already failed; in each failure any accepted `Starting` reservation is
+    /// cancelled before returning. The namespace hold is never released: a
+    /// failed boot fails the build (R-0046). A failed boot of a Claim-stage
     /// reservation leaves the slot unbooted, so the build fails too.
     pub fn boot_pumped_actor<A>(
         &self,
@@ -336,15 +337,9 @@ impl<C: Chassis> PassiveChassis<C> {
         A: Root + NativeActor,
     {
         let spawner = &self.booted.spawner;
-        let actor_registry = spawner.actor_registry();
-        if actor_registry.try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()).is_err() {
-            return Err(BootError::Other(Box::new(io::Error::other(format!(
-                "namespace {:?} already owned by a different TypeId — fix the conflicting actor's NAMESPACE const",
-                A::NAMESPACE
-            )))));
-        }
+        spawner.registry().hold_native::<A>().map_err(|refusal| BootError::Other(Box::new(refusal)))?;
 
-        let boot = if let Some(recovered) = self.recover_reservation(A::NAMESPACE) {
+        if let Some(recovered) = self.recover_reservation(A::NAMESPACE) {
             recovered.and_then(|MailboxClaim { id: mailbox_id, inbox, wake_slot, .. }| {
                 let slot =
                     assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall)?;
@@ -398,13 +393,6 @@ impl<C: Chassis> PassiveChassis<C> {
                     }
                 },
             )
-        };
-        match boot {
-            Ok(pair) => Ok(pair),
-            Err(e) => {
-                actor_registry.release_namespace(A::NAMESPACE, TypeId::of::<A>());
-                Err(e)
-            }
         }
     }
 

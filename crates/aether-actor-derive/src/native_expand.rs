@@ -1309,6 +1309,8 @@ fn emit_native_identity_markers(
     } else {
         quote! {}
     };
+
+    let type_entry = emit_native_type_entry(self_ty, generics);
     quote! {
         #actor_impl
         #lineage_markers
@@ -1317,7 +1319,28 @@ fn emit_native_identity_markers(
         #contract_rows
         #name_entry
         #handler_inventory
+        #type_entry
     }
+}
+
+/// ADR-0241 §3: the actor type beside its namespace, a link-time
+/// `NativeTypeEntry`, so the publication table records which linked types
+/// share one namespace. Gated `not(wasm)` like the name rows, and skipped for
+/// a generic native actor (none exist): `<Self as Addressable>::NAMESPACE`
+/// would not const-resolve in the non-generic inventory static.
+fn emit_native_type_entry(self_ty: &Type, generics: &syn::Generics) -> Option<TokenStream2> {
+    generics.params.is_empty().then(|| {
+        quote! {
+            #[cfg(not(target_family = "wasm"))]
+            ::aether_data::name_inventory::inventory::submit! {
+                ::aether_data::name_inventory::NativeTypeEntry {
+                    namespace: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
+                    type_id: ::core::any::TypeId::of::<#self_ty>,
+                    type_name: ::core::any::type_name::<#self_ty>,
+                }
+            }
+        }
+    })
 }
 
 /// ADR-0123 struct-hosted `#[actor]`: `#[actor(<cardinality>[, <module>])]` on

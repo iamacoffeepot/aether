@@ -8,7 +8,6 @@
 //! deliberately leaves to owner-time reservation. `prepare_commit` is the
 //! seam to the registry owner — everything past it is [`super::commit`]'s.
 
-use std::any::TypeId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -113,9 +112,7 @@ impl Spawner {
         A: Instanced + NativeActor,
     {
         let identity = self.prepare_identity::<A>(subname, parent)?;
-        if let Err(owning) = self.actor_registry.try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()) {
-            return Err(SpawnError::NamespaceOwnedByOtherType { namespace: A::NAMESPACE, owning_type: owning });
-        }
+        self.registry.hold_native::<A>().map_err(SpawnError::NativeHold)?;
         if self.actor_registry.is_tombstoned(identity.id) {
             return Err(SpawnError::SubnameRetired { full_name: identity.canonical_name.to_string() });
         }

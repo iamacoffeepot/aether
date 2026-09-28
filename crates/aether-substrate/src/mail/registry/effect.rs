@@ -1,4 +1,3 @@
-use std::any::TypeId;
 use std::error::Error;
 use std::fmt;
 #[cfg(feature = "wasm")]
@@ -20,7 +19,7 @@ use super::mailbox::MailboxEntry;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::canonical_mailbox_id;
-use crate::mail::registry::{ContractBreak, RouteContract};
+use crate::mail::registry::{ContractBreak, NativeHoldRefusal, NativeType, RouteContract};
 use crate::mail::view::View;
 use crate::mail::{CostCell, CostTable, KindId, MailId, MailboxId, SourceAddr};
 use crate::scheduler::SeizeHandle;
@@ -171,6 +170,14 @@ pub trait PreparedSpawnActivation: Send {
     fn id_is_retired(&self) -> bool {
         false
     }
+
+    /// The native type this birth instantiates and the namespace it holds,
+    /// read by the owner's apply loop to hold the namespace in the
+    /// publication table (ADR-0241 §3) before [`Self::reserve`]. `None` for
+    /// a storage backend that births no native type.
+    fn native_type(&self) -> Option<(&'static str, NativeType)> {
+        None
+    }
 }
 
 /// Storage-neutral reason supplied to the native finalizer. The registry
@@ -178,7 +185,7 @@ pub trait PreparedSpawnActivation: Send {
 /// completion are represented.
 #[derive(Debug)]
 pub enum PreparedSpawnFailure {
-    NamespaceOwnedByOtherType { namespace: &'static str, owning_type: TypeId },
+    NativeHold(NativeHoldRefusal),
     SubnameRetired { full_name: String },
     SubnameInUse { full_name: String },
     ActivationRejected,
@@ -254,6 +261,10 @@ impl PreparedActivationGuard {
     fn id_is_retired(&self) -> bool {
         self.0.as_ref().expect("prepared activation remains available while classifying a conflict").id_is_retired()
     }
+
+    fn native_type(&self) -> Option<(&'static str, NativeType)> {
+        self.0.as_ref().expect("prepared activation remains available until reserved").native_type()
+    }
 }
 
 impl Drop for PreparedActivationGuard {
@@ -288,6 +299,11 @@ impl PreparedSpawnCommit {
 
     pub(super) fn reject_at_home(self, failure: PreparedSpawnFailure) -> crossbeam_channel::Receiver<()> {
         self.activation.discard(failure)
+    }
+
+    /// The native type this birth instantiates and the namespace it holds.
+    pub(super) fn native_type(&self) -> Option<(&'static str, NativeType)> {
+        self.activation.native_type()
     }
 
     /// Why the owner is refusing a birth whose id already carries a route.
