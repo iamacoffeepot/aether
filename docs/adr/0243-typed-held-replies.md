@@ -93,12 +93,20 @@ held.answer(ctx, &WatchHeadResult { .. });
      - **guest:** the ticket is the reply handle, and the host keeps the hold in the reply-table slot.
 
      This is the pattern the guest `Blob` (ADR-0238, `BlobTable`) and `ReplyHandle` (`ReplyTable`) already use: the value is an id, and the runtime's table owns the resource.
+   - **Its schema names its reply kind.** `aether-data` gains one `SchemaType` node, `Ticket { reply: KindId }`, which describes a runtime-owned obligation that answers `reply`. `Held<R>` emits `Ticket { reply: R::ID }`. So a context holding `Held<A>` has a different kind id from one holding `Held<B>`, and the ADR-0139 carried-context check refuses a replacement that changed a held reply's kind. The node has actor reach only, and the JSON and MCP codecs refuse it as they refuse any field that cannot leave the engine.
    - **Dropping the context drops the debt.** An untaken context whose `Held` is live fails fast like any unanswered `Held`. When the actor closes, the ledger's teardown settles its entries silently. A context that holds several variants, such as `aether-text`'s load and metrics requests, is one enum context and one take.
    - **The ledger never evicts.** An entry leaves only when it is answered, when it is staged onto a successor, or when actor close settles it. This replaces the hand-built pairs of `send_with_context` and a stored `Source` or `InboundMail`: `aether-http`'s `DeferredSource` and `aether-window`'s `instance.rs` `pending` map.
 
 5. **A `Held<R>` answers on its actor.** `answer` takes the actor's `NativeCtx`. Work on another thread posts a wake mail, and the woken handler answers from state; this is tcp's `ConnectReady` shape. A reply that must be sent from a thread outside the actor stays manual. `aether-substrate-harness-cap`'s `on_advance`, which hands its `InboundMail` to the embedder loop, is the one such site.
 
-6. **Wasm guests get the same pair.** `WasmCtx::hold::<R>()` returns `(Pending<R>, Held<R>)`. The guest `Held<R>` wraps a `ReplyHandle`, travels in a request context as in §4, and traps when it is dropped unanswered. The host keeps its `ReplyTable` entry alive after the handler returns, and holds settlement open, until the handle answers. Today a single handler's return frees the handle (`component/dispatch.rs`), and a `ReplyEntry` carries no settlement hold. #6960 implements this.
+6. **Wasm guests get the same pair.** `WasmCtx::hold::<R>()` returns `(Pending<R>, Held<R>)`. The guest `Held<R>` wraps a `ReplyHandle`, travels in a request context as in §4, and traps when it is dropped unanswered.
+
+   **Across a replace, the ticket and its obligation both survive:**
+   - **The obligation.** The host reply table, with each held slot's settlement hold, moves to the next occupant in `PendingReplies` (#6409), so a ticket still resolves to its requester.
+   - **The ticket.** It crosses inside a carried request context, or inside saved state that `on_dehydrate` writes and `on_rehydrate` decodes. The old instance's memory is freed without running `Drop`, so no trap fires there.
+   - **The guard.** The guest SDK tracks each live ticket. After `on_dehydrate` returns, a ticket that is live and not encoded traps, which fails the replace and rolls it back (ADR-0101) instead of stranding its requester. A second decode of the same ticket also traps.
+
+   Native capabilities are not replaced at run time (ADR-0231 §5), so a native ticket lives only within one process. The host keeps its `ReplyTable` entry alive after the handler returns, and holds settlement open, until the handle answers. Today a single handler's return frees the handle (`component/dispatch.rs`), and a `ReplyEntry` carries no settlement hold. #6960 implements this.
 
 7. **Misuse fails fast.** The runtime checks what the types cannot:
    - **Unreturned receipt.** A `Pending<R>` has a fail-fast `Drop`, and the `#[actor]` macro defuses the one its handler returns. A handler that holds and discards the receipt, which would lie with a `Silent` row, panics.

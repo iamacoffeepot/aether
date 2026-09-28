@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (shipped — return-type reply contracts in aether-actor)
 - **Date:** 2026-06-13
+- **Amended (ADR-0243):** 2026-09-28 — §3's out-of-crate mint door `NativeCtx::pending` is removed, because it minted a receipt from any `DispatchId`, `DispatchId::NONE` included, with nothing armed. `ctx.hold::<R>()` and the offload dispatch calls are the only mint sites, and every `Pending<R>` names an armed in-flight ledger entry. Deferral outside ADR-0093, which the Negative section leaves uncovered, gets a typed contract through ADR-0243's `(Pending<R>, Held<R>)` pair.
 
 ## Context
 
