@@ -189,10 +189,8 @@ impl WasmActor for MeshViewer {
             path = %context.path,
             "load requested; issuing read",
         );
-        let _ = ctx.send_with_context::<FsCapability>(
-            &Read { addr: NamespaceAddr::new(&context.namespace, &context.path) },
-            &context,
-        );
+        let read = Read { addr: NamespaceAddr::new(&context.namespace, &context.path) };
+        let _ = ctx.send_with_context::<FsCapability>(&read, context);
     }
 
     /// Consumes the substrate's I/O reply. Dispatches on the request

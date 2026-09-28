@@ -55,6 +55,11 @@ pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// rather than reached as a global — the same discipline the parent
     /// slot (`__AETHER_COMPONENT`) already follows.
     pub(super) inline: &'a Registry,
+    /// ADR-0243 §7: whether this dispatch already armed a held reply with
+    /// [`Self::hold`]. A second hold would owe two replies to one request.
+    /// A plain `bool`, the same in every reply mode, so the mode and actor
+    /// reborrows stay layout-identical.
+    pub(super) held_armed: bool,
     _borrow: PhantomData<&'a ()>,
     /// ADR-0112: phantom reply-mode marker (a ZST, layout-neutral) that
     /// selects which reply surface this ctx exposes. Defaults to
@@ -106,6 +111,7 @@ impl<'a> WasmCtx<'a, Erased, Manual> {
             source: decode_source(source),
             host_dispatch: true,
             inline,
+            held_armed: false,
             _borrow: PhantomData,
             _mode: PhantomData,
             _actor: PhantomData,
@@ -124,6 +130,7 @@ impl<'a> WasmCtx<'a, Erased, Manual> {
             source: decode_source(source),
             host_dispatch: false,
             inline,
+            held_armed: false,
             _borrow: PhantomData,
             _mode: PhantomData,
             _actor: PhantomData,
@@ -242,6 +249,11 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// A wrong-kind take leaves the context stored, so a handler that serves
     /// several context kinds tries each type in turn. A decode failure
     /// consumes it.
+    ///
+    /// Each [`Held`](crate::Held) the context carries is claimed back live, to
+    /// be answered or parked again (ADR-0243 §4). A reply whose stored context
+    /// holds a `Held` must take it before its handler returns: the `export!`
+    /// receive shim panics, naming the context kind, when it is left untaken.
     pub fn take_context<C: Kind>(&mut self) -> Option<C> {
         let request = self.in_reply_to()?;
         self.inline.take_request_context(request)

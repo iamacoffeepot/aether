@@ -883,29 +883,44 @@ fn build_dispatch_body(
         // ADR-0112: the dispatch ctx is the full `Manual` view. A single
         // handler is called with the downgraded `as_single()` view and the
         // macro auto-replies a `-> R` return through `OutboundReply::reply`
-        // on the `Manual` ctx (`-> ()` / `-> Pending<R>` discard it — the
-        // deferred `Pending` send is #1805). A manual handler is called with
-        // the `Manual` ctx directly and issues its own replies — no
-        // auto-reply, regardless of return type. The arm's return code
-        // carries its class to the host (#6412): a single arm returns
+        // on the `Manual` ctx; a `-> ()` handler sends nothing. A manual
+        // handler is called with the `Manual` ctx directly and issues its own
+        // replies — no auto-reply, regardless of return type. The arm's return
+        // code carries its class to the host (#6412): a single arm returns
         // `DISPATCH_HANDLED_RELEASE`, so the substrate frees the dispatch's
         // reply handle, and a manual arm returns `DISPATCH_HANDLED`, so the
-        // handle it may have kept stays live.
-        let rc = match h.class {
-            HandlerClass::Single => quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE },
-            HandlerClass::Manual => quote! { ::aether_actor::DISPATCH_HANDLED },
-        };
-        let call = match (h.class, &h.reply) {
-            (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
-                let __aether_reply = self.#method(#ctx.as_single(), __aether_decoded);
-                ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
-            },
-            (HandlerClass::Single, HandlerReply::None | HandlerReply::Deferred(_)) => quote! {
-                self.#method(#ctx.as_single(), __aether_decoded);
-            },
-            (HandlerClass::Manual, _) => quote! {
-                self.#method(#ctx, __aether_decoded);
-            },
+        // handle it may have kept stays live. ADR-0243 §6: a single
+        // `-> Pending<R>` arm defuses the receipt its handler returned and
+        // returns `DISPATCH_HANDLED_HOLD`, so the substrate keeps the handle
+        // and holds the requester's settlement for the `Held<R>` minted beside
+        // the receipt.
+        let (call, rc) = match (h.class, &h.reply) {
+            (HandlerClass::Single, HandlerReply::Sync(_)) => (
+                quote! {
+                    let __aether_reply = self.#method(#ctx.as_single(), __aether_decoded);
+                    ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
+                },
+                quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE },
+            ),
+            (HandlerClass::Single, HandlerReply::None) => (
+                quote! {
+                    self.#method(#ctx.as_single(), __aether_decoded);
+                },
+                quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE },
+            ),
+            (HandlerClass::Single, HandlerReply::Deferred(_)) => (
+                quote! {
+                    let __aether_pending = self.#method(#ctx.as_single(), __aether_decoded);
+                    ::aether_actor::Pending::__defuse(__aether_pending);
+                },
+                quote! { ::aether_actor::DISPATCH_HANDLED_HOLD },
+            ),
+            (HandlerClass::Manual, _) => (
+                quote! {
+                    self.#method(#ctx, __aether_decoded);
+                },
+                quote! { ::aether_actor::DISPATCH_HANDLED },
+            ),
         };
         // `Mail::kind()` and `Kind::ID` are both the typed `KindId`
         // newtype (`KindId: PartialEq`), so they compare directly.

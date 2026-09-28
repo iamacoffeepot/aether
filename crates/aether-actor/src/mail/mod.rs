@@ -16,7 +16,6 @@
 
 use alloc::vec::Vec;
 use core::slice;
-use serde::de::DeserializeOwned;
 
 use core::marker::PhantomData;
 
@@ -28,6 +27,7 @@ use aether_data::{
 
 #[cfg(target_arch = "wasm32")]
 use crate::blob::guest::GuestResolver;
+use crate::wasm::inline::Registry;
 
 /// Framework wake emitted after the registry publishes a new live-mailbox or
 /// kind inventory generation. The inventory rides a pinned registry view, so
@@ -314,6 +314,11 @@ pub struct PriorState<'a> {
     version: u32,
     ptr: usize,
     len: usize,
+    /// The replacement's per-component registry, when the `export!` shim
+    /// supplied it: [`Self::decode_kind`] then claims each ADR-0243 `Held`
+    /// in the saved state back live through its held-reply ledger. Without
+    /// it a `Held` refuses to decode.
+    registry: Option<&'a Registry>,
     _borrow: PhantomData<&'a [u8]>,
 }
 
@@ -323,7 +328,7 @@ impl<'a> PriorState<'a> {
     #[doc(hidden)]
     #[must_use]
     pub unsafe fn __from_raw(version: u32, ptr: u32, len: u32) -> Self {
-        PriorState { version, ptr: ptr as usize, len: len as usize, _borrow: PhantomData }
+        PriorState { version, ptr: ptr as usize, len: len as usize, registry: None, _borrow: PhantomData }
     }
 
     /// Not part of the public API; mirrors `Mail::__from_ptr` for the
@@ -332,7 +337,16 @@ impl<'a> PriorState<'a> {
     #[doc(hidden)]
     #[must_use]
     pub unsafe fn __from_ptr(version: u32, ptr: usize, len: usize) -> Self {
-        PriorState { version, ptr, len, _borrow: PhantomData }
+        PriorState { version, ptr, len, registry: None, _borrow: PhantomData }
+    }
+
+    /// Not part of the public API; called by `export!` and the inline
+    /// reconstruct. Grants [`Self::decode_kind`] the component's held-reply
+    /// ledger, so a saved `Held` claims back live (ADR-0243 §6).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __with_registry(self, registry: &'a Registry) -> Self {
+        Self { registry: Some(registry), ..self }
     }
 
     /// Component-defined schema version. The substrate does not
@@ -371,11 +385,13 @@ impl<'a> PriorState<'a> {
     /// migrate across a schema change can reach for `bytes()` +
     /// `schema_version()` directly, or try `decode_kind::<OldShape>()`
     /// first and fall back if it returns `None`.
+    ///
+    /// Each [`Held`](crate::Held) the state carries is claimed back live, to
+    /// be answered or parked again (ADR-0243 §6). The payload decodes through
+    /// `Kind::decode_with`, which reads the serde wire encoding older SDKs
+    /// wrote for a derived structured kind.
     #[must_use]
-    pub fn decode_kind<K>(&self) -> Option<K>
-    where
-        K: Kind + Schema + DeserializeOwned,
-    {
+    pub fn decode_kind<K: Kind>(&self) -> Option<K> {
         let bytes = self.bytes();
         if bytes.len() < 8 {
             return None;
@@ -387,7 +403,7 @@ impl<'a> PriorState<'a> {
         if id != K::ID.0 {
             return None;
         }
-        wire::from_bytes(payload).ok()
+        self.registry.map_or_else(|| K::decode_from_bytes(payload), |registry| registry.decode_saved_state(payload))
     }
 }
 

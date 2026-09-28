@@ -56,7 +56,7 @@ pub fn dehydrate(
     // Parent half: capture whatever the parent's `on_dehydrate` saves.
     let mut parent_capture = CapturedState::default();
     {
-        let mut ctx = WasmDropCtx::__new_capturing(mailbox_id, &mut parent_capture);
+        let mut ctx = WasmDropCtx::__new_capturing(mailbox_id, &mut parent_capture, registry);
         run_parent_dehydrate(&mut ctx);
     }
     let parent_saved = parent_capture.take();
@@ -69,7 +69,7 @@ pub fn dehydrate(
     for meta in metas {
         let mut child_capture = CapturedState::default();
         registry.with_child_mut(meta.id, |child| {
-            let mut ctx = WasmDropCtx::__new_capturing(meta.id.0, &mut child_capture);
+            let mut ctx = WasmDropCtx::__new_capturing(meta.id.0, &mut child_capture, registry);
             child.erased_on_dehydrate(&mut ctx);
         });
         let (version, state_bytes) = child_capture.take().unwrap_or((0, Vec::new()));
@@ -283,7 +283,8 @@ where
                 to_reconstruct.state_bytes.as_ptr() as usize,
                 to_reconstruct.state_bytes.len(),
             )
-        };
+        }
+        .__with_registry(registry);
         child.erased_on_rehydrate(&mut ctx, prior);
     }
 

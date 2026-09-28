@@ -3,15 +3,15 @@
 //! relative verbs' in-place routing.
 
 use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
-use crate::mail::Mail;
+use crate::mail::{Mail, NO_REPLY_HANDLE};
 use crate::model::ctx::{Erased, Manual, Single};
 use crate::model::{Addressable, Embedded, HandlesKind, Resolve};
 use crate::reference::ErasedActorRef;
 use crate::wasm::inline::{ChildRecord, RouteDecision};
 use crate::wasm::{ActorInitError, WasmInitCtx};
-use aether_data::{ActorId, MailboxId, Source};
+use aether_data::{ActorId, Kind, MailboxId, Source};
 use alloc::string::String;
-use core::mem::{align_of, size_of};
+use core::mem::{self, align_of, size_of};
 
 struct EmbeddedPeer;
 
@@ -38,6 +38,62 @@ impl crate::WasmActor for PeerDependent {
     fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {
         let _ = self;
     }
+}
+
+#[aether_data::kind(name = "test.wasm.deferred_ask")]
+struct DeferredAsk {
+    value: u32,
+}
+
+#[aether_data::kind(name = "test.wasm.deferred_answer")]
+struct DeferredAnswer {
+    value: u32,
+}
+
+/// Answers [`DeferredAsk`] later: its handler holds the reply, parks the
+/// ticket in its state and returns the receipt.
+struct Deferrer {
+    parked: Option<crate::Held<DeferredAnswer>>,
+}
+
+#[crate::actor]
+impl crate::WasmActor for Deferrer {
+    const NAMESPACE: &'static str = "test.wasm.deferrer";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self { parked: None })
+    }
+
+    #[handler::single]
+    fn on_ask(&mut self, ctx: &mut WasmCtx<'_>, _ask: DeferredAsk) -> crate::Pending<DeferredAnswer> {
+        let (pending, held) = ctx.hold::<DeferredAnswer>();
+        self.parked = Some(held);
+        pending
+    }
+}
+
+/// ADR-0243 §6: a single `-> Pending<R>` arm reports `DISPATCH_HANDLED_HOLD`,
+/// so the host keeps the reply handle its `Held` answers through. An arm
+/// that reported `DISPATCH_HANDLED_RELEASE` would free the handle under the
+/// debt, and one that failed to defuse the receipt would trap.
+#[test]
+fn deferred_arm_returns_hold() {
+    let registry = Registry::new();
+    let mut deferrer = Deferrer { parked: None };
+    let payload = DeferredAsk { value: 1 }.encode_into_bytes();
+    let handle = 9;
+    // SAFETY: `payload` outlives the `Mail` built over it.
+    let mail =
+        unsafe { Mail::__from_ptr(DeferredAsk::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, handle, 0x10) };
+
+    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let rc = <Deferrer as crate::WasmDispatch<Deferrer>>::dispatch(&mut deferrer, &mut ctx, mail);
+    assert_eq!(rc, crate::DISPATCH_HANDLED_HOLD);
+
+    let held = deferrer.parked.take().expect("the handler parked its ticket");
+    registry.release_held(handle);
+    assert_ne!(handle, NO_REPLY_HANDLE);
+    mem::forget(held);
 }
 
 #[test]
