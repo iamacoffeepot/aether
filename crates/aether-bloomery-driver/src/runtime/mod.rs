@@ -103,8 +103,9 @@ pub struct DriverParams {
 }
 
 /// [`BundleDriver`] runtime state: the sans-io program core, the unit and
-/// journal it folds for, the workspace its programs run through, the core's startup commands until `wire` performs
-/// them, the parked replies it owes, and each loaded bundle's root.
+/// journal it folds for, the workspace its programs run through, the core's
+/// startup commands until `wire` performs them, the parked replies it owes,
+/// and each loaded bundle's root.
 pub struct BundleDriverState {
     core: ProgramCore,
     unit: UnitKey,

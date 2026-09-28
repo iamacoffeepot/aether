@@ -35,8 +35,8 @@ pub struct Mounted {
 /// Spawn the journal owner over `journal` with the `read_cache` budget under
 /// `Subname::Named(unit)` and the bundle driver under `Subname::Named("driver")`
 /// over the unit's key, the journal's born reference, and the composed
-/// workspace's reference, so the engine answers
-/// as `aether.bloomery.journal:<key>` and `aether.bloomery.driver:driver`, and
+/// workspace's reference, so the engine answers as
+/// `aether.bloomery.journal:<key>` and `aether.bloomery.driver:driver`, and
 /// hand both references back as [`Mounted`]. The journal's name is already the
 /// unit-root name ADR-0240 D1 gives it.
 ///
