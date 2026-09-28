@@ -36,6 +36,16 @@ pub use frame_size::{FrameSizeConfig, FrameSizeOverlay};
 // `aether_rpc::RpcInboundReady` resolves unchanged.
 pub use kinds::*;
 
+/// The held delivery contract for one engine's RPC forwarding route.
+///
+/// A route accepts [`ForwardEnvelope`] and chooses its replies manually:
+/// each remote reply may have any kind, followed by the terminal
+/// [`CallSettled`] signal when the remote call closes.
+#[aether_actor::protocol]
+pub trait EngineRoute {
+    fn forward(mail: ForwardEnvelope) -> aether_actor::Undeclared;
+}
+
 // Re-export the wire vocabulary + the native `Call` client at the
 // module root so `aether_rpc::{MailEnvelope, RpcClient,
 // WireFrame, ...}` resolves unchanged (ADR-0124). The client

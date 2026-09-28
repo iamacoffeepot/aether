@@ -45,11 +45,11 @@ pub struct ForwardEnvelope {
 /// wire `Call` to it.
 ///
 /// A proxy sends this from its `wire` hook, for its own engine. The
-/// registrant is the envelope sender, kept as a proven reference, so the
-/// kind names no position. One registrant owns one engine, and an engine
+/// registrant is the envelope sender, admitted only when its published
+/// contract covers [`crate::EngineRoute`], then kept as that typed proof, so
+/// the kind names no position. One registrant owns one engine, and an engine
 /// id already held by a different registrant is refused. The route lasts
-/// until the registrant departs. The answer is
-/// [`RegisterEngineRouteResult`].
+/// until the registrant departs. The answer is [`RegisterEngineRouteResult`].
 #[aether_data::kind(name = "aether.rpc.register_engine_route")]
 pub struct RegisterEngineRoute {
     pub engine_id: EngineId,

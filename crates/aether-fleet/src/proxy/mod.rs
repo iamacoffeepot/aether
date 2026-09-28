@@ -111,7 +111,13 @@ pub struct FleetProxy;
 // `impl NativeActor` off disk to emit the identity. The handler-signature
 // kinds (`ForwardEnvelope` / `RpcInboundReady` / …) stay always-on at file
 // root — the always-on `HandlesKind<K>` markers name them.
-use aether_actor::actor;
+use aether_actor::{CoveredBy, actor};
+use aether_rpc::EngineRoute;
+
+const _: () = {
+    const fn covered<P: CoveredBy<R>, R>() {}
+    covered::<EngineRoute, FleetProxy>();
+};
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,
 // `FleetProxyState`, its `Drop` + helper methods) plus
