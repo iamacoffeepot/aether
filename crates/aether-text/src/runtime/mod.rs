@@ -158,7 +158,7 @@ impl TextCapabilityState {
         // Forward the read to the single fs resolver (ADR-0041); the
         // `ReadResult` routes back to `on_read_result`, which parses
         // it.
-        let _ = ctx.send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(namespace, path) }, &context);
+        let _ = ctx.send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(namespace, path) }, context);
     }
 
     /// Parse caller-supplied font bytes off the hot path, then resume through

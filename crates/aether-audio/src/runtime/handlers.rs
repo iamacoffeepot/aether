@@ -192,7 +192,7 @@ impl AudioCapabilityState {
         // the read on the fs cap means the audio cap never grows a second
         // namespace registry (ADR-0103 §2).
         let _ = ctx
-            .send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(mail.namespace, mail.path) }, &context);
+            .send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(mail.namespace, mail.path) }, context);
     }
 
     pub fn handle_read_result<A: DependsOn<FsCapability>>(
@@ -326,7 +326,7 @@ impl AudioCapabilityState {
         // the `ReadResult` routes back to `on_read_result`, which parses
         // it and fans out the sample reads (ADR-0103 §2/§5).
         let _ = ctx
-            .send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(mail.namespace, mail.path) }, &context);
+            .send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(mail.namespace, mail.path) }, context);
     }
 
     /// Claim a session-scoped instrument id for an assembled bank and

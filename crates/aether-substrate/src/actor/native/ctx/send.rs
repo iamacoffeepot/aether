@@ -328,8 +328,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.push_to(target.erased(), payload, None, None)
     }
 
-    /// Send `payload` through the held reference `target` and store `context`
-    /// under the minted correlation, for the reply handler to take back with
+    /// Send `payload` through the held reference `target` and move `context`
+    /// into the request-context table under the minted correlation, for the
+    /// reply handler to take back with
     /// [`Self::take_context`](super::NativeCtx::take_context).
     ///
     /// It inherits this handler's causal chain as [`Self::send_to`] does and
@@ -347,16 +348,16 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         &mut self,
         target: impl Target<K, I>,
         payload: &K,
-        context: &C,
+        context: C,
     ) -> MailId {
         let mail_id = self.push_to(target.erased(), payload, self.outbound_parent(), self.outbound_root());
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        self.park_context(mail_id, context);
         mail_id
     }
 
     /// Send `payload` through the held reference `target` on a fresh causal
-    /// chain and store `context` under the minted correlation, for the reply
-    /// handler to take back with
+    /// chain and move `context` into the request-context table under the
+    /// minted correlation, for the reply handler to take back with
     /// [`Self::take_context`](super::NativeCtx::take_context). The returned
     /// [`MailId`] is the root of the new chain.
     ///
@@ -374,10 +375,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         &mut self,
         target: impl Target<K, I>,
         payload: &K,
-        context: &C,
+        context: C,
     ) -> MailId {
         let mail_id = self.push_to(target.erased(), payload, None, None);
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        self.park_context(mail_id, context);
         mail_id
     }
 
@@ -403,8 +404,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
 
     /// Send `payload` to the declared dependency `R` as [`Self::send`] does
-    /// and store `context` under the minted correlation, for the reply
-    /// handler to take back with
+    /// and move `context` into the request-context table under the minted
+    /// correlation, for the reply handler to take back with
     /// [`Self::take_context`](super::NativeCtx::take_context).
     ///
     /// It carries [`Self::send`]'s bound (`A: DependsOn<R>`), inherits this
@@ -417,7 +418,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     pub fn send_with_context<R: Singleton + CallerAddressable>(
         &mut self,
         payload: &impl SendableTo<R>,
-        context: &impl Kind,
+        context: impl Kind,
     ) -> MailId
     where
         A: DependsOn<R>,
@@ -425,7 +426,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     {
         let mail_id =
             self.push_to(self.actor_ref::<R>().erase(), payload, self.outbound_parent(), self.outbound_root());
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        self.park_context(mail_id, context);
         mail_id
     }
 
@@ -474,6 +475,15 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// through the engine store and attached (ADR-0238 decision 3).
     fn encode_in_process<K: Kind>(&self, payload: &K) -> EncodedMail {
         encode_envelope(self.binding.mailer().blob_store(), payload)
+    }
+
+    /// Move `context` into the request-context table under `mail_id`'s
+    /// correlation (ADR-0243 §4): the sender keeps no copy it could answer
+    /// after the reply's take. The table still encodes from a reference, so
+    /// the value drops here once stored.
+    fn park_context(&self, mail_id: MailId, context: impl Kind) {
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), &context);
+        drop(context);
     }
 
     /// The push behind the `send_to` family: encode `payload` and push it to

@@ -51,7 +51,7 @@ pub(super) fn forward<A: DependsOn<WindowCapability>>(
         ctx.fatal_abort(format!("duplicate retained window request {request}"));
     }
     let _ =
-        ctx.send_with_context::<WindowCapability>(&ApplyWindowCommand { command }, &WindowForwardContext { request });
+        ctx.send_with_context::<WindowCapability>(&ApplyWindowCommand { command }, WindowForwardContext { request });
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]

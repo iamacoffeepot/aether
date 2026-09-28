@@ -86,7 +86,7 @@ impl<A, K: ActorMail> DeferredRequest<'_, '_, NativeCtx<'_, A, Manual>, K> {
         R::Resolver: DependencyResolver,
         A: DependsOn<R>,
     {
-        let _ = self.ctx.send_with_context::<R>(self.request, &DeferredSource { source: self.source });
+        let _ = self.ctx.send_with_context::<R>(self.request, DeferredSource { source: self.source });
         Outcome::Deferred
     }
 }
