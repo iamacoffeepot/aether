@@ -49,15 +49,22 @@ held.answer(ctx, &WatchHeadResult { .. });
 
 1. **`ctx.hold::<R>()` returns `(Pending<R>, Held<R>)`.** It captures the current settlement hold and reply target, as `defer_reply_to(reply_target())` does today. `Held<R>` is `DeferredReply` with the reply kind in its type. It is `#[must_use]`, and its drop fails fast when unanswered. `answer(self, ctx, &R)` sends the terminal reply and releases the hold. `abandon_for_actor_close` remains the one silent discharge. `Held<R>` implements `IntoDeferredReply`, so `continue_from` and the other staging surfaces take it unchanged.
 
-2. **`Pending<R>` stays the phantom receipt, and the return type stays the contract.** The receipt goes to the `#[actor]` macro and sets the row. The debt goes to state, a table, or a successor. One value cannot do both, because returning it would hand the debt to the framework. `hold` joins the existing mint sites. A handler may answer through its `Held<R>` before it returns, for an early `Err`; the receipt proves only that the obligation was armed.
+2. **`Pending<R>` stays the phantom receipt, and the return type stays the contract.** The receipt goes to the `#[actor]` macro and sets the row. The debt goes to state, a table, or a successor. One value cannot do both, because returning it would hand the debt to the framework. A handler may answer through its `Held<R>` before it returns, for an early `Err`; the receipt proves only that the obligation was armed.
 
-3. **A native held table pairs a held reply with an outbound send.** A `Held<R>` owns a settlement hold and cannot be a kind, so the ADR-0139 request-context table (`send_with_context` / `take_context`, which stores a `Kind`) cannot carry it. `send_holding::<P>(&payload, held)` sends as `send` does and stores the `Held<R>` under the minted correlation. `take_held::<R>()`, in the handler for the peer's reply, removes it by `in_reply_to`. The table never evicts: an entry leaves only by `take_held`, or by `abandon_for_actor_close` when the actor closes. This replaces the hand-built pairs of `send_with_context` plus a stored `Source` or `InboundMail` (`aether-http`'s `DeferredSource`, `aether-window`'s `instance.rs` `pending` map).
+3. **Only an armed obligation mints a receipt.** `NativeCtx::pending(DispatchId)` is removed. Today it mints a `Pending<R>` from any id, `DispatchId::NONE` included, so a handler can declare `-> Pending<R>` with nothing armed, which ADR-0109 §3 set out to prevent. Its three callers arm by hand just before they mint:
+   - `aether-substrate`'s `TaskQueue::submit`;
+   - `aether-http`'s client `PerSenderEgress::submit`;
+   - `aether-bloomery-workspace`'s `RunQueue::submit`.
 
-4. **A `Held<R>` answers on its actor.** `answer` takes the actor's `NativeCtx`. Work on another thread posts a wake mail, and the woken handler answers from state; this is tcp's `ConnectReady` shape. A reply that must be sent from a thread outside the actor stays manual. `aether-substrate-harness-cap`'s `on_advance`, which hands its `InboundMail` to the embedder loop, is the one such site.
+   When one of these dispatches at once, it returns the receipt that the dispatch call mints. When it queues, it enqueues a `Held<R>` in place of the raw `SettlementHold` and `Source` pair. `hold` and the offload dispatch calls are the only mint sites left.
 
-5. **Wasm guests get the same pair.** `WasmCtx::hold::<R>()` returns `(Pending<R>, Held<R>)`. The guest `Held<R>` is a typed `ReplyHandle` and can live in a request context or saved state. The host keeps its `ReplyTable` entry alive after the handler returns, and holds settlement open, until the handle answers. Today a single handler's return frees the handle (`component/dispatch.rs`), and a `ReplyEntry` carries no settlement hold. #6960 implements this.
+4. **A native held table pairs a held reply with an outbound send.** A `Held<R>` owns a settlement hold and cannot be a kind, so the ADR-0139 request-context table (`send_with_context` / `take_context`, which stores a `Kind`) cannot carry it. `send_holding::<P>(&payload, held)` sends as `send` does and stores the `Held<R>` under the minted correlation. `take_held::<R>()`, in the handler for the peer's reply, removes it by `in_reply_to`. The table never evicts: an entry leaves only by `take_held`, or by `abandon_for_actor_close` when the actor closes. This replaces the hand-built pairs of `send_with_context` plus a stored `Source` or `InboundMail` (`aether-http`'s `DeferredSource`, `aether-window`'s `instance.rs` `pending` map).
 
-6. **Manual keeps what it is for.** A handler stays `#[handler::manual]` when it:
+5. **A `Held<R>` answers on its actor.** `answer` takes the actor's `NativeCtx`. Work on another thread posts a wake mail, and the woken handler answers from state; this is tcp's `ConnectReady` shape. A reply that must be sent from a thread outside the actor stays manual. `aether-substrate-harness-cap`'s `on_advance`, which hands its `InboundMail` to the embedder loop, is the one such site.
+
+6. **Wasm guests get the same pair.** `WasmCtx::hold::<R>()` returns `(Pending<R>, Held<R>)`. The guest `Held<R>` is a typed `ReplyHandle` and can live in a request context or saved state. The host keeps its `ReplyTable` entry alive after the handler returns, and holds settlement open, until the handle answers. Today a single handler's return frees the handle (`component/dispatch.rs`), and a `ReplyEntry` carries no settlement hold. #6960 implements this.
+
+7. **Manual keeps what it is for.** A handler stays `#[handler::manual]` when it:
    - forwards or relays its obligation (`forward_to`, the fleet proxy, bundle relays);
    - replies zero or many times;
    - chooses its reply kind at run time with no enum kind to name the choice;
@@ -77,7 +84,6 @@ held.answer(ctx, &WatchHeadResult { .. });
 
 - The type does not prove that a stored `Held<R>` is ever answered. Rust has no linear types. An unanswered drop fails fast, but a debt parked forever is legitimate for a long-poll and is ended only by the requester's timeout.
 - There are two values where one handler used to have none. The receipt is the cost of keeping the contract on the return type.
-- `NativeCtx::pending(DispatchId)` still mints a receipt from an id alone. That weakens ADR-0109 §3's "you cannot claim a contract you didn't arm". Closing it is follow-on work.
 
 ### Neutral / forward
 
