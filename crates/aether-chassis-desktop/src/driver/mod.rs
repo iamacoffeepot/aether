@@ -240,7 +240,7 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
     }
 
     fn detach_window(&mut self, path: &ErasedActorPath) {
-        if self.render_slot.host_turn(|state, _ctx| state.detach_window(path)) == Some(false) {
+        if self.render_slot.host_turn(|state, ctx| state.detach_window(ctx, path)) == Some(false) {
             tracing::warn!(
                 target: "aether_substrate::render",
                 window = %path,

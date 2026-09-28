@@ -4,7 +4,7 @@
 //! via [`resolve_reference`]; the resolved [`ReferenceCapture`] rides the
 //! pending capture until `on_frame` scores it against the readback RGBA.
 //!
-//! [`PendingCapture`] is that parked capture: the retained reply guard plus
+//! [`PendingCapture`] is that parked capture: the held reply ticket plus
 //! everything the readback still needs. It lives here rather than beside the
 //! frame loop because every field on it is capture state, and the runtime only
 //! ever asks it two questions — is it ready, and has it expired.
@@ -15,9 +15,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use aether_data::ErasedActorPath;
-use aether_kinds::{FrameCheck, SimilarityCheck};
+use aether_kinds::{CaptureFrameResult, FrameCheck, SimilarityCheck};
+use aether_substrate::actor::native::Held;
 use aether_substrate::capture::ReferenceCapture;
-use aether_substrate::chassis::inbox::InboundMail;
 use aether_substrate::mail::BoundaryMail;
 
 /// Resolve the optional reference image for a `#1780` similarity
@@ -63,15 +63,17 @@ pub fn resolve_reference(
 }
 
 /// A parked capture, as plain owned state (ADR-0161 §Decision 4) — no
-/// `Arc`, no atomic, no cross-thread queue. The retained [`InboundMail`]
-/// guard defers the reply a frame (or more) past `on_capture_frame`; its
-/// un-fired `record_finished` keeps the inbound's chain open until the
-/// reply lands (ADR-0080 §6, ADR-0106).
+/// `Arc`, no atomic, no cross-thread queue. The [`Held`] ticket defers the
+/// reply a frame (or more) past `on_capture_frame`; the settlement hold it
+/// captured keeps the caller's chain open until the frame loop answers it
+/// (ADR-0243 §1).
 pub struct PendingCapture {
     /// Selected desktop target, the window's canonical path. `None` is the
     /// explicit surfaceless path.
     pub window: Option<ErasedActorPath>,
-    pub reply: InboundMail,
+    /// The owed `CaptureFrameResult`, answered on the render actor once the
+    /// readback lands, the capture wedges, or its device or window goes.
+    pub held: Held<CaptureFrameResult>,
     pub after_mails: Vec<BoundaryMail>,
     /// `FrameCheck` verdict requests, scored on the read-back RGBA in
     /// `on_frame`'s ready-branch (ADR-0161 §Decision 4). The scorer lives in
@@ -85,6 +87,26 @@ pub struct PendingCapture {
     pub pre_remaining: usize,
     /// Wall-clock instant past which the capture wedges to `Err`.
     pub deadline: Instant,
+}
+
+/// A capture `on_capture_frame` accepted, with its pre-mails already
+/// dispatched: every [`PendingCapture`] field but the held reply, which the
+/// handler arms and hands to [`AcceptedCapture::park`].
+pub struct AcceptedCapture {
+    pub window: Option<ErasedActorPath>,
+    pub after_mails: Vec<BoundaryMail>,
+    pub checks: Vec<FrameCheck>,
+    pub reference: Option<ReferenceCapture>,
+    pub pre_remaining: usize,
+    pub deadline: Instant,
+}
+
+impl AcceptedCapture {
+    /// Park the capture with the ticket its frame-loop answer settles.
+    pub fn park(self, held: Held<CaptureFrameResult>) -> PendingCapture {
+        let Self { window, after_mails, checks, reference, pre_remaining, deadline } = self;
+        PendingCapture { window, held, after_mails, checks, reference, pre_remaining, deadline }
+    }
 }
 
 impl PendingCapture {
