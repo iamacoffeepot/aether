@@ -21,6 +21,7 @@ mod correlation_carry;
 mod cube;
 mod dependent_probe;
 mod editor_region_probe;
+mod held_carry;
 mod http_handler;
 mod inline_child;
 mod mat4_source;
@@ -41,6 +42,7 @@ pub use correlation_carry::{CarryRequester, ReplyHolder};
 pub use cube::Cube;
 pub use dependent_probe::DependentProbe;
 pub use editor_region_probe::EditorRegionProbe;
+pub use held_carry::{HeldForgetter, HeldKeeper, HeldRelay, HeldRequester};
 pub use http_handler::{
     HttpHandler, RoutedHttpHandler, RoutedStreamingHttpHandler, StreamingHttpHandler, WebSocketHandler,
 };
@@ -106,6 +108,10 @@ aether_actor::export!(
         DependentProbe,
         CarryRequester,
         ReplyHolder,
+        HeldRequester,
+        HeldRelay,
+        HeldKeeper,
+        HeldForgetter,
         ContractBase,
         ContractDropped,
         ContractChanged,

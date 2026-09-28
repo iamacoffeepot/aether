@@ -50,7 +50,8 @@ pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
     RolePieces { field_name: format_ident!("programs"), field, init, handlers, items, spawns: vec![invocation_ident()] }
 }
 
-/// The program role's root state: the live-seq table plus the relay maps a
+/// The program role's root state: the live-seq table, each live seq holding
+/// the `Invoked` reply its `Invoke` is owed (ADR-0243), plus the relay maps a
 /// fetch-on-miss and a program API call travel through. An invocation's fetch
 /// or API call goes to its root, which sends it to whoever sent that
 /// invocation's `Invoke` (the driver) and relays the answer back to the
@@ -58,7 +59,7 @@ pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
 fn expand_state(state: &Ident, program: &TokenStream2) -> TokenStream2 {
     quote! {
         struct #state {
-            root: #program::Root<::core::option::Option<::aether_actor::ReplyHandle>>,
+            root: #program::Root<::aether_actor::Held<#program::Invoked>>,
             /// Each live invocation's `Invoke` sender, keyed by the invocation.
             invokers: #program::__macro_internals::BTreeMap<
                 ::aether_actor::ErasedActorRef,
@@ -83,19 +84,18 @@ fn expand_state(state: &Ident, program: &TokenStream2) -> TokenStream2 {
 fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> TokenStream2 {
     let relays = expand_relay_handlers(program);
     quote! {
-        #[handler::manual]
+        /// Admit `invoke` and run it on a per-seq invocation child. The
+        /// `Invoked` reply is held: a rejection answers it at once, and a
+        /// started seq keeps it live until its child reports back.
+        #[handler::single]
         fn on_invoke(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased>,
             invoke: #program::Invoke,
-        ) {
-            use ::aether_actor::OutboundReply;
+        ) -> ::aether_actor::Pending<#program::Invoked> {
+            let (pending, held) = ctx.hold::<#program::Invoked>();
             match self.programs.root.admit(&invoke) {
-                ::core::result::Result::Err(rejected) => {
-                    if ctx.reply_target().is_some() {
-                        ctx.reply(&rejected);
-                    }
-                }
+                ::core::result::Result::Err(rejected) => held.answer(ctx, &rejected),
                 ::core::result::Result::Ok(admission) => {
                     let seq = admission.seq();
                     let seq_name =
@@ -105,40 +105,36 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
                         &(),
                     ) {
                         ::core::result::Result::Ok(child) => {
-                            admission.start(child.id(), ctx.reply_target());
+                            admission.start(child.id(), held);
                             if let Some(invoker) = ctx.sender() {
                                 self.programs.invokers.insert(child.erase(), invoker);
                             }
                             child.send(ctx, &invoke);
                         }
-                        ::core::result::Result::Err(_) => {
-                            let rejected = admission.spawn_failed();
-                            if ctx.reply_target().is_some() {
-                                ctx.reply(&rejected);
-                            }
-                        }
+                        ::core::result::Result::Err(_) => held.answer(ctx, &admission.spawn_failed()),
                     }
                 }
             }
+            pending
         }
 
+        /// A child's `Invoked` report: answer the seq's held reply and
+        /// retire the child. Manual because it answers another request's
+        /// debt, not its own inbound.
         #[handler::manual]
         fn on_invoked(
             &mut self,
             ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
             invoked: #program::Invoked,
         ) {
-            use ::aether_actor::OutboundReply;
             let Some(sender) = ctx.sender() else {
                 return;
             };
-            let Some((_, reply)) = self.programs.root.finish(&invoked, Some(sender.id())) else {
+            let Some((_, held)) = self.programs.root.finish(&invoked, Some(sender.id())) else {
                 return;
             };
             self.programs.invokers.remove(&sender);
-            if let Some(reply) = reply {
-                ctx.reply_to(reply, &invoked);
-            }
+            held.answer(ctx, &invoked);
             ctx.despawn_inline_child(sender);
         }
 
