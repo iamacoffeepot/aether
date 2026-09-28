@@ -89,7 +89,7 @@ impl Component {
     ///
     /// ADR-0243 §6: a single arm that returned a `Pending<R>` reports
     /// `DISPATCH_HANDLED_HOLD`. Its handle stays held, and its slot is armed
-    /// with a [`HeldChain`]: a settlement hold on the inbound's root and the
+    /// with a `HeldChain`: a settlement hold on the inbound's root and the
     /// inbound's lineage, which the held reply is later stamped with. The
     /// hold is taken here, after `receive` returns and before the
     /// trampoline's dispatcher records this inbound's `Finished`, so the

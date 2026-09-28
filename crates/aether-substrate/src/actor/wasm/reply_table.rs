@@ -137,12 +137,21 @@ const fn next_generation(index: u32, generation: u32) -> u32 {
 #[derive(Debug)]
 pub struct HeldChain {
     /// `None` when the inbound carried no root, so there is no chain to hold.
-    #[allow(dead_code, reason = "held for its Drop, which releases the requester's settlement")]
     pub hold: Option<SettlementHold>,
     /// The inbound's root, which the held reply inherits.
     pub root: Option<MailId>,
     /// The inbound's own `mail_id`, the held reply's `parent_mail`.
     pub parent: Option<MailId>,
+}
+
+impl HeldChain {
+    /// Release the requester's settlement hold. The reply path calls this
+    /// once the held reply is sent and its `Sent` recorded; every other
+    /// path that drops a chain releases it the same way through the hold's
+    /// `Drop`.
+    pub fn release(self) {
+        drop(self.hold);
+    }
 }
 
 /// Where a guest reply comes from and which chain it answers, as the

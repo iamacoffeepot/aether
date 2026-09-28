@@ -474,7 +474,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             }
             // The reply is sent and its `Sent` recorded; only now may a
             // held slot's settlement hold release.
-            drop(chain);
+            if let Some(chain) = chain {
+                chain.release();
+            }
             REPLY_OK
         },
     )?;
