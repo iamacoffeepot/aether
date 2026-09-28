@@ -53,6 +53,7 @@
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
+use core::any::TypeId;
 
 use crate::__inventory::DescriptorEntry;
 use crate::hash::{KIND_DOMAIN, fnv1a_64_prefixed};
@@ -235,6 +236,28 @@ pub struct ChildEntry {
 }
 
 inventory::collect!(ChildEntry);
+
+/// A native actor type and the namespace it publishes, collected at link
+/// time (ADR-0241 §3). The native `#[actor]` derive submits one entry per
+/// actor type, so the engine's publication table can say which linked types
+/// share a namespace, the way a chassis composes exactly one of several
+/// interchangeable capabilities. `type_id` and `type_name` are `fn` pointers
+/// so the value stays const-constructible from `inventory::submit!`.
+pub struct NativeTypeEntry {
+    /// The actor's `NAMESPACE` const (e.g. `"aether.window"`).
+    pub namespace: &'static str,
+    /// The actor type's `TypeId`.
+    pub type_id: fn() -> TypeId,
+    /// The actor type's name, for refusal messages.
+    pub type_name: fn() -> &'static str,
+}
+
+inventory::collect!(NativeTypeEntry);
+
+/// Iterate every [`NativeTypeEntry`] collected at link time.
+pub fn native_type_entries() -> impl Iterator<Item = &'static NativeTypeEntry> {
+    inventory::iter::<NativeTypeEntry>.into_iter()
+}
 
 /// An engine-only kind, collected at link time (ADR-0233). The `Kind`
 /// derive submits one entry for each kind that declares

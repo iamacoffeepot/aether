@@ -7,13 +7,13 @@
 //! decisions — are authoritative only at owner time and arrive later on the
 //! birth's own completion.
 
-use std::any::TypeId;
 use std::time::Duration;
 
 use aether_actor::NamespaceError;
 use aether_data::ActorPathError;
 
 use crate::chassis::error::BootError;
+use crate::mail::registry::NativeHoldRefusal;
 
 /// Failure modes for native actor spawning.
 ///
@@ -35,11 +35,10 @@ pub enum SpawnError {
     /// lineage deeper than `MAX_SCOPE_PATH_DEPTH` or longer than
     /// `MAX_SCOPE_PATH_BYTES`. Reported at staging, before `A::init`.
     PathInvalid(ActorPathError),
-    /// `A::NAMESPACE` is already owned by a different `TypeId`. Trips
-    /// when an `Instanced` type tries to spawn under a namespace a
-    /// `Singleton` already owns (or vice versa). ADR-0079 unique-owner
-    /// invariant.
-    NamespaceOwnedByOtherType { namespace: &'static str, owning_type: TypeId },
+    /// The publication table refused `A` its namespace (ADR-0241 §3):
+    /// another type sharing `A::NAMESPACE` was born first in this engine, or
+    /// `A` is not among the types linked there.
+    NativeHold(NativeHoldRefusal),
     /// The full name was previously live and has been retired. Names
     /// don't recycle within a substrate's lifetime (ADR-0079 §Drop /
     /// lifecycle); pick a different subname.

@@ -185,7 +185,7 @@ impl Spawner {
     /// Borrow the actor registry. Crate-private — substrate-internal
     /// dispatcher trampolines (instanced spawn close path, singleton
     /// boot path) use this to call `close_actor` / `mark_dead` /
-    /// `try_claim_namespace` etc. Cap handlers reaching for the
+    /// `is_tombstoned` etc. Cap handlers reaching for the
     /// registry through `transport.spawner().actor_registry()` is
     /// the wrong shape — caps that supervise a fleet hold their own
     /// child map; caps that just send mail use the flat `ctx.send::<R>`

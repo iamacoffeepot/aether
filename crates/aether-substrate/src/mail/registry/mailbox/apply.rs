@@ -114,6 +114,19 @@ impl Registry {
                         drop(commit.reject_at_home(failure));
                         return Err(RegistryEffectError::Name(NameConflict { name }));
                     }
+                    // ADR-0241 §3: the birth holds its namespace in the
+                    // publication table as this batch has staged it, so a
+                    // second type sharing the namespace is refused.
+                    if let Some((namespace, born)) = commit.native_type() {
+                        #[cfg(feature = "wasm")]
+                        let publications = staged_publications.as_mut().unwrap_or(&mut inner.publications);
+                        #[cfg(not(feature = "wasm"))]
+                        let publications = &mut inner.publications;
+                        if let Err(refusal) = publications.hold(namespace, born) {
+                            drop(commit.reject_at_home(PreparedSpawnFailure::NativeHold(refusal)));
+                            return Err(RegistryEffectError::ActivationRejected);
+                        }
+                    }
                     let token = ActivationToken::next(&mut next_activation_token);
                     let activation = match commit.take_activation().reserve(token) {
                         Ok(activation) => activation,

@@ -99,9 +99,15 @@ one implementation is published per namespace per engine.
 
 - **Native code publishes at boot.** Each native actor's link-time inventory
   entry is its publication. It has no blob; its code is the binary. The table
-  records its namespace only: its rows, `Dispatch::capabilities()`, already
+  records the namespace, the linked types that declare it, and which of them
+  this engine has born there: its rows, `Dispatch::capabilities()`, already
   stand on every route it publishes at birth, and join the table with their
-  first reader.
+  first reader. Several linked types may share one native namespace, because
+  a chassis composes exactly one of them (a capability and its headless stub,
+  say). The engine's first birth at a native namespace holds it for the
+  engine's lifetime, and a birth of any other type there is refused, so a
+  second type composed at a held namespace fails the boot and with it the
+  bootstrap (R-0046).
 - **A module publishes as one set.** A publish admits every namespace the
   module exports, all or nothing. Its private and inline child types are not
   published: they belong to the module and cannot be spawned from outside it.
@@ -143,17 +149,22 @@ one admission step when a module is published:
 
 | Check | Rule | Replaces |
 |---|---|---|
-| Namespace | each exported NS is not yet published, or published by this module's predecessor; a republish exports every NS its predecessor did; never native | `try_claim_namespace` by `TypeId`; ADR-0240 D4 |
+| Namespace | each exported NS is not yet published, or published by this module's predecessor; a republish exports every NS its predecessor did; never native. A shared native namespace is selected by composing one of its types, and a second type's birth there is refused (§3) | `try_claim_namespace` by `TypeId`; ADR-0240 D4 |
 | Contract growth | for a republish, each NS's rows only grow and a fallback is kept (`first_contract_break`), and each private child type the predecessor declares is still declared, privately or as an export, with rows that only grow | trampoline `check_contract` and the registry `RepublishContract` guard (ADR-0231 §5); #6845's unchecked inline-child rows |
 | Same type | a namespace's implementation is replaced only by the same namespace | `ReplaceComponent.export: Some(other)`; #6850's replace refusal |
-| Dependencies | every `depends(R)` names a published `R` | the load, boot, replace, and module-wide inline checks |
+| Dependencies | none at publish: `depends(R)` is checked when an actor is stood up (ADR-0230), since a publish imports code and a module cannot say which of its actors will be stood up | nothing; the spawn-time checks stay |
 | Kinds | the module's kinds register in the same owner batch | `RegistryBatch::register_kinds` at load |
 
 Admission is static: it reads manifests, never a live instance. It refuses
-the whole publish with the first failing namespace and rule. Liveness is not
-an admission question: `depends(R)` still requires `R` live when an instance
-is spawned (ADR-0230), and `resolve` still proves a path on receipt
-(ADR-0231 §3).
+the whole publish with the first failing namespace and rule.
+
+Admission checks no dependencies. A publish imports code, and a spawn stands
+an actor up. A module cannot say which of its actors a given engine will
+stand up, and leaving one unstood is fine, so requiring every dependency of
+every actor it exports at publish would refuse code the engine never runs.
+`depends(R)` is checked when an actor is stood up: it requires `R` live when
+an instance is spawned (ADR-0230). Likewise `resolve` still proves a path on
+receipt (ADR-0231 §3).
 
 ### 5. Actors are named by what they are, on either runtime
 
@@ -346,9 +357,9 @@ Each step lands on its own:
    and replace; content-addressed modules. Admission runs beside the per-site
    checks: the same-type rule
    lands, and the trampoline's `check_contract` and the `RepublishContract`
-   guard retire, with step 4; the dependency row lands, and
-   `try_claim_namespace` by `TypeId` retires, with step 3, when guests spawn
-   under their own namespaces. The `Publish` mail door (§9) and the module
+   guard retire, with step 4. `try_claim_namespace` by `TypeId` has retired:
+   each native birth holds its namespace in the publication table (§3), and
+   dependencies stay a stand-up check (§4). The `Publish` mail door (§9) and the module
    cache's move to the registry owner land with step 5, when a remote caller
    first publishes by mail.
 3. **Forwarding host and native naming for guests**: guests spawn as

@@ -502,7 +502,7 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
     // Tripwire: `HandlerSpawnBuilder::stage` validates the named subname
     // *first*, before anything the birth cannot cheaply undo. Every assertion
     // below names one such effect, so moving the check later — behind
-    // `A::init`, the counter, the namespace claim, or the registry write —
+    // `A::init`, the counter, or the registry write —
     // fails here rather than leaking a half-born actor on a typo.
     assert!(invalid_subname_observed.load(AtomicOrdering::SeqCst), "an invalid named subname must be rejected locally");
     assert_eq!(init_count.load(AtomicOrdering::SeqCst), 0, "an invalid subname must not construct or init the child");
@@ -510,10 +510,6 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
         chassis.booted.spawner.next_counter(),
         0,
         "an invalid subname must be rejected before allocating a counter"
-    );
-    assert!(
-        chassis.actor_registry().namespace_owner(Child::NAMESPACE).is_none(),
-        "an invalid subname must be rejected before claiming the child namespace",
     );
     assert!(
         registry.lookup("test.checked_spawn.actual/test.checked_spawn.child:invalid:name").is_none(),

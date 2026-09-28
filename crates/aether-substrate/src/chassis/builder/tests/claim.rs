@@ -1,12 +1,14 @@
 //! Namespace claiming and registry-owner handoff at boot: duplicate claims
 //! abort the build, the owner is retained for the chassis lifetime and applies
-//! after the direct boot claims, and a failed `init` releases what it claimed.
+//! after the direct boot claims, a failed `init` withdraws what it claimed, and
+//! a second type at a held namespace fails the build.
 
 use super::support::StubLog;
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
+use crate::mail::registry::NativeHoldRefusal;
 use crate::testing::{TestChassis, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::Addressable;
@@ -80,63 +82,98 @@ fn registry_owner_applies_after_direct_boot_claims() {
     drop(chassis);
 }
 
-/// Issue 607 Phase 7: a singleton whose `init` returns `Err`
-/// releases its slot before `with_actor` propagates the error.
-/// After the failed build, the chassis's `Registry` has no sink
-/// at the cap's namespace and the `ActorRegistry`'s `name_owners`
-/// no longer claims the namespace — so a fresh chassis can boot
-/// a different cap with the same namespace string (or the same
-/// cap with a different config) without colliding.
+/// A hand-written singleton at one shared namespace: `Cap<true>` fails its
+/// `init`, `Cap<false>` boots. The two are distinct types, and neither has a
+/// link-time type row, so the publication table first hears of their
+/// namespace at the first birth.
+struct Cap<const FAIL: bool>;
+
+impl<const FAIL: bool> Addressable for Cap<FAIL> {
+    const NAMESPACE: &'static str = "test.phase7.failing_cap";
+    type Resolver = aether_actor::One;
+}
+impl<const FAIL: bool> aether_actor::Root for Cap<FAIL> {}
+
+impl<const FAIL: bool> aether_actor::Lifecycle<Self> for Cap<FAIL> {
+    type Config = ();
+    type Params = ();
+    type InitError = BootError;
+    type InitCtx<'a> = NativeInitCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a, Self>;
+    fn init((): (), _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        if FAIL {
+            return Err(BootError::Other(Box::new(io::Error::other(
+                "intentional init failure for Phase 7 cleanup test",
+            ))));
+        }
+        Ok(Self)
+    }
+}
+impl<const FAIL: bool> aether_actor::Declared for Cap<FAIL> {
+    type Depends = ();
+    type Spawns = ();
+}
+impl<const FAIL: bool> NativeActor for Cap<FAIL> {
+    type State = Self;
+}
+impl<const FAIL: bool> Dispatch<Self> for Cap<FAIL> {
+    fn dispatch(
+        _state: &mut Self,
+        _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+        _kind: KindId,
+        _payload: &[u8],
+    ) -> Option<()> {
+        None
+    }
+}
+
+/// Issue 607 Phase 7: a singleton whose `init` returns `Err` fails the build
+/// with that error and withdraws its sink. The namespace hold is never
+/// released (a failed boot fails the build, R-0046), so what may boot the
+/// same namespace next is a fresh chassis on a fresh registry.
+// Catches: a hold kept outside the engine's registry (a process-wide table),
+// so one engine's failed boot refuses the namespace to every later engine.
 #[test]
-fn failed_singleton_init_releases_namespace_and_sink() {
-    struct FailingCap;
-    impl Addressable for FailingCap {
-        const NAMESPACE: &'static str = "test.phase7.failing_cap";
-        type Resolver = aether_actor::One;
-    }
-    impl aether_actor::Root for FailingCap {}
-
-    impl aether_actor::Lifecycle<Self> for FailingCap {
-        type Config = ();
-        type Params = ();
-        type InitError = BootError;
-        type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a, Self>;
-        fn init((): (), _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Err(BootError::Other(Box::new(io::Error::other("intentional init failure for Phase 7 cleanup test"))))
-        }
-    }
-    impl aether_actor::Declared for FailingCap {
-        type Depends = ();
-        type Spawns = ();
-    }
-    impl NativeActor for FailingCap {
-        type State = Self;
-    }
-    impl Dispatch<Self> for FailingCap {
-        fn dispatch(
-            _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
-            _kind: KindId,
-            _payload: &[u8],
-        ) -> Option<()> {
-            None
-        }
-    }
-
+fn failed_singleton_init_fails_the_build_and_withdraws_its_sink() {
     let (registry, mailer) = bare_substrate();
-    let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<FailingCap>(())
+    let err = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
+        .with_actor::<Cap<true>>(())
         .build_passive()
         .expect_err("init failure must propagate");
-    // The error wraps init's std::io::Error message.
-    assert!(format!("{err:?}").contains("intentional init failure"), "expected init error to propagate, got {err:?}");
 
-    // Sink at the cap's namespace must be gone — Registry::lookup
-    // returns None for absent entries.
+    assert!(format!("{err:?}").contains("intentional init failure"), "expected init error to propagate, got {err:?}");
     assert!(
-        registry.lookup(FailingCap::NAMESPACE).is_none(),
+        registry.lookup(Cap::<true>::NAMESPACE).is_none(),
         "sink at {} should be removed after failed init",
-        FailingCap::NAMESPACE,
+        Cap::<true>::NAMESPACE,
+    );
+
+    let (registry, mailer) = bare_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
+        .with_actor::<Cap<false>>(())
+        .build_passive()
+        .expect("a fresh engine boots another type at the failed namespace");
+    assert!(registry.lookup(Cap::<false>::NAMESPACE).is_some());
+    drop(chassis);
+}
+
+// Catches: `hold_native` forgetting the first holder of a namespace the
+// link-time inventory does not list, so two hand-written types both boot at
+// one namespace in one engine.
+#[test]
+fn a_second_type_at_a_held_namespace_fails_the_build() {
+    let (registry, mailer) = bare_substrate();
+    let err = Builder::<TestChassis>::new(registry, mailer)
+        .with_actor::<Cap<false>>(())
+        .with_actor::<Cap<true>>(())
+        .build_passive()
+        .expect_err("the second type's boot is refused its namespace");
+
+    let BootError::Other(source) = &err else {
+        panic!("expected the hold refusal, got {err:?}")
+    };
+    assert!(
+        matches!(source.downcast_ref::<NativeHoldRefusal>(), Some(NativeHoldRefusal::HeldByOther { .. })),
+        "expected HeldByOther, got {err:?}"
     );
 }

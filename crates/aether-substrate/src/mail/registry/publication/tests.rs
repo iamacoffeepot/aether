@@ -5,12 +5,13 @@
 //! the registry tests publish checked-in WAT modules through the owner, so
 //! the table they exercise is the one a load stages.
 
+use std::any::{TypeId, type_name};
 use std::fmt::Write as _;
 use std::iter;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_data::name_inventory::{NameEntry, ParamKind, TemplateEntry, inventory};
+use aether_data::name_inventory::{NameEntry, NativeTypeEntry, ParamKind, TemplateEntry, inventory};
 use aether_data::{
     Blob, BlobHash, CONTENT_ADDRESSED_SECTION, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, MAILBOX_DOMAIN,
     ReplyContract, THREAD_DOMAIN, wire,
@@ -18,7 +19,7 @@ use aether_data::{
 use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 use wasmtime::Engine;
 
-use super::{AdmissionRefusal, Admitted, ModuleSurface, PublicationTable, admit};
+use super::{AdmissionRefusal, Admitted, ModuleSurface, NativeHoldRefusal, NativeType, PublicationTable, admit};
 use crate::actor::native::BlobCheckIn;
 use crate::actor::wasm::module::{Module, ModuleCache};
 use crate::config::RegistryQueueCapacities;
@@ -43,6 +44,23 @@ inventory::submit! {
 inventory::submit! { NameEntry { domain: THREAD_DOMAIN, name: THREAD_NAMED } }
 inventory::submit! {
     TemplateEntry { domain: MAILBOX_DOMAIN, prefix: OTHER_TEMPLATE, template: "-{subname}", param: ParamKind::Dynamic }
+}
+
+/// Two linked types sharing [`NATIVE_SINGLETON`], the way a chassis picks one
+/// of several interchangeable capabilities, and a type linked nowhere.
+struct SharedFirst;
+struct SharedSecond;
+struct Unlinked;
+
+inventory::submit! {
+    NativeTypeEntry { namespace: NATIVE_SINGLETON, type_id: TypeId::of::<SharedFirst>, type_name: type_name::<SharedFirst> }
+}
+inventory::submit! {
+    NativeTypeEntry {
+        namespace: NATIVE_SINGLETON,
+        type_id: TypeId::of::<SharedSecond>,
+        type_name: type_name::<SharedSecond>,
+    }
 }
 
 const KEPT: KindId = KindId(0x11);
@@ -100,7 +118,7 @@ fn admit_over(
 // not.
 #[test]
 fn a_native_namespace_is_refused_to_every_module() {
-    let table = PublicationTable::from_inventory();
+    let table = PublicationTable::native();
     let admit_one = |namespace: &str| {
         let candidate = surface(&[(namespace, contract(&[KEPT], false))], &[]);
         admit(hash(1), &candidate, |namespace| table.holder(namespace), |_| None)
@@ -112,6 +130,30 @@ fn a_native_namespace_is_refused_to_every_module() {
     for unpublished in [THREAD_NAMED, OTHER_TEMPLATE] {
         assert_eq!(admit_one(unpublished), Ok(Admitted::Publish), "{unpublished} is not a native actor namespace");
     }
+}
+
+// Catches: native rows grouped by type rather than by namespace, which splits
+// one shared namespace into two publications, or a hold that admits a second
+// type sharing it or a type linked nowhere.
+#[test]
+fn a_shared_native_namespace_is_held_by_its_first_birth() {
+    let mut table = PublicationTable::native();
+    let (types, held) = table.native_publication(NATIVE_SINGLETON).expect("the namespace is native");
+    assert!(types.contains(&TypeId::of::<SharedFirst>()) && types.contains(&TypeId::of::<SharedSecond>()));
+    assert_eq!(held, None);
+
+    table.hold(NATIVE_SINGLETON, NativeType::of::<SharedSecond>()).expect("the first birth holds");
+    table.hold(NATIVE_SINGLETON, NativeType::of::<SharedSecond>()).expect("the holder is born again");
+    assert!(matches!(
+        table.hold(NATIVE_SINGLETON, NativeType::of::<SharedFirst>()),
+        Err(NativeHoldRefusal::HeldByOther { .. })
+    ));
+
+    let mut fresh = PublicationTable::native();
+    assert!(matches!(
+        fresh.hold(NATIVE_SINGLETON, NativeType::of::<Unlinked>()),
+        Err(NativeHoldRefusal::NotLinked { .. })
+    ));
 }
 
 // Catches: a predecessor taken as the module being replaced rather than every

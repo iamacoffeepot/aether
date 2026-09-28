@@ -95,6 +95,12 @@ platform identity into callers. The headless implementation lives in the
 default `runtime/mod.rs`; keyed alternatives live in `runtime/desktop/` and
 `runtime/synthetic.rs`.
 
+A chassis selects one of the types sharing a namespace by composing it. The
+engine's publication table records every linked type that declares the
+namespace, and the first one born there holds it for the engine's lifetime
+(ADR-0241 §3). Composing a second type at a held namespace fails that boot,
+and with it the whole build.
+
 ## State in the runtime half
 
 ```rust

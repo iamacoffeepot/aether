@@ -1,5 +1,3 @@
-use std::any::TypeId;
-use std::io;
 use std::mem;
 use std::sync::{Arc, Weak};
 
@@ -116,23 +114,13 @@ where
         // before any registry write so a refusal leaves nothing to unwind.
         let canonical_name = ErasedActorPath::new(A::NAMESPACE).map_err(|error| BootError::Other(Box::new(error)))?;
 
-        // Issue 607 Phase 3b (ADR-0079): claim namespace ownership for
-        // this singleton's `Addressable::NAMESPACE`. The actor registry
-        // tracks one TypeId per namespace across both cardinalities
-        // (Singleton/Instanced), so a later `spawn_child::<X>` whose
-        // `X::NAMESPACE` collides with this singleton's namespace
-        // surfaces as `SpawnError::NamespaceOwnedByOtherType`. Same
-        // TypeId re-claiming the same namespace is idempotent.
-        if ctx.spawner_arc().actor_registry().try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()).is_err() {
-            // The other claim is on the same namespace by a different
-            // TypeId — a chassis-build collision. State stays
-            // `Transitioning` (no resources held); cleanup_after_failure
-            // sees that and does nothing.
-            return Err(BootError::Other(Box::new(io::Error::other(format!(
-                "namespace {:?} already owned by a different TypeId — fix the conflicting actor's NAMESPACE const",
-                A::NAMESPACE
-            )))));
-        }
+        // ADR-0241 §3: hold this singleton's namespace in the publication
+        // table. Several linked types may share it, and the chassis selects
+        // one by composing it, so a second type composed here fails the boot
+        // (and so the build, R-0046). The same type re-holding its namespace
+        // is idempotent. State stays `Transitioning` (no resources held);
+        // cleanup_after_failure sees that and does nothing.
+        ctx.registry().hold_native::<A>().map_err(|refusal| BootError::Other(Box::new(refusal)))?;
 
         // ADR-0082: every cap takes the drop-on-shutdown claim. The
         // FRAME_BARRIER frame-bound claim variant retired with the
@@ -145,10 +133,6 @@ where
         let (mailbox_id, receiver, mailbox_sender, wake_slot) = match claim_result {
             Ok(c) => c,
             Err(e) => {
-                // Release the namespace claim we just made — otherwise
-                // a later cap with a different TypeId legitimately
-                // claiming the same namespace can't (issue 607 Phase 7).
-                ctx.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
                 // State stays `Transitioning` — no further cleanup
                 // for the rollback loop to do.
                 return Err(e);
@@ -207,14 +191,12 @@ where
                 // A::init consumed `config` + `params`, so we can't restore
                 // the Claimed variant. Inline the same cleanup
                 // `cleanup_after_failure` would do for Claimed: withdraw
-                // the mailbox claim and release the namespace claim, then
-                // let `resources` drop at end of scope (closing transport +
-                // sender). The failed init pass aborts the whole boot before
-                // any dispatcher runs or any `wire` mail carries the id, so
-                // nothing can still name the claim, and a corrected retry
-                // boots under the same name (ADR-0079 §5).
+                // the mailbox claim, then let `resources` drop at end of
+                // scope (closing transport + sender). The failed init pass
+                // aborts the whole boot before any dispatcher runs or any
+                // `wire` mail carries the id, so nothing can still name the
+                // claim.
                 ctx.withdraw_claim(resources.mailbox_id);
-                ctx.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
                 drop(resources);
                 // State stays `Transitioning` — no further work for
                 // the rollback loop to do.
@@ -343,8 +325,8 @@ where
             // Pre-claim or mid-method failure that already cleaned up
             // inline — no chassis-side state to release.
             BootState::Pending | BootState::Transitioning => {}
-            // Any past-claim variant: release the mailbox + namespace
-            // claims. `resources` (and any held actor) drop at the end
+            // Any past-claim variant: release the mailbox claim. The
+            // namespace hold stays: a failed boot fails the build (R-0046). `resources` (and any held actor) drop at the end
             // of this match arm — dropping `transport` closes the
             // installed receiver, dropping `mailbox_sender` closes the
             // channel.
@@ -354,14 +336,12 @@ where
             // claim is withdrawn and its name stays free for a retry.
             BootState::Claimed { resources, .. } | BootState::Initialized { resources, .. } => {
                 ctx.withdraw_claim(resources.mailbox_id);
-                ctx.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
             }
             // After `wire`, mail stamped with the id may already sit in a
             // draining peer's inbox, so the route retires to `Dropped` and
             // keeps the name that mail's sender still answers to (#6656).
             BootState::Wired { resources, .. } => {
                 ctx.retire_claim(resources.mailbox_id);
-                ctx.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
             }
         }
     }

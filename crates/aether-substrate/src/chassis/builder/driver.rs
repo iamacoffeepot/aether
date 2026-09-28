@@ -1,4 +1,4 @@
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::error::Error as StdError;
 use std::fmt;
 use std::io;
@@ -241,7 +241,7 @@ impl<'a> DriverCtx<'a> {
     /// ADR-0160 §1: boot a [`PumpedSlot`] for driver-as-actor `A` from the
     /// Claim-stage reservation the driver's
     /// [`DriverCapability::claim`] hook made under `A::NAMESPACE`. Recovers
-    /// that [`MailboxClaim`], claims the namespace `TypeId`, builds a
+    /// that [`MailboxClaim`], holds `A`'s namespace, builds a
     /// [`NativeBinding`], installs the claim's inbox re-lineaged onto the
     /// binding's disjoint reply-id space, seeds the per-actor rings + cost
     /// cache, registers `A::capabilities()`, and runs `init` / `wire` under
@@ -257,12 +257,14 @@ impl<'a> DriverCtx<'a> {
     /// [`PumpedSlot::shutdown`] on exit. Only the dispatch *semantics*
     /// (the shared `dispatch_envelope` body) is framework-owned.
     ///
-    /// Errors if `A::NAMESPACE` is already owned by a different actor type,
-    /// or if the driver reserved no Claim-stage mailbox under it (its
+    /// Errors if the publication table refuses `A` its namespace (another
+    /// type sharing it was born first), or if the driver reserved no
+    /// Claim-stage mailbox under it (its
     /// `claim` hook must call
     /// [`ChassisCtx::claim_driver_mailbox`](crate::chassis::ctx::ChassisCtx::claim_driver_mailbox)),
-    /// or if `A::init` returns `Err` — in every failure the namespace + any
-    /// mailbox claim are released before returning.
+    /// or if `A::init` returns `Err` — in every failure any mailbox claim is
+    /// released before returning. The namespace hold is never released: a
+    /// failed boot fails the build (R-0046).
     pub fn boot_pumped_actor<A>(
         &mut self,
         config: A::Config,
@@ -271,19 +273,18 @@ impl<'a> DriverCtx<'a> {
     where
         A: Root + NativeActor,
     {
-        // Claim namespace ownership for this actor's `NAMESPACE` (mirrors
-        // `NativeActorBoot::claim`), so a later collision surfaces loud.
-        if self.inner.spawner_arc().actor_registry().try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()).is_err() {
-            return Err(BootError::Other(Box::new(io::Error::other(format!(
-                "namespace {:?} already owned by a different TypeId — fix the conflicting actor's NAMESPACE const",
-                A::NAMESPACE
-            )))));
-        }
+        // Hold this actor's `NAMESPACE` in the publication table (mirrors
+        // `NativeActorBoot::claim`), so a second type composed there fails
+        // the boot (ADR-0241 §3).
+        self.inner
+            .spawner_arc()
+            .registry()
+            .hold_native::<A>()
+            .map_err(|refusal| BootError::Other(Box::new(refusal)))?;
 
         // Recover the ADR-0155 §4 Claim-stage reservation the driver's
         // `claim` hook made under `A::NAMESPACE`.
         let Some(claim) = self.take_claimed_mailbox(A::NAMESPACE) else {
-            self.inner.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
             return Err(BootError::Other(Box::new(io::Error::other(format!(
                 "no Claim-stage driver mailbox reserved under {:?} — the driver's `claim` hook must call \
                  `claim_driver_mailbox`",
@@ -332,7 +333,6 @@ impl<'a> DriverCtx<'a> {
                 // `depends` reference to this claim, so the route retires to
                 // `Dropped` and keeps the name that reference answers to.
                 self.inner.retire_claim(mailbox_id);
-                self.inner.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
                 return Err(e);
             }
         };

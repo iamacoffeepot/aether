@@ -19,7 +19,7 @@ use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, InstalledActivation, LiveActivation, PreparedMail,
     PreparedSpawnActivation, PreparedSpawnFailure,
 };
-use crate::mail::registry::{DispatchParts, MailboxEntry, OwnedDispatch, Registry, SeizeCell};
+use crate::mail::registry::{DispatchParts, MailboxEntry, NativeType, OwnedDispatch, Registry, SeizeCell};
 use crate::mail::{MailId, MailboxId};
 use crate::runtime::effect_chain::EffectChain;
 use crate::scheduler::pending_depth;
@@ -136,9 +136,7 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
             parent.reservation.reject();
         }
         let error = match failure {
-            PreparedSpawnFailure::NamespaceOwnedByOtherType { namespace, owning_type } => {
-                SpawnError::NamespaceOwnedByOtherType { namespace, owning_type }
-            }
+            PreparedSpawnFailure::NativeHold(refusal) => SpawnError::NativeHold(refusal),
             PreparedSpawnFailure::SubnameRetired { full_name } => SpawnError::SubnameRetired { full_name },
             PreparedSpawnFailure::SubnameInUse { full_name } => SpawnError::SubnameInUse { full_name },
             PreparedSpawnFailure::ActivationRejected => SpawnError::ActivationRejected,
@@ -197,12 +195,6 @@ impl<A: NativeActor> PreparedSpawnActivation for LegacyPreparedActivation<A> {
         self: Box<Self>,
         token: ActivationToken,
     ) -> Result<Arc<dyn ActivationReservation>, (Box<dyn PreparedSpawnActivation>, PreparedSpawnFailure)> {
-        if let Err(owning_type) = self.spawner.actor_registry().try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()) {
-            return Err((
-                self,
-                PreparedSpawnFailure::NamespaceOwnedByOtherType { namespace: A::NAMESPACE, owning_type },
-            ));
-        }
         if self.spawner.actor_registry().is_tombstoned(self.id) {
             let full_name =
                 self.binding.runtime_identity().expect("prepared binding is typed").canonical_name().to_string();
@@ -244,6 +236,10 @@ impl<A: NativeActor> PreparedSpawnActivation for LegacyPreparedActivation<A> {
 
     fn id_is_retired(&self) -> bool {
         self.spawner.actor_registry().is_tombstoned(self.id)
+    }
+
+    fn native_type(&self) -> Option<(&'static str, NativeType)> {
+        Some((A::NAMESPACE, NativeType::of::<A>()))
     }
 }
 

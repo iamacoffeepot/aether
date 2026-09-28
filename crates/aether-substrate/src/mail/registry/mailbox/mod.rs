@@ -11,13 +11,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+use aether_actor::Addressable;
 use rustc_hash::FxHashMap;
 
 use crate::mail::registry::effect::{ChangeSubscriber, RegistryInventory};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::owner::RegistryOwnerHandle;
-#[cfg(feature = "wasm")]
-use crate::mail::registry::publication::PublicationTable;
+use crate::mail::registry::publication::{NativeHoldRefusal, NativeType, PublicationTable};
 use crate::mail::registry::{ActorAddressInventoryError, address::AddressIndex};
 use crate::mail::view::{DoubleBuffer, View, ViewPublisher};
 use crate::mail::{KindId, MailboxId};
@@ -162,8 +162,9 @@ struct Inner {
     name_index: HashMap<String, KindId>,
     /// Which code implements each published namespace (ADR-0241 §3): every
     /// native namespace the binary links from construction, and each module
-    /// the owner's publish arm admitted. Written only by that arm's commit.
-    #[cfg(feature = "wasm")]
+    /// the owner's publish arm admitted. Module publications are written
+    /// only by that arm's commit; a native namespace's hold is written by
+    /// each native birth ([`Registry::hold_native`]).
     publications: PublicationTable,
     route_publisher: DoubleBuffer<MailboxId, RouteRecord>,
     kind_publisher: ViewPublisher<KindTable>,
@@ -193,8 +194,7 @@ impl Registry {
                 next_activation_token: 0,
                 kinds: FxHashMap::default(),
                 name_index: HashMap::default(),
-                #[cfg(feature = "wasm")]
-                publications: PublicationTable::from_inventory(),
+                publications: PublicationTable::native(),
                 route_publisher,
                 kind_publisher,
                 inventory_publisher,
@@ -242,6 +242,19 @@ impl Registry {
     #[cfg(test)]
     pub(crate) fn owner_accepting(&self) -> bool {
         self.owner.get().is_some_and(RegistryOwnerHandle::is_accepting)
+    }
+
+    /// Hold `A`'s namespace for `A` in the publication table (ADR-0241 §3):
+    /// admitted when the namespace is unheld or already held by `A`, refused
+    /// when another type sharing it was born first. One read-modify under the
+    /// `Inner` lock. The prepared-spawn arm the owner applies holds through
+    /// the same table under the lock it already holds.
+    pub(crate) fn hold_native<A: Addressable + 'static>(&self) -> Result<(), NativeHoldRefusal> {
+        self.inner
+            .lock()
+            .expect("registry lock poisoned; fail-fast per ADR-0063")
+            .publications
+            .hold(A::NAMESPACE, NativeType::of::<A>())
     }
 }
 

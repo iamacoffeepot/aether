@@ -1,7 +1,7 @@
 //! Actor-lifecycle registry (ADR-0079, issue 607). Keyed by full-name
 //! `MailboxId`, tracks live actor entries plus tombstones (retired
-//! full names), namespace ownership, and the bidirectional monitor
-//! indices (Phase 4b).
+//! full names), and the bidirectional monitor indices (Phase 4b).
+//! Namespace ownership lives in the publication table (ADR-0241 §3).
 //!
 //! Phase 2 of issue 607 lands the storage shape; Phase 3 wires
 //! `NativeCtx::spawn_child` as the first writer (`Live` slot
@@ -74,13 +74,6 @@ pub struct ActorRegistry {
     /// closed." Single static membership — no per-tombstone allocation
     /// beyond the `HashSet` entry itself.
     tombstones: RwLock<HashSet<MailboxId>>,
-
-    /// One owner per `NAMESPACE`. Populated at chassis-build for
-    /// singletons (Phase 3+) and at first `spawn_child` for instanced
-    /// types. Insertion conflicts when a different `TypeId` already
-    /// owns the namespace — the ADR-0079 guard against
-    /// Singleton/Instanced or Instanced/Instanced name collisions.
-    name_owners: RwLock<HashMap<&'static str, TypeId>>,
 
     /// Forward monitor index: `monitors_of[target]` is the list of
     /// watchers that registered a monitor against `target`. Drained at
@@ -181,58 +174,6 @@ impl ActorRegistry {
     /// the guard, a substrate-level invariant violation.
     pub(crate) fn is_tombstoned(&self, id: MailboxId) -> bool {
         self.tombstones.read().expect("tombstones lock poisoned; fail-fast per ADR-0063").contains(&id)
-    }
-
-    /// `TypeId` that owns the given namespace, if any. Populated at
-    /// chassis-build (singletons) and first spawn (instanced).
-    ///
-    /// # Panics
-    /// Panics if the `name_owners` `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior writer panicked under
-    /// the guard, a substrate-level invariant violation.
-    pub fn namespace_owner(&self, namespace: &'static str) -> Option<TypeId> {
-        self.name_owners.read().expect("name_owners lock poisoned; fail-fast per ADR-0063").get(namespace).copied()
-    }
-
-    /// Claim ownership of `namespace` for `type_id`. Returns `Ok(())` on
-    /// fresh claim or when the same `TypeId` re-claims the same
-    /// namespace (idempotent — multiple instanced spawns of the same
-    /// type share one namespace). Returns `Err(other_type_id)` when a
-    /// different type already owns the namespace — the ADR-0079 guard
-    /// against Singleton/Instanced or Instanced/Instanced collisions.
-    pub(crate) fn try_claim_namespace(&self, namespace: &'static str, type_id: TypeId) -> Result<(), TypeId> {
-        let mut owners = self.name_owners.write().expect("name_owners lock poisoned; fail-fast per ADR-0063");
-        match owners.get(namespace) {
-            Some(&existing) if existing == type_id => Ok(()),
-            Some(&existing) => Err(existing),
-            None => {
-                owners.insert(namespace, type_id);
-                Ok(())
-            }
-        }
-    }
-
-    /// Issue 607 Phase 7: release ownership of `namespace` iff
-    /// `type_id` currently owns it. Used in the chassis-boot unwind
-    /// path when a singleton's `init` fails — without this release,
-    /// the failed cap's namespace stays claimed and a later cap with
-    /// a different `TypeId` legitimately claiming the same namespace
-    /// (after the failed cap is gone) collides. Returns `true` if the
-    /// entry was released, `false` if absent or owned by a different
-    /// type (typically a caller bug, but we don't panic — the boot
-    /// failure path runs even on weird states).
-    ///
-    /// Crate-private — only the boot-failure paths in
-    /// [`crate::chassis::ctx`] / [`crate::chassis::builder`] call this.
-    pub(crate) fn release_namespace(&self, namespace: &'static str, type_id: TypeId) -> bool {
-        let mut owners = self.name_owners.write().expect("name_owners lock poisoned; fail-fast per ADR-0063");
-        match owners.get(namespace) {
-            Some(&existing) if existing == type_id => {
-                owners.remove(namespace);
-                true
-            }
-            _ => false,
-        }
     }
 
     /// Insert a `Live` actor entry under `id`, which must be empty.
@@ -534,7 +475,6 @@ mod tests {
         let r = ActorRegistry::new();
         assert!(!r.is_live_at(MailboxId(1)));
         assert!(!r.is_tombstoned(MailboxId(1)));
-        assert!(r.namespace_owner("aether.example").is_none());
         assert_eq!(r.monitor_count(MailboxId(1)), 0);
         assert_eq!(r.monitoring_count(MailboxId(1)), 0);
     }
