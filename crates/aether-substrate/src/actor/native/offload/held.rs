@@ -70,13 +70,6 @@ impl<R: ActorMail> Held<R> {
         ctx.answer_held(id, &ledger, reply);
     }
 
-    /// Give up the ticket's id without discharging its entry, so the
-    /// request-context table can park it (#6979). The drop no longer runs.
-    #[expect(dead_code, reason = "#6979 parks the ticket in the request-context table")]
-    pub(crate) fn into_ticket(self) -> DispatchId {
-        self.disarm().0
-    }
-
     /// Take the ticket apart so its `Drop` never runs after a consuming path
     /// claims the entry.
     fn disarm(self) -> (DispatchId, Weak<NativeBinding>) {
