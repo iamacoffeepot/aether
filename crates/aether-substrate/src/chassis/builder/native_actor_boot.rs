@@ -326,10 +326,10 @@ where
             // inline — no chassis-side state to release.
             BootState::Pending | BootState::Transitioning => {}
             // Any past-claim variant: release the mailbox claim. The
-            // namespace hold stays: a failed boot fails the build (R-0046). `resources` (and any held actor) drop at the end
-            // of this match arm — dropping `transport` closes the
-            // installed receiver, dropping `mailbox_sender` closes the
-            // channel.
+            // namespace hold stays, since a failed boot fails the build
+            // (R-0046). `resources` (and any held actor) drop at the end of
+            // this match arm — dropping `transport` closes the installed
+            // receiver, dropping `mailbox_sender` closes the channel.
             //
             // Before `wire` ran, the boot is aborting ahead of its spawn
             // pass: no dispatcher runs and no mail carries the id, so the
