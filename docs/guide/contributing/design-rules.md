@@ -819,6 +819,25 @@ option that sends mail at boot is not added.
   demo component brings up the release demo); #6802 (a bootstrap script
   component builds the workspace environment).
 
+### R-0046: Fail the whole bootstrap when a declared step of the engine's structure fails {#r-0046}
+
+Bootstrapping is all or nothing. A step that builds structure the chassis or
+its link set declares (the registry and its tables built from linked
+declarations, a declared capability's boot) must succeed. When one fails, or
+when the declarations contradict one another, the engine refuses to start and
+names every defect it found. A bootstrap step degrades only where the
+possibility was declared beforehand as part of that structure, as with
+companion singletons that one binary links on purpose. Once the engine is
+running, how an operation's failure is handled is decided per operation.
+
+- **Why:** an engine that boots with a hole in its declared structure runs a
+  shape no one declared, and the defect surfaces at runtime, far from the
+  declaration that caused it, as a decision the owner has to make.
+- **Settled:** #6920 (a namespace the linked native inventory contests fails
+  the publication table's build, rather than being recorded and refused per
+  birth); ADR-0232 §6 (the declared possibility: headless stubs claim their
+  capability's mailbox).
+
 ## Rulings
 
 Each ruling made after a rule lands is appended here, oldest first, and no
@@ -832,3 +851,6 @@ line is edited or removed:
 - 2026-09-26 · #6865 · what a native publication records → its namespace only · follows [R-0026](#r-0026)
 - 2026-09-26 · #6865 · how Bloomery bundles publish → each under its own per-digest namespace (the module hash) · follows [R-0021](#r-0021)
 - 2026-09-27 · #6894 (ADR-0242) · how a kind's reach is carried → the `CrossesActors` and `CrossesWire` markers, folded from the fields by the derives; `ActorMail` only for a kind that crosses actors; `WireMail` on the typed wire doors · follows [R-0042](#r-0042)
+- 2026-09-27 · #6920 · where the dependency admission row lands → in #6920, with the fixtures that depend on unpublished code fixed there (a separate observer actor is declared, and a probe that depends on a guest in another module moves to its own fixture crate) · follows [R-0009](#r-0009), [R-0033](#r-0033)
+- 2026-09-27 · #6922 · the one inline-spawn import's name once its untagged twin is deleted → `spawn_inline_child_p32`; a qualifier that distinguishes it from nothing is dropped · follows [R-0019](#r-0019)
+- 2026-09-27 · #6923 · how the component host holds a guest it spawned → as a protocol reference over a minimum control protocol every wasm actor publishes at its own route (drop, boot teardown, replace), since the host cannot name the guest's concrete type · follows [R-0044](#r-0044), [R-0045](#r-0045)
