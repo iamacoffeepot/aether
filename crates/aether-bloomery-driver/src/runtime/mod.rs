@@ -34,17 +34,18 @@
 //! each root's proven reference, taken from its load reply's stamped sender
 //! (ADR-0230 §3), keyed by that digest, and sends to it with the command's
 //! ticket as the request context. Inbound [`Call`],
-//! [`AwaitProcessed`], and a bundle root's fetch-on-miss [`ReadArtifact`]
-//! mail defers its reply, is fed to the core, and parks the reply keyed by
-//! its [`CallerId`]; each reply kind recovers its ticket from the request
-//! context and feeds the matching core continuation. Dropping the actor's
-//! state abandons every parked reply.
+//! [`AwaitProcessed`], a bundle root's fetch-on-miss [`ReadArtifact`], and a
+//! relayed [`ApiCall`] each hold a typed reply (ADR-0243), are fed to the
+//! core, and keep the held ticket keyed by the returned [`CallerId`]; each
+//! reply kind recovers its ticket from the request context and feeds the
+//! matching core continuation. Actor close settles every held ticket before
+//! the state drops.
 //!
 //! A program API call relays the same way as a fetch (ADR-0240 D6): the
 //! invocation sends [`ApiCall`] to its bundle root, the root relays it here,
 //! and the core maps `Http` to the http capability and `Workspace` to the
 //! held workspace, refusing any other API; the provider's reply comes back
-//! under an [`ApiTicket`] and answers the parked call.
+//! under an [`ApiTicket`] and answers the held call.
 
 mod bundles;
 mod core;
@@ -61,16 +62,17 @@ pub use self::core::{
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
 
-use aether_actor::{ActorRef, ErasedActorRef, Manual, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, runtime};
 use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
-    ApiCall, AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Digest, Evaluated, Invoked, ReadArtifact,
-    ReadArtifactResult, ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed, WatchHeadResult,
+    ApiCall, ApiCallResult, AppendRecordsResult, AwaitProcessed, Call, CallOutcome, ClosureLimit, Digest, Evaluated,
+    Invoked, Processed, ReadArtifact, ReadArtifactResult, ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed,
+    WatchHeadResult,
 };
 use aether_bloomery_workspace::WorkspaceCapability;
 use aether_http::FetchResult;
 use aether_kinds::LoadResult;
-use aether_substrate::actor::native::{DeferredReply, NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
 use crate::BundleDriver;
@@ -103,7 +105,7 @@ pub struct DriverParams {
 
 /// [`BundleDriver`] runtime state: the sans-io program core, the unit and
 /// journal it folds for, the workspace its programs run through, the core's
-/// startup commands until `wire` performs them, the parked replies it owes,
+/// startup commands until `wire` performs them, the held replies it owes,
 /// and each loaded bundle's root.
 pub struct BundleDriverState {
     core: ProgramCore,
@@ -111,11 +113,25 @@ pub struct BundleDriverState {
     journal: ActorRef<JournalActor>,
     workspace: ActorRef<WorkspaceCapability>,
     startup: Vec<Command>,
-    callers: HashMap<CallerId, DeferredReply>,
+    callers: HashMap<CallerId, Caller>,
     /// The digest each in-flight load was issued for, keyed by its ticket.
     loading: BTreeMap<LoadTicket, Digest>,
     /// Each loaded bundle's root, the stamped sender of its load reply.
     roots: HashMap<Digest, ErasedActorRef>,
+}
+
+/// One held reply the driver owes, typed by the inbound kind that armed it.
+/// Every [`CallerId`] comes from one core counter, so it is unique across
+/// the variants.
+enum Caller {
+    /// A [`Call`]'s exactly-once outcome.
+    Call(Held<CallOutcome>),
+    /// An [`AwaitProcessed`] barrier's processed head.
+    Processed(Held<Processed>),
+    /// A bundle root's fetch-on-miss [`ReadArtifact`].
+    Fetched(Held<ReadArtifactResult>),
+    /// A bundle root's relayed [`ApiCall`].
+    Api(Held<ApiCallResult>),
 }
 
 #[runtime]
@@ -150,20 +166,28 @@ impl NativeActor for BundleDriver {
         state.perform(ctx, startup);
     }
 
-    #[handler::manual]
-    fn on_call(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, call: Call) {
-        let owed = ctx.defer_reply_to(ctx.reply_target());
+    /// The held ticket is stored before the commands run, because the core
+    /// may answer within this same dispatch (an already recorded outcome).
+    #[handler::single]
+    fn on_call(state: &mut Self::State, ctx: &mut NativeCtx<'_>, call: Call) -> Pending<CallOutcome> {
+        let (pending, held) = ctx.hold::<CallOutcome>();
         let (caller, commands) = state.core.call(call);
-        state.callers.insert(caller, owed);
+        state.callers.insert(caller, Caller::Call(held));
         state.perform(ctx, commands);
+        pending
     }
 
-    #[handler::manual]
-    fn on_await_processed(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, request: AwaitProcessed) {
-        let owed = ctx.defer_reply_to(ctx.reply_target());
+    #[handler::single]
+    fn on_await_processed(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        request: AwaitProcessed,
+    ) -> Pending<Processed> {
+        let (pending, held) = ctx.hold::<Processed>();
         let (caller, commands) = state.core.await_processed(request);
-        state.callers.insert(caller, owed);
+        state.callers.insert(caller, Caller::Processed(held));
         state.perform(ctx, commands);
+        pending
     }
 
     #[handler::single]
@@ -185,25 +209,31 @@ impl NativeActor for BundleDriver {
     }
 
     /// Serves a bundle root's fetch-on-miss: the core answers it from its
-    /// artifact cache or one shared journal read per digest, and the parked
+    /// artifact cache or one shared journal read per digest, and the held
     /// reply carries the answer back to the root with the root's correlation.
-    #[handler::manual]
-    fn on_fetch_artifact(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, request: ReadArtifact) {
-        let owed = ctx.defer_reply_to(ctx.reply_target());
+    #[handler::single]
+    fn on_fetch_artifact(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        request: ReadArtifact,
+    ) -> Pending<ReadArtifactResult> {
+        let (pending, held) = ctx.hold::<ReadArtifactResult>();
         let (caller, commands) = state.core.fetch_artifact(request);
-        state.callers.insert(caller, owed);
+        state.callers.insert(caller, Caller::Fetched(held));
         state.perform(ctx, commands);
+        pending
     }
 
     /// Serves a bundle root's relayed program API call: the core sends it to
-    /// the API's provider or refuses it, and the parked reply carries the
+    /// the API's provider or refuses it, and the held reply carries the
     /// answer back to the root with the root's correlation.
-    #[handler::manual]
-    fn on_api_call(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, request: ApiCall) {
-        let owed = ctx.defer_reply_to(ctx.reply_target());
+    #[handler::single]
+    fn on_api_call(state: &mut Self::State, ctx: &mut NativeCtx<'_>, request: ApiCall) -> Pending<ApiCallResult> {
+        let (pending, held) = ctx.hold::<ApiCallResult>();
         let (caller, commands) = state.core.call_api(request);
-        state.callers.insert(caller, owed);
+        state.callers.insert(caller, Caller::Api(held));
         state.perform(ctx, commands);
+        pending
     }
 
     #[handler::single]
@@ -314,13 +344,5 @@ impl NativeActor for BundleDriver {
         };
         let commands = state.core.on_status(ticket, &status);
         state.perform(ctx, commands);
-    }
-}
-
-impl Drop for BundleDriverState {
-    fn drop(&mut self) {
-        for owed in mem::take(&mut self.callers).into_values() {
-            owed.abandon_for_actor_close();
-        }
     }
 }

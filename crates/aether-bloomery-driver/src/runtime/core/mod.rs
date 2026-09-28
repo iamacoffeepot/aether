@@ -5,7 +5,7 @@
 //! [`ProgramCore::call`] accepts one [`Call`],
 //! [`ProgramCore::fetch_artifact`] one bundle root's fetch-on-miss, and
 //! [`ProgramCore::call_api`] one bundle root's relayed program API call;
-//! the shell stores its deferred reply under the returned [`CallerId`]
+//! the shell stores its held reply under the returned [`CallerId`]
 //! before it performs the commands. Each command kind has one typed reply
 //! method, and a reply whose ticket the core is not waiting on returns no
 //! commands.
