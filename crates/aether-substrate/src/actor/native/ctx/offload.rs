@@ -8,13 +8,17 @@
 //! in-flight ledger, and replies from a later handler turn when the
 //! completion wake lands.
 
+use std::ptr;
+use std::sync::{Arc, Weak};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
 use aether_actor::{Addressable, ReplyMode, Singleton};
 use aether_data::ActorMail;
 
+use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::blocking::{DeferredCompletion, DeferredReply, DispatchId, Pending, TaskDone};
 use crate::actor::native::offload::fail_fast;
+use crate::actor::native::offload::held::Held;
 use crate::actor::native::offload::self_wake::SelfWake;
 use crate::actor::native::offload::thread;
 use crate::mail::Source;
@@ -253,6 +257,49 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// replied to, staged onto a successor, or abandoned.
     pub fn defer_reply_to(&self, reply_to: Source) -> DeferredReply {
         DeferredReply::new(self.acquire_settlement_hold(), reply_to)
+    }
+
+    /// Arm a reply of kind `R` this handler answers later (ADR-0243 §1): the
+    /// current settlement hold and reply target, as
+    /// `defer_reply_to(reply_target())` captures them, parked in one
+    /// in-flight ledger entry that no worker answers.
+    ///
+    /// The handler returns the [`Pending<R>`] receipt, which declares its
+    /// row `-> Pending<R>`, and keeps the [`Held<R>`] debt in state or on a
+    /// successor until [`Held::answer`] sends the one `R`.
+    ///
+    /// # Panics
+    /// Panics on a second `hold` in one dispatch (ADR-0243 §7): two debts
+    /// on one request would send two replies.
+    pub fn hold<R: ActorMail>(&mut self) -> (Pending<R>, Held<R>) {
+        assert!(
+            !self.held_this_dispatch,
+            "a second NativeCtx::hold in one dispatch: one request owes one reply (ADR-0243 §7)"
+        );
+        self.held_this_dispatch = true;
+        let (id, ledger) = self.binding.dispatch_hold(self.acquire_settlement_hold(), self.reply_target());
+        (Pending::new(id), Held::new(id, ledger))
+    }
+
+    /// The ledger half of [`Held::answer`]: claim the held entry `id` from
+    /// this actor's ledger, send `reply` to its captured target under the
+    /// root its hold keeps open, echoing the captured correlation, and then
+    /// release the hold, so `Sent` precedes `Release` (ADR-0080 §12).
+    ///
+    /// # Panics
+    /// Panics when `ledger` is another actor's binding, and when the entry
+    /// is not held in this ledger, which is a second answer for one ticket.
+    pub(crate) fn answer_held<R: ActorMail>(&mut self, id: DispatchId, ledger: &Weak<NativeBinding>, reply: &R) {
+        assert!(
+            ptr::eq(ledger.as_ptr(), Arc::as_ptr(self.binding)),
+            "Held::answer from another actor's ctx: a held reply answers on the actor that armed it (ADR-0243 §5)"
+        );
+        let (hold, reply_to) = self
+            .binding
+            .dispatch_claim_held(id)
+            .expect("Held::answer found no held ledger entry: a ticket answers once (ADR-0243 §1)");
+        self.reply_to_target(reply_to, reply, hold.as_ref().map(SettlementHold::root), None);
+        drop(hold);
     }
 
     /// ADR-0093 completion-routing entry point: remove the in-flight

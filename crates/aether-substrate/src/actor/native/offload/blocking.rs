@@ -72,20 +72,23 @@ impl DispatchId {
     pub const NONE: Self = Self(0);
 }
 
-/// A type-level "receipt" for a deferred reply (ADR-0109). Returned by
-/// [`dispatch_blocking`](NativeCtx::dispatch_blocking) and by bounded submit
-/// helpers that arm the same hold, so a request handler can declare
-/// `-> Pending<R>`: the reply is an `R`, sent later from the matching
-/// `#[handler(task)]` completion rather than synchronously on this handler's
-/// return.
+/// A type-level "receipt" for a deferred reply (ADR-0109). A request handler
+/// returns it to declare `-> Pending<R>`: the reply is an `R`, sent later
+/// rather than synchronously on this handler's return — from the matching
+/// `#[handler(task)]` completion, or through the [`Held<R>`] debt minted
+/// beside it.
 ///
 /// Phantom over `R` only — the actual hold and reply target live in the
 /// in-flight ledger (or in a queued thunk's captured hold), not here, so a
 /// `Pending<R>` carries just the [`DispatchId`] (reachable via
 /// [`Pending::dispatch_id`] for *optional* cancellation) plus the reply-kind
 /// marker. Framework-constructed: `Pending::new` is crate-internal;
-/// out-of-crate minting goes through [`NativeCtx::pending`] or
-/// `TaskQueue` / `PerSenderEgress` `submit` (ADR-0109 §3).
+/// out-of-crate minting goes through [`NativeCtx::hold`], the offload
+/// dispatch calls such as [`NativeCtx::dispatch_blocking`],
+/// [`NativeCtx::pending`], or `TaskQueue` / `PerSenderEgress` `submit`
+/// (ADR-0109 §3, ADR-0243 §3).
+///
+/// [`Held<R>`]: crate::actor::native::offload::held::Held
 pub struct Pending<R: ActorMail> {
     dispatch_id: DispatchId,
     /// `fn() -> R` so `Pending<R>` is covariant in `R` and stays
@@ -95,9 +98,9 @@ pub struct Pending<R: ActorMail> {
 }
 
 impl<R: ActorMail> Pending<R> {
-    /// Wrap the armed dispatch's [`DispatchId`]. Crate-internal — called from
-    /// [`dispatch_blocking`](NativeCtx::dispatch_blocking) and
-    /// [`NativeCtx::pending`] (ADR-0109 §3).
+    /// Wrap the armed obligation's [`DispatchId`]. Crate-internal — called
+    /// from [`NativeCtx::hold`], the offload dispatch calls, and
+    /// [`NativeCtx::pending`] (ADR-0109 §3, ADR-0243 §3).
     pub(crate) fn new(dispatch_id: DispatchId) -> Self {
         Self { dispatch_id, _reply: PhantomData }
     }
@@ -200,34 +203,48 @@ aether_data::name_inventory::inventory::submit! {
     }
 }
 
-/// One in-flight dispatch's held state, parked in the [`InflightTable`]
-/// from the dispatching handler's return until its completion lands.
+/// One armed reply obligation's held state, parked in the [`InflightTable`]
+/// from the arming handler's return until the obligation is answered.
 ///
-/// The actor thread writes the entry at dispatch time (the hold, reply
-/// target, and context, with the output empty); the worker fills
-/// `output` under the table mutex when its closure returns and pushes the
-/// [`TaskCompletionWake`]; the actor reads + removes the entry when that
-/// wake lands ([`NativeCtx::take_task_done`]).
+/// The actor thread writes the entry when it arms (the hold and reply
+/// target, plus the [`EntryState`] naming what answers it). A worker entry
+/// is filled by its worker under the table mutex and read back when its
+/// [`TaskCompletionWake`] lands ([`NativeCtx::take_task_done`]); a held
+/// entry is claimed by its [`Held`](crate::actor::native::offload::held::Held)
+/// ticket.
 struct InflightEntry {
-    /// The [`SettlementHold`] acquired eagerly in the dispatching
-    /// handler (before it returned), keeping the chain root open across
-    /// the async worker. Released only after the re-reply, via
-    /// [`TaskDone::resolve`]. `None` when the dispatching context had no
-    /// chain to hold, in which case the dispatch is invisible to
-    /// settlement (ADR-0168 §2).
+    /// The [`SettlementHold`] acquired eagerly in the arming handler
+    /// (before it returned), keeping the chain root open across the
+    /// deferral. Released only after the re-reply, via
+    /// [`TaskDone::resolve`] or `Held::answer`. `None` when the arming
+    /// context had no chain to hold, in which case the obligation is
+    /// invisible to settlement (ADR-0168 §2).
     hold: Option<SettlementHold>,
-    /// The originating caller's reply target, captured at dispatch. The
+    /// The originating caller's reply target, captured when armed. The
     /// re-reply routes through this.
     reply_to: Source,
-    /// The opt-in completion context (`()` for the bare
-    /// [`dispatch_blocking`](NativeCtx::dispatch_blocking)). Boxed so
-    /// heterogeneous `C`s share one table type; downcast in
-    /// `take_task_done`.
-    context: Box<dyn Any + Send>,
-    /// The worker's output, filled under the table mutex when the
-    /// closure returns and taken in `take_task_done`. Boxed for the same
-    /// heterogeneity reason; `None` until the worker finishes.
-    output: Option<Box<dyn Any + Send>>,
+    /// What answers the obligation.
+    state: EntryState,
+}
+
+/// What answers one ledger entry (ADR-0243 §1).
+enum EntryState {
+    /// An offload worker produces the output a later completion replies
+    /// with (ADR-0093).
+    Worker {
+        /// The opt-in completion context (`()` for the bare
+        /// [`dispatch_blocking`](NativeCtx::dispatch_blocking)). Boxed so
+        /// heterogeneous `C`s share one table type; downcast in
+        /// `take_task_done`.
+        context: Box<dyn Any + Send>,
+        /// The worker's output, filled under the table mutex when the
+        /// closure returns and taken in `take_task_done`. Boxed for the same
+        /// heterogeneity reason; `None` until the worker finishes.
+        output: Option<Box<dyn Any + Send>>,
+    },
+    /// Armed by [`NativeCtx::hold`] with no worker: the `Held` ticket that
+    /// names this entry answers it, from any handler on the actor.
+    Held,
 }
 
 /// Per-actor in-flight ledger for hold-until-resolve dispatch (ADR-0093
@@ -407,9 +424,10 @@ impl Drop for DeferredReply {
 
 /// Surrender an owed reply as a bare [`DeferredReply`].
 ///
-/// Implemented by [`DeferredReply`] itself (identity) and by [`TaskDone`],
+/// Implemented by [`DeferredReply`] itself (identity), by [`TaskDone`],
 /// whose completion carries the same debt alongside a worker output and a
-/// context. Staging surfaces such as
+/// context, and by the typed
+/// [`Held<R>`](crate::actor::native::offload::held::Held). Staging surfaces such as
 /// [`HandlerSpawnBuilder::continue_from`](crate::actor::native::spawn::HandlerSpawnBuilder::continue_from)
 /// take `impl IntoDeferredReply` so a handler can continue from either without
 /// an intermediate noun at the call site, and can be handed the value back
@@ -612,22 +630,64 @@ impl InflightTable {
     /// worker.
     fn insert(&mut self, hold: Option<SettlementHold>, reply_to: Source, context: Box<dyn Any + Send>) -> DispatchId {
         let id = self.mint_id();
-        self.entries.insert(id, InflightEntry { hold, reply_to, context, output: None });
+        self.entries.insert(id, InflightEntry { hold, reply_to, state: EntryState::Worker { context, output: None } });
         id
+    }
+
+    /// Insert an entry armed with no worker (ADR-0243 §1) and return its
+    /// [`DispatchId`]. Only its `Held` ticket claims it back.
+    fn insert_held(&mut self, hold: Option<SettlementHold>, reply_to: Source) -> DispatchId {
+        let id = self.mint_id();
+        self.entries.insert(id, InflightEntry { hold, reply_to, state: EntryState::Held });
+        id
+    }
+
+    /// Remove the named entry and hand back its parked `(hold, reply_to)`,
+    /// only when it is a held entry. `None` for an unknown id or a worker
+    /// entry, which is left in place: a held ticket never discharges a
+    /// worker's obligation.
+    fn claim_held(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
+        if !matches!(self.entries.get(&id)?.state, EntryState::Held) {
+            return None;
+        }
+        let entry = self.entries.remove(&id)?;
+        Some((entry.hold, entry.reply_to))
+    }
+
+    /// Remove every entry no worker answers and hand back their holds, for
+    /// the actor-close tail to release with no reply (ADR-0243 §1). Worker
+    /// entries stay: their workers' fills and wakes still find them, and the
+    /// binding's drop settles them as before.
+    fn settle_held_for_actor_close(&mut self) -> Vec<Option<SettlementHold>> {
+        self.entries
+            .extract_if(|_, entry| !matches!(entry.state, EntryState::Worker { .. }))
+            .map(|(_, entry)| entry.hold)
+            .collect()
+    }
+
+    /// Name the state of the named entry, for tests that pin which entries
+    /// a ledger operation leaves behind.
+    #[cfg(test)]
+    fn state_of(&self, id: DispatchId) -> Option<&'static str> {
+        self.entries.get(&id).map(|entry| match entry.state {
+            EntryState::Worker { .. } => "worker",
+            EntryState::Held => "held",
+        })
     }
 
     /// Fill the worker's `output` into the named entry's completion slot.
     /// Called once, on the worker thread, under the table lock. A no-op
     /// for an unknown id (the dispatch was cancelled out of the table
-    /// before the worker finished).
+    /// before the worker finished) or an entry no worker answers.
     fn fill_output(&mut self, id: DispatchId, output: Box<dyn Any + Send>) -> FillOutcome {
-        let Some(entry) = self.entries.get_mut(&id) else {
+        let Some(InflightEntry { state: EntryState::Worker { output: slot, .. }, .. }) = self.entries.get_mut(&id)
+        else {
             return FillOutcome::Missing;
         };
-        if entry.output.is_some() {
+        if slot.is_some() {
             return FillOutcome::AlreadyFilled;
         }
-        entry.output = Some(output);
+        *slot = Some(output);
         FillOutcome::Filled
     }
 
@@ -636,8 +696,12 @@ impl InflightTable {
     /// is no output to type. The spawn-error branch calls this to release
     /// the eagerly-acquired hold when arming failed: the caller drops the
     /// returned hold, settling the chain the dispatch would otherwise wedge
-    /// forever. A no-op (`None`) for an unknown id.
+    /// forever. A no-op (`None`) for an unknown id, and for an entry no
+    /// worker answers, which is left in place for its `Held` ticket.
     fn abandon(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
+        if !matches!(self.entries.get(&id)?.state, EntryState::Worker { .. }) {
+            return None;
+        }
         let entry = self.entries.remove(&id)?;
         Some((entry.hold, entry.reply_to))
     }
@@ -650,17 +714,20 @@ impl InflightTable {
     /// either miss so a parked hold is never bare-dropped. A downcast
     /// *mismatch* against a filled output is a genuine `O` / `C` wiring bug:
     /// it `debug_assert`s loudly (distinct from the benign unfilled case)
-    /// and returns `None` with the entry retained.
+    /// and returns `None` with the entry retained. An entry no worker
+    /// answers is never taken.
     fn take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
-        let entry = self.entries.get(&id)?;
+        let EntryState::Worker { context, output } = &self.entries.get(&id)?.state else {
+            return None;
+        };
         // Peek-then-remove, the same discipline `try_take` uses: probe the
         // boxed `output` + `context` without disturbing the entry. An
         // unfilled output slot returns `None` quietly (a later wake completes
         // the still-parked entry). A type mismatch against a *filled* output
         // is a wiring bug — loud in debug, `None` in release — and never
         // removes the entry, so the parked hold stays reclaimable.
-        let output = entry.output.as_deref()?;
-        if output.downcast_ref::<O>().is_none() || entry.context.downcast_ref::<C>().is_none() {
+        let output = output.as_deref()?;
+        if output.downcast_ref::<O>().is_none() || context.downcast_ref::<C>().is_none() {
             debug_assert!(
                 false,
                 "dispatch completion type mismatch: the task handler's (O, C) do not match the \
@@ -669,8 +736,10 @@ impl InflightTable {
             return None;
         }
         // Both probes passed — safe to remove and rebuild.
-        let entry = self.entries.remove(&id)?;
-        let InflightEntry { hold, reply_to, context, output } = entry;
+        let InflightEntry { hold, reply_to, state } = self.entries.remove(&id)?;
+        let EntryState::Worker { context, output } = state else {
+            return None;
+        };
         let output = output?.downcast::<O>().ok()?;
         let context = context.downcast::<C>().ok()?;
         Some(TaskDone { output: *output, context: *context, hold, reply_to, resolved: false })
@@ -693,12 +762,14 @@ impl InflightTable {
     /// the unknown-id case, since the wake lands after the fill), or a type
     /// mismatch on either downcast.
     fn try_take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
-        let entry = self.entries.get(&id)?;
+        let EntryState::Worker { context, output } = &self.entries.get(&id)?.state else {
+            return None;
+        };
         // Probe both boxes without disturbing the entry — an unfilled
         // output slot or a type mismatch on either box short-circuits to
         // `None` (the entry stays intact for a later handler to claim).
-        entry.output.as_deref()?.downcast_ref::<O>()?;
-        entry.context.downcast_ref::<C>()?;
+        output.as_deref()?.downcast_ref::<O>()?;
+        context.downcast_ref::<C>()?;
         // Both match — now it's safe to remove and rebuild.
         self.take(id)
     }
@@ -733,6 +804,23 @@ impl InflightTable {
 
     pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
         self.try_take(id)
+    }
+
+    pub(crate) fn dispatch_insert_held(&mut self, hold: Option<SettlementHold>, reply_to: Source) -> DispatchId {
+        self.insert_held(hold, reply_to)
+    }
+
+    pub(crate) fn dispatch_claim_held(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
+        self.claim_held(id)
+    }
+
+    pub(crate) fn dispatch_settle_held_for_actor_close(&mut self) -> Vec<Option<SettlementHold>> {
+        self.settle_held_for_actor_close()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dispatch_state_of(&self, id: DispatchId) -> Option<&'static str> {
+        self.state_of(id)
     }
 }
 

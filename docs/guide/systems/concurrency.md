@@ -121,6 +121,32 @@ produces handles belongs off the actor thread entirely; stage it through the
 offload primitives below and pass results by handle rather than copying them
 through mail.
 
+**4. A reply owed until a later turn, with no worker → `ctx.hold`.** When a
+(native) handler answers one exact reply kind later from a turn no worker drives
+— after a peer's reply, a settlement or monitor notice, a long-poll wake, or a
+frame loop — it arms the obligation with `ctx.hold::<R>()`
+([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)):
+
+```rust
+#[handler::single]
+fn on_watch_head(&mut self, ctx: &mut NativeCtx<'_>, _m: WatchHead) -> Pending<WatchHeadResult> {
+    let (pending, held) = ctx.hold::<WatchHeadResult>();
+    self.watchers.push(held);                              // the debt waits in state
+    pending                                                // the receipt sets the row
+}
+
+// later, from any handler on this actor:
+held.answer(ctx, &WatchHeadResult { head });               // reply, then drop the hold
+```
+
+`hold` parks the caller's settlement hold and reply target in the actor's
+in-flight ledger, the same table `dispatch_blocking` fills, and returns the
+`Pending<R>` receipt with a move-only `Held<R>` ticket. `answer` replies to the
+captured caller with its correlation, whichever turn runs it, and only an `R`
+compiles. A second `hold` in one dispatch panics. Dropping a `Held` unanswered
+releases the hold and panics; an actor that closes with tickets still parked
+settles them silently.
+
 ## The three offload shapes, and the hold
 
 Settlement — how `send_mail_traced` knows a chain of mail is *fully* done rather

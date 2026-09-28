@@ -122,6 +122,11 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// ctxs that dispatch nothing (init / close-hook / chassis-root /
     /// cap-test fixtures built through [`Self::new`]).
     inbound: Option<Envelope>,
+    /// ADR-0243 §7: set by the first [`Self::hold`] of this dispatch, so a
+    /// second one panics — two debts on one request would send two replies.
+    /// [`Self::as_single`] and [`Self::erase`] view the same storage, so one
+    /// dispatch shares one flag across its views.
+    held_this_dispatch: bool,
     /// ADR-0112: phantom reply-mode marker (a ZST, layout-neutral) that
     /// selects which reply surface this ctx exposes. Defaults to
     /// [`Single`], so the common `NativeCtx<'_>` signature is unchanged.
@@ -179,6 +184,7 @@ impl<'a> NativeCtx<'a, Erased, Single> {
             in_flight_root,
             causing_chain: None,
             inbound: None,
+            held_this_dispatch: false,
             _mode: PhantomData,
             _actor: PhantomData,
         }
@@ -213,6 +219,7 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
             in_flight_root,
             causing_chain: None,
             inbound: None,
+            held_this_dispatch: false,
             _mode: PhantomData,
             _actor: PhantomData,
         }
@@ -242,6 +249,7 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
             in_flight_root: None,
             causing_chain: chain.held_root(),
             inbound: None,
+            held_this_dispatch: false,
             _mode: PhantomData,
             _actor: PhantomData,
         }
@@ -285,6 +293,7 @@ impl<'a> NativeCtx<'a, Erased, Manual> {
             in_flight_root,
             causing_chain: None,
             inbound: None,
+            held_this_dispatch: false,
             _mode: PhantomData,
             _actor: PhantomData,
         }
@@ -330,6 +339,7 @@ impl<'a, A> NativeCtx<'a, A, Manual> {
             in_flight_root,
             causing_chain: None,
             inbound: Some(inbound),
+            held_this_dispatch: false,
             _mode: PhantomData,
             _actor: PhantomData,
         }

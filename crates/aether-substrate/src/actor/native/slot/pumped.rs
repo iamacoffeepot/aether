@@ -215,9 +215,9 @@ mod tests {
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
 
     use crate::Erased;
-    use crate::actor::native::Dispatch;
     use crate::actor::native::envelope::Envelope;
     use crate::actor::native::local::with_stamped;
+    use crate::actor::native::{Dispatch, Held, Pending};
     use crate::actor::registry::ActorRegistry;
     use crate::chassis::inbox::{InboundMail, ReplyLineage, SettlingInbox};
     use crate::chassis::settlement::{
@@ -257,6 +257,11 @@ mod tests {
         note: u32,
     }
 
+    #[aether_data::kind(name = "test.pumped.hold", copy, partial_eq)]
+    struct HoldReq {
+        seq: u32,
+    }
+
     /// A pure addressing identity for the peer `on_emit` sends to (test 6).
     /// `One` makes it a root singleton, so `Peer::resolve(_, ())` is the
     /// depth-1 id a registration under `"test.pumped.peer"` takes, regardless
@@ -283,6 +288,9 @@ mod tests {
         /// When present, `on_defer` ships its retained inbound guard here so
         /// the test replies from a worker thread (test 5).
         deferred_tx: Option<mpsc::Sender<InboundMail>>,
+        /// Set by `on_hold` — a held reply parked in actor state, which the
+        /// close tail must settle before this state drops.
+        held: Option<Held<Pong>>,
     }
 
     #[aether_actor::actor(depends(Peer))]
@@ -317,6 +325,13 @@ mod tests {
             // through the binding's outbound burst → the pool `WakeSink`,
             // exercising the pool-side burst demux from the pumping thread.
             ctx.send::<Peer>(&Poke { note: 7 });
+        }
+
+        #[handler::single]
+        fn on_hold(&mut self, ctx: &mut NativeCtx<'_>, _h: HoldReq) -> Pending<Pong> {
+            let (pending, held) = ctx.hold::<Pong>();
+            self.held = Some(held);
+            pending
         }
 
         fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
@@ -577,6 +592,31 @@ mod tests {
 
         // Idempotent: the actor was consumed on the first call.
         slot.shutdown();
+    }
+
+    /// Catches a close tail that drops actor state before settling the
+    /// ledger: the parked `Held` would then find its entry still held and
+    /// panic as a lost reply instead of releasing silently.
+    #[test]
+    fn held_parked_in_state_is_settled_by_shutdown_without_panic() {
+        let fx = fixtures();
+        let counter = Arc::clone(fx.mailer.trace_handle().settlement_counter());
+        let self_id = MailboxId(0x_0DED_0012);
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
+
+        let root = MailId::new(self_id, 1);
+        fx.mailer.record_sent_inflight(root);
+        let bytes = HoldReq { seq: 1 }.encode_into_bytes();
+        fx.mailer.push(Mail::new(self_id, HoldReq::ID, bytes, 1).with_lineage(
+            Some(MailId::new(self_id, 2)),
+            Some(root),
+            None,
+        ));
+        slot.drain_available();
+        assert_eq!(counter.held_open(root), 1, "the parked Held keeps the caller's chain open");
+
+        slot.shutdown();
+        assert_eq!(counter.held_open(root), 0, "shutdown released the parked hold without a reply");
     }
 
     /// ADR-0160 §1: a handler that retains its inbound (`take_inbound`) and

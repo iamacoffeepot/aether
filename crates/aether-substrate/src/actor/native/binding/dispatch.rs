@@ -3,7 +3,7 @@
 //! per-actor table that parks its hold.
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use super::NativeBinding;
 use crate::mail::{KindId, Mail, Source};
@@ -134,5 +134,64 @@ impl NativeBinding {
         id: super::offload::blocking::DispatchId,
     ) -> Option<super::offload::blocking::TaskDone<O, C>> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_try_take(id)
+    }
+
+    /// Arm a ledger entry no worker answers (ADR-0243 §1) and return its
+    /// [`DispatchId`](super::offload::blocking::DispatchId) with the weak
+    /// link its [`Held`](super::offload::held::Held) ticket keeps back to
+    /// this ledger.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn dispatch_hold(
+        self: &Arc<Self>,
+        hold: Option<SettlementHold>,
+        reply_to: Source,
+    ) -> (super::offload::blocking::DispatchId, Weak<Self>) {
+        let id = self
+            .inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_insert_held(hold, reply_to);
+        (id, Arc::downgrade(self))
+    }
+
+    /// Remove the named held entry and hand back its parked
+    /// `(Option<SettlementHold>, Source)`. `None` for an unknown id or an
+    /// entry a worker answers.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn dispatch_claim_held(
+        &self,
+        id: super::offload::blocking::DispatchId,
+    ) -> Option<(Option<SettlementHold>, Source)> {
+        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_claim_held(id)
+    }
+
+    /// Release every held entry still in the ledger with no reply and no
+    /// panic, because the actor that owes them is closing (ADR-0243 §1). The
+    /// close paths call it before the actor's state drops, so a `Held`
+    /// parked in that state then finds its entry gone and drops silently.
+    /// The holds release after the ledger lock is released.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn settle_held_for_actor_close(&self) {
+        let holds = self
+            .inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_settle_held_for_actor_close();
+        drop(holds);
+    }
+
+    /// The named ledger entry's state, for tests.
+    #[cfg(test)]
+    pub(crate) fn dispatch_state_of(&self, id: super::offload::blocking::DispatchId) -> Option<&'static str> {
+        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_state_of(id)
     }
 }
