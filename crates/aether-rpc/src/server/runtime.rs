@@ -31,7 +31,7 @@ use super::{
     MonitorNotice, PeerKind, RegisterEngineRoute, RpcBind, RpcInboundReady, RpcServerCapability, RpcServerConfig,
     RpcServerParams, Settled,
 };
-use aether_actor::{HandlesKind, runtime};
+use aether_actor::{HandlesKind, ProtocolRef, runtime};
 use aether_codec::InlineError;
 use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::mail::boundary::is_engine_only;
@@ -42,7 +42,7 @@ use aether_substrate::net::teardown_connect_addr;
 // single `use runtime::*` glob. Types named only by the inherent helper
 // methods below ride the same wall (used locally here).
 pub use crate::kinds::{CallSettled, ForwardEnvelope, RegisterEngineRouteResult};
-pub use crate::{Hello, HelloAck, MailEnvelope, ReplyEnvelope, RpcError, WIRE_VERSION, WireFrame};
+pub use crate::{EngineRoute, Hello, HelloAck, MailEnvelope, ReplyEnvelope, RpcError, WIRE_VERSION, WireFrame};
 pub use aether_actor::ErasedActorRef;
 pub use aether_codec::frame::{FrameError, write_frame};
 pub use aether_data::{EngineId, Kind};
@@ -134,8 +134,9 @@ fn write_port_file(path: &Path, port: u16) -> io::Result<()> {
 /// Bookkeeping for one in-flight call (cid passed `Some` on the
 /// wire). Looked up by the dispatch's auto-minted
 /// `correlation_id` (== `MailId.correlation_id` of the dispatched
-/// envelope, which is also the root id since we always dispatch
-/// as chassis-root via `send_envelope_detached_to`). Fields are
+/// envelope, which is also the root id since both the local
+/// `deliver_detached` path and the engine route's `send_detached_to` path
+/// mint a detached chassis root). Fields are
 /// `pub` so the parent's `on_settled` / `on_any` handlers can
 /// read them after `remove` / `get`.
 #[derive(Copy, Clone)]
@@ -182,7 +183,7 @@ pub struct RpcServerState {
     /// Engine → the proxy registered for it: the call path's lookup for
     /// an `engine = Some(_)` `Call`. Kept in step with
     /// [`Self::route_owners`]; neither map is ever scanned.
-    pub engine_routes: HashMap<EngineId, ErasedActorRef>,
+    pub engine_routes: HashMap<EngineId, ProtocolRef<EngineRoute>>,
     /// Registrant → its route: the notice path's lookup when a registered
     /// proxy departs, and the owner of its in-flight correlations. Kept in
     /// step with [`Self::engine_routes`]; neither map is ever scanned.
@@ -289,9 +290,10 @@ impl RpcServerState {
         Some(entry)
     }
 
-    /// Record `sender` as the route for `engine` (the five cases of
-    /// `on_register_engine_route`). Every answer is one keyed lookup in
-    /// one of the two route maps.
+    /// Record `sender` as the route for `engine`, preserving the ownership
+    /// guards before proving the new registrant covers [`EngineRoute`]. Every
+    /// ownership answer is one keyed lookup in one of the two route maps; a
+    /// new owner pays one guard cast before monitoring or mutation.
     pub fn register_engine_route<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
@@ -299,7 +301,7 @@ impl RpcServerState {
         engine: EngineId,
     ) -> RegisterEngineRouteResult {
         if let Some(holder) = self.engine_routes.get(&engine) {
-            if *holder == sender {
+            if holder.erase() == sender {
                 return RegisterEngineRouteResult::Ok;
             }
             return RegisterEngineRouteResult::Err {
@@ -315,6 +317,16 @@ impl RpcServerState {
             };
         }
 
+        let Some(route) = ctx.cast::<EngineRoute>(sender) else {
+            return RegisterEngineRouteResult::Err {
+                error: format!(
+                    "cannot register engine {}: the registrant does not handle `{}` manually (EngineRoute)",
+                    engine.0,
+                    <ForwardEnvelope as Kind>::NAME,
+                ),
+            };
+        };
+
         let monitor = match ctx.monitor(sender) {
             Ok(handle) => Some(handle),
             Err(error) => {
@@ -327,7 +339,7 @@ impl RpcServerState {
                 None
             }
         };
-        self.engine_routes.insert(engine, sender);
+        self.engine_routes.insert(engine, route);
         self.route_owners.insert(sender, RouteOwner { engine, calls: HashSet::new(), _monitor: monitor });
         RegisterEngineRouteResult::Ok
     }
@@ -499,15 +511,10 @@ impl RpcServerState {
             };
             let forward =
                 ForwardEnvelope { recipient: envelope.to.path, kind: envelope.kind, payload: envelope.payload };
-            // `ForwardEnvelope` is not engine-only, so the send always mints
-            // an id; the engine-only envelope inside it was refused above.
-            let Some(mail_id) =
-                ctx.send_envelope_detached_to(route, <ForwardEnvelope as Kind>::ID, &forward.encode_into_bytes())
-            else {
-                return;
-            };
+            let mail_id = ctx.send_detached_to(route, &forward);
             if let Some(wire_cid) = cid {
                 let correlation = mail_id.correlation_id;
+                let route = route.erase();
                 self.in_flight.insert(correlation, InFlight { conn_id, wire_cid, route: Some(route) });
                 if let Some(owner) = self.route_owners.get_mut(&route) {
                     owner.calls.insert(correlation);
@@ -848,6 +855,9 @@ impl NativeActor for RpcServerCapability {
     /// is refused and the holder keeps it; a registrant that already
     /// routes a different engine is refused; the same registrant
     /// re-registering its own engine is `Ok` and changes nothing.
+    /// After those ownership guards, a new registrant is refused unless its
+    /// published manual [`ForwardEnvelope`] row covers [`EngineRoute`]. A
+    /// refusal creates no monitor and changes neither route map.
     /// Reply: `RegisterEngineRouteResult`.
     #[handler::single]
     fn on_register_engine_route(
