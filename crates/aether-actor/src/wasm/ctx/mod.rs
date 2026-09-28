@@ -16,7 +16,8 @@
 //! receive ctx carries that are large enough to name in their own right:
 //! `send` (its outbound mail surface), `sends` (that surface again with the
 //! reply-class marker dropped, for helpers), `subscribe` (the flat subscribe
-//! verbs that name their publisher), `relative` (positional cluster-relative
+//! verbs that name their publisher), `held` (the typed deferred reply a
+//! single handler holds past its return), `relative` (positional cluster-relative
 //! addressing), `child` (its typed counterpart) and `spawn` (detached and
 //! inline child creation), and `address` (proving an actor path that arrived
 //! in config or mail).
@@ -24,6 +25,7 @@
 mod address;
 mod child;
 mod drop;
+mod held;
 mod init;
 mod receive;
 mod relative;
@@ -39,6 +41,7 @@ mod tests;
 pub use address::ResolvePathError;
 pub use child::InlineChild;
 pub use drop::WasmDropCtx;
+pub use held::{Held, Pending};
 pub use init::WasmInitCtx;
 pub use receive::{NO_INBOUND_SOURCE, WasmCtx};
 pub use relative::RelativeMailbox;

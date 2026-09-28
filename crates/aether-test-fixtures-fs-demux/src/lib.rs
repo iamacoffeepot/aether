@@ -64,8 +64,8 @@ impl WasmActor for FsDemux {
         *self = Self::default();
 
         let read = Read { addr: NamespaceAddr::new(msg.namespace, msg.path) };
-        let _ = ctx.send_with_context::<FsCapability>(&read, &FsDemuxContextA { payload: CONTEXT_A_PAYLOAD });
-        let _ = ctx.send_with_context::<FsCapability>(&read, &FsDemuxContextB { payload: CONTEXT_B_PAYLOAD });
+        let _ = ctx.send_with_context::<FsCapability>(&read, FsDemuxContextA { payload: CONTEXT_A_PAYLOAD });
+        let _ = ctx.send_with_context::<FsCapability>(&read, FsDemuxContextB { payload: CONTEXT_B_PAYLOAD });
     }
 
     #[handler::manual]

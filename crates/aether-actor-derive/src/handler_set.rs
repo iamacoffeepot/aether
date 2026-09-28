@@ -719,10 +719,16 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
         let k = &h.kind_ty;
         let method = &h.method.sig.ident;
         // #6412: a wasm single arm tells the host it may free the dispatch's
-        // reply handle, as `build_dispatch_body` does for an actor's own arms.
-        // Native actors have no reply table, so every native arm keeps
-        // `DISPATCH_HANDLED`, which the native adopter compares against.
-        let rc = if transport == SetTransport::Wasm && h.class == HandlerClass::Single {
+        // reply handle, as `build_dispatch_body` does for an actor's own arms,
+        // and a wasm single `-> Pending<R>` arm tells it to keep and hold the
+        // handle (ADR-0243 §6). Native actors have no reply table, so every
+        // native arm keeps `DISPATCH_HANDLED`, which the native adopter
+        // compares against.
+        let wasm_deferred = transport == SetTransport::Wasm
+            && matches!((h.class, &h.reply), (HandlerClass::Single, HandlerReply::Deferred(_)));
+        let rc = if wasm_deferred {
+            quote! { ::aether_actor::DISPATCH_HANDLED_HOLD }
+        } else if transport == SetTransport::Wasm && h.class == HandlerClass::Single {
             quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE }
         } else {
             quote! { ::aether_actor::DISPATCH_HANDLED }
@@ -735,6 +741,10 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
             (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
                 let __aether_reply = Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);
                 ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
+            },
+            (HandlerClass::Single, HandlerReply::Deferred(_)) if wasm_deferred => quote! {
+                let __aether_pending = Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);
+                ::aether_actor::Pending::__defuse(__aether_pending);
             },
             (HandlerClass::Single, _) => quote! {
                 Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);

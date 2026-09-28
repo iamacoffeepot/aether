@@ -13,13 +13,16 @@
 //! `save_state_kind` is the typed-state convenience (ADR-0040): the
 //! bundle is framed as `[0..8)` little-endian `K::ID` followed by the
 //! wire encoding of `value`; the replacement instance recovers `K`
-//! via [`crate::mail::PriorState::decode_kind`]. Use the raw `save_state`
+//! via [`crate::mail::PriorState::decode_kind`]. The encoding is
+//! `Kind::encode_with`, which for a derived structured kind is byte-for-byte
+//! the serde wire encoding older SDKs wrote, so bundles cross an SDK
+//! upgrade in both directions. Use the raw `save_state`
 //! when persisting bytes that aren't a kind or when driving an
 //! explicit migration off the leading id.
 
 use alloc::vec::Vec;
 
-use aether_data::{Kind, Schema, wire};
+use aether_data::Kind;
 
 /// Migration-bundle deposit surface for the `on_dehydrate` save hook.
 /// Init / runtime ctxs deliberately don't implement this.
@@ -55,13 +58,20 @@ pub trait Persistence {
     /// identifies the schema, but a non-zero value is legal for
     /// components that want to stack a migration counter on top of
     /// kind identity.
-    fn save_state_kind<K>(&mut self, version: u32, value: &K)
-    where
-        K: Kind + Schema + serde::Serialize,
-    {
+    ///
+    /// The default encodes into a plain buffer, which refuses an ADR-0243
+    /// `Held`; the wasm dehydrate ctx overrides it to grant the held-reply
+    /// ledger.
+    ///
+    /// # Panics
+    ///
+    /// When `value` does not encode: a length past the `u32` ceiling, or a
+    /// `Held` reaching a ctx that grants no ledger.
+    fn save_state_kind<K: Kind>(&mut self, version: u32, value: &K) {
         let mut out = Vec::from(K::ID.0.to_le_bytes());
-        let payload = wire::to_vec(value).expect("wire encode to Vec is infallible");
-        out.extend_from_slice(&payload);
+        if let Err(error) = value.encode_with(&mut out) {
+            panic!("aether-actor: saved state `{}` failed to encode: {error}", K::NAME);
+        }
         self.save_state(version, &out);
     }
 }

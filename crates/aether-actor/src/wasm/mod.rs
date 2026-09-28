@@ -57,8 +57,8 @@ mod raw;
 // allows mirror the def-site allows on each type.
 #[allow(clippy::module_name_repetitions)]
 pub use ctx::{
-    ActorTypeTag, InlineChild, NO_INBOUND_SOURCE, RelativeMailbox, ResolvePathError, Sends, SpawnError, WasmCtx,
-    WasmDropCtx, WasmInitCtx, WireCtx,
+    ActorTypeTag, Held, InlineChild, NO_INBOUND_SOURCE, Pending, RelativeMailbox, ResolvePathError, Sends, SpawnError,
+    WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
 /// Error returned by [`Lifecycle::init`](crate::Lifecycle::init) when the actor cannot start
@@ -1337,6 +1337,9 @@ macro_rules! __export_internal {
                     instance.__aether_dispatch(&mut ctx, __aether_mail)
                 })
             };
+            // ADR-0243 §7: a reply whose stored context parked a held reply
+            // must have taken that context before its handler returned.
+            __AETHER_INLINE.__check_held_contexts_taken();
             // ADR-0114 addressing amendment: drain every intra-cluster send
             // the dispatch (and any cascade it triggers) buffered, in place
             // under this one run-token. Each item re-acquires the instance
@@ -1420,14 +1423,24 @@ macro_rules! __export_internal {
             // composite is byte-identical to the parent's own blob, so a
             // childless component dehydrates exactly as before; a parent
             // that saves nothing and has no children skips the host save.
+            // ADR-0243 §6: a ticket an earlier dehydrate saved, in a replace
+            // that was then rolled back, is live again in this instance.
+            __AETHER_INLINE.__revert_dehydrate();
             let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
                 mailbox_id,
                 &__AETHER_INLINE,
                 |ctx| <$component as $crate::WasmActor>::on_dehydrate(instance, ctx),
             );
+            // ADR-0243 §6: a held reply that is still live was neither saved
+            // nor answered; refuse the replace so the host reinstates this
+            // instance, whose tickets the dehydrate saved are live again.
+            if __AETHER_INLINE.__held_unsaved() {
+                __AETHER_INLINE.__revert_dehydrate();
+                return $crate::DEHYDRATE_HELD_UNSAVED;
+            }
             let __aether_state = __AETHER_INLINE.compose_request_context_state(__aether_user_state);
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id);
+                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id, &__AETHER_INLINE);
                 ctx.save_state(version, &bytes);
             }
             0
@@ -1487,7 +1500,8 @@ macro_rules! __export_internal {
                             parent_bytes.as_ptr() as usize,
                             parent_bytes.len(),
                         )
-                    };
+                    }
+                    .__with_registry(&__AETHER_INLINE);
                     // #6533: `on_rehydrate` takes the lifecycle ctx typed by
                     // the actor, so upgrade the erased ctx once, here where
                     // it is born, as the `wire` / `unwire` shims do.
@@ -2131,6 +2145,9 @@ macro_rules! __export_multi_internal {
                     instance.erased_dispatch(&mut ctx, __aether_mail)
                 })
             };
+            // ADR-0243 §7: a reply whose stored context parked a held reply
+            // must have taken that context before its handler returned.
+            __AETHER_INLINE.__check_held_contexts_taken();
             // ADR-0114 addressing amendment: drain every intra-cluster send
             // in place under this one run-token; each item re-acquires the
             // boxed instance inside the per-item `dispatch_own` factory, which
@@ -2200,14 +2217,24 @@ macro_rules! __export_multi_internal {
             // composite, then `save_state` once (the boxed instance's
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
             // byte-identical to the boxed parent's own blob.
+            // ADR-0243 §6: a ticket an earlier dehydrate saved, in a replace
+            // that was then rolled back, is live again in this instance.
+            __AETHER_INLINE.__revert_dehydrate();
             let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
                 mailbox_id,
                 &__AETHER_INLINE,
                 |ctx| instance.erased_on_dehydrate(ctx),
             );
+            // ADR-0243 §6: a held reply that is still live was neither saved
+            // nor answered; refuse the replace so the host reinstates this
+            // instance, whose tickets the dehydrate saved are live again.
+            if __AETHER_INLINE.__held_unsaved() {
+                __AETHER_INLINE.__revert_dehydrate();
+                return $crate::DEHYDRATE_HELD_UNSAVED;
+            }
             let __aether_state = __AETHER_INLINE.compose_request_context_state(__aether_user_state);
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id);
+                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id, &__AETHER_INLINE);
                 ctx.save_state(version, &bytes);
             }
             0
@@ -2266,7 +2293,8 @@ macro_rules! __export_multi_internal {
                             parent_bytes.as_ptr() as usize,
                             parent_bytes.len(),
                         )
-                    };
+                    }
+                    .__with_registry(&__AETHER_INLINE);
                     instance.erased_on_rehydrate(&mut ctx, parent_prior);
                 },
                 |registry, parent, child| {

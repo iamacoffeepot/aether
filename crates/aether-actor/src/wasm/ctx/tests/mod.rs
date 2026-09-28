@@ -1,12 +1,14 @@
 //! Host-build unit tests for the wasm ctx family, and the fixture actors
 //! they share. The fixtures live here so both test modules reach them
 //! through `super::`; the assertions split by subject — `spawn` for child
-//! creation and teardown, `child` for typed cluster-child resolution, and
-//! `dispatch` for what a ctx reads off the dispatch it was built for.
+//! creation and teardown, `child` for typed cluster-child resolution,
+//! `dispatch` for what a ctx reads off the dispatch it was built for, and
+//! `held` for the typed deferred reply (ADR-0243).
 
 mod actor_ref;
 mod child;
 mod dispatch;
+mod held;
 mod sends;
 mod spawn;
 

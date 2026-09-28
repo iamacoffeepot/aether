@@ -60,8 +60,7 @@ impl WasmActor for CarryRequester {
 
     #[handler::single]
     fn on_run(&mut self, ctx: &mut WasmCtx<'_>, run: RunCarriedRequest) {
-        let _ =
-            ctx.send_with_context::<ReplyHolder>(&CarriedRequest { tag: run.tag }, &CarriedContext { tag: run.tag });
+        let _ = ctx.send_with_context::<ReplyHolder>(&CarriedRequest { tag: run.tag }, CarriedContext { tag: run.tag });
     }
 
     #[handler::single]
