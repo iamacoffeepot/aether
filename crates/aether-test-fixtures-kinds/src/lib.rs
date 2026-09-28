@@ -563,3 +563,44 @@ pub struct CarriedRequestResult {
 /// the context of the request it answers.
 #[aether_data::kind(name = "aether.test_fixtures.carried_reply_matched", default)]
 pub struct CarriedReplyMatched;
+
+/// Issue 6983: [`RunHeldRequest::target`] naming the held relay, which holds
+/// its reply in a request context.
+pub const HELD_TARGET_RELAY: u32 = 0;
+
+/// Issue 6983: [`RunHeldRequest::target`] naming the held keeper, which holds
+/// its reply in state and saves it on dehydrate.
+pub const HELD_TARGET_KEEPER: u32 = 1;
+
+/// Issue 6983: [`RunHeldRequest::target`] naming the held forgetter, which
+/// holds its reply in state and saves nothing on dehydrate.
+pub const HELD_TARGET_FORGETTER: u32 = 2;
+
+/// Issue 6983: trigger that makes the held requester send one [`HeldRequest`]
+/// carrying `tag` to the held actor `target` names (`HELD_TARGET_*`).
+#[aether_data::kind(name = "aether.test_fixtures.run_held_request", copy, default)]
+pub struct RunHeldRequest {
+    pub tag: u32,
+    pub target: u32,
+}
+
+/// Issue 6983: request a held actor answers later, through a held reply.
+#[aether_data::kind(name = "aether.test_fixtures.held_request", copy)]
+pub struct HeldRequest {
+    pub tag: u32,
+}
+
+/// Issue 6983: a held actor's answer to a [`HeldRequest`], echoing its `tag`.
+#[aether_data::kind(name = "aether.test_fixtures.held_request_result", copy)]
+pub struct HeldRequestResult {
+    pub tag: u32,
+}
+
+/// Issue 6983: report the held requester emits when a [`HeldRequestResult`] echoes
+/// the tag of the request it sent.
+#[aether_data::kind(name = "aether.test_fixtures.held_reply_matched", default)]
+pub struct HeldReplyMatched;
+
+/// Issue 6983: tells a held keeper or forgetter to answer the reply it holds.
+#[aether_data::kind(name = "aether.test_fixtures.release_held", default)]
+pub struct ReleaseHeld;

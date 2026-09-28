@@ -10,12 +10,20 @@
 //! that exported `test.carry.requester` alone would republish the bundle's
 //! namespace while dropping the bundle's others, which publish admission
 //! refuses before the carried-context check could run.
+//!
+//! Issue 6983 companion to the bundle's `held_carry`: `ReshapedHeldRelay` has
+//! the same handler rows as `test.held.relay`, but its `HeldRelayContext`
+//! holds a `Held<CarriedRequestResult>` where the bundle's holds a
+//! `Held<HeldRequestResult>`. A held field's schema names its reply kind (ADR-0243
+//! §4), so the context's `Kind::ID` changes, and swapping the bundle's relay
+//! to this export while a held reply is carried must be refused.
 
 #![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and `CarryRequester` is stateless — the same allow the bundle's `correlation_carry` carries
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Held, Pending, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{
-    CarriedReplyMatched, CarriedRequestResult, RunCarriedRequest, SubstrateHarnessObserver,
+    CarriedReplyMatched, CarriedRequestResult, HeldRequest, HeldRequestResult, RunCarriedRequest,
+    SubstrateHarnessObserver,
 };
 
 #[aether_data::kind(name = "aether.test_fixtures.carried_context", no_serde)]
@@ -46,4 +54,39 @@ impl WasmActor for CarryRequester {
     }
 }
 
-aether_actor::export!(default = CarryRequester);
+/// The bundle's held relay context, name and fields kept, with the held
+/// field's reply kind changed.
+#[aether_data::kind(name = "aether.test_fixtures.held_relay_context")]
+struct HeldRelayContext {
+    held: Held<CarriedRequestResult>,
+    tag: u32,
+}
+
+/// The rows of the bundle's `test.held.relay`. The refusal scenario never
+/// installs it, so it answers each request at once.
+pub struct ReshapedHeldRelay;
+
+#[actor(root)]
+impl WasmActor for ReshapedHeldRelay {
+    const NAMESPACE: &'static str = "test.held.reshaped_relay";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(ReshapedHeldRelay)
+    }
+
+    #[handler::single]
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
+        let (pending, held) = ctx.hold::<HeldRequestResult>();
+        held.answer(ctx, &HeldRequestResult { tag: request.tag });
+        pending
+    }
+
+    #[handler::single]
+    fn on_result(&mut self, ctx: &mut WasmCtx<'_>, result: CarriedRequestResult) {
+        if let Some(context) = ctx.take_context::<HeldRelayContext>() {
+            context.held.answer(ctx, &result);
+        }
+    }
+}
+
+aether_actor::export!(default = CarryRequester, public = [ReshapedHeldRelay]);

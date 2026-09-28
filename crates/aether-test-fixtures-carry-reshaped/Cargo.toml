@@ -9,8 +9,13 @@ publish = false
 # own `test.carry.reshaped_requester` namespace, with the
 # `aether.test_fixtures.carried_context` kind reshaped (an added `generation`
 # field changes `Kind::ID`). Swapping the bundle's requester to this export,
-# while a context is carried, must be refused. Standalone because a changed
-# context schema needs a separately compiled module.
+# while a context is carried, must be refused. Issue 6983 adds the bundle's
+# `test.held.relay` rows under `test.held.reshaped_relay`, with the held reply
+# kind in `aether.test_fixtures.held_relay_context` changed (the `Held` field's
+# `Ticket` schema names its reply kind, so `Kind::ID` changes); swapping the
+# bundle's relay to it while a held reply is carried must be refused.
+# Standalone because a changed context schema needs a separately compiled
+# module.
 [lib]
 crate-type = ["cdylib"]
 
