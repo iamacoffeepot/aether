@@ -297,6 +297,13 @@ its return value — `-> R` sends `R` back, `-> ()` is fire-and-forget. The
 replies by hand (`ctx.reply` / `ctx.reply_to`), for a reply it can't compute this
 turn.
 
+A single handler that answers one exact kind in a later turn returns
+`-> Pending<R>`. The offload dispatch calls mint that receipt for work a worker
+finishes; for a reply no worker produces, `ctx.hold::<R>()` returns the
+`Pending<R>` with a move-only `Held<R>` ticket, which the actor keeps in state
+and answers with exactly one `R` through `Held::answer`, from any later handler
+([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)).
+
 A bounded many-item answer is one reply whose kind carries a list, as the log,
 trace, and cost tails do. Incremental or unbounded delivery publishes to
 subscribers (`Publishes<K>` / `subscribe`).
@@ -857,7 +864,9 @@ match ctx.spawn_child::<Worker>(Subname::Named(&name), config, ()).continue_from
 
 A handler with no `TaskDone` in hand — one that parks a caller across a worker
 thread, say — mints the same debt from its ctx with `ctx.defer_reply_to(target)`
-and passes that to `continue_from` instead. Dropping a `DeferredReply` without
+and passes that to `continue_from` instead. A typed `Held<R>` from `ctx.hold` is
+also an `IntoDeferredReply`, so `continue_from` takes it the same way and the
+chain stays held across the hand-off. Dropping a `DeferredReply` without
 replying releases its hold (settlement is never wedged) and then panics, in every
 build, which the scheduler escalates through the chassis aborter, because a lost
 reply strands the caller forever. An actor that closes with debts still parked

@@ -14,6 +14,9 @@
 //!   *later* handler turn. The worker pushes a result and dies, and the reply
 //!   is sent from a subsequent invocation, so the hold has to outlive the
 //!   worker and neither thread shape fits.
+//! - [`held`] — ADR-0243 typed held replies: the [`held::Held`] debt a
+//!   handler keeps while its `Pending<R>` receipt declares the reply, for a
+//!   reply a later handler turn sends that no worker produces.
 //! - [`self_wake`] — the handle a cap's own long-lived thread holds to wake
 //!   its actor, in place of a stored mailbox id plus a mailer (ADR-0230), and
 //!   the sanctioned spawn for that thread (`SelfWake::spawn_sidecar`).
@@ -36,6 +39,7 @@
 pub mod blocking;
 pub mod check_in;
 pub(crate) mod fail_fast;
+pub mod held;
 pub mod self_wake;
 pub mod task_queue;
 pub mod thread;
