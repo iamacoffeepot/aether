@@ -29,7 +29,7 @@ use crate::runtime::bundles::BundleTable;
 use crate::runtime::programs::DigestQueue;
 use crate::runtime::reactors::{CommittedRouting, Routing};
 
-pub use command::{Command, LoadOutcome};
+pub use command::{ApiReply, Command, LoadOutcome};
 pub use journal::EVENTS_PAGE;
 pub use journal::{Journal, PendingWrite, PlannedRecord, RequestedClaim};
 pub use ticket::{

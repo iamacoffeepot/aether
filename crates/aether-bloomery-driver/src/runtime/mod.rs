@@ -54,7 +54,7 @@ mod reactors;
 mod recovery;
 
 pub use self::core::{
-    ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket,
+    ApiReply, ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket,
     EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
 };
 
@@ -68,7 +68,6 @@ use aether_bloomery_kinds::{
     ReadArtifactResult, ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed, WatchHeadResult,
 };
 use aether_bloomery_workspace::WorkspaceCapability;
-use aether_data::Kind;
 use aether_http::FetchResult;
 use aether_kinds::LoadResult;
 use aether_substrate::actor::native::{DeferredReply, NativeActor, NativeCtx, NativeInitCtx};
@@ -208,17 +207,15 @@ impl NativeActor for BundleDriver {
     }
 
     #[handler::single]
-    #[expect(clippy::needless_pass_by_value, reason = "a handler takes its kind by value; the reply relays as bytes")]
     fn on_fetch_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: FetchResult) {
         let Some(ticket) = ctx.take_context::<ApiTicket>() else {
             return;
         };
-        let commands = state.core.on_api_reply(ticket, FetchResult::ID, result.encode_into_bytes());
+        let commands = state.core.on_api_reply(ticket, ApiReply::Fetch(result));
         state.perform(ctx, commands);
     }
 
     #[handler::single]
-    #[expect(clippy::needless_pass_by_value, reason = "a handler takes its kind by value; the reply relays as bytes")]
     fn on_workspace_run_result(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -227,8 +224,7 @@ impl NativeActor for BundleDriver {
         let Some(ticket) = ctx.take_context::<ApiTicket>() else {
             return;
         };
-        let commands =
-            state.core.on_api_reply(ticket, aether_bloomery_workspace::RunResult::ID, result.encode_into_bytes());
+        let commands = state.core.on_api_reply(ticket, ApiReply::Workspace(result));
         state.perform(ctx, commands);
     }
 

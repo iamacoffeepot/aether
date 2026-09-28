@@ -9,7 +9,7 @@
 use aether_bloomery_kinds::{ApiCall, ApiCallResult, Detail, ProgramApi, Refusal};
 use aether_data::{Kind, KindId};
 
-use crate::runtime::core::{ApiTicket, CallerId, Command, ProgramCore};
+use crate::runtime::core::{ApiReply, ApiTicket, CallerId, Command, ProgramCore};
 
 /// Whether this unit holds a provider for `api`. `Http` maps to the http
 /// capability and `Workspace` to the unit's workspace; `Process` has none.
@@ -49,15 +49,19 @@ impl ProgramCore {
         (caller, out)
     }
 
-    /// Feed one provider's reply to a relayed call. Unknown tickets return
-    /// no commands.
-    pub fn on_api_reply(&mut self, ticket: ApiTicket, kind: KindId, payload: Vec<u8>) -> Vec<Command> {
+    /// Feed one provider's reply to a relayed call, encoded for the relay
+    /// back as its kind and bytes. Unknown tickets return no commands.
+    pub fn on_api_reply(&mut self, ticket: ApiTicket, reply: ApiReply) -> Vec<Command> {
         let mut out = Vec::new();
         if self.aborted {
             return out;
         }
         let Some((caller, call)) = self.api_calls.remove(&ticket) else {
             return out;
+        };
+        let (kind, payload) = match reply {
+            ApiReply::Fetch(result) => (aether_http::FetchResult::ID, result.encode_into_bytes()),
+            ApiReply::Workspace(result) => (aether_bloomery_workspace::RunResult::ID, result.encode_into_bytes()),
         };
         out.push(Command::ApiAnswered { caller, result: ApiCallResult::Replied { call, kind, payload } });
         out

@@ -170,3 +170,13 @@ pub enum LoadOutcome {
         error: String,
     },
 }
+
+/// A provider's reply to [`Command::Fetch`] or [`Command::RunWorkspace`],
+/// which the core relays back to the program as its kind and bytes.
+#[derive(Debug, Clone)]
+pub enum ApiReply {
+    /// The http capability's answer to a relayed `Http` call.
+    Fetch(aether_http::FetchResult),
+    /// The workspace's answer to a relayed `Workspace` call.
+    Workspace(aether_bloomery_workspace::RunResult),
+}

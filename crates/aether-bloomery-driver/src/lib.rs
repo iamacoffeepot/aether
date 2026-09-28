@@ -14,7 +14,7 @@
 
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, DriverParams, EVENTS_PAGE,
+    ApiReply, ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, DriverParams, EVENTS_PAGE,
     EvaluateTicket, EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket,
     WatchTicket,
 };
