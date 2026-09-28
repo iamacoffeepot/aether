@@ -85,8 +85,7 @@ use super::TextCapability;
 use crate::kinds::{DrawText, LoadFont, LoadFontResult};
 use crate::fs::{FsCapability, Read, ReadResult};
 use aether_actor::runtime;
-use aether_substrate::Manual;
-use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
 /// The cap's mutable state — the font registry and glyph atlas.
@@ -110,17 +109,15 @@ impl NativeActor for TextCapability {
         // … rasterize glyphs, send the quad batch …
     }
 
-    // Reply-bearing, deferred: attach a typed context to the forwarded
-    // `aether.fs.read`, then reply later from `on_read_result`.
-    // See "the reply is deferred here" below.
-    #[handler::manual]
-    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadFont) {
-        TextCapabilityState::forward_font_read(
-            ctx,
-            mail.namespace,
-            mail.path,
-            PendingReply::LoadFont,
-        );
+    // Reply-bearing, answered later: hold the owed `LoadFontResult`, carry
+    // the held reply in the forwarded `aether.fs.read`'s request context,
+    // and answer it from `on_read_result` or the parse completion.
+    // See "text's held-reply variant" below.
+    #[handler::single]
+    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: LoadFont) -> Pending<LoadFontResult> {
+        let (pending, held) = ctx.hold::<LoadFontResult>();
+        TextCapabilityState::forward_font_read(ctx, mail.namespace, mail.path, FontLoadContext::LoadFont { held });
+        pending
     }
 }
 ```
@@ -176,36 +173,41 @@ The pieces:
   locks](../foundations/actor-model.md). The handler receives `mail` by
   value.
 
-### Reply-bearing handlers, and text's deferred variant
+### Reply-bearing handlers, and text's held-reply variant
 
 A self-contained reply-bearing handler returns its reply kind (`-> R`,
 ADR-0112): the handler computes the answer this turn and the dispatcher
 sends it back. A fire-and-forget handler returns `()`.
 
-Text's `load_font` is the **deferred** variant, because it can't answer
-this turn — it must round-trip `aether.fs` first. So its handlers are the
-`Manual` reply class (`#[handler::manual]`), which hands the reply timing
-to the handler rather than a returned value:
+Text's `load_font` answers **later**, because it can't answer this turn —
+it must round-trip `aether.fs` first. It is still a `#[handler::single]`,
+declared `-> Pending<LoadFontResult>` (ADR-0243): `ctx.hold::<LoadFontResult>()`
+returns the `Pending<LoadFontResult>` receipt the handler returns, which
+sets its row, and a `Held<LoadFontResult>` ticket that answers the one
+`LoadFontResult` from a later turn:
 
-1. **`on_load_font`** captures the original caller's `Source` in a
-   `FontLoadContext` together with the owed `PendingReply` shape, then forwards
+1. **`on_load_font`** holds the reply and moves the `Held` into the
+   `FontLoadContext::LoadFont` variant of the request context, then forwards
    an `aether.fs.read` with
    `ctx.send_with_context::<FsCapability>(&read, context)`, which compiles
-   because `TextCapability` declares `depends(FsCapability)`. Correlation lives in the binding's request table, not a path-keyed actor-state
-   map, so two requests for the same path remain distinct.
-2. **`on_read_result`** recovers the matching context with
-   `ctx.take_context::<FontLoadContext>()`. On the error arm it replies to
-   `context.source` with `ctx.reply_to`; on success it carries that source and a
-   `FontParseContext` into the off-thread parse.
+   because `TextCapability` declares `depends(FsCapability)`. The context
+   is a kind with one variant per owed reply shape (`LoadFont` holds a
+   `Held<LoadFontResult>`, `FontMetrics` a `Held<FontMetricsResult>`), so
+   answering a request in the wrong shape is a compile error. Correlation
+   lives in the binding's request table, not a path-keyed actor-state map,
+   so two requests for the same path remain distinct.
+2. **`on_read_result`** takes the matching context back with
+   `ctx.take_context::<FontLoadContext>()`, which returns the `Held` live.
+   On the error arm it answers with `held.answer(ctx, &LoadFontResult::Err { … })`;
+   on success it hands the ticket and a `FontParseContext` to
+   `ctx.dispatch_blocking_held_with(held, cx, …)` for the off-thread parse.
 3. **`on_font_parsed`** (the `#[handler(task)]` completion) receives
    `TaskDone<FontParseOutput, FontParseContext>`, registers the parsed font under
-   a session-scoped `font_id`, and re-replies through the captured caller with
-   `done.resolve_value(ctx, &LoadFontResult::Ok { … })`.
+   a session-scoped `font_id`, and answers the caller the held entry captured
+   with `done.resolve_value(ctx, &LoadFontResult::Ok { … })`.
 
-`ctx.reply(&result)` replies to the current handler's caller this turn;
-`ctx.reply_to(source, &result)` replies to a `Source` captured earlier —
-the deferred path text uses. Trace the full correlation in
-`runtime/mod.rs` rather than reading it re-explained here.
+Trace the full correlation in `runtime/mod.rs` rather than reading it
+re-explained here.
 
 The kinds a handler receives must exist in the substrate kind inventory
 so the dispatcher can decode the wire bytes. Text **owns** its kinds:
@@ -362,6 +364,9 @@ native cap has nothing to cross-compile.) Text's in-crate pattern, in its
 2. Construct fresh state (`TextCapabilityState::new()`) and a `NativeCtx`
    over the binding, then call the handler directly:
    `TextCapability::on_load_font(&mut state, &mut ctx, LoadFont { … })`.
+   A direct call to a `-> Pending<R>` handler stands in for the dispatch,
+   so it must `.__defuse()` the returned receipt; an armed receipt dropped
+   anywhere else panics.
 3. Assert what the handler *sent* by draining egress with
    `assert_next_send_kind::<K>(&binding, &rx)` (which flushes the buffered
    outbound first, the way `NativeCtx`'s drop would at the end of a real
@@ -381,12 +386,12 @@ token as `testing::token_root(n)`, so it names no mailbox. The in-flight
 lineage a `NativeCtx` constructor takes is optional: `None` for a context with
 no inbound chain, `Some(root)` for one running inside a chain.
 
-Three tests anchor the deferred-reply flow:
+Three tests anchor the held-reply flow:
 `load_font_forwards_read_with_context` drives `on_load_font` and asserts the
 forwarded `aether.fs.read` has a nonzero correlation id;
 `read_err_replies_load_font_err_via_request_context` feeds its correlated
 `ReadResult::Err` and asserts the cap relays `LoadFontResult::Err` to the caller;
-and `same_path_loads_reply_to_their_own_request_contexts` proves concurrent reads
+and `same_path_loads_answer_their_own_request_contexts` proves concurrent reads
 for the same path still reply to their respective sessions.
 
 For an end-to-end check across the real in-process boundaries — rendering, the
