@@ -257,7 +257,7 @@ mod tests {
         let transport = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), None, None);
 
-        ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b""));
+        ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b"")).__defuse();
         drive_task_completion::<ProcessCapability>(&mut state, &transport, &rx);
 
         match decode_session_reply::<RunResult>(&rx) {
@@ -281,7 +281,7 @@ mod tests {
         let transport = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), None, None);
 
-        ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b"hello aether"));
+        ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b"hello aether")).__defuse();
         // The worker runs cat against the piped stdin and pushes the
         // completion wake; route it through the cap's task handler.
         drive_task_completion::<ProcessCapability>(&mut state, &transport, &rx);

@@ -736,6 +736,13 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
                 let __aether_reply = Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);
                 ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
             },
+            // ADR-0243 §7: a native member's returned `Pending<R>` receipt is
+            // defused here, as the actor's own arm does. The wasm transport has
+            // no `Pending` type yet (#6960).
+            (HandlerClass::Single, HandlerReply::Deferred(_)) if transport == SetTransport::Native => quote! {
+                let __aether_pending = Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);
+                ::aether_substrate::actor::native::Pending::__defuse(__aether_pending);
+            },
             (HandlerClass::Single, _) => quote! {
                 Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);
             },

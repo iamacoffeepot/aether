@@ -284,7 +284,7 @@ mod tests {
 
     fn submit(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<ErasedActorRef>, cid: u64) {
         let mut ctx = NativeCtx::new(binding, session_reply_to(cid), None, Some(root_id(cid)));
-        q.submit(&mut ctx, sender, move || Answer { value: cid });
+        q.submit(&mut ctx, sender, move || Answer { value: cid }).__defuse();
     }
 
     fn complete(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<ErasedActorRef>) {
@@ -446,11 +446,11 @@ mod tests {
         let root_b = root_id(2);
         {
             let mut ctx = NativeCtx::new(&binding, session_reply_to(1), None, Some(root_a));
-            q.submit(&mut ctx, sender, || Answer { value: 1 });
+            q.submit(&mut ctx, sender, || Answer { value: 1 }).__defuse();
         }
         {
             let mut ctx = NativeCtx::new(&binding, session_reply_to(2), None, Some(root_b));
-            q.submit(&mut ctx, sender, || Answer { value: 2 });
+            q.submit(&mut ctx, sender, || Answer { value: 2 }).__defuse();
         }
         assert_eq!(q.pending_for(sender), 1, "the second request queued behind the budget of 1");
         assert_eq!(counter.held_open(root_b), 1, "the queued fetch holds its own chain from accept (ADR-0158 §8)");

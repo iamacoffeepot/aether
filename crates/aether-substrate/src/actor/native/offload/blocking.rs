@@ -84,9 +84,19 @@ pub struct DispatchId(pub u64);
 /// armed ledger entry (ADR-0109 §3, ADR-0243 §3). A bounded queue returns
 /// one of those receipts from its `submit`.
 ///
+/// The receipt must be returned from the handler that minted it: the
+/// `#[actor]` / `#[handler_set]` dispatch takes the returned receipt as the
+/// handler's declaration that it replies `R` later. Dropping an armed receipt
+/// anywhere else panics outside an unwind (ADR-0243 §7), so a handler cannot
+/// mint a deferred reply, discard the receipt, and declare a `-> ()` row that
+/// hides the reply it sends later.
+///
 /// [`Held<R>`]: crate::actor::native::offload::held::Held
 pub struct Pending<R: ActorMail> {
     dispatch_id: DispatchId,
+    /// Set at mint; cleared only by [`Pending::__defuse`], the framework's
+    /// acknowledgement that the handler returned the receipt.
+    armed: bool,
     /// `fn() -> R` so `Pending<R>` is covariant in `R` and stays
     /// `Send`/`Sync` regardless of `R` — it owns no `R`, it only names
     /// the reply kind.
@@ -99,7 +109,7 @@ impl<R: ActorMail> Pending<R> {
     /// [`NativeCtx::dispatch_blocking_with_pending`] (ADR-0109 §3,
     /// ADR-0243 §3).
     pub(crate) fn new(dispatch_id: DispatchId) -> Self {
-        Self { dispatch_id, _reply: PhantomData }
+        Self { dispatch_id, armed: true, _reply: PhantomData }
     }
 
     /// The [`DispatchId`] of the armed dispatch, for *optional*
@@ -108,6 +118,32 @@ impl<R: ActorMail> Pending<R> {
     #[must_use]
     pub fn dispatch_id(&self) -> DispatchId {
         self.dispatch_id
+    }
+
+    /// Accept the receipt as returned from its handler. The `#[actor]` and
+    /// `#[handler_set]` native dispatch arms call this on the value a
+    /// `-> Pending<R>` handler returns; a test that calls a handler directly
+    /// stands in for that dispatch and calls it too. Not an escape for handler
+    /// code: a handler that discards its receipt would declare a row that
+    /// hides the reply it owes.
+    #[doc(hidden)]
+    pub fn __defuse(mut self) {
+        self.armed = false;
+    }
+}
+
+impl<R: ActorMail> Drop for Pending<R> {
+    /// An armed receipt dropped outside an unwind is a handler that minted a
+    /// deferred reply without returning its receipt, so its declared row lies
+    /// about the reply it sends. Fail fast (ADR-0243 §7); a panic already
+    /// unwinding past the receipt stays the one reported.
+    fn drop(&mut self) {
+        assert!(
+            !self.armed || thread::panicking(),
+            "Pending<{}> dropped without being returned from its handler: a handler that mints a \
+             deferred reply must return the receipt (ADR-0243 §7)",
+            R::NAME
+        );
     }
 }
 
@@ -942,9 +978,10 @@ mod tests {
         // worker, return.
         {
             let mut ctx = NativeCtx::new(&binding, caller_reply_to, None, Some(root));
-            // The bare `dispatch_blocking` now returns a `Pending<R>`
-            // (ADR-0109); `R` is the declared reply kind (here `Answer`).
-            let _pending = ctx.dispatch_blocking::<Answer, Answer, _>(move || Answer { value: 42 });
+            // The bare `dispatch_blocking` returns a `Pending<R>` (ADR-0109);
+            // `R` is the declared reply kind (here `Answer`). This test stands
+            // in for the dispatch that accepts the returned receipt.
+            ctx.dispatch_blocking::<Answer, Answer, _>(move || Answer { value: 42 }).__defuse();
         }
 
         // The handler returned but the chain is held: settlement is
@@ -1539,5 +1576,22 @@ mod tests {
         assert!(egress.try_recv().is_err(), "an engine-only reply is refused, not sent");
         assert_eq!(counter.held_open(root), 1, "a refused reply leaves the debt owed");
         owed.abandon_for_actor_close();
+    }
+
+    /// Catches a `Pending` whose `Drop` never fires, or a `__defuse` that
+    /// leaves the receipt armed: a discarded receipt is a handler hiding the
+    /// reply it owes behind a false row (ADR-0243 §7).
+    #[test]
+    fn dropping_an_armed_pending_panics_and_a_defused_one_does_not() {
+        let payload = catch_unwind(|| drop(Pending::<Answer>::new(DispatchId(1))))
+            .expect_err("an armed receipt dropped outside an unwind fails fast");
+        let message =
+            payload.downcast_ref::<String>().map(String::as_str).or_else(|| payload.downcast_ref::<&str>().copied());
+        assert!(
+            message.is_some_and(|message| message.starts_with("Pending<test.dispatch_blocking.answer> dropped")),
+            "the panic names the receipt's reply kind"
+        );
+
+        Pending::<Answer>::new(DispatchId(2)).__defuse();
     }
 }
