@@ -1,3 +1,4 @@
+use aether_actor::DEHYDRATE_HELD_UNSAVED;
 use wasmtime::Store;
 
 use super::instantiate::Placement;
@@ -43,11 +44,28 @@ impl Component {
     /// Wasmtime traps (guest panics, unreachable) are caught and
     /// logged rather than propagated — per ADR-0015, a panicking
     /// hook must not stall teardown.
+    ///
+    /// ADR-0243 §6: a guest that left a live held reply unsaved returns
+    /// `DEHYDRATE_HELD_UNSAVED`. That is recorded as a save error, so the
+    /// trampoline's replace takes its existing save-error rollback through
+    /// [`Self::take_save_error`] and reinstates this guest rather than
+    /// stranding the requester. A save error the hook already recorded is
+    /// kept.
     pub fn on_dehydrate(&mut self) {
-        if let Some(f) = self.on_dehydrate.clone()
-            && let Err(e) = f.call(&mut self.store, ())
-        {
-            tracing::error!(target: "aether_substrate::component", error = %e, "on_dehydrate hook trapped");
+        let Some(f) = self.on_dehydrate.clone() else {
+            return;
+        };
+        match f.call(&mut self.store, ()) {
+            Ok(DEHYDRATE_HELD_UNSAVED) => {
+                let error = &mut self.store.data_mut().save_state_error;
+                if error.is_none() {
+                    *error = Some("on_dehydrate refused: a held reply is live and was not saved".to_owned());
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(target: "aether_substrate::component", error = %e, "on_dehydrate hook trapped");
+            }
         }
     }
 
