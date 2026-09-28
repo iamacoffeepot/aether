@@ -1,6 +1,6 @@
 # ADR-0137: In-cluster behavior script host
 
-- **Status:** Accepted (shipped — the behavior script host in `crates/aether-behavior` / `crates/aether-behavior-derive`)
+- **Status:** Withdrawn — removed in #6943; the code last lived at 7dd04a522608e2dede77e5767723616cdc88ddff. No agent ever authored a behavior script, and the mechanism cost maintenance on every actor-API change for a consumer that never materialized.
 - **Date:** 2026-07-07
 
 ## Context

@@ -252,7 +252,7 @@ See [Writing a component](docs/guide/recipes/writing-a-component.md) and
 | Layer | Crates | Responsibility |
 |---|---|---|
 | Data and wire | `aether-data`, `aether-codec`, `aether-math`, `aether-kinds` | ids, schemas, canonical encoding, framing, shared vocabulary |
-| Guest SDKs | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
+| Guest SDKs | `aether-actor` and its derive crate | actor authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm hosts, settlement |
 | Native services | `aether-render`, `aether-audio`, `aether-fs` and the rest of `aether-<cap>` | one crate per capability mailbox: render, text, audio, clipboard, window, FS, HTTP, TCP, process, RPC, component, lifecycle, fleet, inventory, trace |
 | Chassis and harnesses | `aether-chassis` + `aether-chassis-*` | per-chassis crates over a shared composition layer; harnesses in `aether-harness-*` |

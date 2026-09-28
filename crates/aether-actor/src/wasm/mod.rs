@@ -264,9 +264,9 @@ pub trait ListedModule {
 ///
 /// `export!` declares a hidden module type, `__AetherModule`, and implements
 /// `Rebuildable<__AetherModule>` for every type it lists. The parameter is
-/// local to the listing crate, so the impl is legal for a type from another
-/// crate as well (a re-exported actor such as ADR-0137's behavior host). The
-/// listed types are the set the rehydrate shim rebuilds.
+/// local to the listing crate, so the impl is legal for a type re-exported
+/// from another crate as well. The listed types are the set the rehydrate
+/// shim rebuilds.
 ///
 /// Every `export!` also proves it lists each inline child a listed type
 /// declares in `#[actor(spawns(..))]` ([`Spawns`]): it requires each listed
@@ -592,8 +592,8 @@ pub mod guest_alloc;
 /// each child that any type it lists declares, so a declared child the
 /// `export!` does not list is a compile error at the `export!`. By induction,
 /// the `export!` lists every actor that can run in its module, including
-/// another crate's actors (a re-exported behavior host is an ordinary
-/// `public` entry), and its rebuild arm covers the whole cluster.
+/// another crate's actors re-exported as an ordinary `public` entry, and its
+/// rebuild arm covers the whole cluster.
 ///
 /// Hot-swap state continuity (ADR-0040 / ADR-0101) needs no flag: the
 /// `on_dehydrate` / `on_rehydrate` exports always forward to the

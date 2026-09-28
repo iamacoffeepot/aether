@@ -10,7 +10,6 @@ owned.
 | Need | Prefer | Why |
 |---|---|---|
 | Stateful application/gameplay logic | Wasm actor component | isolated mailbox, typed handlers, hot load/replace |
-| Small replaceable mail filter | Behavior | narrow ABI and effect vocabulary |
 | Host I/O, device access, secrets, or privileged policy | Native capability | chassis-owned resources behind mail |
 | Pure bounded value conversion | Native transform | discoverable value-to-value operation without actor state |
 | Reusable product/editor actor | `aether-kit` or `aether-widget` actor | shared guest layer, not substrate policy |
@@ -37,16 +36,6 @@ should not own:
 
 Native is not a performance escape hatch by itself. Moving ordinary product
 logic into a capability expands the trusted surface and chassis matrix.
-
-## Actor versus behavior
-
-A component actor owns a mailbox identity, lifecycle, state, and typed handler
-set. It can initiate mail and participate in request/reply chains.
-
-A behavior receives a compact envelope and returns a verdict/effect list. It is
-suited to interception or policy whose inputs and outputs fit that vocabulary.
-If the design needs open-ended actor interaction, durable state ownership, or a
-new public mailbox, use an actor.
 
 ## Handler versus transform
 

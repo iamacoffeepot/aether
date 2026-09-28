@@ -335,10 +335,10 @@ impl ErasedWasmActor for LifecycleProbe {
 
 /// Inline child whose `wire` spawns a nested inline child by tag — the
 /// reentrant shape the take/reinsert composition must support (a `wire`
-/// that re-enters the registry to install a grandchild). `BehaviorHost`'s
-/// `wire` spawns its wrapped widget exactly this way in the live engine
-/// (issue 2746). The nested child is a [`StubChild`], resolved through
-/// [`stub_resolver`], so its `init` records the threaded config.
+/// that re-enters the registry to install a grandchild), which a by-tag
+/// spawner in the live engine can hit the same way (issue 2746). The nested
+/// child is a [`StubChild`], resolved through [`stub_resolver`], so its
+/// `init` records the threaded config.
 struct NestingParent;
 
 impl Addressable for NestingParent {

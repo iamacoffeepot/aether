@@ -70,12 +70,8 @@ pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 // `aether_widget@aether.widget.editor`), never by list position. ADR-0114
 // §5 reconstructs inline children from this same list, so every instanced
 // composable widget — including Dropdown, TabStrip, MenuBar, Tooltip, Toast,
-// Dialog, and Splitter — must appear in both cfg arms; omitting one drops that
-// type from named load and from replace_component reconstruct. The `behavior`
-// feature (ADR-0137, issue 2687) appends `aether-behavior`'s `BehaviorHost` to
-// `public` so the panel's `WidgetKind::BehaviorHost` arm can spawn it by tag and
-// a replace rebuilds it; the two invocations are cfg-exclusive, keeping the
-// ordinary build's exported set (and its `aether.kinds` section) unchanged.
+// Dialog, and Splitter — must appear here; omitting one drops that type from
+// named load and from replace_component reconstruct.
 //
 // The rule is **every stock widget**, not a chosen few: a widget the panel can
 // spawn by `WidgetKind` is a widget a host can also load on its own by
@@ -88,7 +84,6 @@ pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 // the widget `WasmActor` impls for inline-spawn — enabling `library` — without
 // inheriting a second copy of the `receive_p32` / `init` FFI shims that would
 // collide with its own `export!`. The call sites stay the same either way.
-#[cfg(not(feature = "behavior"))]
 aether_actor::export!(
     public = [
         Widget,
@@ -114,39 +109,6 @@ aether_actor::export!(
         EditorShell,
         EditorRegion,
         WidgetPanel,
-    ]
-);
-
-#[cfg(feature = "behavior")]
-aether_actor::export!(
-    public = [
-        Widget,
-        ScrollWidget,
-        set::SliderWidget,
-        set::TextFieldWidget,
-        set::TextAreaWidget,
-        set::RadioGroupWidget,
-        set::ButtonWidget,
-        set::LabelWidget,
-        set::ImageWidget,
-        set::VirtualListWidget,
-        set::ToggleWidget,
-        set::SegmentedWidget,
-        set::NumericWidget,
-        set::DropdownWidget,
-        set::TabStripWidget,
-        set::MenuBarWidget,
-        set::DialogWidget,
-        set::ToastWidget,
-        set::TooltipWidget,
-        set::SplitterWidget,
-        EditorShell,
-        EditorRegion,
-        WidgetPanel,
-        // ADR-0137: the behavior host is re-exported from `aether-behavior`. The
-        // rebuild marker is per module, so this `export!` lists it like any local
-        // actor; the panel spawns it by tag, not typed.
-        aether_behavior::BehaviorHost,
     ]
 );
 

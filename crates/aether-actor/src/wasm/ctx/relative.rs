@@ -5,7 +5,7 @@
 use aether_data::{ActorMail, MailboxId};
 
 use super::WasmCtx;
-use crate::blob::guest::{EncodedGuestMail, encode_guest};
+use crate::blob::guest::encode_guest;
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::reference::ErasedActorRef;
 use crate::wasm::inline::{ChainMode, Registry};
@@ -46,9 +46,8 @@ impl RelativeMailbox<'_> {
     /// [`InlineChild::erase`](super::InlineChild::erase). The relative came
     /// from a lookup in the per-component inline registry, so it proves what
     /// `ctx.child_as::<C>(name)?.erase()` proves, for a spawner that cannot
-    /// name `C`. The ADR-0137 behavior host spawns its wrapped child by type
-    /// tag and compares this proof with `ctx.sender()` to tell the up lane
-    /// from the down lane.
+    /// name `C` — comparing this proof with `ctx.sender()` tells one lane
+    /// from another when a spawner routes by type tag.
     #[must_use]
     pub const fn reference(&self) -> ErasedActorRef {
         ErasedActorRef::new(self.id)
@@ -71,22 +70,6 @@ impl RelativeMailbox<'_> {
     /// send.
     pub fn send<K: ActorMail>(&self, payload: &K) {
         self.inline.route_or_enqueue(self.id.0, K::ID.0, encode_guest(payload), 1, ChainMode::Inherit, self.sender);
-    }
-
-    /// Forward pre-encoded `bytes` of kind `kind` to this relative — the
-    /// type-erased counterpart of [`Self::send`], for a mail-forwarding
-    /// interposer (the ADR-0137 behavior host, issue 2687) that reroutes an
-    /// arbitrary inbound kind it holds no Rust type for. Routes the same way
-    /// [`Self::send`] does — in place through the cluster membrane, inheriting
-    /// the handler's causal chain — so the interposer stays transparent to
-    /// settlement. `count` is fixed at 1: a forward carries one inbound mail.
-    ///
-    /// It keeps no value alive for the forward (ADR-0238 decision 3): a
-    /// forward made during the receive that delivered `bytes` is admitted by
-    /// that delivery's pin on each entry they name.
-    pub fn send_bytes(&self, kind: aether_data::KindId, bytes: &[u8]) {
-        let payload = EncodedGuestMail::plain(bytes.to_vec());
-        self.inline.route_or_enqueue(self.id.0, kind.0, payload, 1, ChainMode::Inherit, self.sender);
     }
 
     /// Fire-and-forget send to this relative (ADR-0080 §7 detach signal).

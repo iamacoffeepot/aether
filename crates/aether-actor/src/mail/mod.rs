@@ -283,12 +283,10 @@ impl Mail<'_> {
 
     /// The raw inbound payload — the `byte_len` bytes the substrate wrote at
     /// `ptr` for this delivery. The type-erased counterpart of
-    /// [`Self::decode_kind`], for a mail-forwarding interposer (the ADR-0137
-    /// behavior host, issue 2687) that reroutes an arbitrary inbound kind it
-    /// holds no Rust type for, pairing with
-    /// [`RelativeMailbox::send_bytes`](crate::RelativeMailbox::send_bytes). A
-    /// zero length short-circuits to an empty slice so a null pointer is never
-    /// dereferenced.
+    /// [`Self::decode_kind`], for code that needs the encoded bytes
+    /// themselves rather than a decoded value — the `#[actor]` derive's
+    /// rehydrate path is one such reader. A zero length short-circuits to an
+    /// empty slice so a null pointer is never dereferenced.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         if self.byte_len == 0 {

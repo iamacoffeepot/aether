@@ -14,7 +14,7 @@ use cargo_metadata::{Metadata, MetadataCommand, Package, TargetKind};
 
 use crate::affected::rules::global_screen;
 use crate::affected::select::is_dist_consumer;
-use crate::inventory::{discover_behaviors, discover_components};
+use crate::inventory::discover_components;
 
 /// The directory, relative to a package root, holding its
 /// integration-test targets.
@@ -29,11 +29,7 @@ pub(super) struct Workspace {
 impl Workspace {
     pub(super) fn load() -> Self {
         let metadata = MetadataCommand::new().no_deps().exec().expect("run cargo metadata");
-        let wasm_sources = discover_components(&metadata)
-            .into_iter()
-            .map(|component| component.package)
-            .chain(discover_behaviors(&metadata).into_iter().map(|behavior| behavior.package))
-            .collect();
+        let wasm_sources = discover_components(&metadata).into_iter().map(|component| component.package).collect();
         Self { metadata, wasm_sources }
     }
 

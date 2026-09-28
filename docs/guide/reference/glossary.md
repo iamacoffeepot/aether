@@ -67,7 +67,7 @@ metadata. Do not confuse it with the hub's artifact stores.
 
 **Guest**
 
-Code hosted by the substrate, normally a wasm component or behavior script.
+Code hosted by the substrate, normally a wasm component.
 
 **Component**
 
@@ -94,11 +94,6 @@ instance and supports replacement/state transfer.
 
 Actors co-located in one wasm instance and composed below a component root. They
 still have distinct mailbox lineage.
-
-**Behavior**
-
-A small wasm filter interpreted by a `BehaviorHost` at one actor-tree position.
-It owns no mailbox or new kinds and fails open on script faults.
 
 **Capability**
 

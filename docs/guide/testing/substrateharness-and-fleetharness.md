@@ -356,8 +356,7 @@ The fixture crates cover distinct contracts:
 - shared kind vocabulary and a main multi-actor bundle;
 - typed and reshaped state replacement;
 - split capability surface;
-- defaultless multi-actor selection;
-- behavior script/host variants.
+- defaultless multi-actor selection.
 
 Reuse these when the contract matches. A new fixture creates another build
 artifact and CI cost, so it should prove a boundary the current matrix cannot.

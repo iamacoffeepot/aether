@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use guppy::graph::{DependencyDirection, PackageGraph, PackageMetadata};
 
 use crate::affected::select::{Selection, is_dist_consumer, select};
-use crate::inventory::{discover_behaviors, discover_components};
+use crate::inventory::discover_components;
 
 /// The loaded workspace: the package graph, the crates whose sources compile
 /// to wasm, and the crates whose tests need that wasm pre-built.
@@ -29,16 +29,13 @@ impl Workspace {
         let graph = guppy::MetadataCommand::new().build_graph().context("build guppy package graph")?;
         let metadata =
             cargo_metadata::MetadataCommand::new().no_deps().exec().context("run cargo metadata for inventory")?;
-        let wasm_sources: BTreeSet<String> = discover_components(&metadata)
-            .into_iter()
-            .map(|component| component.package)
-            .chain(discover_behaviors(&metadata).into_iter().map(|behavior| behavior.package))
-            .collect();
+        let wasm_sources: BTreeSet<String> =
+            discover_components(&metadata).into_iter().map(|component| component.package).collect();
         // A dist consumer needs the `cargo xtask dist` pre-build for either
-        // artifact class it packages: component/behavior wasm (a dep on a
-        // wasm source — the tests execute that crate's wasm), or the chassis
-        // binaries (a dep on aether-harness-fleet, whose harness forks the
-        // dist-resolved `aether-headless`; issue #3766).
+        // artifact class it packages: component wasm (a dep on a wasm source
+        // — the tests execute that crate's wasm), or the chassis binaries (a
+        // dep on aether-harness-fleet, whose harness forks the dist-resolved
+        // `aether-headless`; issue #3766).
         let wasm_consumers: BTreeSet<String> = metadata
             .packages
             .iter()
@@ -118,7 +115,7 @@ impl Workspace {
             .collect()
     }
 
-    /// The crates whose sources compile to component or behavior wasm.
+    /// The crates whose sources compile to component wasm.
     ///
     /// The verify lane reads this to recognize the one coupling a linkage
     /// closure cannot: a test that loads a built `.wasm` through the

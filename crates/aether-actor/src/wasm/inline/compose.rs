@@ -319,9 +319,9 @@ where
 /// state restore (a fresh spawn has no prior state). The child's logical
 /// parent is recorded as `parent` — the id of the actor that issued the
 /// spawn, threaded down from [`WasmCtx::spawn_inline_child_by_tag`] so a
-/// *nested* by-tag spawn (an inline child spawning its own child, e.g. the
-/// behavior host wrapping a widget) parents the new child to that spawning
-/// actor rather than the cluster root, which is what lets the spawner's
+/// *nested* by-tag spawn (an inline child spawning its own child) parents the
+/// new child to that spawning actor rather than the cluster root, which is
+/// what lets the spawner's
 /// `ctx.child` resolve it (issue 2688) and gives the host-scoped alias fold
 /// the same parent seed.
 ///

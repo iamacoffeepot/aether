@@ -32,7 +32,7 @@ use support::widget_caps;
 fn test_window() -> aether_data::ErasedActorPath {
     aether_window::window_path(&LoadName::new("main").expect("a valid window name"))
 }
-const WASM_STEMS: [&str; 2] = ["aether_widget", "aether_widget_behavior"];
+const WASM_STEMS: [&str; 1] = ["aether_widget"];
 
 /// A GPU-free bench with the component host and everything the widget module
 /// declares: the headless render stub, text (its fs from the sandbox roots) and
@@ -206,8 +206,8 @@ fn numeric_value(message: &str) -> Option<f32> {
 }
 
 /// Duplicate local+set kinds used to reject `CostTable::prepare` at named
-/// load. Each already-exported adopter must activate under both the stock
-/// and behavior-host wasm artifacts.
+/// load. Each already-exported adopter must activate under the stock wasm
+/// artifact.
 #[test]
 fn named_load_exported_widget_defaults_adopters_succeeds() {
     for stem in WASM_STEMS {
