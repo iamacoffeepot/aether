@@ -10,16 +10,15 @@
 //!
 //! [`RunQueue`] carries those decisions out on the actor thread, the way
 //! `aether-http`'s per-sender egress queue does: an admitted run dispatches
-//! through `dispatch_blocking_with`, and a queued one captures its
-//! settlement hold and reply target at accept and dispatches later through
-//! `dispatch_blocking_resumed_with`, so its caller's chain stays held from
-//! accept to reply. No dispatcher thread ever waits.
+//! through `dispatch_blocking_with_pending`, and a queued one holds its reply
+//! at accept (`ctx.hold`) and attaches its worker to that held entry later
+//! through `dispatch_blocking_held_with`, so its caller's chain stays held
+//! from accept to reply and the worker answers the receipt `submit` returned.
+//! No dispatcher thread ever waits.
 
 use std::collections::VecDeque;
 
-use aether_data::Source;
-use aether_substrate::actor::native::{DispatchId, NativeCtx, Pending, TaskDone};
-use aether_substrate::runtime::trace::SettlementHold;
+use aether_substrate::actor::native::{Held, NativeCtx, Pending, TaskDone};
 
 use super::budget::Budget;
 use super::estimate::{Amounts, Estimates};
@@ -93,11 +92,10 @@ impl<W> Admission<W> {
     }
 }
 
-/// A run waiting for the budget, with the chain it answers on.
+/// A run waiting for the budget, with the reply it owes its caller.
 struct Waiting {
     run: Run,
-    hold: Option<SettlementHold>,
-    reply_to: Source,
+    held: Held<RunResult>,
 }
 
 /// Provisioned runs: the runner each admitted run clones onto its worker,
@@ -113,18 +111,18 @@ impl RunQueue {
     }
 
     /// Accept `run`: dispatch it now when it is admitted, or queue it with
-    /// its settlement hold and reply target.
+    /// its held reply.
     pub fn submit(&mut self, ctx: &mut NativeCtx<'_, WorkspaceCapability>, run: Run) -> Pending<RunResult> {
         let key = RunKey::of(&run);
         if let Some(admitted) = self.admission.admit_now(key) {
             self.log_admitted(&admitted);
             let work = self.work(&admitted, run);
-            let id = ctx.dispatch_blocking_with(admitted, work);
-            return ctx.pending(id);
+            return ctx.dispatch_blocking_with_pending::<Ran, RunResult, _, _>(admitted, work);
         }
 
         let amounts = self.admission.amounts(&key);
-        self.admission.enqueue(key, Waiting { run, hold: ctx.acquire_settlement_hold(), reply_to: ctx.reply_target() });
+        let (pending, held) = ctx.hold::<RunResult>();
+        self.admission.enqueue(key, Waiting { run, held });
         tracing::info!(
             target: "aether_bloomery_workspace",
             %key,
@@ -134,7 +132,7 @@ impl RunQueue {
             waiting = self.admission.waiting(),
             "run queued for the budget",
         );
-        ctx.pending(DispatchId::NONE)
+        pending
     }
 
     /// A run finished: learn from it, release its budget, reply to its
@@ -142,10 +140,10 @@ impl RunQueue {
     pub fn complete(&mut self, ctx: &mut NativeCtx<'_, WorkspaceCapability>, done: TaskDone<Ran, Admitted>) {
         self.admission.finish(done.context(), &done.output().result, &done.output().observed);
         done.resolve_with(ctx, |ran, _| ran.result.clone());
-        while let Some((admitted, Waiting { run, hold, reply_to })) = self.admission.next() {
+        while let Some((admitted, Waiting { run, held })) = self.admission.next() {
             self.log_admitted(&admitted);
             let work = self.work(&admitted, run);
-            ctx.dispatch_blocking_resumed_with(hold, reply_to, admitted, work);
+            ctx.dispatch_blocking_held_with(held, admitted, work);
         }
     }
 

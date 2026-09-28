@@ -122,17 +122,51 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         R: ActorMail,
         F: FnOnce() -> O + Send + 'static,
     {
-        let id = self.dispatch_blocking_with::<O, (), F>((), f);
-        Pending::new(id)
+        self.dispatch_blocking_with_pending::<O, R, (), F>((), f)
     }
 
-    /// Framework receipt for a deferred reply `R` (ADR-0109). `dispatch_id` is
-    /// the worker's id from [`Self::dispatch_blocking_with`], or
-    /// [`DispatchId::NONE`] when only a hold was captured for a later resumed
-    /// dispatch. Bounded submit helpers are the other public mint site;
-    /// `Pending::new` stays crate-internal.
-    pub fn pending<R: ActorMail>(&self, dispatch_id: DispatchId) -> Pending<R> {
-        Pending::new(dispatch_id)
+    /// Context-carrying variant of [`Self::dispatch_blocking`]: dispatches
+    /// as [`Self::dispatch_blocking_with`] does, parking `cx` for the
+    /// completion, and returns the [`Pending<R>`] receipt for the armed
+    /// dispatch (ADR-0109, ADR-0243 §3). A bounded queue that runs a request
+    /// at once returns this receipt from its `submit`.
+    pub fn dispatch_blocking_with_pending<O, R, C, F>(&mut self, cx: C, f: F) -> Pending<R>
+    where
+        O: Send + 'static,
+        R: ActorMail,
+        C: Send + 'static,
+        F: FnOnce() -> O + Send + 'static,
+    {
+        Pending::new(self.dispatch_blocking_with::<O, C, F>(cx, f))
+    }
+
+    /// Dispatch a blocking closure that answers an already-held reply
+    /// (ADR-0243 §3): the worker attaches to the ledger entry `held` names,
+    /// which keeps the settlement hold and reply target it captured, and
+    /// parks `cx` for the completion. The completion replies to the caller
+    /// the ticket was taken from, on the chain it kept open, and the
+    /// returned id is the one the ticket's [`Pending<R>`] receipt carries.
+    ///
+    /// A bounded queue takes a [`Held`] with [`Self::hold`] when it accepts
+    /// a request it cannot run yet, returns the receipt, and hands the
+    /// ticket here when a slot frees.
+    ///
+    /// # Panics
+    /// Panics when `held` belongs to another actor, and when its entry is
+    /// no longer held.
+    pub fn dispatch_blocking_held_with<O, R, C, F>(&mut self, held: Held<R>, cx: C, f: F) -> DispatchId
+    where
+        O: Send + 'static,
+        R: ActorMail,
+        C: Send + 'static,
+        F: FnOnce() -> O + Send + 'static,
+    {
+        assert!(
+            self.owns_ledger(held.ledger()),
+            "a Held dispatched from another actor's ctx: a held reply is answered on the actor that armed it (ADR-0243 §5)"
+        );
+        let completion = self.binding.dispatch_attach_worker(held.into_ticket(), Box::new(cx));
+        self.spawn_blocking_worker(completion, f)
     }
 
     /// Context-carrying variant of [`Self::dispatch_blocking`]
@@ -152,10 +186,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         // to the resumed core. A handler turn with no in-flight root yields
         // no hold, and the dispatch it starts is then outside settlement
         // (ADR-0168 §2). A bounded `TaskQueue`
-        // instead captures `(hold, reply_to)` at accept time and replays
-        // them via `dispatch_blocking_resumed` when a slot frees, so a
-        // deferred request keeps its own chain held and replies to its own
-        // caller.
+        // instead holds the reply at accept time and hands it to
+        // `dispatch_blocking_held_with` when a slot frees, so a deferred
+        // request keeps its own chain held and replies to its own caller.
         let hold = self.acquire_settlement_hold();
         let reply_to = self.reply_target();
         self.dispatch_blocking_resumed_with(hold, reply_to, cx, f)
@@ -163,11 +196,13 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// ADR-0093: dispatch a blocking closure with an externally-supplied
     /// `(hold, reply_to)` — *moved in* rather than read from this ctx.
     /// [`Self::dispatch_blocking`] is sugar over this that supplies them
-    /// from the current handler. The bound/queue path (`TaskQueue`)
-    /// captures the hold + reply target when a request is accepted and
-    /// replays them here when the request finally dispatches from a later
-    /// handler turn — so the deferred work keeps its *own* chain held and
-    /// replies to its *own* caller, not the completion handler's.
+    /// from the current handler. A caller that captured the hold + reply
+    /// target when a request was accepted replays them here when the
+    /// request finally dispatches from a later handler turn — so the
+    /// deferred work keeps its *own* chain held and replies to its *own*
+    /// caller, not the completion handler's. A bounded queue holds a
+    /// [`Held`] instead and dispatches through
+    /// [`Self::dispatch_blocking_held_with`].
     pub fn dispatch_blocking_resumed<O, F>(
         &mut self,
         hold: Option<SettlementHold>,
@@ -181,8 +216,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.dispatch_blocking_resumed_with(hold, reply_to, (), f)
     }
 
-    /// Context-carrying core of the resumed dispatch — the single worker
-    /// spawn site for every `dispatch_blocking*` path. Inserts the ledger
+    /// Context-carrying core of the resumed dispatch. Inserts the ledger
     /// entry with the supplied `(hold, reply_to, cx)` and spawns the
     /// worker that runs `f`, parks its output, and wakes the actor.
     pub fn dispatch_blocking_resumed_with<O, C, F>(
@@ -198,6 +232,17 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         F: FnOnce() -> O + Send + 'static,
     {
         let completion = self.binding.dispatch_arm(hold, reply_to, cx);
+        self.spawn_blocking_worker(completion, f)
+    }
+
+    /// The single worker spawn site for every `dispatch_blocking*` path:
+    /// spawn the worker that runs `f`, fills `completion`'s ledger entry
+    /// with the output, and wakes the actor. Returns the entry's id.
+    fn spawn_blocking_worker<O, F>(&self, completion: DeferredCompletion<O>, f: F) -> DispatchId
+    where
+        O: Send + 'static,
+        F: FnOnce() -> O + Send + 'static,
+    {
         let id = completion.dispatch_id();
         let aborter = self.binding.fatal_aborter();
 
@@ -291,7 +336,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// is not held in this ledger, which is a second answer for one ticket.
     pub(crate) fn answer_held<R: ActorMail>(&mut self, id: DispatchId, ledger: &Weak<NativeBinding>, reply: &R) {
         assert!(
-            ptr::eq(ledger.as_ptr(), Arc::as_ptr(self.binding)),
+            self.owns_ledger(ledger),
             "Held::answer from another actor's ctx: a held reply answers on the actor that armed it (ADR-0243 §5)"
         );
         let (hold, reply_to) = self
@@ -300,6 +345,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             .expect("Held::answer found no held ledger entry: a ticket answers once (ADR-0243 §1)");
         self.reply_to_target(reply_to, reply, hold.as_ref().map(SettlementHold::root), None);
         drop(hold);
+    }
+
+    /// Whether `ledger` is this ctx's actor's in-flight ledger, the one a
+    /// [`Held`] must name to be answered or dispatched here.
+    fn owns_ledger(&self, ledger: &Weak<NativeBinding>) -> bool {
+        ptr::eq(ledger.as_ptr(), Arc::as_ptr(self.binding))
     }
 
     /// ADR-0093 completion-routing entry point: remove the in-flight
