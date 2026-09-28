@@ -170,9 +170,11 @@ impl NativeActor for SessionConsumer {
 const NESTED_CONSUMER_KEY: &str = "probe";
 
 /// A root singleton whose `wire` stages one [`SessionConsumer`] beneath
-/// itself at [`NESTED_CONSUMER_KEY`], handing it the capture channel.
+/// itself at [`NESTED_CONSUMER_KEY`], handing it the capture channel, and
+/// keeps the receipt's name until the birth is decided.
 struct ConsumerHost {
     captures: Option<mpsc::Sender<CapturedSessionMail>>,
+    staged: Option<ErasedActorPath>,
 }
 
 #[actor(singleton, root)]
@@ -186,19 +188,23 @@ impl NativeActor for ConsumerHost {
         captures: mpsc::Sender<CapturedSessionMail>,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<Self, BootError> {
-        Ok(Self { captures: Some(captures) })
+        Ok(Self { captures: Some(captures), staged: None })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
         let captures = self.captures.take().expect("wire runs once");
-        ctx.spawn_child::<SessionConsumer>(Subname::Named(NESTED_CONSUMER_KEY), captures, ())
+        let receipt = ctx
+            .spawn_child::<SessionConsumer>(Subname::Named(NESTED_CONSUMER_KEY), captures, ())
             .stage()
             .expect("the nested consumer stages");
+        self.staged = Some(receipt.canonical_name);
     }
 
     #[handler(task)]
-    #[allow(clippy::unused_self)] // actor handler ABI always receives state
     fn on_consumer_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<SessionConsumer>, ()>) {
+        if self.staged.as_ref() == Some(&done.output().canonical_name) {
+            self.staged = None;
+        }
         done.release_no_reply();
     }
 }
@@ -208,6 +214,7 @@ impl NativeActor for ConsumerHost {
 /// `BindListenerSelf` and forwards the reply to the test.
 struct DataOnlyConsumer {
     replies: mpsc::Sender<BindListenerResult>,
+    data_frames: usize,
 }
 
 #[actor(singleton, root, depends(TcpCapability))]
@@ -221,7 +228,7 @@ impl NativeActor for DataOnlyConsumer {
         replies: mpsc::Sender<BindListenerResult>,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<Self, BootError> {
-        Ok(Self { replies })
+        Ok(Self { replies, data_frames: 0 })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
@@ -229,8 +236,9 @@ impl NativeActor for DataOnlyConsumer {
     }
 
     #[handler::single]
-    #[allow(clippy::unused_self)] // actor handler ABI always receives state
-    fn on_session_data(&mut self, _ctx: &mut NativeCtx<'_>, _mail: SessionData) {}
+    fn on_session_data(&mut self, _ctx: &mut NativeCtx<'_>, _mail: SessionData) {
+        self.data_frames += 1;
+    }
 
     #[handler::single]
     fn on_bind_result(&mut self, _ctx: &mut NativeCtx<'_>, result: BindListenerResult) {
