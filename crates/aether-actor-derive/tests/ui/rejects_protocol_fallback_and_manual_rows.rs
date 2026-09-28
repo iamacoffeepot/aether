@@ -1,10 +1,10 @@
 //! ADR-0231 §2, §6: a kind handled only by `#[fallback]` has no row, and a
-//! `#[handler::manual]` handler's row is `Undeclared`, so neither covers a
-//! single or a silent row. A protocol cannot name a manual row either:
-//! `-> Undeclared` is not a `RowReply`.
+//! `#[handler::manual]` handler's `Undeclared` row covers only an explicit
+//! manual protocol row. It does not cover a single or silent row, and a
+//! manual protocol reference still sends only the kind it lists.
 
 use aether_actor::{
-    ActorInitError, CoveredBy, Mail, Manual, Undeclared, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
+    ActorInitError, CoveredBy, Mail, Manual, ProtocolRef, Undeclared, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
 };
 
 #[repr(C)]
@@ -90,8 +90,13 @@ impl WasmActor for ManualSilent {
 
 fn assert_covered<P: CoveredBy<R>, R>() {}
 
+fn send_unsupported(ctx: &mut WasmCtx<'_, ManualSingle>, target: ProtocolRef<ByHand>) {
+    ctx.send_to(target, &Note { seq: 1 });
+}
+
 fn main() {
     assert_covered::<Pinger, FallbackOnly>();
+    assert_covered::<ByHand, FallbackOnly>();
     assert_covered::<Pinger, ManualSingle>();
     assert_covered::<Noter, ManualSilent>();
 }

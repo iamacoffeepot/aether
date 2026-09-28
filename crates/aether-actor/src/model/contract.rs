@@ -23,9 +23,10 @@ use super::declared::RowIndex;
 /// [`ReplyShape`] impl over every kind.
 pub struct Silent;
 
-/// The row of a manual handler, whose replies are issued by hand and so have
-/// no statically declared kind. Transitional (ADR-0231 §6): it goes away once
-/// every manual handler declares its reply.
+/// The permanent row shape of a manual handler, whose replies are issued by
+/// hand and so have no statically declared kind (ADR-0231 §6). A protocol may
+/// name this shape to promise that it handles a kind without promising how it
+/// responds.
 ///
 /// Never implements [`Kind`], which keeps it disjoint from the blanket
 /// [`ReplyShape`] impl over every kind.

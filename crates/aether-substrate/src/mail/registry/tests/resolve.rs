@@ -4,11 +4,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_actor::{Protocol, ProtocolPath, ResolveError, Row, RowSet};
+use aether_actor::__macro_internals::ProtocolCast;
+use aether_actor::{Protocol, ProtocolPath, ResolveError, Row, RowSet, Undeclared};
 use aether_data::tagged_id::{Tag, with_tag};
 use aether_data::wire::{self, DecodeCtx, PublishedRoutes};
 use aether_data::{ActorId, ErasedActorPath, Kind, MAILBOX_DOMAIN, ReplyContract, fnv1a_64_prefixed, fold_lineage};
-use aether_kinds::{ComponentCapabilities, HandlerCapability};
+use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 
 use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
@@ -108,6 +109,16 @@ impl Protocol for Loading {
     type Rows = (Row<Load, Loaded>,);
 }
 
+/// The ordinary protocol cast arm for a manual row, distinct from the
+/// subscriber exception exercised below.
+struct ManualLoading;
+
+impl Protocol for ManualLoading {
+    type Rows = (Row<Load, Undeclared>,);
+}
+
+impl ProtocolCast for ManualLoading {}
+
 #[aether_data::kind(name = "test.resolve_protocol.carries", no_serde)]
 struct Carries {
     path: ProtocolPath<Loading>,
@@ -205,6 +216,14 @@ fn contract(rows: &[(KindId, ReplyContract)]) -> RouteContract {
     })
 }
 
+/// A route contract with only `#[fallback]`, and therefore no explicit row.
+fn fallback_contract() -> RouteContract {
+    RouteContract::from_capabilities(&ComponentCapabilities {
+        fallback: Some(FallbackCapability { doc: None }),
+        ..ComponentCapabilities::default()
+    })
+}
+
 /// The registry's `PublishedRoutes` answer, which a `ProtocolPath` decode
 /// checks coverage against, reads only the `Live` route standing under
 /// exactly the path. Each case names the bug it catches:
@@ -266,14 +285,16 @@ fn published_rows_answer_only_the_live_route_under_the_path() {
 
 /// ADR-0231 §4's guard cast types a held reference as `Subscriber<Load>`
 /// only while its route is `Live` and publishes a silent or manual `Load`
-/// row. Each case names the bug it catches:
+/// row, and as `ManualLoading` only for the exact manual row. Each case names
+/// the bug it catches:
 ///
 /// - a `Live` route publishing `(Load, None)` or `(Load, Manual)` mints: a
 ///   cast that reads anything but the published rows, or that refuses the
 ///   manual row a subscriber may answer an event with;
-/// - a route publishing `(Load, One(Loaded))` or no `Load` row, and a closure
-///   route's empty contract, answer `None`: a cast that mints for a sender
-///   whose rows do not answer the protocol;
+/// - the ordinary manual protocol admits `(Load, Manual)` but refuses
+///   `(Load, None)`, `(Load, One(Loaded))`, a missing row, and a fallback-only
+///   route: a cast that treats manual as a
+///   wildcard or applies the subscriber exception to every protocol;
 /// - a `Starting` reservation and a dropped route answer `None`: a cast that
 ///   mints for a sender that is not live.
 #[test]
@@ -295,17 +316,27 @@ fn cast_mints_only_for_a_live_route_whose_rows_the_protocol_admits() {
         registry.resolve_live(id).expect("the route is live")
     };
     let cast = |reference| registry.cast::<Subscriber<Load>>(reference).is_some();
+    let cast_manual = |reference| registry.cast::<ManualLoading>(reference).is_some();
 
     let silent = stand("test.cast.silent", &[(Load::ID, ReplyContract::None)]);
     let manual = stand("test.cast.manual", &[(Loaded::ID, ReplyContract::None), (Load::ID, ReplyContract::Manual)]);
     assert!(cast(silent), "a silent row answers the subscriber protocol");
     assert!(cast(manual), "a manual row answers it too");
+    assert!(cast_manual(manual), "the exact manual row answers an ordinary manual protocol");
+    assert!(!cast_manual(silent), "a silent row does not answer a manual protocol");
 
     let replying = stand("test.cast.replying", &[(Load::ID, ReplyContract::One(Loaded::ID))]);
     let unrelated = stand("test.cast.unrelated", &[(Loaded::ID, ReplyContract::None)]);
     let closure = stand("test.cast.closure", &[]);
-    for (name, reference) in [("replying", replying), ("unrelated", unrelated), ("closure", closure)] {
+    let fallback_id =
+        registry.try_register_inbox(&auth(), "test.cast.fallback", noop_handler()).expect("the route name is free");
+    registry.publish_contract(&auth(), fallback_id, fallback_contract()).expect("an empty contract takes fallback");
+    let fallback = registry.resolve_live(fallback_id).expect("the route is live");
+    for (name, reference) in
+        [("replying", replying), ("unrelated", unrelated), ("closure", closure), ("fallback", fallback)]
+    {
         assert!(!cast(reference), "{name}: the published rows do not answer the protocol");
+        assert!(!cast_manual(reference), "{name}: the published rows do not answer the manual protocol");
     }
 
     let starting = "test.cast.starting";
@@ -320,4 +351,6 @@ fn cast_mints_only_for_a_live_route_whose_rows_the_protocol_admits() {
     registry.drop_mailbox(&auth(), dropped.id()).expect("the live route retires");
     assert!(!cast(starting), "a Starting route is not live");
     assert!(!cast(dropped), "a dropped route is not live");
+    assert!(!cast_manual(starting), "a Starting route cannot mint the manual protocol");
+    assert!(!cast_manual(dropped), "a dropped route cannot mint the manual protocol");
 }

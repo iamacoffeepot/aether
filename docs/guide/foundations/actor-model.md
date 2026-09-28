@@ -320,11 +320,14 @@ child's alias its own type's.
 A **protocol** names a set of contract rows under a stable type, independent of
 any implementation (ADR-0231 §2). `#[protocol]` on a trait of signatures
 declares one: each method is a row, `-> O` single and no return silent, and the
-trait becomes a unit struct whose `impl Protocol` lists the rows as
+explicit return `-> Undeclared` manual. The trait becomes a unit struct whose
+`impl Protocol` lists the rows as
 `type Rows = (Row<K, O>, …)`. `MeshLoader: CoveredBy<R>` holds when the target
 `R` has a contract row for every kind with the exact reply. Rows match by kind,
 never by method name; a `#[fallback]` has no row and a manual handler's
-`Undeclared` row covers nothing. Coverage is sealed: `aether-actor` computes it
+`Undeclared` row covers only an explicit manual protocol row. That row promises
+the target handles the kind without imposing a reply-handler obligation on the
+sender. Coverage is sealed: `aether-actor` computes it
 from `Rows`, and a hand-written `CoveredBy` impl does not compile.
 `RowSet::CONTRACTS` on the rows is their list in the same `(KindId,
 ReplyContract)` vocabulary as `Contracts::CONTRACTS`.
@@ -334,13 +337,18 @@ ReplyContract)` vocabulary as `Contracts::CONTRACTS`.
 pub trait MeshLoader {
     fn load(mail: LoadMesh) -> MeshLoadResult;
     fn set_mode(mail: SetMode);
+    fn forward(mail: Forward) -> Undeclared;
 }
 
 // is the declaration
 pub struct MeshLoader;
 
 impl Protocol for MeshLoader {
-    type Rows = (Row<LoadMesh, MeshLoadResult>, Row<SetMode, Silent>);
+    type Rows = (
+        Row<LoadMesh, MeshLoadResult>,
+        Row<SetMode, Silent>,
+        Row<Forward, Undeclared>,
+    );
 }
 ```
 
