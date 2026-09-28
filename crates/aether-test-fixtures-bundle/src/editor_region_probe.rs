@@ -7,7 +7,7 @@
 //! shell-first: a probe loaded before the shell exists announces into nothing
 //! and is never routed to.
 
-use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
 };
@@ -95,13 +95,8 @@ impl WasmActor for EditorRegionProbe {
         self.inputs.push(ObservedEditorInput::Modifiers { shift, ctrl, alt, meta });
     }
 
-    #[handler::manual]
-    fn on_drain_editor_inputs(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: DrainEditorInputs) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&DrainEditorInputsResult {
-                region_name: self.region_name.clone(),
-                inputs: mem::take(&mut self.inputs),
-            });
-        }
+    #[handler::single]
+    fn on_drain_editor_inputs(&mut self, _ctx: &mut WasmCtx<'_>, _query: DrainEditorInputs) -> DrainEditorInputsResult {
+        DrainEditorInputsResult { region_name: self.region_name.clone(), inputs: mem::take(&mut self.inputs) }
     }
 }

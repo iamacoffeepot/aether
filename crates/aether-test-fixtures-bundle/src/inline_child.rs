@@ -77,15 +77,15 @@
 //! Consumers load this actor from the `inline_child` bundle with
 //! `export: Some("test.inline.tag_parent")`.
 
-// `#[handler::manual]` methods take `&mut self` to match the dispatch ABI
-// even though stateless replies never read it. `rehydrate` takes its
-// `State` by value; `InlineCounterState` is all-`Copy`, so clippy reads
-// the by-value parameter as needlessly owned — the contract is the point.
+// `#[handler]` methods take `&mut self` to match the dispatch ABI even
+// though a stateless reply never reads it. `rehydrate` takes its `State`
+// by value; `InlineCounterState` is all-`Copy`, so clippy reads the
+// by-value parameter as needlessly owned — the contract is the point.
 #![allow(clippy::unused_self, clippy::needless_pass_by_value)]
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Erased, ErasedActorRef, Mail, Manual, OutboundReply, SpawnError, Subname, WasmActor,
-    WasmCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, Erased, ErasedActorRef, Mail, Manual, SpawnError, Subname, WasmActor, WasmCtx,
+    WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
     Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT,
@@ -99,14 +99,6 @@ use aether_test_fixtures_kinds::{
 #[aether_data::kind(name = "aether.test_fixtures.inline_counter_state")]
 pub struct InlineCounterState {
     pub count: u32,
-}
-
-/// Reply to an `InlineProbe` with the `who` marker of whichever actor
-/// handled it — shared by the basic and despawn parent/child actors.
-fn reply_who<A>(ctx: &mut WasmCtx<'_, A, Manual>, who: u32) {
-    if ctx.reply_target().is_some() {
-        ctx.reply(&InlineEcho { who });
-    }
 }
 
 /// Entry export — the basic ADR-0114 #1916 fixture. Spawns its inline
@@ -130,9 +122,9 @@ impl WasmActor for InlineParent {
 
     /// Answer an `InlineProbe` addressed to the parent's own mailbox with
     /// the parent marker — the membrane's own-id (control) path.
-    #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _probe: InlineProbe) {
-        reply_who(ctx, INLINE_WHO_PARENT);
+    #[handler::single]
+    fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, _probe: InlineProbe) -> InlineEcho {
+        InlineEcho { who: INLINE_WHO_PARENT }
     }
 }
 
@@ -151,9 +143,9 @@ impl WasmActor for InlineChild {
 
     /// Answer an `InlineProbe` addressed to the child's alias with the
     /// child marker — the membrane's child-demux path.
-    #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _probe: InlineProbe) {
-        reply_who(ctx, INLINE_WHO_CHILD);
+    #[handler::single]
+    fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, _probe: InlineProbe) -> InlineEcho {
+        InlineEcho { who: INLINE_WHO_CHILD }
     }
 }
 
@@ -227,11 +219,9 @@ impl WasmActor for InlineStatefulChild {
 
     /// Reply with the live counter so a test can read the child's state
     /// across a swap.
-    #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&CountReport { count: self.count });
-        }
+    #[handler::single]
+    fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
+        CountReport { count: self.count }
     }
 }
 
@@ -281,9 +271,9 @@ impl WasmActor for InlineDespawnParent {
     /// the parent marker — the membrane's own-id (control) path. It is what
     /// shows the parent still live and answering after a teardown, so the
     /// dead alias's silence reads as the retirement rather than a dead host.
-    #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _probe: InlineProbe) {
-        reply_who(ctx, INLINE_WHO_PARENT);
+    #[handler::single]
+    fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, _probe: InlineProbe) -> InlineEcho {
+        InlineEcho { who: INLINE_WHO_PARENT }
     }
 }
 
@@ -303,9 +293,9 @@ impl WasmActor for InlineDespawnChild {
 
     /// Answer an `InlineProbe` addressed to the child's alias with the
     /// child marker — the membrane's child-demux path.
-    #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _probe: InlineProbe) {
-        reply_who(ctx, INLINE_WHO_CHILD);
+    #[handler::single]
+    fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, _probe: InlineProbe) -> InlineEcho {
+        InlineEcho { who: INLINE_WHO_CHILD }
     }
 }
 
@@ -387,11 +377,9 @@ impl WasmActor for InlineConfiguredChild {
 
     /// Reply with the live counter so a test can read the child's state
     /// across a swap.
-    #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&CountReport { count: self.count });
-        }
+    #[handler::single]
+    fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
+        CountReport { count: self.count }
     }
 }
 
@@ -469,11 +457,9 @@ impl WasmActor for NestedLineageLeaf {
         self.count += 1;
     }
 
-    #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&CountReport { count: self.count });
-        }
+    #[handler::single]
+    fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
+        CountReport { count: self.count }
     }
 }
 
@@ -539,15 +525,13 @@ impl WasmActor for InlineTagParent {
 
     /// Report the accepted composable spawn and all three rejected selections
     /// over the wire.
-    #[handler::manual]
-    fn on_tag_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: TagSpawnQuery) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&TagSpawnReport {
-                composable_spawned: self.child.is_some(),
-                wrong_parent_rejected: self.wrong_parent_rejected,
-                non_instanced_rejected: self.non_instanced_rejected,
-                unknown_tag_rejected: self.unknown_tag_rejected,
-            });
+    #[handler::single]
+    fn on_tag_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: TagSpawnQuery) -> TagSpawnReport {
+        TagSpawnReport {
+            composable_spawned: self.child.is_some(),
+            wrong_parent_rejected: self.wrong_parent_rejected,
+            non_instanced_rejected: self.non_instanced_rejected,
+            unknown_tag_rejected: self.unknown_tag_rejected,
         }
     }
 

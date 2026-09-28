@@ -34,7 +34,7 @@ use super::WasmTrampoline;
 use crate::component::LoadDelivered;
 use crate::kinds::BootTeardown;
 pub use aether_actor::Local;
-use aether_actor::{Manual, OutboundReply, Single, runtime};
+use aether_actor::{Single, runtime};
 use aether_kinds::ComponentCapabilities;
 pub use aether_kinds::{DropComponent, DropResult, LoadResult, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::ctx::GuestHost;
@@ -233,10 +233,10 @@ impl NativeActor for WasmTrampoline {
     /// delivery by its sender. It needs no such check: it answers only the
     /// mail's own reply target, so a delivery from anyone else reaches only
     /// the actor that sent it.
-    #[handler::manual]
-    fn on_load_delivered(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: LoadDelivered) {
+    #[handler::single]
+    fn on_load_delivered(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: LoadDelivered) -> LoadResult {
         let LoadDelivered { path, capabilities } = payload;
-        ctx.reply(&LoadResult::Ok { path, capabilities });
+        LoadResult::Ok { path, capabilities }
     }
 
     #[handler(task)]

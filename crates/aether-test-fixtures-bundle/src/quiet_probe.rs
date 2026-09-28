@@ -11,9 +11,7 @@
 //!   through the actor-aware subscriber (issue #581) into the per-actor
 //!   log ring the log-ring tests read.
 
-use aether_actor::{
-    ActorInitError, AssetWindow, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_test_fixtures_kinds::{AssetProbe, AssetProbeResult};
@@ -71,10 +69,8 @@ impl WasmActor for QuietProbe {
     /// Send `aether.test_fixtures.asset_probe`; the reply
     /// `aether.test_fixtures.asset_probe_result` carries `{ pulled, len,
     /// checksum }`.
-    #[handler::manual]
-    fn on_asset_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: AssetProbe) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&self.asset);
-        }
+    #[handler::single]
+    fn on_asset_probe(&mut self, _ctx: &mut WasmCtx<'_>, _query: AssetProbe) -> AssetProbeResult {
+        self.asset.clone()
     }
 }

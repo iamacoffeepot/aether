@@ -71,20 +71,13 @@ fn expand_handlers(reactor: &TokenStream2) -> TokenStream2 {
             ctx.reply(&self.reactors.event(event));
         }
 
-        #[handler::manual]
+        #[handler::single]
         fn on_status(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            _ctx: &mut ::aether_actor::WasmCtx<'_>,
             _query: #reactor::kinds::StatusQuery,
-        ) {
-            use ::aether_actor::OutboundReply;
-            if ctx.reply_target().is_none() {
-                ::aether_actor::__macro_internals::tracing::warn!(
-                    "reactor root ignored a request with no reply target"
-                );
-                return;
-            }
-            ctx.reply(&self.reactors.status());
+        ) -> #reactor::kinds::Status {
+            self.reactors.status()
         }
     }
 }

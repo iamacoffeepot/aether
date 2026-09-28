@@ -53,7 +53,7 @@
 // `ProbeWithConfig::on_config_query` takes `&mut self` for the same reason.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Key, TextInput, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_test_fixtures_kinds::{
@@ -161,10 +161,8 @@ impl WasmActor for ProbeWithConfig {
     /// Reply with a `ConfigEcho` describing the cached config. Lets
     /// the integration test observe what the typed `init` actually
     /// received without scraping logs or readback.
-    #[handler::manual]
-    fn on_config_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: ConfigQuery) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&ConfigEcho { seed: self.seed, label: self.label.clone() });
-        }
+    #[handler::single]
+    fn on_config_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: ConfigQuery) -> ConfigEcho {
+        ConfigEcho { seed: self.seed, label: self.label.clone() }
     }
 }
