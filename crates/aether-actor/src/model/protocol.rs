@@ -224,7 +224,9 @@ impl<P: Protocol, R: CoversRows<P::Rows>> CoveredBy<R> for P {}
 
 pub(super) mod cast_sealed {
     /// Private supertrait sealing [`super::CastTarget`] to the protocols
-    /// this crate lists: today, [`Subscriber<K>`](crate::Subscriber) alone.
+    /// this crate lists: [`Subscriber<K>`](crate::Subscriber), and every
+    /// [`ProtocolCast`](super::ProtocolCast) protocol under the one exact-rows
+    /// rule [`super::covers_exact_rows`].
     pub trait Sealed {}
 }
 
@@ -236,7 +238,70 @@ pub(super) mod cast_sealed {
 /// [`admits`](CastTarget::admits) accepts those rows. The rule lives here,
 /// beside the protocol, and the seal keeps any other crate from naming a
 /// protocol whose rule admits rows of its own choosing.
+///
+/// Two arms implement it: [`Subscriber<K>`](crate::Subscriber), whose rule
+/// also admits a manual row for its published kind, and every protocol
+/// `#[protocol]` declares (through [`ProtocolCast`]), whose rule is ADR-0231
+/// §4's exact-rows check.
 pub trait CastTarget: Protocol + cast_sealed::Sealed {
     /// Whether a route publishing `rows` answers this protocol.
     fn admits(rows: &[(KindId, ReplyContract)]) -> bool;
+}
+
+/// Opts a protocol into the guard cast's protocol arm (ADR-0231 §4).
+/// `#[protocol]` emits it; not part of the public API.
+///
+/// The marker carries no rule of its own: a protocol that has it is cast by
+/// [`covers_exact_rows`] alone, so a hand-written marker still gets only the
+/// fixed exact-rows check against registry-published rows.
+#[doc(hidden)]
+pub trait ProtocolCast: Protocol {}
+
+/// Whether `rows` contains every row of `P`, each with the same kind and the
+/// same [`ReplyContract`] (ADR-0231 §4). A [`ReplyContract::Manual`] row
+/// covers no protocol row (ADR-0231 §6), and extra rows are ignored.
+fn covers_exact_rows<P: Protocol>(rows: &[(KindId, ReplyContract)]) -> bool {
+    <P::Rows as RowSet>::CONTRACTS.iter().all(|row| rows.contains(row))
+}
+
+impl<P: ProtocolCast> cast_sealed::Sealed for P {}
+
+impl<P: ProtocolCast> CastTarget for P {
+    fn admits(rows: &[(KindId, ReplyContract)]) -> bool {
+        covers_exact_rows::<P>(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_data::{Kind, ReplyContract};
+    use aether_kinds::{Ping, Pong, Tick};
+
+    use super::{CastTarget, ProtocolCast};
+    use crate::{Protocol, Row, Silent};
+
+    struct PingPong;
+
+    impl Protocol for PingPong {
+        type Rows = (Row<Ping, Pong>, Row<Pong, Silent>);
+    }
+
+    impl ProtocolCast for PingPong {}
+
+    // A cast that minted a protocol reference for a route missing one of the
+    // protocol's rows, or answering one with another reply or by hand, would
+    // hand its holder a target that warn-drops or misanswers that row.
+    #[test]
+    fn a_protocol_cast_admits_only_every_row_with_its_exact_reply() {
+        let admits = |rows: &[_]| <PingPong as CastTarget>::admits(rows);
+        let request = (Ping::ID, ReplyContract::One(Pong::ID));
+        let notice = (Pong::ID, ReplyContract::None);
+
+        assert!(admits(&[notice, request]));
+        assert!(admits(&[(Tick::ID, ReplyContract::None), request, notice]));
+        assert!(!admits(&[request]));
+        assert!(!admits(&[(Ping::ID, ReplyContract::None), notice]));
+        assert!(!admits(&[request, (Pong::ID, ReplyContract::Manual)]));
+        assert!(!admits(&[(Ping::ID, ReplyContract::Manual), notice]));
+    }
 }

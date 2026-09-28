@@ -139,8 +139,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Its consumers are the Bloomery workspace's receipt of `Run.source` and
     /// `Import.source` (#6841), the window manager's and the lifecycle
     /// capability's explicit subscribe and unsubscribe receipts, whose
-    /// subscriber is a `ProtocolPath<Subscriber<K>>`, and the HTTP server's
-    /// `register_route` receipt, whose handler is a `ProtocolPath<HttpRoute>`.
+    /// subscriber is a `ProtocolPath<Subscriber<K>>`, the HTTP server's
+    /// `register_route` receipt, whose handler is a `ProtocolPath<HttpRoute>`,
+    /// and the tcp capability's `connect` and `bind_listener` receipts, whose
+    /// consumer is a `ProtocolPath<TcpConsumer>`.
     pub fn resolve<P: Protocol>(&self, path: &ProtocolPath<P>) -> Result<ProtocolRef<P>, ResolveError> {
         self.binding.mailer().registry().resolve_protocol(path)
     }
@@ -152,13 +154,18 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// One read of the published view answers both. The reference usually
     /// arrived untyped, as [`Self::sender`](super::NativeCtx::sender) does, and
     /// the cast is how a handler that must send through it later gets a typed
-    /// proof to keep. `T` is sealed: [`Subscriber<K>`](aether_actor::Subscriber)
-    /// admits a silent or manual row for `K`.
+    /// proof to keep. `T` is sealed to two arms:
+    /// [`Subscriber<K>`](aether_actor::Subscriber) admits a silent or manual
+    /// row for `K`, and a `#[protocol]` type admits a route that publishes
+    /// every one of its rows with the exact reply (ADR-0231 §4's protocol
+    /// arm).
     ///
     /// Its consumers are the window manager's and the lifecycle capability's
     /// reflexive `subscribe_self` receipts, which type the sender as a
     /// subscriber to the requested kind and refuse one whose rows do not
-    /// answer it.
+    /// answer it, and the tcp capability's `connect_self` and
+    /// `bind_listener_self` receipts, which type the sender as a
+    /// `TcpConsumer` and refuse one that does not cover it.
     #[must_use]
     pub fn cast<T: CastTarget>(&self, reference: ErasedActorRef) -> Option<ProtocolRef<T>> {
         self.binding.mailer().registry().cast(reference)

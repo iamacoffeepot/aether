@@ -20,10 +20,10 @@ pub use aether_substrate::chassis::error::BootError;
 pub use crate::config::{TcpListenerConfig, TcpSessionConfig};
 pub use crate::session::TcpSessionActor;
 
-use aether_actor::{ErasedActorRef, Single, runtime};
+use aether_actor::{ProtocolRef, Single, runtime};
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
-use crate::kinds::{Close, ConnectionReady};
+use crate::kinds::{Close, ConnectionReady, TcpConsumer};
 // The `#[runtime] impl NativeActor` names the identity struct from the parent.
 use super::TcpListenerActor;
 
@@ -36,9 +36,10 @@ use super::TcpListenerActor;
 /// distinct ZST [`TcpListenerActor`].
 pub struct TcpListenerState {
     pub local_port: u16,
-    /// The consumer the cap proved at `BindListener` receipt (ADR-0230),
-    /// handed to every session this listener accepts.
-    pub consumer: Option<ErasedActorRef>,
+    /// The consumer the cap proved at `BindListener` or `BindListenerSelf`
+    /// receipt (ADR-0230, ADR-0231 §3/§4), handed to every session this
+    /// listener accepts.
+    pub consumer: Option<ProtocolRef<TcpConsumer>>,
     pub shutdown: Arc<AtomicBool>,
     pub accept_start: Option<mpsc::Sender<()>>,
     pub accept_thread: Option<JoinHandle<()>>,

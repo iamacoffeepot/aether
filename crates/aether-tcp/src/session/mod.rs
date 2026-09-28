@@ -17,12 +17,13 @@
 //! aborts any blocked `read()` on the read half, the read thread
 //! sees the error / EOF, exits, and the dispatcher joins it.
 //!
-//! Each session receives an optional late-bound consumer mailbox from
-//! its listener or outbound `Connect` request. The dispatcher appends
-//! read chunks to a reassembly buffer, pops complete ADR-0072
-//! length-prefix frames, and delivers one targeted `SessionData` mail
-//! per frame. Peer EOF and read errors produce a targeted
-//! `SessionClosed`; observer-less sessions preserve the previous
+//! Each session receives an optional consumer from its listener or
+//! outbound `Connect` request, held as a `ProtocolRef` over
+//! [`TcpConsumer`](crate::kinds::TcpConsumer) that the cap proved at
+//! receipt. The dispatcher appends read chunks to a reassembly
+//! buffer, pops complete ADR-0072 length-prefix frames, and delivers one
+//! targeted `SessionData` mail per frame. Peer EOF and read errors produce
+//! a targeted `SessionClosed`; observer-less sessions preserve the previous
 //! drop-on-the-floor behavior.
 
 use super::{TcpCapability, TcpListenerActor};

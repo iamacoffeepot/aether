@@ -5,20 +5,22 @@
 
 use std::net::{TcpListener, TcpStream};
 
-use aether_actor::ErasedActorRef;
+use aether_actor::ProtocolRef;
+
+use crate::kinds::TcpConsumer;
 
 /// Init config for [`TcpListenerActor`](super::TcpListenerActor).
 /// `TcpCapability::on_bind` binds the socket on the dispatcher thread
 /// (so addr-parse / port-in-use failures surface synchronously) and
 /// hands the bound listener through `spawn_child`. The `listener`
 /// field is `Option` so init can move it out into the accept thread.
-/// `consumer` is the proof the cap took when it received `BindListener`
-/// (ADR-0230).
+/// `consumer` is the proof the cap took when it received `BindListener` or
+/// `BindListenerSelf` (ADR-0230, ADR-0231 §3/§4).
 pub struct TcpListenerConfig {
     pub listener: Option<TcpListener>,
     pub addr: String,
     pub port: u16,
-    pub consumer: Option<ErasedActorRef>,
+    pub consumer: Option<ProtocolRef<TcpConsumer>>,
 }
 
 /// Init config for [`TcpSessionActor`](super::TcpSessionActor). A listener's
@@ -26,11 +28,11 @@ pub struct TcpListenerConfig {
 /// `on_connect_ready` builds the same config for a dialed stream. `stream` is
 /// `Option` so init can `.take()` and split it; `peer`, `session_name`, and the
 /// optional late-bound `consumer` are shared by both session lineages. The
-/// consumer is the proof the cap took when it received `Connect` or
-/// `BindListener` (ADR-0230).
+/// consumer is the proof the cap took when it received a `Connect` or
+/// `BindListener` request or its `_self` form (ADR-0230, ADR-0231 §3/§4).
 pub struct TcpSessionConfig {
     pub stream: Option<TcpStream>,
     pub peer: String,
     pub session_name: String,
-    pub consumer: Option<ErasedActorRef>,
+    pub consumer: Option<ProtocolRef<TcpConsumer>>,
 }
