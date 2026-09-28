@@ -303,12 +303,13 @@ fn load_instrument_happy_path_replies_ok_and_registers() {
     let (mailer, rx) = test_mailer_and_rx();
     let transport = unrouted_binding(&mailer);
 
-    let mut ctx = manual_ctx(&transport);
+    let mut ctx = load_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut ctx,
         LoadInstrument { namespace: "assets".to_owned(), path: "piano/bank.sfz".to_owned() },
-    );
+    )
+    .__defuse();
     let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
     // The .sfz parses into two regions referencing two samples.
@@ -377,7 +378,8 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
         &mut cap,
         &mut first_ctx,
         LoadInstrument { namespace: "assets".to_owned(), path: "piano/bank_a.sfz".to_owned() },
-    );
+    )
+    .__defuse();
     let first_sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
     let mut second_ctx =
@@ -386,7 +388,8 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
         &mut cap,
         &mut second_ctx,
         LoadInstrument { namespace: "assets".to_owned(), path: "piano/bank_b.sfz".to_owned() },
-    );
+    )
+    .__defuse();
     let second_sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
     let sfz = b"<region>\nsample=shared.wav pitch_keycenter=60\n";
@@ -456,7 +459,8 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
             looping: false,
             lane: Some("intro".to_owned()),
         },
-    );
+    )
+    .__defuse();
     let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
     let mut instrument_ctx =
@@ -465,7 +469,8 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
         &mut cap,
         &mut instrument_ctx,
         LoadInstrument { namespace: "assets".to_owned(), path: "piano/bank.sfz".to_owned() },
-    );
+    )
+    .__defuse();
     let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
     let mut sfz_ctx = read_result_ctx(&transport, sfz_correlation);
@@ -517,12 +522,13 @@ fn load_instrument_missing_sample_replies_err() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
     let transport = unrouted_binding(&mailer);
-    let mut ctx = manual_ctx(&transport);
+    let mut ctx = load_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut ctx,
         LoadInstrument { namespace: "assets".to_owned(), path: "bank.sfz".to_owned() },
-    );
+    )
+    .__defuse();
     let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     let mut sfz_ctx = read_result_ctx(&transport, sfz_correlation);
     AudioCapability::on_read_result(
@@ -548,17 +554,52 @@ fn load_instrument_missing_sample_replies_err() {
     assert!(queue.pop().is_none(), "a failed bank must not register");
 }
 
+/// A failed `.sfz` read answers the held reply its request context carries.
+/// Catches an `Instrument` error arm that drops the context's `Held` without
+/// answering it, which fails fast or leaves the caller with no reply.
+#[test]
+fn load_instrument_missing_sfz_replies_err() {
+    let (mut cap, queue) = live_cap();
+    let (mailer, rx) = test_mailer_and_rx();
+    let transport = unrouted_binding(&mailer);
+    let mut ctx = load_ctx(&transport);
+    AudioCapability::on_load_instrument(
+        &mut cap,
+        &mut ctx,
+        LoadInstrument { namespace: "assets".to_owned(), path: "missing.sfz".to_owned() },
+    )
+    .__defuse();
+    let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
+    let mut sfz_ctx = read_result_ctx(&transport, sfz_correlation);
+    AudioCapability::on_read_result(
+        &mut cap,
+        &mut sfz_ctx,
+        ReadResult::Err { addr: NamespaceAddr::new("assets", "missing.sfz"), error: FsError::NotFound },
+    );
+    match decode_session_reply::<LoadInstrumentResult>(&rx) {
+        LoadInstrumentResult::Err { path, error, .. } => {
+            assert_eq!(path, "missing.sfz");
+            assert!(error.contains("NotFound"), "fs error not surfaced: {error}");
+        }
+        LoadInstrumentResult::Ok { .. } => panic!("expected Err for a missing sfz"),
+    }
+    assert!(rx.try_recv().is_err(), "a failed sfz read must fan out no sample reads");
+    assert!(cap.assemblies.is_empty(), "no assembly should be parked");
+    assert!(queue.pop().is_none(), "a missing bank must not register");
+}
+
 #[test]
 fn load_instrument_malformed_sfz_replies_err() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
     let transport = unrouted_binding(&mailer);
-    let mut ctx = manual_ctx(&transport);
+    let mut ctx = load_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut ctx,
         LoadInstrument { namespace: "assets".to_owned(), path: "bank.sfz".to_owned() },
-    );
+    )
+    .__defuse();
     let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     let mut sfz_ctx = read_result_ctx(&transport, sfz_correlation);
     // A control block with no regions: the parser rejects it.
@@ -585,12 +626,13 @@ fn load_instrument_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, rx) = test_mailer_and_rx();
     let transport = unrouted_binding(&mailer);
-    let mut ctx = manual_ctx(&transport);
+    let mut ctx = load_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut ctx,
         LoadInstrument { namespace: "assets".to_owned(), path: "bank.sfz".to_owned() },
-    );
+    )
+    .__defuse();
     match decode_session_reply::<LoadInstrumentResult>(&rx) {
         LoadInstrumentResult::Err { .. } => {}
         LoadInstrumentResult::Ok { .. } => panic!("nop chassis must reply Err"),

@@ -31,7 +31,7 @@ use std::time::Duration;
 
 const TEST_RATE: f32 = 48_000.0;
 
-fn read_result_ctx<A>(transport: &Arc<NativeBinding>, correlation_id: u64) -> NativeCtx<'_, A, Manual> {
+fn read_result_ctx<A>(transport: &Arc<NativeBinding>, correlation_id: u64) -> NativeCtx<'_, A> {
     NativeCtx::new_for_actor(transport, fs_reply_source(correlation_id), None, None)
 }
 
@@ -59,14 +59,6 @@ fn ramp(len: usize) -> Vec<f32> {
     (0..len).map(|i| (i as f32 / len as f32) - 0.5).collect()
 }
 fn load_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A> {
-    NativeCtx::new_for_actor(transport, session_sender(), None, None)
-}
-
-/// ADR-0112: a `Manual` ctx for directly calling `#[handler::manual]`
-/// methods (`on_load_instrument`, `on_read_result`). Mirrors `load_ctx`
-/// in the `Manual` mode, so the method's `OutboundReply` surface is
-/// available.
-fn manual_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A, Manual> {
     NativeCtx::new_for_actor(transport, session_sender(), None, None)
 }
 

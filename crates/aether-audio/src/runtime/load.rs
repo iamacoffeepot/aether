@@ -1,7 +1,6 @@
 use std::str::from_utf8;
 
-use aether_actor::{DependsOn, ErasedActorRef, OutboundReply};
-use aether_data::Source;
+use aether_actor::{DependsOn, ErasedActorRef};
 
 use super::decode::decode_wav_to_mono;
 use super::sample::{
@@ -10,28 +9,33 @@ use super::sample::{
 };
 use super::sfz::parse_sfz;
 use super::track::{DecodeOutput, TrackDecodeContext};
-use super::{AudioCapabilityState, FsCapability, Manual, NativeCtx, Read};
+use super::{AudioCapabilityState, FsCapability, Held, NativeCtx, Read};
 use crate::kinds::{LoadInstrumentResult, PlayTrackResult};
 use aether_fs::NamespaceAddr;
 
 /// Context stored under each `aether.fs.read` request correlation while an
 /// audio load is in flight. One enum covers the shared `ReadResult` handler's
 /// track, instrument, and per-sample paths.
+///
+/// The `Instrument` variant carries the request's held reply (ADR-0243 §4),
+/// so the context is actor-local: never mail, and parked only in the
+/// request-context table.
 #[aether_data::kind(name = "aether.audio.load_context")]
 pub enum AudioLoadContext {
     /// A `play_track` WAV read; the load itself waits in the cap's
     /// `track_loads` under `load_id`.
     Track { load_id: u64 },
-    /// A `load_instrument` `.sfz` read; carries the original reply route.
-    Instrument { source: Source },
+    /// A `load_instrument` `.sfz` read; carries the request's held reply.
+    Instrument { held: Held<LoadInstrumentResult> },
     /// One sample read in a bank assembly; carries the assembly and exact slot.
     Sample { assembly_id: u64, slot: u64 },
 }
 
 /// A `play_track` whose read is in flight, keyed by `load_id` in the cap's
-/// `track_loads`: held in state because the proven sender cannot ride a kind.
+/// `track_loads`: held in state because the proven sender cannot ride a kind,
+/// and the request's held reply sits with the rest of its state.
 pub struct TrackLoad {
-    pub source: Source,
+    pub held: Held<PlayTrackResult>,
     pub sender: Option<ErasedActorRef>,
     pub lane: Option<String>,
     pub gain: f32,
@@ -40,21 +44,21 @@ pub struct TrackLoad {
 
 impl AudioCapabilityState {
     /// Dispatch a track's decode off the realtime path (ADR-0093),
-    /// pinning the deferred `PlayTrackResult` to the original
-    /// `play_track` caller. Split out of `on_read_result` so the one
-    /// handler can route three fetch paths.
+    /// handing the load's held `PlayTrackResult` to the worker so the
+    /// completion answers the original `play_track` caller. Split out of
+    /// `on_read_result` so the one handler can route three fetch paths.
     pub fn start_track_decode<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, Manual>,
+        ctx: &mut NativeCtx<'_, A>,
         load: TrackLoad,
         namespace: String,
         path: String,
         bytes: Vec<u8>,
     ) {
-        let TrackLoad { source, sender, lane, gain, looping } = load;
+        let TrackLoad { held, sender, lane, gain, looping } = load;
         let Some(device_rate) = self.sample_rate else {
-            ctx.reply_to(
-                source,
+            held.answer(
+                ctx,
                 &PlayTrackResult::Err {
                     namespace,
                     path,
@@ -70,10 +74,9 @@ impl AudioCapabilityState {
         let target_rate = device_rate as u32;
 
         let context = TrackDecodeContext { sender, lane, namespace, path, gain, looping };
-        // Bridge the hold from this (fs-reply) turn into the decode
-        // dispatch, pinning the reply to the original `play_track` caller.
-        let hold = ctx.acquire_settlement_hold();
-        ctx.dispatch_blocking_resumed_with::<DecodeOutput, _, _>(hold, source, context, move || {
+        // The worker attaches to the held entry, which kept the
+        // `play_track` caller's target and chain open across the read.
+        ctx.dispatch_blocking_held_with::<DecodeOutput, _, _, _>(held, context, move || {
             decode_wav_to_mono(&bytes, target_rate)
         });
     }
@@ -84,15 +87,15 @@ impl AudioCapabilityState {
     /// [`BankAssembly`] is parked until the sample reads complete.
     pub fn on_sfz_loaded<A: DependsOn<FsCapability>>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, Manual>,
-        source: Source,
+        ctx: &mut NativeCtx<'_, A>,
+        held: Held<LoadInstrumentResult>,
         namespace: String,
         path: String,
         bytes: &[u8],
     ) {
         let Ok(text) = from_utf8(bytes) else {
-            ctx.reply_to(
-                source,
+            held.answer(
+                ctx,
                 &LoadInstrumentResult::Err { namespace, path, error: "sfz file is not valid UTF-8".to_owned() },
             );
             return;
@@ -100,8 +103,8 @@ impl AudioCapabilityState {
         let spec = match parse_sfz(text) {
             Ok(spec) => spec,
             Err(e) => {
-                ctx.reply_to(
-                    source,
+                held.answer(
+                    ctx,
                     &LoadInstrumentResult::Err { namespace, path, error: format!("sfz parse failed: {e}") },
                 );
                 return;
@@ -119,8 +122,8 @@ impl AudioCapabilityState {
         // `samples` is non-empty.
         let remaining = samples.len();
         let Some(assembly_id) = self.assembly_ids.allocate() else {
-            ctx.reply_to(
-                source,
+            held.answer(
+                ctx,
                 &LoadInstrumentResult::Err {
                     namespace,
                     path,
@@ -138,7 +141,7 @@ impl AudioCapabilityState {
         self.assemblies.insert(
             assembly_id,
             BankAssembly {
-                source,
+                held,
                 namespace: namespace.clone(),
                 sfz_path: path,
                 name,
@@ -164,13 +167,7 @@ impl AudioCapabilityState {
     /// the last sample is in, dispatch the decode + assembly off the
     /// realtime path (ADR-0093 / ADR-0103 §6). A late / orphan reply
     /// (its assembly already failed) is dropped.
-    pub fn on_sample_loaded<A>(
-        &mut self,
-        ctx: &mut NativeCtx<'_, A, Manual>,
-        assembly_id: u64,
-        slot: u64,
-        bytes: Vec<u8>,
-    ) {
+    pub fn on_sample_loaded<A>(&mut self, ctx: &mut NativeCtx<'_, A>, assembly_id: u64, slot: u64, bytes: Vec<u8>) {
         let Ok(slot) = usize::try_from(slot) else {
             return;
         };
@@ -194,8 +191,8 @@ impl AudioCapabilityState {
 
         let assembly = self.assemblies.remove(&assembly_id).expect("assembly present — checked above");
         let Some(device_rate) = self.sample_rate else {
-            ctx.reply_to(
-                assembly.source,
+            assembly.held.answer(
+                ctx,
                 &LoadInstrumentResult::Err {
                     namespace: assembly.namespace,
                     path: assembly.sfz_path,
@@ -207,12 +204,11 @@ impl AudioCapabilityState {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target_rate = device_rate as u32;
 
-        let BankAssembly { source, namespace, sfz_path, name, regions, samples, .. } = assembly;
+        let BankAssembly { held, namespace, sfz_path, name, regions, samples, .. } = assembly;
         let sample_bytes: Vec<(String, Vec<u8>)> =
             samples.into_iter().map(|s| (s.sample_rel, s.bytes.unwrap_or_default())).collect();
         let context = BankAssemblyContext { namespace, path: sfz_path };
-        let hold = ctx.acquire_settlement_hold();
-        ctx.dispatch_blocking_resumed_with::<BankAssemblyOutput, _, _>(hold, source, context, move || {
+        ctx.dispatch_blocking_held_with::<BankAssemblyOutput, _, _, _>(held, context, move || {
             assemble_bank(name, &regions, &sample_bytes, target_rate)
         });
     }
@@ -221,13 +217,12 @@ impl AudioCapabilityState {
     /// original requester and discard the partial assembly (ADR-0103
     /// §2). Sibling sample reads still in flight will find no assembly
     /// when their context arrives and drop.
-    pub fn fail_assembly<A>(&mut self, ctx: &mut NativeCtx<'_, A, Manual>, assembly_id: u64, error: String) {
+    pub fn fail_assembly<A>(&mut self, ctx: &mut NativeCtx<'_, A>, assembly_id: u64, error: String) {
         let Some(assembly) = self.assemblies.remove(&assembly_id) else {
             return;
         };
-        ctx.reply_to(
-            assembly.source,
-            &LoadInstrumentResult::Err { namespace: assembly.namespace, path: assembly.sfz_path, error },
-        );
+        assembly
+            .held
+            .answer(ctx, &LoadInstrumentResult::Err { namespace: assembly.namespace, path: assembly.sfz_path, error });
     }
 }

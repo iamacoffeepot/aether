@@ -179,7 +179,8 @@ fn play_track_happy_path_replies_ok_and_starts_a_track() {
             looping: false,
             lane: None,
         },
-    );
+    )
+    .__defuse();
     // The cap forwarded an fs.read with a request context.
     let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
@@ -229,7 +230,8 @@ fn play_track_echoes_lane_through_result_and_track_start() {
             looping: false,
             lane: Some("bgm".to_owned()),
         },
-    );
+    )
+    .__defuse();
     let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     let wav = decode::wav_int16_mono(&ramp(512), 24_000);
     let mut read_ctx = read_result_ctx(&transport, track_correlation);
@@ -270,7 +272,8 @@ fn play_track_missing_file_replies_err_with_fs_error() {
             looping: false,
             lane: None,
         },
-    );
+    )
+    .__defuse();
     let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     let mut read_ctx = read_result_ctx(&transport, track_correlation);
     AudioCapability::on_read_result(
@@ -305,7 +308,8 @@ fn play_track_on_nop_chassis_replies_err() {
             looping: false,
             lane: None,
         },
-    );
+    )
+    .__defuse();
     match decode_session_reply::<PlayTrackResult>(&rx) {
         PlayTrackResult::Err { .. } => {}
         PlayTrackResult::Ok { .. } => panic!("nop chassis must reply Err"),

@@ -67,7 +67,8 @@ fn play_track_deferred_reply_settles_caller_chain() {
                 looping: false,
                 lane: None,
             },
-        );
+        )
+        .__defuse();
     }
 
     let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
@@ -111,7 +112,8 @@ fn load_instrument_deferred_reply_settles_caller_chain() {
             &mut cap,
             &mut ctx,
             LoadInstrument { namespace: "assets".to_owned(), path: "piano/bank.sfz".to_owned() },
-        );
+        )
+        .__defuse();
     }
 
     let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);

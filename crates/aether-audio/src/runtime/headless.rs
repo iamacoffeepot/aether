@@ -6,14 +6,16 @@
 //! pipeline, or the worker thread, so it is the whole audio surface a chassis
 //! with no output device carries.
 //!
-//! Every handler here mirrors the primary cap's declaration class and reply
-//! type: a desktop binary links both `aether.audio` runtimes and both submit
+//! Every handler here mirrors the primary cap's declared reply row: a
+//! desktop binary links both `aether.audio` runtimes and both submit
 //! `(namespace, id, name, reply)` rows into the link-time-global handler
 //! inventory, and only field-identical rows fold (ADR-0160 §Decision 2). A
 //! class or reply-type divergence would double-report the kind in
-//! `describe_handlers`.
+//! `describe_handlers`. The two load requests answer at once here with
+//! `-> R`, where the primary defers with `-> Pending<R>`; both declare the
+//! row `One(R)`, so they fold.
 
-use aether_actor::{Manual, OutboundReply, runtime};
+use aether_actor::runtime;
 
 use crate::headless::HeadlessAudioCapability;
 use crate::kinds::{
@@ -22,15 +24,14 @@ use crate::kinds::{
     StopTrack,
 };
 
-use aether_substrate::Erased;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 
 const UNAVAILABLE_ERROR: &str = "unsupported on this chassis — no audio device";
 
 /// Stateless runtime for the fail-fast companion — every handler either
-/// absorbs its mail or answers through its own inbound, so there is nothing to
-/// hold between envelopes.
+/// absorbs its mail or answers on return, so there is nothing to hold between
+/// envelopes.
 pub struct HeadlessAudioCapabilityState;
 
 #[runtime]
@@ -92,20 +93,19 @@ impl NativeActor for HeadlessAudioCapability {
         ScheduleResult::Err { error: UNAVAILABLE_ERROR.to_owned() }
     }
 
-    /// `PlayTrack` replies `Err` through its own inbound (ADR-0103 §2/§7),
-    /// echoing the request's `namespace` / `path` / `lane` the way the pumped
-    /// runtime does so a caller running several lanes correlates the failure.
-    /// `#[handler::manual]` matches the primary cap's declaration, which is
-    /// what keeps the two `aether.audio.play_track` inventory rows folding to
-    /// one.
-    #[handler::manual]
-    fn on_play_track(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: PlayTrack) {
-        ctx.reply(&PlayTrackResult::Err {
+    /// `PlayTrack` replies `Err` (ADR-0103 §2/§7), echoing the request's
+    /// `namespace` / `path` / `lane` the way the pumped runtime does so a
+    /// caller running several lanes correlates the failure. Both runtimes
+    /// declare the row `One(PlayTrackResult)`, which is what keeps the two
+    /// `aether.audio.play_track` inventory rows folding to one.
+    #[handler::single]
+    fn on_play_track(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: PlayTrack) -> PlayTrackResult {
+        PlayTrackResult::Err {
             namespace: mail.namespace,
             path: mail.path,
             lane: mail.lane,
             error: UNAVAILABLE_ERROR.to_owned(),
-        });
+        }
     }
 
     /// `StopTrack` is absorbed — fire-and-forget, and stopping a track that
@@ -113,15 +113,15 @@ impl NativeActor for HeadlessAudioCapability {
     #[handler::single]
     fn on_stop_track(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: StopTrack) {}
 
-    /// `LoadInstrument` replies `Err` through its own inbound (ADR-0103 §4/§7),
-    /// echoing the request's `namespace` / `path` — the same manual shape as
-    /// `on_play_track`.
-    #[handler::manual]
-    fn on_load_instrument(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadInstrument) {
-        ctx.reply(&LoadInstrumentResult::Err {
-            namespace: mail.namespace,
-            path: mail.path,
-            error: UNAVAILABLE_ERROR.to_owned(),
-        });
+    /// `LoadInstrument` replies `Err` (ADR-0103 §4/§7), echoing the request's
+    /// `namespace` / `path`. Both runtimes declare the row
+    /// `One(LoadInstrumentResult)`, the same fold as `on_play_track`.
+    #[handler::single]
+    fn on_load_instrument(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: LoadInstrument,
+    ) -> LoadInstrumentResult {
+        LoadInstrumentResult::Err { namespace: mail.namespace, path: mail.path, error: UNAVAILABLE_ERROR.to_owned() }
     }
 }
