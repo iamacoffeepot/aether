@@ -155,7 +155,7 @@ impl AudioCapabilityState {
             let context = AudioLoadContext::Sample { assembly_id, slot };
             let _ = ctx.send_with_context::<FsCapability>(
                 &Read { addr: NamespaceAddr::new(namespace.clone(), fs_path) },
-                &context,
+                context,
             );
         }
     }

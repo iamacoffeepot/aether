@@ -85,7 +85,7 @@ fn send_to_family_inherits_or_detaches_and_stores_context() {
     let inherited_id = {
         let mut ctx = NativeCtx::new(&binding, source, Some(in_flight_mail), Some(in_flight_root));
         let borrowed = &reference;
-        ctx.send_to_with_context(borrowed, &CastOnly { code: 2 }, &inherited_context)
+        ctx.send_to_with_context(borrowed, &CastOnly { code: 2 }, inherited_context.clone())
     };
     let inherited = rx.try_recv().expect("send_to_with_context routed at flush");
     assert_eq!(inherited.mail_id, Some(inherited_id), "the returned id is the routed mail's");
@@ -101,7 +101,7 @@ fn send_to_family_inherits_or_detaches_and_stores_context() {
     let detached_context = NativeRequestContext { value: 34 };
     let detached_id = {
         let mut ctx = NativeCtx::new(&binding, source, Some(in_flight_mail), Some(in_flight_root));
-        ctx.send_detached_to_with_context(reference.erase(), &CastOnly { code: 3 }, &detached_context)
+        ctx.send_detached_to_with_context(reference.erase(), &CastOnly { code: 3 }, detached_context.clone())
     };
     let detached = rx.try_recv().expect("send_detached_to_with_context routed at flush");
     assert_eq!(detached.mail_id, Some(detached_id), "the returned id is the routed mail's");
@@ -353,7 +353,7 @@ fn flat_send_and_send_with_context_reach_the_declared_dependency_on_the_handlers
     let context_id = {
         let mut ctx: NativeCtx<'_, Dependent, Single> =
             NativeCtx::new_for_actor(&binding, source, Some(in_flight_mail), Some(in_flight_root));
-        ctx.send_with_context::<StubActor>(&CastOnly { code: 7 }, &context)
+        ctx.send_with_context::<StubActor>(&CastOnly { code: 7 }, context.clone())
     };
     let with_context = rx.try_recv().expect("flat send_with_context routed at flush");
     assert_eq!(with_context.mail_id, Some(context_id), "the returned id is the routed mail's");

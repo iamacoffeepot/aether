@@ -190,7 +190,7 @@ to the handler rather than a returned value:
 1. **`on_load_font`** captures the original caller's `Source` in a
    `FontLoadContext` together with the owed `PendingReply` shape, then forwards
    an `aether.fs.read` with
-   `ctx.send_with_context::<FsCapability>(&read, &context)`, which compiles
+   `ctx.send_with_context::<FsCapability>(&read, context)`, which compiles
    because `TextCapability` declares `depends(FsCapability)`. Correlation lives in the binding's request table, not a path-keyed actor-state
    map, so two requests for the same path remain distinct.
 2. **`on_read_result`** recovers the matching context with

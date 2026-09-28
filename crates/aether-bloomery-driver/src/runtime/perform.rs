@@ -31,16 +31,16 @@ impl BundleDriverState {
         for command in commands {
             match command {
                 Command::ReadEvents { ticket, request } => {
-                    let _ = ctx.send_to_with_context(self.journal, &request, &ticket);
+                    let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
                 Command::ReadArtifact { ticket, request } => {
-                    let _ = ctx.send_to_with_context(self.journal, &request, &ticket);
+                    let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
                 Command::ReadClosure { ticket, request } => {
-                    let _ = ctx.send_to_with_context(self.journal, &request, &ticket);
+                    let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
                 Command::Append { ticket, request } => {
-                    let _ = ctx.send_to_with_context(self.journal, &request, &ticket);
+                    let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
                 Command::Load { ticket, bundle, wasm } => {
                     self.loading.insert(ticket, bundle);
@@ -51,16 +51,16 @@ impl BundleDriverState {
                             config: Vec::new(),
                             export: Some(BUNDLE_NAMESPACE.to_owned()),
                         },
-                        &ticket,
+                        ticket,
                     );
                 }
-                Command::Invoke { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, &ticket),
+                Command::Invoke { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, ticket),
                 Command::WatchHead { ticket, request } => {
-                    let _ = ctx.send_detached_to_with_context(self.journal, &request, &ticket);
+                    let _ = ctx.send_detached_to_with_context(self.journal, &request, ticket);
                 }
-                Command::Warm { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, &ticket),
-                Command::Evaluate { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, &ticket),
-                Command::QueryStatus { ticket, bundle } => self.send_to_root(ctx, bundle, &StatusQuery, &ticket),
+                Command::Warm { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, ticket),
+                Command::Evaluate { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, ticket),
+                Command::QueryStatus { ticket, bundle } => self.send_to_root(ctx, bundle, &StatusQuery, ticket),
                 Command::Answer { caller, outcome } => {
                     // A second answer for one caller drops: the caller already
                     // holds its exactly-once outcome, so no reply is owed.
@@ -79,10 +79,10 @@ impl BundleDriverState {
                     }
                 }
                 Command::Fetch { ticket, request } => {
-                    let _ = ctx.send_with_context::<HttpCapability>(&request, &ticket);
+                    let _ = ctx.send_with_context::<HttpCapability>(&request, ticket);
                 }
                 Command::RunWorkspace { ticket, request } => {
-                    let _ = ctx.send_to_with_context(self.workspace, &request, &ticket);
+                    let _ = ctx.send_to_with_context(self.workspace, &request, ticket);
                 }
                 Command::ApiAnswered { caller, result } => {
                     if let Some(owed) = self.take_parked(caller) {
@@ -102,7 +102,7 @@ impl BundleDriverState {
         ctx: &mut NativeCtx<'_, A, M>,
         bundle: Digest,
         request: &K,
-        ticket: &C,
+        ticket: C,
     ) {
         let Some(root) = self.roots.get(&bundle) else {
             ctx.fatal_abort(format!("the core addressed bundle {bundle}, whose root the driver never kept"));

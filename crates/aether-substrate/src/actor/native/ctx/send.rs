@@ -328,8 +328,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.push_to(target.erased(), payload, None, None)
     }
 
-    /// Send `payload` through the held reference `target` and store `context`
-    /// under the minted correlation, for the reply handler to take back with
+    /// Send `payload` through the held reference `target` and move `context`
+    /// into the request-context table under the minted correlation, for the
+    /// reply handler to take back with
     /// [`Self::take_context`](super::NativeCtx::take_context).
     ///
     /// It inherits this handler's causal chain as [`Self::send_to`] does and
@@ -342,21 +343,24 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// through its typed journal reference, and its four bundle-root sends
     /// (`Invoke`, `Warm`, `Evaluate`, and `StatusQuery`, to the erased root it
     /// kept from its load reply's stamped sender).
+    // `context` is owned so it moves into the table (ADR-0243 §4): a context
+    // carrying a held reply cannot be answered again after the send.
+    #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn send_to_with_context<K: ActorMail, C: Kind, I>(
         &mut self,
         target: impl Target<K, I>,
         payload: &K,
-        context: &C,
+        context: C,
     ) -> MailId {
         let mail_id = self.push_to(target.erased(), payload, self.outbound_parent(), self.outbound_root());
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), &context);
         mail_id
     }
 
     /// Send `payload` through the held reference `target` on a fresh causal
-    /// chain and store `context` under the minted correlation, for the reply
-    /// handler to take back with
+    /// chain and move `context` into the request-context table under the
+    /// minted correlation, for the reply handler to take back with
     /// [`Self::take_context`](super::NativeCtx::take_context). The returned
     /// [`MailId`] is the root of the new chain.
     ///
@@ -369,15 +373,18 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// Its consumer is the bloomery driver's `WatchHead`, the long poll the
     /// journal owner parks until the head moves.
+    // `context` is owned so it moves into the table (ADR-0243 §4): a context
+    // carrying a held reply cannot be answered again after the send.
+    #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn send_detached_to_with_context<K: ActorMail, C: Kind, I>(
         &mut self,
         target: impl Target<K, I>,
         payload: &K,
-        context: &C,
+        context: C,
     ) -> MailId {
         let mail_id = self.push_to(target.erased(), payload, None, None);
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), &context);
         mail_id
     }
 
@@ -403,8 +410,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
 
     /// Send `payload` to the declared dependency `R` as [`Self::send`] does
-    /// and store `context` under the minted correlation, for the reply
-    /// handler to take back with
+    /// and move `context` into the request-context table under the minted
+    /// correlation, for the reply handler to take back with
     /// [`Self::take_context`](super::NativeCtx::take_context).
     ///
     /// It carries [`Self::send`]'s bound (`A: DependsOn<R>`), inherits this
@@ -413,11 +420,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Its consumers are the `aether.fs` reads `aether.audio` forwards for a
     /// track, an instrument's `.sfz` file and each of its samples, and the
     /// font read `aether.text` forwards.
+    // `context` is owned so it moves into the table (ADR-0243 §4): a context
+    // carrying a held reply cannot be answered again after the send.
+    #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn send_with_context<R: Singleton + CallerAddressable>(
         &mut self,
         payload: &impl SendableTo<R>,
-        context: &impl Kind,
+        context: impl Kind,
     ) -> MailId
     where
         A: DependsOn<R>,
@@ -425,7 +435,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     {
         let mail_id =
             self.push_to(self.actor_ref::<R>().erase(), payload, self.outbound_parent(), self.outbound_root());
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), &context);
         mail_id
     }
 
