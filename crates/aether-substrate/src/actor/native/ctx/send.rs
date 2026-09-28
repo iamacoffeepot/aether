@@ -36,6 +36,7 @@ use aether_data::{ActorMail, Encoded, Kind, KindId, MailId, RequestId};
 
 use crate::actor::native::binding::OutboundSend;
 use crate::actor::native::envelope::Envelope;
+use crate::actor::native::offload::held::Held;
 use crate::mail::attachments::{Attachments, EncodedMail, encode_envelope, resolve_on_send};
 use crate::mail::boundary::is_engine_only;
 use crate::mail::{BoundaryMail, Source};
@@ -426,6 +427,32 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let mail_id =
             self.push_to(self.actor_ref::<R>().erase(), payload, self.outbound_parent(), self.outbound_root());
         self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        mail_id
+    }
+
+    /// Send `payload` to the declared dependency `R` as [`Self::send`] does
+    /// and park `held` under the minted correlation, for the handler of the
+    /// peer's reply to take back with
+    /// [`Self::take_held`](super::NativeCtx::take_held) and answer
+    /// (ADR-0243 §4).
+    ///
+    /// It carries [`Self::send_with_context`]'s bound and returns the minted
+    /// [`MailId`]. The parked reply leaves the table only through that take,
+    /// or is abandoned when this actor closes.
+    #[must_use]
+    pub fn send_holding<R: Singleton + CallerAddressable>(
+        &mut self,
+        payload: &impl SendableTo<R>,
+        held: Held<impl ActorMail>,
+    ) -> MailId
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        let mail_id =
+            self.push_to(self.actor_ref::<R>().erase(), payload, self.outbound_parent(), self.outbound_root());
+        let (kind, reply) = held.into_keyed();
+        self.binding.store_held(RequestId(mail_id.correlation_id), kind, reply);
         mail_id
     }
 

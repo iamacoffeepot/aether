@@ -179,6 +179,12 @@ pub struct NativeBinding {
     parent_child_reservation: Mutex<Option<LiveChildReservation>>,
     /// ADR-0139: typed request contexts keyed by reply correlation id.
     request_contexts: Mutex<RequestContextTable>,
+    /// ADR-0243 §4: typed held replies keyed by the correlation of the
+    /// outbound request whose reply answers them. A held reply owns a
+    /// settlement hold, so it cannot ride the request-context table, which
+    /// stores kinds. Never evicts: an entry leaves by `take_held`, or is
+    /// abandoned by the close tail's `abandon_held_for_actor_close`.
+    held: Mutex<offload::held::HeldTable>,
     /// ADR-0231 §4: the contract of the guest this guest host hosts or last
     /// hosted, recorded by `NativeCtx::sync_guest`. `None` until a guest is
     /// first resident, and for every actor that hosts none, whose route

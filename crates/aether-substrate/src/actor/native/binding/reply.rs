@@ -1,7 +1,9 @@
 //! The reply path native actors take (ADR-0080 §5) and the typed
-//! request-context table replies are matched against (ADR-0139).
+//! request-context table replies are matched against (ADR-0139), beside the
+//! held replies they answer (ADR-0243 §4).
 
 use super::NativeBinding;
+use super::offload::blocking::DeferredReply;
 use crate::mail::attachments::EncodedMail;
 use crate::mail::{MailId, Source};
 use aether_data::{ActorMail, Kind, KindId, RequestId};
@@ -91,6 +93,35 @@ impl NativeBinding {
     /// Panics if the request-context mutex is poisoned.
     pub fn take_request_context<C: Kind>(&self, request: RequestId) -> Option<C> {
         self.request_contexts.lock().expect("request context table poisoned; fail-fast per ADR-0063").take(request)
+    }
+
+    /// Park a held reply typed as `kind` under the correlation of the
+    /// outbound request whose reply answers it (ADR-0243 §4).
+    ///
+    /// # Panics
+    /// Panics if the held-reply mutex is poisoned.
+    pub(crate) fn store_held(&self, request: RequestId, kind: KindId, reply: DeferredReply) {
+        self.held.lock().expect("held reply table poisoned; fail-fast per ADR-0063").insert(request, kind, reply);
+    }
+
+    /// Remove the held reply parked under `request` when it was typed as
+    /// `kind`; a wrong kind leaves it parked.
+    ///
+    /// # Panics
+    /// Panics if the held-reply mutex is poisoned.
+    pub(crate) fn take_held(&self, request: RequestId, kind: KindId) -> Option<DeferredReply> {
+        self.held.lock().expect("held reply table poisoned; fail-fast per ADR-0063").take(request, kind)
+    }
+
+    /// Abandon every parked held reply because this actor is closing: each
+    /// releases its caller's hold with no reply and no panic. The close tail
+    /// runs it; the table's own `Drop` is the backstop for a binding that
+    /// outlives no close tail.
+    ///
+    /// # Panics
+    /// Panics if the held-reply mutex is poisoned.
+    pub(crate) fn abandon_held_for_actor_close(&self) {
+        self.held.lock().expect("held reply table poisoned; fail-fast per ADR-0063").abandon_all();
     }
 }
 

@@ -11,10 +11,11 @@
 //! host's worker-thread and socket budget). A fetch dispatches only when it
 //! clears both bounds; otherwise it queues, holding its chain from accept.
 //!
-//! A queued fetch captures its chain context *now* — a `SettlementHold` on
-//! the current root plus the originating reply target — and buffers a thunk
-//! that replays the work via `dispatch_blocking_resumed_with` when a slot
-//! frees, exactly like `TaskQueue::submit` (iamacoffeepot/aether#1031). The
+//! A queued fetch holds its reply *now* — `ctx.hold`, a `Held` over a
+//! settlement hold on the current root plus the originating reply target —
+//! and buffers it beside a thunk that replays the work via
+//! `dispatch_blocking_held_with` when a slot frees, exactly like
+//! `TaskQueue::submit` (iamacoffeepot/aether#1031). The
 //! sender key — the envelope sender `ctx.sender()` proves, or `None` for the
 //! shared bucket — rides through as the dispatch context, so the cap's
 //! `#[handler(task)]` completion reads it off the `TaskDone` and frees the
@@ -22,26 +23,35 @@
 //!
 //! Entries reclaim on idle (ADR-0158 §5): a per-sender entry is created
 //! lazily on a sender's first submit and removed the moment it drains fully
-//! idle (`in_flight == 0` and `pending` empty). A `SettlementHold` exists
-//! only while a request is in flight or buffered pending a slot, so an entry
-//! that holds anything is never idle — idle-reclamation can never drop a hold
-//! on the floor.
+//! idle (`in_flight == 0` and `pending` empty). A held reply exists only
+//! while a request is in flight or buffered pending a slot, so an entry that
+//! holds anything is never idle — idle-reclamation can never drop a hold on
+//! the floor. The dispatcher drops with its actor's state, at actor close,
+//! and abandons every buffered fetch's held reply then.
 
 use std::collections::{HashMap, VecDeque};
 
 use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::ActorMail;
-use aether_substrate::actor::native::{DispatchId, NativeCtx, Pending};
+use aether_substrate::actor::native::{DeferredReply, IntoDeferredReply, NativeCtx, Pending};
 
-/// A buffered fetch: replays an over-bound request via
-/// `dispatch_blocking_resumed_with` when a slot frees. Built and run on the
-/// actor thread (the actor IS the mutual exclusion), but `Send` so the
-/// embedding cap can hold it in its `NativeActor` state. Everything it closes
-/// over (the work closure, the captured `SettlementHold`, the reply `Source`,
-/// the sender key) is already `Send`. Stored over the erased ctx because it
-/// only re-dispatches — it never sends a typed request or spawns — so a typed
-/// caller's ctx erases on the way in, as `TaskQueue`'s buffered thunks do.
-type PendingFetch = Box<dyn FnOnce(&mut NativeCtx<'_>) + Send>;
+/// A buffered fetch: the reply it owes, and the thunk that replays the
+/// over-bound request via `dispatch_blocking_held_with` when a slot frees.
+/// Built and run on the actor thread (the actor IS the mutual exclusion), but
+/// `Send` so the embedding cap can hold it in its `NativeActor` state.
+/// Everything the thunk closes over (the work closure, the sender key) is
+/// already `Send`. Stored over the erased ctx because it only re-dispatches —
+/// it never sends a typed request or spawns — so a typed caller's ctx erases
+/// on the way in, as `TaskQueue`'s buffered thunks do. The debt sits beside
+/// the thunk rather than inside it, so the dispatcher's `Drop` can abandon it.
+struct PendingFetch {
+    held: DeferredReply,
+    dispatch: FetchDispatch,
+}
+
+/// The replay half of a [`PendingFetch`], run with its debt when a slot
+/// frees.
+type FetchDispatch = Box<dyn FnOnce(&mut NativeCtx<'_>, DeferredReply) + Send>;
 
 /// One sender's egress state: how many of its fetches are running, and the
 /// FIFO of its requests waiting for a slot.
@@ -90,10 +100,9 @@ impl PerSenderEgress {
     /// Accept a fetch from `sender`. If the sender is under its per-sender
     /// budget **and** the global ceiling has room, dispatch `work` now via
     /// [`NativeCtx::dispatch_blocking_with`] (carrying `sender` as the
-    /// completion context). Otherwise capture the chain context *now* — a
-    /// `SettlementHold` on the current root plus this handler's reply target —
-    /// and buffer a thunk that replays the work via
-    /// [`NativeCtx::dispatch_blocking_resumed_with`] when a slot frees, so the
+    /// completion context). Otherwise hold the reply *now* with
+    /// [`NativeCtx::hold`] and buffer it with a thunk that replays the work
+    /// via [`NativeCtx::dispatch_blocking_held_with`] when a slot frees, so the
     /// queued fetch keeps *its own* chain held from accept through its
     /// eventual re-reply and replies to *its own* caller (ADR-0158 §2).
     pub fn submit<O, F, M, A>(
@@ -114,20 +123,21 @@ impl PerSenderEgress {
         if entry.in_flight < per_sender_max && global_room {
             entry.in_flight += 1;
             self.global_in_flight += 1;
-            let id = ctx.dispatch_blocking_with(sender, work);
-            return ctx.pending(id);
+            return ctx.dispatch_blocking_with_pending::<O, O, _, _>(sender, work);
         }
 
-        let hold = ctx.acquire_settlement_hold();
-        let reply_to = ctx.reply_target();
+        let (pending, held) = ctx.hold::<O>();
         let was_empty = entry.pending.is_empty();
-        entry.pending.push_back(Box::new(move |ctx: &mut NativeCtx<'_>| {
-            ctx.dispatch_blocking_resumed_with::<O, _, _>(hold, reply_to, sender, work);
-        }));
+        entry.pending.push_back(PendingFetch {
+            held: held.into_deferred_reply(),
+            dispatch: Box::new(move |ctx: &mut NativeCtx<'_>, held: DeferredReply| {
+                ctx.dispatch_blocking_held_with::<O, _, _>(held, sender, work);
+            }),
+        });
         if was_empty {
             self.waiting.push_back(sender);
         }
-        ctx.pending(DispatchId::NONE)
+        pending
     }
 
     /// Call from the cap's `#[handler(task)]` after `resolve`, passing the
@@ -176,19 +186,33 @@ impl PerSenderEgress {
             let entry = self.senders.get_mut(&key).expect("a waiting key has a live entry");
 
             if entry.in_flight < per_sender_max {
-                let thunk = entry.pending.pop_front().expect("a waiting key has a pending fetch");
+                let PendingFetch { held, dispatch } =
+                    entry.pending.pop_front().expect("a waiting key has a pending fetch");
                 entry.in_flight += 1;
                 let still_pending = !entry.pending.is_empty();
                 self.global_in_flight += 1;
                 if still_pending {
                     self.waiting.push_back(key);
                 }
-                thunk(ctx.erase());
+                dispatch(ctx.erase(), held);
                 return;
             }
 
             // At its per-sender cap: keep it waiting, rotated to the back.
             self.waiting.push_back(key);
+        }
+    }
+}
+
+/// The dispatcher drops only with its actor's state, at actor close, so every
+/// buffered fetch's held reply is abandoned: its caller's hold releases with
+/// no reply and no panic.
+impl Drop for PerSenderEgress {
+    fn drop(&mut self) {
+        for entry in self.senders.values_mut() {
+            for fetch in entry.pending.drain(..) {
+                fetch.held.abandon_for_actor_close();
+            }
         }
     }
 }

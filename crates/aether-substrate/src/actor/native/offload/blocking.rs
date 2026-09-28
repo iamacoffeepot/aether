@@ -72,20 +72,23 @@ impl DispatchId {
     pub const NONE: Self = Self(0);
 }
 
-/// A type-level "receipt" for a deferred reply (ADR-0109). Returned by
-/// [`dispatch_blocking`](NativeCtx::dispatch_blocking) and by bounded submit
-/// helpers that arm the same hold, so a request handler can declare
-/// `-> Pending<R>`: the reply is an `R`, sent later from the matching
-/// `#[handler(task)]` completion rather than synchronously on this handler's
-/// return.
+/// A type-level "receipt" for a deferred reply (ADR-0109). A request handler
+/// returns it to declare `-> Pending<R>`: the reply is an `R`, sent later
+/// rather than synchronously on this handler's return — from the matching
+/// `#[handler(task)]` completion, or through the [`Held<R>`] debt minted
+/// beside it.
 ///
 /// Phantom over `R` only — the actual hold and reply target live in the
-/// in-flight ledger (or in a queued thunk's captured hold), not here, so a
-/// `Pending<R>` carries just the [`DispatchId`] (reachable via
-/// [`Pending::dispatch_id`] for *optional* cancellation) plus the reply-kind
-/// marker. Framework-constructed: `Pending::new` is crate-internal;
-/// out-of-crate minting goes through [`NativeCtx::pending`] or
-/// `TaskQueue` / `PerSenderEgress` `submit` (ADR-0109 §3).
+/// in-flight ledger or in a [`Held<R>`], not here, so a `Pending<R>` carries
+/// just the [`DispatchId`] (reachable via [`Pending::dispatch_id`] for
+/// *optional* cancellation; [`DispatchId::NONE`] when no worker was
+/// dispatched) plus the reply-kind marker. Only an armed obligation mints
+/// one (ADR-0109 §3, ADR-0243 §3): `Pending::new` is crate-internal, and its
+/// only callers are [`NativeCtx::hold`] and the offload dispatch calls
+/// [`NativeCtx::dispatch_blocking`] and
+/// [`NativeCtx::dispatch_blocking_with_pending`].
+///
+/// [`Held<R>`]: crate::actor::native::offload::held::Held
 pub struct Pending<R: ActorMail> {
     dispatch_id: DispatchId,
     /// `fn() -> R` so `Pending<R>` is covariant in `R` and stays
@@ -95,9 +98,8 @@ pub struct Pending<R: ActorMail> {
 }
 
 impl<R: ActorMail> Pending<R> {
-    /// Wrap the armed dispatch's [`DispatchId`]. Crate-internal — called from
-    /// [`dispatch_blocking`](NativeCtx::dispatch_blocking) and
-    /// [`NativeCtx::pending`] (ADR-0109 §3).
+    /// Wrap the armed obligation's [`DispatchId`]. Crate-internal — called
+    /// from [`NativeCtx::hold`] and the offload dispatch calls (ADR-0243 §3).
     pub(crate) fn new(dispatch_id: DispatchId) -> Self {
         Self { dispatch_id, _reply: PhantomData }
     }
@@ -407,9 +409,10 @@ impl Drop for DeferredReply {
 
 /// Surrender an owed reply as a bare [`DeferredReply`].
 ///
-/// Implemented by [`DeferredReply`] itself (identity) and by [`TaskDone`],
+/// Implemented by [`DeferredReply`] itself (identity), by [`TaskDone`],
 /// whose completion carries the same debt alongside a worker output and a
-/// context. Staging surfaces such as
+/// context, and by the typed
+/// [`Held<R>`](crate::actor::native::offload::held::Held). Staging surfaces such as
 /// [`HandlerSpawnBuilder::continue_from`](crate::actor::native::spawn::HandlerSpawnBuilder::continue_from)
 /// take `impl IntoDeferredReply` so a handler can continue from either without
 /// an intermediate noun at the call site, and can be handed the value back

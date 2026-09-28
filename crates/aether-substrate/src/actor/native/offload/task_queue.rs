@@ -11,15 +11,17 @@
 //! endpoints (ADR-0050 §2).
 //!
 //! Under the bound, [`TaskQueue::submit`] hands the work straight to
-//! `ctx.dispatch_blocking`. Over the bound, it captures the chain context
-//! *now* — a [`SettlementHold`](crate::runtime::trace::SettlementHold)
-//! on the current root plus the originating reply target — and buffers a
-//! thunk that, when a slot later frees, replays the work via
-//! `ctx.dispatch_blocking_resumed(hold, reply_to, work)` so the deferred
-//! request keeps *its own* chain held and replies to *its own* caller
-//! (iamacoffeepot/aether#1031). [`TaskQueue::on_complete`], called from
-//! the cap's `#[handler(task)]` after `resolve`, frees the slot and hands
-//! it straight to the next buffered task.
+//! `ctx.dispatch_blocking_with_pending`. Over the bound, it holds the reply
+//! *now* — `ctx.hold`, a
+//! [`Held`](crate::actor::native::offload::held::Held) over a settlement
+//! hold on the current root plus the originating reply target — and buffers
+//! it beside a thunk that, when a slot later frees, replays the work via
+//! `ctx.dispatch_blocking_held_with(held, (), work)` so the deferred request
+//! keeps *its own* chain held and replies to *its own* caller
+//! (iamacoffeepot/aether#1031). [`TaskQueue::on_complete`], called from the
+//! cap's `#[handler(task)]` after `resolve`, frees the slot and hands it
+//! straight to the next buffered task. A queue dropped with buffered tasks,
+//! which happens only when its actor closes, abandons their held replies.
 //!
 //! Everything `InFlightDispatch` used to own beyond the slot count + the
 //! pending queue — the `request_id` correlation map, the hold accounting,
@@ -32,7 +34,7 @@ use std::collections::VecDeque;
 use aether_actor::Single;
 
 use crate::actor::native::NativeCtx;
-use crate::actor::native::offload::blocking::{DispatchId, Pending};
+use crate::actor::native::offload::blocking::{DeferredReply, IntoDeferredReply, Pending};
 use aether_data::ActorMail;
 
 /// Default per-cap concurrency bound when a cap doesn't override it.
@@ -41,14 +43,20 @@ use aether_data::ActorMail;
 /// the rest queue.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 4;
 
-/// A buffered dispatch thunk: replays an over-bound request via
-/// `dispatch_blocking_resumed` when a slot frees. Built on the actor
-/// thread and run on the actor thread, so the actor IS the mutual
-/// exclusion — but the thunk is `Send` so the embedding cap (a
-/// `NativeActor`, which is `Send + 'static`) can hold the queue in its
-/// state. Everything the thunk closes over (`work`, the captured
-/// `SettlementHold`, the `Source`) is already `Send`.
-type PendingDispatch = Box<dyn FnOnce(&mut NativeCtx<'_>) + Send>;
+/// A buffered request: the reply it owes, and the thunk that replays its
+/// work via `dispatch_blocking_held_with` when a slot frees. Built on the
+/// actor thread and run on the actor thread, so the actor IS the mutual
+/// exclusion — but `Send` so the embedding cap (a `NativeActor`, which is
+/// `Send + 'static`) can hold the queue in its state. The debt sits beside
+/// the thunk rather than inside it, so the queue's `Drop` can abandon it.
+struct Queued {
+    held: DeferredReply,
+    dispatch: QueuedDispatch,
+}
+
+/// The replay half of a [`Queued`] request, run with its debt when a slot
+/// frees.
+type QueuedDispatch = Box<dyn FnOnce(&mut NativeCtx<'_>, DeferredReply) + Send>;
 
 /// Cap-level rate-limit + queue over the substrate's hold-until-resolve
 /// dispatch (ADR-0093). Lives in the cap's plain (lock-free) actor state;
@@ -57,7 +65,7 @@ type PendingDispatch = Box<dyn FnOnce(&mut NativeCtx<'_>) + Send>;
 pub struct TaskQueue {
     max: usize,
     in_flight: usize,
-    pending: VecDeque<PendingDispatch>,
+    pending: VecDeque<Queued>,
 }
 
 impl TaskQueue {
@@ -82,14 +90,12 @@ impl TaskQueue {
     }
 
     /// Accept a unit of blocking work. Under the bound, dispatch it now
-    /// via [`NativeCtx::dispatch_blocking_with`] (which acquires the hold +
-    /// reply target from `ctx`). Over the bound, capture the chain
-    /// context *now* — a [`SettlementHold`](crate::runtime::trace::SettlementHold)
-    /// on the current root plus this handler's reply target — and buffer
-    /// a thunk that replays the work via
-    /// [`NativeCtx::dispatch_blocking_resumed`] when a slot later frees,
-    /// so the deferred dispatch keeps *this* chain held and replies to
-    /// *this* caller (iamacoffeepot/aether#1031).
+    /// via [`NativeCtx::dispatch_blocking_with_pending`] (which acquires the
+    /// hold + reply target from `ctx`). Over the bound, hold the reply
+    /// *now* with [`NativeCtx::hold`] and buffer it with a thunk that
+    /// replays the work via [`NativeCtx::dispatch_blocking_held_with`] when
+    /// a slot later frees, so the deferred dispatch keeps *this* chain held
+    /// and replies to *this* caller (iamacoffeepot/aether#1031).
     pub fn submit<O, F, M, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, work: F) -> Pending<O>
     where
         O: ActorMail + Send + 'static,
@@ -97,21 +103,18 @@ impl TaskQueue {
         M: aether_actor::ReplyMode,
     {
         if self.in_flight < self.max {
-            let id = ctx.dispatch_blocking_with((), work);
             self.in_flight += 1;
-            ctx.pending(id)
-        } else {
-            // Capture the hold + reply target at accept time so the
-            // buffered request stays held from accept -> its eventual
-            // re-reply, exactly like the immediate path's `Finished` is
-            // preceded by `HoldOpen`.
-            let hold = ctx.acquire_settlement_hold();
-            let reply_to = ctx.reply_target();
-            self.pending.push_back(Box::new(move |ctx: &mut NativeCtx<'_>| {
-                ctx.dispatch_blocking_resumed(hold, reply_to, work);
-            }));
-            ctx.pending(DispatchId::NONE)
+            return ctx.dispatch_blocking_with_pending::<O, O, (), _>((), work);
         }
+
+        let (pending, held) = ctx.hold::<O>();
+        self.pending.push_back(Queued {
+            held: held.into_deferred_reply(),
+            dispatch: Box::new(move |ctx: &mut NativeCtx<'_>, held: DeferredReply| {
+                ctx.dispatch_blocking_held_with(held, (), work);
+            }),
+        });
+        pending
     }
 
     /// Call from the cap's `#[handler(task)]` after `resolve`. Frees the
@@ -122,8 +125,19 @@ impl TaskQueue {
     // spawn), so a typed caller's ctx erases on the way in — issue 4158.
     pub fn on_complete<A>(&mut self, ctx: &mut NativeCtx<'_, A, Single>) {
         match self.pending.pop_front() {
-            Some(next) => next(ctx.erase()),
+            Some(Queued { held, dispatch }) => dispatch(ctx.erase(), held),
             None => self.in_flight = self.in_flight.saturating_sub(1),
+        }
+    }
+}
+
+/// A queue drops only with its actor's state, at actor close, so every
+/// buffered request's held reply is abandoned: its caller's hold releases
+/// with no reply and no panic.
+impl Drop for TaskQueue {
+    fn drop(&mut self) {
+        for queued in self.pending.drain(..) {
+            queued.held.abandon_for_actor_close();
         }
     }
 }

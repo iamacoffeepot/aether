@@ -13,8 +13,11 @@ use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use aether_actor::{Addressable, ReplyMode, Singleton};
 use aether_data::ActorMail;
 
-use crate::actor::native::offload::blocking::{DeferredCompletion, DeferredReply, DispatchId, Pending, TaskDone};
+use crate::actor::native::offload::blocking::{
+    DeferredCompletion, DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskDone,
+};
 use crate::actor::native::offload::fail_fast;
+use crate::actor::native::offload::held::Held;
 use crate::actor::native::offload::self_wake::SelfWake;
 use crate::actor::native::offload::thread;
 use crate::mail::Source;
@@ -118,17 +121,39 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         R: ActorMail,
         F: FnOnce() -> O + Send + 'static,
     {
-        let id = self.dispatch_blocking_with::<O, (), F>((), f);
-        Pending::new(id)
+        self.dispatch_blocking_with_pending::<O, R, (), F>((), f)
     }
 
-    /// Framework receipt for a deferred reply `R` (ADR-0109). `dispatch_id` is
-    /// the worker's id from [`Self::dispatch_blocking_with`], or
-    /// [`DispatchId::NONE`] when only a hold was captured for a later resumed
-    /// dispatch. Bounded submit helpers are the other public mint site;
-    /// `Pending::new` stays crate-internal.
-    pub fn pending<R: ActorMail>(&self, dispatch_id: DispatchId) -> Pending<R> {
-        Pending::new(dispatch_id)
+    /// Context-carrying variant of [`Self::dispatch_blocking`]: dispatches
+    /// as [`Self::dispatch_blocking_with`] does, parking `cx` for the
+    /// completion, and returns the [`Pending<R>`] receipt for the armed
+    /// dispatch (ADR-0109, ADR-0243 §3).
+    pub fn dispatch_blocking_with_pending<O, R, C, F>(&mut self, cx: C, f: F) -> Pending<R>
+    where
+        O: Send + 'static,
+        R: ActorMail,
+        C: Send + 'static,
+        F: FnOnce() -> O + Send + 'static,
+    {
+        Pending::new(self.dispatch_blocking_with::<O, C, F>(cx, f))
+    }
+
+    /// Dispatch a blocking closure that answers an already-held reply: the
+    /// held debt's settlement hold and reply target move into the in-flight
+    /// ledger, so the completion replies to the caller the debt was taken
+    /// from, on the chain it kept open (ADR-0243 §3).
+    ///
+    /// A bounded queue takes a [`Held`] with [`Self::hold`] when it accepts
+    /// a request it cannot run yet, returns the receipt, and hands the debt
+    /// here when a slot frees.
+    pub fn dispatch_blocking_held_with<O, C, F>(&mut self, held: impl IntoDeferredReply, cx: C, f: F) -> DispatchId
+    where
+        O: Send + 'static,
+        C: Send + 'static,
+        F: FnOnce() -> O + Send + 'static,
+    {
+        let (settlement, reply_to) = held.into_deferred_reply().into_parts();
+        self.dispatch_blocking_resumed_with(settlement, reply_to, cx, f)
     }
 
     /// Context-carrying variant of [`Self::dispatch_blocking`]
@@ -148,10 +173,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         // to the resumed core. A handler turn with no in-flight root yields
         // no hold, and the dispatch it starts is then outside settlement
         // (ADR-0168 §2). A bounded `TaskQueue`
-        // instead captures `(hold, reply_to)` at accept time and replays
-        // them via `dispatch_blocking_resumed` when a slot frees, so a
-        // deferred request keeps its own chain held and replies to its own
-        // caller.
+        // instead holds the reply at accept time and hands it to
+        // `dispatch_blocking_held_with` when a slot frees, so a deferred
+        // request keeps its own chain held and replies to its own caller.
         let hold = self.acquire_settlement_hold();
         let reply_to = self.reply_target();
         self.dispatch_blocking_resumed_with(hold, reply_to, cx, f)
@@ -159,11 +183,13 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// ADR-0093: dispatch a blocking closure with an externally-supplied
     /// `(hold, reply_to)` — *moved in* rather than read from this ctx.
     /// [`Self::dispatch_blocking`] is sugar over this that supplies them
-    /// from the current handler. The bound/queue path (`TaskQueue`)
-    /// captures the hold + reply target when a request is accepted and
-    /// replays them here when the request finally dispatches from a later
-    /// handler turn — so the deferred work keeps its *own* chain held and
-    /// replies to its *own* caller, not the completion handler's.
+    /// from the current handler. A caller that captured the hold + reply
+    /// target when a request was accepted replays them here when the
+    /// request finally dispatches from a later handler turn — so the
+    /// deferred work keeps its *own* chain held and replies to its *own*
+    /// caller, not the completion handler's. A bounded queue holds a
+    /// [`Held`] instead and dispatches through
+    /// [`Self::dispatch_blocking_held_with`].
     pub fn dispatch_blocking_resumed<O, F>(
         &mut self,
         hold: Option<SettlementHold>,
@@ -253,6 +279,19 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// replied to, staged onto a successor, or abandoned.
     pub fn defer_reply_to(&self, reply_to: Source) -> DeferredReply {
         DeferredReply::new(self.acquire_settlement_hold(), reply_to)
+    }
+
+    /// Arm a reply of kind `R` this handler answers later (ADR-0243 §1): the
+    /// current settlement hold and reply target, as
+    /// `defer_reply_to(reply_target())` captures them.
+    ///
+    /// The handler returns the [`Pending<R>`] receipt, which declares its
+    /// row `-> Pending<R>`, and keeps the [`Held<R>`] debt in state, in the
+    /// held table through [`Self::send_holding`], or on a successor, until
+    /// [`Held::answer`] sends the one `R`.
+    pub fn hold<R: ActorMail>(&self) -> (Pending<R>, Held<R>) {
+        let held = Held::new(self.defer_reply_to(self.reply_target()));
+        (Pending::new(DispatchId::NONE), held)
     }
 
     /// ADR-0093 completion-routing entry point: remove the in-flight

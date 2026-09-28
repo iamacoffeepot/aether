@@ -652,7 +652,9 @@ where
 /// The Phase 4 close tail both the pooled [`DispatcherSlot`] and the
 /// externally-pumped
 /// [`PumpedSlot`](super::pumped::PumpedSlot) run
-/// (ADR-0160 §1): drain `monitors_of[self_id]`, prune `monitoring[id]`
+/// (ADR-0160 §1): abandon the held replies still parked in the binding
+/// (ADR-0243 §4), releasing each caller's hold with no reply and no panic,
+/// then drain `monitors_of[self_id]`, prune `monitoring[id]`
 /// from each target, mark the slot Dead, retire the route to `Dropped`,
 /// release this actor's parent-local live child key, and fan one
 /// [`MonitorNotice`](aether_kinds::MonitorNotice) out to every watcher via
@@ -696,6 +698,7 @@ pub fn finalize_close_and_fan_out(
     chain: EffectChain,
 ) {
     debug_assert!(chain.held_root().is_none(), "the close tail runs past its chain's Finished, so it can hold nothing");
+    binding.abandon_held_for_actor_close();
     let watchers = actor_registry.close_actor(self_id);
     binding.mailer().registry().submit_logged(EffectBatch::new(vec![RegistryEffect::DropMailbox(self_id)]));
     binding.release_parent_child_reservation();

@@ -92,6 +92,7 @@ impl NativeBinding {
             child_reservations: Mutex::new(ChildReservationTable::new()),
             parent_child_reservation: Mutex::new(None),
             request_contexts: Mutex::new(RequestContextTable::new()),
+            held: Mutex::new(super::offload::held::HeldTable::new()),
             #[cfg(feature = "wasm")]
             guest_contract: Mutex::new(None),
         }
@@ -158,6 +159,7 @@ impl NativeBinding {
             child_reservations: Mutex::new(ChildReservationTable::new()),
             parent_child_reservation: Mutex::new(None),
             request_contexts: Mutex::new(RequestContextTable::new()),
+            held: Mutex::new(super::offload::held::HeldTable::new()),
             #[cfg(feature = "wasm")]
             guest_contract: Mutex::new(None),
         }
@@ -559,5 +561,34 @@ mod tests {
         // Drop the transport; the SettlingInbox inside settles the queued mail.
         drop(transport);
         settle.recv().expect("binding teardown settles queued armed mail (#1716)");
+    }
+
+    /// ADR-0243 §4: a held reply parked in the binding is abandoned by the
+    /// close tail's abandon step, with no reply and no panic, and the
+    /// caller's chain it alone held open settles.
+    #[test]
+    fn binding_close_abandons_parked_held_reply() {
+        use crate::actor::native::ctx::NativeCtx;
+        use crate::chassis::settlement::SettlementRegistry;
+        use crate::mail::Source;
+        use aether_data::RequestId;
+        use aether_kinds::Tick;
+
+        let (_registry, mailer) = bare_substrate();
+        let settlement = Arc::new(SettlementRegistry::new());
+        mailer.install_settlement_registry(Arc::clone(&settlement));
+        mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
+
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x0243)));
+        let root = MailId::new(MailboxId(0xC0), 1);
+        let settle = settlement.subscribe_settlement(root);
+
+        let (_pending, held) = NativeCtx::new(&binding, Source::NONE, None, Some(root)).hold::<Tick>();
+        let (kind, reply) = held.into_keyed();
+        binding.store_held(RequestId(9), kind, reply);
+        assert!(settle.try_recv().is_err(), "the parked held reply keeps its caller's chain open");
+
+        binding.abandon_held_for_actor_close();
+        settle.try_recv().expect("abandoning the parked held reply releases its hold and settles the chain");
     }
 }

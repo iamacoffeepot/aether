@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::wire::DecodeCtx;
-use aether_data::{Kind, MailId, RequestId};
+use aether_data::{ActorMail, Kind, MailId, RequestId};
 
 use crate::actor::native::envelope::Envelope;
+use crate::actor::native::offload::held::Held;
 use crate::chassis::inbox::InboundMail;
 use crate::mail::attachments::AttachedEntries;
 use crate::mail::{Source, SourceAddr};
@@ -190,11 +191,21 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let request = self.in_reply_to()?;
         self.binding.take_request_context(request)
     }
+
+    /// Recover and remove the held reply of kind `R` that
+    /// [`Self::send_holding`](super::NativeCtx::send_holding) parked beside
+    /// the request this inbound reply answers (ADR-0243 §4). Returns `None`
+    /// for ordinary mail, an unmatched reply, or a held reply of another
+    /// kind, which stays parked so a handler serving several reply kinds
+    /// tries each in turn.
+    pub fn take_held<R: ActorMail>(&mut self) -> Option<Held<R>> {
+        self.binding.take_held(self.in_reply_to()?, R::ID).map(Held::new)
+    }
     /// Acquire a [`SettlementHold`] on the current in-flight root
-    /// (ADR-0080 §12). Use to keep a chain open across deferred work —
-    /// e.g. a `TaskQueue` buffering an over-limit request holds it until
-    /// a slot frees, then moves it into
-    /// [`Self::dispatch_blocking_resumed`].
+    /// (ADR-0080 §12). Use to keep a chain open across deferred work that
+    /// owes no reply; a reply owed later is armed with
+    /// [`Self::hold`](super::NativeCtx::hold), which takes this hold with
+    /// the reply target.
     ///
     /// A `wire` ctx dispatches no inbound, so it has no in-flight root; it
     /// holds the chain that caused the birth instead (ADR-0168 §1), which is
