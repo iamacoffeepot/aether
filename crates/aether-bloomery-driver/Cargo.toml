@@ -27,6 +27,11 @@ aether-actor = { path = "../aether-actor" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-component = { path = "../aether-component", default-features = false }
 aether-data = { path = "../aether-data", features = ["derive"] }
+# Identity-side: the driver depends on the http capability and relays
+# programs' `Http` and `Workspace` calls, handling `FetchResult` and the
+# workspace's `RunResult` (ADR-0240 D6).
+aether-http = { path = "../aether-http", default-features = false }
+aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-features = false }
 # Identity-side: `LoadResult`, the component host's load reply, is a handled
 # kind of the driver.
 aether-kinds = { path = "../aether-kinds" }

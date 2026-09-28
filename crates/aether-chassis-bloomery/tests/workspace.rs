@@ -120,8 +120,8 @@ fn recorded_fault(harness: &BloomeryHarness, seed: &WorkspaceSeed, outcome: Call
 
 #[test]
 fn a_workspace_run_records_a_transition_citing_the_stored_step_output() -> Result<(), Box<dyn Error>> {
-    // Catches an invocation that does not declare `WorkspaceCapability` (the bundle's load is refused), a run
-    // reply that does not reach the program, and step output the result cites but the journal does not store.
+    // Catches a driver that does not relay the invocation's workspace call, a run reply that does not reach the
+    // program, and step output the result cites but the journal does not store.
     let Some((batch, seed)) = seed()? else {
         return Ok(());
     };

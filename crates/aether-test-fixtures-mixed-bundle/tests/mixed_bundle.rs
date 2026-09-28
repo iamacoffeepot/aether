@@ -78,7 +78,7 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
 
     let programs = declarations(&section_bytes(&wasm, PROGRAMS_SECTION)).expect("programs section decodes");
     assert_eq!(programs.len(), 1, "the programs section lists the one program");
-    assert_eq!(programs[0].name.as_str(), SUMMARIZE_PROGRAM);
+    assert_eq!(programs[0].program.name.as_str(), SUMMARIZE_PROGRAM);
     let reactors = reactor_declarations(&section_bytes(&wasm, REACTORS_SECTION)).expect("reactors section decodes");
     assert_eq!(reactors.len(), 1, "the reactors section lists the one reactor");
     assert_eq!(reactors[0].name().as_str(), "test.bloomery.mixed.caller");

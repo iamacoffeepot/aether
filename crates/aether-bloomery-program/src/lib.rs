@@ -13,6 +13,8 @@
 //!
 //! An async program may take trailing API bindings after `env`, from the
 //! closed set [`Http`], [`Process`], and [`Workspace`]; each is Sampled. A
+//! call through one relays like a fetch: through the bundle root to the
+//! driver, which maps the API to a provider it holds or refuses it. A
 //! [`Workspace`] run that exhausts its allotment or fails in the executor
 //! ends the invocation as [`Invoked::Faulted`] without the program seeing it.
 //!
@@ -38,7 +40,7 @@ pub use declare::{AsyncProgram, SyncProgram};
 pub use env::{Async, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Process, Sync, Workspace};
 pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
-pub use section::{DeclarationsError, declarations};
+pub use section::{Declaration, DeclarationsError, declarations};
 
 #[doc(hidden)]
 pub mod __macro_internals {
@@ -51,12 +53,12 @@ pub mod __macro_internals {
     pub use crate::env::{InjectedApi, Pending, PendingArtifact, PendingCall};
     pub use crate::invoke::{PollResult, Started};
     pub use crate::root::{program_table, start_invocation};
-    pub use crate::section::{MODE_PURE, MODE_SAMPLED, program_record_len, write_program_record};
+    pub use crate::section::{MODE_PURE, MODE_SAMPLED, api_mask, program_record_len, write_program_record};
 
-    /// The target capability of each program API, by the name `#[program]`
-    /// accepts. The bundle generator declares these as the invocation's
-    /// dependencies: an alias is expanded before coherence, so two APIs are
-    /// two concrete `DependsOn` impls rather than overlapping projections.
+    /// The provider the driver maps each program API to, by the name
+    /// `#[program]` accepts. Each row's `Replies` impls type the calls the
+    /// API's binding captures; the invocation sends to none of them itself
+    /// (ADR-0240 D6).
     pub mod api_target {
         /// Target of [`crate::Http`].
         pub type Http = aether_http::HttpCapability;

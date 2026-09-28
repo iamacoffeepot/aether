@@ -5,6 +5,7 @@
 //! A bundle carries one or more programs. Identity recorded in events is
 //! [`ProgramRef`]: the bundle digest plus the program name.
 
+mod api;
 mod events;
 mod executor;
 mod fault;
@@ -19,6 +20,7 @@ use alloc::string::String;
 
 use aether_data::KindId;
 
+pub use api::{ApiCall, ApiCallResult, ProgramApi};
 pub use events::{ProgramHeadMoved, Transition};
 pub use executor::ExecutorFault;
 pub use fault::{Detail, DetailError, Fault, FaultReason};

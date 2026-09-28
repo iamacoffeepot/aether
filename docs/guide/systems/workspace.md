@@ -177,10 +177,13 @@ exit included, and `Ok(Err(refusal))` for the workspace's `Refused` answer. The
 outer `Err` is the program's own `Refusal` for a call that broke: a reply that
 is not a `RunResult`, or a send the invocation could not make.
 
-The bundle's invocation declares `WorkspaceCapability` as a dependency, so the
-bundle loads only where `aether.bloomery.workspace` is composed: the Bloomery chassis.
-Elsewhere the load is refused and the driver records a `BundleUnavailable`
-fault.
+The bundle's invocation declares no dependency. It sends the captured call to
+its bundle root, which relays it to the driver that sent the `Invoke`, and the
+driver maps `Workspace` to the workspace it holds (ADR-0240 D6). Each program's
+record in the `aether.bloomery.programs` section lists the APIs its `run`
+binds, so before a request's closure read or load the driver records a
+`BundleUnavailable` fault for a program that binds an API with no provider in
+its unit.
 
 The binding never resolves on a fault. It ends the invocation instead, no
 program code after the await runs, nothing the program staged is recorded, and

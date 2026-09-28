@@ -4,15 +4,14 @@ use std::error::Error;
 use std::fs;
 
 use aether_bloomery_kinds::{
-    BUNDLE_NAMESPACE, ClosureArtifact, EncodedArtifact, Invoke, Invoked, Mode, OpaqueBytes, ProgramName, Ref, Refusal,
-    Utf8Text, artifact_digest,
+    BUNDLE_NAMESPACE, ClosureArtifact, EncodedArtifact, Invoke, Invoked, Mode, OpaqueBytes, ProgramApi, ProgramName,
+    Ref, Refusal, Utf8Text, artifact_digest,
 };
 use aether_bloomery_program::declarations;
 use aether_component::{ComponentHostCapability, WasmTrampoline};
 use aether_data::{Cites, Kind, LoadName, Storage};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_http::{HttpCapability, HttpConfig};
 use aether_kinds::LoadComponent;
 use wasmparser::{Parser, Payload};
 
@@ -52,29 +51,25 @@ fn program_name(name: &str) -> ProgramName {
 fn assert_fixture_section(wasm: &[u8]) {
     let decoded = declarations(&section_bytes(wasm)).expect("aether.bloomery.programs decodes");
     assert_eq!(decoded.len(), 6, "the custom section lists every exported program");
-    let names: Vec<&str> = decoded.iter().map(|program| program.name.as_str()).collect();
+    let names: Vec<&str> = decoded.iter().map(|declared| declared.program.name.as_str()).collect();
     assert!(names.contains(&"test.program.summarize"), "{names:?}");
     assert!(names.contains(&"test.program.refuse"), "{names:?}");
     assert!(names.contains(&"test.program.fetch_body"), "{names:?}");
     assert!(names.contains(&"test.program.stall"), "{names:?}");
     assert!(names.contains(&"test.program.read_uncited"), "{names:?}");
     assert!(names.contains(&"test.program.read_large"), "{names:?}");
-    let summarize = decoded
-        .iter()
-        .find(|program| program.name.as_str() == "test.program.summarize")
-        .expect("summarize declaration");
-    assert_eq!(summarize.input, SummarizeInput::ID);
-    assert_eq!(summarize.result, SummarizeResult::ID);
-    assert_eq!(summarize.mode, Mode::Pure);
-    let refuse =
-        decoded.iter().find(|program| program.name.as_str() == "test.program.refuse").expect("refuse declaration");
-    assert_eq!(refuse.input, RefuseInput::ID);
-    assert_eq!(refuse.mode, Mode::Pure);
-    let fetch_body = decoded
-        .iter()
-        .find(|program| program.name.as_str() == "test.program.fetch_body")
-        .expect("fetch_body declaration");
-    assert_eq!(fetch_body.mode, Mode::Sampled);
+    let find = |name: &str| decoded.iter().find(|declared| declared.program.name.as_str() == name);
+    let summarize = find("test.program.summarize").expect("summarize declaration");
+    assert_eq!(summarize.program.input, SummarizeInput::ID);
+    assert_eq!(summarize.program.result, SummarizeResult::ID);
+    assert_eq!(summarize.program.mode, Mode::Pure);
+    assert!(summarize.apis.is_empty(), "summarize binds no API, got {:?}", summarize.apis);
+    let refuse = find("test.program.refuse").expect("refuse declaration");
+    assert_eq!(refuse.program.input, RefuseInput::ID);
+    assert_eq!(refuse.program.mode, Mode::Pure);
+    let fetch_body = find("test.program.fetch_body").expect("fetch_body declaration");
+    assert_eq!(fetch_body.program.mode, Mode::Sampled);
+    assert_eq!(fetch_body.apis, [ProgramApi::Http]);
 }
 
 fn section_bytes(wasm: &[u8]) -> Vec<u8> {
@@ -100,13 +95,8 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
 
     assert_fixture_section(&wasm);
 
-    // The bundle's `fetch_body` declares `HttpCapability`, so the load needs it live.
-    let mut harness = SubstrateHarness::builder()
-        .size(64, 48)
-        .with_component_host()
-        .with_actor_configured::<HttpCapability>((), HttpConfig::default())
-        .build()
-        .expect("boot");
+    // No http capability is composed: the invocation declares no dependency, so the load needs none live.
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let (root, path) = harness
         .load_any(&LoadComponent {
             wasm,

@@ -18,6 +18,7 @@ use aether_bloomery_kinds::{
 };
 use aether_bloomery_program::unreachable_staged;
 
+use super::api::provided;
 use super::queue::{Active, Step};
 use crate::runtime::bundles::{LoadState, Programs};
 use crate::runtime::core::{ClosureTicket, Command, InvokeTicket, PendingWrite, ProgramCore};
@@ -91,8 +92,9 @@ impl ProgramCore {
     }
 
     /// Check the active request's name against the decoded declarations,
-    /// then read the input's closure. An unknown name faults without any
-    /// closure read or load; the bundle stays usable for its other programs.
+    /// then read the input's closure. An unknown name, or a program that
+    /// binds an API with no provider in this unit, faults without any closure
+    /// read or load; the bundle stays usable for its other programs.
     ///
     /// Returns `true` when the request finished with a queued fault.
     fn check_name(&mut self, bundle: Digest, seq: u64, out: &mut Vec<Command>) -> bool {
@@ -111,11 +113,18 @@ impl ProgramCore {
             let reason = Detail::new(format!("bundle has no program named {}", program.name().as_str()));
             return self.record_fault(seq, FaultReason::BundleUnavailable { reason }, out);
         };
+        if let Some(api) = declaration.apis.iter().find(|api| !provided(**api)) {
+            let reason = Detail::new(format!(
+                "program {} binds {api:?}, which has no provider in this unit",
+                program.name().as_str()
+            ));
+            return self.record_fault(seq, FaultReason::BundleUnavailable { reason }, out);
+        }
         let Some(step) = self.queues.get_mut(&bundle).and_then(|queue| queue.step_mut(seq)) else {
             self.abort(format!("request {seq} lost its digest queue during the name check"), out);
             return false;
         };
-        *step = Step::ReadingClosure { declaration };
+        *step = Step::ReadingClosure { declaration: declaration.program };
         let ticket = self.mint(ClosureTicket::mint);
         self.closure_reads.insert(ticket, (bundle, seq));
         out.push(Command::ReadClosure { ticket, request: ReadClosure { root: input, limit_bytes: self.limit } });

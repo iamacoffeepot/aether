@@ -2,8 +2,9 @@
 //!
 //! [`ProgramCore::start`] is the only constructor, and it returns the first
 //! journal read, so no core exists that has not begun catching up.
-//! [`ProgramCore::call`] accepts one [`Call`], and
-//! [`ProgramCore::fetch_artifact`] one bundle root's fetch-on-miss;
+//! [`ProgramCore::call`] accepts one [`Call`],
+//! [`ProgramCore::fetch_artifact`] one bundle root's fetch-on-miss, and
+//! [`ProgramCore::call_api`] one bundle root's relayed program API call;
 //! the shell stores its deferred reply under the returned [`CallerId`]
 //! before it performs the commands. Each command kind has one typed reply
 //! method, and a reply whose ticket the core is not waiting on returns no
@@ -28,12 +29,12 @@ use crate::runtime::bundles::BundleTable;
 use crate::runtime::programs::DigestQueue;
 use crate::runtime::reactors::{CommittedRouting, Routing};
 
-pub use command::{Command, LoadOutcome};
+pub use command::{ApiReply, Command, LoadOutcome};
 pub use journal::EVENTS_PAGE;
 pub use journal::{Journal, PendingWrite, PlannedRecord, RequestedClaim};
 pub use ticket::{
-    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, EvaluateTicket, EventsTicket, InvokeTicket, LoadTicket,
-    StatusTicket, WarmTicket, WatchTicket,
+    ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, EvaluateTicket, EventsTicket, InvokeTicket,
+    LoadTicket, StatusTicket, WarmTicket, WatchTicket,
 };
 
 /// Why the core read one artifact.
@@ -80,6 +81,9 @@ pub struct ProgramCore {
     pub(crate) closure_reads: BTreeMap<ClosureTicket, (Digest, u64)>,
     pub(crate) loads: BTreeMap<LoadTicket, Digest>,
     pub(crate) invokes: BTreeMap<InvokeTicket, (Digest, u64)>,
+    /// Each relayed program API call a provider has yet to answer: its
+    /// caller and the invocation's call id.
+    pub(crate) api_calls: BTreeMap<ApiTicket, (CallerId, u64)>,
 }
 
 impl ProgramCore {
@@ -104,6 +108,7 @@ impl ProgramCore {
             closure_reads: BTreeMap::new(),
             loads: BTreeMap::new(),
             invokes: BTreeMap::new(),
+            api_calls: BTreeMap::new(),
         };
         let mut out = Vec::new();
         core.emit_read(&mut out);

@@ -12,9 +12,10 @@ use core::marker::PhantomData;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
-use aether_actor::{Addressable, CallerAddressable, ErasedActorRef, Replies, ReplyMode, Sends, Singleton, WasmCtx};
+use aether_actor::{Addressable, CallerAddressable, Replies, Singleton};
 use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, EncodedArtifact, ExecutorFault, OpaqueBytes, ReadArtifactResult, Ref, Refusal, Utf8Text,
+    ApiCall, ClosureArtifact, Digest, EncodedArtifact, ExecutorFault, OpaqueBytes, ProgramApi, ReadArtifactResult, Ref,
+    Refusal, Utf8Text,
 };
 use aether_data::{ActorMail, Cites, Kind, KindId, Storage};
 
@@ -49,72 +50,43 @@ pub struct PendingArtifact {
     pub expected: KindId,
 }
 
-/// One cap send the invocation child must emit before polling again.
+/// One API call the invocation child must relay before polling again.
 ///
-/// `mailbox` / `kind_id` / `expected_reply` are the pump's type-erased
-/// view. The request value stays `K` inside [`Self::dispatch`], which
-/// sends it through the proof the invocation minted for the binding's
-/// target.
+/// The invocation sends it to its bundle root as [`ApiCall`] (see
+/// [`Self::api_call`]); the root relays it to the driver that sent the
+/// `Invoke`, which maps [`Self::api`] to a provider it holds or refuses it
+/// (ADR-0240 D6). The request was encoded once, at capture, where
+/// `A: Replies<K>` typed it.
 pub struct PendingCall {
-    /// `Addressable::NAMESPACE` of the binding's target actor.
-    pub mailbox: &'static str,
+    /// The API the program's binding captured the call through.
+    pub api: ProgramApi,
     /// Kind id of the captured request.
     pub kind_id: KindId,
-    /// Kind id the `#[fallback]` must match before resume.
+    /// Kind id the relayed reply must carry before resume.
     pub expected_reply: KindId,
-    body: Box<dyn DispatchBody>,
-}
-
-trait DispatchBody: Send {
-    fn send(&self, sends: &mut Sends<'_>, target: ErasedActorRef);
-}
-
-struct CapturedSend<K> {
-    mail: K,
-}
-
-impl<K: ActorMail + Send> DispatchBody for CapturedSend<K> {
-    fn send(&self, sends: &mut Sends<'_>, target: ErasedActorRef) {
-        sends.send_to(target, &self.mail);
-    }
+    payload: Vec<u8>,
 }
 
 impl PendingCall {
-    fn new<A, K>(mail: K) -> Self
+    fn new<A, K>(api: ProgramApi, mail: &K) -> Self
     where
-        A: Singleton + CallerAddressable + Replies<K> + 'static,
-        K: ActorMail + Send + 'static,
+        A: Replies<K>,
+        K: ActorMail,
     {
-        Self {
-            mailbox: A::NAMESPACE,
-            kind_id: K::ID,
-            expected_reply: A::Reply::ID,
-            body: Box::new(CapturedSend { mail }),
-        }
+        Self { api, kind_id: K::ID, expected_reply: A::Reply::ID, payload: mail.encode_into_bytes() }
     }
 
-    /// Send the captured request through `target`, the proof the invocation
-    /// minted from its declared dependency on this call's target.
-    ///
-    /// The invocation matches [`Self::mailbox`] against the targets it
-    /// declares and mints `target` for the one that matches, so the proof
-    /// names the actor the binding captured the call for. The program chose
-    /// that target at run time, and the captured body hides the target and
-    /// kind behind a trait object, which cannot carry a method generic over
-    /// the sending actor. So this erases the sender's view once, here, and
-    /// uses it only to send through the proof. The target still answers the
-    /// kind: `A: Replies<K>` was checked when the call was captured. The send
-    /// inherits the handler's causal chain, so `prev_correlation` after this
-    /// call names the captured request.
-    pub fn dispatch<A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>, target: ErasedActorRef) {
-        self.body.send(&mut ctx.erase().sends(), target);
+    /// The mail that relays this call as the invocation's `call`th.
+    #[must_use]
+    pub fn api_call(&self, call: u64) -> ApiCall {
+        ApiCall { call, api: self.api, kind: self.kind_id, payload: self.payload.clone() }
     }
 }
 
 impl fmt::Debug for PendingCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PendingCall")
-            .field("mailbox", &self.mailbox)
+            .field("api", &self.api)
             .field("kind_id", &self.kind_id)
             .field("expected_reply", &self.expected_reply)
             .finish_non_exhaustive()
@@ -126,7 +98,7 @@ impl fmt::Debug for PendingCall {
 pub enum Pending {
     /// Journal `ReadArtifact` for [`PendingArtifact::digest`].
     Artifact(PendingArtifact),
-    /// Cap send; `K` stays captured until [`PendingCall::dispatch`].
+    /// API call, relayed through the bundle root as [`PendingCall::api_call`].
     Send(PendingCall),
 }
 
@@ -146,10 +118,11 @@ mod sealed {
 /// only by one of those names, maps the name to its target capability through
 /// the table in `__macro_internals::api_target`, and emits a check at the
 /// parameter that this trait's [`Self::Target`] is the table's type. The
-/// bundle's invocation declares each distinct target as a dependency and sends
-/// a captured call only through a proof minted from that declaration.
+/// bundle's invocation declares no dependency: it relays a captured call
+/// through its root to the driver that invoked it, which maps the API to a
+/// provider it holds (ADR-0240 D6).
 pub trait InjectedApi: sealed::Sealed + Sized {
-    /// Actor this binding may send to.
+    /// Actor whose reply contract types this binding's calls.
     type Target: Addressable;
     /// Sampled APIs cannot pair with [`crate::kinds::Mode::Pure`].
     const SAMPLED: bool;
@@ -161,13 +134,14 @@ pub trait InjectedApi: sealed::Sealed + Sized {
 /// the one implementation [`Http`], [`Process`], and [`Workspace`] share.
 struct Binding<A: Addressable> {
     env: Env<Async>,
+    api: ProgramApi,
     _target: PhantomData<A>,
 }
 
 impl<A: Addressable> Binding<A> {
-    /// Share the invocation's environment pointer.
-    fn new(env: &mut Env<Async>) -> Self {
-        Self { env: *env, _target: PhantomData }
+    /// Share the invocation's environment pointer, capturing calls as `api`.
+    fn new(env: &mut Env<Async>, api: ProgramApi) -> Self {
+        Self { env: *env, api, _target: PhantomData }
     }
 
     /// Send `mail` and await `<A as Replies<K>>::Reply`.
@@ -176,7 +150,7 @@ impl<A: Addressable> Binding<A> {
         A: Singleton + CallerAddressable + Replies<K> + Unpin + 'static,
         K: ActorMail + Send + Unpin + 'static,
     {
-        Call::<A, K> { env: self.env, mail: Some(mail), _target: PhantomData }
+        Call::<A, K> { env: self.env, api: self.api, mail: Some(mail), _target: PhantomData }
     }
 }
 
@@ -188,7 +162,7 @@ impl InjectedApi for Http {
     const SAMPLED: bool = true;
 
     fn from_env(env: &mut Env<Async>) -> Self {
-        Self(Binding::new(env))
+        Self(Binding::new(env, ProgramApi::Http))
     }
 }
 
@@ -210,7 +184,7 @@ impl InjectedApi for Process {
     const SAMPLED: bool = true;
 
     fn from_env(env: &mut Env<Async>) -> Self {
-        Self(Binding::new(env))
+        Self(Binding::new(env, ProgramApi::Process))
     }
 }
 
@@ -233,7 +207,7 @@ impl InjectedApi for Workspace {
     const SAMPLED: bool = true;
 
     fn from_env(env: &mut Env<Async>) -> Self {
-        Self(Binding::new(env))
+        Self(Binding::new(env, ProgramApi::Workspace))
     }
 }
 
@@ -295,6 +269,7 @@ impl Future for RunCall {
 
 struct Call<A, K> {
     env: Env<Async>,
+    api: ProgramApi,
     mail: Option<K>,
     _target: PhantomData<A>,
 }
@@ -312,7 +287,7 @@ where
             return Poll::Ready(decode_call_reply::<A::Reply>(result));
         }
         if let Some(mail) = this.mail.take() {
-            this.env.request_send(PendingCall::new::<A, K>(mail));
+            this.env.request_send(PendingCall::new::<A, K>(this.api, &mail));
             return Poll::Pending;
         }
         Poll::Pending

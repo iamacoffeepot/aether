@@ -287,6 +287,9 @@ impl World {
                 self.abort = Some(reason);
                 Step::More(Vec::new())
             }
+            command @ (Command::Fetch { .. } | Command::RunWorkspace { .. } | Command::ApiAnswered { .. }) => {
+                Step::Manual(command)
+            }
         }
     }
 
@@ -468,11 +471,12 @@ pub fn program_records(records: &[(&str, KindId, KindId, &str)]) -> Vec<u8> {
     for (name, input, result, intent) in records {
         let name = name.as_bytes();
         let intent = intent.as_bytes();
-        data.push(1u8);
+        data.push(2u8);
         data.extend_from_slice(&u16::try_from(name.len()).expect("test name fits").to_le_bytes());
         data.extend_from_slice(name);
         data.extend_from_slice(&input.0.to_le_bytes());
         data.extend_from_slice(&result.0.to_le_bytes());
+        data.push(0u8);
         data.push(0u8);
         data.extend_from_slice(&u16::try_from(intent.len()).expect("test intent fits").to_le_bytes());
         data.extend_from_slice(intent);

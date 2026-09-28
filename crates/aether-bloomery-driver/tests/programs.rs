@@ -295,7 +295,7 @@ fn a_closure_past_the_old_ceiling_reaches_the_program_whole() -> Result<(), Box<
 
 #[test]
 fn a_bundle_with_a_process_program_is_refused_where_process_is_not_composed() -> Result<(), Box<dyn Error>> {
-    // Catches an invocation whose `depends` is missing or not load-checked (the load succeeds and the call hangs, #6602), a generator that declares the wrong target (the refusal names another namespace), and a refused load the driver does not record.
+    // Catches a driver that skips the API check (the bundle loads, runs, and sees `Refused` mid-run instead of `BundleUnavailable` before the load), a generator that leaves `Process` out of the program's record, and a fault the driver does not record.
     let Some(wasm_path) = require_wasm("aether_test_fixtures_program_process") else {
         return Ok(());
     };
@@ -312,11 +312,11 @@ fn a_bundle_with_a_process_program_is_refused_where_process_is_not_composed() ->
     match harness.call(&exec) {
         CallOutcome::Fault { key: 1, fault, .. } => {
             let FaultReason::BundleUnavailable { reason } = &fault.reason else {
-                panic!("a refused load faults BundleUnavailable, got {:?}", fault.reason);
+                panic!("an API with no provider faults BundleUnavailable, got {:?}", fault.reason);
             };
             assert!(
-                reason.as_str().contains("depends on aether.process, which is not live"),
-                "the refusal names the uncomposed target, got {reason:?}"
+                reason.as_str().contains("binds Process, which has no provider"),
+                "the refusal names the unprovided API, got {reason:?}"
             );
             assert_eq!(fault.program.bundle(), bundle.digest());
         }

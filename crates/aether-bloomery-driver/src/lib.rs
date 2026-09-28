@@ -14,8 +14,9 @@
 
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, DriverParams, EVENTS_PAGE, EvaluateTicket,
-    EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
+    ApiReply, ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, DriverParams, EVENTS_PAGE,
+    EvaluateTicket, EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket,
+    WatchTicket,
 };
 
 /// `aether.bloomery.driver` actor **identity** (ADR-0122 split): the native
@@ -28,12 +29,15 @@ pub use runtime::{
 /// call, once the outcome is recorded, and `aether.bloomery.driver.await_processed`
 /// with `Processed` once its bound is quiescent. It performs the core's commands
 /// as mail to the journal owner (including the watch), the component host,
-/// and bundle roots. One driver per unit; the type does not enforce it.
-#[actor(instanced, root, depends(ComponentHostCapability))]
+/// bundle roots, the http capability, and the unit's workspace, the last two
+/// serving programs' relayed API calls. One driver per unit; the type does not
+/// enforce it.
+#[actor(instanced, root, depends(ComponentHostCapability, HttpCapability))]
 pub struct BundleDriver;
 
 use aether_actor::actor;
 use aether_component::ComponentHostCapability;
+use aether_http::HttpCapability;
 
 #[cfg(feature = "runtime")]
 mod runtime;

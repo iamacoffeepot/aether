@@ -54,7 +54,7 @@ pub enum PollResult {
     Finished(Invoked),
     /// Poll again after the child sends `ReadArtifact` for this digest.
     NeedArtifact(PendingArtifact),
-    /// Poll again after the child [`PendingCall::dispatch`]es this call.
+    /// Poll again after the child relays this call as [`PendingCall::api_call`].
     NeedSend(PendingCall),
     /// A journal read is already in flight; wait for its reply.
     Waiting,
@@ -125,7 +125,8 @@ impl AsyncSession {
         self.owner.env::<Async>().fulfill_call(kind, bytes);
     }
 
-    /// Fail the in-flight cap await (allowlist miss, or a dropped send).
+    /// Fail the in-flight cap await: the driver refused the API, or the
+    /// invocation had no root to relay through.
     pub fn reject_send(&mut self, refusal: Refusal) {
         self.owner.env::<Async>().reject_call(refusal);
     }

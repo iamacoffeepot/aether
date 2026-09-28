@@ -6,12 +6,13 @@
 //! walks concatenated records:
 //!
 //! ```text
-//! version:     u8  = 1
+//! version:     u8  = 2
 //! name_len:    u16 little-endian
 //! name:        name_len UTF-8 bytes
 //! input:       u64 little-endian KindId
 //! result:      u64 little-endian KindId
 //! mode:        u8  (0 = Pure, 1 = Sampled)
+//! apis:        u8  bit set (bit 0 = Http, bit 1 = Process, bit 2 = Workspace)
 //! intent_len:  u16 little-endian
 //! intent:      intent_len UTF-8 bytes
 //! ```
@@ -24,19 +25,49 @@ use core::str;
 
 use aether_data::KindId;
 
-use crate::kinds::{Mode, Program, ProgramName};
+use crate::kinds::{Mode, Program, ProgramApi, ProgramName};
 
 /// Record version byte written at the start of every program declaration.
-pub const SECTION_VERSION: u8 = 1;
+pub const SECTION_VERSION: u8 = 2;
 /// [`Mode::Pure`] discriminant in a declaration record.
 pub const MODE_PURE: u8 = 0;
 /// [`Mode::Sampled`] discriminant in a declaration record.
 pub const MODE_SAMPLED: u8 = 1;
 
+/// Bit `i` of a record's `apis` byte names `API_BITS[i]`; [`api_mask`] sets
+/// the same bits.
+const API_BITS: [ProgramApi; 3] = [ProgramApi::Http, ProgramApi::Process, ProgramApi::Workspace];
+
+/// The `apis` byte for a program whose `run` binds `apis`.
+#[must_use]
+pub const fn api_mask(apis: &[ProgramApi]) -> u8 {
+    let mut mask = 0u8;
+    let mut index = 0;
+    while index < apis.len() {
+        mask |= match apis[index] {
+            ProgramApi::Http => 1,
+            ProgramApi::Process => 1 << 1,
+            ProgramApi::Workspace => 1 << 2,
+        };
+        index += 1;
+    }
+    mask
+}
+
+/// One decoded program record: the stored declaration plus the APIs its
+/// `run` binds, which the driver checks against the providers its unit holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declaration {
+    /// The stored declaration.
+    pub program: Program,
+    /// The APIs the program's `run` binds, in [`ProgramApi`] order.
+    pub apis: Vec<ProgramApi>,
+}
+
 /// Byte length of one declaration record for `name` and `intent`.
 #[must_use]
 pub const fn program_record_len(name: &[u8], intent: &[u8]) -> usize {
-    1 + 2 + name.len() + 8 + 8 + 1 + 2 + intent.len()
+    1 + 2 + name.len() + 8 + 8 + 1 + 1 + 2 + intent.len()
 }
 
 /// Const-assemble one version-prefixed declaration record.
@@ -51,6 +82,7 @@ pub const fn write_program_record<const N: usize>(
     input: u64,
     result: u64,
     mode: u8,
+    apis: u8,
     intent: &[u8],
 ) -> [u8; N] {
     assert!(N == program_record_len(name, intent), "aether-bloomery-program: program record length mismatch");
@@ -63,6 +95,8 @@ pub const fn write_program_record<const N: usize>(
     write_u64_le(&mut out, &mut pos, input);
     write_u64_le(&mut out, &mut pos, result);
     out[pos] = mode;
+    pos += 1;
+    out[pos] = apis;
     pos += 1;
     write_u16_le(&mut out, &mut pos, u16_len(intent));
     write_slice(&mut out, &mut pos, intent);
@@ -114,7 +148,7 @@ const fn write_slice(out: &mut [u8], pos: &mut usize, bytes: &[u8]) {
 pub enum DeclarationsError {
     /// The remaining bytes were shorter than a record header or declared field.
     Truncated,
-    /// The record version byte is not 1.
+    /// The record version byte is not the current version, 2.
     UnsupportedVersion(u8),
     /// A name or intent field was not UTF-8.
     InvalidUtf8,
@@ -122,6 +156,8 @@ pub enum DeclarationsError {
     InvalidName,
     /// The mode byte is not 0 (`Pure`) or 1 (`Sampled`).
     UnknownMode(u8),
+    /// The APIs byte sets a bit that names no [`ProgramApi`].
+    UnknownApi(u8),
     /// Two records share a program name.
     DuplicateName(ProgramName),
 }
@@ -134,6 +170,7 @@ impl fmt::Display for DeclarationsError {
             Self::InvalidUtf8 => f.write_str("program declaration field is not UTF-8"),
             Self::InvalidName => f.write_str("program declaration name is not a ProgramName"),
             Self::UnknownMode(mode) => write!(f, "unknown program mode {mode}"),
+            Self::UnknownApi(apis) => write!(f, "unknown program api bits {apis:#010b}"),
             Self::DuplicateName(name) => write!(f, "program declaration repeats program {}", name.as_str()),
         }
     }
@@ -146,22 +183,22 @@ impl StdError for DeclarationsError {}
 /// # Errors
 ///
 /// [`DeclarationsError`] when a record is truncated, versioned incorrectly,
-/// or carries an invalid name, UTF-8 field, or mode, or when two records
-/// share a program name.
-pub fn declarations(section: &[u8]) -> Result<Vec<Program>, DeclarationsError> {
+/// or carries an invalid name, UTF-8 field, mode, or API bit, or when two
+/// records share a program name.
+pub fn declarations(section: &[u8]) -> Result<Vec<Declaration>, DeclarationsError> {
     let mut rest = section;
     let mut out = Vec::new();
     while !rest.is_empty() {
-        let program = read_record(&mut rest)?;
-        if out.iter().any(|existing: &Program| existing.name == program.name) {
-            return Err(DeclarationsError::DuplicateName(program.name));
+        let declaration = read_record(&mut rest)?;
+        if out.iter().any(|existing: &Declaration| existing.program.name == declaration.program.name) {
+            return Err(DeclarationsError::DuplicateName(declaration.program.name));
         }
-        out.push(program);
+        out.push(declaration);
     }
     Ok(out)
 }
 
-fn read_record(rest: &mut &[u8]) -> Result<Program, DeclarationsError> {
+fn read_record(rest: &mut &[u8]) -> Result<Declaration, DeclarationsError> {
     let version = read_u8(rest)?;
     if version != SECTION_VERSION {
         return Err(DeclarationsError::UnsupportedVersion(version));
@@ -174,9 +211,17 @@ fn read_record(rest: &mut &[u8]) -> Result<Program, DeclarationsError> {
         MODE_SAMPLED => Mode::Sampled,
         mode => return Err(DeclarationsError::UnknownMode(mode)),
     };
+    let apis = read_apis(read_u8(rest)?)?;
     let intent = read_len_prefixed_string(rest)?;
     let name = ProgramName::new(name).map_err(|_| DeclarationsError::InvalidName)?;
-    Ok(Program { name, input, result, mode, intent })
+    Ok(Declaration { program: Program { name, input, result, mode, intent }, apis })
+}
+
+fn read_apis(mask: u8) -> Result<Vec<ProgramApi>, DeclarationsError> {
+    if mask >> API_BITS.len() != 0 {
+        return Err(DeclarationsError::UnknownApi(mask));
+    }
+    Ok(API_BITS.iter().enumerate().filter(|(bit, _)| mask & (1 << bit) != 0).map(|(_, api)| *api).collect())
 }
 
 fn read_u8(rest: &mut &[u8]) -> Result<u8, DeclarationsError> {
@@ -219,8 +264,8 @@ fn read_len_prefixed_string(rest: &mut &[u8]) -> Result<String, DeclarationsErro
 mod tests {
     use aether_data::KindId;
 
-    use super::{DeclarationsError, MODE_PURE, declarations, program_record_len, write_program_record};
-    use crate::kinds::{Mode, ProgramName};
+    use super::{DeclarationsError, MODE_PURE, api_mask, declarations, program_record_len, write_program_record};
+    use crate::kinds::{Mode, ProgramApi, ProgramName};
 
     #[test]
     fn concatenated_records_decode_name_ids_mode_and_intent() {
@@ -230,22 +275,25 @@ mod tests {
         const SECOND_INTENT: &[u8] = b"second";
         const FIRST_LEN: usize = program_record_len(FIRST_NAME, FIRST_INTENT);
         const SECOND_LEN: usize = program_record_len(SECOND_NAME, SECOND_INTENT);
-        let first = write_program_record::<FIRST_LEN>(FIRST_NAME, 1, 2, MODE_PURE, FIRST_INTENT);
-        let second = write_program_record::<SECOND_LEN>(SECOND_NAME, 3, 4, MODE_PURE, SECOND_INTENT);
+        let apis = api_mask(&[ProgramApi::Http, ProgramApi::Workspace]);
+        let first = write_program_record::<FIRST_LEN>(FIRST_NAME, 1, 2, MODE_PURE, 0, FIRST_INTENT);
+        let second = write_program_record::<SECOND_LEN>(SECOND_NAME, 3, 4, MODE_PURE, apis, SECOND_INTENT);
         let mut section = first.to_vec();
         section.extend_from_slice(&second);
 
         let decoded = declarations(&section).expect("records decode");
         assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0].name.as_str(), "test.program.one");
-        assert_eq!(decoded[0].input, KindId(1));
-        assert_eq!(decoded[0].result, KindId(2));
-        assert_eq!(decoded[0].mode, Mode::Pure);
-        assert_eq!(decoded[0].intent, "first");
-        assert_eq!(decoded[1].name.as_str(), "test.program.two");
-        assert_eq!(decoded[1].input, KindId(3));
-        assert_eq!(decoded[1].result, KindId(4));
-        assert_eq!(decoded[1].intent, "second");
+        assert_eq!(decoded[0].program.name.as_str(), "test.program.one");
+        assert_eq!(decoded[0].program.input, KindId(1));
+        assert_eq!(decoded[0].program.result, KindId(2));
+        assert_eq!(decoded[0].program.mode, Mode::Pure);
+        assert_eq!(decoded[0].program.intent, "first");
+        assert!(decoded[0].apis.is_empty());
+        assert_eq!(decoded[1].program.name.as_str(), "test.program.two");
+        assert_eq!(decoded[1].program.input, KindId(3));
+        assert_eq!(decoded[1].program.result, KindId(4));
+        assert_eq!(decoded[1].program.intent, "second");
+        assert_eq!(decoded[1].apis, [ProgramApi::Http, ProgramApi::Workspace]);
     }
 
     #[test]
@@ -254,8 +302,8 @@ mod tests {
         const NAME: &[u8] = b"test.program.dup";
         const INTENT: &[u8] = b"dup";
         const LEN: usize = program_record_len(NAME, INTENT);
-        let first = write_program_record::<LEN>(NAME, 1, 2, MODE_PURE, INTENT);
-        let second = write_program_record::<LEN>(NAME, 3, 4, MODE_PURE, INTENT);
+        let first = write_program_record::<LEN>(NAME, 1, 2, MODE_PURE, 0, INTENT);
+        let second = write_program_record::<LEN>(NAME, 3, 4, MODE_PURE, 0, INTENT);
         let mut section = first.to_vec();
         section.extend_from_slice(&second);
 
@@ -263,5 +311,17 @@ mod tests {
             declarations(&section),
             Err(DeclarationsError::DuplicateName(ProgramName::new("test.program.dup").expect("valid test name")))
         );
+    }
+
+    #[test]
+    fn a_record_with_an_unknown_api_bit_is_refused() {
+        // Catches a decoder that silently drops an unknown bit, which would let a program bind an API the driver never
+        // checks.
+        const NAME: &[u8] = b"test.program.api";
+        const INTENT: &[u8] = b"api";
+        const LEN: usize = program_record_len(NAME, INTENT);
+        let record = write_program_record::<LEN>(NAME, 1, 2, MODE_PURE, 0b1000, INTENT);
+
+        assert_eq!(declarations(&record), Err(DeclarationsError::UnknownApi(0b1000)));
     }
 }
