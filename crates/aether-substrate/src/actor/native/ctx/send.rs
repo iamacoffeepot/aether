@@ -273,6 +273,36 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let _ = self.push_to(target.erased(), payload, self.outbound_parent(), self.outbound_root());
     }
 
+    /// Send `payload` through the held reference `target` on a fresh causal
+    /// chain and return the emitted mail's [`MailId`], which is also the new
+    /// chain's root. The detached mail has no parent, and replies are
+    /// addressed to this sender.
+    ///
+    /// The target is kind-checked as [`Self::send_to`]'s is: an
+    /// [`ActorRef<R>`](aether_actor::ActorRef) accepts only kinds `R`
+    /// handles, while a [`ProtocolRef<P>`](aether_actor::ProtocolRef) accepts
+    /// only kinds listed by `P`, including an explicitly manual row. The row
+    /// index `I` is inferred and the send performs only the existing encode
+    /// and buffered push.
+    ///
+    /// ```
+    /// use aether_actor::{Erased, Manual, ProtocolRef, Undeclared, protocol};
+    /// use aether_kinds::Ping;
+    /// use aether_substrate::actor::native::NativeCtx;
+    ///
+    /// #[protocol]
+    /// trait Pings {
+    ///     fn ping(mail: Ping) -> Undeclared;
+    /// }
+    ///
+    /// fn detached(ctx: &mut NativeCtx<'_, Erased, Manual>, target: ProtocolRef<Pings>, mail: &Ping) {
+    ///     let _mail_id = ctx.send_detached_to(target, mail);
+    /// }
+    /// ```
+    pub fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) -> MailId {
+        self.push_to(target.erased(), payload, None, None)
+    }
+
     /// Send `payload` through the held reference `target` and store `context`
     /// under the minted correlation, for the reply handler to take back with
     /// [`Self::take_context`](super::NativeCtx::take_context).
@@ -526,18 +556,54 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// the target replies, and its reply target is pinned to the inbound one,
     /// so the target's reply goes to whoever sent the inbound mail.
     ///
-    /// No `HandlesKind` bound checks `payload` against the target, which
-    /// ADR-0230 §2 allows for an erased reference, as for any send to an
-    /// [`ErasedActorRef`].
+    /// The target is kind-checked for the forwarded kind through [`Target`].
+    /// A concrete actor reference therefore accepts only kinds that actor
+    /// handles, while a protocol reference accepts only its listed rows. The
+    /// target's reply row is deliberately unchecked: a relay preserves the
+    /// inbound reply destination, and the forwarding handler's manual row
+    /// declares no reply shape (ADR-0231 §9).
     ///
     /// Its consumers are the component host's `DropComponent` forward to the
     /// addressed trampoline and the `aether.window` root's forward of a
     /// per-window command to the sole live window.
-    pub fn forward_to<K: ActorMail>(&self, target: &ErasedActorRef, payload: &K) {
+    /// A manual protocol row is a valid relay target:
+    ///
+    /// ```
+    /// use aether_actor::{Erased, Manual, ProtocolRef, Undeclared, protocol};
+    /// use aether_kinds::Ping;
+    /// use aether_substrate::actor::native::NativeCtx;
+    ///
+    /// #[protocol]
+    /// trait Pings {
+    ///     fn ping(mail: Ping) -> Undeclared;
+    /// }
+    ///
+    /// fn forward(ctx: &NativeCtx<'_, Erased, Manual>, target: ProtocolRef<Pings>, mail: &Ping) {
+    ///     ctx.forward_to(target, mail);
+    /// }
+    /// ```
+    ///
+    /// A kind outside the target's protocol is rejected at compile time:
+    ///
+    /// ```compile_fail,E0277
+    /// use aether_actor::{Erased, Manual, ProtocolRef, Undeclared, protocol};
+    /// use aether_kinds::{Ping, Pong};
+    /// use aether_substrate::actor::native::NativeCtx;
+    ///
+    /// #[protocol]
+    /// trait Pings {
+    ///     fn ping(mail: Ping) -> Undeclared;
+    /// }
+    ///
+    /// fn wrong(ctx: &NativeCtx<'_, Erased, Manual>, target: ProtocolRef<Pings>, mail: &Pong) {
+    ///     ctx.forward_to(target, mail);
+    /// }
+    /// ```
+    pub fn forward_to<K: ActorMail, I>(&self, target: impl Target<K, I>, payload: &K) {
         let encoded = self.encode_in_process(payload);
         self.binding.push_envelope_buffered_with_reply_to(
             OutboundSend {
-                recipient: target.id().0,
+                recipient: target.erased().id().0,
                 kind: K::ID.0,
                 bytes: &encoded.bytes,
                 attachments: encoded.attachments.as_deref().unwrap_or_default(),
@@ -561,8 +627,9 @@ fn refuse_engine_only(kind: KindId) -> bool {
 }
 
 // The per-stage capability trait impls (`MailSender` / `OutboundReply`).
-// `send_detached_to` suppresses this handler's in-flight lineage
-// (ADR-0080 §7). `shutdown` / `monitor`
+// The shared detached-send signature stays erased for guest compatibility;
+// native delegates it to the inherent typed verb and discards the returned
+// id. `shutdown` / `monitor`
 // are inherent methods on `NativeCtx` that reach into the
 // substrate-internal spawner + actor registry.
 
@@ -571,19 +638,8 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
         self.binding.prev_correlation()
     }
 
-    // By-id detached send — the by-name body with the caller's id, `None` /
-    // `None` lineage minting a fresh root (ADR-0080 §7).
     fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
-        let encoded = self.encode_in_process(payload);
-        self.binding.push_envelope_buffered(OutboundSend {
-            recipient: target.id().0,
-            kind: K::ID.0,
-            bytes: &encoded.bytes,
-            attachments: encoded.attachments.as_deref().unwrap_or_default(),
-            count: 1,
-            parent_mail: None,
-            inherited_root: None,
-        });
+        let _ = NativeCtx::send_detached_to(self, target, payload);
     }
 }
 

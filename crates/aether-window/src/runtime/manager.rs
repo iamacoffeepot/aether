@@ -1,6 +1,6 @@
 //! The mail surface every concrete window manager carries (ADR-0169).
 
-use aether_actor::{Manual, OutboundReply, handler_set};
+use aether_actor::{Manual, OutboundReply, Protocol, ProtocolRef, RowAt, Undeclared, handler_set, protocol};
 use aether_data::{ActorMail, ErasedActorPath};
 use aether_substrate::actor::native::{Erased, NativeCtx};
 
@@ -11,6 +11,29 @@ use crate::{
     SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
     UnsubscribeWindow, UnsubscribeWindowSelf,
 };
+
+/// The seven manual command rows a concrete window endpoint exposes. A
+/// manager retains only this view of each successfully published child, so a
+/// root forward cannot select a kind outside the shared endpoint surface.
+#[protocol]
+pub trait WindowCommands {
+    fn close(mail: CloseWindow) -> Undeclared;
+    fn set_mode(mail: SetWindowMode) -> Undeclared;
+    fn set_title(mail: SetWindowTitle) -> Undeclared;
+    fn set_menu(mail: SetWindowMenu) -> Undeclared;
+    fn set_cursor(mail: SetWindowCursor) -> Undeclared;
+    fn focus(mail: FocusWindow) -> Undeclared;
+    fn request_redraw(mail: RequestWindowRedraw) -> Undeclared;
+}
+
+/// One listed window and the retained command proof for its current child.
+/// A missing proof means the child has departed while the manager still lists
+/// the window (the desktop closing interval); it remains in cardinality and
+/// is refused for liveness when it is the sole entry.
+pub struct RoutableWindow {
+    pub path: ErasedActorPath,
+    pub target: Option<ProtocolRef<WindowCommands>>,
+}
 
 /// Re-dispatch one root-addressed per-window command at the sole live window,
 /// answering the *original* requester rather than this manager.
@@ -27,11 +50,14 @@ use crate::{
 /// `Err` carries the refusal text for the two ambiguous cases and for a sole
 /// window that is no longer live, which the caller receives as the command's
 /// own `Err` variant rather than as silence or a forward into a dead mailbox.
-fn route_to_sole_window<K: ActorMail, A>(
-    windows: &[ErasedActorPath],
+fn route_to_sole_window<K: ActorMail, A, I>(
+    windows: &[RoutableWindow],
     ctx: &mut NativeCtx<'_, A, Manual>,
     mail: &K,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    <WindowCommands as Protocol>::Rows: RowAt<K, I>,
+{
     let window = match windows {
         [window] => window,
         [] => return Err(format!("{} reached the aether.window root, which has no live window", K::NAME)),
@@ -44,10 +70,13 @@ fn route_to_sole_window<K: ActorMail, A>(
             ));
         }
     };
-    let target = ctx.resolve_path(window).map_err(|error| {
-        format!("{} reached the aether.window root, but window {window} is not live: {error}", K::NAME)
+    ctx.resolve_path(&window.path).map_err(|error| {
+        format!("{} reached the aether.window root, but window {} is not live: {error}", K::NAME, window.path)
     })?;
-    ctx.forward_to(&target, mail);
+    let target = window
+        .target
+        .ok_or_else(|| format!("{} reached the aether.window root, but window {} is not live", K::NAME, window.path))?;
+    ctx.forward_to(target, mail);
     Ok(())
 }
 
@@ -78,7 +107,7 @@ pub trait WindowManagerSurface {
     /// `aether.window.list` enumerates, so the count a refusal reports is the
     /// count the caller can see. Per-window liveness stays the endpoint's
     /// answer, not a reason to hide a window from the root's arithmetic.
-    fn routable_windows(state: &Self::State) -> Vec<ErasedActorPath>;
+    fn routable_windows(state: &Self::State) -> Vec<RoutableWindow>;
 
     /// Subscribe an explicitly named actor to one kind for one selector.
     ///
@@ -190,5 +219,43 @@ pub trait WindowManagerSurface {
         if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
             ctx.reply(&RequestWindowRedrawResult::Err { error });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_actor::ActorPath;
+    use aether_data::{LoadName, Source};
+    use aether_substrate::mail::registry::noop_handler;
+    use aether_substrate::testing::{bare_substrate, drop_ref, registered_ref, unrouted_binding};
+
+    use super::*;
+    use crate::{SyntheticWindowCapability, SyntheticWindowInstance};
+
+    #[test]
+    fn sole_window_departure_is_refused_before_its_monitor_notice_is_processed() {
+        let (registry, mailer) = bare_substrate();
+        let typed_path = ActorPath::<SyntheticWindowInstance>::child(
+            &ActorPath::<SyntheticWindowCapability>::root(),
+            &LoadName::new("departed").expect("fixture name"),
+        )
+        .expect("fixture path");
+        let reference = registered_ref(&registry, typed_path.as_erased().as_str(), noop_handler());
+        let binding = unrouted_binding(&mailer);
+        let ctx = NativeCtx::<Erased>::new(&binding, Source::NONE, None, None);
+        let target = ctx.resolve(&typed_path.narrow::<WindowCommands>()).expect("the child protocol path is live");
+        let path = typed_path.as_erased().clone();
+        drop_ref(&registry, reference);
+        let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, None, None);
+
+        let error = route_to_sole_window(
+            &[RoutableWindow { path: path.clone(), target: Some(target) }],
+            &mut ctx,
+            &SetWindowTitle { title: "too late".to_owned() },
+        )
+        .expect_err("a dead child remains listed until its monitor notice, but cannot receive a root command");
+
+        assert!(error.contains(path.as_str()));
+        assert!(error.contains("not live"));
     }
 }

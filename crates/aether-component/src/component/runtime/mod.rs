@@ -43,7 +43,7 @@ pub use aether_actor::Manual;
 // module. No sibling-cap imports: drop-time cleanup rides the ADR-0079
 // vacate/close `MonitorNotice` (each cap monitors its registrants and purges
 // its own rows), so the host names no peer cap's type or kinds.
-use aether_actor::{ErasedActorRef, OutboundReply, Single};
+use aether_actor::{ActorRef, ErasedActorRef, OutboundReply, ProtocolRef, Single};
 use aether_data::ErasedActorPath;
 use aether_data::{MailboxCategory, Source};
 
@@ -135,6 +135,15 @@ pub struct ComponentHostCapabilityState {
     /// replacement module are parked here across the hop. Empty except while a
     /// replace is settling.
     pub pending_replace: HashMap<u64, PendingReplace>,
+    /// Host-owned proof that each successfully spawned trampoline accepts the
+    /// component drop row. The guest's public receive surface deliberately
+    /// replaces the trampoline's native surface, so an external path cannot
+    /// recover this proof by casting after load. Retain it across guest unload
+    /// and refill because the trampoline slot remains the same actor.
+    ///
+    /// Issue #6923's guest-control protocol should replace this transitional
+    /// table once framework control rows have their own published surface.
+    drop_targets: HashMap<ErasedActorRef, ProtocolRef<ComponentDrop>>,
     /// Last replace/drop operation sequence allocated for each actor, keyed by
     /// the proof taken at the drop / replace receipt. A replace reserves its
     /// sequence when forwarded; a drop reserves the next sequence and
@@ -179,9 +188,16 @@ pub struct PendingReplace {
 /// zero-refcount boot alive, and its later rejection performs the final
 /// orphan check.
 pub struct BootEntry {
-    pub boot: ErasedActorRef,
+    pub boot: ActorRef<WasmTrampoline>,
     pub refcount: u32,
     pub pending_requests: u32,
+}
+
+/// The exact component teardown row an externally addressed drop must prove
+/// before it may change host bookkeeping or be forwarded.
+#[aether_actor::protocol]
+trait ComponentDrop {
+    fn drop_component(mail: DropComponent) -> DropResult;
 }
 
 #[runtime]
@@ -213,6 +229,7 @@ impl NativeActor for ComponentHostCapability {
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
+            drop_targets: HashMap::new(),
             boot_operation_sequence_by_actor: HashMap::new(),
             dominant_boot_operation_by_actor: HashMap::new(),
         })
@@ -336,6 +353,12 @@ impl NativeActor for ComponentHostCapability {
             });
             return;
         }
+        let Some(target) = state.drop_targets.get(&actor).copied() else {
+            ctx.reply(&DropResult::Err {
+                error: format!("{} is live but is not owned by the component host", payload.target),
+            });
+            return;
+        };
         // ADR-0147: account this actor's departure against its module's boot
         // singleton before forwarding the drop — the last non-boot actor from a
         // boot-bearing module tears the boot down here (the boot trampoline's
@@ -345,7 +368,7 @@ impl NativeActor for ComponentHostCapability {
         state.release_boot_ref(ctx, actor);
         // The forward inherits this call's chain, so the call stays open until
         // the trampoline's deferred reply lands at the original caller.
-        ctx.forward_to(&actor, &payload);
+        ctx.forward_to(target, &payload);
     }
 
     /// Replace the component at `target` with a fresh wasm
@@ -498,7 +521,10 @@ mod tests {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::{boot_authority, registered_binding, registered_ref, try_registered_ref};
+    use aether_substrate::testing::{
+        boot_authority, decode_session_reply, registered_binding, registered_ref, session_sender, try_registered_ref,
+        unrouted_binding,
+    };
 
     use super::*;
 
@@ -526,6 +552,7 @@ mod tests {
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
+            drop_targets: HashMap::new(),
             boot_operation_sequence_by_actor: HashMap::new(),
             dominant_boot_operation_by_actor: HashMap::new(),
         };
@@ -571,5 +598,55 @@ mod tests {
         assert!(rx.try_recv().is_err());
         state.refresh_registry_inventory();
         assert!(rx.try_recv().is_err());
+    }
+
+    /// A live route without a retained component-host proof is refused at the
+    /// external-address boundary. The guard must run before either boot
+    /// accounting or replacement ordering changes, or a wrong actor kind can
+    /// corrupt component-host state even though no drop was forwarded.
+    #[test]
+    fn unowned_drop_refuses_before_state_mutation() {
+        let registry = Arc::new(Registry::new());
+        let (outbound, rx) = HubOutbound::attached_loopback();
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
+        let binding = unrouted_binding(&mailer);
+        let engine = Arc::new(Engine::default());
+        let mut state = ComponentHostCapabilityState {
+            linker: Arc::new(Linker::new(&engine)),
+            modules: ModuleCache::new(Arc::clone(&engine)),
+            engine,
+            outbound,
+            registry_subscription: None,
+            last_egressed_inventory: None,
+            default_name_counter: 0,
+            boot_registry: HashMap::new(),
+            boot_actors: HashSet::new(),
+            pending_boots: HashMap::new(),
+            boot_hash_by_actor: HashMap::new(),
+            pending_replace: HashMap::new(),
+            drop_targets: HashMap::new(),
+            boot_operation_sequence_by_actor: HashMap::new(),
+            dominant_boot_operation_by_actor: HashMap::new(),
+        };
+        let actor = registered_ref(&registry, "test.component.not-a-trampoline", noop_handler());
+        let target =
+            NativeCtx::<ComponentHostCapability>::new_for_actor(&binding, Source::NONE, None, None).actor_path(actor);
+        let hash = BlobHash::from_bytes([7; 32]);
+        state.boot_hash_by_actor.insert(actor, hash);
+        state.boot_operation_sequence_by_actor.insert(actor, 11);
+        state.dominant_boot_operation_by_actor.insert(actor, 10);
+
+        {
+            let mut ctx = NativeCtx::new_dispatching(&binding, session_sender(), None, None);
+            ComponentHostCapability::on_drop_component(&mut state, &mut ctx, DropComponent { target });
+        }
+
+        assert!(matches!(
+            decode_session_reply::<DropResult>(&rx),
+            DropResult::Err { error } if error.contains("is not owned by the component host")
+        ));
+        assert_eq!(state.boot_hash_by_actor.get(&actor), Some(&hash));
+        assert_eq!(state.boot_operation_sequence_by_actor.get(&actor), Some(&11));
+        assert_eq!(state.dominant_boot_operation_by_actor.get(&actor), Some(&10));
     }
 }

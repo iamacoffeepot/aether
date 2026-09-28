@@ -19,7 +19,7 @@ use aether_component::{ComponentHostCapability, WasmTrampoline};
 use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult};
 use aether_substrate::BootError;
 use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
@@ -126,6 +126,18 @@ fn explicit_and_nested_parents_scope_live_peer_delivery() {
         "each caller must reach the target beneath its own runtime parent; observed kinds: {:?}",
         harness.observed_kinds(),
     );
+
+    let nested_target = ErasedActorPath::new(&nested_target).expect("the loaded target returned a canonical path");
+    let dropped = harness
+        .execute(vec![(
+            "drop-parent-placed",
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &DropComponent { target: nested_target },
+            ),
+        )])
+        .expect("parent-placed drop settles");
+    assert!(matches!(dropped.reply::<DropResult>("drop-parent-placed"), Ok(DropResult::Ok)));
 }
 
 /// Catches a host load that ignores the selected type's lineage (the child-only

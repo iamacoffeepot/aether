@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::{Addressable, ErasedActorRef, MailSender};
+use aether_actor::{Addressable, ErasedActorRef};
 use aether_data::ActorId;
 
 use crate::actor::native::binding::NativeBinding;

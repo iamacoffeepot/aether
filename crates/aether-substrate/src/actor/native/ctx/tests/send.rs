@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Addressable, Manual, OutboundReply, Single};
+use aether_actor::{Addressable, MailSender, Manual, OutboundReply, Single, Undeclared};
 use aether_data::{MailId, MailboxId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -15,6 +15,30 @@ use crate::chassis::error::BootError;
 use crate::mail::{Source, SourceAddr};
 
 use super::support::{CastOnly, NativeRequestContext, StubActor};
+
+#[aether_actor::protocol]
+trait CastRelay {
+    fn cast(mail: CastOnly) -> Undeclared;
+}
+
+struct ManualCastRelay {
+    received: u32,
+}
+
+#[aether_actor::actor(instanced, root)]
+impl NativeActor for ManualCastRelay {
+    const NAMESPACE: &'static str = "test.manual_cast_relay";
+    type Config = ();
+
+    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { received: 0 })
+    }
+
+    #[handler::manual]
+    fn on_cast(&mut self, _ctx: &mut NativeCtx<'_, Self, Manual>, _mail: CastOnly) {
+        self.received += 1;
+    }
+}
 
 /// ADR-0232 §1: the flat `send_to` family sends through a held reference.
 /// `send_to` and `send_to_with_context` land at the reference's id under the
@@ -89,6 +113,97 @@ fn send_to_family_inherits_or_detaches_and_stores_context() {
         Some(detached_context),
         "the detached context is stored under the routed mail's correlation",
     );
+}
+
+/// ADR-0231 §9: a relay accepts the forwarded kind only through the target's
+/// typed row, while preserving the original requester's reply destination and
+/// the inbound parent/root. The protocol row is manual, so this also catches
+/// an implementation that accidentally rejects `Undeclared` relay targets.
+#[test]
+fn forward_to_typed_manual_protocol_preserves_reply_target_and_lineage() {
+    use crate::mail::registry::{OwnedDispatch, Registry};
+    use crate::testing::{bare_substrate, boot_authority};
+    use std::sync::mpsc;
+
+    let (registry, mailer) = bare_substrate();
+    let (tx, rx) = mpsc::channel::<Envelope>();
+    let recipient = registry.register_inbox(
+        &boot_authority(),
+        "test.forward_to_typed.sink",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            dispatch.discharge();
+            let _ = tx.send(dispatch);
+        }),
+    );
+    let target = Registry::declared_dependency::<ManualCastRelay>(recipient).narrow::<CastRelay>();
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00BE_EF07)));
+    let root = MailId::new(MailboxId(0xC4), 11);
+    let parent = MailId::new(MailboxId(0x9D), 46);
+    let requester = Source::with_correlation(SourceAddr::Component(MailboxId(0x1234)), 73);
+
+    {
+        let ctx = NativeCtx::new_dispatching(&binding, requester, Some(parent), Some(root));
+        ctx.forward_to(target, &CastOnly { code: 9 });
+    }
+
+    let forwarded = rx.try_recv().expect("forward_to routed at flush");
+    assert_eq!(forwarded.recipient, recipient, "forward_to addresses the typed target");
+    assert_eq!(forwarded.sender, requester, "the target replies directly to the original requester");
+    assert_eq!(forwarded.parent_mail, Some(parent), "the forwarded mail remains a child of the inbound");
+    assert_eq!(forwarded.root, Some(root), "the forwarded mail remains in the inbound chain");
+}
+
+/// The inherent typed detached verb returns the id minted by its one buffered
+/// push, starts a parentless chain rooted at that id, and stamps this actor as
+/// the reply destination. The compatibility trait delegates to the same path
+/// while retaining its shared `()` return signature.
+#[test]
+fn typed_detached_send_returns_emitted_id_and_mail_sender_delegates() {
+    use crate::mail::registry::{OwnedDispatch, Registry};
+    use crate::testing::{bare_substrate, boot_authority};
+    use std::sync::mpsc;
+
+    let (registry, mailer) = bare_substrate();
+    let (tx, rx) = mpsc::channel::<Envelope>();
+    let recipient = registry.register_inbox(
+        &boot_authority(),
+        "test.typed_detached.sink",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            dispatch.discharge();
+            let _ = tx.send(dispatch);
+        }),
+    );
+    let actor = Registry::declared_dependency::<ManualCastRelay>(recipient);
+    let target = actor.narrow::<CastRelay>();
+    let sender = MailboxId(0x00BE_EF08);
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), sender));
+    let inbound_root = MailId::new(MailboxId(0x44), 19);
+    let inbound_parent = MailId::new(MailboxId(0x55), 23);
+
+    let emitted_id = {
+        let mut ctx: NativeCtx<'_, Erased, Single> =
+            NativeCtx::new(&binding, Source::NONE, Some(inbound_parent), Some(inbound_root));
+        ctx.send_detached_to(target, &CastOnly { code: 10 })
+    };
+    let detached = rx.try_recv().expect("typed detached send routed at flush");
+    assert_eq!(detached.mail_id, Some(emitted_id), "the inherent verb returns the push's id");
+    assert!(detached.parent_mail.is_none(), "detached mail has no parent");
+    assert_eq!(detached.root, Some(emitted_id), "detached mail roots its own chain");
+    assert_eq!(
+        detached.sender,
+        Source::with_correlation(SourceAddr::Component(sender), emitted_id.correlation_id),
+        "replies address the actor that sent the detached mail",
+    );
+
+    {
+        let mut ctx: NativeCtx<'_, Erased, Single> =
+            NativeCtx::new(&binding, Source::NONE, Some(inbound_parent), Some(inbound_root));
+        MailSender::send_detached_to(&mut ctx, actor.erase(), &CastOnly { code: 11 });
+    }
+    let delegated = rx.try_recv().expect("MailSender detached send routed at flush");
+    assert_eq!(delegated.recipient, recipient, "compatibility delegation keeps the target");
+    assert!(delegated.parent_mail.is_none(), "compatibility delegation stays detached");
+    assert_eq!(delegated.root, delegated.mail_id, "compatibility delegation roots the emitted mail");
 }
 
 /// The actor the flat-send test's ctx is typed by: it declares the stub actor
