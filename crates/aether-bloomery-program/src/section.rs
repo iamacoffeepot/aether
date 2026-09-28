@@ -148,7 +148,7 @@ const fn write_slice(out: &mut [u8], pos: &mut usize, bytes: &[u8]) {
 pub enum DeclarationsError {
     /// The remaining bytes were shorter than a record header or declared field.
     Truncated,
-    /// The record version byte is not [`SECTION_VERSION`].
+    /// The record version byte is not the current version, 2.
     UnsupportedVersion(u8),
     /// A name or intent field was not UTF-8.
     InvalidUtf8,
