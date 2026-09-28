@@ -61,7 +61,8 @@ fn parked_context_drops_silently_and_take_answers_the_original_caller() {
     let request = {
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 77);
         let mut ctx = NativeCtx::new(&binding, caller_source, None, Some(root));
-        let (_pending, held) = ctx.hold::<TestReply>();
+        let (pending, held) = ctx.hold::<TestReply>();
+        pending.__defuse();
         ctx.send_to_with_context(peer, &CastOnly { code: 1 }, HeldContext { held, tag: 4 })
     };
     assert_eq!(counter.held_open(root), 1, "the parked debt keeps the caller's chain open");
@@ -103,7 +104,8 @@ fn held_encode_and_decode_outside_the_table_refuse() {
     let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF12)));
     let context = {
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let (_pending, held) = ctx.hold::<TestReply>();
+        let (pending, held) = ctx.hold::<TestReply>();
+        pending.__defuse();
         HeldContext { held, tag: 3 }
     };
     let id = context.held.dispatch_id();

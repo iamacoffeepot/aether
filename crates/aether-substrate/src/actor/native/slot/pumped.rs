@@ -639,7 +639,8 @@ mod tests {
 
         let request = slot
             .host_turn(|_state, ctx| {
-                let (_pending, held) = ctx.hold::<Pong>();
+                let (pending, held) = ctx.hold::<Pong>();
+                pending.__defuse();
                 ctx.send_with_context::<Peer>(&Poke { note: 1 }, Stash { held })
             })
             .expect("the actor is live");
