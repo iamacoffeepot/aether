@@ -201,6 +201,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     pub fn take_held<R: ActorMail>(&mut self) -> Option<Held<R>> {
         self.binding.take_held(self.in_reply_to()?, R::ID).map(Held::new)
     }
+
     /// Acquire a [`SettlementHold`] on the current in-flight root
     /// (ADR-0080 §12). Use to keep a chain open across deferred work that
     /// owes no reply; a reply owed later is armed with
