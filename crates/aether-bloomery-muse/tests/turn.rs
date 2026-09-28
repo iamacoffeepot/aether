@@ -2,7 +2,9 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{ClosureArtifact, EncodedArtifact, Invoke, Invoked, ProgramName, Ref, Refusal, Utf8Text};
+use aether_bloomery_kinds::{
+    ClosureArtifact, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
+};
 use aether_bloomery_muse::{
     Endpoint, ModelName, MuseTurn, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems, TurnOutcome,
     TurnResult,
@@ -46,7 +48,7 @@ fn a_turn_sends_one_fetch_and_stages_the_reply_it_cites() -> Result<(), Box<dyn 
     // Catches a result citing an unstaged artifact, texts not read from the injected closure, a fetch to
     // the wrong target or reply kind, and a second fetch per turn.
     let (mut session, pending) = start_turn()?;
-    assert_eq!(pending.mailbox, "aether.http");
+    assert_eq!(pending.api, ProgramApi::Http);
     assert_eq!(pending.kind_id, Fetch::ID);
     assert_eq!(pending.expected_reply, FetchResult::ID);
 

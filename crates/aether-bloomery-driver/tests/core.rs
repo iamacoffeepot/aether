@@ -9,8 +9,9 @@ mod support;
 
 use aether_bloomery_driver::{Command, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
-    CallOutcome, CallRefusal, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact, ExecutorFault,
-    FaultReason, Invoked, OpaqueBytes, ReadEventsResult, Ref, Utf8Text, artifact_digest,
+    ApiCall, ApiCallResult, CallOutcome, CallRefusal, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact,
+    ExecutorFault, FaultReason, Invoked, OpaqueBytes, ProgramApi, ReadEventsResult, Ref, Refusal, Utf8Text,
+    artifact_digest,
 };
 use aether_data::Kind;
 use program_world::{call, fault, requested, transition};
@@ -720,4 +721,23 @@ fn replayed_ticket_returns_no_commands() {
     assert!(replay.is_empty(), "a consumed ticket answers nothing");
     assert!(world.abort.is_none());
     assert!(world.appends.is_empty());
+}
+
+#[test]
+fn an_api_with_no_provider_is_refused_at_once() {
+    // Catches a core that parks a call it has no provider for, which would leave the invocation's await unanswered
+    // forever.
+    let (mut world, initial) = World::open();
+    world.drive(initial);
+
+    let call = ApiCall { call: 7, api: ProgramApi::Process, kind: OpaqueBytes::ID, payload: Vec::new() };
+    let (caller, commands) = world.core.call_api(call);
+
+    let [Command::ApiAnswered { caller: answered, result: ApiCallResult::Refused { call: 7, refusal } }] =
+        commands.as_slice()
+    else {
+        panic!("expected exactly one refusal, got {commands:?}");
+    };
+    assert_eq!(*answered, caller);
+    assert!(matches!(refusal, Refusal::Refused { .. }), "unexpected refusal: {refusal:?}");
 }

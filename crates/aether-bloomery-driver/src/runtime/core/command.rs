@@ -1,24 +1,25 @@
 //! The core's outbox: one [`Command`] per requested effect.
 
 use aether_bloomery_kinds::{
-    AppendRecords, CallOutcome, Digest, Event, Invoke, Processed, ReadArtifact, ReadArtifactResult, ReadClosure,
-    ReadEvents, Warm, WatchHead,
+    ApiCallResult, AppendRecords, CallOutcome, Digest, Event, Invoke, Processed, ReadArtifact, ReadArtifactResult,
+    ReadClosure, ReadEvents, Warm, WatchHead,
 };
 
 use super::ticket::{
-    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, EvaluateTicket, EventsTicket, InvokeTicket, LoadTicket,
-    StatusTicket, WarmTicket, WatchTicket,
+    ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, EvaluateTicket, EventsTicket, InvokeTicket,
+    LoadTicket, StatusTicket, WarmTicket, WatchTicket,
 };
 
 /// One effect the shell performs on the core's behalf.
 ///
 /// `ReadEvents`, `ReadArtifact`, `ReadClosure`, `Append`, `Load`,
-/// `Invoke`, `WatchHead`, `Warm`, `Evaluate`, and `QueryStatus` each carry
-/// the ticket the shell hands back with the reply. `Answer` delivers a
-/// [`Call`'s](aether_bloomery_kinds::Call) one outcome to a waiting caller,
-/// `Processed` delivers an
+/// `Invoke`, `WatchHead`, `Warm`, `Evaluate`, `QueryStatus`, `Fetch`, and
+/// `RunWorkspace` each carry the ticket the shell hands back with the reply.
+/// `Answer` delivers a [`Call`'s](aether_bloomery_kinds::Call) one outcome
+/// to a waiting caller, `Processed` delivers an
 /// [`AwaitProcessed`](aether_bloomery_kinds::AwaitProcessed) barrier reply,
-/// `Fetched` delivers a bundle root's fetch-on-miss answer, and `Abort`
+/// `Fetched` delivers a bundle root's fetch-on-miss answer, `ApiAnswered`
+/// delivers the answer to a program API call a bundle root relayed, and `Abort`
 /// reports that the core's journal view cannot be trusted or a required
 /// record cannot be written; the shell maps it to `fatal_abort` (ADR-0063).
 ///
@@ -124,6 +125,27 @@ pub enum Command {
         caller: CallerId,
         /// The artifact read's result.
         result: ReadArtifactResult,
+    },
+    /// Send one program's relayed `Http` call to the http capability.
+    Fetch {
+        /// Ticket the matching [`FetchResult`](aether_http::FetchResult) arrives under.
+        ticket: ApiTicket,
+        /// The program's request.
+        request: aether_http::Fetch,
+    },
+    /// Send one program's relayed `Workspace` call to the unit's workspace.
+    RunWorkspace {
+        /// Ticket the matching [`RunResult`](aether_bloomery_workspace::RunResult) arrives under.
+        ticket: ApiTicket,
+        /// The program's run.
+        request: aether_bloomery_workspace::Run,
+    },
+    /// Deliver the answer to one relayed program API call.
+    ApiAnswered {
+        /// The relayed call to answer.
+        caller: CallerId,
+        /// The provider's reply, or the driver's refusal.
+        result: ApiCallResult,
     },
     /// The journal view cannot be trusted or a required record cannot be written.
     Abort {

@@ -4,6 +4,7 @@ use aether_actor::{DependsOn, ReplyMode};
 use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery, UnitBundle};
 use aether_component::ComponentHostCapability;
 use aether_data::{ActorMail, Kind};
+use aether_http::HttpCapability;
 use aether_kinds::LoadComponent;
 use aether_substrate::actor::native::{DeferredReply, NativeCtx};
 
@@ -14,13 +15,15 @@ impl BundleDriverState {
     ///
     /// Journal reads and appends go to the handed-over journal reference, loads go
     /// to the component host under the unit's bundle name, root commands go
-    /// to the reference the digest's load reply was stamped with, and answers
-    /// and fetch answers release the parked reply. Every send carries its ticket as the request
+    /// to the reference the digest's load reply was stamped with, a program's
+    /// relayed `Http` call goes to the http capability and its `Workspace` call
+    /// to the held workspace reference, and answers, fetch answers, and API
+    /// answers release the parked reply. Every send carries its ticket as the request
     /// context, so the reply routes back to the core continuation that issued
     /// it. The head watch rides a fresh chain: the journal parks it until the
     /// head moves, and the chain that happens to re-arm it did not cause the
     /// wait.
-    pub(crate) fn perform<M: ReplyMode, A: DependsOn<ComponentHostCapability>>(
+    pub(crate) fn perform<M: ReplyMode, A: DependsOn<ComponentHostCapability> + DependsOn<HttpCapability>>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
         commands: Vec<Command>,
@@ -71,6 +74,17 @@ impl BundleDriverState {
                     }
                 }
                 Command::Fetched { caller, result } => {
+                    if let Some(owed) = self.take_parked(caller) {
+                        owed.reply(ctx, &result);
+                    }
+                }
+                Command::Fetch { ticket, request } => {
+                    let _ = ctx.send_with_context::<HttpCapability>(&request, &ticket);
+                }
+                Command::RunWorkspace { ticket, request } => {
+                    let _ = ctx.send_to_with_context(self.workspace, &request, &ticket);
+                }
+                Command::ApiAnswered { caller, result } => {
                     if let Some(owed) = self.take_parked(caller) {
                         owed.reply(ctx, &result);
                     }

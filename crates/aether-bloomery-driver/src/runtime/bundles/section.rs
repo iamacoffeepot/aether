@@ -72,11 +72,12 @@ mod tests {
     }
 
     fn record(name: &[u8], input: u64, result: u64, intent: &[u8]) -> Vec<u8> {
-        let mut out = vec![1];
+        let mut out = vec![2];
         out.extend_from_slice(&u16::try_from(name.len()).expect("test name fits").to_le_bytes());
         out.extend_from_slice(name);
         out.extend_from_slice(&input.to_le_bytes());
         out.extend_from_slice(&result.to_le_bytes());
+        out.push(0);
         out.push(0);
         out.extend_from_slice(&u16::try_from(intent.len()).expect("test intent fits").to_le_bytes());
         out.extend_from_slice(intent);
@@ -134,10 +135,10 @@ mod tests {
         let decoded = declared_roles(&wasm).expect("both sections decode");
         let programs = decoded.programs().expect("the program role is declared");
         let one = programs.find(&program_name("test.program.one")).expect("first program declared");
-        assert_eq!(one.input, OpaqueBytes::ID);
-        assert_eq!(one.result, Utf8Text::ID);
+        assert_eq!(one.program.input, OpaqueBytes::ID);
+        assert_eq!(one.program.result, Utf8Text::ID);
         let two = programs.find(&program_name("test.program.two")).expect("second program declared");
-        assert_eq!(two.intent, "second");
+        assert_eq!(two.program.intent, "second");
         assert!(!decoded.declares_reactors());
     }
 

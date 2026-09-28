@@ -97,7 +97,9 @@ loads that root as `aether.component/aether.embedded:<key>-<digest>` (short path
 the unit's key and the bundle digest (ADR-0240 D4). A module provides
 programs, reactors, or both; neither is a compile error. With programs, the
 root answers `Invoke` with `Invoked` through a per-seq inline child and
-writes `aether.bloomery.programs`. With reactors, it answers `Warm`, `Event`,
+writes `aether.bloomery.programs`. The program root relays each invocation's
+fetch-on-miss (`ReadArtifact`) and program API call (`ApiCall`) to the
+`Invoke`'s sender, the driver, and relays the answer back (ADR-0240 D6). With reactors, it answers `Warm`, `Event`,
 and `StatusQuery` to the caller (`Warmed` / `Evaluated` / `Status`) and
 writes `aether.bloomery.reactors`. Each role keeps its own state. Program
 `NAME`s are unique and `Mode::Pure`; reactor `NAMESPACE`s are unique string

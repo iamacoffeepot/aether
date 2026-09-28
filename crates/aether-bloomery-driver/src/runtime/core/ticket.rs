@@ -45,6 +45,7 @@ tickets! {
     WarmTicket => "aether.bloomery.driver.ticket.warm",
     EvaluateTicket => "aether.bloomery.driver.ticket.evaluate",
     StatusTicket => "aether.bloomery.driver.ticket.status",
+    ApiTicket => "aether.bloomery.driver.ticket.api",
 }
 
 /// Caller handle minted by [`ProgramCore::call`](crate::ProgramCore::call).

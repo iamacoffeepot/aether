@@ -5,16 +5,18 @@
 //! [`DeclaredRoles::new`] is the only constructor, and only the section
 //! reader calls it.
 
-use aether_bloomery_kinds::{Program, ProgramName, ReactorDeclaration};
+use aether_bloomery_kinds::{ProgramName, ReactorDeclaration};
+use aether_bloomery_program::Declaration;
 
-/// A bundle's program declarations: never empty.
+/// A bundle's program declarations, each with the APIs its `run` binds:
+/// never empty.
 #[derive(Debug, Clone)]
-pub struct Programs(Vec<Program>);
+pub struct Programs(Vec<Declaration>);
 
 impl Programs {
     /// The declaration named `name`, if the bundle declares it.
-    pub fn find(&self, name: &ProgramName) -> Option<&Program> {
-        self.0.iter().find(|declared| declared.name == *name)
+    pub fn find(&self, name: &ProgramName) -> Option<&Declaration> {
+        self.0.iter().find(|declared| declared.program.name == *name)
     }
 }
 
@@ -31,7 +33,7 @@ pub enum DeclaredRoles {
 
 impl DeclaredRoles {
     /// Classify decoded declarations. `None` when the bundle declares neither role.
-    pub(super) fn new(programs: Vec<Program>, reactors: &[ReactorDeclaration]) -> Option<Self> {
+    pub(super) fn new(programs: Vec<Declaration>, reactors: &[ReactorDeclaration]) -> Option<Self> {
         match (programs.is_empty(), reactors.is_empty()) {
             (true, true) => None,
             (false, true) => Some(Self::Programs(Programs(programs))),

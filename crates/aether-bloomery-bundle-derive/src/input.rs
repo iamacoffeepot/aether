@@ -46,8 +46,8 @@ pub struct ProgramMeta {
     pub intent: LitStr,
     pub async_run: bool,
     pub sampled: bool,
-    /// Canonical API names (`Http`, `Process`): each resolves through the
-    /// SDK's `__macro_internals::api_target` table.
+    /// Canonical API names (`Http`, `Process`, `Workspace`): each names a
+    /// `ProgramApi` variant the program's section record lists.
     pub apis: Vec<Ident>,
 }
 

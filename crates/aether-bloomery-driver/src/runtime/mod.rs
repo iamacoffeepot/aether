@@ -25,11 +25,12 @@
 //! is ever in flight.
 //!
 //! Native code spawns [`BundleDriver`] over a born journal owner, passing the
-//! unit's key and the journal's reference in [`DriverParams`]. `init` builds the
-//! [`ProgramCore`] and keeps its first commands; `wire` performs them once the
-//! mailbox is live. Commands go to the journal owner (reads, appends, and the
-//! watch), the component host (loads, each under the unit's bundle name) and
-//! bundle roots. The core names a loaded bundle by its digest; the shell keeps
+//! unit's key, the journal's reference, and the unit's workspace reference in
+//! [`DriverParams`]. `init` builds the [`ProgramCore`] and keeps its first
+//! commands; `wire` performs them once the mailbox is live. Commands go to the
+//! journal owner (reads, appends, and the watch), the component host (loads,
+//! each under the unit's bundle name), bundle roots, and the providers of
+//! program APIs. The core names a loaded bundle by its digest; the shell keeps
 //! each root's proven reference, taken from its load reply's stamped sender
 //! (ADR-0230 §3), keyed by that digest, and sends to it with the command's
 //! ticket as the request context. Inbound [`Call`],
@@ -38,6 +39,12 @@
 //! its [`CallerId`]; each reply kind recovers its ticket from the request
 //! context and feeds the matching core continuation. Dropping the actor's
 //! state abandons every parked reply.
+//!
+//! A program API call relays the same way as a fetch (ADR-0240 D6): the
+//! invocation sends [`ApiCall`] to its bundle root, the root relays it here,
+//! and the core maps `Http` to the http capability and `Workspace` to the
+//! held workspace, refusing any other API; the provider's reply comes back
+//! under an [`ApiTicket`] and answers the parked call.
 
 mod bundles;
 mod core;
@@ -47,8 +54,8 @@ mod reactors;
 mod recovery;
 
 pub use self::core::{
-    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket, EventsTicket,
-    InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
+    ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket,
+    EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
 };
 
 use std::collections::{BTreeMap, HashMap};
@@ -57,9 +64,12 @@ use std::mem;
 use aether_actor::{ActorRef, ErasedActorRef, Manual, runtime};
 use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
-    AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Digest, Evaluated, Invoked, ReadArtifact,
+    ApiCall, AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Digest, Evaluated, Invoked, ReadArtifact,
     ReadArtifactResult, ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed, WatchHeadResult,
 };
+use aether_bloomery_workspace::WorkspaceCapability;
+use aether_data::Kind;
+use aether_http::FetchResult;
 use aether_kinds::LoadResult;
 use aether_substrate::actor::native::{DeferredReply, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -71,13 +81,14 @@ use crate::BundleDriver;
 // must stay equal or every startup read fails with `Err`.
 const _: () = assert!(EVENTS_PAGE == MAX_READ_EVENTS);
 
-/// Composer-supplied construction input: the unit's key and the born journal
-/// owner's reference.
+/// Composer-supplied construction input: the unit's key, the born journal
+/// owner's reference, and the reference of the workspace the unit's programs
+/// run through.
 ///
-/// The reference is what the journal's own `spawn_actor(..).finish()` returns,
-/// so holding it proves the journal was born (ADR-0230); a driver cannot be
-/// built over a journal that does not exist. The driver sends through it,
-/// never by resolving a name.
+/// The journal reference is what the journal's own `spawn_actor(..).finish()`
+/// returns, so holding it proves the journal was born (ADR-0230); a driver
+/// cannot be built over a journal that does not exist. The driver sends
+/// through both references, never by resolving a name.
 pub struct DriverParams {
     /// The key of the unit this driver folds for. Every bundle root it loads
     /// is named [`UnitBundle::name`] of this key and the bundle's digest
@@ -87,15 +98,18 @@ pub struct DriverParams {
     pub unit: UnitKey,
     /// The journal owner's proven reference, handed over at spawn.
     pub journal: ActorRef<JournalActor>,
+    /// The workspace programs' `Workspace` calls reach (ADR-0240 D6).
+    pub workspace: ActorRef<WorkspaceCapability>,
 }
 
 /// [`BundleDriver`] runtime state: the sans-io program core, the unit and
-/// journal it folds for, the core's startup commands until `wire` performs
+/// journal it folds for, the workspace its programs run through, the core's startup commands until `wire` performs
 /// them, the parked replies it owes, and each loaded bundle's root.
 pub struct BundleDriverState {
     core: ProgramCore,
     unit: UnitKey,
     journal: ActorRef<JournalActor>,
+    workspace: ActorRef<WorkspaceCapability>,
     startup: Vec<Command>,
     callers: HashMap<CallerId, DeferredReply>,
     /// The digest each in-flight load was issued for, keyed by its ticket.
@@ -117,12 +131,13 @@ impl NativeActor for BundleDriver {
         params: DriverParams,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<BundleDriverState, BootError> {
-        let DriverParams { unit, journal } = params;
+        let DriverParams { unit, journal, workspace } = params;
         let (core, startup) = ProgramCore::start(limit);
         Ok(BundleDriverState {
             core,
             unit,
             journal,
+            workspace,
             startup,
             callers: HashMap::new(),
             loading: BTreeMap::new(),
@@ -177,6 +192,42 @@ impl NativeActor for BundleDriver {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = state.core.fetch_artifact(request);
         state.callers.insert(caller, owed);
+        state.perform(ctx, commands);
+    }
+
+    /// Serves a bundle root's relayed program API call: the core sends it to
+    /// the API's provider or refuses it, and the parked reply carries the
+    /// answer back to the root with the root's correlation.
+    #[handler::manual]
+    fn on_api_call(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, request: ApiCall) {
+        let owed = ctx.defer_reply_to(ctx.reply_target());
+        let (caller, commands) = state.core.call_api(request);
+        state.callers.insert(caller, owed);
+        state.perform(ctx, commands);
+    }
+
+    #[handler::single]
+    #[expect(clippy::needless_pass_by_value, reason = "a handler takes its kind by value; the reply relays as bytes")]
+    fn on_fetch_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: FetchResult) {
+        let Some(ticket) = ctx.take_context::<ApiTicket>() else {
+            return;
+        };
+        let commands = state.core.on_api_reply(ticket, FetchResult::ID, result.encode_into_bytes());
+        state.perform(ctx, commands);
+    }
+
+    #[handler::single]
+    #[expect(clippy::needless_pass_by_value, reason = "a handler takes its kind by value; the reply relays as bytes")]
+    fn on_workspace_run_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        result: aether_bloomery_workspace::RunResult,
+    ) {
+        let Some(ticket) = ctx.take_context::<ApiTicket>() else {
+            return;
+        };
+        let commands =
+            state.core.on_api_reply(ticket, aether_bloomery_workspace::RunResult::ID, result.encode_into_bytes());
         state.perform(ctx, commands);
     }
 

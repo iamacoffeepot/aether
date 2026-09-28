@@ -33,12 +33,13 @@ pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
             root: #program::Root::new(&#table),
             invokers: #program::__macro_internals::BTreeMap::new(),
             fetches: #program::__macro_internals::BTreeMap::new(),
+            calls: #program::__macro_internals::BTreeMap::new(),
         };
     };
     let handlers = expand_handlers(root, &invocation, &program);
     let state_struct = expand_state(&state, &program);
     let table_static = expand_table(&table, programs, &program);
-    let invocation_actor = expand_invocation(root, &invocation, &table, &program, programs);
+    let invocation_actor = expand_invocation(root, &invocation, &table, &program);
     let sections = programs.iter().map(|entry| expand_section(entry, &program));
     let items = quote! {
         #state_struct
@@ -49,10 +50,11 @@ pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
     RolePieces { field_name: format_ident!("programs"), field, init, handlers, items, spawns: vec![invocation_ident()] }
 }
 
-/// The program role's root state: the live-seq table plus the two relay maps
-/// a fetch-on-miss travels through. An invocation's fetch goes to its root,
-/// which sends it to whoever sent that invocation's `Invoke` (the driver) and
-/// relays the answer back to the invocation.
+/// The program role's root state: the live-seq table plus the relay maps a
+/// fetch-on-miss and a program API call travel through. An invocation's fetch
+/// or API call goes to its root, which sends it to whoever sent that
+/// invocation's `Invoke` (the driver) and relays the answer back to the
+/// invocation (ADR-0240 D6).
 fn expand_state(state: &Ident, program: &TokenStream2) -> TokenStream2 {
     quote! {
         struct #state {
@@ -68,11 +70,18 @@ fn expand_state(state: &Ident, program: &TokenStream2) -> TokenStream2 {
                 #program::__macro_internals::RequestId,
                 ::aether_actor::ErasedActorRef,
             >,
+            /// The invocation each relayed API call answers to, keyed by the
+            /// root's own request.
+            calls: #program::__macro_internals::BTreeMap<
+                #program::__macro_internals::RequestId,
+                ::aether_actor::ErasedActorRef,
+            >,
         }
     }
 }
 
 fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> TokenStream2 {
+    let relays = expand_relay_handlers(program);
     quote! {
         #[handler::manual]
         fn on_invoke(
@@ -133,6 +142,15 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
             ctx.despawn_inline_child(sender);
         }
 
+        #relays
+    }
+}
+
+/// The root's relay handlers: an invocation's fetch-on-miss and program API
+/// call go to the `Invoke`'s sender, and each answer returns to the
+/// invocation that asked, keyed by the root's own request (ADR-0240 D6).
+fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
+    quote! {
         #[handler::manual]
         fn on_read_artifact(
             &mut self,
@@ -174,6 +192,50 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
             };
             ctx.send_to(invocation, &result);
         }
+
+        #[handler::manual]
+        fn on_api_call(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            request: #program::kinds::ApiCall,
+        ) {
+            use ::aether_actor::{MailSender, OutboundReply};
+            let Some(sender) = ctx.sender() else {
+                return;
+            };
+            let Some(invoker) = self.programs.invokers.get(&sender).copied() else {
+                let refused = #program::kinds::ApiCallResult::Refused {
+                    call: request.call,
+                    refusal: #program::Refusal::Refused {
+                        reason: #program::kinds::Detail::new("no live invocation sent this call"),
+                    },
+                };
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&refused);
+                } else {
+                    ctx.send_to(sender, &refused);
+                }
+                return;
+            };
+            ctx.send_to(invoker, &request);
+            let call = #program::__macro_internals::RequestId(ctx.prev_correlation());
+            self.programs.calls.insert(call, sender);
+        }
+
+        #[handler::manual]
+        fn on_api_call_result(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            result: #program::kinds::ApiCallResult,
+        ) {
+            let Some(call) = ctx.in_reply_to() else {
+                return;
+            };
+            let Some(invocation) = self.programs.calls.remove(&call) else {
+                return;
+            };
+            ctx.send_to(invocation, &result);
+        }
     }
 }
 
@@ -192,45 +254,26 @@ fn expand_table(table: &Ident, programs: &[ProgramEntry], program: &TokenStream2
     }
 }
 
-fn expand_invocation(
-    root: &Ident,
-    invocation: &Ident,
-    table: &Ident,
-    program: &TokenStream2,
-    programs: &[ProgramEntry],
-) -> TokenStream2 {
+fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &TokenStream2) -> TokenStream2 {
     let namespace = format!("{BUNDLE_NAMESPACE}.invocation");
-    let mut names: Vec<&Ident> = Vec::new();
-    for name in programs.iter().flat_map(|entry| entry.meta.apis.iter()) {
-        if !names.contains(&name) {
-            names.push(name);
-        }
-    }
-    let targets: Vec<TokenStream2> =
-        names.iter().map(|name| quote! { #program::__macro_internals::api_target::#name }).collect();
-    let depends = if targets.is_empty() {
-        quote! {}
-    } else {
-        quote! { , depends(#(#targets),*) }
-    };
-    let resume = resume_after_poll(program);
-    let send_pending = expand_send_pending(program, &targets);
+    let send_pending = expand_send_pending(program);
     let fetch_reply = expand_fetch_reply(program);
+    let api_reply = expand_api_reply(program);
     quote! {
         struct #invocation {
             session: ::core::option::Option<#program::AsyncSession>,
             parent: ::core::option::Option<::aether_actor::ErasedActorRef>,
-            waiting: #program::__macro_internals::BTreeMap<
-                #program::__macro_internals::RequestId,
-                #program::__macro_internals::PendingCall,
-            >,
+            /// Each relayed API call awaiting its answer, keyed by the call
+            /// id this invocation minted.
+            waiting: #program::__macro_internals::BTreeMap<u64, #program::__macro_internals::PendingCall>,
+            next_call: u64,
             fetching: #program::__macro_internals::BTreeMap<
                 #program::kinds::Digest,
                 #program::__macro_internals::PendingArtifact,
             >,
         }
 
-        #[::aether_actor::actor(instanced, child_of(#root) #depends)]
+        #[::aether_actor::actor(instanced, child_of(#root))]
         impl ::aether_actor::WasmActor for #invocation {
             const NAMESPACE: &'static str = #namespace;
 
@@ -241,6 +284,7 @@ fn expand_invocation(
                     session: ::core::option::Option::None,
                     parent: ::core::option::Option::None,
                     waiting: #program::__macro_internals::BTreeMap::new(),
+                    next_call: 0,
                     fetching: #program::__macro_internals::BTreeMap::new(),
                 })
             }
@@ -267,24 +311,7 @@ fn expand_invocation(
 
             #fetch_reply
 
-            #[fallback]
-            fn on_mail(&mut self, ctx: &mut ::aether_actor::WasmCtx<'_>, mail: ::aether_actor::Mail<'_>) {
-                let Some(request) = ctx.in_reply_to() else {
-                    return;
-                };
-                let Some(pending) = self.waiting.remove(&request) else {
-                    return;
-                };
-                if mail.kind() != pending.expected_reply {
-                    self.waiting.insert(request, pending);
-                    return;
-                }
-                let Some(session) = self.session.as_mut() else {
-                    return;
-                };
-                session.fulfill_send(&pending, mail.kind(), mail.bytes().to_vec());
-                #resume
-            }
+            #api_reply
         }
 
         impl #invocation {
@@ -336,6 +363,40 @@ fn expand_fetch_reply(program: &TokenStream2) -> TokenStream2 {
     }
 }
 
+/// The invocation's handler for its root's relay of an API call's answer.
+fn expand_api_reply(program: &TokenStream2) -> TokenStream2 {
+    let resume = resume_after_poll(program);
+    quote! {
+        /// The root's relay of the driver's answer to one of this
+        /// invocation's API calls. Like a fetch answer it arrives as a
+        /// cluster-local send from the parent, so the wait is keyed by the
+        /// call id the invocation minted.
+        #[handler::single]
+        fn on_api_call_result(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_>,
+            result: #program::kinds::ApiCallResult,
+        ) {
+            if self.parent.is_none() || ctx.sender() != self.parent {
+                return;
+            }
+            let Some(pending) = self.waiting.remove(&result.call()) else {
+                return;
+            };
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            match result {
+                #program::kinds::ApiCallResult::Replied { kind, payload, .. } => {
+                    session.fulfill_send(&pending, kind, payload);
+                }
+                #program::kinds::ApiCallResult::Refused { refusal, .. } => session.reject_send(refusal),
+            }
+            #resume
+        }
+    }
+}
+
 fn resume_after_poll(program: &TokenStream2) -> TokenStream2 {
     quote! {
         match session.poll() {
@@ -356,11 +417,10 @@ fn resume_after_poll(program: &TokenStream2) -> TokenStream2 {
     }
 }
 
-/// The invocation's pump for one pending wait. A captured call is sent only
-/// through a proof minted from the invocation's declared dependency on the
-/// call's target, one arm per declared target; a call to any other mailbox is
-/// refused.
-fn expand_send_pending(program: &TokenStream2, targets: &[TokenStream2]) -> TokenStream2 {
+/// The invocation's pump for one pending wait. A fetch and a captured API call
+/// both go to the parent root, which relays them to the driver; the
+/// invocation declares no dependency and sends to nothing else.
+fn expand_send_pending(program: &TokenStream2) -> TokenStream2 {
     let resume = resume_after_poll(program);
     quote! {
         fn send_pending<M: ::aether_actor::ReplyMode>(
@@ -387,25 +447,21 @@ fn expand_send_pending(program: &TokenStream2, targets: &[TokenStream2]) -> Toke
                     self.fetching.insert(pending.digest, pending);
                 }
                 #program::__macro_internals::Pending::Send(pending) => {
-                    let target = #(
-                        if pending.mailbox == <#targets as ::aether_actor::Addressable>::NAMESPACE {
-                            ::core::option::Option::Some(ctx.actor_ref::<#targets>().erase())
-                        } else
-                    )* {
-                        ::core::option::Option::None
-                    };
-                    let ::core::option::Option::Some(target) = target else {
+                    let Some(parent) = self.parent else {
                         if let Some(session) = self.session.as_mut() {
                             session.reject_send(#program::Refusal::Refused {
-                                reason: #program::kinds::Detail::new("mailbox is not in the program allowlist"),
+                                reason: #program::kinds::Detail::new(
+                                    "the invocation has no parent to relay its call through",
+                                ),
                             });
                             #resume
                         }
                         return;
                     };
-                    pending.dispatch(ctx, target);
-                    let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
-                    self.waiting.insert(request, pending);
+                    let call = self.next_call;
+                    self.next_call = call.wrapping_add(1);
+                    ctx.send_to(parent, &pending.api_call(call));
+                    self.waiting.insert(call, pending);
                 }
             }
         }
@@ -425,6 +481,7 @@ fn expand_section(entry: &ProgramEntry, program: &TokenStream2) -> TokenStream2 
     } else {
         quote! { #program::__macro_internals::MODE_PURE }
     };
+    let apis = &entry.meta.apis;
     quote! {
         const #len_ident: usize = #program::__macro_internals::program_record_len(
             #name.as_bytes(),
@@ -435,6 +492,7 @@ fn expand_section(entry: &ProgramEntry, program: &TokenStream2) -> TokenStream2 
             <<#ty as #program::Program>::Input as #program::__macro_internals::Kind>::ID.0,
             <<#ty as #program::Program>::Result as #program::__macro_internals::Kind>::ID.0,
             #mode,
+            #program::__macro_internals::api_mask(&[#(#program::kinds::ProgramApi::#apis),*]),
             #intent.as_bytes(),
         );
         const _: &[u8] = &#bytes_ident;

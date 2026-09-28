@@ -4,8 +4,8 @@ use std::cell::Cell;
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Detail, Digest, EncodedArtifact, ExecutorFault, Invoke, Invoked, Mode, OpaqueBytes, ProgramName,
-    ReadArtifactResult, Ref, Refusal, Tree, Utf8Text, artifact_digest,
+    ClosureArtifact, Detail, Digest, EncodedArtifact, ExecutorFault, Invoke, Invoked, Mode, OpaqueBytes, ProgramApi,
+    ProgramName, ReadArtifactResult, Ref, Refusal, Tree, Utf8Text, artifact_digest,
 };
 use aether_bloomery_program::{
     Async, AsyncProgram, AsyncSession, Env, Http, InjectedApi, Pending, PendingCall, PollResult, Process, Program,
@@ -439,7 +439,7 @@ fn sampled_http_fetch_yields_need_send_then_completes() -> Result<(), Box<dyn Er
             let Pending::Send(pending) = waiting.expect("first poll records one cap send") else {
                 panic!("expected NeedSend to aether.http");
             };
-            assert_eq!(pending.mailbox, "aether.http");
+            assert_eq!(pending.api, ProgramApi::Http);
             assert_eq!(pending.kind_id, Fetch::ID);
             assert_eq!(pending.expected_reply, FetchResult::ID);
             let reply = FetchResult::Ok {
@@ -515,7 +515,7 @@ fn sampled_process_run_yields_need_send_then_completes() -> Result<(), Box<dyn E
             let Pending::Send(pending) = waiting.expect("first poll records one cap send") else {
                 panic!("expected NeedSend to aether.process");
             };
-            assert_eq!(pending.mailbox, "aether.process");
+            assert_eq!(pending.api, ProgramApi::Process);
             assert_eq!(pending.kind_id, Run::ID);
             assert_eq!(pending.expected_reply, RunResult::ID);
             let reply = RunResult::Ok { exit_code: Some(0), stdout: b"hello".to_vec(), stderr: Vec::new() };
@@ -647,7 +647,7 @@ fn a_workspace_run_targets_the_workspace_and_hands_the_program_its_outcome_or_re
     // reach the program, and a workspace refusal that ends the invocation
     // instead of reaching the program as `Ok(Err(..))`.
     let (_, pending) = start_workspace()?;
-    assert_eq!(pending.mailbox, "aether.bloomery.workspace");
+    assert_eq!(pending.api, ProgramApi::Workspace);
     assert_eq!(pending.kind_id, aether_bloomery_workspace::Run::ID);
     assert_eq!(pending.expected_reply, aether_bloomery_workspace::RunResult::ID);
 

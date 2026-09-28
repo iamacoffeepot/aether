@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-21
-- **Amended:** 2026-09-24 — program APIs are the closed, sealed set `Http` / `Process`, which `#[program]` maps by name to concrete target capabilities through an SDK table; the generated invocation declares those targets as `depends(..)` and sends a captured call through a proof minted from that declaration, and the host checks the declaration when the bundle loads (#6594).
+- **Amended:** 2026-09-24 — program APIs are the closed, sealed set `Http` / `Process`, which `#[program]` maps by name to concrete target capabilities through an SDK table; the generated invocation relays a captured call through its bundle root to the driver that invoked it, which maps the API to a provider it holds, and the driver refuses a program whose API has no provider before it runs (#6594).
 - **Amended:** 2026-09-24 — the closed set gains `Workspace`, the program-side binding of the `aether.workspace` run contract, required beside `Mode::Sampled` ([ADR-0237](0237-workspaces-run-steps-over-trees.md)).
 
 Amends [ADR-0228](0228-async-programs-await-sanctioned-mail.md) (async
@@ -48,22 +48,22 @@ without editing the invocation child.
 
 2. **The allowlist is those actors.** `#[program]` does not match the
    name `Http`. Each trailing parameter is `InjectedApi`; the target is
-   `A: Addressable` (`A::NAMESPACE`). The generated invocation child
-   (`crates/aether-bloomery-bundle-derive/src/expand/programs.rs`) may
-   send only to those mailboxes plus the journal read `Env<Async>`
-   already uses. A pending mailbox outside that set is refused.
+   `A: Addressable`, whose reply contract types the binding's calls. The
+   generated invocation child
+   (`crates/aether-bloomery-bundle-derive/src/expand/programs.rs`) sends to
+   no target of its own: it sends only to its bundle root, which relays
+   both the journal read `Env<Async>` already uses and each API call. The
+   driver maps each API to a provider it holds and refuses any other.
 
    *(Amended 2026-09-24: `#[program]` matches the name. It maps `Http` and
    `Process` to their target capabilities through the SDK table
    `__macro_internals::api_target`, and emits a check at the program's
    parameter that the type's `InjectedApi::Target` is the table's type, so
    `use aether_bloomery_program::Http as Process;` does not compile. The
-   export descriptor carries the canonical names, and the bundle generator
-   resolves each through the same table. The reason is coherence: a
-   `DependsOn<<Api as InjectedApi>::Target>` impl per API fails with E0119
-   as soon as a bundle uses two distinct APIs, because a projection through
-   a foreign trait on foreign types is not normalized before the overlap
-   check, while a type alias is expanded first.)*
+   table names the provider the driver maps each API to; the invocation
+   sends to none of them. The export descriptor carries the canonical
+   names, and the bundle generator writes each into the program's section
+   record.)*
 
 3. **Generic `call`, Http is sugar.** `Binding<A: Addressable>` shares
    the `EnvOwner` pointer with `Env<Async>`. `Binding<A>::call<K>(mail)`
@@ -79,28 +79,25 @@ without editing the invocation child.
    table.)*
 
 4. **Captured pending send.** `PollResult::NeedSend` carries
-   `PendingCall { mailbox, kind_id, expected_reply }` plus the request
-   `K`. Journal `read` stays `PendingArtifact` / `NeedArtifact`. The
-   child allowlists `pending.mailbox` then `pending.dispatch(&mut
-   ctx.sends())`, which calls `MailSender::send_to_named` with the
-   captured `K`. The pump is still one child and one `PollResult` (the
-   capture is the erasure, not encoded bytes). `#[fallback]` keeps
-   ADR-0228's three checks (`in_reply_to`, pending map, `mail.kind() ==
-   expected`) and resumes on the reply kind. It does not match `Fetch`
-   by name.
+   `PendingCall { api, kind_id, expected_reply }` plus the request `K`,
+   encoded once at capture, where `A: Replies<K>` typed it. Journal `read`
+   stays `PendingArtifact` / `NeedArtifact`. The pump is still one child
+   and one `PollResult`. The invocation declares no dependency: it sends
+   `pending.api_call(call)`, an `ApiCall`, to its bundle root, which
+   relays it to the `Invoke`'s sender, the driver, as it relays a
+   fetch-on-miss ([ADR-0240](0240-several-bloomery-journal-units-per-engine.md)
+   D6). The driver maps the API to a provider it holds, sends it the
+   decoded request, and relays the reply back as an `ApiCallResult`; an API
+   it holds no provider for is answered `Refusal::Refused`. The invocation
+   matches the answer by the call id it minted, checks the reply kind
+   against `expected`, and resumes. It does not match `Fetch` by name.
 
-   *(Amended 2026-09-24: the generated invocation declares
-   `depends(..)` on each distinct target its bundle's programs name. For a
-   pending call it matches `pending.mailbox` against each declared target's
-   namespace, mints `ctx.actor_ref::<Target>().erase()` for the one that
-   matches, and `pending.dispatch(ctx, target)` sends the captured `K`
-   through `send_to` with that proof, the held-reference send of
-   [ADR-0232](0232-flat-ctx-send-verbs.md) §1–§2. A mailbox no declared
-   target matches is refused as before. The invocation is a private inline child, and the
-   host checks private children's dependency declarations when the module
-   loads, so a bundle whose programs name an API the engine does not
-   compose is refused at load, and the driver records the refused load as
-   a `BundleUnavailable` fault.)*
+   *(Amended 2026-09-24: each program's record in the
+   `aether.bloomery.programs` section lists the APIs its `run` binds. The
+   driver reads that record before any load, so a program that binds an
+   API with no provider in its unit faults `BundleUnavailable` before the
+   run, and a bundle whose programs name an API the engine does not
+   compose never runs one.)*
 
 5. **Sampled pairing.** `Mode::Sampled` is required when any trailing
    target is Sampled (`Http` is). Pure + `Http` / `Binding<HttpCapability>`
@@ -119,8 +116,8 @@ without editing the invocation child.
 - ADR-0228's deferred HTTP / `Caps` parameter become trailing `Binding<A>`
   plus an actor allowlist derived from the signature. *(Amended
   2026-09-24: they become trailing `Http` / `Process` bindings, and the
-  allowlist is the invocation's `depends(..)` declaration on their target
-  capabilities.)*
+  allowlist is the set of APIs the driver maps to a provider it holds,
+  checked against each program's section record before the run.)*
 - Generic unscoped `env.request` stays rejected; the signature names
   allowed `A`.
 - Host outbound allowlisting for invocation children (ADR-0228 decision 8)
