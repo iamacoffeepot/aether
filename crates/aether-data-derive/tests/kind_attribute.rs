@@ -74,12 +74,17 @@ pub enum Outcome {
 /// or variant. A kind holding an engine-reach leaf sends as `ActorMail` and
 /// is refused as `WireMail`: catches the `CrossesWire` fold or its supertrait
 /// going wrong.
+///
+/// A `Held` hidden behind a type alias keeps `Clone` in the stack and fails
+/// at the field: catches a detector that guesses through aliases instead of
+/// letting the missing `Held: Clone` impl refuse the kind.
 #[test]
 fn ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/rejects_engine_only_send.rs");
     t.compile_fail("tests/ui/rejects_actor_reach_send.rs");
     t.compile_fail("tests/ui/rejects_engine_reach_on_wire.rs");
+    t.compile_fail("tests/ui/rejects_aliased_held.rs");
 }
 
 /// Tripwire: `pod` must keep the cast wire shape, and the base stack

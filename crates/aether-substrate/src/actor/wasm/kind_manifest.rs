@@ -593,6 +593,7 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>, depth: usize) ->
         SchemaShape::String => SchemaType::String,
         SchemaShape::Bytes => SchemaType::Bytes,
         SchemaShape::Blob => SchemaType::Blob,
+        SchemaShape::Ticket { reply } => SchemaType::Ticket { reply: *reply },
         SchemaShape::Option(inner) => {
             let inner_label = match label {
                 Some(LabelNode::Option(cell)) => Some(&**cell),
@@ -731,6 +732,7 @@ fn merge_variant(
 )]
 mod tests {
     use super::*;
+    use aether_data::canonical::{canonical_len_kind, canonical_serialize_kind};
     use aether_data::{
         KINDS_SECTION_VERSION, LABELS_SECTION_VERSION, LabelCell, LabelNode, Primitive, SchemaShape, VariantShape,
     };
@@ -912,6 +914,30 @@ mod tests {
         };
         // Labels missing → anonymous field name (empty string).
         assert_eq!(fields[0].name, "");
+    }
+
+    // Catches a selector mismatch between the const canonical writer and the
+    // `SchemaShape` decode: the host would then refuse to load any guest whose
+    // request context holds a `Held` field, or merge it with another reply.
+    #[test]
+    fn ticket_field_merges_with_its_reply_kind() {
+        static CONTEXT: SchemaType = SchemaType::Struct {
+            fields: Cow::Borrowed(&[NamedField {
+                name: Cow::Borrowed("debt"),
+                ty: SchemaType::Ticket { reply: aether_data::KindId(0x0102_0304_0506_0708) },
+            }]),
+            repr_c: false,
+        };
+        const N: usize = canonical_len_kind("t.context", &CONTEXT);
+        const BYTES: [u8; N] = canonical_serialize_kind::<N>("t.context", &CONTEXT);
+
+        let mut canonical = vec![KINDS_SECTION_VERSION];
+        canonical.extend_from_slice(&BYTES);
+        let descs = read_from_bytes(&wasm_with_section(MANIFEST_SECTION, &canonical)).unwrap();
+        let SchemaType::Struct { fields, .. } = &descs[0].schema else {
+            panic!("expected Struct");
+        };
+        assert_eq!(fields[0].ty, SchemaType::Ticket { reply: aether_data::KindId(0x0102_0304_0506_0708) });
     }
 
     #[test]
