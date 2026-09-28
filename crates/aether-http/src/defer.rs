@@ -102,12 +102,3 @@ pub fn answer_deferred<A>(ctx: &mut NativeCtx<'_, A, Manual>, response: &HttpSer
         ctx.reply_to(deferred.source, response);
     }
 }
-
-/// Answer a deferred route's request inline — the synchronous arm of
-/// [`Outcome`] (`Outcome::Reply`), for a route that decides its answer without
-/// forwarding (e.g. a validation `400`). Replies to the current inbound.
-/// Public for the macro-generated `#[http::route]` glue only.
-#[doc(hidden)]
-pub fn answer_now<A>(ctx: &mut NativeCtx<'_, A, Manual>, response: &HttpServerResponse) {
-    ctx.reply(response);
-}

@@ -259,9 +259,9 @@ const MAX_CHUNK_TRAILERS: usize = MAX_HEADER_COUNT;
 /// [`HttpRequestStreamOpen`] — the same structural opt-in the
 /// dispatcher used to read.
 enum ReaderResolution {
-    /// A live handler: the dispatch target, its dispatch kind, and
-    /// whether it takes the streamed body path.
-    Live { handler: ErasedActorRef, kind: KindId, streaming: bool },
+    /// A live handler: the dispatch target and whether it takes the
+    /// streamed body path.
+    Live { handler: ProtocolRef<HttpRouter>, streaming: bool },
     /// A route matched but no member of its set is live — `503`, never
     /// silently rerouted (that would reroute a claimed family).
     Dead,
@@ -280,8 +280,8 @@ fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, meth
                 let mut live = None;
                 for offset in 0..len {
                     let member = route.members[(start + offset) % len];
-                    if shared.probe.is_live(member) {
-                        live = Some((member, route.kind));
+                    if shared.probe.is_live(member.erase()) {
+                        live = Some(member);
                         break;
                     }
                 }
@@ -293,14 +293,10 @@ fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, meth
             None => None,
         }
     };
-    match picked {
-        Some((handler, kind)) => ReaderResolution::Live {
-            handler,
-            kind,
-            streaming: shared.probe.accepts(handler, <HttpRequestStreamOpen as Kind>::ID),
-        },
-        None => ReaderResolution::NoHandler,
-    }
+    picked.map_or(ReaderResolution::NoHandler, |handler| ReaderResolution::Live {
+        handler,
+        streaming: shared.probe.accepts(handler.erase(), <HttpRequestStreamOpen as Kind>::ID),
+    })
 }
 
 /// Re-arm the socket read timeout to `want` if it differs from `current`,
@@ -456,8 +452,8 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
             return;
         };
         let resolution = resolve_at_reader(shared, &mut route_cursor, &head.path, method);
-        let (handler, dispatch_kind, streaming) = match resolution {
-            ReaderResolution::Live { handler, kind, streaming } => (handler, kind, streaming),
+        let (handler, streaming) = match resolution {
+            ReaderResolution::Live { handler, streaming } => (handler, streaming),
             ReaderResolution::Dead => {
                 reject_and_close(&mut stream, sink, conn_id, 503, "routed handler gone");
                 return;
@@ -547,7 +543,7 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
                 framing: head.framing,
                 keep_alive,
             };
-            if !sink.post(InboundEvent::RequestHeadParsed { conn_id, head: parsed_head, handler }) {
+            if !sink.post(InboundEvent::RequestHeadParsed { conn_id, head: parsed_head, handler: handler.erase() }) {
                 return;
             }
             // A timeout means the shard never answered (wedged / torn
@@ -580,20 +576,18 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
         } else {
             match read_buffered_body(&mut stream, conn_id, shutdown, sink, &head, &buf, max_request_bytes) {
                 Some((body, next_buf)) => {
-                    let payload = HttpServerRequest {
+                    let payload = Encoded::new(&HttpServerRequest {
                         method,
                         path: head.path,
                         query: head.query,
                         headers: head.headers,
                         body,
                         peer_addr: shared.peer.clone(),
-                    }
-                    .encode_into_bytes();
+                    });
                     if !sink.post(InboundEvent::RequestParsed(PreparedRequest {
                         conn_id,
                         payload,
                         handler,
-                        kind: dispatch_kind,
                         method,
                         keep_alive,
                         ws_key,

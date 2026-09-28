@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-03
+- **Amended:** 2026-09-28 (#6935) — `#[http::router]` mints no route kinds. It emits one `#[handler::manual]` over `HttpServerRequest` per router, the row of the `HttpRouter` protocol every route holder covers (ADR-0130), and its `wire` registrations are `RegisterRouteSelf { prefix, method, shared }` with no kind. The handler picks its route group by the server's own rule (`route_rank`: the longest matching claim, method-specific over method-agnostic at equal length), then tries that group's templates, and answers every route, bind failure, and `404` through its reply obligation. A router's `describe_component` entry and `actor_cost` row are therefore per router, not per route.
 
 Realizes the guest-side typed-routing layer **ADR-0130** decided and scoped as its follow-on arc. Builds on **ADR-0033** / **ADR-0123** (the `#[actor]` dispatch macro and its impl-hosted / struct-hosted forms), **ADR-0121** (capabilities own their kinds), and the shared `Lifecycle<S>` hook of iamacoffeepot/aether#2048.
 

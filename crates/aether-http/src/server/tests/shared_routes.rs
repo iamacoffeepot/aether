@@ -20,7 +20,7 @@ use super::support::{body_of, boot_single_shard_fixed_body, port_of, round_trip}
 /// A bare `#[http::router]` impl still registers exclusive (issue 2625
 /// regression guard on the default): two instances of the same compiled
 /// actor claim `/macro-excl` through the typed macro surface with no
-/// `shared` argument. Because they share the same macro-minted kind, an
+/// `shared` argument. Both run the same macro-emitted registration, so an
 /// accidental `shared: true` default would let both instances serve; the
 /// exclusive default keeps the route owned by exactly one instance.
 #[test]
@@ -71,8 +71,7 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
     // Two named instances of the exact same `SharedMacroPoolHandler` type
     // (the accurate replica analog, per the type's own doc comment): each
     // instance's `wire` runs the identical macro-emitted `shared: true`
-    // registration, so both carry the same minted `Kind::ID` and can join
-    // one member set.
+    // registration, so both join one member set.
     chassis
         .spawn_actor::<SharedMacroPoolHandler>(Subname::Named("alpha"), b"macro-alpha", ())
         .finish()

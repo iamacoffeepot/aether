@@ -2,8 +2,7 @@
 //! prefix `shared: true` and so join a round-robin member set, plus the bare
 //! (exclusive-by-default) router the negative case pins.
 
-use aether_actor::actor;
-use aether_data::Kind;
+use aether_actor::{Manual, OutboundReply, actor};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
@@ -12,11 +11,10 @@ use crate::kinds::{HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
 use crate::server::HttpServerCapability;
 
 /// A routed handler whose `wire` registers each claim `shared: true`
-/// with the given dispatch kind (ADR-0136) — the member-set opt-in
-/// the shared-route tests exercise. Replies `200` with a fixed tag
-/// body.
+/// (ADR-0136) — the member-set opt-in the shared-route tests exercise.
+/// Replies `200` with a fixed tag body.
 macro_rules! shared_routed_handler {
-    ($ty:ident, $state:ident, $namespace:literal, $tag:literal, $kind:ty,
+    ($ty:ident, $state:ident, $namespace:literal, $tag:literal,
      [$(($method:expr, $prefix:literal)),+ $(,)?]) => {
         pub struct $ty;
         pub struct $state;
@@ -35,22 +33,21 @@ macro_rules! shared_routed_handler {
                 $(ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
                     prefix: $prefix.to_string(),
                     method: $method,
-                    kind: <$kind as Kind>::ID,
                     shared: true,
                 });)+
             }
 
-            #[handler::single]
+            #[handler::manual]
             fn on_request(
                 _state: &mut Self::State,
-                _ctx: &mut NativeCtx<'_>,
+                ctx: &mut NativeCtx<'_, Self, Manual>,
                 _request: HttpServerRequest,
-            ) -> HttpServerResponse {
-                HttpServerResponse {
+            ) {
+                ctx.reply(&HttpServerResponse {
                     status: 200,
                     headers: Vec::new(),
                     body: $tag.to_vec(),
-                }
+                });
             }
         }
     };
@@ -66,7 +63,6 @@ shared_routed_handler!(
     SharedAlphaHandlerState,
     "aether.http.test_route_shared_alpha",
     b"alpha",
-    HttpServerRequest,
     [(None, "/pool")]
 );
 shared_routed_handler!(
@@ -74,7 +70,6 @@ shared_routed_handler!(
     SharedBetaHandlerState,
     "aether.http.test_route_shared_beta",
     b"beta",
-    HttpServerRequest,
     [(None, "/pool")]
 );
 
@@ -86,11 +81,8 @@ shared_routed_handler!(
 /// exact compiled type under `/macro-pool` — the accurate analog of
 /// loading one wasm component `replicas: 2` times (#2626): both
 /// instances' `wire` runs the identical macro-emitted registration send,
-/// so they carry the same minted `Kind::ID` (derived from the compiled
-/// `NAMESPACE` + method name, not the runtime instance name) and can
-/// actually join one member set — two *different* actor types can't,
-/// since each mints its own kind. `Config` is each instance's reply
-/// tag, so the test can tell which instance served a request.
+/// so both join one member set. `Config` is each instance's reply tag, so
+/// the test can tell which instance served a request.
 pub struct SharedMacroPoolHandler;
 pub struct SharedMacroPoolHandlerState {
     tag: &'static [u8],
@@ -131,7 +123,7 @@ impl NativeActor for SharedMacroPoolHandler {
 
 /// A bare `#[http::router]` instanced handler (issue 2827): two
 /// runtime instances of this one compiled actor type claim
-/// `/macro-excl` with the same macro-minted kind. With today's
+/// `/macro-excl` through the same macro-emitted registration. With today's
 /// default (`shared: false`), only one instance can own the route;
 /// if bare routers accidentally default to `shared: true`, both
 /// instances can join and both configured tags become observable.

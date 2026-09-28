@@ -13,6 +13,8 @@
 
 use core::ops::{Deref, DerefMut};
 
+use aether_actor::OutboundReply;
+
 use super::kinds::{HttpMethod, HttpServerRequest, HttpServerResponse};
 
 /// Parse a value out of an inbound [`HttpServerRequest`]. The `Ok` value
@@ -99,6 +101,33 @@ macro_rules! from_path_segment_via_fromstr {
 
 from_path_segment_via_fromstr!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
 
+/// Segment-boundary prefix match (ADR-0130): `/api` matches `/api` and
+/// `/api/…`, never `/apiary`; `/` is the catch-all. Prefixes are
+/// normalized at registration, so no trailing slash reaches this check.
+#[must_use]
+pub fn route_matches(prefix: &str, path: &str) -> bool {
+    if prefix == "/" {
+        return true;
+    }
+    path.strip_prefix(prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// How well the route key `(prefix, filter)` fits a `method` request to
+/// `path` (ADR-0130), or `None` when it does not match: the key's `filter`
+/// must pass `method` and its `prefix` must [`route_matches`] `path`. Among
+/// matching keys the greatest rank wins, the longest prefix first and a
+/// method-specific key over a method-agnostic one at equal prefix.
+///
+/// The server's route table picks the route a request dispatches to by this
+/// rank, and a `#[http::router]` actor's generated handler picks its route
+/// group by it, so the router answers from the group whose key the server
+/// chose.
+#[must_use]
+pub fn route_rank(prefix: &str, filter: Option<HttpMethod>, path: &str, method: HttpMethod) -> Option<(usize, bool)> {
+    (filter.is_none_or(|filter| filter == method) && route_matches(prefix, path))
+        .then_some((prefix.len(), filter.is_some()))
+}
+
 /// The route a glue handler serves — compile-time constants the
 /// `#[http::route]` macro stamps in, surfaced through [`Ctx::route`].
 /// `prefix` is the claimed path prefix; `method` is the method filter
@@ -180,4 +209,15 @@ pub enum Outcome {
     /// The request was forwarded to a recipient by `ctx.defer(&request).to::<R>()`;
     /// a later `#[http::reply]` route answers when the peer replies.
     Deferred,
+}
+
+/// Answer the request a `#[http::router]` handler is serving with
+/// `response`, through the handler's reply obligation (ADR-0231 §6): a
+/// synchronous route's return, an [`Outcome::Reply`], a bind failure's `400`,
+/// and the no-match `404` all reply here. The router's handler is manual on
+/// both transports, so this takes any manual ctx. Public for the
+/// macro-generated glue only.
+#[doc(hidden)]
+pub fn answer_now<C: OutboundReply>(ctx: &mut C, response: &HttpServerResponse) {
+    ctx.reply(response);
 }

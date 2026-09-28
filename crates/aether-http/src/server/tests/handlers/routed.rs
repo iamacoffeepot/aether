@@ -4,7 +4,6 @@
 //! macro-authored precedence handlers the routing tests drive.
 
 use aether_actor::{Manual, actor};
-use aether_data::Kind;
 use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
@@ -13,11 +12,10 @@ use crate::kinds::{HttpServerRequest, HttpServerResponse, RegisterRouteSelf, Unr
 use crate::server::HttpServerCapability;
 
 /// Claims `/api` through the typed authoring surface (`#[http::router]`
-/// / `#[http::route]`, ADR-0131): the macro mints the route's
-/// request-shaped kind, injects its `wire` registration, and decodes
-/// the dispatched payload under the minted kind. The handler echoes
-/// the decoded path, proving the payload round-tripped as the minted
-/// kind (not merely that dispatch picked the right mailbox).
+/// / `#[http::route]`, ADR-0131): the macro emits the router's manual
+/// `HttpServerRequest` handler and injects its `wire` registration. The
+/// handler echoes the decoded path, proving the payload round-tripped as a
+/// request (not merely that dispatch picked the right mailbox).
 pub struct ApiRouteHandler;
 pub struct ApiRouteHandlerState;
 
@@ -119,10 +117,11 @@ impl NativeActor for TmpRouteHandler {
 }
 
 /// A macro route alongside a hand-written `wire`: the macro appends
-/// its `/wired` registration to the author's `wire` (which
-/// independently claims `/wired-extra` on the raw surface for a
-/// generic-kind `#[handler]`), so both routes dispatch and the
-/// hand-written registration survives the append.
+/// its `/wired` registration to the author's `wire`, which independently
+/// claims `/wired-extra` on the raw surface. The router's one request
+/// handler serves both claims and has no route for `/wired-extra`, so that
+/// path answers the router's `404`: the author's registration survived the
+/// append.
 pub struct WiredRouteHandler;
 pub struct WiredRouteHandlerState;
 
@@ -141,15 +140,8 @@ impl NativeActor for WiredRouteHandler {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/wired-extra".to_string(),
             method: None,
-            kind: <HttpServerRequest as Kind>::ID,
             shared: false,
         });
-    }
-
-    /// Generic-kind dispatch for the hand-registered `/wired-extra`.
-    #[handler::single]
-    fn on_extra(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpServerResponse {
-        HttpServerResponse { status: 200, headers: Vec::new(), body: b"wired-raw".to_vec() }
     }
 
     /// The macro route whose registration is appended to `wire`.
@@ -300,6 +292,17 @@ impl NativeActor for DeferRouteHandler {
         ctx.defer(&EchoAsk { text: "hi".to_string() }).to::<EchoPeer>()
     }
 
+    /// `GET /echo/{word}` — a synchronous route on the deferred `/echo`
+    /// routes' claim, so the router's one handler answers both kinds of arm.
+    #[http::route(Get, "/echo/{word}")]
+    fn echo_now(
+        _state: &mut DeferRouteHandlerState,
+        _ctx: http::Ctx<'_, NativeCtx<'_>>,
+        word: http::Path<String>,
+    ) -> HttpServerResponse {
+        HttpServerResponse { status: 200, headers: Vec::new(), body: format!("now:{}", word.0).into_bytes() }
+    }
+
     /// `GET /blackhole` — forward to the silent peer; it settles without a
     /// reply, so the server's own `502` net answers.
     #[http::route(Get, "/blackhole")]
@@ -344,6 +347,43 @@ impl NativeActor for DeferRouteHandler {
         _reply: GatedOutReply,
     ) -> HttpServerResponse {
         HttpServerResponse { status: 200, headers: Vec::new(), body: Vec::new() }
+    }
+}
+
+/// Two route groups where one static head extends the other: `/a/{x}/{y}`
+/// claims `/a`, and `/a/b` claims `/a/b`. The server sends `/a/b/c` to the
+/// `/a/b` key, the longer prefix, so the router must answer it from the
+/// `/a/b` group, which has no three-segment template, rather than from the
+/// looser `/a` template that would also match it.
+pub struct NestedRouteHandler;
+pub struct NestedRouteHandlerState;
+
+#[http::router]
+#[actor(singleton, root, depends(HttpServerCapability))]
+impl NativeActor for NestedRouteHandler {
+    type State = NestedRouteHandlerState;
+    type Config = ();
+    const NAMESPACE: &'static str = "aether.http.test_route_nested";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<NestedRouteHandlerState, BootError> {
+        Ok(NestedRouteHandlerState)
+    }
+
+    /// `GET /a/{x}/{y}` — the `/a` group's one template.
+    #[http::route(Get, "/a/{x}/{y}")]
+    fn pair(
+        _state: &mut NestedRouteHandlerState,
+        _ctx: http::Ctx<'_, NativeCtx<'_>>,
+        x: http::Path<String>,
+        y: http::Path<String>,
+    ) -> HttpServerResponse {
+        HttpServerResponse { status: 200, headers: Vec::new(), body: format!("a:{}:{}", x.0, y.0).into_bytes() }
+    }
+
+    /// `GET /a/b` — the `/a/b` group's one template.
+    #[http::route(Get, "/a/b")]
+    fn b(_state: &mut NestedRouteHandlerState, _ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
+        HttpServerResponse { status: 200, headers: Vec::new(), body: b"a/b".to_vec() }
     }
 }
 

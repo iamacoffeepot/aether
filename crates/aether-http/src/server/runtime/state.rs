@@ -475,17 +475,15 @@ impl HttpSupervisorState {
         }
     }
 
-    /// Claim `(prefix, method)` for `holder`, dispatching as `kind`
-    /// (ADR-0130), or join its shared member set (ADR-0136). Exclusive
-    /// (`shared: false`): a key held by anyone else is answered `Err`;
-    /// the same sole holder re-claiming its own key is an idempotent
-    /// `Ok` that updates `kind` — so a component re-running `wire`
-    /// after `replace_component` re-registers cleanly (its reference
-    /// is stable). Shared (`shared: true`): joins the key's member set
-    /// when the set is shared and the `kind` matches; re-registering an
-    /// existing membership is an idempotent `Ok`. Mixing exclusive and
-    /// shared on one key, or joining with a different `kind`, is a
-    /// conflict `Err` either way.
+    /// Claim `(prefix, method)` for `holder` (ADR-0130), or join its
+    /// shared member set (ADR-0136). Exclusive (`shared: false`): a key
+    /// held by anyone else is answered `Err`; the same sole holder
+    /// re-claiming its own key is an idempotent `Ok` — so a component
+    /// re-running `wire` after `replace_component` re-registers cleanly
+    /// (its reference is stable). Shared (`shared: true`): joins the key's
+    /// member set when the set is shared; re-registering an existing
+    /// membership is an idempotent `Ok`. Mixing exclusive and shared on one
+    /// key is a conflict `Err` either way.
     ///
     /// # Panics
     /// Panics if the route-table `RwLock` is poisoned — fail-fast per
@@ -495,11 +493,10 @@ impl HttpSupervisorState {
         &mut self,
         prefix: &str,
         method: Option<HttpMethod>,
-        kind: KindId,
-        holder: ErasedActorRef,
+        holder: ProtocolRef<HttpRouter>,
         shared: bool,
     ) -> RegisterRouteResult {
-        register_route(&self.routes, prefix, method, kind, holder, shared)
+        register_route(&self.routes, prefix, method, holder, shared)
     }
 
     /// Monitor the proven route holder `subscriber` on its first route claim
@@ -698,20 +695,21 @@ impl HttpShardState {
     /// check is caught by the settlement `502` net — the same net that
     /// covers the dispatch-to-delivery gap.
     pub fn dispatch_prepared<A: HandlesKind<Settled>>(&mut self, ctx: &mut NativeCtx<'_, A>, request: PreparedRequest) {
-        let PreparedRequest { conn_id, payload, handler, kind, method, keep_alive, ws_key } = request;
+        let PreparedRequest { conn_id, payload, handler, method, keep_alive, ws_key } = request;
         if ws_key.is_some()
             && let Some(conn) = self.connections.get_mut(&conn_id)
         {
             conn.ws_pending_key = ws_key;
         }
-        let Some(mail_id) = ctx.send_envelope_detached_to(handler, kind, &payload) else {
+        let Some(mail_id) = ctx.send_encoded_detached_to(handler, &payload) else {
             return;
         };
         // Safety net (ADR-0108 §5): if the chain settles with no
         // response, `on_settled` answers `502`. Best-effort — a chassis
         // without the settlement registry still serves the reply path.
         let _ = ctx.subscribe_settlement::<Settled>(mail_id);
-        self.in_flight.insert(mail_id.correlation_id, PendingRequest { conn_id, method, keep_alive, handler });
+        self.in_flight
+            .insert(mail_id.correlation_id, PendingRequest { conn_id, method, keep_alive, handler: handler.erase() });
     }
 
     /// Open the inbound request stream for a reader-posted head bound

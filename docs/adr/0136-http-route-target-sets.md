@@ -4,6 +4,7 @@
 - **Date:** 2026-07-05
 - **Amended:** 2026-09-22 — A route's member set holds proven references (ADR-0230), not mailbox positions; the wire kinds' positions are proven at receipt. A departing member is removed through the route table's reverse index from holder to keys, which touches only that member's routes.
 - **Amended:** 2026-09-27 — The explicit forms name the member by path, not by mailbox position (ADR-0231 §3), superseding the 2026-09-22 line's "the wire kinds' positions". `RegisterRoute` carries `handler: ProtocolPath<HttpRoute>`, so an explicit member always joins the set as `aether.http.server.request` and the kind-mismatch conflict is decided against that; `UnregisterRoute` carries `handler: ErasedActorPath`. `UnregisterRoutesAll` is removed, so the strip-from-every-set path is reached only by the `MonitorNotice` purge.
+- **Amended:** 2026-09-28 (#6935) — Every member covers the one `HttpRouter` protocol and receives `aether.http.server.request` (ADR-0130), so a member set carries no dispatch kind and the kind-mismatch conflict is removed. Members are `ProtocolRef<HttpRouter>`s; the reverse index, the monitors, and membership checks compare their erased identity.
 
 Amends **ADR-0130** (HTTP route registration): a route's target grows from one mailbox to a set of member mailboxes that N handler instances opt into together, with per-request selection spreading load across live members. Registration, conflict, and dead-target semantics otherwise stand. Builds on the sharded dispatch of **ADR-0135**.
 

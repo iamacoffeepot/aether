@@ -10,9 +10,9 @@
 //! dispatcher drains the queue.
 //!
 //! On a parsed request the cap dispatches an
-//! [`HttpServerRequest`](crate::kinds::HttpServerRequest) to the configured
-//! handler mailbox as a fresh causal chain via
-//! `NativeCtx::send_envelope_detached_to` (the wake mail is causally unrelated
+//! [`HttpServerRequest`](crate::kinds::HttpServerRequest) to the route
+//! holder's [`HttpRouter`](crate::kinds::HttpRouter) reference as a fresh
+//! causal chain via `NativeCtx::send_encoded_detached_to` (the wake mail is causally unrelated
 //! to the inbound request), records the open response socket in an
 //! in-flight table keyed by the dispatch's correlation id, and subscribes
 //! to settlement of the dispatched root. The handler replies

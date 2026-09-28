@@ -538,9 +538,8 @@ after filling a short path's holes from the generated root and child
 declarations, a static inventory rather than the live tree; the
 `ErasedActorRef` it returns serves identity and monitoring, and sends
 nothing. The http server's `aether.http.server.unregister_route` names its
-handler that way: a release keys the route table and sends nothing, and a
-typed path would exclude a holder that claimed the route through
-`register_route_self` with a minted kind, which covers no protocol.
+handler that way: a release keys the route table and sends nothing, so it
+needs the holder's identity and nothing its rows promise.
 
 Each arm lands with its consumer. The native arm over a `ProtocolPath<P>`
 serves the Bloomery workspace's receipt of a request's storage source, the
@@ -567,19 +566,16 @@ subscription enum with one variant per published kind (`WindowSubscription`,
 protocol is fixed by the variant. Each publisher decodes the request against
 the engine and resolves the path on receipt. The http server's
 `aether.http.server.register_route` carries its handler as a
-`ProtocolPath<HttpRoute>`, the one-row protocol
-`aether.http.server.request -> aether.http.server.response`
+`ProtocolPath<HttpRouter>`, the one manual row
+`aether.http.server.request -> Undeclared`
 (`crates/aether-http/src/kinds.rs`), decoded against the engine and resolved
-at receipt; the route then holds the erased twin of that proof, which is what
-its table is keyed by and what its pre-encoded per-request dispatch sends
-through (§4). Because the protocol fixes the dispatch kind, the kind carries
-no `KindId` field, and a handler whose request row is manual — a streaming,
-websocket, or deferred one, or a `#[http::router]` group's minted kind — does
-not cover `HttpRoute`'s declared response row (§6) and registers through the
-reflexive
-`register_route_self`, which takes its stamped sender and claims nothing
-about that sender's rows: the route it claims dispatches a runtime-chosen
-kind, so it is served by §4's ingress bridge rather than a protocol.
+at receipt; the route then holds that proof, and its per-request dispatch
+sends the reader's pre-encoded request through it (§4). A router promises no
+reply shape, so the one protocol covers every holder: a buffered, streaming,
+websocket, or deferred handler, and a `#[http::router]` actor's one generated
+handler, each replying through its obligation (§6). The reflexive
+`register_route_self` casts its stamped sender to the same protocol, so both
+forms hold the same proof and neither names a kind.
 
 ### 4. Published rows, typed sends, and the guard cast
 
@@ -689,7 +685,6 @@ The bridges today:
 |---|---|---|
 | RPC `Call` receipt (`crates/aether-rpc/src/server/runtime.rs`) and the bundle doors `DispatchTraced` (`crates/aether-trace/src/runtime.rs`) and `CaptureFrame` (`crates/aether-render/src/runtime/mod.rs`) | the `Call`'s or bundle item's kind | `aether-substrate`'s boundary module, which proves the path and mints the deliver-only `BoundaryMail` (`crates/aether-substrate/src/mail/boundary.rs`); the item's recipient becomes the stand-in reference, and the RPC server, render, and trace hold only the item |
 | Embedder boundary (`PassiveChassis::accept_call`) | the kind and bytes supplied by the embedder | `aether-substrate`'s boundary module; the passive chassis proves an `ErasedActorPath`, mints a deliver-only `BoundaryMail`, and accepts it only through `deliver_tracked` or `deliver_for_reply` |
-| The http server's routed request (`dispatch_prepared`, `crates/aether-http/src/server/runtime/state.rs`) | the kind the route holder registered in `RegisterRouteSelf`, or `aether.http.server.request` for a `RegisterRoute` by `ProtocolPath<HttpRoute>` | `aether-http`'s server runtime |
 
 The http server's stream and websocket deliveries
 (`crates/aether-http/src/server/runtime/streaming.rs`, `websocket.rs`) send
@@ -697,6 +692,15 @@ kinds fixed at compile time (`HttpRequestStreamOpen`, `HttpRequestChunk`,
 `HttpRequestStreamEnd`, `HttpStreamCredit`, `WebSocketMessage`,
 `WebSocketClose`), so they are not bridges: the handler is held as a
 `ProtocolRef` over those rows, cast from the registrant at registration.
+
+Nor is the http server's routed request (`dispatch_prepared`,
+`crates/aether-http/src/server/runtime/state.rs`). Every route holder covers
+one manual protocol, `HttpRouter { fn request(mail: HttpServerRequest) ->
+Undeclared; }`, proven from a `ProtocolPath<HttpRouter>` or cast from a
+`_self` sender, so the kind is fixed at compile time. The reader encodes the
+request as an `Encoded<HttpServerRequest>`, bytes only an encode of that kind
+produces, and the shard sends it through the route's
+`ProtocolRef<HttpRouter>` with `send_encoded_detached_to`.
 
 #### Where today's erased sends go
 

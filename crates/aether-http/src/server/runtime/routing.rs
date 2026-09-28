@@ -4,6 +4,8 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+use crate::typed::route_rank;
+
 /// The route table (ADR-0130 / ADR-0136): the registered routes under
 /// their `(prefix, method)` key, plus the reverse index `held` naming
 /// every key each holder is a member of. A departing holder's routes are
@@ -25,21 +27,20 @@ pub struct RouteKey {
 
 /// One registered route (ADR-0130 / ADR-0136): requests whose path
 /// matches its key's `prefix` on a segment boundary (and whose method
-/// passes the key's `method`) dispatch as kind `kind` to one of
-/// `members`. An exclusive registration is the one-member set; a shared
-/// set (ADR-0136) holds every instance that opted in, picked round-robin
-/// per request. Members are proven references (ADR-0230) whose ids are
-/// stable, so a route survives `replace_component` and dispatch skips
-/// name resolution.
+/// passes the key's `method`) dispatch as `aether.http.server.request` to
+/// one of `members`. An exclusive registration is the one-member set; a
+/// shared set (ADR-0136) holds every instance that opted in, picked
+/// round-robin per request. Members are proven [`HttpRouter`] references
+/// (ADR-0230, ADR-0231) whose ids are stable, so a route survives
+/// `replace_component` and dispatch skips name resolution.
 pub struct Route {
-    pub kind: KindId,
     /// Whether this key was registered `shared` (ADR-0136). An
     /// exclusive route never grows a second member; a shared route
-    /// only admits further `shared` registrations of the same `kind`.
+    /// only admits further `shared` registrations.
     pub shared: bool,
     /// The target set, in registration order. Never empty — the last
     /// member's unregistration drops the whole route.
-    pub members: Vec<ErasedActorRef>,
+    pub members: Vec<ProtocolRef<HttpRouter>>,
 }
 
 /// The winning route for `(path, method)` (ADR-0130): the longest
@@ -50,24 +51,17 @@ pub struct Route {
 /// drift. No two keys tie — two distinct equal-length prefixes cannot
 /// both match one path — so the map's iteration order never picks the
 /// winner.
+///
+/// The rule is [`route_rank`], which a `#[http::router]` actor's generated
+/// handler applies to its own groups, so the group the router picks is the
+/// one whose key won here.
 pub fn best_route<'a>(table: &'a RouteTable, path: &str, method: HttpMethod) -> Option<&'a Route> {
     table
         .routes
         .iter()
-        .filter(|(key, _)| key.method.is_none_or(|m| m == method) && route_matches(&key.prefix, path))
-        .max_by_key(|(key, _)| (key.prefix.len(), key.method.is_some()))
+        .filter_map(|(key, route)| route_rank(&key.prefix, key.method, path, method).map(|rank| (rank, route)))
+        .max_by_key(|(rank, _)| *rank)
         .map(|(_, route)| route)
-}
-
-/// Segment-boundary prefix match (ADR-0130): `/api` matches `/api` and
-/// `/api/…`, never `/apiary`; `/` is the catch-all. Prefixes are
-/// normalized at registration ([`normalize_prefix`]), so no trailing
-/// slash reaches this check.
-pub fn route_matches(prefix: &str, path: &str) -> bool {
-    if prefix == "/" {
-        return true;
-    }
-    path.strip_prefix(prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// Validate + normalize a registration prefix: must start with `/`;
@@ -86,17 +80,16 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
     })
 }
 
-/// Claim `(prefix, method)` for `holder` in `routes`, dispatching as
-/// `kind` (ADR-0130), or join its shared member set (ADR-0136).
-/// Exclusive (`shared: false`): a key held by anyone else is answered
-/// `Err`; the same sole holder re-claiming its own key is an idempotent
-/// `Ok` that updates `kind` — so a component re-running `wire` after
-/// `replace_component` re-registers cleanly (its reference is stable).
-/// Shared (`shared: true`): joins the key's member set when the set is
-/// shared and the `kind` matches; re-registering an existing membership
-/// is an idempotent `Ok`. Mixing exclusive and shared on one key, or
-/// joining with a different `kind`, is a conflict `Err` either way.
-/// Every `Ok` records the key under `holder` in the reverse index.
+/// Claim `(prefix, method)` for `holder` in `routes` (ADR-0130), or join
+/// its shared member set (ADR-0136). Exclusive (`shared: false`): a key
+/// held by anyone else is answered `Err`; the same sole holder re-claiming
+/// its own key is an idempotent `Ok` — so a component re-running `wire`
+/// after `replace_component` re-registers cleanly (its reference is
+/// stable). Shared (`shared: true`): joins the key's member set when the
+/// set is shared; re-registering an existing membership is an idempotent
+/// `Ok`. Mixing exclusive and shared on one key is a conflict `Err` either
+/// way. Every `Ok` records the key under `holder`'s identity in the reverse
+/// index.
 ///
 /// The winner of two conflicting claims is whichever reaches the table
 /// first; this is a pure function of the table's contents, so a caller
@@ -110,13 +103,12 @@ pub fn register_route(
     routes: &SharedRoutes,
     prefix: &str,
     method: Option<HttpMethod>,
-    kind: KindId,
-    holder: ErasedActorRef,
+    holder: ProtocolRef<HttpRouter>,
     shared: bool,
 ) -> RegisterRouteResult {
     match normalize_prefix(prefix) {
         Ok(prefix) => {
-            routes.write().expect("route table lock poisoned").claim(RouteKey { prefix, method }, kind, holder, shared)
+            routes.write().expect("route table lock poisoned").claim(RouteKey { prefix, method }, holder, shared)
         }
         Err(error) => RegisterRouteResult::Err { error },
     }
@@ -160,13 +152,13 @@ pub fn unregister_routes_all(routes: &SharedRoutes, holder: ErasedActorRef) {
 
 impl RouteTable {
     /// [`register_route`]'s body over the locked table.
-    fn claim(&mut self, key: RouteKey, kind: KindId, holder: ErasedActorRef, shared: bool) -> RegisterRouteResult {
+    fn claim(&mut self, key: RouteKey, holder: ProtocolRef<HttpRouter>, shared: bool) -> RegisterRouteResult {
+        let identity = holder.erase();
         if let Some(existing) = self.routes.get_mut(&key) {
             let RouteKey { prefix, method } = &key;
-            // Exclusive re-claim by the sole holder stays the idempotent
-            // kind-updating Ok it always was.
-            if !shared && !existing.shared && existing.members == [holder] {
-                existing.kind = kind;
+            // Exclusive re-claim by the sole holder stays the idempotent Ok
+            // it always was.
+            if !shared && !existing.shared && existing.members.iter().map(|member| member.erase()).eq([identity]) {
                 return RegisterRouteResult::Ok;
             }
             if shared != existing.shared {
@@ -192,22 +184,13 @@ impl RouteTable {
                     error: format!("route ({prefix:?}, {method:?}) already claimed by {:?}", existing.members[0]),
                 };
             }
-            if existing.kind != kind {
-                return RegisterRouteResult::Err {
-                    error: format!(
-                        "route ({prefix:?}, {method:?}) member set dispatches kind {:?}; a \
-                         member registering kind {kind:?} cannot join (ADR-0136)",
-                        existing.kind,
-                    ),
-                };
-            }
-            if !existing.members.contains(&holder) {
+            if !existing.members.iter().any(|member| member.erase() == identity) {
                 existing.members.push(holder);
             }
         } else {
-            self.routes.insert(key.clone(), Route { kind, shared, members: vec![holder] });
+            self.routes.insert(key.clone(), Route { shared, members: vec![holder] });
         }
-        self.held.entry(holder).or_default().insert(key);
+        self.held.entry(identity).or_default().insert(key);
         RegisterRouteResult::Ok
     }
 
@@ -234,7 +217,7 @@ impl RouteTable {
     /// its replica count bounds.
     fn release_member(&mut self, key: &RouteKey, holder: ErasedActorRef) {
         if let Some(route) = self.routes.get_mut(key) {
-            route.members.retain(|member| *member != holder);
+            route.members.retain(|member| member.erase() != holder);
             if route.members.is_empty() {
                 self.routes.remove(key);
             }

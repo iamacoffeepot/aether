@@ -1,11 +1,11 @@
 use super::{
-    Arc, HttpResponseStreamOpen, KindId, NativeCtx, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT,
-    RegisterRouteResult, RwLock, SharedRoutes, WsFrameParse, http_date, normalize_prefix, parse_http_method,
-    parse_ws_frame, percent_decode_path, reason_phrase, register_route, render_stream_head, request_keeps_alive,
-    route_matches, sec_websocket_accept, serialize_ws_frame, sha1, unregister_route, unregister_routes_all,
-    validate_ws_handshake,
+    Arc, HttpResponseStreamOpen, NativeCtx, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT, RegisterRouteResult,
+    RwLock, SharedRoutes, WsFrameParse, http_date, normalize_prefix, parse_http_method, parse_ws_frame,
+    percent_decode_path, reason_phrase, register_route, render_stream_head, request_keeps_alive, sec_websocket_accept,
+    serialize_ws_frame, sha1, unregister_route, unregister_routes_all, validate_ws_handshake,
 };
 use crate::kinds::{HttpHeader, HttpMethod};
+use crate::typed::route_matches;
 use aether_actor::ErasedActorRef;
 use aether_substrate::mail::Source;
 use aether_substrate::mail::registry::{Registry, noop_handler};
@@ -39,7 +39,7 @@ fn conn_header(value: &str) -> Vec<HttpHeader> {
 #[test]
 fn disabled_http_server_err_replies_to_register_route() {
     use super::{HttpServerCapability, HttpServerConfig, HttpSupervisorState};
-    use crate::kinds::{HttpRoute, RegisterRoute};
+    use crate::kinds::{HttpRouter, RegisterRoute};
     use crate::server::tests::handlers::EchoHttpHandler;
     use aether_actor::ActorPath;
 
@@ -54,7 +54,7 @@ fn disabled_http_server_err_replies_to_register_route() {
         RegisterRoute {
             prefix: "/".to_string(),
             method: None,
-            handler: ActorPath::<EchoHttpHandler>::root().narrow::<HttpRoute>(),
+            handler: ActorPath::<EchoHttpHandler>::root().narrow::<HttpRouter>(),
             shared: false,
         },
     );
@@ -353,18 +353,14 @@ fn config_layer_defaults_match_the_named_consts() {
 mod route_registration {
     use super::super::RouteTable;
     use super::{
-        Arc, ErasedActorRef, KindId, RegisterRouteResult, RwLock, SharedRoutes, proven, register_route,
-        unregister_route, unregister_routes_all, with_test_ctx,
+        Arc, ErasedActorRef, RegisterRouteResult, RwLock, SharedRoutes, register_route, unregister_route,
+        unregister_routes_all,
     };
     use crate::kinds::HttpMethod;
+    use crate::server::tests::handlers::router_holders as holders;
 
     fn fresh_routes() -> SharedRoutes {
         Arc::new(RwLock::new(RouteTable::default()))
-    }
-
-    /// Two proven route holders.
-    fn holders() -> (ErasedActorRef, ErasedActorRef) {
-        with_test_ctx(|registry, _| (proven(registry, "test.http.route.a"), proven(registry, "test.http.route.b")))
     }
 
     #[track_caller]
@@ -382,13 +378,14 @@ mod route_registration {
         }
     }
 
-    /// Snapshot the sole route's `(members, kind, shared)`, asserting the
-    /// table holds exactly one route — the shape every case below checks.
-    fn only_route(routes: &SharedRoutes) -> (Vec<ErasedActorRef>, KindId, bool) {
+    /// Snapshot the sole route's `(members, shared)`, members by identity,
+    /// asserting the table holds exactly one route — the shape every case
+    /// below checks.
+    fn only_route(routes: &SharedRoutes) -> (Vec<ErasedActorRef>, bool) {
         let table = routes.read().expect("route table lock");
         assert_eq!(table.routes.len(), 1, "expected exactly one route, got {}", table.routes.len());
         let route = table.routes.values().next().expect("one route");
-        let snapshot = (route.members.clone(), route.kind, route.shared);
+        let snapshot = (route.members.iter().map(|member| member.erase()).collect(), route.shared);
         drop(table);
         snapshot
     }
@@ -403,29 +400,27 @@ mod route_registration {
     #[test]
     fn exclusive_conflict_first_claimant_keeps_route() {
         let routes = fresh_routes();
-        let (first, second) = holders();
-        let (kind_a, kind_b) = (KindId(100), KindId(200));
+        let (_chassis, first, second) = holders();
 
-        expect_ok(register_route(&routes, "/dup", None, kind_a, first, false));
-        expect_err_containing(register_route(&routes, "/dup", None, kind_b, second, false), "already claimed by");
+        expect_ok(register_route(&routes, "/dup", None, first, false));
+        expect_err_containing(register_route(&routes, "/dup", None, second, false), "already claimed by");
 
-        assert_eq!(only_route(&routes), (vec![first], kind_a, false));
+        assert_eq!(only_route(&routes), (vec![first.erase()], false));
     }
 
     /// Tripwire: the sole-holder idempotent re-claim branch — the same
-    /// exclusive mailbox re-registering its own key is `Ok` and updates
-    /// `kind` without growing the member set, so a component re-running
-    /// `wire` after `replace_component` re-registers cleanly.
+    /// exclusive holder re-registering its own key is `Ok` without growing
+    /// the member set, so a component re-running `wire` after
+    /// `replace_component` re-registers cleanly.
     #[test]
-    fn exclusive_reclaim_by_holder_updates_kind() {
+    fn exclusive_reclaim_by_holder_is_idempotent() {
         let routes = fresh_routes();
-        let (holder, _) = holders();
-        let (kind_a, kind_b) = (KindId(100), KindId(200));
+        let (_chassis, holder, _) = holders();
 
-        expect_ok(register_route(&routes, "/dup", None, kind_a, holder, false));
-        expect_ok(register_route(&routes, "/dup", None, kind_b, holder, false));
+        expect_ok(register_route(&routes, "/dup", None, holder, false));
+        expect_ok(register_route(&routes, "/dup", None, holder, false));
 
-        assert_eq!(only_route(&routes), (vec![holder], kind_b, false));
+        assert_eq!(only_route(&routes), (vec![holder.erase()], false));
     }
 
     /// Tripwire: the `(prefix, method)` compound key — a claim on one
@@ -434,11 +429,10 @@ mod route_registration {
     #[test]
     fn distinct_method_same_prefix_is_not_a_conflict() {
         let routes = fresh_routes();
-        let (a, b) = holders();
-        let kind = KindId(100);
+        let (_chassis, a, b) = holders();
 
-        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Get), kind, a, false));
-        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Post), kind, b, false));
+        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Get), a, false));
+        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Post), b, false));
 
         assert_eq!(routes.read().expect("route table lock").routes.len(), 2);
     }
@@ -451,55 +445,38 @@ mod route_registration {
     fn shared_and_exclusive_claims_do_not_mix() {
         // Shared claim onto an exclusive key: rejected, stays exclusive.
         let excl = fresh_routes();
-        let (a, b) = holders();
-        let kind = KindId(100);
-        expect_ok(register_route(&excl, "/k", None, kind, a, false));
-        expect_err_containing(register_route(&excl, "/k", None, kind, b, true), "exclusively claimed");
-        assert_eq!(only_route(&excl), (vec![a], kind, false));
+        let (_chassis, a, b) = holders();
+        expect_ok(register_route(&excl, "/k", None, a, false));
+        expect_err_containing(register_route(&excl, "/k", None, b, true), "exclusively claimed");
+        assert_eq!(only_route(&excl), (vec![a.erase()], false));
 
         // Exclusive claim onto a shared key: rejected, stays shared.
         let shared = fresh_routes();
-        expect_ok(register_route(&shared, "/k", None, kind, a, true));
-        expect_err_containing(register_route(&shared, "/k", None, kind, b, false), "shared member set");
-        assert_eq!(only_route(&shared), (vec![a], kind, true));
-    }
-
-    /// Tripwire: the kind-mismatch branch on a shared join — a member
-    /// registering a different dispatch kind cannot join the set, and
-    /// the existing set is untouched.
-    #[test]
-    fn shared_join_with_mismatched_kind_is_rejected() {
-        let routes = fresh_routes();
-        let (a, b) = holders();
-        let (kind_a, kind_b) = (KindId(100), KindId(200));
-
-        expect_ok(register_route(&routes, "/pool", None, kind_a, a, true));
-        expect_err_containing(register_route(&routes, "/pool", None, kind_b, b, true), "cannot join");
-
-        assert_eq!(only_route(&routes), (vec![a], kind_a, true));
+        expect_ok(register_route(&shared, "/k", None, a, true));
+        expect_err_containing(register_route(&shared, "/k", None, b, false), "shared member set");
+        assert_eq!(only_route(&shared), (vec![a.erase()], true));
     }
 
     /// Tripwire: the shared-join admit branch — a matching shared claim
-    /// (same key, same kind) grows the member set in registration order,
-    /// and re-registering an existing membership is an idempotent `Ok`
-    /// that does not duplicate the member.
+    /// grows the member set in registration order, and re-registering an
+    /// existing membership is an idempotent `Ok` that does not duplicate
+    /// the member.
     #[test]
     fn matching_shared_claims_accumulate_members() {
         let routes = fresh_routes();
-        let (a, b) = holders();
-        let kind = KindId(100);
+        let (_chassis, a, b) = holders();
 
-        expect_ok(register_route(&routes, "/pool", None, kind, a, true));
-        expect_ok(register_route(&routes, "/pool", None, kind, b, true));
+        expect_ok(register_route(&routes, "/pool", None, a, true));
+        expect_ok(register_route(&routes, "/pool", None, b, true));
         // Idempotent re-registration of an existing member.
-        expect_ok(register_route(&routes, "/pool", None, kind, a, true));
+        expect_ok(register_route(&routes, "/pool", None, a, true));
 
-        assert_eq!(only_route(&routes), (vec![a, b], kind, true));
+        assert_eq!(only_route(&routes), (vec![a.erase(), b.erase()], true));
 
         // A shared join is recorded in the reverse index: releasing every
         // route `a` holds leaves `b` as the set's sole member.
-        unregister_routes_all(&routes, a);
-        assert_eq!(only_route(&routes), (vec![b], kind, true));
+        unregister_routes_all(&routes, a.erase());
+        assert_eq!(only_route(&routes), (vec![b.erase()], true));
     }
 
     /// Tripwire: unregistration release + drop-when-empty — releasing one
@@ -509,23 +486,22 @@ mod route_registration {
     #[test]
     fn unregister_releases_members_and_drops_empty_routes() {
         let routes = fresh_routes();
-        let (a, b) = holders();
-        let kind = KindId(100);
-        expect_ok(register_route(&routes, "/pool", None, kind, a, true));
-        expect_ok(register_route(&routes, "/pool", None, kind, b, true));
+        let (_chassis, a, b) = holders();
+        expect_ok(register_route(&routes, "/pool", None, a, true));
+        expect_ok(register_route(&routes, "/pool", None, b, true));
 
         // One member leaves; the set survives with the rest.
-        expect_ok(unregister_route(&routes, "/pool", None, a));
-        assert_eq!(only_route(&routes), (vec![b], kind, true));
+        expect_ok(unregister_route(&routes, "/pool", None, a.erase()));
+        assert_eq!(only_route(&routes), (vec![b.erase()], true));
 
         // The last member leaves; the route is dropped.
-        expect_ok(unregister_route(&routes, "/pool", None, b));
+        expect_ok(unregister_route(&routes, "/pool", None, b.erase()));
         assert!(routes.read().expect("route table lock").routes.is_empty());
 
         // unregister_routes_all clears every route the holder holds.
-        expect_ok(register_route(&routes, "/x", None, kind, a, false));
-        expect_ok(register_route(&routes, "/y", None, kind, a, false));
-        unregister_routes_all(&routes, a);
+        expect_ok(register_route(&routes, "/x", None, a, false));
+        expect_ok(register_route(&routes, "/y", None, a, false));
+        unregister_routes_all(&routes, a.erase());
         assert!(routes.read().expect("route table lock").routes.is_empty());
     }
 }
