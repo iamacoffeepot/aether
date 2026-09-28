@@ -29,45 +29,44 @@
 //! ```
 //!
 //! A target covers a row only through a [`Contract<K>`] row with the same kind
-//! and the exact reply type. A `#[fallback]` emits no row and a
-//! `#[handler::manual]` handler's row is [`Undeclared`](crate::Undeclared), so
-//! neither covers anything.
+//! and the exact reply type. A `#[fallback]` emits no row. A
+//! `#[handler::manual]` handler's row is [`Undeclared`], and covers only an
+//! explicit manual protocol row with that same reply shape.
 
 use core::marker::PhantomData;
 
 use aether_data::{ActorMail, Kind, KindId, ReplyContract};
 
-use super::contract::{Contract, ReplyShape, Silent};
+use super::contract::{Contract, ReplyShape, Silent, Undeclared};
 
-/// One protocol row: kind `K`, answered with `O`, a reply kind or [`Silent`].
+/// One protocol row: kind `K`, answered with reply shape `O`: a reply kind,
+/// [`Silent`], or [`Undeclared`].
 ///
 /// A type-level label only, never constructed: a protocol names its rows as
 /// the tuple [`Protocol::Rows`].
 pub struct Row<K, O>(PhantomData<fn() -> (K, O)>);
 
 mod reply_sealed {
-    /// Private supertrait sealing [`super::RowReply`] to [`super::Silent`]
-    /// and every reply kind.
+    /// Private supertrait sealing [`super::RowReply`] to [`super::Silent`],
+    /// [`super::Undeclared`], and every reply kind.
     pub trait Sealed {}
 
     impl Sealed for super::Silent {}
+    impl Sealed for super::Undeclared {}
     impl<O: aether_data::ActorMail> Sealed for O {}
 }
 
-/// What a protocol row can name as its reply: a reply kind or [`Silent`].
-/// Sealed.
-///
-/// [`Undeclared`](crate::Undeclared) is left out, so a protocol has no manual
-/// row (ADR-0231 §6): a row that answers by hand promises nothing a sender can
-/// check.
+/// What a protocol row can name as its reply: a reply kind, [`Silent`], or
+/// [`Undeclared`]. Sealed.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a protocol row's reply",
-    label = "not a reply kind or `Silent`",
-    note = "a protocol row is single (`-> O`) or silent (no return); a manual row has no protocol spelling (ADR-0231 §6)"
+    label = "not a reply kind, `Silent`, or `Undeclared`",
+    note = "a protocol row is single (`-> O`), silent (no return), or manual (`-> Undeclared`) (ADR-0231 §6)"
 )]
 pub trait RowReply: ReplyShape + reply_sealed::Sealed {}
 
 impl RowReply for Silent {}
+impl RowReply for Undeclared {}
 
 // The failure a reader needs is the row reply, not the `ActorMail` bound
 // this impl's where-clause adds.
@@ -87,7 +86,8 @@ mod rows_sealed {
 pub trait RowSet: rows_sealed::Sealed {
     /// The rows as `(kind, reply)` pairs in the manifest's [`ReplyContract`]
     /// vocabulary, in tuple order: `One(O::ID)` for a row `O`, `None` for a
-    /// [`Silent`] row. The same mapping `#[actor]` uses for
+    /// [`Silent`] row, and `Manual` for an [`Undeclared`] row. The same mapping
+    /// `#[actor]` uses for
     /// [`Contracts::CONTRACTS`](crate::Contracts::CONTRACTS), so the two lists
     /// compare directly.
     const CONTRACTS: &'static [(KindId, ReplyContract)];
@@ -204,17 +204,17 @@ mod covered_sealed {
 /// `P`: for each [`Row<K, O>`], a [`Contract<K>`] row replying exactly `O`.
 ///
 /// Rows match by kind and exact reply type, never by method name. A silent row
-/// is covered only by a silent handler and a row `O` only by a handler that
-/// replies `O`, directly or deferred. A kind the target handles only through
-/// `#[fallback]` has no row, and a `#[handler::manual]` handler's row is
-/// [`Undeclared`](crate::Undeclared), so neither covers.
+/// is covered only by a silent handler, a row `O` only by a handler that
+/// replies `O` directly or deferred, and an [`Undeclared`] row only by a
+/// manual handler. A kind the target handles only through `#[fallback]` has
+/// no row.
 ///
 /// Sealed: the one impl is the blanket over [`Protocol`] and [`CoversRows`].
 #[diagnostic::on_unimplemented(
     message = "`{R}` does not cover the protocol `{Self}`",
     label = "`{R}` lacks a row of `{Self}`, or `{Self}` is not a protocol",
     note = "a target covers a protocol with a handler for each of its kinds replying exactly the row's reply; \
-            a `#[fallback]` or `#[handler::manual]` handler covers nothing"
+            a `#[fallback]` has no row"
 )]
 pub trait CoveredBy<R>: covered_sealed::Sealed<R> {}
 
@@ -239,8 +239,9 @@ pub(super) mod cast_sealed {
 /// beside the protocol, and the seal keeps any other crate from naming a
 /// protocol whose rule admits rows of its own choosing.
 ///
-/// Two arms implement it: [`Subscriber<K>`](crate::Subscriber), whose rule
-/// also admits a manual row for its published kind, and every protocol
+/// Two arms implement it: [`Subscriber<K>`](crate::Subscriber), whose silent
+/// subscription rule also admits a manual row for its published kind, and
+/// every protocol
 /// `#[protocol]` declares (through [`ProtocolCast`]), whose rule is ADR-0231
 /// §4's exact-rows check.
 pub trait CastTarget: Protocol + cast_sealed::Sealed {
@@ -259,7 +260,7 @@ pub trait ProtocolCast: Protocol {}
 
 /// Whether `rows` contains every row of `P`, each with the same kind and the
 /// same [`ReplyContract`] (ADR-0231 §4). A [`ReplyContract::Manual`] row
-/// covers no protocol row (ADR-0231 §6), and extra rows are ignored.
+/// covers exactly an explicit manual protocol row, and extra rows are ignored.
 fn covers_exact_rows<P: Protocol>(rows: &[(KindId, ReplyContract)]) -> bool {
     <P::Rows as RowSet>::CONTRACTS.iter().all(|row| rows.contains(row))
 }
@@ -278,7 +279,7 @@ mod tests {
     use aether_kinds::{Ping, Pong, Tick};
 
     use super::{CastTarget, ProtocolCast};
-    use crate::{Protocol, Row, Silent};
+    use crate::{Protocol, Row, Silent, Undeclared};
 
     struct PingPong;
 
@@ -287,6 +288,22 @@ mod tests {
     }
 
     impl ProtocolCast for PingPong {}
+
+    struct ManualPing;
+
+    impl Protocol for ManualPing {
+        type Rows = (Row<Ping, Undeclared>,);
+    }
+
+    impl ProtocolCast for ManualPing {}
+
+    struct MixedPing;
+
+    impl Protocol for MixedPing {
+        type Rows = (Row<Ping, Undeclared>, Row<Pong, Silent>);
+    }
+
+    impl ProtocolCast for MixedPing {}
 
     // A cast that minted a protocol reference for a route missing one of the
     // protocol's rows, or answering one with another reply or by hand, would
@@ -303,5 +320,23 @@ mod tests {
         assert!(!admits(&[(Ping::ID, ReplyContract::None), notice]));
         assert!(!admits(&[request, (Pong::ID, ReplyContract::Manual)]));
         assert!(!admits(&[(Ping::ID, ReplyContract::Manual), notice]));
+    }
+
+    // A manual protocol row must be admitted by the same exact-row rule as
+    // every other protocol row. Treating Manual as silence or a wildcard
+    // would mint a proof for a route whose response contract differs, while
+    // checking only one row would mint an incomplete mixed protocol.
+    #[test]
+    fn a_manual_protocol_cast_requires_the_exact_manual_row_and_every_other_row() {
+        let request = (Ping::ID, ReplyContract::Manual);
+        let notice = (Pong::ID, ReplyContract::None);
+
+        assert!(<ManualPing as CastTarget>::admits(&[request]));
+        assert!(<ManualPing as CastTarget>::admits(&[(Tick::ID, ReplyContract::None), request]));
+        assert!(!<ManualPing as CastTarget>::admits(&[]));
+        assert!(!<ManualPing as CastTarget>::admits(&[(Ping::ID, ReplyContract::None)]));
+        assert!(!<ManualPing as CastTarget>::admits(&[(Ping::ID, ReplyContract::One(Pong::ID))]));
+        assert!(!<MixedPing as CastTarget>::admits(&[request]));
+        assert!(<MixedPing as CastTarget>::admits(&[notice, request]));
     }
 }

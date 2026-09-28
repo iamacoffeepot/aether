@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 
 use super::{BlobResolver, Error};
 use crate::blob::{Blob, BlobHash};
-use crate::{ErasedActorPath, KindId, ReplyContract, first_contract_break};
+use crate::{ErasedActorPath, KindId, ReplyContract};
 
 /// The engine's published route contracts (ADR-0231 §4): an input to
 /// [`DecodeCtx::routes`], never handed to a leaf.
@@ -59,8 +59,9 @@ impl<'a> DecodeCtx<'a> {
     }
 
     /// Prove that the `Live` route standing under exactly `path` publishes
-    /// every one of `rows`, by the ADR-0231 §5 keep rule
-    /// ([`first_contract_break`] with `rows` as the predecessor).
+    /// every one of `rows` with the exact same [`ReplyContract`]. Protocol
+    /// coverage is exact: replacement compatibility is a separate rule and
+    /// does not make a manual row interchangeable with a declared one.
     ///
     /// # Errors
     ///
@@ -73,8 +74,9 @@ impl<'a> DecodeCtx<'a> {
         let published =
             routes.published_rows(path).ok_or_else(|| Error::ProtocolPathUnpublished { path: path.clone() })?;
 
-        first_contract_break(rows.iter().copied(), published.iter().copied())
-            .map_or(Ok(()), |kind| Err(Error::UncoveredProtocolPath { path: path.clone(), kind }))
+        rows.iter()
+            .find(|row| !published.contains(row))
+            .map_or(Ok(()), |(kind, _)| Err(Error::UncoveredProtocolPath { path: path.clone(), kind: *kind }))
     }
 }
 
@@ -101,9 +103,10 @@ mod tests {
         ErasedActorPath::new(text).expect("test setup: a valid path")
     }
 
-    // Catches a reversed `first_contract_break` argument order (which accepts
-    // a route publishing fewer rows than asked and refuses one publishing
-    // more), a loose reply comparison, and a wrong or missing refusal.
+    // Catches reversed subset comparison (which accepts a route publishing
+    // fewer rows than asked and refuses a superset), a loose reply comparison,
+    // substitution of replacement's Manual wildcard, and a wrong or missing
+    // first-row refusal.
     #[test]
     fn context_proves_route_coverage_and_names_each_refusal() {
         let asked = [(ASKED, ReplyContract::One(REPLY))];
@@ -111,17 +114,36 @@ mod tests {
             (path("test.superset"), Vec::from([(ASKED, ReplyContract::One(REPLY)), (OTHER, ReplyContract::None)])),
             (path("test.missing"), Vec::from([(OTHER, ReplyContract::None)])),
             (path("test.other_reply"), Vec::from([(ASKED, ReplyContract::One(ANOTHER_REPLY))])),
-            (path("test.manual"), Vec::from([(ASKED, ReplyContract::Manual)])),
+            (path("test.manual_for_declared"), Vec::from([(ASKED, ReplyContract::Manual)])),
+            (path("test.manual_exact"), Vec::from([(ASKED, ReplyContract::Manual)])),
+            (path("test.manual_silent"), Vec::from([(ASKED, ReplyContract::None)])),
+            (path("test.manual_reply"), Vec::from([(ASKED, ReplyContract::One(REPLY))])),
+            (path("test.first_missing"), Vec::from([(OTHER, ReplyContract::None)])),
         ]));
         let ctx = DecodeCtx::empty().routes(&stub);
 
         assert_eq!(ctx.prove_route_covers(&path("test.superset"), &asked), Ok(()));
-        for uncovered in ["test.missing", "test.other_reply", "test.manual"] {
+        for uncovered in ["test.missing", "test.other_reply", "test.manual_for_declared"] {
             assert_eq!(
                 ctx.prove_route_covers(&path(uncovered), &asked),
                 Err(Error::UncoveredProtocolPath { path: path(uncovered), kind: ASKED }),
             );
         }
+
+        let manual = [(ASKED, ReplyContract::Manual)];
+        assert_eq!(ctx.prove_route_covers(&path("test.manual_exact"), &manual), Ok(()));
+        for uncovered in ["test.manual_silent", "test.manual_reply"] {
+            assert_eq!(
+                ctx.prove_route_covers(&path(uncovered), &manual),
+                Err(Error::UncoveredProtocolPath { path: path(uncovered), kind: ASKED }),
+            );
+        }
+
+        let two_rows = [(ASKED, ReplyContract::One(REPLY)), (OTHER, ReplyContract::None)];
+        assert_eq!(
+            ctx.prove_route_covers(&path("test.first_missing"), &two_rows),
+            Err(Error::UncoveredProtocolPath { path: path("test.first_missing"), kind: ASKED }),
+        );
         assert_eq!(
             ctx.prove_route_covers(&path("test.unknown"), &asked),
             Err(Error::ProtocolPathUnpublished { path: path("test.unknown") }),

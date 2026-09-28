@@ -11,10 +11,11 @@
 //! that tuple, through sealed traits, so this macro has no `Contract`,
 //! `CoveredBy`, `CoversRows`, `RowSet`, or `CastTarget` impl to get wrong.
 //!
-//! Each method is one row: `fn name(mail: K) -> O;` is a single row and
-//! `fn name(mail: K);` (or `-> ()`) a silent one. A manual row has no spelling:
-//! `-> Undeclared` fails `RowReply` at the type level (ADR-0231 §6). Every
-//! grammar violation is reported, each at its own span, in one combined error.
+//! Each method is one row: `fn name(mail: K) -> O;` is a single row,
+//! `fn name(mail: K);` (or `-> ()`) a silent one, and `-> Undeclared` a manual
+//! row. The explicit return type follows the same parser and emission path as
+//! any other reply shape. Every grammar violation is reported, each at its own
+//! span, in one combined error.
 
 use proc_macro2::{Delimiter, Group, Span, TokenStream as TokenStream2};
 use quote::{ToTokens, quote, quote_spanned};
@@ -224,8 +225,8 @@ fn emit(item: &ItemTrait, rows: &[ProtocolRow]) -> TokenStream2 {
         };
         quote_spanned! {row.span=> ::aether_actor::Row<#kind, #reply> }
     });
-    // The rows tuple carries the trait body's span, so a row the type level
-    // refuses (`-> Undeclared`) is reported on the author's rows.
+    // The rows tuple carries the trait body's span, so a reply type the sealed
+    // row vocabulary refuses is reported on the author's rows.
     let mut rows_ty = Group::new(Delimiter::Parenthesis, quote! { #(#row_tys,)* });
     rows_ty.set_span(item.brace_token.span.join());
 

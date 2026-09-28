@@ -1,14 +1,12 @@
 //! ADR-0231 §2: an actor covers a `#[protocol]` when it has a handler for each
 //! row's kind replying exactly the row's reply; an extra handler and a
-//! `#[fallback]` do not get in the way. `RowSet::CONTRACTS` must use the mapping
-//! `#[actor]`'s `Contracts::CONTRACTS` uses (a silent row is
-//! `ReplyContract::None`), because a route's published rows are compared with
-//! it, so every protocol row appears in the covering actor's list, and the
-//! guard cast's protocol arm (ADR-0231 §4), which `#[protocol]` opts into,
-//! admits those published rows.
+//! `#[fallback]` do not get in the way. This includes an explicit manual row:
+//! it narrows as a reference and path, sends without a reply-handler bound,
+//! and maps to `ReplyContract::Manual` in the same list the actor publishes.
 
 use aether_actor::{
-    ActorInitError, CastTarget, Contracts, CoveredBy, Mail, Protocol, RowSet, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
+    ActorInitError, ActorPath, ActorRef, CastTarget, Contracts, CoveredBy, Mail, Manual, Protocol, ProtocolPath,
+    ProtocolRef, RowSet, Undeclared, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
 };
 
 #[repr(C)]
@@ -39,12 +37,25 @@ struct Extra {
     seq: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "test.protocol_covered.forward")]
+struct Forward {
+    seq: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "test.protocol_covered.trigger")]
+struct Trigger;
+
 /// Loads things.
 #[protocol]
 trait Loader {
     /// Load one thing.
     fn load(mail: Load) -> Loaded;
     fn set_mode(_: SetMode);
+    fn forward(mail: Forward) -> Undeclared;
 }
 
 struct LoaderActor;
@@ -68,8 +79,37 @@ impl WasmActor for LoaderActor {
     #[handler::single]
     fn on_extra(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Extra) {}
 
+    #[handler::manual]
+    fn on_forward(&mut self, _ctx: &mut WasmCtx<'_, Self, Manual>, _mail: Forward) {}
+
     #[fallback]
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
+}
+
+/// A sender with no handler for any reply the manual recipient might choose.
+struct Sender;
+
+#[actor]
+impl WasmActor for Sender {
+    const NAMESPACE: &'static str = "test.protocol_covered.sender";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self)
+    }
+
+    #[handler::single]
+    fn on_trigger(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Trigger) {}
+}
+
+fn narrow_and_send_manual(
+    ctx: &mut WasmCtx<'_, Sender>,
+    reference: ActorRef<LoaderActor>,
+    path: &ActorPath<LoaderActor>,
+) {
+    let protocol: ProtocolRef<Loader> = reference.narrow::<Loader>();
+    let _path: ProtocolPath<Loader> = path.narrow::<Loader>();
+
+    ctx.send_to(protocol, &Forward { seq: 7 });
 }
 
 fn assert_covered<P: CoveredBy<R>, R>() {}
@@ -79,7 +119,7 @@ fn main() {
 
     let protocol_rows = <<Loader as Protocol>::Rows as RowSet>::CONTRACTS;
     let actor_rows = <LoaderActor as Contracts>::CONTRACTS;
-    assert_eq!(protocol_rows.len(), 2);
+    assert_eq!(protocol_rows.len(), 3);
     for row in protocol_rows {
         assert!(actor_rows.contains(row), "protocol row {row:?} is missing from the covering actor's rows");
     }
