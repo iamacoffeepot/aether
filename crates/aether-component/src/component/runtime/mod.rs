@@ -54,7 +54,7 @@ use aether_data::BlobHash;
 use wasmtime::{Engine, Linker};
 
 use aether_substrate::actor::native::{
-    Erased, NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
+    Erased, NativeActor, NativeCtx, NativeInitCtx, Pending, RegistryBatchResult, SpawnOutcome, TaskDone,
 };
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::actor::wasm::module::{Module, ModuleCache};
@@ -248,7 +248,7 @@ impl NativeActor for ComponentHostCapability {
     /// section register. On Ok it picks a final name (caller value > wasm's
     /// `aether.namespace` > `component_N`), spawns a
     /// [`WasmTrampoline`] under
-    /// `aether.embedded:NAME`, and hands the trampoline the owed reply: the
+    /// `aether.embedded:NAME`, and hands the trampoline the held reply: the
     /// loaded trampoline itself replies `LoadResult::Ok { path, capabilities }`,
     /// where `path` is its full lineage address — agents send subsequent mail
     /// to that address, and an actor requester keeps the reply's stamped
@@ -256,22 +256,31 @@ impl NativeActor for ComponentHostCapability {
     /// Errors (bad wire bytes, a publish admission refuses, kind conflict,
     /// name conflict, invalid wasm, instantiation trap) come back from the
     /// host as `LoadResult::Err`.
-    #[handler::manual]
-    fn on_load_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LoadComponent) {
-        state.begin_load(ctx, payload);
+    #[handler::single]
+    fn on_load_component(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        payload: LoadComponent,
+    ) -> Pending<LoadResult> {
+        let (pending, held) = ctx.hold::<LoadResult>();
+        state.begin_load(ctx, held, payload);
+        pending
     }
 
     /// Load a component beneath a caller-selected live logical parent for a
     /// `SubstrateHarness` composition scenario. Ordinary `LoadComponent`
     /// continues to place the requested trampoline beneath this component
     /// host; this handler is the explicit test-harness seam for nested peers.
-    #[handler::manual]
+    /// Its `LoadResult` is held and answered the same way `on_load_component`'s is.
+    #[handler::single]
     fn on_load_component_under(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Erased, Manual>,
+        ctx: &mut NativeCtx<'_>,
         payload: LoadComponentUnder,
-    ) {
-        state.begin_load_under(ctx, payload);
+    ) -> Pending<LoadResult> {
+        let (pending, held) = ctx.hold::<LoadResult>();
+        state.begin_load_under(ctx, held, payload);
+        pending
     }
 
     /// A load's or a replace's module publish settled (ADR-0241 §3/§4): a
@@ -375,9 +384,11 @@ impl NativeActor for ComponentHostCapability {
     /// binary. Forwards [`ReplaceComponent`] to the trampoline;
     /// the trampoline's `WasmTrampoline::on_replace_component`
     /// handler swaps `Component` internally and replies
-    /// `ReplaceResult`. ADR-0022 + ADR-0038 splice invariants
-    /// hold because the inbox channel is the trampoline's
-    /// `NativeBinding`, which outlives the swap.
+    /// `ReplaceResult` to this host, which answers the held reply from
+    /// `on_replace_result`; an early refusal answers it here.
+    /// ADR-0022 + ADR-0038 splice invariants hold because the inbox
+    /// channel is the trampoline's `NativeBinding`, which outlives the
+    /// swap.
     ///
     /// # Agent
     /// `ReplaceComponent { target, wasm, drain_timeout_ms, config, export }`,
@@ -388,7 +399,11 @@ impl NativeActor for ComponentHostCapability {
     /// replacement module to instantiate; `None` reuses the type the
     /// trampoline currently hosts.
     #[handler::single]
-    fn on_replace_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
+    fn on_replace_component(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        payload: ReplaceComponent,
+    ) -> Pending<ReplaceResult> {
         // ADR-0241 §4: the replacement module publishes first, so admission
         // refuses a republish that drops a namespace or narrows a contract
         // before the trampoline is touched, and the replacement's kinds
@@ -399,7 +414,9 @@ impl NativeActor for ComponentHostCapability {
         // (`finish_replace` / `on_replace_result`). Committing it here — before
         // the fire-and-forget replace resolves — would desync the refcount on a
         // failed replace, where the trampoline keeps hosting the old module.
-        state.begin_replace(ctx, payload);
+        let (pending, held) = ctx.hold::<ReplaceResult>();
+        state.begin_replace(ctx, held, payload);
+        pending
     }
 
     /// Settle a forwarded `aether.component.replace` (ADR-0147). The
