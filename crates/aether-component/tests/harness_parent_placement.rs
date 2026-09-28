@@ -269,7 +269,7 @@ fn a_starting_parent_is_a_clean_load_error() {
         .build()
         .expect("boot");
     let _open = OpenOnDrop;
-    let _hatch = harness.send_deferred(&harness.actor_ref::<Launcher>(), &HatchHeld);
+    let _hatch = harness.send_deferred(harness.actor_ref::<Launcher>(), &HatchHeld);
     let (gate, changed) = &GATE;
     let entered = changed
         .wait_timeout_while(gate.lock().expect("gate lock"), Duration::from_secs(10), |state| !state.entered)

@@ -214,7 +214,7 @@ mod cost_cell_liveness {
 
     use super::*;
     use crate::perf::harness::{TickSource, fanout};
-    use crate::{DEFAULT_TICK_DELTA_MICROS, SubstrateHarness};
+    use crate::{DEFAULT_TICK_DELTA_MICROS, SendTarget, SubstrateHarness};
     use aether_lifecycle::LifecycleCapability;
 
     #[test]
@@ -236,8 +236,9 @@ mod cost_cell_liveness {
 
         for (i, relay) in relays.iter().enumerate() {
             let name = format!("mlat.relay:{i}");
-            let request = CostTail { kind: Some(Ping::ID) }.encode_into_bytes();
-            let bytes = tb.request_bytes(relay.erase(), CostTail::ID, request).expect("the relay answers cost.tail");
+            let bytes = tb
+                .request_prepared(&relay.erase().prepare(&CostTail { kind: Some(Ping::ID) }))
+                .expect("the relay answers cost.tail");
             let Some(CostTailResult::Ok { rows }) = CostTailResult::decode_from_bytes(&bytes) else {
                 panic!("{name}: cost.tail did not answer Ok");
             };

@@ -361,14 +361,12 @@ fn bind_then_list_then_unbind_roundtrip() {
 fn staged_bind_reply_preserves_the_original_root_and_follows_monitor_commit() {
     const LISTENER_NAME: &str = "held-bind";
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let session = SessionToken(Uuid::from_u128(0x4066_B1AD));
     let correlation_id = 0x4066;
     let (_, settled) = chassis.send_tracked(
         tcp,
-        BindListener::ID,
-        BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None }
-            .encode_into_bytes(),
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
         Some(ReplyTarget::Session { session, correlation: correlation_id }),
     );
 
@@ -390,13 +388,13 @@ fn staged_bind_reply_preserves_the_original_root_and_follows_monitor_commit() {
     assert_eq!(listener_name, LISTENER_NAME);
     settled.recv_timeout(Duration::from_secs(2)).expect("the original root settles after the staged reply");
 
-    let listed: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
+    let listed: ListListenersResult = drive_and_decode(&registry, &rx, tcp.erase(), &ListListeners::default());
     assert!(
         listed.listeners.iter().any(|entry| entry.name == LISTENER_NAME && entry.port == local_port),
         "the success reply is sent only after monitor installation and supervisor-map commit",
     );
     let unbound: UnbindListenerResult =
-        drive_and_decode(&registry, &rx, tcp, &UnbindListener { listener_name: LISTENER_NAME.into() });
+        drive_and_decode(&registry, &rx, tcp.erase(), &UnbindListener { listener_name: LISTENER_NAME.into() });
     assert!(matches!(unbound, UnbindListenerResult::Ok { .. }));
 }
 
@@ -561,11 +559,11 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
 #[test]
 fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let bind_reply: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        tcp,
+        tcp.erase(),
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("held-unbind".into()), consumer: None },
     );
     let listener_name = match bind_reply {
@@ -577,8 +575,7 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
     let correlation_id = 0x3051;
     let (_, settled) = chassis.send_tracked(
         tcp,
-        UnbindListener::ID,
-        UnbindListener { listener_name: listener_name.clone() }.encode_into_bytes(),
+        &UnbindListener { listener_name: listener_name.clone() },
         Some(ReplyTarget::Session { session, correlation: correlation_id }),
     );
 
@@ -602,7 +599,7 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
         matches!(rx.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)),
         "deferred unbind emits exactly one result",
     );
-    let listeners: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
+    let listeners: ListListenersResult = drive_and_decode(&registry, &rx, tcp.erase(), &ListListeners::default());
     assert!(listeners.listeners.is_empty(), "monitor cleanup removes the unbound listener");
 }
 
@@ -754,21 +751,19 @@ fn concurrent_connects_reply_to_their_own_origins() {
     let server_beta = thread::spawn(move || listener_beta.accept().expect("accept beta connect").1);
 
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let session_alpha = SessionToken(Uuid::from_u128(0xA11A));
     let session_beta = SessionToken(Uuid::from_u128(0xB37A));
     let correlation_alpha = 0xA11A;
     let correlation_beta = 0xB37A;
     let (_, settled_alpha) = chassis.send_tracked(
         tcp,
-        Connect::ID,
-        Connect { addr: addr_alpha.to_string(), name: Some("alpha".into()), consumer: None }.encode_into_bytes(),
+        &Connect { addr: addr_alpha.to_string(), name: Some("alpha".into()), consumer: None },
         Some(ReplyTarget::Session { session: session_alpha, correlation: correlation_alpha }),
     );
     let (_, settled_beta) = chassis.send_tracked(
         tcp,
-        Connect::ID,
-        Connect { addr: addr_beta.to_string(), name: Some("beta".into()), consumer: None }.encode_into_bytes(),
+        &Connect { addr: addr_beta.to_string(), name: Some("beta".into()), consumer: None },
         Some(ReplyTarget::Session { session: session_beta, correlation: correlation_beta }),
     );
 

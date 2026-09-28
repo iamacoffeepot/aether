@@ -84,8 +84,8 @@ pub use aether_derive::{Config, StageArgv};
 #[cfg(feature = "wasm")]
 pub use boot::SubstrateBoot;
 pub use chassis::builder::{
-    Builder, BuilderState, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, HasDriver, NeverDriver,
-    NeverDriverRunning, NoDriver, PassiveChassis, ReplyTarget, RootPusher, RouteReadProbe, RunError,
+    Builder, BuilderState, BuiltChassis, ChassisTarget, DriverCapability, DriverCtx, DriverRunning, HasDriver,
+    NeverDriver, NeverDriverRunning, NoDriver, PassiveChassis, ReplyTarget, RootPusher, RouteReadProbe, RunError,
 };
 pub use chassis::ctx::{
     ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender, MailboxWakeSlot, SharedActorSlots,

@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root};
-use aether_data::{KindId, LoadName, MailId, ReplyContract, SessionToken};
+use aether_data::{ErasedActorPath, Kind, KindId, LoadName, MailId, ReplyContract, SessionToken};
 use aether_kinds::{CostTail, CostTailResult};
 use crossbeam_channel::Receiver;
 
@@ -14,6 +14,7 @@ use super::boot_passives::BootedPassives;
 use super::driver::{DriverRunning, RunError, assemble_pumped_slot};
 use super::root_pusher::RootPusher;
 use super::route_probe::RouteReadProbe;
+use super::target::ChassisTarget;
 use crate::actor::native::NativeActor;
 use crate::actor::native::slot::pumped::PumpedSlot;
 use crate::chassis::Chassis;
@@ -21,6 +22,7 @@ use crate::chassis::ctx::{MailboxClaim, MailboxWakeSlot, RelayInbox, prepare_rel
 use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::chassis::settlement::SettlementRegistry;
+use crate::mail::boundary::{self, BoundaryMail};
 use crate::mail::registry::effect::RegistryEffectError;
 use crate::mail::registry::{
     AddressResolutionError, AdoptRefused, ChildRefused, Registry, ResolvedAddress, RouteContract,
@@ -120,7 +122,7 @@ impl<C: Chassis> BuiltChassis<C> {
         result
     }
 
-    /// Push `payload` to the actor `to` proves, untracked, with its reply
+    /// Push typed `mail` to the actor `to` proves, untracked, with its reply
     /// routed to `reply` — the embedder's **test-scoped** push for a driven
     /// chassis that is built but never [`run`](Self::run).
     ///
@@ -132,11 +134,11 @@ impl<C: Chassis> BuiltChassis<C> {
     /// shipped bloomery chassis, holds the references its mount took back, and
     /// drives the journal owner and the bundle driver in process.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn send_for_reply(&self, to: ErasedActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
-        self.booted.spawner.push_for_reply(to, kind, payload, reply);
+    pub fn send_for_reply<K: Kind, I>(&self, to: impl ChassisTarget<K, I>, mail: &K, reply: ReplyTarget) {
+        self.booted.spawner.push_for_reply(to.erased(), K::ID, mail.encode_into_bytes(), reply);
     }
 
-    /// Push `payload` to the actor `to` proves as a chassis-root mail and
+    /// Push typed `mail` to the actor `to` proves as a chassis-root mail and
     /// return the minted root beside the receiver that fires once its whole
     /// causal chain settles (ADR-0080 §6) — the tracked sibling of
     /// [`Self::send_for_reply`], gated on the `test-support` feature the same
@@ -147,14 +149,13 @@ impl<C: Chassis> BuiltChassis<C> {
     /// that a `Call`'s chain settles once its outcome is out.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub fn send_tracked(
+    pub fn send_tracked<K: Kind, I>(
         &self,
-        to: ErasedActorRef,
-        kind: KindId,
-        payload: Vec<u8>,
+        to: impl ChassisTarget<K, I>,
+        mail: &K,
         reply: Option<ReplyTarget>,
     ) -> (MailId, Receiver<()>) {
-        self.booted.spawner.push_tracked(to, kind, payload, reply)
+        self.booted.spawner.push_tracked(to.erased(), K::ID, mail.encode_into_bytes(), reply)
     }
 }
 
@@ -430,7 +431,7 @@ impl<C: Chassis> PassiveChassis<C> {
         check_reservations_booted(self.lock_reserved().keys().map(String::as_str))
     }
 
-    /// Push `payload` to the actor `to` proves as a chassis-root mail and
+    /// Push typed `mail` to the actor `to` proves as a chassis-root mail and
     /// return the minted root beside the receiver that fires once its whole
     /// causal chain settles (ADR-0080 §6).
     ///
@@ -440,14 +441,43 @@ impl<C: Chassis> PassiveChassis<C> {
     /// `reply`, when present, routes the recipient's reply to a hub session
     /// or another proven actor. The embedder holds a proof, never a position.
     #[must_use]
-    pub fn send_tracked(
+    pub fn send_tracked<K: Kind, I>(
         &self,
-        to: ErasedActorRef,
-        kind: KindId,
-        payload: Vec<u8>,
+        to: impl ChassisTarget<K, I>,
+        mail: &K,
         reply: Option<ReplyTarget>,
     ) -> (MailId, Receiver<()>) {
-        self.booted.spawner.push_tracked(to, kind, payload, reply)
+        self.booted.spawner.push_tracked(to.erased(), K::ID, mail.encode_into_bytes(), reply)
+    }
+
+    /// Prove one boundary-named recipient path and bind it to the supplied
+    /// kind and payload bytes. The returned item can only be delivered.
+    pub fn accept_call(
+        &self,
+        recipient: &ErasedActorPath,
+        kind: KindId,
+        payload: Vec<u8>,
+    ) -> Result<BoundaryMail, String> {
+        boundary::accept_call(self.booted.spawner.registry(), recipient, kind, payload)
+    }
+
+    /// Deliver a path-proven boundary item as a tracked chassis root.
+    #[must_use]
+    pub fn deliver_tracked(&self, item: BoundaryMail, reply: Option<ReplyTarget>) -> (MailId, Receiver<()>) {
+        let BoundaryMail { recipient, kind, payload } = item;
+        self.booted.spawner.push_tracked(recipient, kind, payload, reply)
+    }
+
+    /// Deliver a path-proven boundary item with its reply routed to `reply`.
+    pub fn deliver_for_reply(&self, item: BoundaryMail, reply: ReplyTarget) {
+        let BoundaryMail { recipient, kind, payload } = item;
+        self.booted.spawner.push_for_reply(recipient, kind, payload, reply);
+    }
+
+    /// Name the canonical path retained for an erased reference.
+    #[must_use]
+    pub fn actor_path(&self, reference: ErasedActorRef) -> Option<ErasedActorPath> {
+        self.booted.spawner.registry().actor_path(reference)
     }
 
     /// The chassis-root door to the composed root actor `R` (ADR-0080 §6),
@@ -463,10 +493,10 @@ impl<C: Chassis> PassiveChassis<C> {
         self.booted.spawner.root_pusher(actor_ref::<R>(&self.booted))
     }
 
-    /// Push `payload` to the actor `to` proves, untracked, with its reply
+    /// Push typed `mail` to the actor `to` proves, untracked, with its reply
     /// routed to `reply` — a hub session or another proven actor.
-    pub fn send_for_reply(&self, to: ErasedActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
-        self.booted.spawner.push_for_reply(to, kind, payload, reply);
+    pub fn send_for_reply<K: Kind, I>(&self, to: impl ChassisTarget<K, I>, mail: &K, reply: ReplyTarget) {
+        self.booted.spawner.push_for_reply(to.erased(), K::ID, mail.encode_into_bytes(), reply);
     }
 
     /// Type the stamped sender of a successful load reply as the loaded actor

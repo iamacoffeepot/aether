@@ -128,7 +128,7 @@ fn concurrent_same_hash_loads_share_the_pending_boot() {
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     let widget_a = harness.send_deferred(
-        &harness.actor_ref::<ComponentHostCapability>(),
+        harness.actor_ref::<ComponentHostCapability>(),
         &LoadComponent {
             wasm: wasm.clone(),
             name: None,
@@ -137,7 +137,7 @@ fn concurrent_same_hash_loads_share_the_pending_boot() {
         },
     );
     let widget_b = harness.send_deferred(
-        &harness.actor_ref::<ComponentHostCapability>(),
+        harness.actor_ref::<ComponentHostCapability>(),
         &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("aether.test.boot.widget_b".to_owned()) },
     );
 

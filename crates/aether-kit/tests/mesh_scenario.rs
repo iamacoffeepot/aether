@@ -449,8 +449,8 @@ fn overlapping_loads_reply_to_their_own_requesters() {
         .expect("boot");
     let viewer = load_viewer(&mut harness, &wasm_path);
 
-    let first = harness.send_deferred(&viewer, &LoadMesh { namespace: "save".to_owned(), path: dsl_path.clone() });
-    let second = harness.send_deferred(&viewer, &LoadMesh { namespace: "save".to_owned(), path: obj_path.clone() });
+    let first = harness.send_deferred(viewer, &LoadMesh { namespace: "save".to_owned(), path: dsl_path.clone() });
+    let second = harness.send_deferred(viewer, &LoadMesh { namespace: "save".to_owned(), path: obj_path.clone() });
 
     let second_reply = harness.await_deferred::<MeshLoadResult>(second).expect("second load replies");
     let first_reply = harness.await_deferred::<MeshLoadResult>(first).expect("first load replies");

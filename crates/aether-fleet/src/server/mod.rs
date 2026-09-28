@@ -268,11 +268,13 @@ mod tests {
     /// Drive one request kind at `aether.fleet`, reply-to the sink,
     /// and block until `probe` sees a recorded reply (or the deadline
     /// passes).
-    fn drive<K: Kind, T>(chassis: &PassiveChassis<TestChassis>, request: &K, probe: impl Fn() -> Option<T>) -> T {
+    fn drive<K: Kind, T>(chassis: &PassiveChassis<TestChassis>, request: &K, probe: impl Fn() -> Option<T>) -> T
+    where
+        FleetServer: aether_actor::HandlesKind<K>,
+    {
         chassis.send_for_reply(
-            chassis.actor_ref::<FleetServer>().erase(),
-            K::ID,
-            request.encode_into_bytes(),
+            chassis.actor_ref::<FleetServer>(),
+            request,
             ReplyTarget::Actor { to: chassis.actor_ref::<ReplySink>().erase(), correlation: 1 },
         );
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -294,9 +296,14 @@ mod tests {
         chassis: &PassiveChassis<TestChassis>,
         cells: &ReplyCells,
         fire: &K,
-    ) -> aether_kinds::ListEnginesResult {
-        drop(chassis.send_tracked(chassis.actor_ref::<FleetServer>().erase(), K::ID, fire.encode_into_bytes(), None));
-        drive(chassis, &ListEngines {}, || cells.list.lock().expect("test setup: list cell mutex poisoned").take())
+    ) -> aether_kinds::ListEnginesResult
+    where
+        FleetServer: aether_actor::HandlesKind<K>,
+    {
+        drop(chassis.send_tracked(chassis.actor_ref::<FleetServer>(), fire, None));
+        drive::<ListEngines, aether_kinds::ListEnginesResult>(chassis, &ListEngines {}, || {
+            cells.list.lock().expect("test setup: list cell mutex poisoned").take()
+        })
     }
 
     /// `on_list` on a fresh cap replies with an empty engine list.

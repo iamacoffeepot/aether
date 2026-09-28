@@ -2,7 +2,7 @@
 //! and a push that names a claimed inbox gets `R`'s reply there, joined to
 //! the root it pushed.
 
-use super::support::{DrivenTestChassis, StubLog};
+use super::support::DrivenTestChassis;
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
 use crate::chassis::builder::{Builder, DriverCapability, DriverCtx, DriverRunning, RootPusher, RunError};
@@ -24,22 +24,32 @@ pod_kind!(RootPong { tag: u32 }, "test.root_pusher.pong", 0xA1B2_C3D4_E5F6_0005)
 fn two_senders_never_mint_the_same_root() {
     let (registry, mailer) = bare_substrate();
     let chassis = Builder::<TestChassis>::new(registry, mailer)
-        .with_actor::<StubLog>(())
+        .with_actor::<EchoCap>(())
         .build_passive()
         .expect("the stub cap boots");
     let ping = RootPing { tag: 1 };
 
-    let first = chassis.root_pusher::<StubLog>().push_root(&ping, None);
-    let (tracked, _settled) =
-        chassis.send_tracked(chassis.actor_ref::<StubLog>().erase(), RootPing::ID, ping.encode_into_bytes(), None);
-    let second = chassis.root_pusher::<StubLog>().push_root(&ping, None);
+    let first = chassis.root_pusher::<EchoCap>().push_root(&ping, None);
+    let target = chassis.actor_ref::<EchoCap>();
+    let (tracked, _settled) = chassis.send_tracked(target, &ping, None);
+    let path = chassis.actor_path(target.erase()).expect("the composed actor keeps its path");
+    let (delivered, _settled) = chassis.deliver_tracked(
+        chassis
+            .accept_call(&path, RootPing::ID, ping.encode_into_bytes())
+            .expect("the composed actor path proves live"),
+        None,
+    );
+    let second = chassis.root_pusher::<EchoCap>().push_root(&ping, None);
 
     // Tripwire: any sender that keeps its own counter mints correlation 1
     // again and collides with the first push. The roots are minted, not
     // literals, so this drifts if the mint logic changes.
     assert_ne!(first, tracked, "a door and the tracked send share one counter");
+    assert_ne!(first, delivered, "a door and boundary delivery share one counter");
+    assert_ne!(tracked, delivered, "typed and boundary delivery share one counter");
     assert_ne!(first, second, "two doors share one counter");
     assert_ne!(tracked, second, "the tracked send and a later door share one counter");
+    assert_ne!(delivered, second, "boundary delivery and a later door share one counter");
 
     drop(chassis);
 }
