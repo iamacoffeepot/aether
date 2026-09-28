@@ -6,6 +6,9 @@
 //! placement is what embedded resolution consumes. The refusal scenarios
 //! pin the parent boundary: an address that does not resolve, and one that
 //! resolves to a parent still `Starting`, both answer `Err` before any load.
+//! Host placement is pinned the same way (ADR-0241 §5): a host load of a type
+//! whose only declared placement is `child_of(P)` answers `Err` naming it,
+//! before the module publishes or its route is staged.
 
 use std::fs;
 use std::sync::{Condvar, Mutex, PoisonError};
@@ -23,6 +26,7 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Spa
 use aether_test_fixtures_kinds::{Bump, TickObserved};
 
 const PROBE_EXPORT: &str = "test.probe";
+const CHILD_ONLY_EXPORT: &str = "test.matrix.child";
 const CALLER_EXPORT: &str = "test.parent_peer.caller";
 const TARGET_EXPORT: &str = "test.parent_peer.target";
 
@@ -34,6 +38,20 @@ fn load(
     name: Option<&str>,
     export: &str,
 ) -> String {
+    match load_result(harness, wasm, label, parent, name, export) {
+        LoadResult::Ok { path, .. } => path.to_string(),
+        LoadResult::Err { error } => panic!("load {export} beneath {parent:?} failed: {error}"),
+    }
+}
+
+fn load_result(
+    harness: &mut SubstrateHarness,
+    wasm: &[u8],
+    label: &str,
+    parent: Option<&str>,
+    name: Option<&str>,
+    export: &str,
+) -> LoadResult {
     let component = LoadComponent {
         wasm: wasm.to_vec(),
         name: name.map(str::to_owned),
@@ -47,10 +65,7 @@ fn load(
     };
     let result = harness.execute(vec![(label, operation)]).expect("component load operation");
 
-    match result.reply::<LoadResult>(label).expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path.to_string(),
-        LoadResult::Err { error } => panic!("load {export} beneath {parent:?} failed: {error}"),
-    }
+    result.reply::<LoadResult>(label).expect("decode LoadResult")
 }
 
 /// The loaded trampoline keyed `name` beneath the trampoline `parent` — the
@@ -111,6 +126,27 @@ fn explicit_and_nested_parents_scope_live_peer_delivery() {
         "each caller must reach the target beneath its own runtime parent; observed kinds: {:?}",
         harness.observed_kinds(),
     );
+}
+
+/// Catches a host load that ignores the selected type's lineage (the child-only
+/// type would load at the host) and a refusal that comes after staging (a route
+/// left behind under `stray` would make the second load `SubnameInUse`).
+#[test]
+fn a_host_load_of_a_child_only_type_is_refused_before_staging() {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
+        return;
+    };
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+
+    let LoadResult::Err { error } =
+        load_result(&mut harness, &wasm, "child-only", None, Some("stray"), CHILD_ONLY_EXPORT)
+    else {
+        panic!("a type declaring only child_of(..) must not load at the component host");
+    };
+    assert!(error.contains(CHILD_ONLY_EXPORT), "the refusal names the type: {error}");
+
+    load(&mut harness, &wasm, "root", None, Some("stray"), PROBE_EXPORT);
 }
 
 #[test]

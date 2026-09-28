@@ -28,7 +28,7 @@ use super::source_observer::SourceObserver;
 
 pub struct SourceForwarder;
 
-#[actor(depends(SourceObserver))]
+#[actor(root, depends(SourceObserver))]
 impl WasmActor for SourceForwarder {
     const NAMESPACE: &'static str = "test.source_forwarder";
 

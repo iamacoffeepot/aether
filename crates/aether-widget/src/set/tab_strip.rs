@@ -300,7 +300,7 @@ impl WidgetDefaults for TabStripWidget {
 /// Not loaded directly — the panel root spawns it as an inline child. Send
 /// it its `TabStripConfig` again to replace the labels or the style in place —
 /// that holds the current tab. Send it [`SetSelection`] to move the tab.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for TabStripWidget {
     type Config = TabStripConfig;
     const NAMESPACE: &'static str = "aether.widget.tab_strip";

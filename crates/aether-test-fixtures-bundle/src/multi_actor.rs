@@ -24,7 +24,7 @@ use aether_kinds::Ping;
 /// host instantiates this one. Strict receiver: no `#[fallback]`.
 pub struct RootManager;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for RootManager {
     const NAMESPACE: &'static str = "test.ui.root";
 
@@ -43,7 +43,7 @@ impl WasmActor for RootManager {
 /// capability group from the entry type's strict receiver.
 pub struct Panel;
 
-#[actor(instanced)]
+#[actor(instanced, root)]
 impl WasmActor for Panel {
     const NAMESPACE: &'static str = "test.ui.panel";
 

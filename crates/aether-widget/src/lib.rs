@@ -1447,7 +1447,7 @@ mod tests {
 /// render sender: the root emits every widget's solid/textured draws in
 /// structural depth-first order, grouping only adjacent compatible items, so
 /// a background drawn as root chrome sits under the children by construction.
-#[actor(instanced, composable, depends(LifecycleCapability, RenderCapability, TextCapability), spawns(Widget))]
+#[actor(instanced, root, composable, depends(LifecycleCapability, RenderCapability, TextCapability), spawns(Widget))]
 impl WasmActor for Widget {
     type Config = WidgetConfig;
     const NAMESPACE: &'static str = "aether.widget";

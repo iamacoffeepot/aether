@@ -28,7 +28,7 @@ use aether_test_fixtures_kinds::{SourceQuery, SourceReport};
 
 pub struct SourceObserver;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for SourceObserver {
     const NAMESPACE: &'static str = "test.source_observer";
 

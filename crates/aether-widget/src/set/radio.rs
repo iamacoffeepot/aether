@@ -172,7 +172,7 @@ impl WidgetDefaults for RadioGroupWidget {
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `RadioConfig` again to replace the options or theme in place — that
 /// holds the current choice. Send it [`SetSelection`] to move the choice.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for RadioGroupWidget {
     type Config = RadioConfig;
     const NAMESPACE: &'static str = "aether.widget.radio";

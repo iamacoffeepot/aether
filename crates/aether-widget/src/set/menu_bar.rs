@@ -487,7 +487,7 @@ impl WidgetDefaults for MenuBarWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
 /// it its `MenuBarConfig` again to replace the menus in place.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for MenuBarWidget {
     type Config = MenuBarConfig;
     const NAMESPACE: &'static str = "aether.widget.menu_bar";

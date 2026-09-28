@@ -346,6 +346,7 @@ fn a_fixture_with_a_stderr_sibling_is_compile_fail() {
 const HAND_LIST_FIXTURES: &[&str] = &[
     "accepts_actor_composable_wasm",
     "accepts_actor_lineage_wasm",
+    "accepts_actor_root_wasm",
     "accepts_actor_runtime_feature",
     "accepts_actor_split_fallback",
     "accepts_actor_split_task_handler",
@@ -373,7 +374,6 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_actor_composable_child_of",
     "rejects_actor_composable_native",
     "rejects_actor_reach_handler",
-    "rejects_actor_root_wasm",
     "rejects_actor_unknown_arg",
     "rejects_bare_handler_native",
     "rejects_bare_handler_wasm",

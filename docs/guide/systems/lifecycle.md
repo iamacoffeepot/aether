@@ -152,7 +152,7 @@ typed by your actor like a handler's: `WireCtx<'_, '_>` reads as
 publisher and the stage:
 
 ```rust
-#[actor(depends(LifecycleCapability))]
+#[actor(root, depends(LifecycleCapability))]
 impl WasmActor for Camera {
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
         ctx.subscribe::<LifecycleCapability, Tick>();

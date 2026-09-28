@@ -87,7 +87,7 @@ use aether_data::Kind as _;
 
 pub struct Web;
 
-#[actor(depends(HttpServerCapability))]
+#[actor(root, depends(HttpServerCapability))]
 impl WasmActor for Web {
     const NAMESPACE: &'static str = "web";
 
@@ -319,7 +319,7 @@ use aether_http::HttpServerCapability;
 use aether_http::kinds::{HttpServerRequest, HttpServerResponse};
 
 #[http::router]
-#[actor(depends(HttpServerCapability))]
+#[actor(root, depends(HttpServerCapability))]
 impl WasmActor for ApiHandler {
     const NAMESPACE: &'static str = "api";
 
@@ -464,7 +464,7 @@ pub struct Feed {
     done: bool,
 }
 
-#[actor]
+#[actor(root)]
 impl WasmActor for Feed {
     const NAMESPACE: &'static str = "feed";
 

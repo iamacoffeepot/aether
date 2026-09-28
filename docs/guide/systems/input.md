@@ -102,7 +102,7 @@ and the kind:
 use aether_kinds::{Key, WindowSize};
 use aether_window::WindowCapability;
 
-#[actor(depends(WindowCapability))]
+#[actor(root, depends(WindowCapability))]
 impl WasmActor for Editor {
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
         ctx.subscribe::<WindowCapability, Key>();

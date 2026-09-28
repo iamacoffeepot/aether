@@ -33,7 +33,7 @@ pub struct Counter {
     generation: u32,
 }
 
-#[actor]
+#[actor(root)]
 impl WasmActor for Counter {
     const NAMESPACE: &'static str = "test.stateful.typed";
 

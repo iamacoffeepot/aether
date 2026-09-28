@@ -128,7 +128,7 @@ impl WidgetDefaults for TextFieldWidget {
 /// its `TextFieldConfig` again to re-cap or restyle it in place — that holds
 /// the buffer, the caret, and the selection. Send it [`SetText`] to replace
 /// what it holds.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability, ClipboardCapability))]
+#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability, ClipboardCapability))]
 impl WasmActor for TextFieldWidget {
     type Config = TextFieldConfig;
     const NAMESPACE: &'static str = "aether.widget.text_field";

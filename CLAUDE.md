@@ -114,7 +114,7 @@ Pre-build component wasm with `cargo xtask build-wasm` before a scenario suite (
 A component is an actor whose receive side is declared with **`#[actor]`** on one `impl WasmActor for C` block (ADR-0033 / ADR-0074). Guide: `docs/guide/writing-guest-code.md`, `docs/guide/systems/components.md`, `docs/guide/foundations/actor-model.md`, and `docs/guide/architecture/guest-native-boundary.md`.
 
 ```rust
-#[actor(depends(LifecycleCapability, RenderCapability))]
+#[actor(root, depends(LifecycleCapability, RenderCapability))]
 impl WasmActor for CameraComponent {
     const NAMESPACE: &'static str = "aether.kit.camera";   // default load name
 

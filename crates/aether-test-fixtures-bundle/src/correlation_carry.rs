@@ -50,7 +50,7 @@ struct ParkedReplies {
 /// id its mailbox mints.
 pub struct CarryRequester;
 
-#[actor(depends(ReplyHolder, SubstrateHarnessObserver))]
+#[actor(root, depends(ReplyHolder, SubstrateHarnessObserver))]
 impl WasmActor for CarryRequester {
     const NAMESPACE: &'static str = "test.carry.requester";
 
@@ -85,7 +85,7 @@ pub struct ReplyHolder {
     parked: Vec<(ReplyHandle, u32)>,
 }
 
-#[actor]
+#[actor(root)]
 impl WasmActor for ReplyHolder {
     const NAMESPACE: &'static str = "test.carry.holder";
 

@@ -44,7 +44,7 @@ impl EditorRegion {
     }
 }
 
-#[actor(instanced, depends(EditorShell), spawns(WidgetPanel))]
+#[actor(instanced, root, depends(EditorShell), spawns(WidgetPanel))]
 impl WasmActor for EditorRegion {
     type Config = PanelConfig;
     const NAMESPACE: &'static str = "aether.widget.editor_region";

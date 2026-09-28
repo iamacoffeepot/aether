@@ -16,6 +16,7 @@ use aether_substrate::actor::wasm::module::Module;
 
 use super::LoadResult;
 use super::dependencies::{dependency_refusal, inline_dependency_refusal};
+use super::placement::root_refusal;
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
 use crate::component::{ComponentHostCapability, LoadDelivered};
 use crate::kinds::BootTeardown;
@@ -230,6 +231,12 @@ impl ComponentHostCapabilityState {
             return Err(LoadResult::Err { error });
         }
 
+        // ADR-0241 §5: a module boot is always host-placed, whatever the
+        // requested placement, so its type must declare `root`.
+        if let Some(error) = manifest.boot().and_then(|boot_ns| root_refusal(manifest.lineage(), boot_ns)) {
+            return Err(LoadResult::Err { error });
+        }
+
         if let Some(boot_ns) = manifest.boot()
             && export.as_deref() == Some(boot_ns)
         {
@@ -282,6 +289,21 @@ impl ComponentHostCapabilityState {
                 default_actor.and_then(|actor| actor.namespace.clone()),
             )
         };
+
+        // ADR-0241 §5: a host load places the selected type at the component
+        // host, so it must declare `root`; a single-actor module's implicit
+        // group is named by the module's namespace. `load_under` places
+        // beneath a parent and is not checked here.
+        if matches!(placement, LoadPlacement::ComponentHost) {
+            let Some(namespace) = selected_namespace.as_deref().or_else(|| manifest.namespace()) else {
+                return Err(LoadResult::Err {
+                    error: "the load selects no actor namespace, so its host placement cannot be checked".to_owned(),
+                });
+            };
+            if let Some(error) = root_refusal(manifest.lineage(), namespace) {
+                return Err(LoadResult::Err { error });
+            }
+        }
 
         capabilities.assets = manifest.asset_catalog().to_vec();
         let name =
@@ -634,6 +656,14 @@ impl ComponentHostCapabilityState {
         // The module-wide inline check runs here; the trampoline checks the
         // dependencies of the type the replacement will host.
         if let Some(error) = inline_dependency_refusal(ctx, module.manifest()) {
+            ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
+            return;
+        }
+        // ADR-0241 §5: the replacement's module boot is host-placed, so a
+        // boot type without `root` refuses the whole replace here, before
+        // anything is staged, rather than failing the boot after the swap.
+        let manifest = module.manifest();
+        if let Some(error) = manifest.boot().and_then(|boot_ns| root_refusal(manifest.lineage(), boot_ns)) {
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;
         }

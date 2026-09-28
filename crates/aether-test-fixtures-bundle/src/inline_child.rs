@@ -113,7 +113,7 @@ fn reply_who<A>(ctx: &mut WasmCtx<'_, A, Manual>, who: u32) {
 /// child in `wire`.
 pub struct InlineParent;
 
-#[actor(spawns(InlineChild))]
+#[actor(root, spawns(InlineChild))]
 impl WasmActor for InlineParent {
     const NAMESPACE: &'static str = "test.inline.parent";
 
@@ -164,7 +164,7 @@ impl WasmActor for InlineChild {
 /// `export: Some("test.inline.stateful_parent")`.
 pub struct InlineStatefulParent;
 
-#[actor(spawns(InlineStatefulChild))]
+#[actor(root, spawns(InlineStatefulChild))]
 impl WasmActor for InlineStatefulParent {
     const NAMESPACE: &'static str = "test.inline.stateful_parent";
 
@@ -247,7 +247,7 @@ pub struct InlineDespawnParent {
     child: Option<ErasedActorRef>,
 }
 
-#[actor(spawns(InlineDespawnChild))]
+#[actor(root, spawns(InlineDespawnChild))]
 impl WasmActor for InlineDespawnParent {
     const NAMESPACE: &'static str = "test.inline.despawn_parent";
 
@@ -317,7 +317,7 @@ impl WasmActor for InlineDespawnChild {
 /// `export: Some("test.inline.configured_parent")`.
 pub struct InlineConfiguredParent;
 
-#[actor(spawns(InlineConfiguredChild))]
+#[actor(root, spawns(InlineConfiguredChild))]
 impl WasmActor for InlineConfiguredParent {
     const NAMESPACE: &'static str = "test.inline.configured_parent";
 
@@ -400,7 +400,7 @@ impl WasmActor for InlineConfiguredChild {
 /// the first alias is still only locally prepared.
 pub struct NestedLineageParent;
 
-#[actor(spawns(NestedLineageChild))]
+#[actor(root, spawns(NestedLineageChild))]
 impl WasmActor for NestedLineageParent {
     const NAMESPACE: &'static str = "test.inline.nested_parent";
 
@@ -496,7 +496,7 @@ pub struct InlineTagParent {
     non_instanced_rejected: bool,
 }
 
-#[actor]
+#[actor(root)]
 impl WasmActor for InlineTagParent {
     const NAMESPACE: &'static str = "test.inline.tag_parent";
 

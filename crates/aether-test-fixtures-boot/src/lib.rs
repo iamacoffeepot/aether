@@ -39,7 +39,7 @@ use aether_test_fixtures_kinds::{BootObserved, BootTornDown, SubstrateHarnessObs
 /// and instantiated exactly once per loaded module content hash.
 pub struct Boot;
 
-#[actor(depends(SubstrateHarnessObserver))]
+#[actor(root, depends(SubstrateHarnessObserver))]
 impl WasmActor for Boot {
     const NAMESPACE: &'static str = "aether.test.boot.boot";
 
@@ -69,7 +69,7 @@ impl WasmActor for Boot {
 /// selector. Refcounts against the module's boot singleton while loaded.
 pub struct WidgetA;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for WidgetA {
     const NAMESPACE: &'static str = "aether.test.boot.widget_a";
 
@@ -85,7 +85,7 @@ impl WasmActor for WidgetA {
 /// selector.
 pub struct WidgetB;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for WidgetB {
     const NAMESPACE: &'static str = "aether.test.boot.widget_b";
 
