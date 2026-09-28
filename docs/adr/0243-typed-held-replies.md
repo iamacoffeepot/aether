@@ -51,10 +51,10 @@ held.answer(ctx, &WatchHeadResult { .. });
 
    ```rust
    pub struct Pending<R> { id: DispatchId, _reply: PhantomData<fn() -> R> }   // the receipt
-   pub struct Held<R>    { id: DispatchId, _reply: PhantomData<fn() -> R> }   // the ticket; move-only
+   pub struct Held<R>    { id: DispatchId, ledger: Weak<NativeBinding>, _reply: PhantomData<fn() -> R> }   // the ticket; move-only
    ```
 
-   - **The ledger owns the obligation, not the value.** A `Held<R>` is a typed ticket to its ledger entry.
+   - **The ledger owns the obligation, not the value.** A `Held<R>` is a typed ticket to its ledger entry. It also keeps a weak link to that ledger, because its `Drop` and `into_deferred_reply` get no ctx. The weak link is never encoded. `DeferredCompletion` is the in-tree precedent for a ticket holding a weak binding link.
    - **`answer` completes the entry.** `answer(self, ctx, &R)` sends the terminal reply to the entry's target and releases its hold.
    - **An unanswered drop fails fast.** `Held<R>` is `#[must_use]`, and dropping it unanswered fails fast, as `DeferredReply` does.
    - **Staging takes it unchanged.** `Held<R>` implements `IntoDeferredReply`, so `continue_from` and the other staging surfaces accept it.
@@ -88,11 +88,12 @@ held.answer(ctx, &WatchHeadResult { .. });
 
    - **`send_with_context` takes the context by value.** Parking moves the debt into the table, so the sender cannot answer it again after the reply's take. The existing `&context` callers become `context`.
    - **`Held<R>` is a kind with actor reach.** It implements neither `CrossesActors` nor `CrossesWire`, so under ADR-0242 it, and any context that holds it, is never `ActorMail`, never a handler's kind, and never sent.
-   - **It encodes as its ticket, never as the hold.** A `Held` is an actor-local kind that serializes and deserializes, because contexts are stored as kind bytes that survive a guest replace. Encoding writes the ticket, and `take_context` decodes it back into a live `Held`:
+   - **It encodes as its ticket, never as the hold, through the codec hooks.** A `Held` is an actor-local kind that serializes and deserializes, because contexts are stored as kind bytes that survive a guest replace. Its codec reaches the engine only through the hooks `Blob` and `ProtocolPath` already use (`aether-data/src/wire/attach.rs`, `context.rs`): `Encoder::held` on the way out and `DecodeCtx::claim_held` on the way in. Both default to refusing. Only the request-context table's encoder and decode ctx grant them, and only the dehydrate encoder does for saved state. An encode anywhere else fails, so a stray encode can never defuse a debt. The codec reads no thread-local or module-global state. Encoding parks the ticket, and `take_context` claims it back into a live `Held`:
      - **native:** the ticket is the ledger entry's `DispatchId`;
      - **guest:** the ticket is the reply handle, and the host keeps the hold in the reply-table slot.
 
      This is the pattern the guest `Blob` (ADR-0238, `BlobTable`) and `ReplyHandle` (`ReplyTable`) already use: the value is an id, and the runtime's table owns the resource.
+   - **A context holding a `Held` needs no flag.** `#[aether_data::kind]` recognizes a `Held<..>` field and leaves `Clone` and serde out of the derives, the same way `#[actor]` reads a handler's ctx type from its tokens. Serde exists only for the wire, and a `Held` field makes the kind actor-reach, so the kind never needs it. A `Held` hidden behind a type alias is not recognized, and the build then fails at the field.
    - **Its schema names its reply kind.** `aether-data` gains one `SchemaType` node, `Ticket { reply: KindId }`, which describes a runtime-owned obligation that answers `reply`. `Held<R>` emits `Ticket { reply: R::ID }`. So a context holding `Held<A>` has a different kind id from one holding `Held<B>`, and the ADR-0139 carried-context check refuses a replacement that changed a held reply's kind. The node has actor reach only, and the JSON and MCP codecs refuse it as they refuse any field that cannot leave the engine.
    - **Dropping the context drops the debt.** An untaken context whose `Held` is live fails fast like any unanswered `Held`. When the actor closes, the ledger's teardown settles its entries silently. A context that holds several variants, such as `aether-text`'s load and metrics requests, is one enum context and one take.
    - **The ledger never evicts.** An entry leaves only when it is answered, when it is staged onto a successor, or when actor close settles it. This replaces the hand-built pairs of `send_with_context` and a stored `Source` or `InboundMail`: `aether-http`'s `DeferredSource` and `aether-window`'s `instance.rs` `pending` map.
@@ -104,7 +105,8 @@ held.answer(ctx, &WatchHeadResult { .. });
    **Across a replace, the ticket and its obligation both survive:**
    - **The obligation.** The host reply table, with each held slot's settlement hold, moves to the next occupant in `PendingReplies` (#6409), so a ticket still resolves to its requester.
    - **The ticket.** It crosses inside a carried request context, or inside saved state that `on_dehydrate` writes and `on_rehydrate` decodes. The old instance's memory is freed without running `Drop`, so no trap fires there.
-   - **The guard.** The guest SDK tracks each live ticket. After `on_dehydrate` returns, a ticket that is live and not encoded traps, which fails the replace and rolls it back (ADR-0101) instead of stranding its requester. A second decode of the same ticket also traps.
+   - **The guard.** The guest's per-actor registry, the one that already holds its request-context table and is reached through the ctx, tracks each live ticket. After `on_dehydrate`, a ticket that is still live and was not encoded makes the hook return a refusal status. The host maps that status onto the existing save-error rollback, which reinstates the old guest (ADR-0101), so the requester is not stranded. The hook refuses, not traps, because the host contains `on_dehydrate` traps and lets the replace proceed (ADR-0015). That long-standing behavior is out of scope here. A dropped guest `Held` checks only a flag on the value that a granted encoder sets, so no drop path reads global state.
+   - **Limits.** A successor whose `on_rehydrate` does not decode a saved `Held` leaves the host slot held until actor close; neither side can see this without a format change to the state envelope. The untaken-reply guard (§7) does not cover a context carried across a replace.
 
    Native capabilities are not replaced at run time (ADR-0231 §5), so a native ticket lives only within one process. The host keeps its `ReplyTable` entry alive after the handler returns, and holds settlement open, until the handle answers. Today a single handler's return frees the handle (`component/dispatch.rs`), and a `ReplyEntry` carries no settlement hold. #6960 implements this.
 
@@ -112,7 +114,7 @@ held.answer(ctx, &WatchHeadResult { .. });
    - **Unreturned receipt.** A `Pending<R>` has a fail-fast `Drop`, and the `#[actor]` macro defuses the one its handler returns. A handler that holds and discards the receipt, which would lie with a `Silent` row, panics.
    - **Second hold.** A second `hold` in one dispatch panics. Two debts on one request would send two replies.
    - **Untaken reply.** When a handler runs on a reply whose context holds a live `Held` and does not take that context, the framework fails fast after the handler returns. The failure names the stored context kind.
-   - **Forward with no reply.** When a forward settles and its context's `Held` is still unclaimed, the framework logs a warning that names the request. It cannot make up an `R`, so the requester's timeout still ends the chain.
+   - **Forward with no reply.** An inherited forward cannot settle while its `Held` keeps the root open. Only a native detached forward (`send_detached_to_with_context`) could settle with its `Held` unclaimed, and a warning for that case is follow-on work. A guest gets no settlement notice for its own sends, so the guest side has no warning. The requester's timeout still ends the chain.
 
 8. **Manual keeps what it is for.** A handler stays `#[handler::manual]` when it:
    - forwards or relays its obligation (`forward_to`, the fleet proxy, bundle relays);
