@@ -343,9 +343,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// through its typed journal reference, and its four bundle-root sends
     /// (`Invoke`, `Warm`, `Evaluate`, and `StatusQuery`, to the erased root it
     /// kept from its load reply's stamped sender).
-    // `context` is owned so it moves into the table (ADR-0243 §4): a context
-    // carrying a held reply cannot be answered again after the send.
-    #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn send_to_with_context<K: ActorMail, C: Kind, I>(
         &mut self,
@@ -354,7 +351,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         context: C,
     ) -> MailId {
         let mail_id = self.push_to(target.erased(), payload, self.outbound_parent(), self.outbound_root());
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), &context);
+        self.park_context(mail_id, context);
         mail_id
     }
 
@@ -373,9 +370,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// Its consumer is the bloomery driver's `WatchHead`, the long poll the
     /// journal owner parks until the head moves.
-    // `context` is owned so it moves into the table (ADR-0243 §4): a context
-    // carrying a held reply cannot be answered again after the send.
-    #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn send_detached_to_with_context<K: ActorMail, C: Kind, I>(
         &mut self,
@@ -384,7 +378,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         context: C,
     ) -> MailId {
         let mail_id = self.push_to(target.erased(), payload, None, None);
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), &context);
+        self.park_context(mail_id, context);
         mail_id
     }
 
@@ -420,9 +414,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Its consumers are the `aether.fs` reads `aether.audio` forwards for a
     /// track, an instrument's `.sfz` file and each of its samples, and the
     /// font read `aether.text` forwards.
-    // `context` is owned so it moves into the table (ADR-0243 §4): a context
-    // carrying a held reply cannot be answered again after the send.
-    #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn send_with_context<R: Singleton + CallerAddressable>(
         &mut self,
@@ -435,7 +426,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     {
         let mail_id =
             self.push_to(self.actor_ref::<R>().erase(), payload, self.outbound_parent(), self.outbound_root());
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), &context);
+        self.park_context(mail_id, context);
         mail_id
     }
 
@@ -484,6 +475,15 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// through the engine store and attached (ADR-0238 decision 3).
     fn encode_in_process<K: Kind>(&self, payload: &K) -> EncodedMail {
         encode_envelope(self.binding.mailer().blob_store(), payload)
+    }
+
+    /// Move `context` into the request-context table under `mail_id`'s
+    /// correlation (ADR-0243 §4): the sender keeps no copy it could answer
+    /// after the reply's take. The table still encodes from a reference, so
+    /// the value drops here once stored.
+    fn park_context(&self, mail_id: MailId, context: impl Kind) {
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), &context);
+        drop(context);
     }
 
     /// The push behind the `send_to` family: encode `payload` and push it to
