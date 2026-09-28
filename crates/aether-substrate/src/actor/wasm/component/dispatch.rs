@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use aether_actor::DISPATCH_HANDLED_RELEASE;
 use aether_actor::wasm::NO_INBOUND_SOURCE;
+use aether_actor::{DISPATCH_HANDLED_HOLD, DISPATCH_HANDLED_RELEASE};
 
 use crate::actor::native::envelope::Envelope;
-use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
+use crate::actor::wasm::reply_table::{HeldChain, NO_REPLY_HANDLE, ReplyEntry};
 use crate::mail::SourceAddr;
 
 use super::instantiate::Placement;
@@ -87,6 +87,16 @@ impl Component {
     /// addressable handle fails the delivery, which the trampoline turns
     /// into an ADR-0063 fail-fast.
     ///
+    /// ADR-0243 §6: a single arm that returned a `Pending<R>` reports
+    /// `DISPATCH_HANDLED_HOLD`. Its handle stays held, and its slot is armed
+    /// with a `HeldChain`: a settlement hold on the inbound's root and the
+    /// inbound's lineage, which the held reply is later stamped with. The
+    /// hold is taken here, after `receive` returns and before the
+    /// trampoline's dispatcher records this inbound's `Finished`, so the
+    /// root cannot settle in between. A guest that answered inside the
+    /// dispatch left no live slot, so nothing is armed and the hold drops
+    /// at once.
+    ///
     /// ADR-0238 decision 3: the envelope's blob attachments are pinned in
     /// the instance's blob table for the `receive` call and unpinned when it
     /// returns, whether it returned or trapped. A dropped delivery pins
@@ -164,10 +174,16 @@ impl Component {
             .call(&mut self.store, (env.kind.0, mail_ptr, byte_len, env.count, handle, env.recipient.0, source));
         self.store.data_mut().blob_table.unpin_all();
         self.store.data().clear_in_flight();
-        if let Ok(rc) = result
-            && (rc == DISPATCH_HANDLED_RELEASE || rc == DISPATCH_UNKNOWN_KIND)
-        {
-            self.store.data_mut().reply_table.take(handle);
+        match result {
+            Ok(DISPATCH_HANDLED_RELEASE | DISPATCH_UNKNOWN_KIND) => {
+                self.store.data_mut().reply_table.take(handle);
+            }
+            Ok(DISPATCH_HANDLED_HOLD) if handle != NO_REPLY_HANDLE => {
+                let ctx = self.store.data_mut();
+                let hold = env.root.map(|root| ctx.binding.mailer().acquire_settlement_hold(root));
+                ctx.reply_table.hold(handle, HeldChain { hold, root: env.root, parent: env.mail_id });
+            }
+            _ => {}
         }
         result
     }

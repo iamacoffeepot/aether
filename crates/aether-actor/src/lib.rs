@@ -99,13 +99,31 @@ pub use wasm::{
 /// returns this from every arm and so keeps every handle.
 pub const DISPATCH_HANDLED: u32 = 0;
 
-/// Return code for "a single-class `#[handler]` arm matched and returned".
-/// A single handler replies at most once, through the macro's `-> R`
-/// auto-reply, and cannot read its handle, so no reply can follow once it
-/// returns (ADR-0112); the substrate frees the dispatch's reply handle.
-/// Value 2 is the substrate's host-only `DISPATCH_DROPPED_OVERSIZE` and is
-/// never returned by a guest.
+/// Return code for "a single-class `#[handler]` arm matched and returned
+/// with nothing held". It replied through the macro's `-> R` auto-reply, or
+/// not at all, and armed no held reply, so no reply can follow once it
+/// returns (ADR-0112); the substrate frees the dispatch's reply handle. A
+/// single arm that returns a `Pending<R>` answers later and returns
+/// [`DISPATCH_HANDLED_HOLD`] instead (ADR-0243 §6). Value 2 is the
+/// substrate's host-only `DISPATCH_DROPPED_OVERSIZE` and is never returned
+/// by a guest.
 pub const DISPATCH_HANDLED_RELEASE: u32 = 3;
+
+/// Return code for "a single arm returned a `Pending<R>`; keep the handle
+/// and hold the requester's settlement" (ADR-0243 §6). The substrate keeps
+/// the dispatch's reply handle live and holds the inbound's root open in
+/// the handle's reply-table slot until the guest answers it, so the held
+/// reply is sent on the requester's own chain. A host that predates it
+/// reads it as an unrecognized class and keeps the handle, as for
+/// [`DISPATCH_HANDLED`].
+pub const DISPATCH_HANDLED_HOLD: u32 = 4;
+
+/// Status the guest's `on_dehydrate` export returns when a live held reply
+/// was left unsaved: refuse the replace (ADR-0243 §6). The substrate maps it
+/// onto the save-error rollback, which reinstates the old guest so the
+/// requester is not stranded. `0` is a normal dehydrate and `1` is the
+/// shim's "no instance" status.
+pub const DEHYDRATE_HELD_UNSAVED: u32 = 2;
 
 /// Return code for "no `#[handler]` matched and there's no `#[fallback]`"
 /// — the strict-receiver miss. Propagated through the FFI so the

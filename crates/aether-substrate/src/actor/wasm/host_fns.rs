@@ -13,6 +13,7 @@ use wasmtime::{Caller, Linker};
 
 use crate::actor::native::ResolvePathError;
 use crate::actor::wasm::component::{ComponentCtx, StateBundle, TRAMPOLINE_NAMESPACE};
+use crate::actor::wasm::reply_table::ReplyOrigin;
 use crate::mail::attachments::{EncodedMail, inline_payload};
 use crate::mail::boundary::is_engine_only;
 use crate::mail::registry::PreparedAliasRoute;
@@ -395,12 +396,26 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             };
             let payload = EncodedMail { bytes: payload, attachments };
 
+            // Validate the kind id before the handle is taken — the guest
+            // might have passed a bogus one, and we'd rather return a
+            // meaningful status than enqueue mail the receiver can't
+            // decode. Checked first so a refused reply leaves the handle
+            // answerable, and a held slot's settlement hold stays with it
+            // rather than releasing with its reply unsent (ADR-0243 §6).
+            let kind = KindId(kind);
+            let Some(kind_name) = caller.data().registry.kind_name(kind) else {
+                return REPLY_KIND_NOT_FOUND;
+            };
+
             // A reply handle is one-shot: take (not resolve) so the
             // entry is removed here, capping the table at in-flight
             // replies rather than lifetime traffic. The mutable
             // borrow ends with this statement, before the `&self`
-            // uses below.
-            let Some(entry) = caller.data_mut().reply_table.take(sender) else {
+            // uses below. A held slot's chain comes with it and lives
+            // until the arm below has sent: dropping it releases the
+            // requester's settlement hold, which must follow the reply's
+            // `Sent` (ADR-0243 §6).
+            let Some((entry, chain)) = caller.data_mut().reply_table.take(sender) else {
                 return REPLY_UNKNOWN_HANDLE;
             };
             let ctx = caller.data();
@@ -408,12 +423,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             // path so the originating actor's handler can match its
             // own reply to the request it sent out of a busy inbox.
             let correlation = entry.correlation_id;
-            let kind = KindId(kind);
             match entry.addr {
                 SourceAddr::Session(token) => {
-                    let Some(kind_name) = ctx.registry.kind_name(kind) else {
-                        return REPLY_KIND_NOT_FOUND;
-                    };
                     let Some(payload) = egress_payload(ctx, kind, payload) else {
                         return REPLY_BLOB_REFUSED;
                     };
@@ -425,13 +436,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     ctx.outbound.egress_to_session(token, &kind_name, payload, origin, correlation, stamp);
                 }
                 SourceAddr::Component(mbox) => {
-                    // Validate the kind id cheaply — the guest might
-                    // have passed a bogus one and we'd rather return
-                    // a meaningful status than silently enqueue mail
-                    // that the receiver can't decode.
-                    if ctx.registry.kind_name(kind).is_none() {
-                        return REPLY_KIND_NOT_FOUND;
-                    }
                     // Issue iamacoffeepot/aether#1465: `reply` (not
                     // `send`) so the outgoing reply echoes the inbound
                     // `correlation` with target `None` — matching native
@@ -444,20 +448,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     // Issue 1987: the reply's lineage identity is the
                     // guest-carried `from`, validated in-cluster (a zero /
                     // foreign value falls back to the component's own id).
+                    //
+                    // ADR-0243 §6: a held slot's chain stamps the reply on
+                    // the requester's chain, not the dispatch in flight.
                     let identity = resolve_dispatch_identity(ctx, MailboxId(from));
-                    ctx.reply(mbox, kind, payload, count, correlation, identity);
+                    let origin = ReplyOrigin { correlation, from: identity, chain: chain.as_ref() };
+                    ctx.reply(mbox, kind, payload, count, origin);
                 }
                 SourceAddr::EngineMailbox { engine_id, mailbox_id } => {
                     // ADR-0037 Phase 2: reply to a component on
-                    // another engine. Validate the kind exists
-                    // locally so we surface a meaningful status
-                    // rather than shipping a frame the receiver
-                    // can't decode. The hub forwards the frame to
-                    // the target engine's connection as
-                    // `HubToEngine::MailById`.
-                    if ctx.registry.kind_name(kind).is_none() {
-                        return REPLY_KIND_NOT_FOUND;
-                    }
+                    // another engine; the kind was validated locally
+                    // above. The hub forwards the frame to the target
+                    // engine's connection as `HubToEngine::MailById`.
                     let Some(payload) = egress_payload(ctx, kind, payload) else {
                         return REPLY_BLOB_REFUSED;
                     };
@@ -469,6 +471,11 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     // Treat as unknown-handle to avoid silent drops.
                     return REPLY_UNKNOWN_HANDLE;
                 }
+            }
+            // The reply is sent and its `Sent` recorded; only now may a
+            // held slot's settlement hold release.
+            if let Some(chain) = chain {
+                chain.release();
             }
             REPLY_OK
         },

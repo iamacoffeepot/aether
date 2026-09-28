@@ -85,7 +85,12 @@ impl WasmTrampolineState {
             self.retired_correlations = Some(component.correlation_cursor());
             // #6409: after `unwire`, which may still answer handles, so a
             // later refill answers the rest to their own requesters.
-            self.retired_replies = Some(component.take_pending_replies());
+            // ADR-0243 §6: except held slots. Unload saves no guest state,
+            // so no ticket survives to answer one, and its settlement hold
+            // would keep the requester's chain open until actor close.
+            let mut replies = component.take_pending_replies();
+            replies.settle_held();
+            self.retired_replies = Some(replies);
         }
         // The slot is empty now, so the declaration reads `None` and the sync
         // releases the guest. iamacoffeepot/aether#1037: the mailbox accepts

@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::blob_table::BlobTable;
-use crate::actor::wasm::reply_table::ReplyTable;
+use crate::actor::wasm::reply_table::{ReplyOrigin, ReplyTable};
 use crate::mail::attachments::{Attachments, EncodedMail, ResolveError, plain_payload, resolve_on_send};
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
@@ -45,6 +45,17 @@ pub struct CorrelationCursor {
 /// live component. Neither `Clone` nor `Copy`: two tables holding the same
 /// handle would answer one request twice.
 pub struct PendingReplies(ReplyTable);
+
+impl PendingReplies {
+    /// Free every held slot and release each requester's settlement hold
+    /// unanswered (ADR-0243 §6). The consumer is the trampoline's unload:
+    /// it saves no guest state, so no ticket survives to answer a held
+    /// slot, and keeping the hold would leave the requester's chain open
+    /// until actor close. A replace carries the table without calling this.
+    pub fn settle_held(&mut self) {
+        self.0.settle_held();
+    }
+}
 
 /// Per-component context stored as wasmtime `Store` data. Holds the
 /// sender's own `MailboxId`, its binding (which reaches the shared mail
@@ -238,6 +249,11 @@ struct RoutedSend {
     reply_to: Source,
     mail_id: MailId,
     force_detach: bool,
+    /// A held reply's own chain as `(parent_mail, root)` (ADR-0243 §6),
+    /// stamped in place of the in-flight cells: the reply belongs to the
+    /// requester's chain, not to whichever dispatch is running when the
+    /// guest answers. `None` for every other send.
+    lineage: Option<(Option<MailId>, Option<MailId>)>,
     /// The resolved dispatch identity (issue 1987) — the caller computed
     /// it from the guest-carried `from`, so the recorded source + the
     /// `origin` name read it directly.
@@ -481,6 +497,7 @@ impl ComponentCtx {
             reply_to,
             mail_id,
             force_detach: false,
+            lineage: None,
             identity: from,
         });
     }
@@ -514,6 +531,7 @@ impl ComponentCtx {
             reply_to,
             mail_id,
             force_detach: true,
+            lineage: None,
             identity: from,
         });
     }
@@ -538,15 +556,21 @@ impl ComponentCtx {
     /// `mint_correlation` — a reply is not the component's own outbound
     /// request, so it must not advance the counter `prev_correlation_p32`
     /// reports.
+    ///
+    /// A held slot's chain in `origin` (ADR-0243 §6) stamps the reply with
+    /// the requester's inbound as its parent and root, whatever dispatch is
+    /// in flight. The caller keeps the chain, and so its settlement hold,
+    /// alive until this returns, by which time the reply's `Sent` is
+    /// recorded.
     pub(crate) fn reply(
         &self,
         recipient: MailboxId,
         kind: MailKind,
         payload: EncodedMail,
         count: u32,
-        correlation: u64,
-        from: MailboxId,
+        origin: ReplyOrigin<'_>,
     ) {
+        let ReplyOrigin { correlation, from, chain } = origin;
         let reply_to = Source::with_correlation(SourceAddr::None, correlation);
         // Issue 1987: a child's reply stamps the child's identity (the
         // guest-carried `from`, already resolved in-cluster by the host fn)
@@ -562,6 +586,7 @@ impl ComponentCtx {
             reply_to,
             mail_id,
             force_detach: false,
+            lineage: chain.map(|chain| (chain.parent, chain.root)),
             identity: from,
         });
     }
@@ -578,19 +603,31 @@ impl ComponentCtx {
     /// `force_detach` (ADR-0080 §7) suppresses the in-flight lineage
     /// inheritance: `true` (a guest `send_detached`) starts a fresh
     /// causal chain regardless of the in-flight cells; `false` (the
-    /// default `send` / a reply) inherits the dispatch's chain.
+    /// default `send` / a reply) inherits the dispatch's chain. A held
+    /// reply's `lineage` (ADR-0243 §6) replaces the in-flight cells.
     fn send_routed(&self, send: RoutedSend) {
-        let RoutedSend { recipient, kind, payload, attachments, count, reply_to, mail_id, force_detach, identity } =
-            send;
+        let RoutedSend {
+            recipient,
+            kind,
+            payload,
+            attachments,
+            count,
+            reply_to,
+            mail_id,
+            force_detach,
+            lineage,
+            identity,
+        } = send;
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): the in-flight
         // cells were populated by `Component::deliver` for guest-triggered
         // sends (and remain `None` for substrate-internal call sites that
         // bypass `deliver`, e.g. test fixtures). ADR-0080 §7: a detached
-        // send ignores them and opens its own chain.
-        let (parent_mail, inherited_root) = if force_detach {
-            (None, None)
-        } else {
-            (self.in_flight_mail_id.get(), self.in_flight_root.get())
+        // send ignores them and opens its own chain. ADR-0243 §6: a held
+        // reply carries the requester's chain and ignores them too.
+        let (parent_mail, inherited_root) = match lineage {
+            Some(lineage) => lineage,
+            None if force_detach => (None, None),
+            None => (self.in_flight_mail_id.get(), self.in_flight_root.get()),
         };
         let root = inherited_root.unwrap_or(mail_id);
         let mail = Mail::new(recipient, kind, payload, count)

@@ -32,6 +32,16 @@
 // when a delivery is unhandled (`DISPATCH_UNKNOWN_KIND`). A handle a
 // manual handler or a `#[fallback]` keeps lives until it is answered.
 //
+// A single arm that returned a `Pending<R>` (`DISPATCH_HANDLED_HOLD`,
+// ADR-0243 §6) keeps its handle too, and its slot also holds a
+// `HeldChain`: the requester's settlement hold and the inbound's lineage.
+// The chain leaves the slot with the entry when the guest answers, so the
+// reply is stamped on the requester's chain and the hold is released only
+// after the reply's `Sent`. An unload, which saves no guest state, frees
+// every held slot through `settle_held` and releases its hold unanswered;
+// a replace carries the chains to the next occupant unchanged; actor close
+// drops the table and every hold with it.
+//
 // The table lives on `ComponentCtx` rather than `Component` because
 // the host fn touches it via `Caller::data_mut()`. The ctx dies with
 // its instance, so the component trampoline moves the table out as an
@@ -42,7 +52,8 @@
 
 use std::collections::VecDeque;
 
-use crate::mail::SourceAddr;
+use crate::mail::{MailId, MailboxId, SourceAddr};
+use crate::runtime::trace::SettlementHold;
 
 /// Sentinel passed to the guest's `receive` shim when the inbound
 /// mail has no reply target (broadcast origin — ADR-0013 §1). A
@@ -118,12 +129,52 @@ const fn next_generation(index: u32, generation: u32) -> u32 {
     }
 }
 
-/// One slab slot: the generation its current or next handle carries, and
-/// the entry while a handle is held.
+/// What a held slot keeps past its dispatch (ADR-0243 §6): the settlement
+/// hold that keeps the requester's root open, and the inbound's lineage a
+/// held reply is stamped with, whatever dispatch is in flight when the
+/// guest answers. Dropping it releases the hold, so a caller that sends the
+/// reply drops it only after the send has recorded its `Sent`.
+#[derive(Debug)]
+pub struct HeldChain {
+    /// `None` when the inbound carried no root, so there is no chain to hold.
+    pub hold: Option<SettlementHold>,
+    /// The inbound's root, which the held reply inherits.
+    pub root: Option<MailId>,
+    /// The inbound's own `mail_id`, the held reply's `parent_mail`.
+    pub parent: Option<MailId>,
+}
+
+impl HeldChain {
+    /// Release the requester's settlement hold. The reply path calls this
+    /// once the held reply is sent and its `Sent` recorded; every other
+    /// path that drops a chain releases it the same way through the hold's
+    /// `Drop`.
+    pub fn release(self) {
+        drop(self.hold);
+    }
+}
+
+/// Where a guest reply comes from and which chain it answers, as the
+/// `reply_mail_p32` host fn resolved it for `ComponentCtx::reply`.
+#[derive(Clone, Copy, Debug)]
+pub struct ReplyOrigin<'a> {
+    /// The inbound's correlation, echoed so the requester matches its reply.
+    pub correlation: u64,
+    /// The dispatch identity the reply is sent as (issue 1987).
+    pub from: MailboxId,
+    /// A held slot's chain (ADR-0243 §6), or `None` for a reply answered
+    /// inside its own dispatch.
+    pub chain: Option<&'a HeldChain>,
+}
+
+/// One slab slot: the generation its current or next handle carries, the
+/// entry while a handle is held, and the chain while that handle is held
+/// past its dispatch.
 #[derive(Debug, Default)]
 struct Slot {
     generation: u32,
     entry: Option<ReplyEntry>,
+    chain: Option<HeldChain>,
 }
 
 /// Maintains the handle→entry slab for one mailbox slot.
@@ -200,17 +251,71 @@ impl ReplyTable {
     /// table holds only unanswered handles, never lifetime traffic.
     /// Returns `None` for `NO_REPLY_HANDLE`, for handles that were never
     /// allocated, and for handles already taken.
-    pub fn take(&mut self, handle: u32) -> Option<ReplyEntry> {
+    ///
+    /// A held slot's [`HeldChain`] leaves with its entry. The caller keeps
+    /// it alive until the reply is sent, since dropping it releases the
+    /// requester's settlement hold.
+    pub(crate) fn take(&mut self, handle: u32) -> Option<(ReplyEntry, Option<HeldChain>)> {
+        let index = self.live_index(handle)?;
+        Some(self.free_slot(index))
+    }
+
+    /// Arm a live handle's slot with `chain`, keeping the requester's
+    /// settlement open until the handle is answered (ADR-0243 §6). Returns
+    /// whether the slot was armed. A handle the guest already answered
+    /// inside its dispatch, a stale or unknown handle, and a slot already
+    /// holding a chain are left as they are and `chain` is dropped, which
+    /// releases its hold at once: arming a freed slot would keep the
+    /// requester's chain open with no reply left to send.
+    pub(crate) fn hold(&mut self, handle: u32, chain: HeldChain) -> bool {
+        let Some(index) = self.live_index(handle) else {
+            return false;
+        };
+        let slot = &mut self.slots[index as usize];
+        if slot.chain.is_some() {
+            return false;
+        }
+        slot.chain = Some(chain);
+        true
+    }
+
+    /// Free every held slot and drop its chain, releasing each requester's
+    /// settlement hold unanswered. Slots a manual handler keeps without a
+    /// chain stay live. The consumer is the trampoline's unload: no guest
+    /// state survives it, so no ticket is left to answer a held slot.
+    pub(crate) fn settle_held(&mut self) {
+        let held: Vec<u32> = (0..self.slots.len())
+            .filter(|index| self.slots[*index].chain.is_some())
+            .map(|index| u32::try_from(index).expect("a slot index fits the handle's index bits"))
+            .collect();
+        for index in held {
+            drop(self.free_slot(index));
+        }
+    }
+
+    /// The index of the live slot a guest-supplied handle names, if its
+    /// generation is current and it still holds an entry.
+    fn live_index(&self, handle: u32) -> Option<u32> {
         if handle == NO_REPLY_HANDLE {
             return None;
         }
         let (index, generation) = unpack(handle);
-        let slot = self.slots.get_mut(index as usize).filter(|slot| slot.generation == generation)?;
-        let entry = slot.entry.take()?;
-        slot.generation = next_generation(index, generation);
+        self.slots
+            .get(index as usize)
+            .filter(|slot| slot.generation == generation && slot.entry.is_some())
+            .map(|_| index)
+    }
+
+    /// Free a live slot under its next generation, returning its entry and
+    /// chain.
+    fn free_slot(&mut self, index: u32) -> (ReplyEntry, Option<HeldChain>) {
+        let slot = &mut self.slots[index as usize];
+        let entry = slot.entry.take().expect("only a live slot is freed");
+        let chain = slot.chain.take();
+        slot.generation = next_generation(index, slot.generation);
         self.free.push_back(index);
         self.live -= 1;
-        Some(entry)
+        (entry, chain)
     }
 
     /// The live handle count, once each time it passes the next high-water
@@ -245,10 +350,78 @@ mod tests {
     use aether_data::{SessionToken, Uuid};
 
     use super::*;
-    use crate::mail::MailboxId;
+    use crate::runtime::trace::TraceHandle;
 
     fn token(byte: u8) -> SessionToken {
         SessionToken(Uuid::from_bytes([byte; 16]))
+    }
+
+    /// The entry a `take` returned, without its chain.
+    fn take_entry(table: &mut ReplyTable, handle: u32) -> Option<ReplyEntry> {
+        table.take(handle).map(|(entry, _)| entry)
+    }
+
+    /// A chain holding `root` open on `trace`.
+    fn chain_on(trace: &TraceHandle, root: MailId) -> HeldChain {
+        HeldChain { hold: Some(trace.acquire_settlement_hold(root)), root: Some(root), parent: Some(root) }
+    }
+
+    fn root(correlation: u64) -> MailId {
+        MailId::new(MailboxId(7), correlation)
+    }
+
+    #[test]
+    fn hold_on_an_answered_or_stale_handle_releases_at_once() {
+        let trace = TraceHandle::new();
+        let mut t = ReplyTable::with_preallocated(1);
+        let handle = t.allocate(ReplyEntry::new(SourceAddr::Session(token(1)), 0)).expect("room");
+        assert!(t.take(handle).is_some());
+
+        assert!(!t.hold(handle, chain_on(&trace, root(1))));
+        assert!(!t.hold(0xDEAD, chain_on(&trace, root(1))));
+        assert!(!t.hold(NO_REPLY_HANDLE, chain_on(&trace, root(1))));
+        assert_eq!(trace.settlement_counter().held_open(root(1)), 0);
+        assert!(t.take(handle).is_none());
+
+        // The freed slot's next handle starts with no chain.
+        let next = t.allocate(ReplyEntry::new(SourceAddr::Session(token(2)), 0)).expect("room");
+        assert!(t.take(next).expect("live").1.is_none());
+    }
+
+    #[test]
+    fn take_of_a_held_slot_returns_its_chain() {
+        let trace = TraceHandle::new();
+        let mut t = ReplyTable::new();
+        let entry = ReplyEntry::new(SourceAddr::Session(token(3)), 9);
+        let handle = t.allocate(entry).expect("room");
+        assert!(t.hold(handle, chain_on(&trace, root(2))));
+        // A second arm of the same slot would leak its hold.
+        assert!(!t.hold(handle, chain_on(&trace, root(2))));
+        assert_eq!(trace.settlement_counter().held_open(root(2)), 1);
+
+        let (taken, chain) = t.take(handle).expect("live");
+        assert_eq!(taken, entry);
+        let chain = chain.expect("held");
+        assert_eq!(chain.root, Some(root(2)));
+        assert_eq!(trace.settlement_counter().held_open(root(2)), 1, "the chain carries the hold out");
+
+        drop(chain);
+        assert_eq!(trace.settlement_counter().held_open(root(2)), 0);
+    }
+
+    #[test]
+    fn settle_held_frees_only_held_slots() {
+        let trace = TraceHandle::new();
+        let mut t = ReplyTable::new();
+        let held = t.allocate(ReplyEntry::new(SourceAddr::Session(token(4)), 0)).expect("room");
+        let kept = t.allocate(ReplyEntry::new(SourceAddr::Session(token(5)), 0)).expect("room");
+        assert!(t.hold(held, chain_on(&trace, root(3))));
+
+        t.settle_held();
+
+        assert_eq!(trace.settlement_counter().held_open(root(3)), 0);
+        assert!(t.take(held).is_none());
+        assert!(t.take(kept).is_some(), "a manual handler's handle stays answerable");
     }
 
     #[test]
@@ -290,12 +463,12 @@ mod tests {
         let a = ReplyEntry::new(SourceAddr::Session(token(1)), 0);
         let b = ReplyEntry::new(SourceAddr::Session(token(2)), 0);
         let first = t.allocate(a).expect("room");
-        assert_eq!(t.take(first), Some(a));
+        assert_eq!(take_entry(&mut t, first), Some(a));
         let second = t.allocate(b).expect("room");
 
         assert_ne!(first, second);
         assert_eq!(unpack(first).0, unpack(second).0);
-        assert_eq!(t.take(first), None);
+        assert_eq!(take_entry(&mut t, first), None);
         assert_eq!(t.resolve(second), Some(b));
     }
 
@@ -352,8 +525,8 @@ mod tests {
         // Tripwire: a handle is one-shot — the first `take` returns
         // the entry and removes it, so a second take (or resolve)
         // against the same handle sees nothing.
-        assert_eq!(t.take(h), Some(entry));
-        assert_eq!(t.take(h), None);
+        assert_eq!(take_entry(&mut t, h), Some(entry));
+        assert_eq!(take_entry(&mut t, h), None);
         assert_eq!(t.resolve(h), None);
     }
 }
