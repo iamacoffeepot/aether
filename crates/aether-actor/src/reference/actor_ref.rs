@@ -6,8 +6,9 @@ use core::marker::PhantomData;
 
 use aether_data::MailboxId;
 
-use super::ErasedActorRef;
+use super::{ErasedActorRef, ProtocolRef};
 use crate::Addressable;
+use crate::model::CoveredBy;
 
 /// Proof that an actor of type `R` reached `Live` at an id, in this engine
 /// session (ADR-0230).
@@ -69,6 +70,16 @@ impl<R> ActorRef<R> {
     #[must_use]
     pub const fn erase(self) -> ErasedActorRef {
         ErasedActorRef::new(self.id)
+    }
+
+    /// The same proof under a narrower claim: the actor here covers `P`
+    /// (ADR-0231 §3). Compiles only for `P: CoveredBy<R>`, the sealed coverage
+    /// check over `R`'s contract rows (ADR-0231 §2), so a send through the
+    /// result compiles only for a kind `P` lists and `R` handles with the
+    /// row's exact reply. A copy of the proof: no registry is read.
+    #[must_use]
+    pub const fn narrow<P: CoveredBy<R>>(self) -> ProtocolRef<P> {
+        ProtocolRef::new(self.id)
     }
 }
 

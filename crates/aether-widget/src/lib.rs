@@ -45,6 +45,7 @@ pub mod composite;
 mod editor;
 mod editor_region;
 pub mod focus;
+pub mod lanes;
 pub mod layout;
 pub mod panel;
 pub mod routing;
@@ -58,7 +59,13 @@ pub mod theme;
 
 pub use editor::EditorShell;
 pub use editor_region::EditorRegion;
-pub use panel::{ChildLayout, SpawnedChild, SpawnsWidgets, WidgetPanel, content_frame, spawn_widget_child};
+pub use lanes::{
+    WidgetControl, WidgetHover, WidgetKeyRelease, WidgetLaneSet, WidgetLanes, WidgetMotion, WidgetSlot, WidgetStyled,
+    WidgetTextEntry, WidgetWheel,
+};
+pub use panel::{
+    ChildLayout, ChildProfile, SpawnedChild, SpawnsWidgets, WidgetPanel, content_frame, spawn_widget_child,
+};
 pub use scroll::ScrollWidget;
 pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 
@@ -113,7 +120,7 @@ aether_actor::export!(
 );
 
 use aether_actor::{
-    ActorInitError, Addressable, DependsOn, Manual, Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Addressable, DependsOn, Manual, ReplyMode, Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
 use aether_kinds::{ClipRect, QuadSpace, Tick};
@@ -203,7 +210,7 @@ impl Widget {
     /// A child whose subname fails validation or whose config fails to
     /// decode is skipped with a warn — its slot is never registered, so
     /// the completion counter stays honest.
-    fn ensure_spawned<A: Spawns<Self>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn ensure_spawned<A: Spawns<Self>, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
         if self.spawned {
             return;
         }
@@ -234,9 +241,9 @@ impl Widget {
     /// composite, lays down own chrome, then polls each child in layout
     /// order. A leaf (no children) is already complete, so it finishes on
     /// the spot; a node with children finishes later, from `on_draw_list`.
-    fn drive_frame<A: DependsOn<RenderCapability> + DependsOn<TextCapability> + Spawns<Self>>(
+    fn drive_frame<A: DependsOn<RenderCapability> + DependsOn<TextCapability> + Spawns<Self>, M: ReplyMode>(
         &mut self,
-        ctx: &mut WasmCtx<'_, A, Manual>,
+        ctx: &mut WasmCtx<'_, A, M>,
     ) {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
@@ -255,7 +262,10 @@ impl Widget {
 
     /// Discharge the closed composite: the root emits it to the render /
     /// text caps; an interior or leaf node replies it up to its parent.
-    fn finish<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn finish<A: DependsOn<RenderCapability> + DependsOn<TextCapability>, M: ReplyMode>(
+        &mut self,
+        ctx: &mut WasmCtx<'_, A, M>,
+    ) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -278,7 +288,7 @@ impl Widget {
 /// has no up-lane consumer, so the drain is a harmless no-send there (kept
 /// mechanical for uniformity and future re-parenting). Shared by the
 /// compositing node and the reference panel, which both own a `Composite`.
-pub(crate) fn flush_membership<A>(composite: &mut Composite, ctx: &mut WasmCtx<'_, A, Manual>) {
+pub(crate) fn flush_membership<A, M: ReplyMode>(composite: &mut Composite, ctx: &mut WasmCtx<'_, A, M>) {
     if let Some(changed) = composite.take_membership_changes()
         && let Some(parent) = ctx.parent()
     {
@@ -290,9 +300,9 @@ pub(crate) fn flush_membership<A>(composite: &mut Composite, ctx: &mut WasmCtx<'
 /// report whether the frame's slots have now all filled. The caller
 /// discharges the completed composite its own way (the node replies up or
 /// emits; the panel emits), so only the fill + completeness check is shared.
-pub(crate) fn accept_child_list<A>(
+pub(crate) fn accept_child_list<A, M: ReplyMode>(
     composite: &mut Composite,
-    ctx: &mut WasmCtx<'_, A, Manual>,
+    ctx: &mut WasmCtx<'_, A, M>,
     list: WidgetDrawList,
 ) -> bool {
     if let Some(source) = ctx.sender() {
@@ -301,10 +311,10 @@ pub(crate) fn accept_child_list<A>(
     composite.is_complete()
 }
 
-fn accept_open_child_list<A>(
+fn accept_open_child_list<A, M: ReplyMode>(
     discharge: &FrameDischarge,
     composite: &mut Composite,
-    ctx: &mut WasmCtx<'_, A, Manual>,
+    ctx: &mut WasmCtx<'_, A, M>,
     list: WidgetDrawList,
 ) -> bool {
     !discharge.is_closed() && accept_child_list(composite, ctx, list)
@@ -617,8 +627,8 @@ fn text_items(items: &[WidgetDrawItem], later_overlay: &[WidgetDrawItem]) -> Vec
 /// same single-sender flush for its own composite. The caller's actor
 /// declares both caps: `depends(RenderCapability)` and
 /// `depends(TextCapability)` on its `#[actor]`.
-pub fn emit<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(
-    ctx: &mut WasmCtx<'_, A, Manual>,
+pub fn emit<A: DependsOn<RenderCapability> + DependsOn<TextCapability>, M: ReplyMode>(
+    ctx: &mut WasmCtx<'_, A, M>,
     list: &WidgetDrawList,
 ) {
     emit_layer(ctx, &list.items, &list.overlay);
@@ -632,8 +642,8 @@ pub fn emit<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(
 /// cluster overlay for the ordinary lane, empty for the overlay lane. Called
 /// for the ordinary items and again for the overlay, so an overlay's quads
 /// and glyphs are submitted after every ordinary quad and glyph respectively.
-fn emit_layer<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(
-    ctx: &mut WasmCtx<'_, A, Manual>,
+fn emit_layer<A: DependsOn<RenderCapability> + DependsOn<TextCapability>, M: ReplyMode>(
+    ctx: &mut WasmCtx<'_, A, M>,
     items: &[WidgetDrawItem],
     later_overlay: &[WidgetDrawItem],
 ) {
@@ -1445,8 +1455,8 @@ impl WasmActor for Widget {
     /// # Agent
     /// Sent by a compositing parent each frame; not useful to send
     /// manually.
-    #[handler::manual]
-    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _collect: Collect) {
+    #[handler::single]
+    fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         self.drive_frame(ctx);
     }
 

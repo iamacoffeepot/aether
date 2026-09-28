@@ -28,7 +28,7 @@ pub struct Direct;
 /// A held reference that mail of kind `K` may be sent through (ADR-0232 §1).
 ///
 /// The flat held-reference verbs (`ctx.send_to(reference, &kind)` and its
-/// context-carrying siblings) take `impl Target<K>`, so the kind is inferred
+/// context-carrying siblings) take `impl Target<K, I>`, so the kind is inferred
 /// from the payload and no turbofish is written. An [`ActorRef<R>`] is a
 /// target only for the kinds `R` handles, which keeps the compile-time check
 /// a typed send to `R` carries. An [`ErasedActorRef`] is a target for
@@ -41,8 +41,9 @@ pub struct Direct;
 /// A [`ProtocolRef<P>`] is a target only for the kinds `P` lists (ADR-0231
 /// §3). A protocol implements no [`Contract<K>`](crate::Contract), so its
 /// impl finds `K`'s row through [`RowAt<K, I>`]: `I` is the row's position,
-/// which the compiler infers at the call site. The native held-reference
-/// verbs take `impl Target<K, I>` with `I` inferred; the other targets are
+/// which the compiler infers at the call site. The held-reference verbs,
+/// native and guest (`WasmCtx::send_to`, `Sends::send_to`), take
+/// `impl Target<K, I>` with `I` inferred; the other targets are
 /// `Target<K, Direct>`, which `Target<K>` names.
 ///
 /// The trait is sealed: no crate outside `aether-actor` adds a target, so a

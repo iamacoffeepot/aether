@@ -9,7 +9,9 @@
 
 use alloc::string::String;
 
-use aether_actor::{ActorInitError, ErasedActorRef, Subname, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
+use aether_actor::{
+    ActorInitError, HandlesKind, InlineChild, Subname, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor,
+};
 use aether_data::ActorMail;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
@@ -31,15 +33,20 @@ use crate::{EditorShell, PanelConfig, RegionAttach, WidgetPanel};
 /// its child `panel`, so the panel's own children sit one level further down.
 pub struct EditorRegion {
     config: PanelConfig,
-    panel: Option<ErasedActorRef>,
+    /// The hosted panel, typed: each relay is checked against the kinds
+    /// [`WidgetPanel`] handles.
+    panel: Option<InlineChild<WidgetPanel>>,
 }
 
 impl EditorRegion {
     /// Hand one relayed input event to the hosted panel. A region whose panel
     /// failed to spawn has nowhere to send it, and says so once, in `wire`.
-    fn relay<A, K: ActorMail>(&self, ctx: &mut WasmCtx<'_, A>, payload: &K) {
+    fn relay<A, K: ActorMail>(&self, ctx: &mut WasmCtx<'_, A>, payload: &K)
+    where
+        WidgetPanel: HandlesKind<K>,
+    {
         if let Some(panel) = self.panel {
-            ctx.send_to(panel, payload);
+            panel.send(ctx, payload);
         }
     }
 }
@@ -64,7 +71,7 @@ impl WasmActor for EditorRegion {
 
         let panel_config = PanelConfig { owns_input: false, editor_region: String::new(), ..self.config.clone() };
         match ctx.spawn_inline_child::<EditorRegion, WidgetPanel>(Subname::Named("panel"), &panel_config) {
-            Ok(panel) => self.panel = Some(panel.erase()),
+            Ok(panel) => self.panel = Some(panel),
             Err(error) => tracing::warn!(
                 target: "aether_widget_editor",
                 region = self.config.editor_region.as_str(),

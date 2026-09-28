@@ -13,13 +13,14 @@
 //! painting and hit testing from drifting under non-zero panel origins or
 //! ancestor offsets.
 
-use aether_actor::{ActorInitError, Erased, ErasedActorRef, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, ErasedActorRef, Manual, ReplyMode, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::MouseWheel;
 use aether_math::Vec2;
 
 use crate::composite::Composite;
 use crate::focus::{Focus, FocusEligibility, FocusRect};
-use crate::panel::{ChildLayout, SpawnedChild, SpawnsWidgets, spawn_widget_child};
+use crate::lanes::WidgetLanes;
+use crate::panel::{ChildLayout, ChildProfile, SpawnedChild, SpawnsWidgets, spawn_widget_child};
 use crate::set::{
     ButtonWidget, DropdownWidget, ImageWidget, LabelWidget, MenuBarWidget, NumericWidget, RadioGroupWidget,
     SegmentedWidget, SliderWidget, TabStripWidget, TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget,
@@ -31,8 +32,11 @@ use crate::{
 };
 use crate::{FrameDischarge, accept_open_child_list, flush_membership};
 
+/// The content root's identity and routing facts. Its lanes are kept apart,
+/// in `ScrollWidget::content_lanes`, because every decision below reads
+/// only these.
 struct ScrollContent {
-    reference: ErasedActorRef,
+    key: ErasedActorRef,
     /// The content is itself a scroll container, so its `ScrollOutcome` and
     /// `ScrollResidual` are the ones this container relays and applies.
     is_scroll: bool,
@@ -43,11 +47,11 @@ struct ScrollContent {
 }
 
 impl ScrollContent {
-    fn new(spawned: &SpawnedChild) -> Self {
+    fn new(key: ErasedActorRef, profile: &ChildProfile) -> Self {
         Self {
-            reference: spawned.reference,
-            is_scroll: spawned.scroll_viewport.is_some(),
-            owns_wheel: spawned.scroll_viewport.is_some() || spawned.wheel_eligible,
+            key,
+            is_scroll: profile.scroll_viewport.is_some(),
+            owns_wheel: profile.scroll_viewport.is_some() || profile.wheel_eligible,
         }
     }
 }
@@ -65,6 +69,8 @@ pub struct ScrollWidget {
     frame_discharge: FrameDischarge,
     scroll_focus: Focus,
     content: Option<ScrollContent>,
+    /// The lanes the content root is sent through, set with `content`.
+    content_lanes: Option<WidgetLanes>,
     spawned: bool,
     /// Live `SetTheme` that arrived before the content root existed.
     pending_theme: Option<SetTheme>,
@@ -196,7 +202,7 @@ fn clipped_focus_rect(viewport: &WidgetFrame, child: &WidgetFrame) -> Option<Foc
 }
 
 impl ScrollWidget {
-    fn ensure_spawned<A: SpawnsWidgets>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn ensure_spawned<A: SpawnsWidgets, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
         if self.spawned {
             return;
         }
@@ -206,20 +212,23 @@ impl ScrollWidget {
         else {
             return;
         };
-        let content = spawned.reference;
+        let SpawnedChild { lanes, profile } = spawned;
         self.composite.register_slot(
-            content,
+            lanes.key(),
             self.local_content_origin(),
             Some(viewport_clip(self.viewport_extent)),
             &self.content_spec.subname,
-            spawned.type_namespace,
+            profile.type_namespace,
         );
-        self.content = Some(ScrollContent::new(&spawned));
+        self.content = Some(ScrollContent::new(lanes.key(), &profile));
+        self.content_lanes = Some(lanes);
         self.sync_layout(ctx);
         // Replay before the first Collect so a nested content cascade sees the
         // latest theme on the same FIFO drain.
-        if let Some(set) = self.pending_theme.take() {
-            ctx.send_to(content, &set);
+        if let Some(set) = self.pending_theme.take()
+            && let Some(styled) = lanes.styled
+        {
+            ctx.send_to(styled, &set);
         }
     }
 
@@ -237,18 +246,19 @@ impl ScrollWidget {
         }
     }
 
-    fn sync_layout<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
-        let Some(content) = &self.content else {
+    fn sync_layout<A, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
+        let Some(lanes) = self.content_lanes else {
             return;
         };
-        let content = content.reference;
         let content_frame = self.content_frame();
         self.composite.update_slot_layout(
-            content,
+            lanes.key(),
             self.local_content_origin(),
             Some(viewport_clip(self.viewport_extent)),
         );
-        ctx.send_to(content, &content_frame);
+        if let Some(styled) = lanes.styled {
+            ctx.send_to(styled, &content_frame);
+        }
 
         self.rebuild_wheel_focus(&content_frame);
     }
@@ -257,8 +267,7 @@ impl ScrollWidget {
     /// this viewport. The content joins it when it scrolls *itself*.
     fn rebuild_wheel_focus(&mut self, content_frame: &WidgetFrame) {
         self.scroll_focus.clear();
-        let Some((content, owns_wheel)) = self.content.as_ref().map(|content| (content.reference, content.owns_wheel))
-        else {
+        let Some((content, owns_wheel)) = self.content.as_ref().map(|content| (content.key, content.owns_wheel)) else {
             return;
         };
         if owns_wheel && let Some(rect) = clipped_focus_rect(&self.frame, content_frame) {
@@ -271,20 +280,20 @@ impl ScrollWidget {
         }
     }
 
-    fn drive_frame<A: SpawnsWidgets>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn drive_frame<A: SpawnsWidgets, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
         self.frame_discharge.begin_frame();
-        if let Some(content) = &self.content {
-            ctx.send_to(content.reference, &Collect);
+        if let Some(lanes) = self.content_lanes {
+            ctx.send_to(lanes.slot, &Collect);
         }
         if self.composite.is_complete() {
             self.finish(ctx);
         }
     }
 
-    fn finish<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn finish<A, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -299,7 +308,7 @@ impl ScrollWidget {
         debug_assert!(closed, "an open scroll frame closes exactly once");
     }
 
-    fn apply_delta<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>, delta: ScrollDelta) {
+    fn apply_delta<A, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>, delta: ScrollDelta) {
         let outcome = apply_scroll(self.viewport_extent, self.content_extent, self.offset, delta);
         self.offset = outcome.offset;
         self.sync_layout(ctx);
@@ -312,7 +321,7 @@ impl ScrollWidget {
     }
 
     fn nested_source(&self, source: Option<ErasedActorRef>) -> bool {
-        self.content.as_ref().is_some_and(|content| content.is_scroll && source == Some(content.reference))
+        self.content.as_ref().is_some_and(|content| content.is_scroll && source == Some(content.key))
     }
 }
 
@@ -374,19 +383,20 @@ impl WasmActor for ScrollWidget {
             frame_discharge: FrameDischarge::default(),
             scroll_focus: Focus::new(),
             content: None,
+            content_lanes: None,
             spawned: false,
             pending_theme: None,
         })
     }
 
-    #[handler::manual]
-    fn on_frame(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, frame: WidgetFrame) {
+    #[handler::single]
+    fn on_frame(&mut self, ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         self.frame = frame;
         self.sync_layout(ctx);
     }
 
-    #[handler::manual]
-    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _collect: Collect) {
+    #[handler::single]
+    fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         self.drive_frame(ctx);
     }
 
@@ -403,19 +413,25 @@ impl WasmActor for ScrollWidget {
     /// successfully spawned content root before that Collect.
     #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        if let Some(content) = &self.content {
-            ctx.send_to(content.reference, &set);
-        } else {
-            self.pending_theme = Some(set);
+        match self.content_lanes {
+            Some(lanes) => {
+                if let Some(styled) = lanes.styled {
+                    ctx.send_to(styled, &set);
+                }
+            }
+            None => self.pending_theme = Some(set),
         }
     }
 
-    #[handler::manual]
-    fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, wheel: MouseWheel) {
-        if let Some(child) = self.scroll_focus.hit_test(wheel.x, wheel.y) {
-            ctx.send_to(child, &wheel);
-        } else {
-            self.apply_delta(ctx, wheel_delta(wheel));
+    #[handler::single]
+    fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
+        let lane = self
+            .scroll_focus
+            .hit_test(wheel.x, wheel.y)
+            .and_then(|key| self.content_lanes.filter(|lanes| lanes.key() == key)?.wheel);
+        match lane {
+            Some(lane) => ctx.send_to(lane, &wheel),
+            None => self.apply_delta(ctx, wheel_delta(wheel)),
         }
     }
 
@@ -471,16 +487,16 @@ mod tests {
             frame_discharge: FrameDischarge::default(),
             scroll_focus: Focus::new(),
             content,
+            content_lanes: None,
             spawned,
             pending_theme: None,
         }
     }
 
-    /// What `spawn_virtual_list_child` hands back: a child that scrolls itself
-    /// on the wheel without being a scroll viewport.
-    fn spawned_virtual_list(reference: ErasedActorRef) -> SpawnedChild {
-        SpawnedChild {
-            reference,
+    /// The profile `spawn_virtual_list_child` hands back: a child that scrolls
+    /// itself on the wheel without being a scroll viewport.
+    fn virtual_list_profile() -> ChildProfile {
+        ChildProfile {
             width_pixels: None,
             height_pixels: CONTENT.height_pixels,
             pointer_eligible: true,
@@ -646,7 +662,7 @@ mod tests {
         // alone, so a virtual list nested in a scroll container never joined
         // it and this container ate a wheel the list owns — the whole content
         // plate slid under the clip while the realized row window stood still.
-        let mut widget = widget_over(Some(ScrollContent::new(&spawned_virtual_list(proven(11)))));
+        let mut widget = widget_over(Some(ScrollContent::new(proven(11), &virtual_list_profile())));
         let content_frame = widget.content_frame();
         widget.rebuild_wheel_focus(&content_frame);
 

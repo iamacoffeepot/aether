@@ -23,7 +23,7 @@
 //! - `__AETHER_HANDLER_SET_CONTRACTS` (wasm sets) — the set's ADR-0231
 //!   `CONTRACTS` rows, each under its handler's `#[cfg]`s, which an adopter
 //!   appends to its own `Contracts` list. A native set carries the same rows in
-//!   its marker bridge (see Markers below).
+//!   its marker bridge's `@contracts` arm instead (see Markers below).
 //! - `__aether_handler_set_capabilities` (native sets) — the set's
 //!   `HandlerCapability` rows, which an adopter splices into its own
 //!   `Dispatch::capabilities` / `measured_kinds` so the native describe surface
@@ -34,10 +34,11 @@
 //!
 //! # Markers
 //!
-//! A native set additionally emits a `#[macro_export] macro_rules!` bridge that
-//! pastes the set's `impl HandlesKind<K> for $ty {}` markers, its ADR-0231
+//! A set additionally emits a `macro_rules!` bridge that pastes the set's
+//! `impl HandlesKind<K> for $ty {}` markers and its ADR-0231
 //! `impl Contract<K> for $ty` rows (and the `Replies<K>` marker of a replying
-//! handler), and the matching `HandlerEntry` inventory rows. The bridge exists
+//! handler), plus, for a native set, the matching `HandlerEntry` inventory
+//! rows. The bridge exists
 //! because the orphan rule forecloses the set declaring the markers itself —
 //! `impl<T: Set> HandlesKind<K> for T` puts the `Self` type parameter ahead of
 //! the first local type in the trait reference. The adopter's `#[actor]` emits
@@ -56,12 +57,13 @@
 //! to its own `Contracts` list (ADR-0231 §4). A native set carries its rows
 //! there rather than in a trait const because a struct-hosted adopter cannot
 //! always name the set trait: it may sit in a private module of the runtime
-//! tree. A wasm set has no bridge, so it carries the rows as the hidden trait
-//! const `__AETHER_HANDLER_SET_CONTRACTS`, which its adopters name through the
-//! trait path they already hold.
+//! tree. A wasm set's bridge has no `@contracts` arm: it carries the rows as
+//! the hidden trait const `__AETHER_HANDLER_SET_CONTRACTS`, which its adopters
+//! name through the trait path they already hold.
 //!
-//! Two properties of that bridge are load-bearing. It is invoked **unqualified**
-//! rather than as `crate::__aether_handler_set_markers_…!` — a macro-expanded
+//! Two properties of a native set's `#[macro_export]` bridge are load-bearing.
+//! It is invoked **unqualified** rather than as
+//! `crate::__aether_handler_set_markers_…!` — a macro-expanded
 //! `#[macro_export]` macro named by absolute path from inside its own crate
 //! trips `macro_expanded_macro_exports_accessed_by_absolute_paths` (rust-lang
 //! issue 52234), while the unqualified form resolves through the crate-root
@@ -71,10 +73,12 @@
 //! crate. And a `macro_rules!` pastes paths at the use site, so a native set's
 //! kind types need spellings that resolve from every adopter.
 //!
-//! A wasm set emits no bridge. Its adopters — the widget family — address each
-//! other by name through `RelativeMailbox::send<K: ActorMail>`, which carries no
-//! `HandlesKind` bound, so a marker there would gate nothing. Its kinds reach
-//! the adopter's `CONTRACTS` list but get no per-kind `Contract` row.
+//! A wasm set's bridge is instead a plain `macro_rules!` re-exported
+//! crate-wide under the set trait's own name, so an adopter in any module
+//! reaches it through the set path it already names (see
+//! `build_wasm_marker_bridge`). Its rows are what let the widget panel narrow
+//! each spawned child to the lane protocols that list a set kind (ADR-0231
+//! §2, §3).
 //!
 //! # Typed members
 //!
@@ -119,6 +123,10 @@
 //! keeps its slot and every later row its position. A handler with no `#[cfg]`
 //! gets no gate and its tokens stay inline, so an unchanged set expands to
 //! exactly what it expanded to before.
+//!
+//! A wasm set's bridge needs no gates: it is crate-local, so its body lands only
+//! in the defining crate, where a replayed `#[cfg]` answers to the definer's
+//! features (see `build_wasm_marker_bridge`).
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
@@ -433,7 +441,7 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
     }
 
     let marker_bridge = match transport {
-        SetTransport::Wasm => quote! {},
+        SetTransport::Wasm => build_wasm_marker_bridge(&item, &handlers)?,
         SetTransport::Native => build_native_marker_bridge(&item.ident, &handlers)?,
     };
 
@@ -530,35 +538,8 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
         })
         .collect::<syn::Result<Vec<_>>>()?;
 
-    // ADR-0231 §10: set row `j` sits `j` entries past the adopter's own rows,
-    // whose end the adopter passes as `$base` (the position just past its last
-    // local row). `There` steps commute, so wrapping `$base` in `j` of them
-    // names the same position as counting the adopter's rows first.
     let markers = handlers.iter().zip(&gate_idents).enumerate().flat_map(|(position, (h, gate))| {
-        let kind_ty = &h.kind_ty;
-        let handles_marker =
-            wrap_in_gate(gate.as_ref(), quote! { impl ::aether_actor::HandlesKind<#kind_ty> for $ty {} });
-        let empty = quote! {};
-        let self_ty = quote! { $ty };
-        let reply = reply_marker_impl(
-            h.class,
-            &h.reply,
-            kind_ty,
-            &ReplyMarkerSite { impl_generics: &empty, self_ty: &self_ty, where_clause: &empty, cfgs: &[] },
-        );
-        let mut markers = vec![handles_marker];
-        if !reply.is_empty() {
-            markers.push(wrap_in_gate(gate.as_ref(), reply));
-        }
-        let contract = contract_row_impl(
-            h.class,
-            &h.reply,
-            kind_ty,
-            &position_past(quote! { $base }, position),
-            &ReplyMarkerSite { impl_generics: &empty, self_ty: &self_ty, where_clause: &empty, cfgs: &[] },
-        );
-        markers.push(wrap_in_gate(gate.as_ref(), contract));
-        markers
+        handler_markers(h, position, &[]).into_iter().map(|marker| wrap_in_gate(gate.as_ref(), marker))
     });
     // ADR-0231 §4: the set's `CONTRACTS` rows, one single-row slice per
     // handler. A gated handler's slice picks between its row and an empty one
@@ -609,6 +590,92 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
                 #(#inventory)*
             };
         }
+    })
+}
+
+/// One set handler's markers as a bridge pastes them onto the adopter `$ty`:
+/// its `HandlesKind<K>` marker, its reply marker, and its `Contract<K>` row,
+/// each under `cfgs`.
+///
+/// ADR-0231 §10: set row `position` sits that many entries past the adopter's
+/// own rows, whose end the adopter passes as `$base` (the position just past
+/// its last local row). `There` steps commute, so wrapping `$base` in
+/// `position` of them names the same position as counting the adopter's rows
+/// first.
+fn handler_markers(h: &HandlerFn, position: usize, cfgs: &[syn::Attribute]) -> [TokenStream2; 3] {
+    let kind_ty = &h.kind_ty;
+    let empty = quote! {};
+    let self_ty = quote! { $ty };
+    let site = ReplyMarkerSite { impl_generics: &empty, self_ty: &self_ty, where_clause: &empty, cfgs };
+    [
+        quote! {
+            #(#cfgs)*
+            impl ::aether_actor::HandlesKind<#kind_ty> for $ty {}
+        },
+        reply_marker_impl(h.class, &h.reply, kind_ty, &site),
+        contract_row_impl(h.class, &h.reply, kind_ty, &position_past(quote! { $base }, position), &site),
+    ]
+}
+
+/// A wasm set's bridge (ADR-0231 §2, §10): the same `HandlesKind<K>` markers,
+/// reply markers, and `Contract<K>` rows a native bridge pastes, plus the
+/// set's `Rows` tail, so a wasm adopter covers a protocol that lists a set
+/// kind. No inventory rows, which only the native registry reads, and no
+/// `@contracts` arm: a wasm adopter appends the trait const
+/// `__AETHER_HANDLER_SET_CONTRACTS` instead.
+///
+/// The bridge is a plain `macro_rules!` re-exported crate-wide under the set
+/// trait's own name, in the macro namespace beside the trait. An adopter
+/// invokes it through the set path it already names (`handler_set(T)` expands
+/// to `T!(..)`), so the adopter may sit in any module that can name the set,
+/// where a `#[macro_export]` bridge is found unqualified only from the crate
+/// root. The re-export is `pub(crate)`, so a wasm set is adopted within the
+/// crate that defines it.
+///
+/// That also settles ADR-0183 without gate macros: the bridge body only ever
+/// expands in the defining crate, so a handler's `#[cfg]`s ride its items
+/// directly and resolve against the definer's configuration. The `@rows` list
+/// is a type and takes no attribute, so a gated handler's slot is an alias the
+/// `@aliases` arm defines as its row or `Gap`, which the adopter pastes beside
+/// its `Contracts` impl.
+fn build_wasm_marker_bridge(set: &ItemTrait, handlers: &[HandlerFn]) -> syn::Result<TokenStream2> {
+    let set_ident = &set.ident;
+    let macro_ident = format_ident!("__aether_handler_set_markers_{}", set_ident);
+
+    let markers = handlers.iter().enumerate().flat_map(|(position, h)| handler_markers(h, position, &h.cfgs));
+    let mut aliases = Vec::new();
+    let mut entries = Vec::with_capacity(handlers.len());
+    for (index, h) in handlers.iter().enumerate() {
+        let entry = row_entry(h.class, &h.reply, &h.kind_ty);
+        if h.cfgs.is_empty() {
+            entries.push(entry);
+            continue;
+        }
+
+        let alias = format_ident!("__AetherSetRow{}", index);
+        let predicate = conjoined_cfg_predicate(&h.cfgs)?;
+        aliases.push(quote! {
+            #[cfg(#predicate)]
+            type #alias = #entry;
+            #[cfg(not(#predicate))]
+            type #alias = ::aether_actor::Gap;
+        });
+        entries.push(quote! { #alias });
+    }
+    let rows = declaration_list(entries.into_iter(), quote! { () });
+
+    Ok(quote! {
+        #[doc(hidden)]
+        macro_rules! #macro_ident {
+            (@aliases) => { #(#aliases)* };
+            (@rows) => { #rows };
+            ($ty:ty, $base:ty) => {
+                #(#markers)*
+            };
+        }
+        #[doc(hidden)]
+        #[allow(unused_imports)]
+        pub(crate) use #macro_ident as #set_ident;
     })
 }
 

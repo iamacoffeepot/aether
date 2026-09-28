@@ -2,17 +2,18 @@
 //! artifact the set derives from it, and the crate defining the set is the one
 //! whose configuration decides.
 //!
-//! A wasm set emits two artifact families — the dispatch chain's arms and the
-//! `aether.kinds.inputs` manifest records — and no marker bridge, so this
-//! fixture covers the whole of what a wasm set produces. The bridge belongs to
-//! native sets and is asserted twice elsewhere: its gate pair over the emitted
-//! tokens in `handler_set::tests`, and its effect on a real adopter in
-//! `aether-substrate/tests/native_actor_macro.rs`. Neither belongs here, because
-//! a native set's expansion names `aether_substrate` types and
-//! `aether-substrate` depends transitively on the crate under test. A
-//! dev-dependency can close that cycle, so what rules a fixture out here is
-//! cost, not the dependency graph: it would pull the wasmtime and cranelift tree
-//! into these UI tests, which the substrate side of the edge builds anyway.
+//! A wasm set emits the dispatch chain's arms, the `aether.kinds.inputs`
+//! manifest records, and a crate-local marker bridge. This fixture pins the
+//! first two by value. The bridge carries each gated handler's `#[cfg]`s on
+//! its items and picks the handler's `Rows` slot through an alias, so
+//! `Adopter` compiling here is its check: a `TestOnly` marker or row that
+//! leaked past the gate would name a kind that does not exist, and a stripped
+//! slot that shifted a later row would break that row's position check. The
+//! native bridge's gate pair is asserted elsewhere: over the emitted tokens in
+//! `handler_set::tests`, and on a real adopter in
+//! `aether-substrate/tests/native_actor_macro.rs`, because a native set's
+//! expansion names `aether_substrate` types and pulling that tree into these
+//! UI tests costs the wasmtime and cranelift build.
 //!
 //! trybuild compiles a fixture as a plain binary, so `test` is off here:
 //! `on_test_only` is stripped and `on_not_test` survives. Both directions are
