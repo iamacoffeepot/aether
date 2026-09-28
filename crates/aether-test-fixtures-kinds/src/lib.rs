@@ -591,12 +591,12 @@ pub struct HeldRequest {
 }
 
 /// Issue 6983: a held actor's answer to a [`HeldRequest`], echoing its `tag`.
-#[aether_data::kind(name = "aether.test_fixtures.held_reply", copy)]
-pub struct HeldReply {
+#[aether_data::kind(name = "aether.test_fixtures.held_request_result", copy)]
+pub struct HeldRequestResult {
     pub tag: u32,
 }
 
-/// Issue 6983: report the held requester emits when a [`HeldReply`] echoes
+/// Issue 6983: report the held requester emits when a [`HeldRequestResult`] echoes
 /// the tag of the request it sent.
 #[aether_data::kind(name = "aether.test_fixtures.held_reply_matched", default)]
 pub struct HeldReplyMatched;

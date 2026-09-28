@@ -14,7 +14,7 @@
 //! Issue 6983 companion to the bundle's `held_carry`: `ReshapedHeldRelay` has
 //! the same handler rows as `test.held.relay`, but its `HeldRelayContext`
 //! holds a `Held<CarriedRequestResult>` where the bundle's holds a
-//! `Held<HeldReply>`. A held field's schema names its reply kind (ADR-0243
+//! `Held<HeldRequestResult>`. A held field's schema names its reply kind (ADR-0243
 //! §4), so the context's `Kind::ID` changes, and swapping the bundle's relay
 //! to this export while a held reply is carried must be refused.
 
@@ -22,7 +22,8 @@
 
 use aether_actor::{ActorInitError, Held, Pending, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{
-    CarriedReplyMatched, CarriedRequestResult, HeldReply, HeldRequest, RunCarriedRequest, SubstrateHarnessObserver,
+    CarriedReplyMatched, CarriedRequestResult, HeldRequest, HeldRequestResult, RunCarriedRequest,
+    SubstrateHarnessObserver,
 };
 
 #[aether_data::kind(name = "aether.test_fixtures.carried_context", no_serde)]
@@ -74,9 +75,9 @@ impl WasmActor for ReshapedHeldRelay {
     }
 
     #[handler::single]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldReply> {
-        let (pending, held) = ctx.hold::<HeldReply>();
-        held.answer(ctx, &HeldReply { tag: request.tag });
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
+        let (pending, held) = ctx.hold::<HeldRequestResult>();
+        held.answer(ctx, &HeldRequestResult { tag: request.tag });
         pending
     }
 

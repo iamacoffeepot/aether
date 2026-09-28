@@ -5,12 +5,12 @@
 //! `HeldRequester` sends one [`HeldRequest`] per [`RunHeldRequest`] to the
 //! held actor its `target` names. The send is detached, so the held reply's
 //! chain stays out of the chain the harness settles, and a scenario can
-//! replace the holder while the reply is still owed. On each [`HeldReply`]
+//! replace the holder while the reply is still owed. On each [`HeldRequestResult`]
 //! that echoes a tag it sent, the requester reports [`HeldReplyMatched`] and
 //! counts the match; it answers [`CountQuery`] with that count, which is the
 //! barrier a scenario polls, since the reply lands on a chain it never joins.
 //!
-//! Each held actor answers its [`HeldRequest`] through a `Held<HeldReply>`:
+//! Each held actor answers its [`HeldRequest`] through a `Held<HeldRequestResult>`:
 //!
 //! - `HeldRelay` carries it in a request context on a [`CarriedRequest`] to
 //!   the correlation-carry `ReplyHolder`, and answers from that request's
@@ -23,7 +23,8 @@
 use aether_actor::{ActorInitError, Held, Pending, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{
     CarriedRequest, CarriedRequestResult, CountQuery, CountReport, HELD_TARGET_FORGETTER, HELD_TARGET_KEEPER,
-    HELD_TARGET_RELAY, HeldReply, HeldReplyMatched, HeldRequest, ReleaseHeld, RunHeldRequest, SubstrateHarnessObserver,
+    HELD_TARGET_RELAY, HeldReplyMatched, HeldRequest, HeldRequestResult, ReleaseHeld, RunHeldRequest,
+    SubstrateHarnessObserver,
 };
 
 use crate::correlation_carry::ReplyHolder;
@@ -32,14 +33,14 @@ use crate::correlation_carry::ReplyHolder;
 /// the relay owes, and the tag it echoes.
 #[aether_data::kind(name = "aether.test_fixtures.held_relay_context")]
 struct HeldRelayContext {
-    held: Held<HeldReply>,
+    held: Held<HeldRequestResult>,
     tag: u32,
 }
 
 /// The held replies `HeldKeeper` saves across a replace, with their tags.
 #[aether_data::kind(name = "aether.test_fixtures.kept_helds")]
 struct KeptHelds {
-    helds: Vec<Held<HeldReply>>,
+    helds: Vec<Held<HeldRequestResult>>,
     tags: Vec<u32>,
 }
 
@@ -74,7 +75,7 @@ impl WasmActor for HeldRequester {
     }
 
     #[handler::single]
-    fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: HeldReply) {
+    fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: HeldRequestResult) {
         let Some(index) = self.sent.iter().position(|tag| *tag == reply.tag) else {
             tracing::warn!(target: "test.held.requester", tag = reply.tag, "held reply echoes no tag sent");
             return;
@@ -105,8 +106,8 @@ impl WasmActor for HeldRelay {
     }
 
     #[handler::single]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldReply> {
-        let (pending, held) = ctx.hold::<HeldReply>();
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
+        let (pending, held) = ctx.hold::<HeldRequestResult>();
         let _ = ctx.send_with_context::<ReplyHolder>(
             &CarriedRequest { tag: request.tag },
             HeldRelayContext { held, tag: request.tag },
@@ -126,14 +127,14 @@ impl WasmActor for HeldRelay {
             );
             return;
         };
-        context.held.answer(ctx, &HeldReply { tag: context.tag });
+        context.held.answer(ctx, &HeldRequestResult { tag: context.tag });
     }
 }
 
 /// Parks each request's reply in state until [`ReleaseHeld`], and carries the
 /// parked replies across a replace through saved state.
 pub struct HeldKeeper {
-    kept: Vec<(Held<HeldReply>, u32)>,
+    kept: Vec<(Held<HeldRequestResult>, u32)>,
 }
 
 #[actor(root)]
@@ -145,8 +146,8 @@ impl WasmActor for HeldKeeper {
     }
 
     #[handler::single]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldReply> {
-        let (pending, held) = ctx.hold::<HeldReply>();
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
+        let (pending, held) = ctx.hold::<HeldRequestResult>();
         self.kept.push((held, request.tag));
         pending
     }
@@ -154,7 +155,7 @@ impl WasmActor for HeldKeeper {
     #[handler::single]
     fn on_release(&mut self, ctx: &mut WasmCtx<'_>, _release: ReleaseHeld) {
         for (held, tag) in self.kept.drain(..) {
-            held.answer(ctx, &HeldReply { tag });
+            held.answer(ctx, &HeldRequestResult { tag });
         }
     }
 
@@ -175,7 +176,7 @@ impl WasmActor for HeldKeeper {
 /// [`HeldKeeper`] without the dehydrate override: its parked replies are
 /// never saved, so a replace while one is live must be refused.
 pub struct HeldForgetter {
-    kept: Vec<(Held<HeldReply>, u32)>,
+    kept: Vec<(Held<HeldRequestResult>, u32)>,
 }
 
 #[actor(root)]
@@ -187,8 +188,8 @@ impl WasmActor for HeldForgetter {
     }
 
     #[handler::single]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldReply> {
-        let (pending, held) = ctx.hold::<HeldReply>();
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
+        let (pending, held) = ctx.hold::<HeldRequestResult>();
         self.kept.push((held, request.tag));
         pending
     }
@@ -196,7 +197,7 @@ impl WasmActor for HeldForgetter {
     #[handler::single]
     fn on_release(&mut self, ctx: &mut WasmCtx<'_>, _release: ReleaseHeld) {
         for (held, tag) in self.kept.drain(..) {
-            held.answer(ctx, &HeldReply { tag });
+            held.answer(ctx, &HeldRequestResult { tag });
         }
     }
 }
