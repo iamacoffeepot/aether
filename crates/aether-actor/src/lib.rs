@@ -127,6 +127,9 @@ pub mod __macro_internals {
     // ADR-0231 §10: `export!` writes a type's `Dependency` records from its
     // `Declared::Depends` list with these.
     pub use crate::model::{dependency_records_len, write_dependency_records};
+    // ADR-0231 §4: `#[protocol]` opts each protocol into the guard cast's
+    // protocol arm with this marker.
+    pub use crate::model::ProtocolCast;
     pub use crate::wasm::{ActorTypeTag, WasmPlacementFacts};
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{ActorId, CrossesActors, Kind, KindId, ReplyContract, Schema};

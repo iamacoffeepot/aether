@@ -4,10 +4,12 @@
 //! The expansion is sugar for a hand-written protocol: the trait becomes a unit
 //! struct carrying the trait's visibility and docs, plus a row list in its docs,
 //! and `impl ::aether_actor::Protocol` names the rows as a tuple of
-//! `::aether_actor::Row<K, O>`. Nothing else is emitted: the rows' list and the
-//! coverage check are computed in `aether-actor` from that tuple, through
-//! sealed traits, so this macro has no `Contract`, `CoveredBy`, `CoversRows`,
-//! or `RowSet` impl to get wrong.
+//! `::aether_actor::Row<K, O>`. The one other emission is the hidden
+//! `ProtocolCast` marker, which opts the protocol into the native guard cast's
+//! protocol arm (ADR-0231 §4) and carries no rule of its own. The rows' list,
+//! the coverage check, and the cast rule are computed in `aether-actor` from
+//! that tuple, through sealed traits, so this macro has no `Contract`,
+//! `CoveredBy`, `CoversRows`, `RowSet`, or `CastTarget` impl to get wrong.
 //!
 //! Each method is one row: `fn name(mail: K) -> O;` is a single row and
 //! `fn name(mail: K);` (or `-> ()`) a silent one. A manual row has no spelling:
@@ -235,6 +237,8 @@ fn emit(item: &ItemTrait, rows: &[ProtocolRow]) -> TokenStream2 {
         impl ::aether_actor::Protocol for #ident {
             type Rows = #rows_ty;
         }
+
+        impl ::aether_actor::__macro_internals::ProtocolCast for #ident {}
     }
 }
 

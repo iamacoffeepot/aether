@@ -3,10 +3,12 @@
 //! `#[fallback]` do not get in the way. `RowSet::CONTRACTS` must use the mapping
 //! `#[actor]`'s `Contracts::CONTRACTS` uses (a silent row is
 //! `ReplyContract::None`), because a route's published rows are compared with
-//! it, so every protocol row appears in the covering actor's list.
+//! it, so every protocol row appears in the covering actor's list, and the
+//! guard cast's protocol arm (ADR-0231 §4), which `#[protocol]` opts into,
+//! admits those published rows.
 
 use aether_actor::{
-    ActorInitError, Contracts, CoveredBy, Mail, Protocol, RowSet, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
+    ActorInitError, CastTarget, Contracts, CoveredBy, Mail, Protocol, RowSet, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
 };
 
 #[repr(C)]
@@ -81,4 +83,5 @@ fn main() {
     for row in protocol_rows {
         assert!(actor_rows.contains(row), "protocol row {row:?} is missing from the covering actor's rows");
     }
+    assert!(<Loader as CastTarget>::admits(actor_rows));
 }

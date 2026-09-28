@@ -53,16 +53,31 @@ one peer read. Reassembly and full-write loops are native responsibilities.
 
 ## Consumer binding
 
+A consumer covers the `TcpConsumer` protocol (`aether_tcp::TcpConsumer`): it
+handles `session_data` and `session_closed`, both silently. Each session holds
+its consumer as a `ProtocolRef<TcpConsumer>`, so its fan-out compiles only for
+those two kinds.
+
 A consumer actor binds itself to its sessions with a `_self` kind:
 `ctx.send::<TcpCapability>(&BindListenerSelf { .. })` or
 `ctx.send::<TcpCapability>(&ConnectSelf { .. })`. The capability takes the
-consumer from the proven sender, so the actor never names its own position.
+consumer from the proven sender, so the actor never names its own position. It
+casts the sender to `TcpConsumer` once, at receipt (ADR-0231 §4), and replies
+`Err` without binding or dialing when the sender's published rows do not
+cover the protocol, or when the mail has no actor sender. A component that
+binds itself can check its coverage at compile time with
+`TcpConsumer: CoveredBy<Self>`, as the `tcp_load_probe` fixture does.
 
 An agent, or a capability binding a different actor, names that actor in the
-`consumer` field of `bind_listener` or `connect` by its ADR-0166 address,
-canonical or short. The capability proves the address once, at receipt, and
-refuses the request when it names no live actor. Sessions and listeners are
-addressed as `aether.tcp/aether.tcp.session:<session_name>` and
+`consumer` field of `bind_listener` or `connect`. The field is a
+`ProtocolPath<TcpConsumer>`: in code an `ActorPath<R>` narrowed with
+`.narrow::<TcpConsumer>()`, and over MCP the canonical `path` a component load
+returns. The path must be canonical; a short `aether.component/:name` path is
+refused. Its decode proves that the live route at the path publishes both
+silent rows, and a path that does not is refused at decode: the mail is logged
+at warn and gets no reply. A route that left between decode and receipt gets
+`Err`. Sessions and listeners are addressed as
+`aether.tcp/aether.tcp.session:<session_name>` and
 `aether.tcp/aether.tcp.listener:<listener_name>`, from the names the results
 return.
 
@@ -74,13 +89,10 @@ and outbound sessions are addressed the same way. There are no route helpers,
 and the consumer never derives a session's mailbox from its name. Raw sockets
 stay in native state.
 
-Both of these are erased shapes on `main` that #6895 retires. The `consumer`
-field is an `ErasedActorPath`, and each session delivers to the consumer
-through the `ErasedActorRef` the capability proves; the consumer's write goes
-through `ctx.sender()`'s `ErasedActorRef`. Under the design rules, a path the
-capability will send to is a typed path
-([R-0040](../contributing/design-rules.md#r-0040)), and a reference that is
-sent through is a typed proof
+That consumer-to-session write is still an erased shape on `main` that #6895
+retires: it goes through `ctx.sender()`'s `ErasedActorRef`, and a guest has no
+cast or typed resolve yet to prove the session with. Under the design rules, a
+reference that is sent through is a typed proof
 ([R-0039](../contributing/design-rules.md#r-0039)).
 
 Listener/session names live under the engine's lineage. They are not globally

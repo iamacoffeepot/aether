@@ -27,6 +27,12 @@
 //! - `BindListener { addr, name?, consumer? }` → `BindListenerResult`
 //! - `BindListenerSelf { addr, name? }` → `BindListenerResult` (the sender
 //!   is the consumer)
+//!
+//! A consumer covers the [`TcpConsumer`] protocol: it handles
+//! [`SessionData`] and [`SessionClosed`] silently. The explicit `consumer`
+//! is a `ProtocolPath<TcpConsumer>` proven at decode, and a `_self` request
+//! casts its sender to the protocol at receipt, so every session holds its
+//! consumer as a `ProtocolRef<TcpConsumer>`.
 //! - `UnbindListener { listener_name }` → `UnbindListenerResult`
 //!   (asynchronous reply: the cap monitors the listener at spawn time
 //!   and replies only after `MonitorNotice` arrives)
@@ -54,8 +60,8 @@
 //!
 //! A consumer tier (the shelved `aether-game` player tier was the in-repo
 //! example) names these types directly: it sends the cap-root kinds with
-//! `ctx.send::<TcpCapability>`, binds or dials itself as consumer with a
-//! `_self` kind, and writes framed bytes to a session through the
+//! `ctx.send::<TcpCapability>`, covers [`TcpConsumer`], binds or dials
+//! itself as consumer with a `_self` kind, and writes framed bytes to a session through the
 //! host-stamped sender of the [`SessionData`] it receives (`ctx.sender()`,
 //! then `ctx.send_to`). That is a downward leaf→leaf dependency, not a
 //! facade: a downstream crate that wants TCP deps here directly, and pulls

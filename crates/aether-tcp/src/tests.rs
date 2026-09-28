@@ -10,15 +10,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::{
-    BindListener, BindListenerResult, Connect, ConnectResult, ListListeners, ListListenersResult, SessionClosed,
-    SessionData, SessionWrite, TcpCapability, TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
+    BindListener, BindListenerResult, BindListenerSelf, Connect, ConnectResult, ListListeners, ListListenersResult,
+    SessionClosed, SessionData, SessionWrite, TcpCapability, TcpConsumer, TcpListenerActor, TcpSessionActor,
+    UnbindListener, UnbindListenerResult,
 };
-use aether_actor::{Addressable, ErasedActorRef};
+use aether_actor::{ActorPath, Addressable, ErasedActorRef, ProtocolPath, actor};
 use aether_data::{ErasedActorPath, Kind, LoadName, SessionToken, Uuid};
 use aether_kinds::descriptors;
 use aether_substrate::ReplyTarget;
-use aether_substrate::actor::native::PumpedSlot;
+use aether_substrate::actor::native::spawn::Subname;
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, PumpedSlot, SpawnOutcome, TaskDone};
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
+use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::MailId;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
@@ -48,11 +51,20 @@ fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>
 /// `Builder::<TestChassis>::new(...)` chain that opened every
 /// test (issue 796).
 fn boot_tcp_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>, PassiveChassis<TestChassis>) {
+    boot_tcp_substrate_with(|builder| builder)
+}
+
+/// [`boot_tcp_substrate`] with further actors composed beside
+/// `TcpCapability` by `compose`.
+fn boot_tcp_substrate_with(
+    compose: impl FnOnce(Builder<TestChassis>) -> Builder<TestChassis>,
+) -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>, PassiveChassis<TestChassis>) {
     let (registry, mailer, rx) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TcpCapability>(())
-        .build_passive()
-        .expect("TcpCapability boots");
+    let chassis = compose(
+        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer)).with_actor::<TcpCapability>(()),
+    )
+    .build_passive()
+    .expect("TcpCapability boots");
     (registry, mailer, rx, chassis)
 }
 
@@ -117,48 +129,128 @@ fn enqueue<K: Kind>(registry: &Arc<Registry>, target: ErasedActorRef, mail: &K, 
 enum CapturedSessionMail {
     Data(SessionData),
     Closed(SessionClosed),
-    #[allow(dead_code, reason = "named through the Debug rendering the receiving test's panic message carries")]
-    Unexpected(aether_data::KindId),
 }
 
-/// Register a capture inbox for a session consumer. The substrate's test
-/// door stands the route at `name`'s ADR-0099 lineage position, so `name`
-/// may be a nested path — the shape a loaded wasm component has, and the
-/// shape the `consumer` field must serve.
+/// A session consumer: it covers [`TcpConsumer`] with silent handlers, so a
+/// `ProtocolPath<TcpConsumer>` to it decodes, and forwards each delivery to
+/// the test over its config's channel. A kind outside the protocol has no
+/// handler and is warn-dropped, and a send whose receiver has already dropped
+/// is discarded: a session still live when the test body ends mails its
+/// `SessionClosed` on peer EOF after the receiver is gone, and losing that
+/// late capture is correct, since a test that wants it awaits it.
 ///
-/// The capture closure runs inline on whichever pool worker dispatched the
-/// session actor's send, so a panic here is escalated to a chassis fatal abort
-/// that kills the worker before its slot fires close-done; teardown then waits
-/// out the five-minute close gate, which the 60 s harness ceiling turns into a
-/// bare `TIMEOUT` carrying no attribution (iamacoffeepot/aether#3752). Both
-/// paths a healthy engine drives it down are therefore total: an unexpected
-/// kind is captured rather than asserted, so the receiving test names it on its
-/// own thread, and a send whose receiver has already dropped is discarded — a
-/// session still live when the test body ends mails its `SessionClosed` on peer
-/// EOF after `rx` is gone, and losing that late capture is correct, since a
-/// test that wants it awaits it.
-fn register_session_consumer(registry: &Registry, name: &str) -> mpsc::Receiver<CapturedSessionMail> {
-    let (tx, rx) = mpsc::channel();
-    registered_ref(
-        registry,
-        name,
-        Arc::new(move |dispatch: OwnedDispatch| {
-            let captured = if dispatch.kind == SessionData::ID {
-                CapturedSessionMail::Data(
-                    SessionData::decode_from_bytes(dispatch.payload.bytes()).expect("decode SessionData"),
-                )
-            } else if dispatch.kind == SessionClosed::ID {
-                CapturedSessionMail::Closed(
-                    SessionClosed::decode_from_bytes(dispatch.payload.bytes()).expect("decode SessionClosed"),
-                )
-            } else {
-                CapturedSessionMail::Unexpected(dispatch.kind)
-            };
-            dispatch.discharge();
-            let _ = tx.send(captured);
-        }),
-    );
-    rx
+/// It stands at a root instance ([`spawn_consumer`]) or, beneath
+/// [`ConsumerHost`], at a nested lineage position: the shape a loaded wasm
+/// component has.
+struct SessionConsumer {
+    captures: mpsc::Sender<CapturedSessionMail>,
+}
+
+#[actor(instanced, root, child_of(ConsumerHost))]
+impl NativeActor for SessionConsumer {
+    const NAMESPACE: &'static str = "test.tcp.consumer";
+    type Config = mpsc::Sender<CapturedSessionMail>;
+
+    fn init(captures: mpsc::Sender<CapturedSessionMail>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { captures })
+    }
+
+    #[handler::single]
+    fn on_session_data(&mut self, _ctx: &mut NativeCtx<'_>, mail: SessionData) {
+        let _ = self.captures.send(CapturedSessionMail::Data(mail));
+    }
+
+    #[handler::single]
+    fn on_session_closed(&mut self, _ctx: &mut NativeCtx<'_>, mail: SessionClosed) {
+        let _ = self.captures.send(CapturedSessionMail::Closed(mail));
+    }
+}
+
+/// The key [`ConsumerHost`] spawns its nested [`SessionConsumer`] under.
+const NESTED_CONSUMER_KEY: &str = "probe";
+
+/// A root singleton whose `wire` stages one [`SessionConsumer`] beneath
+/// itself at [`NESTED_CONSUMER_KEY`], handing it the capture channel.
+struct ConsumerHost {
+    captures: Option<mpsc::Sender<CapturedSessionMail>>,
+}
+
+#[actor(singleton, root)]
+impl NativeActor for ConsumerHost {
+    const NAMESPACE: &'static str = "test.tcp.consumer_host";
+    type Config = ();
+    type Params = mpsc::Sender<CapturedSessionMail>;
+
+    fn init(
+        (): (),
+        captures: mpsc::Sender<CapturedSessionMail>,
+        _ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<Self, BootError> {
+        Ok(Self { captures: Some(captures) })
+    }
+
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+        let captures = self.captures.take().expect("wire runs once");
+        ctx.spawn_child::<SessionConsumer>(Subname::Named(NESTED_CONSUMER_KEY), captures, ())
+            .stage()
+            .expect("the nested consumer stages");
+    }
+
+    #[handler(task)]
+    #[allow(clippy::unused_self)] // actor handler ABI always receives state
+    fn on_consumer_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<SessionConsumer>, ()>) {
+        done.release_no_reply();
+    }
+}
+
+/// Handles `SessionData` but not `SessionClosed`, so it does not cover
+/// [`TcpConsumer`]. Its `wire` binds a listener for itself with
+/// `BindListenerSelf` and forwards the reply to the test.
+struct DataOnlyConsumer {
+    replies: mpsc::Sender<BindListenerResult>,
+}
+
+#[actor(singleton, root, depends(TcpCapability))]
+impl NativeActor for DataOnlyConsumer {
+    const NAMESPACE: &'static str = "test.tcp.data_only_consumer";
+    type Config = ();
+    type Params = mpsc::Sender<BindListenerResult>;
+
+    fn init(
+        (): (),
+        replies: mpsc::Sender<BindListenerResult>,
+        _ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<Self, BootError> {
+        Ok(Self { replies })
+    }
+
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+        ctx.send::<TcpCapability>(&BindListenerSelf { addr: "127.0.0.1:0".into(), name: Some("data-only".into()) });
+    }
+
+    #[handler::single]
+    #[allow(clippy::unused_self)] // actor handler ABI always receives state
+    fn on_session_data(&mut self, _ctx: &mut NativeCtx<'_>, _mail: SessionData) {}
+
+    #[handler::single]
+    fn on_bind_result(&mut self, _ctx: &mut NativeCtx<'_>, result: BindListenerResult) {
+        let _ = self.replies.send(result);
+    }
+}
+
+/// Spawn a [`SessionConsumer`] at the root instance `key` and answer its
+/// path narrowed to [`TcpConsumer`], with the receiver of its captures.
+fn spawn_consumer(
+    chassis: &PassiveChassis<TestChassis>,
+    key: &str,
+) -> (ProtocolPath<TcpConsumer>, mpsc::Receiver<CapturedSessionMail>) {
+    let (captures, rx) = mpsc::channel();
+    chassis
+        .spawn_actor::<SessionConsumer>(Subname::Named(key), captures, ())
+        .finish()
+        .expect("the session consumer spawns");
+
+    (ActorPath::<SessionConsumer>::instance(&LoadName::new(key).expect("a valid key")).narrow(), rx)
 }
 
 fn address(text: &str) -> ErasedActorPath {
@@ -208,7 +300,10 @@ where
         thread::sleep(Duration::from_millis(5));
     };
     let payload = match frame {
-        EgressEvent::ToSession { payload, .. } => payload,
+        EgressEvent::ToSession { kind_name, payload, .. } => {
+            assert_eq!(kind_name, R::NAME, "the next reply for {} is not a {}", K::NAME, R::NAME);
+            payload
+        }
         other => panic!("expected ToSession egress, got {other:?}"),
     };
     R::decode_from_bytes(&payload).expect("decode reply")
@@ -582,7 +677,6 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
 #[test]
 #[allow(clippy::disallowed_methods)] // test-only loopback server thread; no actor lineage or runtime work.
 fn connect_roundtrip_spawns_writable_session() {
-    const CONSUMER: &str = "test.tcp.connect-consumer";
     const REPLY: &[u8] = b"loopback-reply";
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback server");
     let addr = listener.local_addr().expect("loopback server address");
@@ -598,12 +692,12 @@ fn connect_roundtrip_spawns_writable_session() {
 
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>().erase();
-    let consumer_rx = register_session_consumer(&registry, CONSUMER);
+    let (consumer, consumer_rx) = spawn_consumer(&chassis, "connect-consumer");
     let connect_reply = drive_and_decode::<Connect, ConnectResult>(
         &registry,
         &rx,
         tcp,
-        &Connect { addr: addr.to_string(), name: None, consumer: Some(address(CONSUMER)) },
+        &Connect { addr: addr.to_string(), name: None, consumer: Some(consumer) },
     );
     let (session_name, peer) = match connect_reply {
         ConnectResult::Ok { session_name, peer } => (session_name, peer),
@@ -776,28 +870,49 @@ fn unbind_unknown_listener_errors() {
 }
 
 /// A refused consumer binds no socket and spawns no listener: a `consumer`
-/// address that names no live actor replies `Err` and leaves the listener
-/// fleet empty, rather than binding a listener whose frames go nowhere.
+/// path at which no live actor covers [`TcpConsumer`] is refused at decode,
+/// so the request gets no reply and leaves the listener fleet empty, rather
+/// than binding a listener whose frames go nowhere. The next reply the
+/// session sees is the list's, and it lists nothing.
 #[test]
-fn bind_refuses_a_consumer_address_with_no_live_actor() {
+fn bind_refuses_a_consumer_path_with_no_live_covering_actor() {
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let unregistered = ActorPath::<SessionConsumer>::instance(&LoadName::new("unregistered").expect("a valid key"));
 
-    let reply: BindListenerResult = drive_and_decode(
+    enqueue(
         &registry,
-        &rx,
         tcp,
         &BindListener {
             addr: "127.0.0.1:0".into(),
             name: Some("orphan".into()),
-            consumer: Some(address("test.tcp.unregistered-consumer")),
+            consumer: Some(unregistered.narrow()),
         },
+        session_reply(),
+        None,
     );
+
+    let list: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
+    assert!(list.listeners.is_empty(), "a refused bind must spawn no listener: {:?}", list.listeners);
+}
+
+/// The reflexive form casts its sender at receipt: a `BindListenerSelf` from
+/// an actor that handles `SessionData` but not `SessionClosed` replies `Err`
+/// naming the protocol and binds nothing, rather than binding a listener
+/// whose sessions' close notices its consumer would warn-drop.
+#[test]
+fn bind_listener_self_refuses_a_sender_that_does_not_cover_the_consumer_protocol() {
+    let (replies_tx, replies) = mpsc::channel();
+    let (registry, _mailer, rx, chassis) =
+        boot_tcp_substrate_with(|builder| builder.with_actor::<DataOnlyConsumer>(replies_tx));
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+
+    let reply = replies.recv_timeout(Duration::from_secs(2)).expect("the bind reply reaches its sender");
     match reply {
         BindListenerResult::Err { error, .. } => {
-            assert!(error.starts_with("consumer refused:"), "expected a consumer refusal, got: {error}");
+            assert!(error.contains("TcpConsumer"), "expected a consumer-protocol refusal, got: {error}");
         }
-        BindListenerResult::Ok { .. } => panic!("a consumer address with no live actor must refuse the bind"),
+        BindListenerResult::Ok { .. } => panic!("a sender that does not cover TcpConsumer must not bind"),
     }
 
     let list: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
@@ -808,16 +923,15 @@ fn bind_refuses_a_consumer_address_with_no_live_actor() {
 /// frame body spans TCP writes, followed by a close notice on peer EOF.
 #[test]
 fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
-    const CONSUMER: &str = "test.tcp.consumer";
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>().erase();
-    let consumer_rx = register_session_consumer(&registry, CONSUMER);
+    let (consumer, consumer_rx) = spawn_consumer(&chassis, "delivery-consumer");
 
     let bind: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("delivery".into()), consumer: Some(address(CONSUMER)) },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("delivery".into()), consumer: Some(consumer) },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
@@ -867,21 +981,29 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
 /// session mail. A loaded wasm component lives at the ADR-0099 lineage
 /// path `aether.component/aether.embedded:<name>`, which is precisely
 /// what the `consumer` field exists to serve. The written lineage path
-/// resolves through the registry's fold, so a nested consumer is
-/// reachable; resolving it as a flat name would silently drop every
-/// frame bound for a component.
+/// is proven at decode through the registry's fold, so a nested consumer
+/// is reachable; resolving it as a flat name would refuse every bind
+/// naming a component.
 #[test]
 fn nested_lineage_consumer_receives_session_mail() {
-    const CONSUMER: &str = "aether.component/aether.embedded:probe";
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let (captures, consumer_rx) = mpsc::channel();
+    let (registry, _mailer, rx, chassis) =
+        boot_tcp_substrate_with(|builder| builder.with_actor::<ConsumerHost>(captures));
     let tcp = chassis.actor_ref::<TcpCapability>().erase();
-    let consumer_rx = register_session_consumer(&registry, CONSUMER);
+    let key = LoadName::new(NESTED_CONSUMER_KEY).expect("a valid key");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while chassis.child::<ConsumerHost, SessionConsumer>(chassis.actor_ref::<ConsumerHost>(), key.clone()).is_err() {
+        assert!(Instant::now() < deadline, "the nested consumer did not go live within the deadline");
+        thread::sleep(Duration::from_millis(5));
+    }
+    let consumer = ActorPath::<SessionConsumer>::child(&ActorPath::<ConsumerHost>::root(), &key)
+        .expect("the nested path is under the caps");
 
     let bind: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("nested".into()), consumer: Some(address(CONSUMER)) },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("nested".into()), consumer: Some(consumer.narrow()) },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
@@ -903,16 +1025,15 @@ fn nested_lineage_consumer_receives_session_mail() {
 /// silent shutdown: the bound consumer receives exactly one close notice.
 #[test]
 fn session_reports_frame_rejection_to_bound_consumer() {
-    const CONSUMER: &str = "test.tcp.rejection-consumer";
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>().erase();
-    let consumer_rx = register_session_consumer(&registry, CONSUMER);
+    let (consumer, consumer_rx) = spawn_consumer(&chassis, "rejection-consumer");
 
     let bind: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("rejection".into()), consumer: Some(address(CONSUMER)) },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("rejection".into()), consumer: Some(consumer) },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,

@@ -322,9 +322,11 @@ impl Registry {
     ///
     /// One read of the published view, [`Self::published_contract`], finds
     /// the route `reference` proves `Live` and reads the rows it published;
-    /// `T::admits` decides whether those rows answer `T`. A `Starting`,
-    /// `Dropped`, or unknown route answers `None`, as does a live one whose
-    /// rows `T` does not admit, such as a closure route's empty contract.
+    /// `T::admits` decides whether those rows answer `T`: the subscriber arm's
+    /// silent-or-manual rule or the protocol arm's exact-rows rule (ADR-0231
+    /// §4), both fixed in `aether-actor`. A `Starting`, `Dropped`, or unknown
+    /// route answers `None`, as does a live one whose rows `T` does not admit,
+    /// such as a closure route's empty contract.
     ///
     /// Its one caller is
     /// [`NativeCtx::cast`](crate::actor::native::NativeCtx::cast).

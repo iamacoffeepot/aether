@@ -23,11 +23,11 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use crate::config::TcpSessionConfig;
 
-use aether_actor::{ErasedActorRef, runtime};
+use aether_actor::{ProtocolRef, runtime};
 use aether_codec::frame::pop_frame;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
-use crate::kinds::{SessionClose, SessionClosed, SessionData, SessionDataReady, SessionWrite};
+use crate::kinds::{SessionClose, SessionClosed, SessionData, SessionDataReady, SessionWrite, TcpConsumer};
 // The `#[runtime] impl NativeActor` names the identity struct from the parent.
 use super::TcpSessionActor;
 
@@ -47,12 +47,13 @@ pub const READ_BUFFER_BYTES: usize = 64 * 1024;
 pub struct TcpSessionState {
     pub peer: String,
     pub session_name: String,
-    /// The bound consumer, proven by the cap at receipt (ADR-0230). Every
-    /// delivery fans out to it and inherits the handler's causal chain; a
-    /// proof rather than a runtime name, because a name cannot reach a
-    /// nested actor such as a loaded component at
-    /// `aether.component/aether.embedded:<name>`.
-    pub consumer: Option<ErasedActorRef>,
+    /// The bound consumer, proven by the cap at receipt to cover
+    /// [`TcpConsumer`] (ADR-0230, ADR-0231 §3/§4), so a fan-out through it
+    /// compiles only for `SessionData` and `SessionClosed`. Every delivery
+    /// inherits the handler's causal chain; a proof rather than a runtime
+    /// name, because a name cannot reach a nested actor such as a loaded
+    /// component at `aether.component/aether.embedded:<name>`.
+    pub consumer: Option<ProtocolRef<TcpConsumer>>,
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,

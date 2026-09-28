@@ -6,7 +6,25 @@
 //! kinds. Kind ids are `fnv1a_64(name, schema)`, so moving declarations
 //! does not change any id or alter wire compatibility.
 
+use aether_actor::ProtocolPath;
 use serde::{Deserialize, Serialize};
+
+/// What a tcp session delivers to its consumer: every reassembled frame and
+/// the close notice, both silent (ADR-0231 §2).
+///
+/// A session holds its consumer as a `ProtocolRef<TcpConsumer>`, so its
+/// fan-out compiles only for these two kinds. The explicit `consumer` field of
+/// [`Connect`] and [`BindListener`] is a `ProtocolPath<TcpConsumer>`, and the
+/// reflexive [`ConnectSelf`] and [`BindListenerSelf`] cast their sender to it,
+/// so a consumer that would warn-drop either kind is refused before any
+/// socket is dialed or bound.
+#[aether_actor::protocol]
+pub trait TcpConsumer {
+    /// One reassembled length-prefix frame.
+    fn data(mail: SessionData);
+    /// The session closed: peer EOF, read error, or frame rejection.
+    fn closed(mail: SessionClosed);
+}
 
 /// `aether.tcp.bind_listener` — request the singleton
 /// `TcpCapability` to spawn a fresh `TcpListenerActor` bound to
@@ -14,25 +32,32 @@ use serde::{Deserialize, Serialize};
 /// (so `"127.0.0.1:8080"` and `"0.0.0.0:0"` both work; the
 /// latter asks the OS to pick a free port). Optional `name`
 /// overrides the default subname (the bound port string); pass
-/// `None` for the default. Optional `consumer` is the ADR-0166 address
-/// (canonical or short) of the actor every accepted session delivers
-/// inbound frames and close notices to. The cap proves it once, at
-/// receipt, and replies `Err` without binding when it names no live
-/// actor; `None` leaves the listener observer-less and drops inbound
-/// bytes. A consumer binding itself sends [`BindListenerSelf`]. Reply:
-/// `BindListenerResult`.
-#[aether_data::kind(name = "aether.tcp.bind_listener")]
+/// `None` for the default. Reply: `BindListenerResult`.
+///
+/// Optional `consumer` is the canonical path of the actor every accepted
+/// session delivers inbound frames and close notices to, an actor covering
+/// [`TcpConsumer`] (ADR-0231 §3): in code an `ActorPath<R>` narrowed with
+/// `.narrow::<TcpConsumer>()`, which compiles only when `R` handles both
+/// kinds silently; over MCP the `path` a component load returns. A short
+/// `aether.component/:name` path, or one whose live route does not publish
+/// both silent rows, is refused at decode: the mail is logged at warn and
+/// gets no reply. A route that left between decode and receipt gets `Err`
+/// without binding. `None` leaves the listener observer-less and drops
+/// inbound bytes. A consumer binding itself sends [`BindListenerSelf`].
+#[aether_data::kind(name = "aether.tcp.bind_listener", no_serde)]
 pub struct BindListener {
     pub addr: String,
     pub name: Option<String>,
-    pub consumer: Option<aether_data::ErasedActorPath>,
+    pub consumer: Option<ProtocolPath<TcpConsumer>>,
 }
 
 /// `aether.tcp.bind_listener_self` — [`BindListener`] with the sender as
 /// the consumer: every accepted session delivers its inbound frames and
 /// close notices to the actor that sent this mail. The host-stamped sender
 /// is already proven, so a component binds itself without naming its own
-/// position. `addr` and `name` mean what they mean on [`BindListener`].
+/// position; the cap casts it to [`TcpConsumer`] at receipt and replies
+/// `Err` without binding when its published rows do not cover the protocol.
+/// `addr` and `name` mean what they mean on [`BindListener`].
 /// Reply: `BindListenerResult`.
 #[aether_data::kind(name = "aether.tcp.bind_listener_self")]
 pub struct BindListenerSelf {
@@ -44,26 +69,28 @@ pub struct BindListenerSelf {
 /// to dial `addr` and spawn a fresh `TcpSessionActor` over the
 /// connected stream. Mirrors [`BindListener`]: `addr` is resolved
 /// via `std::net::ToSocketAddrs`, and optional `name` overrides
-/// the default `conn-N` session subname. Optional `consumer` is the
-/// ADR-0166 address (canonical or short) of the actor the dialed session
-/// delivers inbound frames and close notices to. The cap proves it once,
-/// at receipt, and replies `Err` without dialing when it names no live
-/// actor; `None` leaves the session observer-less and drops inbound
-/// bytes. A consumer dialing for itself sends [`ConnectSelf`]. Reply:
-/// [`ConnectResult`].
-#[aether_data::kind(name = "aether.tcp.connect")]
+/// the default `conn-N` session subname. Reply: [`ConnectResult`].
+///
+/// Optional `consumer` is the canonical path of the actor covering
+/// [`TcpConsumer`] the dialed session delivers inbound frames and close
+/// notices to, with [`BindListener`]'s rules: a short or non-covering path is
+/// refused at decode without a reply, and a route that left before receipt
+/// gets `Err` without dialing. `None` leaves the session observer-less and
+/// drops inbound bytes. A consumer dialing for itself sends [`ConnectSelf`].
+#[aether_data::kind(name = "aether.tcp.connect", no_serde)]
 pub struct Connect {
     pub addr: String,
     pub name: Option<String>,
-    pub consumer: Option<aether_data::ErasedActorPath>,
+    pub consumer: Option<ProtocolPath<TcpConsumer>>,
 }
 
 /// `aether.tcp.connect_self` — [`Connect`] with the sender as the
 /// consumer: the dialed session delivers its inbound frames and close
 /// notices to the actor that sent this mail. The host-stamped sender is
-/// already proven, so a component dials without naming its own position.
-/// `addr` and `name` mean what they mean on [`Connect`]. Reply:
-/// [`ConnectResult`].
+/// already proven, so a component dials without naming its own position;
+/// the cap casts it to [`TcpConsumer`] at receipt and replies `Err` without
+/// dialing when its published rows do not cover the protocol. `addr` and
+/// `name` mean what they mean on [`Connect`]. Reply: [`ConnectResult`].
 #[aether_data::kind(name = "aether.tcp.connect_self")]
 pub struct ConnectSelf {
     pub addr: String,
@@ -79,8 +106,7 @@ pub struct ConnectSelf {
 /// of the [`SessionData`] it receives (`ctx.sender()`, then `ctx.send_to`).
 /// An MCP agent addresses the session by the full ADR-0099 lineage path
 /// `aether.tcp/aether.tcp.session:<session_name>` as a mail recipient address —
-/// the bare subname is not a mailbox address. The same path is what a
-/// `consumer` field takes.
+/// the bare subname is not a mailbox address.
 #[aether_data::kind(name = "aether.tcp.connect_result")]
 pub enum ConnectResult {
     Ok { session_name: String, peer: String },

@@ -24,7 +24,7 @@ pub use aether_substrate::actor::native::{
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::runtime::trace::SettlementHold;
 
-use aether_actor::{ActorRef, ErasedActorRef, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef, runtime};
 use aether_substrate::Erased;
 // `MonitorNotice` is named by `on_monitor_notice`'s signature; the parent's
 // import of it is private, so re-import it directly where the body expands.
@@ -45,7 +45,7 @@ fn bind_listener(
     ctx: &mut NativeCtx<'_, TcpCapability, Manual>,
     addr: String,
     name: Option<String>,
-    consumer: Option<ErasedActorRef>,
+    consumer: Option<ProtocolRef<TcpConsumer>>,
 ) {
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
@@ -86,7 +86,7 @@ fn dial<A>(
     ctx: &mut NativeCtx<'_, A, Manual>,
     addr: String,
     name: Option<String>,
-    consumer: Option<ErasedActorRef>,
+    consumer: Option<ProtocolRef<TcpConsumer>>,
 ) {
     let id = state.next_connect_id;
     state.next_connect_id += 1;
@@ -188,8 +188,9 @@ pub struct PendingConnect {
     pub owed: DeferredReply,
     pub addr: String,
     pub name: Option<String>,
-    /// The consumer proven at `Connect` receipt (ADR-0230).
-    pub consumer: Option<ErasedActorRef>,
+    /// The consumer proven at `Connect` or `ConnectSelf` receipt (ADR-0230,
+    /// ADR-0231 §3/§4).
+    pub consumer: Option<ProtocolRef<TcpConsumer>>,
 }
 
 /// The dial a staged session birth is answering, plus the request vocabulary
@@ -210,6 +211,16 @@ pub struct ListenerSpawn {
     pub addr: String,
     pub listener_name: String,
     pub local_port: u16,
+}
+
+/// Type a `_self` request's sender as the session consumer (ADR-0231 §4's
+/// guard cast), or name why it cannot be one: the mail has no actor sender,
+/// or the sender's published rows do not cover [`TcpConsumer`].
+fn cast_consumer<A>(ctx: &NativeCtx<'_, A, Manual>, request: &str) -> Result<ProtocolRef<TcpConsumer>, String> {
+    let sender = ctx.sender().ok_or_else(|| format!("{request} needs an actor sender to deliver frames to"))?;
+    ctx.cast::<TcpConsumer>(sender).ok_or_else(|| {
+        format!("{request} sender does not handle `SessionData` and `SessionClosed` silently (TcpConsumer)")
+    })
 }
 
 fn reply_to_pending_connect<A>(ctx: &mut NativeCtx<'_, A, Manual>, owed: DeferredReply, result: &ConnectResult) {
@@ -250,8 +261,9 @@ impl NativeActor for TcpCapability {
     /// remains available while the OS resolves and connects `mail.addr`.
     #[handler::manual]
     fn on_connect(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: Connect) {
-        // ADR-0230 §3: prove the consumer's address once, at receipt.
-        let consumer = match mail.consumer.as_ref().map(|address| ctx.resolve_path(address)).transpose() {
+        // ADR-0231 §3: the decode proved the consumer covers `TcpConsumer`;
+        // prove it is still live once, at receipt.
+        let consumer = match mail.consumer.as_ref().map(|path| ctx.resolve(path)).transpose() {
             Ok(consumer) => consumer,
             Err(error) => {
                 ctx.reply(&ConnectResult::Err { addr: mail.addr, error: format!("consumer refused: {error}") });
@@ -264,20 +276,21 @@ impl NativeActor for TcpCapability {
     /// Dial `mail.addr` with the sender as the session's consumer, as
     /// [`Self::on_connect`] does with an explicit consumer.
     ///
+    /// The sender is cast to [`TcpConsumer`] once, at receipt (ADR-0231
+    /// §4), so nothing is dialed for a sender that would warn-drop the
+    /// session's frames or its close notice.
+    ///
     /// # Agent
     /// Reply: `ConnectResult`. `Err` when the mail carries no actor sender
-    /// (a session has no inbox to deliver frames to), or on the errors
-    /// `Connect` reports.
+    /// (a session has no inbox to deliver frames to), when the sender's
+    /// published rows do not handle `SessionData` and `SessionClosed`
+    /// silently, or on the errors `Connect` reports.
     #[handler::manual]
     fn on_connect_self(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: ConnectSelf) {
-        let Some(consumer) = ctx.sender() else {
-            ctx.reply(&ConnectResult::Err {
-                addr: mail.addr,
-                error: "connect_self needs an actor sender to deliver frames to".to_owned(),
-            });
-            return;
-        };
-        dial(state, ctx, mail.addr, mail.name, Some(consumer));
+        match cast_consumer(ctx, "connect_self") {
+            Ok(consumer) => dial(state, ctx, mail.addr, mail.name, Some(consumer)),
+            Err(error) => ctx.reply(&ConnectResult::Err { addr: mail.addr, error }),
+        }
     }
 
     /// Drain completed outbound dials and stage one `TcpSessionActor` per
@@ -349,8 +362,9 @@ impl NativeActor for TcpCapability {
     /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
     #[handler::manual]
     fn on_bind(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: BindListener) {
-        // ADR-0230 §3: prove the consumer's address once, at receipt, before binding.
-        let consumer = match mail.consumer.as_ref().map(|address| ctx.resolve_path(address)).transpose() {
+        // ADR-0231 §3: the decode proved the consumer covers `TcpConsumer`;
+        // prove it is still live once, at receipt, before binding.
+        let consumer = match mail.consumer.as_ref().map(|path| ctx.resolve(path)).transpose() {
             Ok(consumer) => consumer,
             Err(error) => {
                 ctx.reply(&BindListenerResult::Err { addr: mail.addr, error: format!("consumer refused: {error}") });
@@ -363,20 +377,21 @@ impl NativeActor for TcpCapability {
     /// Spawn a fresh `TcpListenerActor` bound to `mail.addr` whose consumer
     /// is the sender, as [`Self::on_bind`] does with an explicit consumer.
     ///
+    /// The sender is cast to [`TcpConsumer`] once, at receipt (ADR-0231
+    /// §4), so nothing is bound for a sender that would warn-drop its
+    /// sessions' frames or close notices.
+    ///
     /// # Agent
     /// Reply: `BindListenerResult`. `Err` when the mail carries no actor
-    /// sender (a session has no inbox to deliver frames to), or on the
-    /// errors `BindListener` reports.
+    /// sender (a session has no inbox to deliver frames to), when the
+    /// sender's published rows do not handle `SessionData` and
+    /// `SessionClosed` silently, or on the errors `BindListener` reports.
     #[handler::manual]
     fn on_bind_self(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: BindListenerSelf) {
-        let Some(consumer) = ctx.sender() else {
-            ctx.reply(&BindListenerResult::Err {
-                addr: mail.addr,
-                error: "bind_listener_self needs an actor sender to deliver frames to".to_owned(),
-            });
-            return;
-        };
-        bind_listener(ctx, mail.addr, mail.name, Some(consumer));
+        match cast_consumer(ctx, "bind_listener_self") {
+            Ok(consumer) => bind_listener(ctx, mail.addr, mail.name, Some(consumer)),
+            Err(error) => ctx.reply(&BindListenerResult::Err { addr: mail.addr, error }),
+        }
     }
 
     #[handler(task)]
