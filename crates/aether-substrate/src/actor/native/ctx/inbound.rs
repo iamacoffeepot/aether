@@ -191,10 +191,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.binding.take_request_context(request)
     }
     /// Acquire a [`SettlementHold`] on the current in-flight root
-    /// (ADR-0080 §12). Use to keep a chain open across deferred work —
-    /// e.g. a `TaskQueue` buffering an over-limit request holds it until
-    /// a slot frees, then moves it into
-    /// [`Self::dispatch_blocking_resumed`].
+    /// (ADR-0080 §12). Use to keep a chain open across deferred work that
+    /// later moves it into [`Self::dispatch_blocking_resumed`]. A bounded
+    /// queue buffering an over-limit request holds its reply with
+    /// [`Self::hold`] instead (ADR-0243 §3).
     ///
     /// A `wire` ctx dispatches no inbound, so it has no in-flight root; it
     /// holds the chain that caused the birth instead (ADR-0168 §1), which is

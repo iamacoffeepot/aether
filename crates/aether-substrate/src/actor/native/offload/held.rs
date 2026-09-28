@@ -70,6 +70,19 @@ impl<R: ActorMail> Held<R> {
         ctx.answer_held(id, &ledger, reply);
     }
 
+    /// The ledger this ticket's entry lives in, for a consuming path that
+    /// checks the ticket belongs to its ctx's actor before claiming it.
+    pub(crate) fn ledger(&self) -> &Weak<NativeBinding> {
+        &self.ledger
+    }
+
+    /// Give up the ticket without claiming its entry and return the entry's
+    /// id: the entry stays owed, and the caller attaches what answers it.
+    /// The ticket's unanswered-drop check never runs.
+    pub(crate) fn into_ticket(self) -> DispatchId {
+        self.disarm().0
+    }
+
     /// Take the ticket apart so its `Drop` never runs after a consuming path
     /// claims the entry.
     fn disarm(self) -> (DispatchId, Weak<NativeBinding>) {

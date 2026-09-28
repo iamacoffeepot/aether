@@ -3,18 +3,20 @@
 //! The `aether.http` client no longer runs one fetch at a time on the
 //! dispatcher thread. [`PerSenderEgress`] composes a per-sender `(in_flight,
 //! pending)` table over the ADR-0093 hold-until-resolve dispatch primitives
-//! (`NativeCtx::dispatch_blocking_with` / `dispatch_blocking_resumed_with`,
-//! the same "bound-and-hold machinery" `TaskQueue` uses), adding the two
+//! (`NativeCtx::dispatch_blocking_with_pending` / `hold` /
+//! `dispatch_blocking_held_with`, the same "bound-and-hold machinery"
+//! `TaskQueue` uses), adding the two
 //! things a single flat queue cannot express: a **per-sender** budget
 //! (fairness — one noisy sender cannot starve its peers) and a **global**
 //! ceiling (protection — a fan-out of distinct senders cannot exhaust the
 //! host's worker-thread and socket budget). A fetch dispatches only when it
 //! clears both bounds; otherwise it queues, holding its chain from accept.
 //!
-//! A queued fetch captures its chain context *now* — a `SettlementHold` on
-//! the current root plus the originating reply target — and buffers a thunk
-//! that replays the work via `dispatch_blocking_resumed_with` when a slot
-//! frees, exactly like `TaskQueue::submit` (iamacoffeepot/aether#1031). The
+//! A queued fetch holds its reply *now* with `ctx.hold` — a `Held` ticket to
+//! a ledger entry that keeps a settlement hold on the current root plus the
+//! originating reply target — and buffers a thunk that attaches the work to
+//! that same entry via `dispatch_blocking_held_with` when a slot frees,
+//! exactly like `TaskQueue::submit` (iamacoffeepot/aether#1031). The
 //! sender key — the envelope sender `ctx.sender()` proves, or `None` for the
 //! shared bucket — rides through as the dispatch context, so the cap's
 //! `#[handler(task)]` completion reads it off the `TaskDone` and frees the
@@ -22,23 +24,24 @@
 //!
 //! Entries reclaim on idle (ADR-0158 §5): a per-sender entry is created
 //! lazily on a sender's first submit and removed the moment it drains fully
-//! idle (`in_flight == 0` and `pending` empty). A `SettlementHold` exists
-//! only while a request is in flight or buffered pending a slot, so an entry
-//! that holds anything is never idle — idle-reclamation can never drop a hold
-//! on the floor.
+//! idle (`in_flight == 0` and `pending` empty). A held reply exists only
+//! while a request is in flight or buffered pending a slot, so an entry that
+//! holds anything is never idle — idle-reclamation can never drop a hold on
+//! the floor. At actor close the ledger settles every buffered ticket's entry
+//! before the dispatcher drops with the actor's state.
 
 use std::collections::{HashMap, VecDeque};
 
 use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::ActorMail;
-use aether_substrate::actor::native::{DispatchId, NativeCtx, Pending};
+use aether_substrate::actor::native::{NativeCtx, Pending};
 
-/// A buffered fetch: replays an over-bound request via
-/// `dispatch_blocking_resumed_with` when a slot frees. Built and run on the
+/// A buffered fetch: attaches an over-bound request's work to its held reply
+/// via `dispatch_blocking_held_with` when a slot frees. Built and run on the
 /// actor thread (the actor IS the mutual exclusion), but `Send` so the
 /// embedding cap can hold it in its `NativeActor` state. Everything it closes
-/// over (the work closure, the captured `SettlementHold`, the reply `Source`,
-/// the sender key) is already `Send`. Stored over the erased ctx because it
+/// over (the work closure, the `Held` ticket, the sender key) is already
+/// `Send`. Stored over the erased ctx because it
 /// only re-dispatches — it never sends a typed request or spawns — so a typed
 /// caller's ctx erases on the way in, as `TaskQueue`'s buffered thunks do.
 type PendingFetch = Box<dyn FnOnce(&mut NativeCtx<'_>) + Send>;
@@ -89,13 +92,18 @@ impl PerSenderEgress {
 
     /// Accept a fetch from `sender`. If the sender is under its per-sender
     /// budget **and** the global ceiling has room, dispatch `work` now via
-    /// [`NativeCtx::dispatch_blocking_with`] (carrying `sender` as the
-    /// completion context). Otherwise capture the chain context *now* — a
-    /// `SettlementHold` on the current root plus this handler's reply target —
-    /// and buffer a thunk that replays the work via
-    /// [`NativeCtx::dispatch_blocking_resumed_with`] when a slot frees, so the
-    /// queued fetch keeps *its own* chain held from accept through its
-    /// eventual re-reply and replies to *its own* caller (ADR-0158 §2).
+    /// [`NativeCtx::dispatch_blocking_with_pending`] (carrying `sender` as the
+    /// completion context). Otherwise hold the reply *now* with
+    /// [`NativeCtx::hold`] and buffer a thunk that attaches the work to that
+    /// held entry via [`NativeCtx::dispatch_blocking_held_with`] when a slot
+    /// frees, so the queued fetch keeps *its own* chain held from accept
+    /// through its eventual re-reply and replies to *its own* caller
+    /// (ADR-0158 §2). Either way the returned receipt names the ledger entry
+    /// the fetch's completion answers.
+    ///
+    /// # Panics
+    /// Queuing takes this dispatch's one [`NativeCtx::hold`], so a handler
+    /// that already holds a reply panics when its fetch queues.
     pub fn submit<O, F, M, A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
@@ -114,20 +122,18 @@ impl PerSenderEgress {
         if entry.in_flight < per_sender_max && global_room {
             entry.in_flight += 1;
             self.global_in_flight += 1;
-            let id = ctx.dispatch_blocking_with(sender, work);
-            return ctx.pending(id);
+            return ctx.dispatch_blocking_with_pending::<O, O, _, _>(sender, work);
         }
 
-        let hold = ctx.acquire_settlement_hold();
-        let reply_to = ctx.reply_target();
+        let (pending, held) = ctx.hold::<O>();
         let was_empty = entry.pending.is_empty();
         entry.pending.push_back(Box::new(move |ctx: &mut NativeCtx<'_>| {
-            ctx.dispatch_blocking_resumed_with::<O, _, _>(hold, reply_to, sender, work);
+            ctx.dispatch_blocking_held_with(held, sender, work);
         }));
         if was_empty {
             self.waiting.push_back(sender);
         }
-        ctx.pending(DispatchId::NONE)
+        pending
     }
 
     /// Call from the cap's `#[handler(task)]` after `resolve`, passing the
@@ -306,6 +312,10 @@ mod tests {
         assert_eq!(q.in_flight_for(sender), 2, "two dispatched under the per-sender budget of 2");
         assert_eq!(q.pending_for(sender), 1, "the third queued");
         assert_eq!(q.global_in_flight(), 2);
+
+        // Drain the queued fetch so no held reply is owed when the dispatcher
+        // drops; in a running actor, actor close settles it instead.
+        complete(&mut q, &binding, sender);
     }
 
     /// A queued fetch dispatches when a slot frees — the drain path. `in_flight`
@@ -344,6 +354,10 @@ mod tests {
         assert_eq!(q.pending_for(a), 1, "A's surplus queued");
         assert_eq!(q.in_flight_for(b), 1, "B dispatched immediately, unaffected by A");
         assert_eq!(q.pending_for(b), 0);
+
+        // Drain A's queued fetch so no held reply is owed when the dispatcher
+        // drops; in a running actor, actor close settles it instead.
+        complete(&mut q, &binding, a);
     }
 
     /// The global ceiling gates a fetch even when its sender is under its own
@@ -364,6 +378,10 @@ mod tests {
         assert_eq!(q.global_in_flight(), 2, "global ceiling holds at 2");
         assert_eq!(q.in_flight_for(a), 1, "A under its own budget but ceiling-gated");
         assert_eq!(q.pending_for(a), 1, "A's second fetch queued on the global ceiling");
+
+        // Drain A's queued fetch so no held reply is owed when the dispatcher
+        // drops; in a running actor, actor close settles it instead.
+        complete(&mut q, &binding, b);
     }
 
     /// A completion at the global ceiling rotates admission across waiting

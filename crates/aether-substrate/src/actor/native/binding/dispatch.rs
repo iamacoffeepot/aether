@@ -106,8 +106,8 @@ impl NativeBinding {
     /// Remove the named dispatch entry and hand back its parked
     /// `(Option<SettlementHold>, Source)` without any downcast — the
     /// release path for a worker that never armed. The spawn-error branch of
-    /// [`dispatch_blocking_resumed_with`](crate::actor::native::ctx::NativeCtx::dispatch_blocking_resumed_with)
-    /// calls this and drops the returned hold so the chain settles.
+    /// the `dispatch_blocking*` worker spawn calls this and drops the returned
+    /// hold so the chain settles.
     ///
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
@@ -169,6 +169,27 @@ impl NativeBinding {
         id: super::offload::blocking::DispatchId,
     ) -> Option<(Option<SettlementHold>, Source)> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_claim_held(id)
+    }
+
+    /// Hand the held entry `id` to a worker (ADR-0243 §3): the entry keeps
+    /// the hold and reply target its `Held` ticket named and parks `context`
+    /// for the completion. The returned capability fills that same entry, so
+    /// the worker's completion answers the obligation the ticket's receipt
+    /// declared.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063 — and when `id` names no held entry.
+    pub(crate) fn dispatch_attach_worker<O>(
+        self: &Arc<Self>,
+        id: super::offload::blocking::DispatchId,
+        context: Box<dyn Any + Send>,
+    ) -> super::offload::blocking::DeferredCompletion<O> {
+        self.inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_attach_worker(id, context);
+        super::offload::blocking::DeferredCompletion::new(Arc::downgrade(self), id)
     }
 
     /// Release every held entry still in the ledger with no reply and no

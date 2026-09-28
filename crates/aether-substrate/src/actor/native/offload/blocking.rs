@@ -57,20 +57,15 @@ use crate::runtime::trace::SettlementHold;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 
-/// A `Copy` correlation token minted monotonically per
-/// [`dispatch_blocking`](NativeCtx::dispatch_blocking). Names one
-/// in-flight dispatch in the `InflightTable`; rides the
-/// [`TaskCompletionWake`] mail so the completion routes back to the
-/// right ledger entry. Returned to the call site for *optional*
-/// cancellation — the happy path ignores it.
+/// A `Copy` correlation token minted monotonically per armed reply
+/// obligation: one entry in the `InflightTable`, armed by an offload
+/// dispatch such as [`dispatch_blocking`](NativeCtx::dispatch_blocking) or
+/// by [`NativeCtx::hold`] (ADR-0243 §1). A worker entry's id rides the
+/// [`TaskCompletionWake`] mail so the completion routes back to the right
+/// ledger entry. Returned to the call site for *optional* cancellation —
+/// the happy path ignores it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DispatchId(pub u64);
-
-impl DispatchId {
-    /// Sentinel for a hold captured without a worker yet.
-    /// The in-flight table mints from 1, so `0` is never a live dispatch.
-    pub const NONE: Self = Self(0);
-}
 
 /// A type-level "receipt" for a deferred reply (ADR-0109). A request handler
 /// returns it to declare `-> Pending<R>`: the reply is an `R`, sent later
@@ -79,14 +74,15 @@ impl DispatchId {
 /// beside it.
 ///
 /// Phantom over `R` only — the actual hold and reply target live in the
-/// in-flight ledger (or in a queued thunk's captured hold), not here, so a
-/// `Pending<R>` carries just the [`DispatchId`] (reachable via
-/// [`Pending::dispatch_id`] for *optional* cancellation) plus the reply-kind
-/// marker. Framework-constructed: `Pending::new` is crate-internal;
-/// out-of-crate minting goes through [`NativeCtx::hold`], the offload
-/// dispatch calls such as [`NativeCtx::dispatch_blocking`],
-/// [`NativeCtx::pending`], or `TaskQueue` / `PerSenderEgress` `submit`
-/// (ADR-0109 §3, ADR-0243 §3).
+/// in-flight ledger entry it names, not here, so a `Pending<R>` carries just
+/// the [`DispatchId`] (reachable via [`Pending::dispatch_id`] for *optional*
+/// cancellation) plus the reply-kind marker. Framework-constructed:
+/// `Pending::new` is crate-internal, and the only mint sites are
+/// [`NativeCtx::hold`] and the offload dispatch calls
+/// [`NativeCtx::dispatch_blocking`] and
+/// [`NativeCtx::dispatch_blocking_with_pending`], so every receipt names an
+/// armed ledger entry (ADR-0109 §3, ADR-0243 §3). A bounded queue returns
+/// one of those receipts from its `submit`.
 ///
 /// [`Held<R>`]: crate::actor::native::offload::held::Held
 pub struct Pending<R: ActorMail> {
@@ -99,8 +95,9 @@ pub struct Pending<R: ActorMail> {
 
 impl<R: ActorMail> Pending<R> {
     /// Wrap the armed obligation's [`DispatchId`]. Crate-internal — called
-    /// from [`NativeCtx::hold`], the offload dispatch calls, and
-    /// [`NativeCtx::pending`] (ADR-0109 §3, ADR-0243 §3).
+    /// only from [`NativeCtx::hold`] and
+    /// [`NativeCtx::dispatch_blocking_with_pending`] (ADR-0109 §3,
+    /// ADR-0243 §3).
     pub(crate) fn new(dispatch_id: DispatchId) -> Self {
         Self { dispatch_id, _reply: PhantomData }
     }
@@ -654,6 +651,22 @@ impl InflightTable {
         Some((entry.hold, entry.reply_to))
     }
 
+    /// Hand the held entry `id` to a worker (ADR-0243 §3): it keeps its hold
+    /// and reply target, and its state becomes a worker entry carrying
+    /// `context` with no output yet, so the worker's completion answers the
+    /// obligation the entry's `Held` ticket named.
+    ///
+    /// # Panics
+    /// Panics when `id` names no held entry: an unknown id, or an entry a
+    /// worker already answers.
+    fn attach_worker(&mut self, id: DispatchId, context: Box<dyn Any + Send>) {
+        self.entries
+            .get_mut(&id)
+            .filter(|entry| matches!(entry.state, EntryState::Held))
+            .expect("a worker attached to a ledger entry that is not held")
+            .state = EntryState::Worker { context, output: None };
+    }
+
     /// Remove every entry no worker answers and hand back their holds, for
     /// the actor-close tail to release with no reply (ADR-0243 §1). Worker
     /// entries stay: their workers' fills and wakes still find them, and the
@@ -812,6 +825,10 @@ impl InflightTable {
 
     pub(crate) fn dispatch_claim_held(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
         self.claim_held(id)
+    }
+
+    pub(crate) fn dispatch_attach_worker(&mut self, id: DispatchId, context: Box<dyn Any + Send>) {
+        self.attach_worker(id, context);
     }
 
     pub(crate) fn dispatch_settle_held_for_actor_close(&mut self) -> Vec<Option<SettlementHold>> {
