@@ -53,7 +53,7 @@ pub use kinds::*;
 
 use std::collections::HashMap;
 
-use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Render, Tick, WindowSize};
 use aether_lifecycle::LifecycleCapability;
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
@@ -340,11 +340,9 @@ impl WasmActor for CameraComponent {
     /// Reply to the sender with the active camera's world-space eye. The
     /// source-bound reply carries `None` when the active binding is absent or
     /// names a camera that is no longer live.
-    #[handler::manual]
-    fn on_eye(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _request: CameraEyeRequest) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&self.eye_result());
-        }
+    #[handler::single]
+    fn on_eye(&mut self, _ctx: &mut WasmCtx<'_>, _request: CameraEyeRequest) -> CameraEyeResult {
+        self.eye_result()
     }
 
     /// Track live window aspect so 3D / orthographic projections stay

@@ -12,7 +12,7 @@
 // owned for an all-`Copy` state, so silence the false positive.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Reshaped durable state — the added `generation` field changes the
@@ -57,11 +57,9 @@ impl WasmActor for Counter {
         self.count += 1;
     }
 
-    #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&CountReport { count: self.count });
-        }
+    #[handler::single]
+    fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
+        CountReport { count: self.count }
     }
 }
 

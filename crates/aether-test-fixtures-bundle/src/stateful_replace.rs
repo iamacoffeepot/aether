@@ -28,10 +28,7 @@
 
 use std::process;
 
-use aether_actor::{
-    ActorInitError, Erased, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx,
-    actor,
-};
+use aether_actor::{ActorInitError, Mail, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Entry export — the first type in the `export!` list. Holds a counter
@@ -55,11 +52,9 @@ impl WasmActor for Counter {
     }
 
     /// Reply with the live counter so a test can read it across a swap.
-    #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&CountReport { count: self.count });
-        }
+    #[handler::single]
+    fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
+        CountReport { count: self.count }
     }
 
     /// Save-side hot-swap hook: serialize the live counter so the
@@ -120,11 +115,9 @@ impl WasmActor for RehydrateTrap {
     }
 
     /// Reply with the counter, the row `Counter` declares.
-    #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&CountReport { count: self.count });
-        }
+    #[handler::single]
+    fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
+        CountReport { count: self.count }
     }
 
     /// Trap the wasm instance: `abort` lowers to `unreachable`, which the

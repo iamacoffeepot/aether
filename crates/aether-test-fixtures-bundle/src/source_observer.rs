@@ -1,6 +1,6 @@
 //! Issue 1958: `ctx.sender()` end-to-end fixture — the reading half.
 //!
-//! `on_source_query` (manual) handles `SourceQuery`, reads `ctx.sender()`,
+//! `on_source_query` (single) handles `SourceQuery`, reads `ctx.sender()`,
 //! and replies a `SourceReport` whose `had_sender` says whether it returned a
 //! proof. The host routes the reply to the origin it stamped on the query,
 //! the same origin `sender()` reads, so where the report lands is the other
@@ -19,11 +19,11 @@
 //!   the report's arrival, and the test reads that log with `log_tail` on the
 //!   forwarder's address.
 
-// `#[handler::manual]` and `#[handler]` methods take `&mut self` to match
-// the dispatch ABI even when the actor carries no state.
+// `#[handler]` methods take `&mut self` to match the dispatch ABI even when
+// the actor carries no state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{SourceQuery, SourceReport};
 
 pub struct SourceObserver;
@@ -39,8 +39,8 @@ impl WasmActor for SourceObserver {
     /// Read `sender()` from the inbound `SourceQuery` and reply whether it
     /// returned a proof. The reply goes to the origin the host stamped on the
     /// query, a component or a session alike.
-    #[handler::manual]
-    fn on_source_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: SourceQuery) {
-        ctx.reply(&SourceReport { had_sender: ctx.sender().is_some() });
+    #[handler::single]
+    fn on_source_query(&mut self, ctx: &mut WasmCtx<'_>, _query: SourceQuery) -> SourceReport {
+        SourceReport { had_sender: ctx.sender().is_some() }
     }
 }

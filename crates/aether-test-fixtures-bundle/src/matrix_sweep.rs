@@ -51,8 +51,8 @@
 use core::cell::UnsafeCell;
 
 use aether_actor::{
-    ActorInitError, ActorRef, Erased, ErasedActorRef, InlineChild, Manual, OutboundReply, RelativeMailbox, Subname,
-    WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, ActorRef, Erased, ErasedActorRef, InlineChild, Manual, RelativeMailbox, Subname, WasmActor,
+    WasmCtx, WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF, MATRIX_CELL_CHILD_TO_SIBLING,
@@ -241,11 +241,9 @@ impl WasmActor for MatrixParent {
 
     /// Read the cluster's shared observation log and reply the structured
     /// matrix report. Sent after `RunMatrix` has fully settled.
-    #[handler::manual]
-    fn on_collect_matrix(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CollectMatrix) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&snapshot_report());
-        }
+    #[handler::single]
+    fn on_collect_matrix(&mut self, _ctx: &mut WasmCtx<'_>, _query: CollectMatrix) -> MatrixReport {
+        snapshot_report()
     }
 }
 

@@ -4,7 +4,7 @@
 // borrows their fields.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{ActorInitError, CoveredBy, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, CoveredBy, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_tcp::{
     BindListenerResult, BindListenerSelf, ConnectResult, ConnectSelf, SessionClosed, SessionData, SessionWrite,
     TcpCapability, TcpConsumer,
@@ -126,14 +126,12 @@ impl WasmActor for TcpLoadProbe {
         self.sessions[index].closed = true;
     }
 
-    #[handler::manual]
-    fn on_collect_snapshot(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CollectTcpLoadSnapshot) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&TcpLoadSnapshot {
-                sessions: self.sessions.clone(),
-                connect_failures: self.connect_failures.clone(),
-                local_port: self.local_port,
-            });
+    #[handler::single]
+    fn on_collect_snapshot(&mut self, _ctx: &mut WasmCtx<'_>, _query: CollectTcpLoadSnapshot) -> TcpLoadSnapshot {
+        TcpLoadSnapshot {
+            sessions: self.sessions.clone(),
+            connect_failures: self.connect_failures.clone(),
+            local_port: self.local_port,
         }
     }
 }

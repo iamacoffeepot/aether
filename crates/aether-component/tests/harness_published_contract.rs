@@ -23,7 +23,7 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::{Dispatch, NativeActor};
 use aether_test_fixtures_bundle::{ContractBase, InlineChild, InlineParent, InlineStatefulChild, InlineStatefulParent};
-use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, InlineProbe};
+use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, InlineEcho, InlineProbe};
 
 const BUNDLE: &str = "aether_test_fixtures_bundle";
 const EXTENDED_EXPORT: &str = "test.contract.extended";
@@ -146,7 +146,10 @@ fn an_inline_child_alias_publishes_its_own_type_contract() {
     assert_eq!(harness.published_contract(stateful_parent.erase()), Some((Vec::new(), true)));
     assert_eq!(
         harness.published_contract(stateful_child.erase()),
-        Some((sorted(vec![(Bump::ID, ReplyContract::None), (CountQuery::ID, ReplyContract::Manual)]), false)),
+        Some((
+            sorted(vec![(Bump::ID, ReplyContract::None), (CountQuery::ID, ReplyContract::One(CountReport::ID))]),
+            false
+        )),
     );
 
     let (private_parent, _) = harness
@@ -155,7 +158,7 @@ fn an_inline_child_alias_publishes_its_own_type_contract() {
     let private_child = await_child::<InlineParent, InlineChild>(&harness, private_parent, "widget");
     assert_eq!(
         harness.published_contract(private_child.erase()),
-        Some((vec![(InlineProbe::ID, ReplyContract::Manual)], false)),
+        Some((vec![(InlineProbe::ID, ReplyContract::One(InlineEcho::ID))], false)),
     );
 }
 
