@@ -9,8 +9,7 @@ use aether_actor::runtime;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult};
 
-use aether_substrate::Manual;
-use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate::headless::HeadlessRenderCapability;
@@ -24,7 +23,7 @@ use crate::{
 /// `HeadlessRenderCapability` runtime state, which is nothing at all — the
 /// headless cap replies `Err` to the GPU-bound kinds (`CaptureFrame` /
 /// `CreateTexture`) and no-ops the accumulator kinds, and each of those
-/// answers through its own inbound rather than through a handle held here.
+/// returns its reply rather than answering through a handle held here.
 /// The addressing identity is the distinct ZST
 /// [`HeadlessRenderCapability`]. Living in this private module keeps it
 /// `pub`-enough to satisfy the `NativeActor::State` interface without
@@ -39,7 +38,7 @@ const UNAVAILABLE_ERROR: &str = "unsupported on headless chassis — no GPU";
 #[runtime]
 impl NativeActor for HeadlessRenderCapability {
     /// The runtime state this identity boots into (ADR-0122 split) —
-    /// stateless, since every handler answers through its own inbound.
+    /// stateless, since every handler returns its reply.
     type State = HeadlessRenderCapabilityState;
 
     type Config = ();
@@ -55,15 +54,18 @@ impl NativeActor for HeadlessRenderCapability {
     /// never comes. Mirrors ADR-0035 §Consequences fail-fast shape
     /// for `set_window_mode`.
     ///
-    /// Through the inbound guard rather than the hub outbound, which is
-    /// what made the fail-fast a hang in practice: an RPC `Call` names the
-    /// rpc server's own mailbox as its reply target, and
-    /// `HubOutbound::send_reply` answers only `Session` / `EngineMailbox`
-    /// senders — it drops a `Component` one and returns `false`
-    /// (iamacoffeepot/aether#4341).
-    #[handler::manual]
-    fn on_capture_frame(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, _mail: CaptureFrame) {
-        ctx.take_inbound().reply(&CaptureFrameResult::Err { error: UNAVAILABLE_ERROR.to_owned() });
+    /// The returned reply goes to the request's own reply target rather
+    /// than the hub outbound, which is what made the fail-fast a hang in
+    /// practice: an RPC `Call` names the rpc server's own mailbox as its
+    /// reply target, and `HubOutbound::send_reply` answers only `Session` /
+    /// `EngineMailbox` senders — it drops a `Component` one and returns
+    /// `false` (iamacoffeepot/aether#4341). Declared `#[handler::single]`
+    /// with a returned reply, matching the pumped [`crate::RenderCapability`]'s
+    /// `-> Pending<CaptureFrameResult>` row so live `describe_handlers`
+    /// reports one deduped `capture_frame` row for `aether.render`.
+    #[handler::single]
+    fn on_capture_frame(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: CaptureFrame) -> CaptureFrameResult {
+        CaptureFrameResult::Err { error: UNAVAILABLE_ERROR.to_owned() }
     }
 
     /// `CreateTexture` replies `Err` so an agent that creates a texture

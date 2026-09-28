@@ -45,8 +45,7 @@ use aether_data::ErasedActorPath;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult};
 
-use aether_substrate::Manual;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
@@ -108,8 +107,8 @@ use self::target::{DesktopGpuContext, FirstWindowGpu, RenderTarget, WindowTarget
 
 // These seam items are `pub` (visible in `render`) in their now-nested child
 // modules, so the re-export up to runtime level keeps that exact visibility.
-use self::capture::PendingCapture;
 pub use self::capture::resolve_reference;
+use self::capture::{AcceptedCapture, PendingCapture};
 use self::device::DeviceRecovery;
 pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
 pub use self::material::MaterialBatch;
@@ -334,22 +333,31 @@ impl RenderCapabilityState {
 
     /// Detach one window surface. A capture selected for that target fails
     /// immediately; captures for other targets and the shared scene survive.
+    /// `ctx` is the render actor's own, which answers the failed capture's
+    /// held reply.
     #[cfg(feature = "desktop")]
-    pub fn detach_window(&mut self, path: &ErasedActorPath) -> bool {
+    pub fn detach_window<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, path: &ErasedActorPath) -> bool {
         let removed = self.targets.detach(path).is_some();
         if removed {
-            self.fail_capture_for_detached_window(path);
+            self.fail_capture_for_detached_window(ctx, path);
         }
         removed
     }
 
     #[cfg(feature = "desktop")]
-    fn fail_capture_for_detached_window(&mut self, path: &ErasedActorPath) {
+    fn fail_capture_for_detached_window<M: ReplyMode, A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        path: &ErasedActorPath,
+    ) {
         if self.pending_capture.as_ref().is_some_and(|pending| pending.window.as_ref() == Some(path)) {
             let pending = self.pending_capture.take().expect("just checked Some");
-            pending.reply.reply(&CaptureFrameResult::Err {
-                error: format!("capture_frame failed: window target {path} detached before capture"),
-            });
+            pending.held.answer(
+                ctx,
+                &CaptureFrameResult::Err {
+                    error: format!("capture_frame failed: window target {path} detached before capture"),
+                },
+            );
         }
     }
 
@@ -369,6 +377,59 @@ impl RenderCapabilityState {
         } else {
             Err("capture_frame failed: no surfaceless capture target is configured".to_owned())
         }
+    }
+
+    /// Accept a `CaptureFrame` up to the point it parks: refuse it while the
+    /// device is unusable, prove the requested window once at receipt, check
+    /// the target and the one global in-flight limit, prove both bundles,
+    /// resolve the similarity reference, and dispatch the pre-mails with
+    /// their settlement bridged back here. `Err` is the message the caller
+    /// is answered with; nothing has moved when it returns one.
+    fn accept_capture<M: ReplyMode>(
+        &mut self,
+        ctx: &NativeCtx<'_, RenderCapability, M>,
+        mail: CaptureFrame,
+    ) -> Result<AcceptedCapture, String> {
+        self.device_recovery.refresh();
+        if let Some(error) = self.device_recovery.unusable_error() {
+            return Err(format!("capture_frame failed: {error}"));
+        }
+        // Keep the canonical path, so a short path selects the same target
+        // as the path `aether.window.list` reports (ADR-0166).
+        let window = mail.window.as_ref().map(|window| canonical_window(ctx, window)).transpose()?;
+        self.validate_capture_target(window.as_ref())?;
+        if self.pending_capture.is_some() {
+            return Err("capture already pending; try again once the in-flight request completes".to_owned());
+        }
+
+        // Prove both bundles before either moves (ADR-0230 §3), so an
+        // unprovable recipient in the after bundle aborts before any
+        // pre-mail is sent.
+        let pre = ctx.accept_bundle(mail.mails, "capture bundle")?;
+        let after_mails = ctx.accept_bundle(mail.after_mails, "capture after bundle")?;
+        let reference = resolve_reference(self.assets_dir.as_deref(), mail.similarity.as_ref())?;
+
+        // Dispatch each pre-mail on a fresh chassis-rooted chain (issue
+        // 860) and bridge its settlement to a `PreSettled` mail addressed
+        // to this render mailbox — pushed from whatever thread the
+        // settlement fires on. With no settlement registry (some fixtures)
+        // `pre_remaining` stays the number dispatched but nothing decrements
+        // it, so such a fixture never gates a capture on settlement.
+        let mut pre_remaining = 0usize;
+        for item in pre {
+            let mail_id = ctx.deliver_detached(item);
+            pre_remaining += 1;
+            let _ = ctx.subscribe_settlement::<PreSettled>(mail_id);
+        }
+
+        Ok(AcceptedCapture {
+            window,
+            after_mails,
+            checks: mail.checks,
+            reference,
+            pre_remaining,
+            deadline: Instant::now() + FRAME_SETTLEMENT_CAP,
+        })
     }
 
     /// Boot the explicit surfaceless harness GPU. Desktop GPUs are booted by
@@ -459,7 +520,7 @@ impl RenderCapabilityState {
     /// canonical desktop target map are built off to the side; registry
     /// realizations are then switched in the same actor-owned commit. A
     /// failed device or surface acquisition is terminal.
-    fn recover_gpu_if_needed<M: ReplyMode, A>(&mut self, ctx: &NativeCtx<'_, A, M>) -> Result<(), String> {
+    fn recover_gpu_if_needed<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>) -> Result<(), String> {
         self.device_recovery.refresh();
         if let Some(error) = self.device_recovery.unusable_error() {
             return Err(error);
@@ -499,7 +560,7 @@ impl RenderCapabilityState {
 
     fn finish_failed_replacement<M: ReplyMode, A>(
         &mut self,
-        ctx: &NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, M>,
         ticket: device::ReplacementTicket,
         reason: String,
     ) {
@@ -532,14 +593,14 @@ impl RenderCapabilityState {
         true
     }
 
-    fn fail_pending_capture_for_device<M: ReplyMode, A>(&mut self, ctx: &NativeCtx<'_, A, M>, error: String) {
+    fn fail_pending_capture_for_device<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, error: String) {
         let Some(pending) = self.pending_capture.take() else {
             return;
         };
         for item in pending.after_mails {
             let _ = ctx.deliver_detached(item);
         }
-        pending.reply.reply(&CaptureFrameResult::Err { error });
+        pending.held.answer(ctx, &CaptureFrameResult::Err { error });
     }
 
     /// Host-only deterministic injection reached through the concrete
@@ -687,7 +748,7 @@ impl RenderCapabilityState {
         Ok(capture_meta)
     }
 
-    fn complete_capture<M: ReplyMode, A>(&mut self, ctx: &NativeCtx<'_, A, M>, meta: CaptureMeta) {
+    fn complete_capture<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, meta: CaptureMeta) {
         let pending = self.pending_capture.take().expect("capture metadata requires a pending capture");
         for item in pending.after_mails {
             let _ = ctx.deliver_detached(item);
@@ -715,10 +776,8 @@ impl RenderCapabilityState {
             },
             |error| Err(format!("capture_frame failed during device loss: {error}")),
         );
-        match outcome {
-            Ok(result) => pending.reply.reply(&result),
-            Err(error) => pending.reply.reply(&CaptureFrameResult::Err { error }),
-        };
+        let result = outcome.unwrap_or_else(|error| CaptureFrameResult::Err { error });
+        pending.held.answer(ctx, &result);
     }
 }
 
@@ -1031,7 +1090,7 @@ impl NativeActor for RenderCapability {
     /// `Occluded` — update only the named target and fail only a capture
     /// selected for that target. Engine-only mail (ADR-0233).
     #[handler::single]
-    fn on_occluded(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Occluded) {
+    fn on_occluded(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Occluded) {
         #[cfg(feature = "desktop")]
         let became_occluded =
             state.targets.set_occluded(&mail.window, mail.occluded, |target, occluded| target.occluded = occluded)
@@ -1043,9 +1102,15 @@ impl NativeActor for RenderCapability {
             && state.pending_capture.as_ref().is_some_and(|pending| pending.window.as_ref() == Some(&mail.window))
         {
             let pending = state.pending_capture.take().expect("just checked Some");
-            pending.reply.reply(&CaptureFrameResult::Err {
-                error: format!("capture_frame failed: window target {} became occluded before capture", mail.window),
-            });
+            pending.held.answer(
+                ctx,
+                &CaptureFrameResult::Err {
+                    error: format!(
+                        "capture_frame failed: window target {} became occluded before capture",
+                        mail.window
+                    ),
+                },
+            );
         }
     }
 
@@ -1066,10 +1131,13 @@ impl NativeActor for RenderCapability {
         let now = Instant::now();
         if state.pending_capture.as_ref().is_some_and(|pending| pending.is_expired(now)) {
             let pending = state.pending_capture.take().expect("just checked Some");
-            pending.reply.reply(&CaptureFrameResult::Err {
-                error: "capture_frame failed: pre-mail settlement did not complete within the frame settlement cap"
-                    .to_owned(),
-            });
+            pending.held.answer(
+                ctx,
+                &CaptureFrameResult::Err {
+                    error: "capture_frame failed: pre-mail settlement did not complete within the frame settlement cap"
+                        .to_owned(),
+                },
+            );
         }
 
         state.ensure_offscreen_gpu_booted();
@@ -1080,9 +1148,12 @@ impl NativeActor for RenderCapability {
             if state.pending_capture.as_ref().is_some_and(PendingCapture::is_ready)
                 && let Some(pending) = state.pending_capture.take()
             {
-                pending.reply.reply(&CaptureFrameResult::Err {
-                    error: "capture_frame failed: the render GPU is not booted on this chassis".to_owned(),
-                });
+                pending.held.answer(
+                    ctx,
+                    &CaptureFrameResult::Err {
+                        error: "capture_frame failed: the render GPU is not booted on this chassis".to_owned(),
+                    },
+                );
             }
             return;
         };
@@ -1168,90 +1239,27 @@ impl NativeActor for RenderCapability {
     /// ADR Context deadlock: pre-chains terminate back at this mailbox), so
     /// the settlement bridge only mails — it never waits.
     ///
-    /// Every exit answers through the inbound guard, the same edge the
-    /// deferred readback replies through. The failure paths used to answer
-    /// through the hub outbound instead, which routes only `Session` /
-    /// `EngineMailbox` senders and drops a `Component` one — and an RPC
-    /// `Call` names the rpc server's own mailbox as its reply target, so
-    /// every rejected capture over the wire returned no image, no error and
-    /// no timeout (iamacoffeepot/aether#4341).
-    #[handler::manual]
-    fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: CaptureFrame) {
-        let reply = ctx.take_inbound();
-
-        state.device_recovery.refresh();
-        if let Some(error) = state.device_recovery.unusable_error() {
-            reply.reply(&CaptureFrameResult::Err { error: format!("capture_frame failed: {error}") });
-            return;
+    /// Every exit answers the captured caller through the held ticket, the
+    /// same edge the deferred readback replies through: an early `Err`
+    /// answers it before the handler returns, and an accepted capture parks
+    /// it for the frame loop. The failure paths once answered through the
+    /// hub outbound instead, which routes only `Session` / `EngineMailbox`
+    /// senders and drops a `Component` one — and an RPC `Call` names the rpc
+    /// server's own mailbox as its reply target, so every rejected capture
+    /// over the wire returned no image, no error and no timeout
+    /// (iamacoffeepot/aether#4341).
+    #[handler::single]
+    fn on_capture_frame(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: CaptureFrame,
+    ) -> Pending<CaptureFrameResult> {
+        let (pending, held) = ctx.hold::<CaptureFrameResult>();
+        match state.accept_capture(ctx, mail) {
+            Ok(accepted) => state.pending_capture = Some(accepted.park(held)),
+            Err(error) => held.answer(ctx, &CaptureFrameResult::Err { error }),
         }
-        // Prove the requested window once, at receipt, and keep its canonical
-        // path, so a short path selects the same target as the path
-        // `aether.window.list` reports (ADR-0166).
-        let window = match mail.window.as_ref().map(|window| canonical_window(ctx, window)).transpose() {
-            Ok(window) => window,
-            Err(error) => {
-                reply.reply(&CaptureFrameResult::Err { error });
-                return;
-            }
-        };
-        if let Err(error) = state.validate_capture_target(window.as_ref()) {
-            reply.reply(&CaptureFrameResult::Err { error });
-            return;
-        }
-        if state.pending_capture.is_some() {
-            reply.reply(&CaptureFrameResult::Err {
-                error: "capture already pending; try again once the in-flight request completes".to_owned(),
-            });
-            return;
-        }
-
-        // Prove both bundles before either moves (ADR-0230 §3), so an
-        // unprovable recipient in the after bundle aborts before any
-        // pre-mail is sent.
-        let pre = match ctx.accept_bundle(mail.mails, "capture bundle") {
-            Ok(bundle) => bundle,
-            Err(error) => {
-                reply.reply(&CaptureFrameResult::Err { error });
-                return;
-            }
-        };
-        let after = match ctx.accept_bundle(mail.after_mails, "capture after bundle") {
-            Ok(bundle) => bundle,
-            Err(error) => {
-                reply.reply(&CaptureFrameResult::Err { error });
-                return;
-            }
-        };
-        let reference = match resolve_reference(state.assets_dir.as_deref(), mail.similarity.as_ref()) {
-            Ok(reference) => reference,
-            Err(error) => {
-                reply.reply(&CaptureFrameResult::Err { error });
-                return;
-            }
-        };
-
-        // Dispatch each pre-mail on a fresh chassis-rooted chain (issue
-        // 860) and bridge its settlement to a `PreSettled` mail addressed
-        // to this render mailbox — pushed from whatever thread the
-        // settlement fires on. With no settlement registry (some fixtures)
-        // `pre_remaining` stays the number dispatched but nothing decrements
-        // it, so such a fixture never gates a capture on settlement.
-        let mut pre_remaining = 0usize;
-        for item in pre {
-            let mail_id = ctx.deliver_detached(item);
-            pre_remaining += 1;
-            let _ = ctx.subscribe_settlement::<PreSettled>(mail_id);
-        }
-
-        state.pending_capture = Some(PendingCapture {
-            window,
-            reply,
-            after_mails: after,
-            checks: mail.checks,
-            reference,
-            pre_remaining,
-            deadline: Instant::now() + FRAME_SETTLEMENT_CAP,
-        });
+        pending
     }
 
     /// Log the session's cumulative triangle count on teardown — the
@@ -1277,9 +1285,7 @@ mod tests {
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::EgressEvent;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::testing::{
-        decode_reply, manual_dispatch_ctx, session_sender, test_mailer_and_rx, token_root, unrouted_binding,
-    };
+    use aether_substrate::testing::{decode_reply, session_sender, test_mailer_and_rx, token_root, unrouted_binding};
     use std::sync::mpsc;
 
     fn window(name: &str) -> ErasedActorPath {
@@ -1299,21 +1305,23 @@ mod tests {
         }
     }
 
-    /// Build a `PendingCapture` whose retained guard replies to a Session
-    /// source so the toy pump can observe the deferred reply through the
-    /// egress channel. The guard is the one inbound a `<Manual>` dispatch
-    /// ctx carries (no route), taken out of the ctx.
+    /// Build a `PendingCapture` whose held ticket answers a Session source
+    /// so the toy pump can observe the deferred reply through the egress
+    /// channel. The ticket is armed on `binding`, the ledger the test's
+    /// answering ctx must share, and its receipt is accepted as the
+    /// dispatch would accept a returned one.
     fn parked_capture(
-        mailer: &Arc<Mailer>,
+        binding: &Arc<NativeBinding>,
         window: Option<ErasedActorPath>,
         pre_remaining: usize,
         deadline: Instant,
     ) -> PendingCapture {
-        let binding = ctx_binding(mailer);
-        let reply = manual_dispatch_ctx::<RenderCapability>(&binding, session_sender()).take_inbound();
+        let mut ctx = NativeCtx::<RenderCapability>::new_for_actor(binding, session_sender(), None, None);
+        let (pending, held) = ctx.hold::<CaptureFrameResult>();
+        pending.__defuse();
         PendingCapture {
             window,
-            reply,
+            held,
             after_mails: Vec::new(),
             checks: Vec::new(),
             reference: None,
@@ -1378,8 +1386,8 @@ mod tests {
     fn park_then_pre_settled_countdown_readies_on_frame() {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = headless_state();
-        state.pending_capture = Some(parked_capture(&mailer, None, 2, Instant::now() + FRAME_SETTLEMENT_CAP));
         let binding = ctx_binding(&mailer);
+        state.pending_capture = Some(parked_capture(&binding, None, 2, Instant::now() + FRAME_SETTLEMENT_CAP));
 
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
         RenderCapability::on_pre_settled(&mut state, &mut ctx, PreSettled { mail_id: token_root(1) });
@@ -1393,7 +1401,7 @@ mod tests {
         assert!(capture_err(&rx).contains("GPU"), "no adapter in unit tests => the ready branch fails fast");
     }
 
-    /// A capture past its deadline replies `Err` through the retained guard
+    /// A capture past its deadline replies `Err` through the held ticket
     /// on the next frame — the `FRAME_SETTLEMENT_CAP` wedge, event-driven.
     #[test]
     fn expired_capture_replies_err_on_frame() {
@@ -1401,8 +1409,8 @@ mod tests {
         let mut state = headless_state();
         // A deadline in the past, with pre-mails still outstanding.
         let past = Instant::now().checked_sub(Duration::from_secs(1)).expect("clock is past the epoch");
-        state.pending_capture = Some(parked_capture(&mailer, None, 3, past));
         let binding = ctx_binding(&mailer);
+        state.pending_capture = Some(parked_capture(&binding, None, 3, past));
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
 
         RenderCapability::on_frame(&mut state, &mut ctx, Frame { replay_cache_when_idle: false, windows: Vec::new() });
@@ -1416,13 +1424,15 @@ mod tests {
     fn detached_target_fails_only_its_pending_capture() {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = headless_state();
+        let binding = ctx_binding(&mailer);
         state.pending_capture =
-            Some(parked_capture(&mailer, Some(window("left")), 1, Instant::now() + FRAME_SETTLEMENT_CAP));
+            Some(parked_capture(&binding, Some(window("left")), 1, Instant::now() + FRAME_SETTLEMENT_CAP));
+        let mut ctx = NativeCtx::<RenderCapability>::new_for_actor(&binding, Source::NONE, None, None);
 
-        state.fail_capture_for_detached_window(&window("right"));
+        state.fail_capture_for_detached_window(&mut ctx, &window("right"));
         assert!(state.pending_capture.is_some(), "a different target's capture survives");
 
-        state.fail_capture_for_detached_window(&window("left"));
+        state.fail_capture_for_detached_window(&mut ctx, &window("left"));
         assert!(state.pending_capture.is_none(), "the detached target's capture is cleared");
         assert!(capture_err(&rx).contains("detached"));
     }
@@ -1457,7 +1467,7 @@ mod tests {
         let mut state = headless_state();
         state.offscreen_size = Some((64, 48));
         let binding = ctx_binding(&mailer);
-        let mut ctx = manual_dispatch_ctx(&binding, session_sender());
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
 
         RenderCapability::on_capture_frame(
             &mut state,
@@ -1469,7 +1479,8 @@ mod tests {
                 checks: Vec::new(),
                 similarity: None,
             },
-        );
+        )
+        .__defuse();
 
         assert!(state.pending_capture.is_none(), "an unproven window parks no capture");
         let error = capture_err(&rx);
@@ -1554,7 +1565,7 @@ mod tests {
         assert_eq!(state.textures.entries[&3].pixels, vec![7; 16], "fire-and-forget updates are dropped");
         assert!(state.frame_vertices.is_empty(), "fire-and-forget draws are dropped");
 
-        let mut ctx = manual_dispatch_ctx(&binding, session_sender());
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
         RenderCapability::on_capture_frame(
             &mut state,
             &mut ctx,
@@ -1565,7 +1576,8 @@ mod tests {
                 checks: Vec::new(),
                 similarity: None,
             },
-        );
+        )
+        .__defuse();
         assert!(capture_err(&rx).contains("unusable"), "capture replies with the terminal structured error");
         assert!(state.gpu.is_none(), "terminal capture does not retry device acquisition");
     }
@@ -1577,9 +1589,9 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = headless_state();
         state.offscreen_size = Some((64, 48));
-        state.pending_capture = Some(parked_capture(&mailer, None, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
         let binding = ctx_binding(&mailer);
-        let mut ctx = manual_dispatch_ctx(&binding, session_sender());
+        state.pending_capture = Some(parked_capture(&binding, None, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
 
         RenderCapability::on_capture_frame(
             &mut state,
@@ -1591,7 +1603,8 @@ mod tests {
                 checks: Vec::new(),
                 similarity: None,
             },
-        );
+        )
+        .__defuse();
 
         assert!(state.pending_capture.is_some(), "the in-flight capture is untouched");
         assert!(capture_err(&rx).contains("already pending"), "a second capture is rejected");

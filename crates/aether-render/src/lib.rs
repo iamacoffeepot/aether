@@ -64,7 +64,7 @@ pub use runtime::{
 // [`RenderCapability`] and the nested `runtime::headless` for
 // [`HeadlessRenderCapability`], both under the one `mod runtime;` gate. The
 // `aether_substrate` ctx types each impl names (`NativeActor` / `NativeCtx`
-// / … / `Manual` / `CaptureFrameResult`) are now sourced inside each runtime
+// / … / `CaptureFrameResult`) are now sourced inside each runtime
 // module beside the body, not here — only the handler-argument kinds the
 // emitted markers lift verbatim must keep resolving at this file's root.
 use aether_actor::actor;
