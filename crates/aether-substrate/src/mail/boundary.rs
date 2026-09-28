@@ -42,9 +42,10 @@ use crate::mail::registry::Registry;
 /// boundary named, and the bytes the boundary encoded.
 ///
 /// No public constructor, no accessor, no `Clone`, and no serde, wire, or
-/// `Schema` impl: [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle) and
-/// [`NativeCtx::accept_call`](crate::actor::native::NativeCtx::accept_call) are the only ways to make one,
-/// and delivering it is the only thing a holder can do with it.
+/// `Schema` impl: [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle),
+/// [`NativeCtx::accept_call`](crate::actor::native::NativeCtx::accept_call), and
+/// [`PassiveChassis::accept_call`](crate::PassiveChassis::accept_call) are the only ways to make one, and
+/// delivering it is the only thing a holder can do with it.
 #[derive(Debug)]
 pub struct BoundaryMail {
     pub(crate) recipient: ErasedActorRef,
