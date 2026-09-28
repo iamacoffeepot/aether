@@ -51,11 +51,11 @@ use aether_substrate::config::{ConfigMember, SettlementConfig};
 #[cfg(test)]
 use aether_substrate::mail::MailboxId;
 use aether_substrate::{
-    Builder, ChildRefused, EgressEvent, NativeActor, PassiveChassis, ReplyTarget, RingCapacities, RouteReadProbe,
-    SchedulerTuning, SubstrateBoot, mail::MailId,
+    Builder, ChassisTarget, ChildRefused, EgressEvent, NativeActor, PassiveChassis, ReplyTarget, RingCapacities,
+    RouteReadProbe, SchedulerTuning, SubstrateBoot, mail::MailId,
 };
 
-use crate::SendTarget;
+use crate::{PreparedSend, SendTarget};
 use aether_substrate_harness_cap::SubstrateHarnessCapability;
 
 use super::chassis::{
@@ -247,10 +247,6 @@ pub struct SubstrateHarness {
     /// broadcasts the `Tick` stage directly to its stage subscriber set per
     /// ADR-0082.
     lifecycle: ActorRef<aether_lifecycle::LifecycleCapability>,
-    /// Kind id of [`aether_kinds::LifecycleAdvance`], pre-resolved so the advance
-    /// loop body stays alloc-free per tick.
-    kind_lifecycle_advance: KindId,
-
     frame: u64,
     /// Counter behind [`Self::fresh_correlation_id`]: session-reply
     /// correlations only, never chassis roots.
@@ -715,14 +711,12 @@ impl SubstrateHarness {
         // The loopback driver's route to the lifecycle cap: the reference the
         // chassis recorded when it composed the cap.
         let lifecycle = passive.actor_ref::<aether_lifecycle::LifecycleCapability>();
-        let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
 
         Ok(Self {
             loopback_rx,
             events_rx,
             hook,
             lifecycle,
-            kind_lifecycle_advance,
             frame: 0,
             next_correlation_id: AtomicU64::new(1),
             settlement_cap,
@@ -827,9 +821,8 @@ impl SubstrateHarness {
         since: Option<u64>,
         contains: Option<String>,
     ) -> LogTailResult {
-        let request = LogTail { max: 0, min_level: None, since, contains };
         let payload = self
-            .request_bytes(to.erased(), LogTail::ID, request.encode_into_bytes())
+            .request_prepared(&to.prepare(&LogTail { max: 0, min_level: None, since, contains }))
             .unwrap_or_else(|e| panic!("log_tail send failed: {e}"));
         LogTailResult::decode_from_bytes(&payload)
             .unwrap_or_else(|| panic!("log_tail reply did not decode as LogTailResult"))
@@ -939,9 +932,9 @@ impl SubstrateHarness {
         &mut self,
         component: &LoadComponent,
     ) -> Result<(ErasedActorRef, ErasedActorPath), SubstrateHarnessError> {
-        let host = self.passive.actor_ref::<ComponentHostCapability>().erase();
+        let host = self.passive.actor_ref::<ComponentHostCapability>();
         let cid = self.fresh_correlation_id();
-        self.passive.send_for_reply(host, LoadComponent::ID, component.encode_into_bytes(), self.session_reply(cid));
+        self.passive.send_for_reply(host, component, self.session_reply(cid));
 
         let EgressEvent::ToSession { payload, sender, .. } = self.pump_until_event(cid, LoadResult::NAME, None)? else {
             return Err(SubstrateHarnessError::Decode("expected a session-targeted LoadResult".to_owned()));
@@ -979,15 +972,24 @@ impl SubstrateHarness {
     /// the pumped analogue of `await_settlement_pumped`, on the harness's
     /// existing receiver-poll wait model. Returns `SettlementTimeout` if the
     /// chain doesn't drain within the settlement cap.
-    pub(crate) fn settle_bytes(
-        &mut self,
-        to: ErasedActorRef,
-        kind: KindId,
-        payload: Vec<u8>,
-    ) -> Result<(), SubstrateHarnessError> {
-        use crossbeam_channel::RecvTimeoutError;
+    pub(crate) fn settle_prepared(&mut self, send: &PreparedSend, kind: KindId) -> Result<(), SubstrateHarnessError> {
+        let (_, rx) = send
+            .tracked(&self.passive, None)
+            .map_err(|error| SubstrateHarnessError::Decode(format!("prepare harness send: {error}")))?;
+        self.await_settlement(kind, &rx)
+    }
 
-        let (_, rx) = self.passive.send_tracked(to, kind, payload, None);
+    pub(crate) fn settle_bytes<K: Kind, I>(
+        &mut self,
+        to: impl ChassisTarget<K, I>,
+        mail: &K,
+    ) -> Result<(), SubstrateHarnessError> {
+        let (_, rx) = self.passive.send_tracked(to, mail, None);
+        self.await_settlement(K::ID, &rx)
+    }
+
+    fn await_settlement(&mut self, kind: KindId, rx: &Receiver<()>) -> Result<(), SubstrateHarnessError> {
+        use crossbeam_channel::RecvTimeoutError;
 
         // A short drain cadence so a render chain gated on the pumped slot
         // (a render mail that emits another render mail) advances every round;
@@ -1085,13 +1087,12 @@ impl SubstrateHarness {
     /// [`PassiveChassis::send_tracked`], which subscribes settlement before
     /// the push, so a tree that drains at once still fires the receiver.
     #[cfg(test)]
-    pub(crate) fn inject_root(
+    pub(crate) fn inject_root<K: Kind, I>(
         &self,
-        recipient: ErasedActorRef,
-        kind: KindId,
-        payload: Vec<u8>,
+        recipient: impl ChassisTarget<K, I>,
+        mail: &K,
     ) -> (MailId, Receiver<()>) {
-        self.passive.send_tracked(recipient, kind, payload, None)
+        self.passive.send_tracked(recipient, mail, None)
     }
 
     /// The lifetime-guard boot, for this crate's `#[cfg(test)]` fixtures,
@@ -1144,7 +1145,7 @@ impl SubstrateHarness {
                 Some(self.chassis_host_trace_tail(&request))
             } else {
                 actors.iter().find(|actor| actor.id() == mailbox).and_then(|&actor| {
-                    self.request_bytes(actor, TraceTail::ID, request.encode_into_bytes())
+                    self.request_prepared(&actor.prepare(&request))
                         .ok()
                         .and_then(|reply| TraceTailResult::decode_from_bytes(&reply))
                 })
@@ -1165,15 +1166,21 @@ impl SubstrateHarness {
     /// component load/replace/drop round trips and the `aether.fs`
     /// `Read`/`Write`/`Delete`/`List` replies — every standard
     /// `*Result` kind is structured-encoded.
-    pub(crate) fn request_bytes(
+    pub(crate) fn request_prepared(&mut self, send: &PreparedSend) -> Result<Vec<u8>, SubstrateHarnessError> {
+        let cid = self.fresh_correlation_id();
+        send.for_reply(&self.passive, self.session_reply(cid))
+            .map_err(|error| SubstrateHarnessError::Decode(format!("prepare harness request: {error}")))?;
+        self.pump_until_reply_bytes(cid, "<await-reply bytes>")
+    }
+
+    pub(crate) fn request_bytes<K: Kind, I>(
         &mut self,
-        to: ErasedActorRef,
-        kind: KindId,
-        payload: Vec<u8>,
+        to: impl ChassisTarget<K, I>,
+        mail: &K,
     ) -> Result<Vec<u8>, SubstrateHarnessError> {
         let cid = self.fresh_correlation_id();
-        self.passive.send_for_reply(to, kind, payload, self.session_reply(cid));
-        self.pump_until_reply_bytes(cid, "<await-reply bytes>")
+        self.passive.send_for_reply(to, mail, self.session_reply(cid));
+        self.pump_until_reply_bytes(cid, K::NAME)
     }
 
     /// Enqueue a typed request with this harness's session as the reply target,
@@ -1182,12 +1189,12 @@ impl SubstrateHarness {
     /// This is the asynchronous counterpart to `send_and_await_reply` for tests that
     /// need several requests in flight at once to validate correlation.
     #[must_use]
-    pub fn send_deferred<K>(&self, to: impl SendTarget<K>, mail: &K) -> PendingBenchReply
+    pub fn send_deferred<K, I>(&self, to: impl ChassisTarget<K, I>, mail: &K) -> PendingBenchReply
     where
         K: Kind,
     {
         let cid = self.fresh_correlation_id();
-        self.passive.send_for_reply(to.erased(), K::ID, mail.encode_into_bytes(), self.session_reply(cid));
+        self.passive.send_for_reply(to, mail, self.session_reply(cid));
         PendingBenchReply { cid, expected: K::NAME }
     }
 
@@ -1210,9 +1217,8 @@ impl SubstrateHarness {
         // (chassis_handler closure) onto `aether.substrate_harness`
         // (`SubstrateHarnessCapability`).
         self.passive.send_for_reply(
-            self.passive.actor_ref::<SubstrateHarnessCapability>().erase(),
-            Advance::ID,
-            Advance { ticks, delta_micros }.encode_into_bytes(),
+            self.passive.actor_ref::<SubstrateHarnessCapability>(),
+            &Advance { ticks, delta_micros },
             self.session_reply(cid),
         );
         match self.pump_until_reply::<AdvanceResult>(cid, "AdvanceResult")? {
@@ -1264,23 +1270,21 @@ impl SubstrateHarness {
                 SubstrateHarnessError::Capture("render not composed — no capture pipeline".to_owned())
             })?;
         let cid = self.fresh_correlation_id();
-        self.passive.send_for_reply(
-            render,
-            CaptureFrame::ID,
-            CaptureFrame {
-                window: None,
-                mails: pre,
-                after_mails: after,
-                // The `SubstrateHarness::capture` API returns the PNG only; the
-                // substrate-side verdict path (iamacoffeepot/aether#1777)
-                // and similarity path (iamacoffeepot/aether#1780) are
-                // exercised through `HarnessOp::send_and_await_reply` scenarios.
-                checks: Vec::new(),
-                similarity: None,
-            }
-            .encode_into_bytes(),
-            self.session_reply(cid),
-        );
+        let mail = CaptureFrame {
+            window: None,
+            mails: pre,
+            after_mails: after,
+            // The `SubstrateHarness::capture` API returns the PNG only; the
+            // substrate-side verdict path (iamacoffeepot/aether#1777)
+            // and similarity path (iamacoffeepot/aether#1780) are
+            // exercised through `HarnessOp::send_and_await_reply` scenarios.
+            checks: Vec::new(),
+            similarity: None,
+        };
+        render
+            .prepare(&mail)
+            .for_reply(&self.passive, self.session_reply(cid))
+            .map_err(|error| SubstrateHarnessError::Capture(format!("prepare capture request: {error}")))?;
         match self.pump_until_reply::<CaptureFrameResult>(cid, "CaptureFrameResult")? {
             CaptureFrameResult::Ok { png, .. } => Ok(png),
             CaptureFrameResult::Err { error } => Err(SubstrateHarnessError::Capture(error)),
@@ -1597,9 +1601,8 @@ impl SubstrateHarness {
             // routes `LifecycleAdvanceComplete` there via `on_settled`'s
             // `ctx.reply_to`.
             let (_, settlement) = self.passive.send_tracked(
-                self.lifecycle.erase(),
-                self.kind_lifecycle_advance,
-                aether_kinds::LifecycleAdvance { delta_micros }.encode_into_bytes(),
+                self.lifecycle,
+                &aether_kinds::LifecycleAdvance { delta_micros },
                 Some(self.session_reply(cid)),
             );
             // Block until the driver replies `LifecycleAdvanceComplete`
@@ -1851,8 +1854,9 @@ mod tests {
         assert!(tb.count_observed(Tick::NAME) > 0, "subscriber received no Tick — fanout never reached it");
 
         let relay = tb.actor_ref::<StageRelay>().erase();
-        let tail = TraceTail { max: 0, since: None, root: None };
-        let reply = tb.request_bytes(relay, TraceTail::ID, tail.encode_into_bytes()).expect("the relay's ring answers");
+        let reply = tb
+            .request_prepared(&relay.prepare(&TraceTail { max: 0, since: None, root: None }))
+            .expect("the relay's ring answers");
         let Some(TraceTailResult::Ok { entries, .. }) = TraceTailResult::decode_from_bytes(&reply) else {
             panic!("the relay's trace tail decodes");
         };

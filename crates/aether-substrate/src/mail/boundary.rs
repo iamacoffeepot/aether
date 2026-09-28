@@ -10,9 +10,13 @@
 //! [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle) proves every recipient
 //! before any item moves, and
 //! [`NativeCtx::accept_call`](crate::actor::native::NativeCtx::accept_call) proves a `Call`'s one.
-//! Both hand back [`BoundaryMail`]s, which a holder can only deliver — through
+//! The embedder counterpart is
+//! [`PassiveChassis::accept_call`](crate::PassiveChassis::accept_call), which
+//! proves a path before bytes enter a passive chassis. These doors hand back
+//! [`BoundaryMail`]s, which a holder can only deliver — through
 //! [`NativeCtx::deliver_detached`](crate::actor::native::NativeCtx::deliver_detached)
-//! or [`NativeCtx::deliver_forwarded`](crate::actor::native::NativeCtx::deliver_forwarded).
+//! or [`NativeCtx::deliver_forwarded`](crate::actor::native::NativeCtx::deliver_forwarded),
+//! or the matching `PassiveChassis::deliver_*` verb.
 //! The proof never leaves the item and the item is never exportable, so a
 //! boundary-derived reference cannot land in actor state as something a cap
 //! sends other kinds through.
@@ -38,9 +42,10 @@ use crate::mail::registry::Registry;
 /// boundary named, and the bytes the boundary encoded.
 ///
 /// No public constructor, no accessor, no `Clone`, and no serde, wire, or
-/// `Schema` impl: [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle) and
-/// [`NativeCtx::accept_call`](crate::actor::native::NativeCtx::accept_call) are the only ways to make one,
-/// and delivering it is the only thing a holder can do with it.
+/// `Schema` impl: [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle),
+/// [`NativeCtx::accept_call`](crate::actor::native::NativeCtx::accept_call), and
+/// [`PassiveChassis::accept_call`](crate::PassiveChassis::accept_call) are the only ways to make one, and
+/// delivering it is the only thing a holder can do with it.
 #[derive(Debug)]
 pub struct BoundaryMail {
     pub(crate) recipient: ErasedActorRef,

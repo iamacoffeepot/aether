@@ -30,8 +30,11 @@ use aether_actor::{ActorRef, ErasedActorRef, HandlesKind};
 use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind, KindId};
 use aether_kinds::{LoadComponent, LoadComponentUnder, NamedMail};
+use aether_substrate::{PassiveChassis, ReplyTarget, mail::MailId};
 use aether_window::{InjectWindowEvent, SyntheticWindowCapability};
+use crossbeam_channel::Receiver;
 
+use super::chassis::SubstrateHarnessChassis;
 use super::diagnostics::{self, CompletedStep};
 use super::harness::{SubstrateHarness, SubstrateHarnessError};
 
@@ -108,7 +111,7 @@ pub enum HarnessOp {
     /// recipient's handler and every mail descended from it have run
     /// (`Settled { root }`, ADR-0080 §6). No reply is stored. Build with
     /// the typed [`HarnessOp::send_and_settle`].
-    SendAndSettle { to: ErasedActorRef, kind: KindId, payload: Vec<u8> },
+    SendAndSettle { send: PreparedSend, kind: KindId },
     /// Send a mail and wait for the reply carrying its correlation id,
     /// stashing the raw reply bytes — and wait for nothing else, so
     /// anything else the handler started may still be in flight. Build
@@ -116,7 +119,7 @@ pub enum HarnessOp {
     /// component load / replace / drop and the `aether.fs`
     /// read / write / delete / list round trips uniformly — decode
     /// the stored bytes downstream with [`ExecutionResult::reply`].
-    SendAndAwaitReply { to: ErasedActorRef, kind: KindId, payload: Vec<u8> },
+    SendAndAwaitReply { send: PreparedSend, kind: KindId },
     /// Capture the current frame as PNG bytes. Build with
     /// [`HarnessOp::capture`]. Does not dispatch a tick — sequence a
     /// [`HarnessOp::Advance`] before it if the world must move first.
@@ -139,14 +142,7 @@ pub enum HarnessOp {
     /// The satisfying reply is stored like a [`HarnessOp::SendAndAwaitReply`]
     /// one, so [`ExecutionResult::reply`] decodes the observation that
     /// ended the wait rather than a re-read of it.
-    PollUntil {
-        to: ErasedActorRef,
-        kind: KindId,
-        payload: Vec<u8>,
-        budget: Duration,
-        observed_kind: &'static str,
-        observe: PollObserver,
-    },
+    PollUntil { send: PreparedSend, kind: KindId, budget: Duration, observed_kind: &'static str, observe: PollObserver },
 }
 
 /// What one probe reply told a [`HarnessOp::PollUntil`] step.
@@ -171,6 +167,49 @@ pub struct PollObserver(ObserveFn);
 /// The erased decode-and-test closure a [`PollObserver`] wraps.
 type ObserveFn = Box<dyn FnMut(&[u8]) -> Observation>;
 
+/// A harness send whose target and payload representation are closed over by
+/// [`SendTarget`]. Its internals and constructor stay private, so public
+/// [`HarnessOp`] variants expose no erased target, kind, and payload triple.
+pub struct PreparedSend(PreparedPush);
+
+type PreparedPush =
+    Box<dyn Fn(&PassiveChassis<SubstrateHarnessChassis>, PreparedMode) -> Result<PreparedOutcome, String>>;
+
+#[derive(Clone, Copy)]
+enum PreparedMode {
+    Tracked(Option<ReplyTarget>),
+    ForReply(ReplyTarget),
+}
+
+enum PreparedOutcome {
+    Tracked(MailId, Receiver<()>),
+    Sent,
+}
+
+impl PreparedSend {
+    pub(crate) fn tracked(
+        &self,
+        chassis: &PassiveChassis<SubstrateHarnessChassis>,
+        reply: Option<ReplyTarget>,
+    ) -> Result<(MailId, Receiver<()>), String> {
+        match (self.0)(chassis, PreparedMode::Tracked(reply))? {
+            PreparedOutcome::Tracked(root, settlement) => Ok((root, settlement)),
+            PreparedOutcome::Sent => unreachable!("tracked prepared send returned an untracked outcome"),
+        }
+    }
+
+    pub(crate) fn for_reply(
+        &self,
+        chassis: &PassiveChassis<SubstrateHarnessChassis>,
+        reply: ReplyTarget,
+    ) -> Result<(), String> {
+        match (self.0)(chassis, PreparedMode::ForReply(reply))? {
+            PreparedOutcome::Sent => Ok(()),
+            PreparedOutcome::Tracked(..) => unreachable!("untracked prepared send returned a tracked outcome"),
+        }
+    }
+}
+
 mod sealed {
     /// Seals [`super::SendTarget`] to the two reference shapes it names.
     pub trait Sealed {}
@@ -181,11 +220,13 @@ mod sealed {
 ///
 /// Two shapes implement it. A typed `&ActorRef<R>` compile-checks that `R`
 /// handles `K`, so a wrong-kind send is refused where it is written; an
-/// [`ErasedActorRef`] names some actor that reached `Live` and is unchecked,
-/// as ADR-0230 §2 allows for an erased target — the shape for a fixture
-/// loaded through [`SubstrateHarness::load_any`], or for a query every actor
-/// answers, such as [`SubstrateHarness::log_tail`]'s. `K` is inferred from
-/// the mail, so no call site names it.
+/// [`ErasedActorRef`] is retained only for framework-tail queries over
+/// heterogeneous participants. Its prepared send names the reference's
+/// canonical path and proves that path again through the chassis boundary
+/// before each delivery. This is the shape for a fixture loaded through
+/// [`SubstrateHarness::load_any`], or for a query every actor answers, such as
+/// [`SubstrateHarness::log_tail`]'s. `K` is inferred from the mail, so no call
+/// site names it.
 ///
 /// A kind the actor does not handle fails at compile time:
 ///
@@ -199,23 +240,55 @@ mod sealed {
 /// let _ = HarnessOp::send_and_settle(&window, &Tick::default());
 /// ```
 pub trait SendTarget<K: Kind>: sealed::Sealed {
-    /// The erased reference the harness pushes the mail through.
-    fn erased(self) -> ErasedActorRef;
+    /// Bind the target and typed mail into an opaque send operation.
+    fn prepare(self, mail: &K) -> PreparedSend;
 }
 
 impl<R> sealed::Sealed for &ActorRef<R> {}
 
 impl sealed::Sealed for ErasedActorRef {}
 
-impl<K: Kind, R: HandlesKind<K>> SendTarget<K> for &ActorRef<R> {
-    fn erased(self) -> ErasedActorRef {
-        self.erase()
+impl<K, R> SendTarget<K> for &ActorRef<R>
+where
+    K: Kind + Clone + 'static,
+    R: HandlesKind<K> + 'static,
+{
+    fn prepare(self, mail: &K) -> PreparedSend {
+        let target = *self;
+        let mail = mail.clone();
+        PreparedSend(Box::new(move |chassis, mode| match mode {
+            PreparedMode::Tracked(reply) => {
+                let (root, settlement) = chassis.send_tracked(target, &mail, reply);
+                Ok(PreparedOutcome::Tracked(root, settlement))
+            }
+            PreparedMode::ForReply(reply) => {
+                chassis.send_for_reply(target, &mail, reply);
+                Ok(PreparedOutcome::Sent)
+            }
+        }))
     }
 }
 
 impl<K: Kind> SendTarget<K> for ErasedActorRef {
-    fn erased(self) -> ErasedActorRef {
-        self
+    fn prepare(self, mail: &K) -> PreparedSend {
+        let kind = K::ID;
+        let payload = mail.encode_into_bytes();
+        PreparedSend(Box::new(move |chassis, mode| {
+            let path = chassis
+                .actor_path(self)
+                .ok_or_else(|| "the erased harness target has no retained actor path".to_owned())?;
+            let item = chassis.accept_call(&path, kind, payload.clone())?;
+            match mode {
+                PreparedMode::Tracked(reply) => {
+                    let (root, settlement) = chassis.deliver_tracked(item, reply);
+                    Ok(PreparedOutcome::Tracked(root, settlement))
+                }
+                PreparedMode::ForReply(reply) => {
+                    chassis.deliver_for_reply(item, reply);
+                    Ok(PreparedOutcome::Sent)
+                }
+            }
+        }))
     }
 }
 
@@ -301,7 +374,7 @@ impl HarnessOp {
     /// kinds.
     #[must_use]
     pub fn send_and_settle<K: Kind>(to: impl SendTarget<K>, mail: &K) -> Self {
-        Self::SendAndSettle { to: to.erased(), kind: K::ID, payload: mail.encode_into_bytes() }
+        Self::SendAndSettle { send: to.prepare(mail), kind: K::ID }
     }
 
     /// Send a typed mail and wait for the reply carrying its correlation
@@ -316,7 +389,7 @@ impl HarnessOp {
     /// barrier that orders it; see the rule on [`HarnessOp`].
     #[must_use]
     pub fn send_and_await_reply<K: Kind>(to: impl SendTarget<K>, mail: &K) -> Self {
-        Self::SendAndAwaitReply { to: to.erased(), kind: K::ID, payload: mail.encode_into_bytes() }
+        Self::SendAndAwaitReply { send: to.prepare(mail), kind: K::ID }
     }
 
     /// Re-send `probe` to `to` until its reply satisfies
@@ -381,9 +454,8 @@ impl HarnessOp {
         R: Kind + fmt::Debug,
     {
         Self::PollUntil {
-            to: to.erased(),
+            send: to.prepare(probe),
             kind: K::ID,
-            payload: probe.encode_into_bytes(),
             budget,
             observed_kind: R::NAME,
             observe: PollObserver(Box::new(move |bytes| {
@@ -635,20 +707,19 @@ impl SubstrateHarness {
                 HarnessOp::Advance { ticks, delta_micros } => {
                     self.advance(ticks, delta_micros).map(|_| HarnessOutput::Advanced).map_err(failed)
                 }
-                HarnessOp::SendAndSettle { to, kind, payload } => {
-                    self.settle_bytes(to, kind, payload).map(|()| HarnessOutput::Mailed).map_err(failed)
+                HarnessOp::SendAndSettle { send, kind } => {
+                    self.settle_prepared(&send, kind).map(|()| HarnessOutput::Mailed).map_err(failed)
                 }
-                HarnessOp::SendAndAwaitReply { to, kind, payload } => {
-                    self.request_bytes(to, kind, payload).map(HarnessOutput::Replied).map_err(failed)
+                HarnessOp::SendAndAwaitReply { send, .. } => {
+                    self.request_prepared(&send).map(HarnessOutput::Replied).map_err(failed)
                 }
                 HarnessOp::Capture => self.capture().map(HarnessOutput::Captured).map_err(failed),
                 HarnessOp::CaptureWithMails { pre, after } => {
                     self.capture_with_mails(pre, after).map(HarnessOutput::Captured).map_err(failed)
                 }
-                HarnessOp::PollUntil { to, kind, payload, budget, observed_kind, observe } => self.poll_until_observed(
-                    PollStep { label, to, kind, payload: &payload, budget, observed_kind },
-                    observe,
-                ),
+                HarnessOp::PollUntil { send, kind, budget, observed_kind, observe } => {
+                    self.poll_until_observed(PollStep { label, send: &send, kind, budget, observed_kind }, observe)
+                }
             }
             .map_err(|error| Box::new(ExecutionFailure { error, completed: completed.clone() }))?;
 
@@ -662,7 +733,7 @@ impl SubstrateHarness {
     /// Body of the [`HarnessOp::PollUntil`] step: re-send the probe
     /// until `observe` is satisfied or `budget` elapses.
     ///
-    /// The probe rides [`Self::request_bytes`] — the correlation-only
+    /// The probe rides the prepared correlation-only request path
     /// wait — deliberately. This op exists precisely because the effect
     /// under observation is not on the probe's chain, so the probe needs
     /// only to fetch the current answer; what orders the wait is the
@@ -673,13 +744,13 @@ impl SubstrateHarness {
         step: PollStep<'_>,
         mut observe: PollObserver,
     ) -> Result<HarnessOutput, ExecutionError> {
-        let PollStep { label, to, kind, payload, budget, observed_kind } = step;
+        let PollStep { label, send, kind, budget, observed_kind } = step;
         let start = Instant::now();
         let mut probes = 0u32;
 
         loop {
             let bytes = self
-                .request_bytes(to, kind, payload.to_vec())
+                .request_prepared(send)
                 .map_err(|error| ExecutionError::OpFailed { label: label.to_owned(), error })?;
             probes = probes.saturating_add(1);
 
@@ -719,9 +790,8 @@ impl SubstrateHarness {
 #[derive(Clone, Copy)]
 struct PollStep<'a> {
     label: &'a str,
-    to: ErasedActorRef,
+    send: &'a PreparedSend,
     kind: KindId,
-    payload: &'a [u8],
     budget: Duration,
     observed_kind: &'static str,
 }

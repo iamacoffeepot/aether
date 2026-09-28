@@ -5,7 +5,6 @@
 //! self-unregistration.
 
 use aether_actor::ActorPath;
-use aether_data::Kind as KindTrait;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::io::Write;
@@ -231,19 +230,13 @@ fn route_registered_mid_connection_serves_next_request() {
     // parked between keep-alive requests. The handler is named by its
     // canonical path, narrowed to `HttpRoute` by the `on_extra` row.
     let handler = ActorPath::<WiredRouteHandler>::root();
-    let payload = RegisterRoute {
+    let mail = RegisterRoute {
         prefix: "/late".to_string(),
         method: None,
         handler: handler.narrow::<HttpRoute>(),
         shared: false,
-    }
-    .encode_into_bytes();
-    let (_, registered) = chassis.send_tracked(
-        chassis.actor_ref::<HttpServerCapability>().erase(),
-        <RegisterRoute as KindTrait>::ID,
-        payload,
-        None,
-    );
+    };
+    let (_, registered) = chassis.send_tracked(chassis.actor_ref::<HttpServerCapability>(), &mail, None);
     registered.recv_timeout(Duration::from_secs(10)).expect("the route registration settles");
 
     // The registration lands asynchronously; poll on the SAME socket.
@@ -264,14 +257,8 @@ fn route_registered_mid_connection_serves_next_request() {
 
     // Release the same key by the holder's plain path: the route drops and
     // /late falls back to the echo catch-all, which stamps the path header.
-    let payload = UnregisterRoute { prefix: "/late".to_string(), method: None, handler: handler.as_erased().clone() }
-        .encode_into_bytes();
-    let (_, released) = chassis.send_tracked(
-        chassis.actor_ref::<HttpServerCapability>().erase(),
-        <UnregisterRoute as KindTrait>::ID,
-        payload,
-        None,
-    );
+    let mail = UnregisterRoute { prefix: "/late".to_string(), method: None, handler: handler.as_erased().clone() };
+    let (_, released) = chassis.send_tracked(chassis.actor_ref::<HttpServerCapability>(), &mail, None);
     released.recv_timeout(Duration::from_secs(10)).expect("the route release settles");
 
     let deadline = Instant::now() + Duration::from_secs(10);

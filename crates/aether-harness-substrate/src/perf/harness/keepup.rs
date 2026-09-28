@@ -9,7 +9,7 @@ use aether_data::Kind;
 use serde::{Deserialize, Serialize};
 
 use super::{CountQuery, CountReport, Drive};
-use crate::SubstrateHarness;
+use crate::{SendTarget, SubstrateHarness};
 
 /// The real tier's keep-up characterisation (iamacoffeepot/aether#1233): a
 /// sustained-paced run answers "does it keep up at 60 Hz", not the per-hop
@@ -55,8 +55,7 @@ pub(super) fn harvest_keepup(
     let mut offered = 0u64;
     let mut completed = 0u64;
     for (name, participant) in participants {
-        let req = CountQuery::default().encode_into_bytes();
-        let reply = match tb.request_bytes(*participant, CountQuery::ID, req) {
+        let reply = match tb.request_prepared(&(*participant).prepare(&CountQuery::default())) {
             Ok(reply) => reply,
             Err(e) => {
                 tracing::warn!(target: "aether_perf", topo = %topo_name, %name, error = ?e, "count_query send failed");

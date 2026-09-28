@@ -164,7 +164,7 @@ fn on_one_core_a_second_run_waits_for_the_first_holding_its_settlement_and_both_
 
     let served_before_settling = thread::scope(|scope| -> Result<bool, Box<dyn Error>> {
         let served = scope.spawn(|| stub.answer(back_to_back()));
-        let _first = harness.send_deferred(&workspace, &run);
+        let _first = harness.send_deferred(workspace, &run);
         harness.execute(vec![("second", HarnessOp::send_and_settle(&workspace, &run))])?;
         let finished = served.is_finished();
         served.join().map_err(|_| "the stub thread panicked")??;
@@ -174,7 +174,7 @@ fn on_one_core_a_second_run_waits_for_the_first_holding_its_settlement_and_both_
 
     let (first, second, requests) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
         let served = scope.spawn(|| stub.serve(back_to_back()));
-        let first = harness.send_deferred(&workspace, &run);
+        let first = harness.send_deferred(workspace, &run);
         let second = harness.execute(vec![("second", HarnessOp::send_and_await_reply(&workspace, &run))])?;
         let first = harness.await_deferred::<RunResult>(first)?;
         let requests = served.join().map_err(|_| "the stub thread panicked")??;

@@ -22,7 +22,7 @@ use super::{
     Drive, KeepUp, Ping, Stats, TickSource, Tier, Topology, drive_for_tier, max_out_degree, scheduler_tuning_from_env,
     spawn_relays, summarize,
 };
-use crate::{DEFAULT_TICK_DELTA_MICROS, SubstrateHarness};
+use crate::{DEFAULT_TICK_DELTA_MICROS, SendTarget, SubstrateHarness};
 
 /// One measured cell's **raw** samples (per worker count × topology),
 /// before percentile collapse. The latency spans are nanosecond
@@ -305,8 +305,7 @@ pub fn run_cell(
     for (name, participant) in &participants {
         // `max: u32::MAX` clamps to the ring capacity — pull the
         // whole ring, `root: None` across every tree in the run.
-        let req = TraceTail { max: u32::MAX, since: None, root: None }.encode_into_bytes();
-        match tb.request_bytes(*participant, TraceTail::ID, req) {
+        match tb.request_prepared(&(*participant).prepare(&TraceTail { max: u32::MAX, since: None, root: None })) {
             Ok(reply) => match TraceTailResult::decode_from_bytes(&reply) {
                 Some(TraceTailResult::Ok { entries: ring, truncated_before, .. }) => {
                     truncated |= truncated_before.is_some();

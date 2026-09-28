@@ -31,7 +31,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::{ActorRef, ErasedActorRef};
-use aether_data::Kind;
 use aether_substrate::RouteReadProbe;
 use aether_substrate::mail::registry::RouteResolution;
 use serde::{Deserialize, Serialize};
@@ -224,13 +223,11 @@ pub fn warm_read_path(probe: &RouteReadProbe, targets: &[ErasedActorRef]) {
 fn drive_churn(harness: &mut SubstrateHarness, parent: ActorRef<CommitParent>, window: Duration) {
     let deadline = Instant::now() + window;
     while Instant::now() < deadline {
-        let stage = StageBurst { count: CHURN_BURST }.encode_into_bytes();
-        if let Err(error) = harness.settle_bytes(parent.erase(), StageBurst::ID, stage) {
+        if let Err(error) = harness.settle_bytes(parent, &StageBurst { count: CHURN_BURST }) {
             tracing::warn!(target: "aether_perf", ?error, "churn stage did not settle; ending churn early");
             return;
         }
-        let close = CloseBurst::default().encode_into_bytes();
-        if let Err(error) = harness.settle_bytes(parent.erase(), CloseBurst::ID, close) {
+        if let Err(error) = harness.settle_bytes(parent, &CloseBurst::default()) {
             tracing::warn!(target: "aether_perf", ?error, "churn close did not settle; ending churn early");
             return;
         }

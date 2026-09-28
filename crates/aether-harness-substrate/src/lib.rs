@@ -93,7 +93,7 @@ pub use chassis::{
 };
 pub use execute::{
     DEFAULT_POLL_BUDGET, DEFAULT_TICK_DELTA_MICROS, ExecutionError, ExecutionResult, HarnessOp, HarnessOutput,
-    PollObserver, SendTarget,
+    PollObserver, PreparedSend, SendTarget,
 };
 pub use harness::{
     DEFAULT_HEIGHT, DEFAULT_WIDTH, HookFactory, SubstrateHarness, SubstrateHarnessBuilder, SubstrateHarnessError,

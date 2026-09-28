@@ -191,8 +191,7 @@ pub fn measure_loaded_ceiling(harness: &mut SubstrateHarness, parent: ActorRef<C
     let start = Instant::now();
     let mut driven = 0_u64;
     for _ in 0..BURSTS {
-        let payload = StageBurst { count: BURST }.encode_into_bytes();
-        if let Err(error) = harness.settle_bytes(parent.erase(), StageBurst::ID, payload) {
+        if let Err(error) = harness.settle_bytes(parent, &StageBurst { count: BURST }) {
             tracing::warn!(target: "aether_perf", ?error, "staged burst did not settle");
             break;
         }
@@ -227,16 +226,14 @@ pub fn measure_loaded_ceiling(harness: &mut SubstrateHarness, parent: ActorRef<C
 /// `populated_mailboxes` the report states. Closing them keeps the reported
 /// table size honest.
 pub fn close_children(harness: &mut SubstrateHarness, parent: ActorRef<CommitParent>) {
-    let payload = CloseBurst::default().encode_into_bytes();
-    if let Err(error) = harness.settle_bytes(parent.erase(), CloseBurst::ID, payload) {
+    if let Err(error) = harness.settle_bytes(parent, &CloseBurst::default()) {
         tracing::warn!(target: "aether_perf", ?error, "closing the staged children did not settle");
     }
 }
 
 /// Ask the staging parent for its birth tally.
 pub fn query(harness: &mut SubstrateHarness, parent: ActorRef<CommitParent>) -> Option<CommitReport> {
-    let request = CommitQuery::default().encode_into_bytes();
-    match harness.request_bytes(parent.erase(), CommitQuery::ID, request) {
+    match harness.request_bytes(parent, &CommitQuery::default()) {
         Ok(reply) => CommitReport::decode_from_bytes(&reply),
         Err(error) => {
             tracing::warn!(target: "aether_perf", ?error, "commit-tally query failed");

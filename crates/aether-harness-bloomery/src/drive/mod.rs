@@ -16,7 +16,6 @@ use std::marker::PhantomData;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use aether_actor::ErasedActorRef;
 use aether_bloomery_kinds::{
     AwaitProcessed, Call, CallOutcome, MoveHead, MoveHeadResult, Processed, Publish, PublishResult, Seq, WatchHead,
     WatchHeadResult,
@@ -24,7 +23,7 @@ use aether_bloomery_kinds::{
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_substrate::ReplyTarget;
+use aether_substrate::{ChassisTarget, ReplyTarget};
 
 pub use sink::{Arrival, Reply, ReplySink};
 
@@ -135,9 +134,8 @@ impl BloomeryHarness {
     pub fn call(&mut self, call: &Call) -> CallOutcome {
         let correlation = self.next_correlation();
         let (_, settled) = self.chassis.send_tracked(
-            self.mounted.driver.erase(),
-            Call::ID,
-            call.encode_into_bytes(),
+            self.mounted.driver,
+            call,
             Some(ReplyTarget::Actor { to: self.sink.erase(), correlation }),
         );
         let outcome =
@@ -157,7 +155,7 @@ impl BloomeryHarness {
     ///
     /// Panics when no result arrives within thirty seconds.
     pub fn move_head(&mut self, move_head: &MoveHead) -> MoveHeadResult {
-        let pending = self.request(self.mounted.journal.erase(), move_head);
+        let pending = self.request(self.mounted.journal, move_head);
         self.wait(pending)
     }
 
@@ -169,7 +167,7 @@ impl BloomeryHarness {
     ///
     /// Panics when no result arrives within thirty seconds.
     pub fn publish(&mut self, publish: &Publish) -> PublishResult {
-        let pending = self.request(self.mounted.journal.erase(), publish);
+        let pending = self.request(self.mounted.journal, publish);
         self.wait(pending)
     }
 
@@ -181,7 +179,7 @@ impl BloomeryHarness {
     ///
     /// Panics when no result arrives within thirty seconds.
     pub fn load(&mut self, load: &LoadComponent) -> LoadResult {
-        let pending = self.request(self.chassis.actor_ref::<ComponentHostCapability>().erase(), load);
+        let pending = self.request(self.chassis.actor_ref::<ComponentHostCapability>(), load);
         self.wait(pending)
     }
 
@@ -192,14 +190,14 @@ impl BloomeryHarness {
     ///
     /// Panics when no answer arrives within thirty seconds.
     pub fn watch_head(&mut self, after: Seq) -> WatchHeadResult {
-        let pending = self.request(self.mounted.journal.erase(), &WatchHead { after: after.0 });
+        let pending = self.request(self.mounted.journal, &WatchHead { after: after.0 });
         self.wait(pending)
     }
 
     /// Send one `AwaitProcessed { through }` to the bundle driver without
     /// waiting, for a scenario that acts while the barrier is outstanding.
     pub fn await_processed(&mut self, through: Seq) -> Pending<Processed> {
-        self.request(self.mounted.driver.erase(), &AwaitProcessed { through: through.0 })
+        self.request(self.mounted.driver, &AwaitProcessed { through: through.0 })
     }
 
     /// Drive the barrier at `through` to quiescence: re-send `AwaitProcessed`
@@ -238,14 +236,9 @@ impl BloomeryHarness {
 
     /// Send `mail` to `to` with the sink as its reply target, under a fresh
     /// correlation.
-    fn request<K: Kind + Debug, A>(&mut self, to: ErasedActorRef, mail: &K) -> Pending<A> {
+    fn request<K: Kind + Debug, I, A>(&mut self, to: impl ChassisTarget<K, I>, mail: &K) -> Pending<A> {
         let correlation = self.next_correlation();
-        self.chassis.send_for_reply(
-            to,
-            K::ID,
-            mail.encode_into_bytes(),
-            ReplyTarget::Actor { to: self.sink.erase(), correlation },
-        );
+        self.chassis.send_for_reply(to, mail, ReplyTarget::Actor { to: self.sink.erase(), correlation });
         Pending { correlation, request: format!("{} {mail:?}", K::NAME), answer: PhantomData }
     }
 

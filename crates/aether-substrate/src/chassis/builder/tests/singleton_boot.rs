@@ -295,7 +295,6 @@ counting_cap!(ComposedRight, "test.composed.right", ComposedPing);
 /// its own `actor_ref`.
 #[test]
 fn actor_ref_reaches_each_composed_cap_and_only_it() {
-    use aether_data::Kind;
     use std::sync::atomic::Ordering as AtomicOrdering;
 
     let (registry, mailer) = bare_substrate();
@@ -307,12 +306,12 @@ fn actor_ref_reaches_each_composed_cap_and_only_it() {
         .build_passive()
         .expect("both caps boot");
 
-    let ping = ComposedPing { tag: 7 }.encode_into_bytes();
-    let _left_settled =
-        chassis.send_tracked(chassis.actor_ref::<ComposedLeft>().erase(), ComposedPing::ID, ping.clone(), None);
-    let _right_settled =
-        chassis.send_tracked(chassis.actor_ref::<ComposedRight>().erase(), ComposedPing::ID, ping.clone(), None);
-    let _right_again = chassis.send_tracked(chassis.actor_ref::<ComposedRight>().erase(), ComposedPing::ID, ping, None);
+    let ping = ComposedPing { tag: 7 };
+    let left_ref = chassis.actor_ref::<ComposedLeft>();
+    let right_ref = chassis.actor_ref::<ComposedRight>();
+    let _left_settled = chassis.send_tracked(left_ref, &ping, None);
+    let _right_settled = chassis.send_tracked(right_ref, &ping, None);
+    let _right_again = chassis.send_tracked(right_ref, &ping, None);
 
     let deadline = Instant::now() + Duration::from_millis(500);
     while (left.load(AtomicOrdering::SeqCst), right.load(AtomicOrdering::SeqCst)) != (1, 2) && Instant::now() < deadline

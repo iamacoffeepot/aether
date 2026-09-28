@@ -301,18 +301,23 @@ fn drive<K: Kind, T>(
     request: &K,
     deadline: Duration,
     probe: impl Fn() -> Option<T>,
-) -> T {
+) -> T
+where
+    FleetServer: aether_actor::HandlesKind<K>,
+{
     send_to_server(chassis, request);
     wait_for(deadline, probe)
 }
 
 /// Send `request` to the chassis's `FleetServer` with its reply routed to
 /// the sink, addressing both through the proofs the chassis recorded.
-fn send_to_server<K: Kind>(chassis: &PassiveChassis<TestChassis>, request: &K) {
+fn send_to_server<K: Kind>(chassis: &PassiveChassis<TestChassis>, request: &K)
+where
+    FleetServer: aether_actor::HandlesKind<K>,
+{
     chassis.send_for_reply(
-        chassis.actor_ref::<FleetServer>().erase(),
-        K::ID,
-        request.encode_into_bytes(),
+        chassis.actor_ref::<FleetServer>(),
+        request,
         ReplyTarget::Actor { to: chassis.actor_ref::<ReplySink>().erase(), correlation: 1 },
     );
 }
@@ -410,9 +415,8 @@ mod tests {
         // settlement through owner apply and the later task turn.
         let correlation_id = 0x4068;
         let (_, settled) = chassis.send_tracked(
-            chassis.actor_ref::<FleetServer>().erase(),
-            SpawnEngine::ID,
-            SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None }.encode_into_bytes(),
+            chassis.actor_ref::<FleetServer>(),
+            &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
             Some(ReplyTarget::Actor { to: chassis.actor_ref::<ReplySink>().erase(), correlation: correlation_id }),
         );
         let spawn = wait_for(Duration::from_secs(30), || {
@@ -486,9 +490,8 @@ mod tests {
         let collision = register_proxy_collision(&registry, expected_engine);
         let correlation_id = 0x4068_C011;
         let (_, settled) = chassis.send_tracked(
-            chassis.actor_ref::<FleetServer>().erase(),
-            SpawnEngine::ID,
-            SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None }.encode_into_bytes(),
+            chassis.actor_ref::<FleetServer>(),
+            &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
             Some(ReplyTarget::Actor { to: chassis.actor_ref::<ReplySink>().erase(), correlation: correlation_id }),
         );
 
