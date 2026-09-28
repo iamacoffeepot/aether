@@ -143,7 +143,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
         );
     }
     {
-        // Last sample — triggers assembly dispatch and hold acquisition.
+        // Last sample — hands the held reply to the assembly dispatch.
         let mut read_ctx = NativeCtx::new_for_actor(&transport, fs_reply_source(c5_correlation), root, root);
         AudioCapability::on_read_result(
             &mut cap,
