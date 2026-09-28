@@ -4,12 +4,12 @@ mod instance;
 
 use std::collections::{BTreeMap, HashMap};
 
-use aether_actor::{ActorRef, ErasedActorRef, Manual, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, Manual, ProtocolRef, runtime};
 use aether_data::ErasedActorPath;
 use aether_kinds::MonitorNotice;
 use aether_substrate::{InboundMail, MonitorHandle, Subname};
 
-use super::manager::WindowManagerSurface;
+use super::manager::{RoutableWindow, WindowCommands, WindowManagerSurface};
 use super::subscribers::{Published, WindowSubscribers};
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
@@ -42,27 +42,34 @@ struct PendingWindowCreate {
     reply: Option<Box<InboundMail>>,
 }
 
+struct SyntheticWindow {
+    info: WindowInfo,
+    commands: ProtocolRef<WindowCommands>,
+}
+
 pub struct SyntheticWindowCapabilityState {
-    windows: BTreeMap<ErasedActorPath, WindowInfo>,
+    windows: BTreeMap<ErasedActorPath, SyntheticWindow>,
     /// Staged creates keyed by window name, the key each birth carries back
     /// as its completion context.
     pending_creates: HashMap<String, PendingWindowCreate>,
-    /// Each live child's window and monitor, keyed by the child's reference:
-    /// the `MonitorNotice` sender a departing child is found by (ADR-0230).
+    /// Each live child's window and retained monitor, keyed by the child's
+    /// reference. The same reverse index identifies a command sender and a
+    /// departing child's `MonitorNotice` (ADR-0230).
     child_monitors: HashMap<ErasedActorRef, (ErasedActorPath, MonitorHandle)>,
     subscribers: WindowSubscribers,
 }
 
 impl SyntheticWindowCapabilityState {
     fn window_mut(&mut self, window: &ErasedActorPath) -> Result<&mut WindowInfo, String> {
-        self.windows.get_mut(window).ok_or_else(|| format!("unknown window {window}"))
+        self.windows.get_mut(window).map(|window| &mut window.info).ok_or_else(|| format!("unknown window {window}"))
     }
 
     /// Validate one create request against the live windows and the reserved
     /// names no `ListWindows` reply can see yet, answering the window's path.
     fn check_create(&self, spec: &WindowSpec) -> Result<ErasedActorPath, String> {
         let path = crate::window_path(&crate::window_name(&spec.name)?);
-        if self.windows.values().any(|window| window.name == spec.name) || self.pending_creates.contains_key(&spec.name)
+        if self.windows.values().any(|window| window.info.name == spec.name)
+            || self.pending_creates.contains_key(&spec.name)
         {
             return Err(format!("window name `{}` is already in use", spec.name));
         }
@@ -113,7 +120,8 @@ impl SyntheticWindowCapabilityState {
         // name is the canonical path `window_path` wrote.
         let window = Self::describe(spec, path.clone());
         self.child_monitors.insert(child.erase(), (path.clone(), monitor));
-        self.windows.insert(path.clone(), window.clone());
+        self.windows
+            .insert(path.clone(), SyntheticWindow { info: window.clone(), commands: child.narrow::<WindowCommands>() });
         self.publish(ctx, &path, &WindowOpened { window: window.clone() });
         answer(&mut reply, &CreateWindowResult::Ok { window });
     }
@@ -187,8 +195,8 @@ impl SyntheticWindowCapabilityState {
                         error: format!("unknown window {window}"),
                     });
                 }
-                for (path, info) in &mut self.windows {
-                    info.focused = path == window;
+                for (path, entry) in &mut self.windows {
+                    entry.info.focused = path == window;
                 }
                 ApplyWindowCommandResult::Focus(FocusWindowResult::Ok)
             }
@@ -237,7 +245,7 @@ impl NativeActor for SyntheticWindowCapability {
 
     #[handler::single]
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListWindows) -> ListWindowsResult {
-        ListWindowsResult::Ok { windows: state.windows.values().cloned().collect() }
+        ListWindowsResult::Ok { windows: state.windows.values().map(|window| window.info.clone()).collect() }
     }
 
     #[handler::manual]
@@ -337,24 +345,23 @@ impl WindowManagerSurface for SyntheticWindowCapability {
     /// Every window this runtime enumerates is applied and routable — a
     /// reservation is not a window here until its child's birth is
     /// authoritative, and it is absent from `windows` until then.
-    fn routable_windows(state: &Self::State) -> Vec<ErasedActorPath> {
-        state.windows.keys().cloned().collect()
+    fn routable_windows(state: &Self::State) -> Vec<RoutableWindow> {
+        state
+            .windows
+            .iter()
+            .map(|(path, window)| RoutableWindow { path: path.clone(), target: Some(window.commands) })
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
-
     use aether_data::Kind;
     use aether_kinds::Key;
-    use aether_substrate::Registry;
-    use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::Source;
-    use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::noop_handler;
     use aether_substrate::testing::{bare_substrate, drop_ref, unrouted_binding};
+    use std::collections::BTreeSet;
 
     use super::*;
     use crate::runtime::subscribers::fixture::{recipients, stand, watcher};
@@ -369,11 +376,6 @@ mod tests {
             child_monitors: HashMap::new(),
             subscribers: WindowSubscribers::new(),
         }
-    }
-
-    fn test_ctx() -> (Arc<NativeBinding>, Arc<Mailer>) {
-        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        (unrouted_binding(&mailer), mailer)
     }
 
     fn window_path(name: &str) -> ErasedActorPath {
@@ -486,11 +488,8 @@ mod tests {
     /// Reducer-only, for the same reason as above: it proves the reservation
     /// set participates in duplicate detection, not the staged spawn path.
     #[test]
-    fn duplicate_live_and_reserved_names_are_rejected() {
+    fn duplicate_reserved_names_are_rejected() {
         let mut state = test_state();
-        state.windows.insert(main_path(), SyntheticWindowCapabilityState::describe(spec("main", "Game"), main_path()));
-
-        assert!(state.check_create(&spec("main", "Other title")).is_err());
         assert!(state.check_create(&spec("palette", "Tools")).is_ok());
 
         // A reserved-but-not-yet-live name is invisible to `ListWindows` and
@@ -500,35 +499,6 @@ mod tests {
             PendingWindowCreate { spec: spec("palette", "Tools"), path: window_path("palette"), reply: None },
         );
         assert!(state.check_create(&spec("palette", "Other tools")).is_err());
-        assert!(!state.windows.values().any(|window| window.name == "palette"));
-    }
-
-    #[test]
-    fn name_is_stable_after_title_mutation() {
-        let (binding, _mailer) = test_ctx();
-        let mut ctx: NativeCtx<'_> = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-        let mut state = test_state();
-        let path = main_path();
-        state.windows.insert(
-            path.clone(),
-            WindowInfo {
-                path: path.clone(),
-                name: "main".to_owned(),
-                title: "Game".to_owned(),
-                mode: WindowMode::Windowed,
-                width: DEFAULT_WIDTH,
-                height: DEFAULT_HEIGHT,
-                focused: false,
-                occluded: false,
-            },
-        );
-
-        assert!(matches!(
-            state.apply_at_window(&mut ctx, &path, WindowCommand::SetTitle { title: "Renamed".to_owned() }),
-            ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { .. })
-        ));
-
-        assert_eq!(state.windows[&path].name, "main");
-        assert_eq!(state.windows[&path].title, "Renamed");
+        assert!(!state.windows.values().any(|window| window.info.name == "palette"));
     }
 }

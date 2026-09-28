@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{ErasedActorRef, MailSender, Manual, OutboundReply, ReplyMode, Single};
+use aether_actor::{ErasedActorRef, Manual, OutboundReply, ReplyMode, Single};
 use aether_data::{BlobHash, ErasedActorPath, Kind, Source};
 use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult};
 
@@ -17,7 +17,7 @@ use aether_substrate::actor::wasm::module::Module;
 use super::LoadResult;
 use super::dependencies::{dependency_refusal, inline_dependency_refusal};
 use super::placement::root_refusal;
-use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
+use crate::component::runtime::{BootEntry, ComponentDrop, ComponentHostCapabilityState, PendingReplace};
 use crate::component::{ComponentHostCapability, LoadDelivered};
 use crate::kinds::BootTeardown;
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
@@ -467,7 +467,7 @@ impl ComponentHostCapabilityState {
         first: BootSuccessor,
     ) {
         let outcome = done.output();
-        let booted = outcome.result.as_ref().map(|actor| actor.erase()).map_err(|error| format!("{error:?}"));
+        let booted = outcome.result.as_ref().copied().map_err(|error| format!("{error:?}"));
         let hash = plan.hash();
         let mut pending = self.pending_boots.remove(&hash).expect("module boot retains its actor-local reservation");
         match booted {
@@ -550,6 +550,7 @@ impl ComponentHostCapabilityState {
             }
         };
 
+        self.drop_targets.insert(child.erase(), child.narrow::<ComponentDrop>());
         if let Some(hash) = boot_hash {
             self.settle_boot_request(ctx, hash, Some(child.erase()));
         }
@@ -564,7 +565,7 @@ impl ComponentHostCapabilityState {
     /// Record a module's Live boot under its content hash, indexing its
     /// reference for the drop guard.
     fn register_boot(&mut self, hash: BlobHash, entry: BootEntry) {
-        self.boot_actors.insert(entry.boot);
+        self.boot_actors.insert(entry.boot.erase());
         self.boot_registry.insert(hash, entry);
     }
 
@@ -572,7 +573,7 @@ impl ComponentHostCapabilityState {
     /// the entry the teardown sends through.
     fn unregister_boot(&mut self, hash: BlobHash) -> Option<BootEntry> {
         let entry = self.boot_registry.remove(&hash)?;
-        self.boot_actors.remove(&entry.boot);
+        self.boot_actors.remove(&entry.boot.erase());
         Some(entry)
     }
 
@@ -786,10 +787,11 @@ mod tests {
 
     use aether_data::Source;
     use aether_substrate::actor::native::NativeBinding;
+    use aether_substrate::chassis::builder::PassiveChassis;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::{registered_ref, unrouted_binding};
+    use aether_substrate::testing::{TestChassis, boot_test_chassis_with, registered_ref, unrouted_binding};
     use wasmtime::{Engine, Linker};
 
     use aether_substrate::actor::wasm::module::ModuleCache;
@@ -798,13 +800,24 @@ mod tests {
 
     /// A host state beside the registry its tests register into and a binding
     /// over the mailer that routes through that registry.
-    fn fixture() -> (ComponentHostCapabilityState, Arc<Registry>, Arc<NativeBinding>) {
+    fn fixture() -> (ComponentHostCapabilityState, Arc<Registry>, Arc<NativeBinding>, PassiveChassis<TestChassis>) {
         let registry = Arc::new(Registry::new());
         let (outbound, _events) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
         let engine = Arc::new(Engine::default());
+        let linker = Arc::new(Linker::new(&engine));
+        let chassis = boot_test_chassis_with::<ComponentHostCapability>(
+            &registry,
+            &mailer,
+            (),
+            super::super::ComponentHostParams {
+                engine: Arc::clone(&engine),
+                linker: Arc::clone(&linker),
+                hub_outbound: Arc::clone(&outbound),
+            },
+        );
         let state = ComponentHostCapabilityState {
-            linker: Arc::new(Linker::new(&engine)),
+            linker,
             modules: ModuleCache::new(Arc::clone(&engine)),
             engine,
             outbound,
@@ -816,11 +829,12 @@ mod tests {
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
+            drop_targets: HashMap::new(),
             boot_operation_sequence_by_actor: HashMap::new(),
             dominant_boot_operation_by_actor: HashMap::new(),
         };
         let binding = unrouted_binding(&mailer);
-        (state, registry, binding)
+        (state, registry, binding, chassis)
     }
 
     /// Register a test-local inbox under `name` and take its reference from
@@ -832,17 +846,25 @@ mod tests {
 
     /// A boot entry over a test-local inbox registered under `name`, proven
     /// like the boot spawn outcome's reference.
-    fn boot_entry(registry: &Registry, name: &str, refcount: u32, pending_requests: u32) -> BootEntry {
-        BootEntry { boot: proven_actor(registry, name), refcount, pending_requests }
+    fn boot_entry(
+        chassis: &PassiveChassis<TestChassis>,
+        registry: &Registry,
+        name: &str,
+        refcount: u32,
+        pending_requests: u32,
+    ) -> BootEntry {
+        let route = proven_actor(registry, &format!("aether.embedded:{name}"));
+        let boot = chassis.adopt_load::<WasmTrampoline>(route).expect("the live trampoline route is adopted");
+        BootEntry { boot, refcount, pending_requests }
     }
 
     #[test]
     fn manual_interleaving_last_live_drop_then_pending_rejection_drops_boot() {
-        let (mut state, registry, binding) = fixture();
+        let (mut state, registry, binding, chassis) = fixture();
         let hash = BlobHash::from_bytes([1; 32]);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let live_actor = proven_actor(&registry, "test.component.live-actor");
-        let boot = boot_entry(&registry, "test.component.boot-pending", 1, 1);
+        let boot = boot_entry(&chassis, &registry, "boot-pending", 1, 1);
         state.register_boot(hash, boot);
         state.boot_hash_by_actor.insert(live_actor, hash);
 
@@ -858,7 +880,7 @@ mod tests {
 
     #[test]
     fn manual_interleaving_reverse_replacement_boot_completion_keeps_newest_epoch() {
-        let (mut state, registry, binding) = fixture();
+        let (mut state, registry, binding, chassis) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let actor = proven_actor(&registry, "test.component.reverse-replacement");
         let old_hash = BlobHash::from_bytes([1; 32]);
@@ -867,8 +889,8 @@ mod tests {
         assert!(state.accept_successful_boot_operation(actor, old_operation));
         let new_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, new_operation));
-        let old_boot = boot_entry(&registry, "test.component.boot-n1", 0, 0);
-        let new_boot = boot_entry(&registry, "test.component.boot-n2", 0, 0);
+        let old_boot = boot_entry(&chassis, &registry, "boot-n1", 0, 0);
+        let new_boot = boot_entry(&chassis, &registry, "boot-n2", 0, 0);
         state.register_boot(old_hash, old_boot);
         state.register_boot(new_hash, new_boot);
 
@@ -887,7 +909,7 @@ mod tests {
 
     #[test]
     fn later_failed_replacement_does_not_dominate_earlier_success() {
-        let (mut state, registry, _binding) = fixture();
+        let (mut state, registry, _binding, _chassis) = fixture();
         let actor = proven_actor(&registry, "test.component.later-failure");
         let earlier_success = state.next_boot_operation(actor);
         let later_failure = state.next_boot_operation(actor);
@@ -902,14 +924,14 @@ mod tests {
 
     #[test]
     fn manual_interleaving_drop_before_replacement_boot_completion_cannot_resurrect_ref() {
-        let (mut state, registry, binding) = fixture();
+        let (mut state, registry, binding, chassis) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let actor = proven_actor(&registry, "test.component.drop-before-completion");
         let hash = BlobHash::from_bytes([1; 32]);
         let replacement_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, replacement_operation));
         state.invalidate_replacement_boot_operation(actor);
-        let boot = boot_entry(&registry, "test.component.boot-after-drop", 0, 0);
+        let boot = boot_entry(&chassis, &registry, "boot-after-drop", 0, 0);
         state.register_boot(hash, boot);
 
         // Manual state-machine proof: DropComponent invalidates the actor

@@ -16,7 +16,7 @@ mod menu;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, ErasedActorRef, Manual, Single, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, Manual, ProtocolRef, Single, runtime};
 use aether_data::ErasedActorPath;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
@@ -44,7 +44,7 @@ use self::input::{
     text_input_gate,
 };
 use self::menu::{apply_menu, parse_menu_item_id};
-use super::manager::WindowManagerSurface;
+use super::manager::{RoutableWindow, WindowCommands, WindowManagerSurface};
 use super::subscribers::{Published, WindowSubscribers};
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
@@ -182,6 +182,10 @@ struct DesktopWindowState {
     focused: bool,
     occluded: bool,
     lifecycle: DesktopWindowLifecycle,
+    /// The command proof installed when attachment publishes the child. It is
+    /// cleared on departure while the explicitly tracked closing window stays
+    /// listed and continues to participate in root-command cardinality.
+    commands: Option<ProtocolRef<WindowCommands>>,
     close_reply: Option<Box<InboundMail>>,
 }
 
@@ -274,6 +278,7 @@ impl DesktopWindowCapabilityState {
                 focused: window.has_focus(),
                 occluded: size.width == 0 || size.height == 0,
                 lifecycle: DesktopWindowLifecycle::Attaching,
+                commands: None,
                 close_reply: None,
             },
         );
@@ -396,6 +401,7 @@ impl DesktopWindowCapabilityState {
         self.children.insert(path.clone(), WindowChild { reference: child, _monitor: monitor });
         self.child_windows.insert(child.erase(), path.clone());
         state.lifecycle = DesktopWindowLifecycle::Live;
+        state.commands = Some(child.narrow::<WindowCommands>());
         self.shutdown_when_idle = false;
         let info = state.info(path);
         if let Some(reply) = pending.reply.take() {
@@ -950,6 +956,9 @@ impl NativeActor for DesktopWindowCapability {
         if let Some(path) = state.child_windows.remove(&departed)
             && state.children.remove(&path).is_some()
         {
+            if let Some(window) = state.windows.get_mut(&path) {
+                window.commands = None;
+            }
             let _ = state.queue_close(&path, None);
         }
         state.subscribers.unsubscribe_all(departed);
@@ -964,15 +973,15 @@ impl WindowManagerSurface for DesktopWindowCapability {
     }
 
     /// The same filter `on_list` publishes: an attaching window is not yet
-    /// anyone's to address, and a closing one still is — its endpoint answers
-    /// `window … is not live` for itself rather than being hidden from the
-    /// count the caller was just shown.
-    fn routable_windows(state: &Self::State) -> Vec<ErasedActorPath> {
+    /// anyone's to address, and a closing one still is — its missing or dead
+    /// child proof makes the root answer `window … is not live` rather than
+    /// hiding it from the count the caller was just shown.
+    fn routable_windows(state: &Self::State) -> Vec<RoutableWindow> {
         state
             .windows
             .iter()
             .filter(|(_, window)| window.lifecycle != DesktopWindowLifecycle::Attaching)
-            .map(|(path, _)| path.clone())
+            .map(|(path, window)| RoutableWindow { path: path.clone(), target: window.commands })
             .collect()
     }
 }
@@ -1084,6 +1093,7 @@ mod tests {
                 } else {
                     DesktopWindowLifecycle::Live
                 },
+                commands: None,
                 close_reply: None,
             },
         );
@@ -1323,6 +1333,16 @@ mod tests {
 
         assert!(effects.is_empty());
         assert!(state.windows.contains_key(&second));
+    }
+
+    #[test]
+    fn closing_window_without_child_proof_stays_in_root_command_cardinality() {
+        let mut state = test_state();
+        let path = insert_window(&mut state, "closing", true);
+
+        let windows = DesktopWindowCapability::routable_windows(&state);
+
+        assert!(matches!(windows.as_slice(), [window] if window.path == path && window.target.is_none()));
     }
 
     #[test]

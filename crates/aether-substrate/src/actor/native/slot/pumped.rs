@@ -209,7 +209,7 @@ mod tests {
     use aether_actor::local::ActorSlots;
     use aether_actor::log::ActorLogRing;
     use aether_actor::trace::ActorTraceRing;
-    use aether_actor::{Addressable, HandlesKind, Local as _, MailSender, Manual, One};
+    use aether_actor::{Addressable, HandlesKind, Local as _, Manual, One};
     use aether_data::{ErasedActorPath, Kind, KindId, MailId, MailboxId, Source, SourceAddr};
     use aether_kinds::trace::TraceEvent;
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};

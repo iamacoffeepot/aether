@@ -12,10 +12,11 @@ use std::collections::BTreeMap;
 use aether_data::LoadName;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_window::{
-    ApplyWindowCommand, ApplyWindowCommandResult, CreateWindow, CreateWindowResult, CursorIcon, ListWindows,
-    ListWindowsResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowTitle,
-    SetWindowTitleResult, SyntheticWindowCapability, SyntheticWindowInstance, WindowCommand, WindowMenu, WindowMode,
-    WindowSpec, window_path,
+    ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult,
+    CursorIcon, FocusWindow, FocusWindowResult, ListWindows, ListWindowsResult, RequestWindowRedraw,
+    RequestWindowRedrawResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult,
+    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SyntheticWindowCapability,
+    SyntheticWindowInstance, WindowCommand, WindowMenu, WindowMode, WindowSpec, window_path,
 };
 
 /// Local twin of the runtime's crate-private `RetireWindow`
@@ -156,6 +157,44 @@ fn root_addressed_commands_reach_the_sole_window_and_refuse_when_it_is_ambiguous
         BTreeMap::from([("main", "Routed"), ("palette", "Tools")]),
         "the routed command applied to the sole window and the refused one applied to nothing",
     );
+}
+
+#[test]
+fn every_root_command_row_forwards_to_the_sole_window() {
+    let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
+    let manager = harness.actor_ref::<SyntheticWindowCapability>();
+    let report = harness
+        .execute(vec![
+            ("created", HarnessOp::send_and_await_reply(&manager, &CreateWindow { spec: spec("main", "Main") })),
+            (
+                "mode",
+                HarnessOp::send_and_await_reply(
+                    &manager,
+                    &SetWindowMode { mode: WindowMode::Windowed, width: Some(1024), height: Some(768) },
+                ),
+            ),
+            ("title", HarnessOp::send_and_await_reply(&manager, &SetWindowTitle { title: "Forwarded".to_owned() })),
+            ("menu", HarnessOp::send_and_await_reply(&manager, &SetWindowMenu { menus: Vec::new() })),
+            ("cursor", HarnessOp::send_and_await_reply(&manager, &SetWindowCursor { icon: CursorIcon::Pointer })),
+            ("focus", HarnessOp::send_and_await_reply(&manager, &FocusWindow)),
+            ("redraw", HarnessOp::send_and_await_reply(&manager, &RequestWindowRedraw)),
+            ("close", HarnessOp::send_and_await_reply(&manager, &CloseWindow)),
+        ])
+        .expect("all root-addressed window commands settle");
+
+    assert!(matches!(
+        report.reply::<SetWindowModeResult>("mode"),
+        Ok(SetWindowModeResult::Ok { width: 1024, height: 768, .. })
+    ));
+    assert!(matches!(
+        report.reply::<SetWindowTitleResult>("title"),
+        Ok(SetWindowTitleResult::Ok { title }) if title == "Forwarded"
+    ));
+    assert!(matches!(report.reply::<SetWindowMenuResult>("menu"), Ok(SetWindowMenuResult::Ok)));
+    assert!(matches!(report.reply::<SetWindowCursorResult>("cursor"), Ok(SetWindowCursorResult::Ok)));
+    assert!(matches!(report.reply::<FocusWindowResult>("focus"), Ok(FocusWindowResult::Ok)));
+    assert!(matches!(report.reply::<RequestWindowRedrawResult>("redraw"), Ok(RequestWindowRedrawResult::Ok)));
+    assert!(matches!(report.reply::<CloseWindowResult>("close"), Ok(CloseWindowResult::Ok)));
 }
 
 /// The manager applies a forwarded command only to the window whose child
