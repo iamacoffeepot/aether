@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 
-use aether_data::Source;
-
+use super::Held;
 use super::decode::{decode_wav_to_mono, wav_source_rate};
 use super::sfz::{SfzLoop, SfzRegion};
 use super::voice::{BankStage, STEAL_RELEASE_SECS};
+use crate::kinds::LoadInstrumentResult;
 
 /// Attack ramp (seconds) wrapping a sample voice — a short swell so a
 /// re-pitched recording doesn't click on at full level (ADR-0103 §6,
@@ -261,9 +261,10 @@ pub struct SampleSlot {
 /// `AudioCapabilityState::assemblies` by a minted id; each per-sample
 /// read carries that id plus its exact sample slot in a request context.
 pub struct BankAssembly {
-    /// The original `load_instrument` requester — the
-    /// `LoadInstrumentResult` reply routes here.
-    pub source: Source,
+    /// The original `load_instrument` request's held reply (ADR-0243):
+    /// the one `LoadInstrumentResult` answers it, from `fail_assembly` or
+    /// the assembly worker's completion.
+    pub held: Held<LoadInstrumentResult>,
     /// The fs namespace the `.sfz` and its samples live in (shared).
     pub namespace: String,
     /// The `.sfz` path — echoed on an `Err` reply for diagnostics.

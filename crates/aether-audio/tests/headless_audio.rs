@@ -1,6 +1,5 @@
 //! `HeadlessAudioCapability`'s fail-fast path over a [`SubstrateHarness`]:
-//! the two `#[handler::manual]` requests answer `Err` instead of settling
-//! silently.
+//! the two load requests answer `Err` instead of settling silently.
 //!
 //! Minimal composition — the companion opens no device and mails no peer, so
 //! it boots on the harness basics with no render / wgpu gate. It shares the
@@ -12,7 +11,7 @@ use aether_harness_substrate::test_helpers::{init_save_sandbox, test_namespace_r
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 
 /// iamacoffeepot/aether#5705: `play_track` and `load_instrument` are the two
-/// audio requests whose reply is hand-issued from a manual-class handler, so
+/// audio requests the primary runtime answers later rather than on return, so
 /// they are the two a companion can silently swallow — the pre-fix headless
 /// sink did exactly that, and the caller read the settled-with-no-reply chain
 /// as success. Catches a companion handler that absorbs its mail without

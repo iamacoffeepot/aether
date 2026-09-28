@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use aether_actor::{DependsOn, OutboundReply};
+use aether_actor::DependsOn;
 
 use super::event::TrackStart;
 use super::sample::SampleBank;
 use super::{
     AudioCapabilityState, AudioEvent, AudioLoadContext, BankAssemblyContext, BankAssemblyOutput, DecodeOutput,
-    FsCapability, Manual, NativeCtx, Read, ReadResult, SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS, TaskDone,
+    FsCapability, NativeCtx, Pending, Read, ReadResult, SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS, TaskDone,
     TrackDecodeContext, TrackLoad,
 };
 use crate::kinds::{
@@ -150,39 +150,41 @@ impl AudioCapabilityState {
 
     pub fn handle_play_track<A: DependsOn<FsCapability>>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, Manual>,
+        ctx: &mut NativeCtx<'_, A>,
         mail: PlayTrack,
-    ) {
+    ) -> Pending<PlayTrackResult> {
+        let (pending, held) = ctx.hold::<PlayTrackResult>();
+
         // Nop chassis (headless / hub / disabled / no device): fail
         // fast with a loud Err (ADR-0103 §7).
         if self.sender.is_none() || self.sample_rate.is_none() {
-            ctx.reply(&PlayTrackResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                lane: mail.lane,
-                error: "audio pipeline not initialised on this desktop substrate".to_owned(),
-            });
-            return;
+            held.answer(
+                ctx,
+                &PlayTrackResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    lane: mail.lane,
+                    error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+                },
+            );
+            return pending;
         }
 
         let Some(load_id) = self.track_load_ids.allocate() else {
-            ctx.reply(&PlayTrackResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                lane: mail.lane,
-                error: "this session has run out of track-load ids".to_owned(),
-            });
-            return;
+            held.answer(
+                ctx,
+                &PlayTrackResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    lane: mail.lane,
+                    error: "this session has run out of track-load ids".to_owned(),
+                },
+            );
+            return pending;
         };
         self.track_loads.insert(
             load_id,
-            TrackLoad {
-                source: ctx.reply_target(),
-                sender: ctx.sender(),
-                lane: mail.lane,
-                gain: mail.gain,
-                looping: mail.looping,
-            },
+            TrackLoad { held, sender: ctx.sender(), lane: mail.lane, gain: mail.gain, looping: mail.looping },
         );
         let context = AudioLoadContext::Track { load_id };
 
@@ -193,13 +195,10 @@ impl AudioCapabilityState {
         // namespace registry (ADR-0103 §2).
         let _ = ctx
             .send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(mail.namespace, mail.path) }, context);
+        pending
     }
 
-    pub fn handle_read_result<A: DependsOn<FsCapability>>(
-        &mut self,
-        ctx: &mut NativeCtx<'_, A, Manual>,
-        mail: ReadResult,
-    ) {
+    pub fn handle_read_result<A: DependsOn<FsCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>, mail: ReadResult) {
         let Some(context) = ctx.take_context::<AudioLoadContext>() else {
             return;
         };
@@ -211,8 +210,8 @@ impl AudioCapabilityState {
                     };
                     self.start_track_decode(ctx, load, addr.namespace, addr.path, bytes);
                 }
-                AudioLoadContext::Instrument { source } => {
-                    self.on_sfz_loaded(ctx, source, addr.namespace, addr.path, &bytes);
+                AudioLoadContext::Instrument { held } => {
+                    self.on_sfz_loaded(ctx, held, addr.namespace, addr.path, &bytes);
                 }
                 AudioLoadContext::Sample { assembly_id, slot } => {
                     self.on_sample_loaded(ctx, assembly_id, slot, bytes);
@@ -226,13 +225,11 @@ impl AudioCapabilityState {
                         let Some(load) = self.track_loads.remove(&load_id) else {
                             return;
                         };
-                        ctx.reply_to(
-                            load.source,
-                            &PlayTrackResult::Err { namespace, path, lane: load.lane, error: reason },
-                        );
+                        load.held
+                            .answer(ctx, &PlayTrackResult::Err { namespace, path, lane: load.lane, error: reason });
                     }
-                    AudioLoadContext::Instrument { source } => {
-                        ctx.reply_to(source, &LoadInstrumentResult::Err { namespace, path, error: reason });
+                    AudioLoadContext::Instrument { held } => {
+                        held.answer(ctx, &LoadInstrumentResult::Err { namespace, path, error: reason });
                     }
                     AudioLoadContext::Sample { assembly_id, .. } => {
                         self.fail_assembly(ctx, assembly_id, reason);
@@ -305,28 +302,36 @@ impl AudioCapabilityState {
 
     pub fn handle_load_instrument<A: DependsOn<FsCapability>>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, Manual>,
+        ctx: &mut NativeCtx<'_, A>,
         mail: LoadInstrument,
-    ) {
+    ) -> Pending<LoadInstrumentResult> {
+        let (pending, held) = ctx.hold::<LoadInstrumentResult>();
+
         // Nop chassis (headless / hub / disabled / no device): fail
         // fast with a loud Err (ADR-0103 §7).
         if self.sender.is_none() || self.sample_rate.is_none() {
-            ctx.reply(&LoadInstrumentResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                error: "audio pipeline not initialised on this desktop substrate".to_owned(),
-            });
-            return;
+            held.answer(
+                ctx,
+                &LoadInstrumentResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+                },
+            );
+            return pending;
         }
 
-        let source = ctx.reply_target();
-        let context = AudioLoadContext::Instrument { source };
+        // The `.sfz` read's request context carries the held reply, so
+        // the one take in `on_read_result` claims the debt with it
+        // (ADR-0243 §4).
+        let context = AudioLoadContext::Instrument { held };
 
         // Forward the `.sfz` read to the single fs resolver (ADR-0041);
         // the `ReadResult` routes back to `on_read_result`, which parses
         // it and fans out the sample reads (ADR-0103 §2/§5).
         let _ = ctx
             .send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(mail.namespace, mail.path) }, context);
+        pending
     }
 
     /// Claim a session-scoped instrument id for an assembled bank and
