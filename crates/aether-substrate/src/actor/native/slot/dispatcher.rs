@@ -601,6 +601,7 @@ where
         // framework arms below are generic over the dispatched actor, and none
         // of them spawns.
         let mut ctx = NativeCtx::<'_, A, crate::Manual>::with_inbound(binding, sender, mail_id, root, env);
+        let replied = ctx.in_reply_to();
         let payload = payload_view.bytes();
         // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128 framework-built-in
         // dispatch arms for `aether.log.tail` + `aether.trace.tail` +
@@ -622,6 +623,18 @@ where
         // `Sent` (stamped at flush-begin on `ctx` drop) precedes its
         // parent's `Finished`.
         drop(ctx);
+        // ADR-0243 §7: a reply whose stored context still carries a parked
+        // `Held` after its handler returned strands the debt, whether or not a
+        // typed arm ran, so it fails fast naming the context kind.
+        if let Some(request) = replied
+            && let Some(context) = binding.parked_context(request)
+        {
+            panic!(
+                "reply to request {} left its request context `{context}` untaken while it holds a `Held` \
+                 (ADR-0243 §7): the handler must take_context and answer or stage the debt",
+                request.0,
+            );
+        }
         let t_finished = th.now_nanos();
         if let Some((mail_id, root)) = traced {
             th.push_trace_ring(root, TraceEvent::Finished { mail_id, t: t_finished });

@@ -479,11 +479,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
 
     /// Move `context` into the request-context table under `mail_id`'s
     /// correlation (ADR-0243 §4): the sender keeps no copy it could answer
-    /// after the reply's take. The table still encodes from a reference, so
-    /// the value drops here once stored.
+    /// after the reply's take, and each `Held` it carries parks in this
+    /// actor's in-flight ledger until the reply's take claims it back.
     fn park_context(&self, mail_id: MailId, context: impl Kind) {
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), &context);
-        drop(context);
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
     }
 
     /// The push behind the `send_to` family: encode `payload` and push it to

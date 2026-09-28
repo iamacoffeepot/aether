@@ -166,6 +166,11 @@ pub struct NativeBinding {
     /// the output slot once. `Mutex` only for `&self` interior
     /// mutability — the same single-logical-writer discipline as
     /// `outbound` / `burst_producer`.
+    ///
+    /// Lock order: `request_contexts` → `inflight`. A request context's
+    /// store or take parks and claims its `Held` tickets here while the
+    /// table lock is held (ADR-0243 §4); every holder of this lock holds it
+    /// for one ledger operation and never takes `request_contexts` under it.
     inflight: offload::blocking::InflightLedger,
     /// ADR-0165: parent-local uniqueness reservations for staged and live
     /// children. This table is actor-local bookkeeping only; reserving or
@@ -178,6 +183,10 @@ pub struct NativeBinding {
     /// [`Self::release_parent_child_reservation`].
     parent_child_reservation: Mutex<Option<LiveChildReservation>>,
     /// ADR-0139: typed request contexts keyed by reply correlation id.
+    ///
+    /// Lock order: `request_contexts` → `inflight`, never the reverse. A
+    /// store or take holds this lock while the context's `Held` tickets park
+    /// in or are claimed from the in-flight ledger (ADR-0243 §4).
     request_contexts: Mutex<RequestContextTable>,
     /// ADR-0231 §4: the contract of the guest this guest host hosts or last
     /// hosted, recorded by `NativeCtx::sync_guest`. `None` until a guest is
