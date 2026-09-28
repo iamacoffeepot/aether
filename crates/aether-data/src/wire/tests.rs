@@ -5,6 +5,7 @@
 //! confirm the serializer and deserializer mirror each other.
 #![allow(clippy::unwrap_used)]
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
@@ -13,7 +14,11 @@ use alloc::vec::Vec;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 
-use super::{Error, from_bytes, take_from_bytes, to_vec};
+use super::owned::take_array;
+use super::{
+    DecodeCtx, Decoder, Encoder, Error, HeldClaim, HeldLedger, InCtx, LedgerEncoder, WireDecode, WireEncode,
+    decode_from_slice, encode_to_vec, from_bytes, take_from_bytes, to_vec,
+};
 use crate::ids::KindId;
 
 #[test]
@@ -222,4 +227,101 @@ fn take_from_bytes_walks_back_to_back_records() {
     let (second, rest): (u32, &[u8]) = take_from_bytes(rest).unwrap();
     assert_eq!(second, 0x0102_0304);
     assert!(rest.is_empty());
+}
+
+/// The reply a test [`Debt`] answers.
+const DEBT_REPLY: KindId = KindId(0x2A);
+
+/// A test-only held leaf shaped as ADR-0243's `Held`: it writes its ticket
+/// only through [`Encoder::held`] and reads it back only through
+/// [`Decoder::claim_held`].
+#[derive(Debug, PartialEq, Eq)]
+struct Debt {
+    ticket: u64,
+}
+
+impl WireEncode for Debt {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+        self.encode_to(out)
+    }
+
+    fn encode_to<E: Encoder + ?Sized>(&self, enc: &mut E) -> Result<(), Error> {
+        enc.held(self.ticket, DEBT_REPLY)
+    }
+}
+
+impl<'de> WireDecode<'de> for Debt {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
+        Self::decode_from(cursor)
+    }
+
+    fn decode_from<D: Decoder<'de> + ?Sized>(dec: &mut D) -> Result<Self, Error> {
+        let ticket = u64::from_le_bytes(take_array::<8>(dec.cursor())?);
+        let marker: u64 = dec.claim_held(ticket, DEBT_REPLY)?.downcast().unwrap();
+        assert_eq!(marker, ticket, "the ledger hands back what it parked for this ticket");
+        Ok(Self { ticket })
+    }
+}
+
+/// A ledger that records every parked ticket and hands the ticket back as its
+/// claim.
+#[derive(Default)]
+struct Ledger {
+    parked: Vec<(u64, KindId)>,
+}
+
+impl HeldLedger for Ledger {
+    fn park(&mut self, ticket: u64, reply: KindId) -> Result<(), Error> {
+        self.parked.push((ticket, reply));
+        Ok(())
+    }
+
+    fn claim(&mut self, ticket: u64, reply: KindId) -> Result<HeldClaim, Error> {
+        let at = self.parked.iter().position(|parked| *parked == (ticket, reply));
+        let at = at.ok_or(Error::HeldUnclaimed { ticket, reply })?;
+        self.parked.remove(at);
+        Ok(HeldClaim(Box::new(ticket)))
+    }
+}
+
+// Catches a default `held` or `claim_held` that silently writes or reads the
+// ticket: a stray encode through a plain buffer would then leave a ticket in
+// bytes no ledger parked, defusing the debt it carries.
+#[test]
+fn held_ticket_refuses_without_a_ledger() {
+    let debt = Debt { ticket: 7 };
+    let ungranted = Err(Error::HeldUngranted { reply: DEBT_REPLY });
+
+    let mut out = Vec::new();
+    assert_eq!(debt.encode_to(&mut out), ungranted);
+    assert!(out.is_empty(), "a refused held ticket writes nothing");
+    assert_eq!(encode_to_vec(&debt).map(|_| ()), ungranted);
+
+    let bytes = 7u64.to_le_bytes();
+    assert_eq!(decode_from_slice::<Debt>(&bytes), ungranted.map(|()| debt));
+
+    let mut ctx = DecodeCtx::empty();
+    assert_eq!(Debt::decode_from(&mut InCtx::new(&bytes, &mut ctx)), Err(Error::HeldUngranted { reply: DEBT_REPLY }));
+}
+
+// Catches a ledger encoder that writes without parking, parks without
+// writing, or a granted decode that fails to claim the parked ticket back
+// (or claims it twice).
+#[test]
+fn held_ticket_parks_through_a_ledger_encoder_and_claims_through_the_context() {
+    let mut ledger = Ledger::default();
+    let mut enc = LedgerEncoder::new(&mut ledger);
+    Debt { ticket: 7 }.encode_to(&mut enc).unwrap();
+    let bytes = enc.into_bytes();
+
+    assert_eq!(bytes, 7u64.to_le_bytes());
+    assert_eq!(ledger.parked, [(7, DEBT_REPLY)]);
+
+    let mut ctx = DecodeCtx::empty().held(&mut ledger);
+    assert_eq!(Debt::decode_from(&mut InCtx::new(&bytes, &mut ctx)), Ok(Debt { ticket: 7 }));
+    assert_eq!(
+        Debt::decode_from(&mut InCtx::new(&bytes, &mut ctx)),
+        Err(Error::HeldUnclaimed { ticket: 7, reply: DEBT_REPLY }),
+    );
+    assert!(ledger.parked.is_empty());
 }

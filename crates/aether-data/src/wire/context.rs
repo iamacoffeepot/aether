@@ -1,16 +1,18 @@
 //! The engine state a decode may consult (ADR-0231 §3, ADR-0238 decision 3).
 //!
 //! [`Kind::decode_with`](crate::Kind::decode_with) takes a [`DecodeCtx`]. A
-//! leaf that needs the engine asks the context through one of its two
-//! operations: [`DecodeCtx::resolve_blob`] for a tag-1 `Blob` hash, and
-//! [`DecodeCtx::prove_route_covers`] for a `ProtocolPath`. The context holds
-//! its blob resolver and published routes in private fields, so no decode
-//! reaches either hook except through those operations, and each operation
-//! refuses with a named error when the context was not given its hook.
+//! leaf that needs the engine asks the context through one of its three
+//! operations: [`DecodeCtx::resolve_blob`] for a tag-1 `Blob` hash,
+//! [`DecodeCtx::prove_route_covers`] for a `ProtocolPath`, and
+//! [`DecodeCtx::claim_held`] for a held-reply ticket (ADR-0243). The context
+//! holds its blob resolver, published routes and held ledger in private
+//! fields, so no decode reaches any hook except through those operations, and
+//! each operation refuses with a named error when the context was not given
+//! its hook.
 
 use alloc::sync::Arc;
 
-use super::{BlobResolver, Error};
+use super::{BlobResolver, Error, HeldClaim, HeldLedger};
 use crate::blob::{Blob, BlobHash};
 use crate::{ErasedActorPath, KindId, ReplyContract};
 
@@ -27,13 +29,15 @@ pub trait PublishedRoutes {
 pub struct DecodeCtx<'a> {
     blobs: Option<&'a mut dyn BlobResolver>,
     routes: Option<&'a dyn PublishedRoutes>,
+    held: Option<&'a mut dyn HeldLedger>,
 }
 
 impl<'a> DecodeCtx<'a> {
-    /// A context that resolves no blob and proves no route.
+    /// A context that resolves no blob, proves no route and claims no held
+    /// ticket.
     #[must_use]
     pub fn empty() -> Self {
-        Self { blobs: None, routes: None }
+        Self { blobs: None, routes: None, held: None }
     }
 
     /// This context, resolving tag-1 `Blob` hashes through `blobs`.
@@ -48,6 +52,12 @@ impl<'a> DecodeCtx<'a> {
         Self { routes: Some(routes), ..self }
     }
 
+    /// This context, claiming held tickets back from `ledger` (ADR-0243).
+    #[must_use]
+    pub fn held(self, ledger: &'a mut dyn HeldLedger) -> Self {
+        Self { held: Some(ledger), ..self }
+    }
+
     /// The shared value a tag-1 `Blob` field's hash names.
     ///
     /// # Errors
@@ -56,6 +66,18 @@ impl<'a> DecodeCtx<'a> {
     /// resolver does not supply `hash`.
     pub fn resolve_blob(&mut self, hash: BlobHash) -> Result<Blob, Error> {
         self.blobs.as_deref_mut().map_or(Err(Error::DetachedBlob(hash)), |blobs| blobs.resolve(hash))
+    }
+
+    /// Claim the held ticket a decoded field carries: an obligation to answer
+    /// `reply`, handed back by the granted ledger.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::HeldUngranted`] when this context has no ledger, and the
+    /// ledger's [`Error::HeldUnclaimed`] when it does not hold `ticket` for
+    /// `reply`.
+    pub fn claim_held(&mut self, ticket: u64, reply: KindId) -> Result<HeldClaim, Error> {
+        self.held.as_deref_mut().map_or(Err(Error::HeldUngranted { reply }), |held| held.claim(ticket, reply))
     }
 
     /// Prove that the `Live` route standing under exactly `path` publishes

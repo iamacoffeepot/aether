@@ -39,6 +39,7 @@ const SCHEMA_ENUM: u8 = 9;
 const SCHEMA_MAP: u8 = 10;
 const SCHEMA_TYPE_ID: u8 = 11;
 const SCHEMA_BLOB: u8 = 12;
+const SCHEMA_TICKET: u8 = 13;
 
 const VARIANT_UNIT: u8 = 0;
 const VARIANT_TUPLE: u8 = 1;
@@ -88,7 +89,7 @@ pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
             total
         }
         SchemaType::Map { key, value } => U32_WIDTH + canonical_len_cell(key) + canonical_len_cell(value),
-        SchemaType::TypeId(_) => U32_WIDTH + U64_WIDTH,
+        SchemaType::TypeId(_) | SchemaType::Ticket { .. } => U32_WIDTH + U64_WIDTH,
     }
 }
 
@@ -219,6 +220,7 @@ fn schema_to_shape(s: &SchemaType) -> SchemaShape {
         }
         SchemaType::TypeId(id) => SchemaShape::TypeId(*id),
         SchemaType::Blob => SchemaShape::Blob,
+        SchemaType::Ticket { reply } => SchemaShape::Ticket { reply: *reply },
     }
 }
 
@@ -339,6 +341,10 @@ const fn write_schema(schema: &SchemaType, out: &mut [u8], cursor: usize) -> usi
         }
         SchemaType::Blob => {
             pos = write_u32_le(SCHEMA_BLOB as u32, out, pos);
+        }
+        SchemaType::Ticket { reply } => {
+            pos = write_u32_le(SCHEMA_TICKET as u32, out, pos);
+            pos = write_u64_le(reply.0, out, pos);
         }
     }
     pos

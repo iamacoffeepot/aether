@@ -161,6 +161,41 @@ mod tests {
         ]),
     };
 
+    static HOLDS_TICKET_A: SchemaType = SchemaType::Struct {
+        fields: Cow::Borrowed(&[NamedField {
+            name: Cow::Borrowed("debt"),
+            ty: SchemaType::Ticket { reply: KindId(0xA) },
+        }]),
+        repr_c: false,
+    };
+
+    static HOLDS_TICKET_B: SchemaType = SchemaType::Struct {
+        fields: Cow::Borrowed(&[NamedField {
+            name: Cow::Borrowed("debt"),
+            ty: SchemaType::Ticket { reply: KindId(0xB) },
+        }]),
+        repr_c: false,
+    };
+
+    // Catches a canonical writer that drops a ticket's reply id: two contexts
+    // holding a `Held` of different reply kinds would then share a `Kind::ID`,
+    // and a replacement whose held reply kind changed would pass the
+    // carried-context check.
+    #[test]
+    fn ticket_reply_kind_separates_kind_ids() {
+        const NAME: &str = "t.context";
+        const N_A: usize = canonical_len_kind(NAME, &HOLDS_TICKET_A);
+        const BYTES_A: [u8; N_A] = canonical_serialize_kind::<N_A>(NAME, &HOLDS_TICKET_A);
+        const N_B: usize = canonical_len_kind(NAME, &HOLDS_TICKET_B);
+        const BYTES_B: [u8; N_B] = canonical_serialize_kind::<N_B>(NAME, &HOLDS_TICKET_B);
+        let id_of =
+            |bytes: &[u8]| (u64::from(TAG_KIND) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, bytes) & HASH_MASK);
+
+        assert_eq!(id_of(&BYTES_A), kind_id_from_parts(NAME, &HOLDS_TICKET_A));
+        assert_eq!(id_of(&BYTES_B), kind_id_from_parts(NAME, &HOLDS_TICKET_B));
+        assert_ne!(id_of(&BYTES_A), id_of(&BYTES_B));
+    }
+
     #[test]
     fn canonical_schema_primitive_round_trips_as_shape() {
         const N: usize = canonical_len_schema(&F32);

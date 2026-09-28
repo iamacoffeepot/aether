@@ -158,6 +158,16 @@ fn schema_type_unit_and_bool_match_serde_and_golden() {
 }
 
 #[test]
+fn schema_type_ticket_matches_serde_and_golden() {
+    // Tripwire: the ADR-0243 ticket node is selector 13, the next index after
+    // `Blob`, followed by its reply id as a fixed little-endian `u64`. A node
+    // declared out of order renumbers the selector, and a reply written as a
+    // tagged string moves the bytes; either changes the `Kind::ID` of every
+    // context that holds a `Held` field.
+    assert_golden(&SchemaType::Ticket { reply: KindId(0x0102_0304_0506_0708) }, &[13, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1]);
+}
+
+#[test]
 fn schema_type_scalar_and_type_id_match_serde() {
     assert_drivers_agree(&SchemaType::Scalar(Primitive::F32));
     assert_drivers_agree(&SchemaType::TypeId(KindId::TYPE_ID));

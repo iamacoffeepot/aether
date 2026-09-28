@@ -139,6 +139,16 @@ pub enum SchemaType {
     /// hash, written only in in-process mail. Every outside codec (JSON,
     /// MCP) reads and writes plain bytes. Never cast-eligible.
     Blob,
+    /// ADR-0243: a runtime-owned obligation to answer one reply of kind
+    /// `reply`, held as a `Held<R>` field of a request context. The
+    /// binary form is the ticket as a `u64` little-endian, written only
+    /// through `Encoder::held` and claimed only through
+    /// `Decoder::claim_held`. Actor reach: every outside codec (JSON,
+    /// MCP) refuses it, so no caller outside the runtime can forge one.
+    /// Never cast-eligible.
+    Ticket {
+        reply: KindId,
+    },
 }
 
 /// Recursion-breaking indirection for nested `SchemaType` fields
@@ -317,6 +327,11 @@ pub enum SchemaShape {
     TypeId(u64),
     /// ADR-0238 blob leaf. Wire-identical to `SchemaType::Blob`.
     Blob,
+    /// ADR-0243 held-reply ticket. Wire-identical to
+    /// `SchemaType::Ticket { reply }`.
+    Ticket {
+        reply: KindId,
+    },
 }
 
 /// Positional enum variant — `VariantShape::Tuple { discriminant, fields }`

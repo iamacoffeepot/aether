@@ -227,6 +227,7 @@ fn holds_blob(schema: &SchemaType, depth: usize) -> bool {
         | SchemaType::Bool
         | SchemaType::Scalar(_)
         | SchemaType::TypeId(_)
+        | SchemaType::Ticket { .. }
         | SchemaType::String
         | SchemaType::Bytes => false,
     }
@@ -302,7 +303,11 @@ impl Walk<'_> {
                 Ok(())
             }
             // Every other shape has a fixed width and returned above.
-            SchemaType::Unit | SchemaType::Bool | SchemaType::Scalar(_) | SchemaType::TypeId(_) => Ok(()),
+            SchemaType::Unit
+            | SchemaType::Bool
+            | SchemaType::Scalar(_)
+            | SchemaType::TypeId(_)
+            | SchemaType::Ticket { .. } => Ok(()),
         }
     }
 
@@ -399,7 +404,7 @@ fn fixed_width(schema: &SchemaType, depth: usize) -> Option<usize> {
         SchemaType::Unit => Some(0),
         SchemaType::Bool => Some(1),
         SchemaType::Scalar(primitive) => Some(primitive_width(*primitive)),
-        SchemaType::TypeId(_) => Some(8),
+        SchemaType::TypeId(_) | SchemaType::Ticket { .. } => Some(8),
         SchemaType::Array { element, len } => fixed_width(element, depth + 1)?.checked_mul(*len as usize),
         SchemaType::Struct { fields, .. } => {
             fields.iter().try_fold(0usize, |total, field| total.checked_add(fixed_width(&field.ty, depth + 1)?))

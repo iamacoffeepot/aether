@@ -47,7 +47,8 @@ const MAX_WIDTH: usize = 4;
 /// `Struct` is eligible iff it is itself `repr_c: true` (which, by
 /// construction, already implies its own fields are eligible). Everything
 /// else — `Bool`, `String`, `Bytes`, `Blob`, `Option`, `Vec`, `Enum`, `Map`,
-/// `Unit` — disqualifies the parent. `TypeId` is never generated.
+/// `Unit` — disqualifies the parent. `TypeId` and `Ticket` are never
+/// generated.
 fn cast_eligible(ty: &SchemaType) -> bool {
     match ty {
         SchemaType::Scalar(_) | SchemaType::TypeId(_) => true,
@@ -387,6 +388,9 @@ fn value_for_schema(schema: &SchemaType) -> BoxedStrategy<Value> {
         SchemaType::Map { key, value } => value_for_map(key, value),
         SchemaType::TypeId(_) => {
             unreachable!("arb_schema never generates TypeId")
+        }
+        SchemaType::Ticket { .. } => {
+            unreachable!("arb_schema never generates Ticket: the JSON codec refuses it")
         }
     }
 }

@@ -70,6 +70,12 @@ pub enum EncodeError {
     /// disqualify the parent from cast eligibility. Carries a short
     /// description so the agent error is actionable.
     UnsupportedSchema(&'static str),
+    /// ADR-0243: a held-reply ticket field. A ticket has actor reach; no
+    /// outside caller may write one, so the JSON encoder refuses it rather
+    /// than forge an obligation from a number.
+    ActorReach {
+        field: String,
+    },
 }
 
 impl fmt::Display for EncodeError {
@@ -89,6 +95,9 @@ impl fmt::Display for EncodeError {
             }
             Self::UnsupportedSchema(shape) => {
                 write!(f, "schema arm not supported by hub encoder: {shape}")
+            }
+            Self::ActorReach { field } => {
+                write!(f, "field {field:?} is a held-reply ticket, which never crosses outside its actor")
             }
         }
     }
@@ -307,6 +316,7 @@ fn encode_wire_value(value: &Value, schema: &SchemaType, path: &str, out: &mut V
             out.extend_from_slice(&id.to_le_bytes());
             Ok(())
         }
+        SchemaType::Ticket { .. } => Err(EncodeError::ActorReach { field: path.to_owned() }),
     }
 }
 
@@ -1026,6 +1036,17 @@ mod tests {
         let bytes = encode_schema(&json!({"blob": [1, 2, 3]}), &schema).expect("encode a blob field");
         assert_eq!(bytes, expected);
         assert_eq!(bytes, [0, 3, 0, 0, 0, 1, 2, 3]);
+    }
+
+    // Catches an outside encoder that writes a held-reply ticket from a JSON
+    // number, which would let an MCP caller forge a runtime obligation.
+    #[test]
+    fn wire_ticket_field_refuses_with_actor_reach() {
+        let reply = aether_data::KindId(0x2A);
+        let schema = structured_struct(vec![NamedField { name: "debt".into(), ty: SchemaType::Ticket { reply } }]);
+
+        let err = encode_schema(&json!({"debt": 7}), &schema).expect_err("a ticket never crosses outside its actor");
+        assert!(matches!(&err, EncodeError::ActorReach { field } if field.ends_with("debt")), "{err}");
     }
 
     #[test]

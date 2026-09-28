@@ -1,0 +1,15 @@
+error[E0277]: the trait bound `Held<Reply>: Clone` is not satisfied
+  --> tests/ui/rejects_aliased_held.rs:57:5
+   |
+55 | #[aether_data::kind(name = "test.held.aliased", no_serde)]
+   | ---------------------------------------------------------- in this attribute macro expansion
+56 | pub struct Context {
+57 |     pub debt: Debt,
+   |     ^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `Held<Reply>`
+   |
+   = note: this error originates in the derive macro `Clone` which comes from the expansion of the attribute macro `aether_data::kind` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `Held<Reply>` with `#[derive(Clone)]`
+   |
+14 + #[derive(Clone)]
+15 | pub struct Held<R>(u64, PhantomData<R>);
+   |

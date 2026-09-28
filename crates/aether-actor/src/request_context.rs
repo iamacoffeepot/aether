@@ -17,6 +17,13 @@
 //! table's owner logs a warning, so a peer that never replies shows up as
 //! warnings and memory growth, never as a lost reply.
 //!
+//! A context that holds an ADR-0243 `Held` reply goes through
+//! [`RequestContextTable::insert_with`] and [`RequestContextTable::take_with`],
+//! which park and claim its tickets in the caller's [`HeldLedger`]; this is
+//! the one context-write path both runtimes share. [`RequestContextTable::insert`]
+//! and [`RequestContextTable::take`] grant no ledger, so a held ticket in their
+//! context refuses.
+//!
 //! The snapshot keeps the layout older SDKs wrote: `next_seq`, `count`, then
 //! per entry `request`, `kind`, `insert_seq`, `len`, `bytes`. The table does
 //! not track insertion sequence, so restore ignores both sequence fields.
@@ -29,6 +36,7 @@
 use alloc::vec::Vec;
 use core::hash::{BuildHasher, Hasher};
 
+use aether_data::wire::{DecodeCtx, HeldLedger, LedgerEncoder};
 use aether_data::{Kind, KindId, RequestId, Source};
 use hashbrown::HashMap;
 
@@ -122,10 +130,41 @@ impl RequestContextTable {
             return;
         }
 
+        self.store(request, C::ID, context.encode_into_bytes());
+    }
+
+    /// [`Self::insert`] for a context that may hold `Held` replies (ADR-0243):
+    /// each held ticket parks in `ledger` as the context encodes, and the
+    /// context is then dropped, its tickets now owned by the stored bytes.
+    ///
+    /// A no-correlation request is checked before anything encodes: the
+    /// context is dropped as an ordinary value, so no ticket parks without a
+    /// stored context to carry it, and a live `Held` inside fails fast on drop.
+    ///
+    /// # Panics
+    ///
+    /// When the context does not encode: a length past the `u32` ceiling, or
+    /// `ledger` refusing to park a ticket it does not own (fail-fast per
+    /// ADR-0063).
+    pub fn insert_with<C: Kind>(&mut self, request: RequestId, context: C, ledger: &mut dyn HeldLedger) {
+        if request.0 == Source::NO_CORRELATION {
+            tracing::warn!(kind = C::NAME, "request context not stored: request has no correlation id",);
+            return;
+        }
+
+        let mut enc = LedgerEncoder::new(ledger);
+        if let Err(error) = context.encode_with(&mut enc) {
+            panic!("request context `{}` failed to encode: {error}", C::NAME);
+        }
+        drop(context);
+        self.store(request, C::ID, enc.into_bytes());
+    }
+
+    fn store(&mut self, request: RequestId, kind: KindId, bytes: Vec<u8>) {
         if self.entries.capacity() == 0 {
             self.entries.reserve(self.preallocated);
         }
-        self.entries.insert(request, RequestContextEntry { kind: C::ID, bytes: context.encode_into_bytes() });
+        self.entries.insert(request, RequestContextEntry { kind, bytes });
     }
 
     /// The live count, once each time it passes the next high-water mark; the
@@ -153,12 +192,28 @@ impl RequestContextTable {
     /// decode, the entry is consumed with a warning, since no other type could
     /// ever take it.
     pub fn take<C: Kind>(&mut self, request: RequestId) -> Option<C> {
+        self.take_in(request, &mut DecodeCtx::empty())
+    }
+
+    /// [`Self::take`] for a context that may hold `Held` replies (ADR-0243):
+    /// each held ticket is claimed back from `ledger` as the context decodes.
+    ///
+    /// A decode that fails after a successful claim drops the value it claimed
+    /// inside this call, and a live `Held` fails fast on drop. A caller that
+    /// holds a lock around this call (the native runtime holds its table
+    /// mutex) has that lock poisoned by the panic, which is intended per
+    /// ADR-0063.
+    pub fn take_with<C: Kind>(&mut self, request: RequestId, ledger: &mut dyn HeldLedger) -> Option<C> {
+        self.take_in(request, &mut DecodeCtx::empty().held(ledger))
+    }
+
+    fn take_in<C: Kind>(&mut self, request: RequestId, ctx: &mut DecodeCtx<'_>) -> Option<C> {
         if self.entries.get(&request)?.kind != C::ID {
             return None;
         }
 
         let entry = self.entries.remove(&request)?;
-        let decoded = C::decode_from_bytes(&entry.bytes);
+        let decoded = C::decode_with(&entry.bytes, ctx).ok();
         if decoded.is_none() {
             tracing::warn!(request = request.0, kind = C::ID.0, "request context decode failed",);
         }
@@ -332,6 +387,9 @@ fn take_u64(cursor: &mut &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::boxed::Box;
+
+    use aether_data::wire::{self, Decoder, Encoder, HeldClaim, WireDecode, WireEncode};
     use aether_data::{MailboxId, Source, SourceAddr};
 
     #[aether_data::kind(name = "test.request_context", partial_eq)]
@@ -347,6 +405,101 @@ mod tests {
     #[aether_data::kind(name = "test.source_request_context", partial_eq)]
     struct SourceContext {
         source: Source,
+    }
+
+    /// A test-only held leaf shaped as ADR-0243's `Held`: its ticket goes
+    /// out only through `Encoder::held` and back only through
+    /// `Decoder::claim_held`.
+    #[derive(Debug, PartialEq)]
+    struct Held(u64);
+
+    const HELD_REPLY: KindId = KindId(0x2A);
+
+    impl aether_data::Schema for Held {
+        const SCHEMA: aether_data::SchemaType = aether_data::SchemaType::Ticket { reply: HELD_REPLY };
+        const LABEL: Option<&'static str> = None;
+        const LABEL_NODE: aether_data::LabelNode = aether_data::LabelNode::Anonymous;
+    }
+
+    impl aether_data::CrossesActors for Held {}
+
+    impl aether_data::CastEligible for Held {
+        const ELIGIBLE: bool = false;
+    }
+
+    impl WireEncode for Held {
+        fn encode(&self, out: &mut Vec<u8>) -> Result<(), wire::Error> {
+            self.encode_to(out)
+        }
+
+        fn encode_to<E: Encoder + ?Sized>(&self, enc: &mut E) -> Result<(), wire::Error> {
+            enc.held(self.0, HELD_REPLY)
+        }
+    }
+
+    impl<'de> WireDecode<'de> for Held {
+        fn decode(cursor: &mut &'de [u8]) -> Result<Self, wire::Error> {
+            Self::decode_from(cursor)
+        }
+
+        fn decode_from<D: Decoder<'de> + ?Sized>(dec: &mut D) -> Result<Self, wire::Error> {
+            let ticket = u64::decode(dec.cursor())?;
+            dec.claim_held(ticket, HELD_REPLY)?;
+            Ok(Self(ticket))
+        }
+    }
+
+    #[aether_data::kind(name = "test.held_request_context", partial_eq)]
+    struct HeldContext {
+        debt: Held,
+    }
+
+    /// A ledger that records every park and claim.
+    #[derive(Default)]
+    struct Ledger {
+        parked: Vec<u64>,
+        claimed: Vec<u64>,
+    }
+
+    impl HeldLedger for Ledger {
+        fn park(&mut self, ticket: u64, _reply: KindId) -> Result<(), wire::Error> {
+            self.parked.push(ticket);
+            Ok(())
+        }
+
+        fn claim(&mut self, ticket: u64, _reply: KindId) -> Result<HeldClaim, wire::Error> {
+            self.claimed.push(ticket);
+            Ok(HeldClaim(Box::new(())))
+        }
+    }
+
+    /// A no-correlation insert stores nothing, so it must park nothing:
+    /// encoding first would park the ticket in bytes no reply can ever take,
+    /// stranding the debt until the actor closes.
+    #[test]
+    fn insert_with_parks_nothing_for_a_no_correlation_request() {
+        let mut table = RequestContextTable::new();
+        let mut ledger = Ledger::default();
+        table.insert_with(RequestId(Source::NO_CORRELATION), HeldContext { debt: Held(7) }, &mut ledger);
+
+        assert!(ledger.parked.is_empty());
+        assert!(table.is_empty());
+    }
+
+    /// Catches a context path that encodes or decodes without the ledger: the
+    /// ticket must park on insert and be claimed back on take, and the plain
+    /// forms must refuse it.
+    #[test]
+    fn insert_with_parks_and_take_with_claims() {
+        let mut table = RequestContextTable::new();
+        let mut ledger = Ledger::default();
+        table.insert_with(RequestId(7), HeldContext { debt: Held(9) }, &mut ledger);
+        assert_eq!(ledger.parked, [9]);
+
+        assert_eq!(table.take::<HeldContext>(RequestId(7)), None);
+        table.insert_with(RequestId(8), HeldContext { debt: Held(10) }, &mut ledger);
+        assert_eq!(table.take_with::<HeldContext>(RequestId(8), &mut ledger), Some(HeldContext { debt: Held(10) }));
+        assert_eq!(ledger.claimed, [10]);
     }
 
     #[test]

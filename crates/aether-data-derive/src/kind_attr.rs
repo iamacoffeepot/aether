@@ -9,6 +9,14 @@
 //! instead — a kind, optionally copyable, comparable, defaultable, POD,
 //! serde-free, or engine-only — fixes the membership in one place.
 //!
+//! A field that holds an ADR-0243 `Held<..>` ticket makes the kind
+//! move-only: the ticket is a runtime obligation that neither clones nor
+//! crosses serde, so the stack leaves `Clone`, `Serialize` and
+//! `Deserialize` out. The check reads field types syntactically, as
+//! `#[actor]` reads ctx types: a `Held` reached through a type alias is
+//! not seen, keeps `Clone`, and fails to compile at the field because
+//! `Held` has no `Clone` impl.
+//!
 //! The emitted derives use absolute paths for everything outside the
 //! prelude (`::aether_data`, `::serde`, `::bytemuck`) so a declaring
 //! module needs no imports for them; the prelude traits stay unqualified
@@ -21,7 +29,8 @@ use syn::meta::parser as nested_meta_parser;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{Attribute, Data, DeriveInput, LitStr, Path, Token};
+use syn::visit::{self, Visit};
+use syn::{Attribute, Data, DeriveInput, Fields, LitStr, Path, Token, TypePath};
 
 /// One bare option of `#[aether_data::kind(...)]`. Held as a set rather
 /// than as a field per option so adding the next contract knob doesn't
@@ -59,7 +68,7 @@ impl Flag {
 /// The parsed argument list of one `#[aether_data::kind(...)]`.
 pub struct KindArgs {
     name: LitStr,
-    flags: Vec<Flag>,
+    flags: Vec<(Flag, Span)>,
     extra: Vec<Path>,
 }
 
@@ -68,14 +77,22 @@ const EXPECTED_OPTIONS: &str = "expected `name = \"...\"`, `copy`, `default`, `p
 
 impl KindArgs {
     fn has(&self, flag: Flag) -> bool {
-        self.flags.contains(&flag)
+        self.span_of(flag).is_some()
+    }
+
+    fn span_of(&self, flag: Flag) -> Option<Span> {
+        self.flags.iter().find(|(given, _)| *given == flag).map(|(_, span)| *span)
     }
 
     /// The derive list this option set stands for, in a fixed order:
     /// prelude traits, then the data-layer pair, then the POD pair, then
-    /// serde, then whatever `derive(...)` added.
-    fn derive_paths(&self) -> Vec<TokenStream2> {
-        let mut paths = vec![quote!(Debug), quote!(Clone)];
+    /// serde, then whatever `derive(...)` added. A kind that holds a
+    /// `Held` field carries neither `Clone` nor serde.
+    fn derive_paths(&self, holds_held: bool) -> Vec<TokenStream2> {
+        let mut paths = vec![quote!(Debug)];
+        if !holds_held {
+            paths.push(quote!(Clone));
+        }
         if self.has(Flag::Copy) || self.has(Flag::Pod) {
             paths.push(quote!(Copy));
         }
@@ -94,7 +111,7 @@ impl KindArgs {
             paths.push(quote!(::bytemuck::Pod));
             paths.push(quote!(::bytemuck::Zeroable));
         }
-        if !self.has(Flag::Pod) && !self.has(Flag::NoSerde) {
+        if !holds_held && !self.has(Flag::Pod) && !self.has(Flag::NoSerde) {
             paths.push(quote!(::serde::Serialize));
             paths.push(quote!(::serde::Deserialize));
         }
@@ -108,7 +125,7 @@ impl KindArgs {
 /// hatch, which appends its paths verbatim.
 pub fn parse_args(attr: &TokenStream2) -> syn::Result<KindArgs> {
     let mut name: Option<LitStr> = None;
-    let mut flags: Vec<Flag> = Vec::new();
+    let mut flags: Vec<(Flag, Span)> = Vec::new();
     let mut extra: Vec<Path> = Vec::new();
 
     nested_meta_parser(|entry| {
@@ -128,7 +145,7 @@ pub fn parse_args(attr: &TokenStream2) -> syn::Result<KindArgs> {
         let Some(flag) = Flag::from_ident(&entry.path) else {
             return Err(entry.error(EXPECTED_OPTIONS));
         };
-        flags.push(flag);
+        flags.push((flag, entry.path.span()));
         Ok(())
     })
     .parse2(attr.clone())?;
@@ -160,7 +177,12 @@ pub fn expand(args: &KindArgs, item: &TokenStream2) -> syn::Result<TokenStream2>
         return Err(syn::Error::new_spanned(u.union_token, "`#[aether_data::kind]` does not support unions"));
     }
 
-    let derives = args.derive_paths();
+    let holds_held = holds_held(&parsed);
+    if holds_held && let Some(span) = args.span_of(Flag::Copy).or_else(|| args.span_of(Flag::Pod)) {
+        return Err(syn::Error::new(span, "a kind holding a `Held` field is move-only; it cannot be `copy` or `pod`"));
+    }
+
+    let derives = args.derive_paths(holds_held);
     let name = &args.name;
     // `engine_only` adds no derive: it is a property of the `Kind` impl, so it
     // rides the helper attribute the `Kind` derive reads.
@@ -170,6 +192,35 @@ pub fn expand(args: &KindArgs, item: &TokenStream2) -> syn::Result<TokenStream2>
         #[kind(name = #name #engine_only)]
         #item
     })
+}
+
+/// Whether any struct field or enum-variant field type names a path whose
+/// last segment is `Held`, at any depth (`Option<Held<R>>`, `Vec<Held<R>>`).
+fn holds_held(item: &DeriveInput) -> bool {
+    let mut finder = HeldFinder(false);
+    match &item.data {
+        Data::Struct(data) => finder.visit_fields(&data.fields),
+        Data::Enum(data) => data.variants.iter().for_each(|variant| finder.visit_fields(&variant.fields)),
+        Data::Union(_) => {}
+    }
+    finder.0
+}
+
+struct HeldFinder(bool);
+
+impl HeldFinder {
+    fn visit_fields(&mut self, fields: &Fields) {
+        fields.iter().for_each(|field| self.visit_type(&field.ty));
+    }
+}
+
+impl<'ast> Visit<'ast> for HeldFinder {
+    fn visit_type_path(&mut self, path: &'ast TypePath) {
+        if path.path.segments.last().is_some_and(|segment| segment.ident == "Held") {
+            self.0 = true;
+        }
+        visit::visit_type_path(self, path);
+    }
 }
 
 /// A leftover `#[derive(...)]` or `#[kind(...)]` on the item is the
@@ -206,10 +257,42 @@ mod tests {
     // Each case pins one option's contribution, so a reordered or
     // renamed flag can't silently change what a kind declaration means.
     fn derives_for(attr: &proc_macro2::TokenStream) -> String {
+        derives_for_item(attr, &quote! { pub struct Probe { pub value: u32 } })
+    }
+
+    fn derives_for_item(attr: &proc_macro2::TokenStream, item: &proc_macro2::TokenStream) -> String {
         let args = parse_args(attr).expect("test fixture parses");
-        let item = quote! { pub struct Probe { pub value: u32 } };
-        let rendered = expand(&args, &item).expect("test fixture expands").to_string();
+        let rendered = expand(&args, item).expect("test fixture expands").to_string();
         rendered.split("] #").next().expect("expansion starts with the derive attribute").to_owned()
+    }
+
+    // Catches a detector that reads only a top-level field type: a `Held`
+    // wrapped in an `Option` or inside an enum variant must drop `Clone`
+    // and serde just as a bare field does.
+    #[test]
+    fn a_held_field_at_any_depth_drops_clone_and_serde() {
+        for item in [
+            quote! { pub struct Probe { pub debt: Held<Reply> } },
+            quote! { pub struct Probe { pub debt: Option<Held<Reply>> } },
+            quote! { pub struct Probe(pub Vec<crate::held::Held<Reply>>); },
+            quote! { pub enum Probe { Idle, Waiting { debt: Held<Reply> } } },
+            quote! { pub enum Probe { Idle, Waiting(Held<Reply>) } },
+        ] {
+            let derives = derives_for_item(&quote! { name = "test.held" }, &item);
+            assert!(!derives.contains("Clone"), "a held field is move-only, got: {derives} for {item}");
+            assert!(!derives.contains("serde"), "a held field never crosses serde, got: {derives} for {item}");
+            assert!(derives.contains(":: aether_data :: Kind"), "got: {derives}");
+        }
+    }
+
+    #[test]
+    fn copy_or_pod_with_a_held_field_is_refused() {
+        for flag in [quote!(copy), quote!(pod)] {
+            let args = parse_args(&quote! { name = "test.held", #flag }).expect("parses");
+            let item = quote! { pub struct Probe { pub debt: Held<Reply> } };
+            let err = expand(&args, &item).expect_err("a move-only kind must not be copy or pod");
+            assert!(err.to_string().contains("move-only"), "got: {err}");
+        }
     }
 
     #[test]

@@ -21,12 +21,16 @@
 //!   `variant_index`), then the selected variant's body;
 //! - a `Blob` is a one-byte tag (ADR-0238): tag 0 is a `u32` count then the
 //!   bytes, tag 1 the blob's 32-byte hash, written only by the in-process
-//!   envelope encoder through the [`Encoder`] hook.
+//!   envelope encoder through the [`Encoder`] hook;
+//! - a held-reply ticket (ADR-0243) is a `u64`, written only through
+//!   [`Encoder::held`] on a [`LedgerEncoder`] and claimed back only through
+//!   [`Decoder::claim_held`] on a [`DecodeCtx`] granted a [`HeldLedger`].
 //!
 //! A decode that needs the engine reaches it only through a [`DecodeCtx`]:
-//! a tag-1 `Blob` resolves through [`Decoder::resolve_blob`], and a
-//! `ProtocolPath` proves its route through [`Decoder::prove_route_covers`].
-//! The plain `&[u8]` decoder behind [`decode_from_slice`] refuses both, as
+//! a tag-1 `Blob` resolves through [`Decoder::resolve_blob`], a
+//! `ProtocolPath` proves its route through [`Decoder::prove_route_covers`],
+//! and a held ticket is claimed through [`Decoder::claim_held`]. The plain
+//! `&[u8]` decoder behind [`decode_from_slice`] refuses all three, as
 //! [`DecodeCtx::empty`] does.
 //!
 //! This module is the workspace's structured wire format (ADR-0118,
@@ -61,14 +65,15 @@ mod differential;
 mod tests;
 
 pub(crate) use attach::InCtx;
-pub use attach::{BlobResolver, Decoder, Encoder};
+pub use attach::{BlobResolver, Decoder, Encoder, HeldClaim, HeldLedger, LedgerEncoder};
 pub use context::{DecodeCtx, PublishedRoutes};
 pub use owned::{
     WireDecode, WireEncode, decode_bytes, decode_from_slice, encode_bytes, encode_to_vec, take_from_slice,
 };
 
 /// A wire encode or decode failure. Encoding fails only when a length exceeds
-/// the `u32` ceiling; everything else is a decode-side fault.
+/// the `u32` ceiling or a held ticket reaches an encoder that grants none;
+/// everything else is a decode-side fault.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// Input ended mid-value.
@@ -107,6 +112,12 @@ pub enum Error {
     UncoveredProtocolPath { path: ErasedActorPath, kind: KindId },
     /// A hand-written kind with no decode body.
     NoDecodeBody { kind: &'static str },
+    /// A held ticket answering `reply` reached an encoder or decode context
+    /// that grants no [`HeldLedger`] (ADR-0243).
+    HeldUngranted { reply: KindId },
+    /// A granted [`HeldLedger`] does not accept `ticket` as an obligation to
+    /// answer `reply` (ADR-0243).
+    HeldUnclaimed { ticket: u64, reply: KindId },
 }
 
 impl fmt::Display for Error {
@@ -135,6 +146,12 @@ impl fmt::Display for Error {
                 write!(f, "aether wire: protocol path `{path}` refused: `{kind}`'s row is missing or different")
             }
             Self::NoDecodeBody { kind } => write!(f, "aether wire: kind `{kind}` has no decode body"),
+            Self::HeldUngranted { reply } => {
+                write!(f, "aether wire: held ticket answering `{reply}` refused: no ledger is granted here")
+            }
+            Self::HeldUnclaimed { ticket, reply } => {
+                write!(f, "aether wire: held ticket {ticket} answering `{reply}` is not in the granted ledger")
+            }
         }
     }
 }

@@ -194,11 +194,13 @@ pub trait Kind {
     /// [`wire::Encoder::blob`] once wherever it nests (ADR-0238 decision 3).
     /// The `Kind` derive overrides it for structured kinds. The default, which
     /// cast kinds keep because a `#[repr(C)]` type cannot hold a `Blob`,
-    /// appends [`Kind::encode_into_bytes`] to [`wire::Encoder::out`].
+    /// appends [`Kind::encode_into_bytes`] to [`wire::Encoder::out`]. Each
+    /// held-reply ticket goes to [`wire::Encoder::held`] once (ADR-0243).
     ///
     /// # Errors
     ///
-    /// Fails only when a length exceeds the `u32` ceiling.
+    /// Fails when a length exceeds the `u32` ceiling or `enc` refuses a held
+    /// ticket.
     fn encode_with<E: wire::Encoder>(&self, enc: &mut E) -> Result<(), wire::Error> {
         enc.out().extend_from_slice(&self.encode_into_bytes());
         Ok(())
@@ -696,9 +698,13 @@ pub mod __derive_runtime {
     /// Wire-shape encode helper. Mirror of `decode_wire_with`. The
     /// [`WireEncode`] bound lives here, not on `Kind`, so cast kinds stay
     /// independent of the structured codec. Emits the unversioned wire
-    /// body (ADR-0118); encoding fails only past the `u32` length ceiling.
+    /// body (ADR-0118); encoding fails only past the `u32` length ceiling
+    /// or on a held ticket, which a plain `Vec` refuses (ADR-0243).
     pub fn encode_wire<T: WireEncode>(value: &T) -> Vec<u8> {
-        wire::encode_to_vec(value).expect("wire encode to Vec fails only past the u32 length ceiling")
+        wire::encode_to_vec(value).expect(
+            "wire encode to Vec fails only past the u32 length ceiling or on a held ticket, which only a \
+             LedgerEncoder grants",
+        )
     }
 
     /// Wire-shape encode through an [`Encoder`]: the body the `Kind` derive
@@ -707,7 +713,8 @@ pub mod __derive_runtime {
     ///
     /// # Errors
     ///
-    /// Fails only when a length exceeds the `u32` ceiling.
+    /// Fails when a length exceeds the `u32` ceiling or `enc` refuses a held
+    /// ticket.
     pub fn encode_wire_with<T: WireEncode, E: Encoder + ?Sized>(value: &T, enc: &mut E) -> Result<(), wire::Error> {
         value.encode_to(enc)
     }
