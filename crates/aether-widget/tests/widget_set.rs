@@ -46,8 +46,8 @@ use aether_kinds::{
 use aether_render::HeadlessRenderCapability;
 use aether_widget::set::{ButtonWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, VirtualListWidget};
 use aether_widget::{
-    BehaviorHostSpec, ButtonConfig, PanelConfig, RadioConfig, ScriptRef, SetWidgetState, SliderConfig, TextFieldConfig,
-    Theme, VirtualListConfig, VirtualListRow, Widget, WidgetChildSpec, WidgetControlState, WidgetKind, WidgetPanel,
+    ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, VirtualListConfig,
+    VirtualListRow, WidgetChildSpec, WidgetControlState, WidgetKind, WidgetPanel,
 };
 use support::widget_caps;
 
@@ -395,28 +395,6 @@ fn live_list_spec(
         origin: [0.0, 0.0],
         clip: None,
         config: live_list_config(items, initial, state).encode_into_bytes(),
-    }
-}
-
-fn behavior_host_list_spec(
-    subname: &str,
-    items: Vec<VirtualListRow>,
-    initial: Option<u32>,
-    state: WidgetControlState,
-) -> WidgetChildSpec {
-    WidgetChildSpec {
-        subname: subname.to_owned(),
-        kind: WidgetKind::BehaviorHost,
-        origin: [0.0, 0.0],
-        clip: None,
-        config: BehaviorHostSpec {
-            wrapped: WidgetKind::VirtualList,
-            wrapped_config: live_list_config(items, initial, state).encode_into_bytes(),
-            script: ScriptRef::None,
-            fuel_per_call: 0,
-            disable_after_traps: 0,
-        }
-        .encode_into_bytes(),
     }
 }
 
@@ -1525,89 +1503,6 @@ fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
         &take_log_delta(&mut harness, panel, &mut cursor),
         &[],
         &[(Some("inventory"), 1)],
-        &[],
-    );
-}
-
-/// A behavior-wrapped initially empty list must become eligible through the
-/// host slot once its config is populated.
-#[test]
-fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
-    let Some(wasm_path) = require_wasm("aether_widget_behavior") else {
-        return;
-    };
-    let wasm = fs::read(&wasm_path).expect("read widget wasm");
-    let mut harness = bench(240, 180);
-    let panel = load_panel_with(
-        &mut harness,
-        &wasm,
-        vec![
-            behavior_host_list_spec("inventory", Vec::new(), None, WidgetControlState::default()),
-            button_spec("run", WidgetControlState::default()),
-        ],
-    );
-    let mut cursor = 0;
-
-    harness
-        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
-        .expect("spawn the widget set");
-    // The slot is `aether-behavior`'s `BehaviorHost`, which this crate's tests
-    // do not link; it is looked up as the composable widget it stands in for —
-    // an embedded instanced child whose position its key alone determines —
-    // and its mail is sent erased.
-    let host = panel_child::<Widget>(&harness, panel, "inventory");
-
-    harness
-        .execute(vec![
-            ("empty_hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
-            ("empty_press", HarnessOp::send_and_settle(&panel, &press(30.0, 22.0))),
-            ("empty_release", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
-            ("empty_tab", HarnessOp::send_and_settle(&panel, &tab())),
-            ("empty_space", HarnessOp::send_and_settle(&panel, &space())),
-            ("empty_space_up", HarnessOp::send_and_settle(&panel, &space_up())),
-        ])
-        .expect("empty host baseline");
-    assert_list_phase("empty host baseline", &take_log_delta(&mut harness, panel, &mut cursor), &[], &[], &["run"]);
-
-    harness
-        .execute(vec![
-            ("populate", HarnessOp::send_and_settle(host.erase(), &populated_list_config(Some(0)))),
-            ("hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
-        ])
-        .expect("populate host hover");
-    assert_list_phase(
-        "host populate hover",
-        &take_log_delta(&mut harness, panel, &mut cursor),
-        &[(Some("inventory"), Some("0"))],
-        &[],
-        &[],
-    );
-
-    harness
-        .execute(vec![
-            ("tab_to_list", HarnessOp::send_and_settle(&panel, &tab())),
-            ("down", HarnessOp::send_and_settle(&panel, &down())),
-        ])
-        .expect("host tab and down");
-    assert_list_phase(
-        "host tab+down",
-        &take_log_delta(&mut harness, panel, &mut cursor),
-        &[],
-        &[(Some("inventory"), 1)],
-        &[],
-    );
-
-    harness
-        .execute(vec![
-            ("click_row_two", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
-            ("click_row_two_up", HarnessOp::send_and_settle(&panel, &release(30.0, 70.0))),
-        ])
-        .expect("host row click");
-    assert_list_phase(
-        "host click row 2",
-        &take_log_delta(&mut harness, panel, &mut cursor),
-        &[(Some("inventory"), Some("2"))],
-        &[(Some("inventory"), 2)],
         &[],
     );
 }

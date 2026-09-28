@@ -237,8 +237,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// type is looked up by tag (through the same export-set table the
     /// reconstruct arm walks, ADR-0114 §5) instead of monomorphized. So a
     /// spawner can hold specs carrying tags and stay non-generic over its
-    /// children, which is what lets the behavior host and the panel drop
-    /// their per-child-type generic / hand-written dispatch.
+    /// children, dropping the per-child-type generic / hand-written dispatch
+    /// a typed spawner would otherwise need.
     ///
     /// `config_bytes` are the selected type's `Config` encoded to its wire
     /// shape (empty for a `Config = ()` type); the resolver decodes them for

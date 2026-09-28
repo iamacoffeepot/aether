@@ -36,11 +36,6 @@ relative to `dist/`. `--no-bins` provides a wasm-only fast path. The command
 regenerates `dist/` rather than allowing stale artifacts to masquerade as the
 current manifest.
 
-Behavior scripts are discovered separately from components. A behavior script
-depends on `aether-behavior`, exposes a `cdylib`, and does not depend on
-`aether-actor`. Host-carrying component variants are also built separately so
-the ordinary component artifact is not forced to carry the behavior interpreter.
-
 ## Chassis binary inventory
 
 `xtask/src/inventory.rs` holds the one list of chassis binaries the workspace

@@ -51,9 +51,8 @@ pub struct Collect;
 /// `subname` and `type_namespace` — the spawned actor's `NAMESPACE` lineage
 /// string, the same address vocabulary lineage addressing speaks. Both are
 /// strings, not tags, because the observers this event serves (a debugger, an
-/// MCP agent, the behavior host's tree cache) read identity, not an opaque
-/// number. Not a kind on its own; only addressable inside
-/// [`ChildrenChanged::added`].
+/// MCP agent) read identity, not an opaque number. Not a kind on its own; only
+/// addressable inside [`ChildrenChanged::added`].
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MembershipEntry {
     pub subname: String,
@@ -67,8 +66,8 @@ pub struct MembershipEntry {
 /// chokepoints and drains them once per activation, so the initial spawn of a
 /// stack drains as one batched event carrying all N adds, and a later single
 /// despawn as one event with one `removed` entry. It is the discovery signal a
-/// lane observer (the behavior host's tree cache, a debugger) reads to know
-/// what a node contains and when that changed.
+/// lane observer (a debugger, an MCP agent) reads to know what a node contains
+/// and when that changed.
 #[aether_data::kind(name = "aether.widget.children_changed", eq)]
 pub struct ChildrenChanged {
     pub added: Vec<MembershipEntry>,
@@ -626,12 +625,6 @@ pub enum WidgetKind {
     TextField,
     /// A push button — `config` decodes as [`ButtonConfig`].
     Button,
-    /// A behavior-script host wrapping one stock widget (ADR-0137, issue
-    /// 2687) — `config` decodes as [`BehaviorHostSpec`] (the wrapped widget's
-    /// kind + config plus the script), and the panel spawns the host by tag
-    /// (`aether-behavior`'s `BehaviorHost`) instead of a widget. Only spawnable
-    /// under the widget crate's `behavior` feature; without it the slot is skipped.
-    BehaviorHost,
     /// A static image — `config` decodes as [`ImageConfig`]. Not focusable.
     /// Appended to preserve the established wire discriminants above.
     Image,
@@ -672,15 +665,11 @@ pub enum WidgetKind {
 impl WidgetKind {
     /// This stock widget's actor type tag — `hash(NAMESPACE)` of the widget
     /// actor `self` spawns, the same value `ActorTypeTag::of::<W>().0` would
-    /// produce for the concrete actor type. `None` for container/host variants
-    /// (`Composite`, `Scroll`, `BehaviorHost`), which are not stock leaves a
-    /// behavior host can wrap. The trunk-reachable producer for
-    /// `aether_behavior::host::ChildSpec::type_tag` when composing a
-    /// `HostConfig` directly, outside the widget crate's `WidgetKind::BehaviorHost`
-    /// spawn arm — the concrete widget actor types are `runtime`-gated and
-    /// not re-exported, so this computes each widget type's
-    /// `ActorId::singleton` from its namespace literal rather than naming
-    /// the types.
+    /// produce for the concrete actor type. `None` for container variants
+    /// (`Composite`, `Scroll`), which are not stock leaves. The concrete widget
+    /// actor types are `runtime`-gated and not re-exported, so this computes
+    /// each widget type's `ActorId::singleton` from its namespace literal
+    /// rather than naming the types.
     #[must_use]
     pub const fn type_tag(self) -> Option<u64> {
         let tag = match self {
@@ -698,53 +687,10 @@ impl WidgetKind {
             Self::Dropdown => aether_data::ActorId::singleton("aether.widget.dropdown").0,
             Self::TabStrip => aether_data::ActorId::singleton("aether.widget.tab_strip").0,
             Self::MenuBar => aether_data::ActorId::singleton("aether.widget.menu_bar").0,
-            Self::Composite | Self::Scroll | Self::BehaviorHost => return None,
+            Self::Composite | Self::Scroll => return None,
         };
         Some(tag)
     }
-}
-
-/// Where a wrapped host's script comes from — the widget crate's local mirror of
-/// `aether_behavior`'s `ScriptSource`, carried in a [`BehaviorHostSpec`] so the
-/// trunk (always compiled) names no `aether-behavior` type. The `behavior`
-/// arm maps it across.
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
-pub enum ScriptRef {
-    /// No script — the host runs wrapper-transparent until one is loaded.
-    #[default]
-    None,
-    /// The script's wasm bytes inline.
-    Inline(Vec<u8>),
-    /// Fetch the script from an `aether.fs` namespace at boot.
-    FsRef {
-        /// The `aether.fs` namespace prefix (`"save"`, `"assets"`, `"config"`).
-        namespace: String,
-        /// The path within the namespace.
-        path: String,
-    },
-}
-
-/// `aether.widget.behavior_host_spec` — the config bytes a [`WidgetChildSpec`]
-/// carries for a [`WidgetKind::BehaviorHost`] slot (issue 2687). It names the
-/// wrapped widget's kind + its own pre-encoded config (the same opaque bytes a
-/// direct widget slot would carry) plus the script and its fuel knobs. Not
-/// recursive — `wrapped` is a plain [`WidgetKind`] discriminant, and
-/// `WidgetKind::BehaviorHost` is a unit variant that references nothing back,
-/// so the `Schema` derive stays acyclic.
-#[aether_data::kind(name = "aether.widget.behavior_host_spec")]
-pub struct BehaviorHostSpec {
-    /// The stock widget the host interposes on.
-    pub wrapped: WidgetKind,
-    /// The wrapped widget's own config, pre-encoded (as a direct slot's
-    /// `config` would be).
-    #[serde(with = "aether_data::bytes")]
-    pub wrapped_config: Vec<u8>,
-    /// The behavior script.
-    pub script: ScriptRef,
-    /// Fuel budget per filter call (`0` ⇒ the host default).
-    pub fuel_per_call: u64,
-    /// Consecutive-trap disable threshold (`0` ⇒ the host default).
-    pub disable_after_traps: u32,
 }
 
 /// One child's placement in a compositing node's layout table. `subname`
@@ -2624,8 +2570,10 @@ mod tests {
     fn widget_kind_preserves_established_wire_discriminants() {
         // Tripwire: WidgetKind is nested in public configs and its encoded
         // variant index is the wire contract. Add variants at the end; never
-        // re-bless this golden when inserting a new kind.
-        let behavior_host = wire::to_vec(&WidgetKind::BehaviorHost).expect("encode BehaviorHost");
+        // re-bless this golden when inserting a new kind. The variant formerly
+        // at index 6 was removed in #6943, which renumbers every discriminant
+        // from `Image` on down by one — an intentional, one-time rebless of
+        // this golden alongside that removal.
         let image = wire::to_vec(&WidgetKind::Image).expect("encode Image");
         let text_area = wire::to_vec(&WidgetKind::TextArea).expect("encode TextArea");
         let scroll = wire::to_vec(&WidgetKind::Scroll).expect("encode Scroll");
@@ -2633,20 +2581,19 @@ mod tests {
         let toggle = wire::to_vec(&WidgetKind::Toggle).expect("encode Toggle");
         let segmented = wire::to_vec(&WidgetKind::Segmented).expect("encode Segmented");
         let numeric = wire::to_vec(&WidgetKind::Numeric).expect("encode Numeric");
-        assert_eq!(behavior_host.as_slice(), 6_u32.to_le_bytes());
-        assert_eq!(image.as_slice(), 7_u32.to_le_bytes());
-        assert_eq!(text_area.as_slice(), 8_u32.to_le_bytes());
-        assert_eq!(scroll.as_slice(), 9_u32.to_le_bytes());
-        assert_eq!(virtual_list.as_slice(), 10_u32.to_le_bytes());
-        assert_eq!(toggle.as_slice(), 11_u32.to_le_bytes());
-        assert_eq!(segmented.as_slice(), 12_u32.to_le_bytes());
-        assert_eq!(numeric.as_slice(), 13_u32.to_le_bytes());
+        assert_eq!(image.as_slice(), 6_u32.to_le_bytes());
+        assert_eq!(text_area.as_slice(), 7_u32.to_le_bytes());
+        assert_eq!(scroll.as_slice(), 8_u32.to_le_bytes());
+        assert_eq!(virtual_list.as_slice(), 9_u32.to_le_bytes());
+        assert_eq!(toggle.as_slice(), 10_u32.to_le_bytes());
+        assert_eq!(segmented.as_slice(), 11_u32.to_le_bytes());
+        assert_eq!(numeric.as_slice(), 12_u32.to_le_bytes());
         let dropdown = wire::to_vec(&WidgetKind::Dropdown).expect("encode Dropdown");
         let tab_strip = wire::to_vec(&WidgetKind::TabStrip).expect("encode TabStrip");
         let menu_bar = wire::to_vec(&WidgetKind::MenuBar).expect("encode MenuBar");
-        assert_eq!(dropdown.as_slice(), 14_u32.to_le_bytes());
-        assert_eq!(tab_strip.as_slice(), 15_u32.to_le_bytes());
-        assert_eq!(menu_bar.as_slice(), 16_u32.to_le_bytes());
+        assert_eq!(dropdown.as_slice(), 13_u32.to_le_bytes());
+        assert_eq!(tab_strip.as_slice(), 14_u32.to_le_bytes());
+        assert_eq!(menu_bar.as_slice(), 15_u32.to_le_bytes());
     }
 
     #[test]

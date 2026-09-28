@@ -14,7 +14,7 @@
 //! analysis runs, and a changed path matching no workspace package and no
 //! rule marks the whole workspace changed (determinator's built-in
 //! fallback). The couplings cargo's graph cannot see are injected
-//! structurally: a changed component or behavior crate pulls in
+//! structurally: a changed component crate pulls in
 //! the wasm-executing scenario suites, resolved through cargo's own
 //! dependency edges (the chassis-bundle coupling special case retired
 //! with that crate, #3816).

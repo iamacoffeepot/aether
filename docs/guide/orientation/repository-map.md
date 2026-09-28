@@ -7,7 +7,7 @@ as their responsibility requires.
 wire/schema/identity/math foundations                 aether-data, aether-codec, aether-math
 mail runtime, wasm host, scheduler, chassis traits    aether-substrate
 native services and their public mail contracts      aether-<capability> crates
-guest actor and behavior authoring SDKs               aether-actor, aether-behavior
+guest actor authoring SDK                             aether-actor
 process profiles, binaries, packaging     aether-chassis, aether-chassis-*
 operator bridge                                       aether-mcp
 test harnesses                                        aether-harness-*
@@ -40,13 +40,10 @@ put every new native message into `aether-kinds`.
 |---|---|
 | `aether-actor` | `Actor`/`WasmActor`, typed mailboxes, contexts, request/reply correlation, wasm exports |
 | `aether-actor-derive` | actor and handler code generation |
-| `aether-behavior` | compact behavior ABI, filter envelope, verdicts and effects |
-| `aether-behavior-derive` | behavior authoring macros |
 
 Use a component when code needs actor state, typed handlers, replies, or a
-first-class mailbox. Use a behavior when a small replaceable filter over mail
-is the right boundary. The [extension-point guide](../building/extension-points.md)
-compares these with native capabilities.
+first-class mailbox. The [extension-point guide](../building/extension-points.md)
+compares this with native capabilities.
 
 ## Runtime and process crates
 
@@ -117,8 +114,8 @@ expanded tests.
 
 Test-only packages are grouped by role rather than maintained here as an
 exhaustive crate ledger. `aether-test-fixtures-*` packages provide deliberately
-small wasm/native artifacts for replacement, capability-split, boot,
-multi-actor, and behavior contracts. `aether-subscribe-ui-tests` is the narrow
+small wasm/native artifacts for replacement, capability-split, boot, and
+multi-actor contracts. `aether-subscribe-ui-tests` is the narrow
 trybuild host for the publisher gate on the lifecycle and window subscribe
 surfaces. Derive crates also keep
 their compile-pass/fail fixtures beside the macro they exercise. These are

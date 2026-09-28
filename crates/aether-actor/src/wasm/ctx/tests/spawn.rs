@@ -116,11 +116,10 @@ fn spawn_inline_child_by_tag_spawns_matched_type_and_threads_config() {
 
 /// Issue 2789: a by-tag inline spawn records the **spawner** as the
 /// child's parent, not the cluster root — so a nested by-tag spawn (an
-/// inline child spawning its own child, e.g. the behavior host wrapping
-/// a widget) is reachable through the spawner's `ctx.child` /
-/// `ctx.parent`. The spawner's own id (`0x5AFE`) is set distinct from
-/// the cluster root (`0x1111`) so the assertion fails against the old
-/// `registry.self_id()` behavior. Owned logic: the by-tag spawn's
+/// inline child spawning its own child) is reachable through the spawner's
+/// `ctx.child` / `ctx.parent`. The spawner's own id (`0x5AFE`) is set
+/// distinct from the cluster root (`0x1111`) so the assertion fails against
+/// the old `registry.self_id()` behavior. Owned logic: the by-tag spawn's
 /// parent recording, mirroring the typed `spawn_inline_child` path.
 #[test]
 fn spawn_inline_child_by_tag_parents_to_the_spawner_not_the_root() {

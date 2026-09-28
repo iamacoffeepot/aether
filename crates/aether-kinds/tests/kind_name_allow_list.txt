@@ -5,7 +5,6 @@
 # here AND on an entry here that no longer violates, so a rename removes its
 # line and nothing can add one. Draining an entry means changing the kind's
 # `Kind::ID` — a per-family decision with a wire cost, not a drive-by edit.
-aether.behavior.host_config
 aether.draw_triangle
 aether.http.server.response
 aether.ime_preedit

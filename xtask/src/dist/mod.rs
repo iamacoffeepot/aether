@@ -24,10 +24,7 @@ use crate::cargo::{
 use crate::dist::cache::{BundleCache, CacheStatus};
 use crate::dist::freshness::BuildKey;
 use crate::dist::manifest::Manifest;
-use crate::inventory::{
-    Behavior, BehaviorVariant, BuildPlan, CHASSIS_BINS, Component, behavior_build_plans, build_plans,
-    discover_behavior_variants, discover_behaviors, discover_components,
-};
+use crate::inventory::{CHASSIS_BINS, Component, build_plans, discover_components};
 
 #[derive(Args)]
 pub struct DistArgs {
@@ -57,27 +54,16 @@ pub fn run(args: &DistArgs) -> Result<()> {
     if components.is_empty() {
         bail!("no wasm component crates discovered (cdylib target + aether-actor dep)");
     }
-    // Behavior-script fixtures (ADR-0137, issue 2688): cross-built alongside
-    // the components so the in-process scenario tests locate their wasm under
-    // `target/.../examples/`. They are not components (no `aether-actor`), so
-    // they ride their own discovery pass and are not copied into the dist
-    // component manifest — only built.
-    let behaviors = discover_behaviors(&metadata);
 
     let workspace_root = metadata.workspace_root.as_std_path();
     let target_dir = metadata.target_directory.as_std_path();
     let wasm_profile_dir = target_dir.join(WASM_TARGET).join(args.profile.as_str());
     let dist = workspace_root.join("dist");
 
-    let variants = discover_behavior_variants(&metadata);
     let host_profile_dir = target_dir.join(args.profile.as_str());
     let built_artifacts: Vec<PathBuf> = components
         .iter()
         .map(|component| wasm_artifact_path(&wasm_profile_dir, component))
-        .chain(variants.iter().map(|variant| wasm_profile_dir.join(format!("{}_behavior.wasm", variant.stem))))
-        .chain(
-            behaviors.iter().map(|behavior| wasm_profile_dir.join("examples").join(format!("{}.wasm", behavior.stem))),
-        )
         .chain(
             (!args.no_bins)
                 .then(|| CHASSIS_BINS.iter().map(|(_, bin)| host_profile_dir.join(host_binary_filename(bin))))
@@ -101,7 +87,7 @@ pub fn run(args: &DistArgs) -> Result<()> {
         resolve_bundle(key.as_ref(), bundle_cache.as_ref(), target_dir, &wasm_profile_dir, &built_artifacts);
     if !fresh {
         freshness::invalidate(&wasm_profile_dir);
-        build_bundle(args, &components, &behaviors, &variants, &wasm_profile_dir)?;
+        build_bundle(args, &components)?;
 
         if let Some(key) = key.as_ref() {
             freshness::record(key, &wasm_profile_dir);
@@ -161,10 +147,6 @@ pub fn run(args: &DistArgs) -> Result<()> {
         manifest.chassis.len(),
         manifest_path.display(),
     );
-    if !behaviors.is_empty() {
-        let stems: Vec<&str> = behaviors.iter().map(|b| b.stem.as_str()).collect();
-        println!("dist: {} behavior script(s) built into target/: {}", stems.len(), stems.join(", "));
-    }
     // Last, so a caller reading the captured stream takes the marker of the run
     // that actually decided the artifacts it is about to use.
     if let Some(status) = cache_status {
@@ -173,35 +155,12 @@ pub fn run(args: &DistArgs) -> Result<()> {
     Ok(())
 }
 
-/// Cross-build every component, behavior fixture and behavior-host variant, and
-/// the chassis binaries unless they were waived — the work a fresh key pays for.
-fn build_bundle(
-    args: &DistArgs,
-    components: &[Component],
-    behaviors: &[Behavior],
-    variants: &[BehaviorVariant],
-    wasm_profile_dir: &Path,
-) -> Result<()> {
-    // Build host-carrying variants FIRST (issue 2688): the feature build
-    // clobbers `<stem>.wasm`, so we copy it to `<stem>_behavior.wasm` and then
-    // let the stock component loop below rebuild `<stem>.wasm` lean. Only the
-    // behavior-host scenario loads the `_behavior` stem; every other widget
-    // consumer keeps the small stock wasm.
-    for variant in variants {
-        let plan = BuildPlan { package: variant.package.clone(), examples: false, features: variant.features.clone() };
-        build_component(&plan, args.profile)?;
-        let built = wasm_profile_dir.join(format!("{}.wasm", variant.stem));
-        let variant_stem = wasm_profile_dir.join(format!("{}_behavior.wasm", variant.stem));
-        fs::copy(&built, &variant_stem)
-            .with_context(|| format!("copy {} -> {}", built.display(), variant_stem.display()))?;
-    }
-
+/// Cross-build every component and the chassis binaries unless they were
+/// waived — the work a fresh key pays for.
+fn build_bundle(args: &DistArgs, components: &[Component]) -> Result<()> {
     // Build each component package in its own cargo invocation — never
     // batch multiple `-p`. See `inventory::build_plans`.
     for plan in build_plans(components) {
-        build_component(&plan, args.profile)?;
-    }
-    for plan in behavior_build_plans(behaviors) {
         build_component(&plan, args.profile)?;
     }
     if !args.no_bins {
@@ -252,7 +211,7 @@ fn resolve_bundle(
 mod tests {
     use std::collections::BTreeSet;
 
-    use crate::inventory::{discover_behaviors, discover_components};
+    use crate::inventory::discover_components;
 
     #[test]
     fn discovers_expected_component_set() {
@@ -289,36 +248,6 @@ mod tests {
         // crate does not depend on itself, so it fails the actor-dep gate.
         for excluded in ["hello", "input_logger"] {
             assert!(!stems.contains(excluded), "discovery wrongly included aether-actor example {excluded}");
-        }
-    }
-
-    #[test]
-    fn discovers_behavior_fixtures_and_excludes_components() {
-        let metadata = cargo_metadata::MetadataCommand::new().no_deps().exec().expect("run cargo metadata");
-        let behaviors = discover_behaviors(&metadata);
-        let stems: BTreeSet<&str> = behaviors.iter().map(|b| b.stem.as_str()).collect();
-
-        // The #2688 fixture crate's example cdylibs depend on `aether-behavior`
-        // and never `aether-actor`, so the behavior pass discovers each.
-        for expected in ["intercept_slider", "intercept_slider_v2", "trap_script"] {
-            assert!(stems.contains(expected), "behavior discovery dropped {expected}; found {stems:?}");
-        }
-
-        // The disjointness guard: `aether-widget` declares an optional
-        // `aether-behavior` dep (its `behavior` feature) AND an unconditional
-        // `aether-actor` dep, and `cargo metadata` lists optional deps — so a
-        // rule keyed on `aether-behavior` alone would sweep the widget crate in.
-        // The `aether-actor`-absence guard keeps it a component, not a behavior.
-        assert!(
-            !stems.contains("aether_widget"),
-            "the actor-absence guard must exclude aether-widget (a component) from behaviors; \
-             found {stems:?}",
-        );
-
-        // Every discovered behavior is an `[[example]]` cdylib, so no lib-cdylib
-        // special-casing on the build side.
-        for behavior in &behaviors {
-            assert!(behavior.from_example, "behavior {} is an [[example]] cdylib", behavior.stem);
         }
     }
 }

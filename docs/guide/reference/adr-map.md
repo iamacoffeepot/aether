@@ -35,7 +35,6 @@ rg -l 'HTTP server|settlement|component' docs/adr
 | Components and wasm hosting | ADR-0022 (**superseded by ADR-0038**), ADR-0033 | ADR-0096, ADR-0099 |
 | Instanced actors | ADR-0079 | ADR-0114, ADR-0138 |
 | Reply classes | ADR-0112 | ADR-0134 |
-| Behavior scripting | ADR-0137 | current `aether-behavior` code |
 | Capability-owned kinds | ADR-0121 | ADR-0122 marker/runtime split; current per-capability crates such as `crates/aether-audio`, `crates/aether-http`, and `crates/aether-component` |
 
 ## Scheduling, lifecycle, and evidence

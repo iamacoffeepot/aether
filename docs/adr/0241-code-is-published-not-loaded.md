@@ -333,7 +333,6 @@ links its code; the kind crates of ADR-0066 are where these markers live.
 ### Neutral
 
 - Generators stay a build concern; only their output sections are read.
-- ADR-0137 behavior scripts are not actors and keep their own `wasmi` path.
 
 ## Migration
 

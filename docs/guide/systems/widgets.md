@@ -2045,15 +2045,11 @@ stack), loads a font through `aether.text` and stamps the
 session `font_id` into its theme when `load_font_result` arrives, drives the
 collect/emit loop each frame, and routes input through `Focus`. Row height,
 initial state, and initial eligibility derive from each child's decoded config.
-A later `WidgetEligibilityChanged` from a child (or from a behavior host that
-forwarded its wrapped widget's event) updates that slot in place; the host
-slot is the attributed source, and wrapping does not make every child
-focusable. TextArea slots derive their height from `theme.row_height * rows.max(1)`.
-A `WidgetKind::BehaviorHost` derives the same spawn metadata from both its
-`wrapped` discriminator and opaque `wrapped_config`. A `WidgetKind::Scroll`
-row takes its width and height from its named viewport extent and also enters
-the panel's separate wheel-only hit table. Scroll widgets are wheel-only and
-have no pointer/Tab router of their own.
+A later `WidgetEligibilityChanged` from a child updates that slot in place.
+TextArea slots derive their height from `theme.row_height * rows.max(1)`.
+A `WidgetKind::Scroll` row takes its width and height from its named viewport
+extent and also enters the panel's separate wheel-only hit table. Scroll
+widgets are wheel-only and have no pointer/Tab router of their own.
 The vertical order follows the declared order, so what a panel
 contains is config data. Its
 value-up handlers are the seam: each attributes the event by

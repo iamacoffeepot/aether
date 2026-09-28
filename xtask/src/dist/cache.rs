@@ -544,9 +544,9 @@ mod tests {
 
     #[test]
     fn an_entry_missing_an_artifact_the_caller_needs_is_a_miss() {
-        // Tripwire: the artifact set moves — a new component crate, a new
-        // behavior fixture, the chassis bins that `--no-bins` drops. An entry
-        // published before the set grew carries fewer files than the caller
+        // Tripwire: the artifact set moves — a new component crate, the
+        // chassis bins that `--no-bins` drops. An entry published before the
+        // set grew carries fewer files than the caller
         // asks for, and serving it would leave the scenario tests looking for
         // wasm that was never restored.
         let root = temp_root("partial");

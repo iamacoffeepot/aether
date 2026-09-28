@@ -10,7 +10,7 @@ order.
 | If you are trying to… | Start here | Then read |
 |---|---|---|
 | Drive a running engine | [First engine session](first-engine-session.md) | [Operating an engine](../operating/index.md) |
-| Write a wasm actor | [Writing guest code](../writing-guest-code.md) | [Components](../systems/components.md) or [behaviors](../systems/behaviors.md) |
+| Write a wasm actor | [Writing guest code](../writing-guest-code.md) | [Components](../systems/components.md) |
 | Add a native service | [Choose an extension point](../building/extension-points.md) | [Capability anatomy](../capability-anatomy.md) |
 | Change mail or scheduling | [Actor model](../foundations/actor-model.md) | [Mail](../systems/mail-and-kinds.md), [concurrency](../systems/concurrency.md), and [scheduler](../systems/scheduler.md) |
 | Change a public capability | [Subsystem map](../systems.md) | The capability page and its owning ADRs |

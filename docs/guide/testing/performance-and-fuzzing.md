@@ -113,9 +113,8 @@ has a plausible performance effect.
 Use it to find a hot mailbox or handler before reaching for a broad benchmark.
 Then reproduce the mechanism in SubstrateHarness/perf with enough control to compare.
 
-Actor cost includes behavior-script work inside `BehaviorHost`; it is not a
-script-level profile. Network/device callbacks may spend time off dispatcher and
-need adapter-specific evidence too.
+Actor cost is a per-handler estimate, not a finer-grained profile. Network/device
+callbacks may spend time off dispatcher and need adapter-specific evidence too.
 
 ## Fuzzing
 

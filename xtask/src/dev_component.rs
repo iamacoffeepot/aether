@@ -138,11 +138,7 @@ pub fn run(args: &DevComponentArgs) -> Result<()> {
         .to_path_buf();
     let generated_target = metadata.target_directory.into_std_path_buf();
     let wasm_profile_dir = generated_target.join(WASM_TARGET).join(Profile::Debug.as_str());
-    let plan = BuildPlan {
-        package: component.package.clone(),
-        examples: component.from_example,
-        features: component.features.clone(),
-    };
+    let plan = BuildPlan { package: component.package.clone(), examples: component.from_example };
     let mut binding = args.address.as_ref().map(|address| LiveBinding { address: address.clone() });
     let runtime = RuntimeBuilder::new_multi_thread().enable_all().build().context("start async runtime")?;
 

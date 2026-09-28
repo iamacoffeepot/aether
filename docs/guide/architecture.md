@@ -67,7 +67,7 @@ project replies.
 | Layer | Main crates | Responsibility |
 |---|---|---|
 | Data/wire | `aether-data`, `aether-codec`, `aether-math`, `aether-kinds` | ids, schemas, canonical encoding, framing, shared vocabulary |
-| Guest SDK | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
+| Guest SDK | `aether-actor` and its derive crate | actor authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm host, settlement |
 | Native services | one `aether-<capability>` crate per cap | chassis resource actors and public capability kinds |
 | Process profiles | `aether-chassis` + `aether-chassis-*` | desktop/headless/hub/harness composition; the shippable package depot comes from `cargo xtask package` |

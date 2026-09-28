@@ -194,9 +194,6 @@ pub fn build_component(plan: &BuildPlan, profile: Profile) -> Result<()> {
     if plan.examples {
         cmd.arg("--examples");
     }
-    if !plan.features.is_empty() {
-        cmd.args(["--features", &plan.features.join(",")]);
-    }
     let label = if plan.examples {
         format!("{} (examples)", plan.package)
     } else {

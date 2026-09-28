@@ -1,12 +1,11 @@
 //! Named-export and replace-reconstruct coverage for the widget module's
 //! `export!` lists (issue 5538).
 //!
-//! Both the default and `behavior` wasm builds are grab-bag defaultless
-//! modules (ADR-0138). A type missing from `export!` cannot be loaded by
-//! `module@actor` selector, and ADR-0114 §5 reconstructs inline children
-//! from that same list — so a panel-spawned Dropdown, `TabStrip`, or `MenuBar`
-//! vanishes across `replace_component` even though typed spawn still works
-//! on a cold Tick.
+//! The widget wasm build is a grab-bag defaultless module (ADR-0138). A type
+//! missing from `export!` cannot be loaded by `module@actor` selector, and
+//! ADR-0114 §5 reconstructs inline children from that same list — so a
+//! panel-spawned Dropdown, `TabStrip`, or `MenuBar` vanishes across
+//! `replace_component` even though typed spawn still works on a cold Tick.
 //!
 //! Reconstruction assertions send input to the original child aliases
 //! *without* a post-replace Tick: `WidgetPanel` does not persist `spawned`,
@@ -17,7 +16,7 @@
 //!
 //! Skipped when the matching wasm has not been pre-built (`require_wasm`).
 //! CI sets `AETHER_REQUIRE_RUNTIME=1` to turn that skip into a hard failure.
-//! The parent builds `aether_widget` and `aether_widget_behavior`.
+//! The parent builds `aether_widget`.
 
 mod support;
 
@@ -44,7 +43,6 @@ use aether_widget::{
 use support::widget_caps;
 
 const DEFAULT_STEM: &str = "aether_widget";
-const BEHAVIOR_STEM: &str = "aether_widget_behavior";
 
 /// The window the injected input events name.
 fn test_window() -> aether_data::ErasedActorPath {
@@ -367,25 +365,9 @@ fn default_wasm_exports_the_seven_by_selector() {
 }
 
 #[test]
-fn behavior_wasm_exports_the_seven_by_selector() {
-    let Some(wasm) = wasm_or_skip(BEHAVIOR_STEM) else {
-        return;
-    };
-    assert_selectors(&wasm, BEHAVIOR_STEM);
-}
-
-#[test]
 fn default_wasm_reconstructs_panel_children_across_replace() {
     let Some(wasm) = wasm_or_skip(DEFAULT_STEM) else {
         return;
     };
     assert_panel_children_reconstruct(&wasm, DEFAULT_STEM);
-}
-
-#[test]
-fn behavior_wasm_reconstructs_panel_children_across_replace() {
-    let Some(wasm) = wasm_or_skip(BEHAVIOR_STEM) else {
-        return;
-    };
-    assert_panel_children_reconstruct(&wasm, BEHAVIOR_STEM);
 }

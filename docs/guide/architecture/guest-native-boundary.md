@@ -99,15 +99,6 @@ Choose a transform only when the operation is deterministic, bounded, and
 naturally value-to-value. Stateful ownership, I/O, scheduling, and replies
 belong in an actor.
 
-## Behaviors are a smaller guest boundary
-
-`aether-behavior` supports compact replaceable filters that consume an envelope
-and produce a verdict plus effects. They are useful when a full actor lifecycle
-and mailbox would be excess surface. Behaviors are hosted and replaced through
-their own runtime contract; they do not silently gain arbitrary native access.
-
-Read [Behaviors](../systems/behaviors.md) for the ABI and selection model.
-
 ## Replies carry lineage, not blocking calls
 
 Request/reply syntax does not turn actor mail into a synchronous function call.
@@ -144,7 +135,6 @@ example.
 - Guest SDK and exports: `crates/aether-actor/src/`
 - Wasm host: `crates/aether-substrate/src/actor/wasm/`
 - Capability types/runtimes: `crates/aether-<capability>/src/`
-- Behavior ABI: `crates/aether-behavior/src/`
 - ADR-0096: multi-actor wasm modules
 - ADR-0099: actor identity and addressing
 - ADR-0121 and ADR-0122: kind ownership and marker/runtime split
