@@ -1,4 +1,5 @@
-//! Bounded table of parked `WatchHead` replies (ADR-0226 decision 10).
+//! Bounded table of held `WatchHead` replies (ADR-0226 decision 10,
+//! ADR-0243).
 //!
 //! A watch whose `after` is already behind the head answers at once; the
 //! journal actor never parks it. Every other watch enters this table until
@@ -11,14 +12,17 @@ use std::collections::BTreeMap;
 use std::mem;
 
 use aether_bloomery_kinds::WatchHeadResult;
-use aether_substrate::actor::native::{DeferredReply, NativeCtx};
+use aether_substrate::actor::native::{Held, NativeCtx};
 
 use crate::MAX_HEAD_WATCHERS;
 
-/// Parked `WatchHead` replies, keyed by the exclusive sequence boundary
+/// Held `WatchHead` replies, keyed by the exclusive sequence boundary
 /// they are waiting to pass.
+///
+/// Actor close settles the held entries before the state drops, so a
+/// ticket still parked here at close drops silently.
 pub struct Watchers {
-    by_after: BTreeMap<u64, Vec<DeferredReply>>,
+    by_after: BTreeMap<u64, Vec<Held<WatchHeadResult>>>,
     count: usize,
 }
 
@@ -28,17 +32,17 @@ impl Watchers {
         Self { by_after: BTreeMap::new(), count: 0 }
     }
 
-    /// Park `owed` under `after`, refusing when the table already holds
-    /// [`MAX_HEAD_WATCHERS`] entries.
+    /// Park the held reply `held` under `after`, refusing when the table
+    /// already holds [`MAX_HEAD_WATCHERS`] entries.
     ///
-    /// On refusal `owed` is handed back so the caller can still answer it
-    /// exactly once; the table never drops an owed reply.
-    pub fn park(&mut self, after: u64, owed: DeferredReply) -> Result<(), DeferredReply> {
+    /// On refusal `held` is handed back so the caller can still answer it
+    /// exactly once; the table never drops a held reply.
+    pub fn park(&mut self, after: u64, held: Held<WatchHeadResult>) -> Result<(), Held<WatchHeadResult>> {
         if self.count >= MAX_HEAD_WATCHERS {
-            return Err(owed);
+            return Err(held);
         }
 
-        self.by_after.entry(after).or_default().push(owed);
+        self.by_after.entry(after).or_default().push(held);
         self.count += 1;
         Ok(())
     }
@@ -53,20 +57,10 @@ impl Watchers {
         let remaining = self.by_after.split_off(&head);
         let passed = mem::replace(&mut self.by_after, remaining);
 
-        for (_, owed) in passed {
-            for reply in owed {
+        for (_, held) in passed {
+            for reply in held {
                 self.count -= 1;
-                reply.reply(ctx, &WatchHeadResult::Advanced { head });
-            }
-        }
-    }
-}
-
-impl Drop for Watchers {
-    fn drop(&mut self) {
-        for (_, owed) in mem::take(&mut self.by_after) {
-            for reply in owed {
-                reply.abandon_for_actor_close();
+                reply.answer(ctx, &WatchHeadResult::Advanced { head });
             }
         }
     }

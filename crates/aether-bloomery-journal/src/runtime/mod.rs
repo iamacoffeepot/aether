@@ -89,7 +89,7 @@ pub use store::{ArtifactBatch, ArtifactStore, BlobFile, VerifiedBlob};
 
 use std::ops::Range;
 
-use aether_actor::{Manual, runtime};
+use aether_actor::runtime;
 use aether_bloomery_kinds::{
     AppendRecords, AppendRecordsResult, ClosureArtifact, ClosureLimit, DriverRecord, JournalEntry, MoveHead,
     MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult,
@@ -340,35 +340,29 @@ impl NativeActor for JournalActor {
     }
 
     /// Long-poll watch on the head (ADR-0226 decision 10): answered at once
-    /// when the head is already past `after`, otherwise parked until
-    /// [`JournalActorState::commit`] wakes it.
-    #[handler::manual]
-    fn on_watch_head(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, aether_substrate::Erased, Manual>,
-        request: WatchHead,
-    ) {
-        let owed = ctx.defer_reply_to(ctx.reply_target());
+    /// when the head is already past `after`, otherwise held until
+    /// [`JournalActorState::commit`] wakes it. Every path answers through
+    /// the one held ticket, so the row is `WatchHeadResult` (ADR-0243 §2).
+    #[handler::single]
+    fn on_watch_head(state: &mut Self::State, ctx: &mut NativeCtx<'_>, request: WatchHead) -> Pending<WatchHeadResult> {
+        let (pending, held) = ctx.hold::<WatchHeadResult>();
 
-        let head = match state.journal.head() {
-            Ok(head) => head,
-            Err(error) => {
-                owed.reply(ctx, &WatchHeadResult::Err { message: error.to_string() });
-                return;
+        match state.journal.head() {
+            Err(error) => held.answer(ctx, &WatchHeadResult::Err { message: error.to_string() }),
+            Ok(current) if current.0 > request.after => {
+                held.answer(ctx, &WatchHeadResult::Advanced { head: current.0 });
             }
-        };
-
-        if head.0 > request.after {
-            owed.reply(ctx, &WatchHeadResult::Advanced { head: head.0 });
-            return;
+            Ok(_) => {
+                if let Err(held) = state.watchers.park(request.after, held) {
+                    held.answer(
+                        ctx,
+                        &WatchHeadResult::Err { message: format!("watcher table is full (max {MAX_HEAD_WATCHERS})") },
+                    );
+                }
+            }
         }
 
-        if let Err(owed) = state.watchers.park(request.after, owed) {
-            owed.reply(
-                ctx,
-                &WatchHeadResult::Err { message: format!("watcher table is full (max {MAX_HEAD_WATCHERS})") },
-            );
-        }
+        pending
     }
 }
 

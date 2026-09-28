@@ -6,9 +6,9 @@ use aether_component::ComponentHostCapability;
 use aether_data::{ActorMail, Kind};
 use aether_http::HttpCapability;
 use aether_kinds::LoadComponent;
-use aether_substrate::actor::native::{DeferredReply, NativeCtx};
+use aether_substrate::actor::native::NativeCtx;
 
-use super::{BundleDriverState, CallerId, Command};
+use super::{BundleDriverState, Caller, CallerId, Command};
 
 impl BundleDriverState {
     /// Perform each [`Command`] in order, then return.
@@ -18,7 +18,7 @@ impl BundleDriverState {
     /// to the reference the digest's load reply was stamped with, a program's
     /// relayed `Http` call goes to the http capability and its `Workspace` call
     /// to the held workspace reference, and answers, fetch answers, and API
-    /// answers release the parked reply. Every send carries its ticket as the request
+    /// answers release the held reply. Every send carries its ticket as the request
     /// context, so the reply routes back to the core continuation that issued
     /// it. The head watch rides a fresh chain: the journal parks it until the
     /// head moves, and the chain that happens to re-arm it did not cause the
@@ -61,34 +61,34 @@ impl BundleDriverState {
                 Command::Warm { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, ticket),
                 Command::Evaluate { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, ticket),
                 Command::QueryStatus { ticket, bundle } => self.send_to_root(ctx, bundle, &StatusQuery, ticket),
-                Command::Answer { caller, outcome } => {
-                    // A second answer for one caller drops: the caller already
-                    // holds its exactly-once outcome, so no reply is owed.
-                    if let Some(owed) = self.take_parked(caller) {
-                        owed.reply(ctx, &outcome);
-                    }
-                }
-                Command::Processed { caller, reply } => {
-                    if let Some(owed) = self.take_parked(caller) {
-                        owed.reply(ctx, &reply);
-                    }
-                }
-                Command::Fetched { caller, result } => {
-                    if let Some(owed) = self.take_parked(caller) {
-                        owed.reply(ctx, &result);
-                    }
-                }
+                // A second answer for one caller drops: the caller already
+                // holds its exactly-once outcome, so no reply is owed.
+                Command::Answer { caller, outcome } => match self.callers.remove(&caller) {
+                    Some(Caller::Call(held)) => held.answer(ctx, &outcome),
+                    Some(_) => owed_other(ctx, caller, "CallOutcome"),
+                    None => {}
+                },
+                Command::Processed { caller, reply } => match self.callers.remove(&caller) {
+                    Some(Caller::Processed(held)) => held.answer(ctx, &reply),
+                    Some(_) => owed_other(ctx, caller, "Processed"),
+                    None => {}
+                },
+                Command::Fetched { caller, result } => match self.callers.remove(&caller) {
+                    Some(Caller::Fetched(held)) => held.answer(ctx, &result),
+                    Some(_) => owed_other(ctx, caller, "ReadArtifactResult"),
+                    None => {}
+                },
                 Command::Fetch { ticket, request } => {
                     let _ = ctx.send_with_context::<HttpCapability>(&request, ticket);
                 }
                 Command::RunWorkspace { ticket, request } => {
                     let _ = ctx.send_to_with_context(self.workspace, &request, ticket);
                 }
-                Command::ApiAnswered { caller, result } => {
-                    if let Some(owed) = self.take_parked(caller) {
-                        owed.reply(ctx, &result);
-                    }
-                }
+                Command::ApiAnswered { caller, result } => match self.callers.remove(&caller) {
+                    Some(Caller::Api(held)) => held.answer(ctx, &result),
+                    Some(_) => owed_other(ctx, caller, "ApiCallResult"),
+                    None => {}
+                },
                 Command::Abort { reason } => ctx.fatal_abort(reason),
             }
         }
@@ -109,9 +109,12 @@ impl BundleDriverState {
         };
         let _ = ctx.send_to_with_context(root, request, ticket);
     }
+}
 
-    /// Take the parked reply tagged with `caller`, if one is still parked.
-    fn take_parked(&mut self, caller: CallerId) -> Option<DeferredReply> {
-        self.callers.remove(&caller)
-    }
+/// The core answered `caller` with a `reply` kind that caller's held ticket
+/// does not owe: the core addressed the wrong kind of caller, a broken
+/// invariant that aborts (ADR-0063). The removed ticket drops silently
+/// during the unwind.
+fn owed_other<M: ReplyMode, A>(ctx: &NativeCtx<'_, A, M>, caller: CallerId, reply: &str) -> ! {
+    ctx.fatal_abort(format!("the core answered caller {caller:?} with a {reply} it does not owe"))
 }
