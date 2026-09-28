@@ -3,8 +3,8 @@
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx, recording_target};
 use crate::model::ctx::{Erased, Manual};
-use crate::model::{Addressable, Embedded, HandlesKind};
-use crate::reference::{ActorRef, ErasedActorRef};
+use crate::model::{Addressable, Embedded, HandlesKind, Protocol, Row, Silent};
+use crate::reference::{ActorRef, ErasedActorRef, ProtocolRef};
 use crate::wasm::inline::{ChildRecord, drain_cluster_queue};
 use alloc::string::String;
 
@@ -16,6 +16,14 @@ impl Addressable for SendsPeer {
 }
 
 impl HandlesKind<()> for SendsPeer {}
+
+/// A one-row protocol listing the unit kind, so a [`ProtocolRef`] to it is a
+/// target the guest verbs take at an inferred row index.
+struct UnitRow;
+
+impl Protocol for UnitRow {
+    type Rows = (Row<(), Silent>,);
+}
 
 /// Tripwire: `Sends` carries its own copy of the routing every `WasmCtx` send
 /// verb performs, so the two can drift. A view that stamped a different `from`,
@@ -99,5 +107,12 @@ fn send_to_sends_through_a_proven_reference_on_ctx_and_view() {
     ctx.sends().send_to(borrowed, &());
     drain_to_members(&registry, "the view send_to through a borrowed reference");
     assert_eq!(probe.dispatches.get(), 2, "the view's send_to through the reference reaches the same id");
+    assert_eq!(probe.source.get(), Some(root), "and stamps the same source");
+
+    let lane = ProtocolRef::<UnitRow>::new(target);
+    ctx.send_to(lane, &());
+    ctx.sends().send_to(lane, &());
+    drain_to_members(&registry, "the send_to legs through a protocol reference");
+    assert_eq!(probe.dispatches.get(), 4, "a protocol reference reaches the id it proves on the ctx and the view");
     assert_eq!(probe.source.get(), Some(root), "and stamps the same source");
 }

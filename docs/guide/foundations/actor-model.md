@@ -537,6 +537,14 @@ native throughout, uses one authoring shape throughout, does not nest, and an
 actor adopts at most one — a family that outgrows one set wants a second set,
 not a chain.
 
+A set's handlers are contract rows of each adopter too, at positions past the
+adopter's own, so an adopter covers a protocol that lists a set kind
+(ADR-0231 §2). The rows travel through a bridge macro the set emits and the
+adopter's `#[actor]` expands in the adopter's own module, so a set spells its
+kind types with paths that resolve from every adopter (`crate::WidgetFrame`),
+and a wasm set, whose bridge is crate-local, is adopted within the crate that
+defines it.
+
 A native capability adopts a set the same way, with two differences that follow
 from how native actors are authored. Handlers are written against `NativeCtx`,
 and a capability with a `type State` writes them in the split shape — the state
@@ -863,7 +871,10 @@ rather than by Rust type, so the parent is named at the call and the SDK checks 
 against the ctx's registry-backed actor tag before allocating the child's alias;
 writing a different parent type earns an error rather than bypassing the declared
 edge. Either hands back an `InlineChild<Panel>`, whose `send` is checked against
-`Panel`'s handler set. A component spawns within the
+`Panel`'s handler set. A parent keeping children of several types in one table
+narrows each handle with `narrow::<P>()` to a `ProtocolRef<P>` for a protocol the
+child covers, which compiles only where it does (ADR-0231 §3), and keeps the
+erased `erase()` reference as the table's identity key. A component spawns within the
 module it was built from; a foreign module comes in through `load_component`, which
 carries its own code and kinds — the boundary is covered in
 [Components & lifecycle](../systems/components.md).

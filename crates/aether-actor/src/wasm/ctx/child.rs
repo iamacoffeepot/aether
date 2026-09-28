@@ -13,8 +13,8 @@ use aether_data::{ActorMail, MailboxId};
 
 use super::{ActorTypeTag, WasmCtx};
 use crate::model::ctx::reply_mode::ReplyMode;
-use crate::model::{Addressable, HandlesKind};
-use crate::reference::ErasedActorRef;
+use crate::model::{Addressable, CoveredBy, HandlesKind};
+use crate::reference::{ErasedActorRef, ProtocolRef};
 
 /// A typed sendable handle to an inline child of type `C` — what
 /// [`WasmCtx::spawn_inline_child`] hands back, and what
@@ -28,11 +28,12 @@ use crate::reference::ErasedActorRef;
 /// instead of a substrate warn-drop — or, for a child with a `#[fallback]`,
 /// instead of nothing at all.
 ///
-/// A parent keeping children of several types erases the handle with
-/// [`Self::erase`] and keeps the [`ErasedActorRef`] it yields — still a proof,
-/// minus the type, and what a send or `despawn_inline_child` takes.
-/// [`Self::id`] remains as the key for a registry lookup, never as a send or
-/// despawn target: every by-id send takes a proof.
+/// A parent keeping children of several types narrows the handle with
+/// [`Self::narrow`] to a [`ProtocolRef<P>`] for each protocol the child covers,
+/// and sends through those. [`Self::erase`] yields the [`ErasedActorRef`] a
+/// table compares by and `despawn_inline_child` takes — still a proof, minus
+/// the type. [`Self::id`] remains as the key for a registry lookup, never as a
+/// send or despawn target: every by-id send takes a proof.
 pub struct InlineChild<C> {
     id: MailboxId,
     /// `fn() -> C` rather than `C`: the handle owns no child state, so it must
@@ -87,17 +88,30 @@ impl<C: Addressable> InlineChild<C> {
     }
 
     /// This child as an [`ErasedActorRef`] — the ADR-0230 §3 spawn-result door
-    /// for a heterogeneous child set. A parent keeping children of several
-    /// types keeps proofs, not positions: the erased reference drops `C` but
-    /// keeps the fact that the spawn registered the child, so it is a valid
-    /// target for [`WasmCtx::send_to`] and a key for a table of children.
+    /// for a heterogeneous child set's identity. The erased reference drops
+    /// `C` but keeps the fact that the spawn registered the child, so it is
+    /// the key a table of children compares, monitors, and purges by
+    /// (ADR-0231 §4) and what `despawn_inline_child` takes. A parent that
+    /// sends to the child sends through [`Self::send`] or a reference
+    /// [`Self::narrow`] yields instead.
     ///
-    /// Consumed by [`Self::send`] above, by `aether-widget`'s panel spawn,
-    /// and by its composite node's spawn. The *reference* erasure: unrelated
-    /// to the ctx reply-mode `erase()` the native `#[actor]` expansion emits.
+    /// Consumed by [`Self::send`] above, by `aether-widget`'s lane keys, and
+    /// by its composite node's spawn. The *reference* erasure: unrelated to
+    /// the ctx reply-mode `erase()` the native `#[actor]` expansion emits.
     #[must_use]
     pub const fn erase(self) -> ErasedActorRef {
         ErasedActorRef::new(self.id)
+    }
+
+    /// This child under a protocol it covers, as a [`ProtocolRef<P>`] — the
+    /// spawn-result sibling of [`ActorRef::narrow`](crate::ActorRef::narrow)
+    /// (ADR-0231 §3). Compiles only for `P: CoveredBy<C>`, the sealed coverage
+    /// check over `C`'s contract rows (ADR-0231 §2), so a parent keeping
+    /// children of several types keeps, per child, a reference that sends only
+    /// the kinds that child handles. A copy of the proof: no registry is read.
+    #[must_use]
+    pub const fn narrow<P: CoveredBy<C>>(self) -> ProtocolRef<P> {
+        ProtocolRef::new(self.id)
     }
 
     /// This child's alias [`MailboxId`] — the key a registry lookup takes. A

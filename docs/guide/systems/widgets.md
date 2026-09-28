@@ -1689,9 +1689,9 @@ and a child that missed a release while unfocused does not keep a stale chord:
 let focusable = self.focus.focus_hit_test(press.x, press.y);
 if let Some(transition) = self.focus.set_focus(focusable) {
     // FocusLost to `previous`, then FocusGained plus the panel's cached
-    // modifiers to `next`. `false`: this focus came from a press, so the
-    // child it lands on must not draw a ring.
-    apply_focus(ctx, transition, false, self.modifiers);
+    // modifiers to `next`, each through the child's lane. `false`: this focus
+    // came from a press, so the child it lands on must not draw a ring.
+    self.apply_focus(&mut ctx.sends(), transition, false);
 }
 ```
 
@@ -2065,12 +2065,48 @@ and an unknown widget a compile error rather than a runtime warn-drop. So a
 its own widget in a tree writes its **own root** rather than configuring this
 one, and the pieces a root is made of are public for exactly that:
 `panel::spawn_widget_child` spawns one child and reports back the
-`SpawnedChild` metadata (id, reported extents, eligibility, state, the scroll
-strip it wants) a root needs to place and route it; `ChildLayout` says whether
+`SpawnedChild` a root needs to place and route it — its `WidgetLanes` and a
+`ChildProfile` of reported extents, eligibility, state, and the scroll strip it
+wants; `ChildLayout` says whether
 the slot is a panel row or a content extent; `content_frame` takes the clear
 column a host-owned scroll bar stands in out of an assigned rectangle. Adding a
 variant to `WidgetKind` is a change to this crate, and the stock set is
 deliberately what the widget crate itself can draw.
+
+### How the panel holds its children
+
+The panel never holds a child as an unchecked reference. Each spawn is narrowed
+at once, by `InlineChild::narrow`, to one `ProtocolRef` per *lane* the child's
+type covers (ADR-0231 §3), and those lanes, as `WidgetLanes`, are what the panel
+sends through. A lane groups the kinds the panel routes that the same widget
+types handle, so the narrowing compiles only where the type really has those
+handlers, and a child without a lane is skipped rather than mailed a kind it
+would warn-drop:
+
+| Lane | Kinds | Covered by |
+|---|---|---|
+| `WidgetSlot` | `Collect` | every spawnable widget |
+| `WidgetStyled` | `WidgetFrame`, `SetTheme` | every one but the compositing `Widget` |
+| `WidgetHover` | `HoverGained`, `HoverLost` | the label and the `WidgetDefaults` adopters |
+| `WidgetControl` | `FocusGained`, `FocusLost`, `MouseButton`, `MouseButtonRelease`, `Key` | the `WidgetDefaults` adopters |
+| `WidgetMotion` | `MouseMove` | the adopters but button, radio, and toggle |
+| `WidgetWheel` | `MouseWheel` | the virtual list and the scroll container |
+| `WidgetKeyRelease` | `KeyRelease` | button, dropdown, and toggle |
+| `WidgetTextEntry` | `TextInput`, `ImePreedit`, `Modifiers` | text field, text area, and numeric |
+
+The routing tables stay keyed by identity. `Focus`, `Composite`, and the layout
+rows hold each child's `WidgetLanes::key`, an erased reference they compare,
+monitor, and purge by and never send through (ADR-0231 §4). A routing decision
+returns a key; the panel looks up that key's lanes and sends through the lane
+the event needs. So a press reaches a focused control through its control
+lane, typed text reaches only a child with a text-entry lane, and the modifier
+chord that accompanies a focus gain is primed only where a text-entry lane
+caches it.
+
+A root that forks the panel keeps that shape. A widget type it spawns
+implements `WidgetLaneSet`, which names the lanes the type covers; the trait is
+sealed to this crate, so a new stock widget adds its impl in `lanes.rs` beside
+its siblings, and a lane it claims but does not cover is a compile error there.
 
 Inline children are externally addressable by lineage. Keep the exact root
 `name` returned by `load_component`, then append
@@ -2127,7 +2163,8 @@ configs.
 
 To add a new widget — a dropdown, a checkbox, a color well — write one more
 `#[actor(instanced)]` type that speaks the same state/interaction lanes and answers `Collect`
-with a `WidgetDrawList`, then spawn it into a panel's stack. The focus model and
+with a `WidgetDrawList`, name the lanes it covers with a `WidgetLaneSet` impl,
+then spawn it into a panel's stack. The focus model and
 the draw protocol carry it with no new machinery.
 
 ## Plates, rings, and knobs are shapes

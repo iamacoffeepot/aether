@@ -19,15 +19,17 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// Issue 1987: send `payload` through a held reference, threading this
     /// actor's own id as the send's `from` (ADR-0232 §1). The target is a
     /// [`Target`]: an [`ActorRef<R>`](crate::ActorRef) is kind-checked, so the
-    /// send compiles only when `R` handles `K`, and an [`ErasedActorRef`] is
-    /// not. The erased proof for a recipient known only at runtime is one a
+    /// send compiles only when `R` handles `K`, a
+    /// [`ProtocolRef<P>`](crate::ProtocolRef) only for a kind `P` lists (its
+    /// row index `I` inferred), and an [`ErasedActorRef`] is not checked. The
+    /// erased proof for a recipient known only at runtime is one a
     /// spawn ([`InlineChild::erase`](super::InlineChild::erase),
     /// [`Self::spawn_inline_child_by_tag`]), a `child_as` / `sibling_as`
     /// lookup, or [`Self::sender`] produced — never a computed position
     /// (ADR-0230). There is no by-name counterpart, because text is not a
     /// proof. Routes through the inline registry and inherits the handler's
     /// causal chain like every ctx send.
-    pub fn send_to<K: ActorMail>(&mut self, target: impl Target<K>, payload: &K) {
+    pub fn send_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
         self.push(target.erased(), payload, ChainMode::Inherit);
     }
 

@@ -82,8 +82,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
 impl<A> Sends<'_, A> {
     /// Send `payload` through a held reference, inheriting the handler's
     /// causal chain. Identical to [`WasmCtx::send_to`]: an [`ActorRef<R>`](crate::ActorRef) is
-    /// kind-checked against `K` and an [`ErasedActorRef`] is not.
-    pub fn send_to<K: ActorMail>(&mut self, target: impl Target<K>, payload: &K) {
+    /// kind-checked against `K`, a [`ProtocolRef<P>`](crate::ProtocolRef) against the kinds `P`
+    /// lists, and an [`ErasedActorRef`] is not checked.
+    pub fn send_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
         self.route::<K>(target.erased().id().0, encode_guest(payload), 1, ChainMode::Inherit);
     }
 

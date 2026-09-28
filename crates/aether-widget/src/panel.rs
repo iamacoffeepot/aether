@@ -50,8 +50,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, Sends,
-    Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Addressable, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, ReplyMode,
+    Sends, Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
 use aether_kinds::keycode::KEY_TAB;
@@ -69,6 +69,7 @@ use crate::composite::Composite;
 use crate::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
+use crate::lanes::{WidgetLaneSet, WidgetLanes};
 use crate::layout::{Cell, Column, Row};
 use crate::set::{
     ButtonWidget, DropdownWidget, ImageWidget, LabelWidget, MenuBarWidget, NumericWidget, RadioGroupWidget,
@@ -89,11 +90,11 @@ use crate::{
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
 
-/// One spawned child's proof plus the logical name the panel attributes its
+/// One spawned child's lanes plus the logical name the panel attributes its
 /// value-up events under (for the map-editor translation / logging) — the
 /// child's spec subname.
 struct ChildRef {
-    reference: ErasedActorRef,
+    lanes: WidgetLanes,
     name: String,
 }
 
@@ -119,8 +120,17 @@ impl ChildLayout {
     }
 }
 
+/// One spawned child as its host holds it: the lanes it is sent through, and
+/// the profile its host places and routes it by.
 pub struct SpawnedChild {
-    pub reference: ErasedActorRef,
+    pub lanes: WidgetLanes,
+    pub profile: ChildProfile,
+}
+
+/// What a host needs to place and route one spawned child, apart from the
+/// lanes it sends through: its size, its eligibility for pointer, keyboard,
+/// and wheel input, and its type's namespace for the membership record.
+pub struct ChildProfile {
     pub width_pixels: Option<f32>,
     pub height_pixels: f32,
     pub pointer_eligible: bool,
@@ -141,6 +151,25 @@ pub struct SpawnedChild {
     /// scroll viewport does, which is what keeps a drag capture from stealing
     /// a wheel gesture.
     pub wheel_eligible: bool,
+}
+
+impl ChildProfile {
+    /// The profile of a `C` laid out as one full-width row of `height_pixels`
+    /// that draws only inside its frame and does not scroll itself: every stock
+    /// control but the virtual list, the composite, and the scroll container.
+    fn row<C: Addressable>(height_pixels: f32, eligibility: FocusEligibility, state: WidgetControlState) -> Self {
+        Self {
+            width_pixels: None,
+            height_pixels,
+            pointer_eligible: eligibility.pointer,
+            focusable: eligibility.keyboard,
+            state,
+            type_namespace: C::NAMESPACE,
+            scroll_viewport: None,
+            host_scroll_strip_units: None,
+            wheel_eligible: false,
+        }
+    }
 }
 
 struct VirtualListProfile {
@@ -182,7 +211,7 @@ impl WidgetPanel {
     /// the spec is ignored — the panel owns layout). Each widget gets its rect
     /// in both the composite layout table and the focus table, and its
     /// `WidgetFrame`. An empty child list falls back to [`reference_stack`].
-    fn ensure_spawned<A: SpawnsWidgets>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn ensure_spawned<A: SpawnsWidgets, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
         if self.spawned {
             return;
         }
@@ -238,50 +267,57 @@ impl WidgetPanel {
     /// inside the panel, and the clip — which was already the assigned
     /// rectangle — reaches across it, where a track drawn past the full width
     /// would have been clipped away with a press over it reaching nothing.
-    fn place<A>(
+    fn place<A, M: ReplyMode>(
         &mut self,
-        ctx: &mut WasmCtx<'_, A, Manual>,
+        ctx: &mut WasmCtx<'_, A, M>,
         child: &SpawnedChild,
         assigned: WidgetFrame,
         name: String,
     ) {
-        let frame = content_frame(&assigned, self.scroll_strip_pixels(child));
+        let SpawnedChild { lanes, profile } = child;
+        let key = lanes.key();
+        let frame = content_frame(&assigned, self.scroll_strip_pixels(profile));
         let focus_rect = FocusRect { x: assigned.x, y: assigned.y, width: assigned.width, height: assigned.height };
         self.composite.register_slot(
-            child.reference,
+            key,
             Vec2::new(assigned.x, assigned.y),
             Some(WidgetClipRect { x: assigned.x, y: assigned.y, width: assigned.width, height: assigned.height }),
             &name,
-            child.type_namespace,
+            profile.type_namespace,
         );
         self.focus.register(
-            child.reference,
+            key,
             focus_rect,
-            FocusEligibility { pointer: child.pointer_eligible, keyboard: child.focusable },
-            &child.state,
+            FocusEligibility { pointer: profile.pointer_eligible, keyboard: profile.focusable },
+            &profile.state,
         );
-        if child.scroll_viewport.is_some() || child.wheel_eligible {
+        if profile.scroll_viewport.is_some() || profile.wheel_eligible {
             self.scroll_focus.register(
-                child.reference,
+                key,
                 focus_rect,
                 FocusEligibility { pointer: true, keyboard: false },
                 &WidgetControlState::default(),
             );
         }
-        ctx.send_to(child.reference, &frame);
-        self.children.push(ChildRef { reference: child.reference, name });
+        if let Some(styled) = lanes.styled {
+            ctx.send_to(styled, &frame);
+        }
+        self.children.push(ChildRef { lanes: *lanes, name });
     }
 
     /// How wide a column this child's scroll bar stands in beside its rows,
     /// in the panel's own live theme — the theme the panel fans down to every
     /// child, so the column it reserves is the one the child draws in.
-    fn scroll_strip_pixels(&self, child: &SpawnedChild) -> f32 {
+    fn scroll_strip_pixels(&self, child: &ChildProfile) -> f32 {
         child.host_scroll_strip_units.map_or(0.0, |units| VirtualListConfig::host_strip_width(units, &self.theme))
     }
 
     /// Discharge a closed frame: flatten the composite and emit it from the
     /// panel's single render + text sender.
-    fn finish<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn finish<A: DependsOn<RenderCapability> + DependsOn<TextCapability>, M: ReplyMode>(
+        &mut self,
+        ctx: &mut WasmCtx<'_, A, M>,
+    ) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -292,15 +328,15 @@ impl WidgetPanel {
     }
 
     /// Re-fan the live theme to every child (after a font stamp or a restyle).
-    fn fan_theme<A, M: aether_actor::ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>) {
-        for child in &self.children {
-            ctx.send_to(child.reference, &SetTheme { theme: self.theme.clone() });
+    fn fan_theme<A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>) {
+        for styled in self.children.iter().filter_map(|child| child.lanes.styled) {
+            ctx.send_to(styled, &SetTheme { theme: self.theme.clone() });
         }
     }
 
     /// Adopt a live style change now, and either fan it immediately or keep it
     /// until the first successful spawn so the FIFO drain applies it before Collect.
-    fn retain_or_fan_theme<A, M: aether_actor::ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
+    fn retain_or_fan_theme<A, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
         if self.spawned {
             self.fan_theme(ctx);
             self.pending_style = false;
@@ -312,9 +348,67 @@ impl WidgetPanel {
     /// The logical name of the child a value-up event came from, for
     /// attribution.
     fn child_name(&self, source: Option<ErasedActorRef>) -> &str {
-        source
-            .and_then(|source| self.children.iter().find(|child| child.reference == source))
-            .map_or("unknown", |child| child.name.as_str())
+        source.and_then(|source| self.child(source)).map_or("unknown", |child| child.name.as_str())
+    }
+
+    /// The child whose key is `key`: the lookup from a routing table's answer
+    /// to the child it names.
+    fn child(&self, key: ErasedActorRef) -> Option<&ChildRef> {
+        self.children.iter().find(|child| child.lanes.key() == key)
+    }
+
+    /// The lanes of the child whose key is `key`, to send it what a routing
+    /// decision chose it for.
+    fn lanes(&self, key: ErasedActorRef) -> Option<WidgetLanes> {
+        self.child(key).map(|child| child.lanes)
+    }
+
+    /// The lanes of the child keyboard input goes to, if one holds focus.
+    fn focused_lanes(&self) -> Option<WidgetLanes> {
+        self.lanes(self.focus.keyboard_target()?)
+    }
+
+    /// Send a focus transition down: `FocusLost` to the child that lost focus,
+    /// then `FocusGained` and the panel's latest [`Modifiers`] to the one that
+    /// gained it. Lost still goes first. `keyboard` rides on the gain so the
+    /// child knows whether to draw its ring (see [`FocusGained`]). Before the
+    /// first `Modifiers` arrives there is none to send, and a child that has
+    /// none reads the same no-modifier state. Only a child with a text-entry
+    /// lane caches the chord, so only it is primed.
+    fn apply_focus<A>(&self, sends: &mut Sends<'_, A>, transition: FocusTransition, keyboard: bool) {
+        let FocusTransition { previous, next } = transition;
+        if let Some(control) = previous.and_then(|key| self.lanes(key)?.control) {
+            sends.send_to(control, &FocusLost);
+        }
+        if let Some(gained) = next.and_then(|key| self.lanes(key)) {
+            if let Some(control) = gained.control {
+                sends.send_to(control, &FocusGained { keyboard });
+            }
+            if let (Some(text_entry), Some(modifiers)) = (gained.text_entry, &self.modifiers) {
+                sends.send_to(text_entry, modifiers);
+            }
+        }
+    }
+
+    /// Send hover edges lost-before-gained so sibling crossings cannot leave
+    /// two controls hovered during the breadth-first drain.
+    fn apply_hover<A>(&self, sends: &mut Sends<'_, A>, transition: HoverTransition) {
+        let HoverTransition { previous, next } = transition;
+        if let Some(hover) = previous.and_then(|key| self.lanes(key)?.hover) {
+            sends.send_to(hover, &HoverLost);
+        }
+        if let Some(hover) = next.and_then(|key| self.lanes(key)?.hover) {
+            sends.send_to(hover, &HoverGained);
+        }
+    }
+
+    fn apply_availability<A>(&self, sends: &mut Sends<'_, A>, effects: AvailabilityEffects) {
+        if let Some(hover) = effects.hover {
+            self.apply_hover(sends, hover);
+        }
+        if let Some(focus) = effects.focus {
+            self.apply_focus(sends, focus, false);
+        }
     }
 }
 
@@ -333,13 +427,16 @@ fn stack_column(config: &PanelConfig, gap: f32) -> Column {
 /// A spec that failed to spawn never reaches here, so it contributes neither a
 /// row nor the gap that would have preceded it.
 fn stack_rows<'a>(children: impl IntoIterator<Item = &'a SpawnedChild>) -> Vec<Row<ErasedActorRef>> {
-    children.into_iter().map(|child| stack_row(child.reference, child.width_pixels, child.height_pixels)).collect()
+    children
+        .into_iter()
+        .map(|child| stack_row(child.lanes.key(), child.profile.width_pixels, child.profile.height_pixels))
+        .collect()
 }
 
 /// One child's [`Row`], keyed by `key`.
 ///
 /// Each row is the height the child's own config asked for. A child that named
-/// its own width ([`SpawnedChild::width_pixels`] — a button sized to its label)
+/// its own width ([`ChildProfile::width_pixels`] — a button sized to its label)
 /// gets exactly that width; one that did not takes the whole column.
 fn stack_row<K: Copy>(key: K, width_pixels: Option<f32>, height_pixels: f32) -> Row<K> {
     let cell = width_pixels.map_or_else(|| Cell::share(key, 1.0), |pixels| Cell::fixed(key, pixels));
@@ -395,8 +492,8 @@ impl<A> SpawnsWidgets for A where
 /// Decode, spawn, and derive one panel child's static/dynamic routing profile.
 /// Keeping this dispatch out of `ensure_spawned` leaves the layout loop focused
 /// on ordering and placement.
-pub fn spawn_widget_child<A: SpawnsWidgets>(
-    ctx: &mut WasmCtx<'_, A, Manual>,
+pub fn spawn_widget_child<A: SpawnsWidgets, M: ReplyMode>(
+    ctx: &mut WasmCtx<'_, A, M>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
 ) -> Option<SpawnedChild> {
@@ -427,136 +524,108 @@ pub fn spawn_widget_child<A: SpawnsWidgets>(
 /// [`spawn_row_control_child`] does: the exhaustive dispatcher above stays a
 /// dispatcher, and a reader looking for one kind's profile finds every
 /// sibling profile beside it.
-fn spawn_content_child<A: SpawnsWidgets>(
-    ctx: &mut WasmCtx<'_, A, Manual>,
+fn spawn_content_child<A: SpawnsWidgets, M: ReplyMode>(
+    ctx: &mut WasmCtx<'_, A, M>,
     spec: &WidgetChildSpec,
     row: f32,
 ) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
-            let reference = spawn::<LabelWidget, A>(ctx, &spec.subname, &config)?;
+            let lanes = spawn::<LabelWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                reference,
-                width_pixels: None,
-                // Pointer-eligible for hover only: a label whose text is wider
-                // than its slot reveals the rest on a raised plate while the
-                // pointer is over it, and hover edges follow the pointer hit
-                // table. Still never focusable, so a press on a label clears
-                // focus like a press on the background.
-                pointer_eligible: true,
-                height_pixels: row,
-                focusable: false,
-                state: config.state,
-                type_namespace: <LabelWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+                lanes,
+                profile: ChildProfile::row::<LabelWidget>(
+                    row,
+                    // Pointer-eligible for hover only: a label whose text is wider
+                    // than its slot reveals the rest on a raised plate while the
+                    // pointer is over it, and hover edges follow the pointer hit
+                    // table. Still never focusable, so a press on a label clears
+                    // focus like a press on the background.
+                    FocusEligibility { pointer: true, keyboard: false },
+                    config.state,
+                ),
             })
         }),
         WidgetKind::Image => decode_child::<ImageConfig>(spec).and_then(|config| {
-            let reference = spawn::<ImageWidget, A>(ctx, &spec.subname, &config)?;
+            let lanes = spawn::<ImageWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: row,
-                pointer_eligible: false,
-                focusable: false,
-                state: config.state,
-                type_namespace: <ImageWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+                lanes,
+                profile: ChildProfile::row::<ImageWidget>(
+                    row,
+                    FocusEligibility { pointer: false, keyboard: false },
+                    config.state,
+                ),
             })
         }),
         WidgetKind::Slider => decode_child::<SliderConfig>(spec).and_then(|config| {
-            let reference = spawn::<SliderWidget, A>(ctx, &spec.subname, &config)?;
+            let lanes = spawn::<SliderWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: row,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <SliderWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+                lanes,
+                profile: ChildProfile::row::<SliderWidget>(
+                    row,
+                    FocusEligibility { pointer: true, keyboard: true },
+                    config.state,
+                ),
             })
         }),
         WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
             let height = row * config.options.len() as f32;
-            let reference = spawn::<RadioGroupWidget, A>(ctx, &spec.subname, &config)?;
+            let lanes = spawn::<RadioGroupWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: height,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <RadioGroupWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+                lanes,
+                profile: ChildProfile::row::<RadioGroupWidget>(
+                    height,
+                    FocusEligibility { pointer: true, keyboard: true },
+                    config.state,
+                ),
             })
         }),
         WidgetKind::TextField => decode_child::<TextFieldConfig>(spec).and_then(|config| {
-            let reference = spawn::<TextFieldWidget, A>(ctx, &spec.subname, &config)?;
+            let lanes = spawn::<TextFieldWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: row,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <TextFieldWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+                lanes,
+                profile: ChildProfile::row::<TextFieldWidget>(
+                    row,
+                    FocusEligibility { pointer: true, keyboard: true },
+                    config.state,
+                ),
             })
         }),
         WidgetKind::TextArea => decode_child::<TextAreaConfig>(spec).and_then(|config| {
             let height = row * config.rows.max(1) as f32;
-            let reference = spawn::<TextAreaWidget, A>(ctx, &spec.subname, &config)?;
+            let lanes = spawn::<TextAreaWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: height,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <TextAreaWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+                lanes,
+                profile: ChildProfile::row::<TextAreaWidget>(
+                    height,
+                    FocusEligibility { pointer: true, keyboard: true },
+                    config.state,
+                ),
             })
         }),
         _ => None,
     }
 }
 
-fn spawn_button_child<A: Spawns<ButtonWidget>>(
-    ctx: &mut WasmCtx<'_, A, Manual>,
+fn spawn_button_child<A: Spawns<ButtonWidget>, M: ReplyMode>(
+    ctx: &mut WasmCtx<'_, A, M>,
     spec: &WidgetChildSpec,
     row: f32,
 ) -> Option<SpawnedChild> {
     let config = decode_child::<ButtonConfig>(spec)?;
-    let reference = spawn::<ButtonWidget, A>(ctx, &spec.subname, &config)?;
+    let lanes = spawn::<ButtonWidget, A, M>(ctx, &spec.subname, &config)?;
     Some(SpawnedChild {
-        reference,
-        width_pixels: None,
-        height_pixels: row,
-        pointer_eligible: true,
-        focusable: true,
-        state: config.state,
-        type_namespace: <ButtonWidget as Addressable>::NAMESPACE,
-        host_scroll_strip_units: None,
-        wheel_eligible: false,
-        scroll_viewport: None,
+        lanes,
+        profile: ChildProfile::row::<ButtonWidget>(
+            row,
+            FocusEligibility { pointer: true, keyboard: true },
+            config.state,
+        ),
     })
 }
 
-fn spawn_virtual_list_child<A: Spawns<VirtualListWidget>>(
-    ctx: &mut WasmCtx<'_, A, Manual>,
+fn spawn_virtual_list_child<A: Spawns<VirtualListWidget>, M: ReplyMode>(
+    ctx: &mut WasmCtx<'_, A, M>,
     spec: &WidgetChildSpec,
     row: f32,
 ) -> Option<SpawnedChild> {
@@ -564,17 +633,19 @@ fn spawn_virtual_list_child<A: Spawns<VirtualListWidget>>(
     let profile = virtual_list_profile(&spec.subname, row, &config)?;
     let state = config.state.clone();
     let host_scroll_strip_units = host_scroll_strip_units(&config);
-    spawn::<VirtualListWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
-        reference,
-        width_pixels: None,
-        height_pixels: profile.height,
-        pointer_eligible: profile.eligible,
-        focusable: profile.eligible,
-        state,
-        type_namespace: <VirtualListWidget as Addressable>::NAMESPACE,
-        host_scroll_strip_units,
-        wheel_eligible: true,
-        scroll_viewport: None,
+    spawn::<VirtualListWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
+        lanes,
+        profile: ChildProfile {
+            width_pixels: None,
+            height_pixels: profile.height,
+            pointer_eligible: profile.eligible,
+            focusable: profile.eligible,
+            state,
+            type_namespace: <VirtualListWidget as Addressable>::NAMESPACE,
+            host_scroll_strip_units,
+            wheel_eligible: true,
+            scroll_viewport: None,
+        },
     })
 }
 
@@ -625,8 +696,8 @@ fn virtual_list_height(row_height: f32, visible_row_count: u32) -> Option<f32> {
     (height.is_finite() && height >= 0.0).then_some(height)
 }
 
-fn spawn_composite_child<A: Spawns<Widget>>(
-    ctx: &mut WasmCtx<'_, A, Manual>,
+fn spawn_composite_child<A: Spawns<Widget>, M: ReplyMode>(
+    ctx: &mut WasmCtx<'_, A, M>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
     row_height_pixels: f32,
@@ -641,25 +712,28 @@ fn spawn_composite_child<A: Spawns<Widget>>(
     }
     decode_nested_widget_config(spec).and_then(|config| {
         let intrinsic = config.intrinsic;
-        spawn::<Widget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
-            reference,
-            width_pixels: intrinsic.and_then(|extent| (extent[0].is_finite() && extent[0] >= 0.0).then_some(extent[0])),
-            height_pixels: intrinsic
-                .and_then(|extent| (extent[1].is_finite() && extent[1] >= 0.0).then_some(extent[1]))
-                .unwrap_or(row_height_pixels),
-            pointer_eligible: false,
-            focusable: false,
-            state: WidgetControlState::default(),
-            type_namespace: <Widget as Addressable>::NAMESPACE,
-            host_scroll_strip_units: None,
-            wheel_eligible: false,
-            scroll_viewport: None,
+        spawn::<Widget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
+            lanes,
+            profile: ChildProfile {
+                width_pixels: intrinsic
+                    .and_then(|extent| (extent[0].is_finite() && extent[0] >= 0.0).then_some(extent[0])),
+                height_pixels: intrinsic
+                    .and_then(|extent| (extent[1].is_finite() && extent[1] >= 0.0).then_some(extent[1]))
+                    .unwrap_or(row_height_pixels),
+                pointer_eligible: false,
+                focusable: false,
+                state: WidgetControlState::default(),
+                type_namespace: <Widget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
+                wheel_eligible: false,
+                scroll_viewport: None,
+            },
         })
     })
 }
 
-fn spawn_scroll_child<A: Spawns<ScrollWidget>>(
-    ctx: &mut WasmCtx<'_, A, Manual>,
+fn spawn_scroll_child<A: Spawns<ScrollWidget>, M: ReplyMode>(
+    ctx: &mut WasmCtx<'_, A, M>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
 ) -> Option<SpawnedChild> {
@@ -677,17 +751,19 @@ fn spawn_scroll_child<A: Spawns<ScrollWidget>>(
             return None;
         }
         let viewport = config.viewport_extent;
-        spawn::<ScrollWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
-            reference,
-            width_pixels: Some(viewport.width_pixels),
-            height_pixels: viewport.height_pixels,
-            pointer_eligible: false,
-            focusable: false,
-            state: WidgetControlState::default(),
-            type_namespace: <ScrollWidget as Addressable>::NAMESPACE,
-            host_scroll_strip_units: None,
-            wheel_eligible: false,
-            scroll_viewport: Some(viewport),
+        spawn::<ScrollWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
+            lanes,
+            profile: ChildProfile {
+                width_pixels: Some(viewport.width_pixels),
+                height_pixels: viewport.height_pixels,
+                pointer_eligible: false,
+                focusable: false,
+                state: WidgetControlState::default(),
+                type_namespace: <ScrollWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
+                wheel_eligible: false,
+                scroll_viewport: Some(viewport),
+            },
         })
     })
 }
@@ -695,94 +771,70 @@ fn spawn_scroll_child<A: Spawns<ScrollWidget>>(
 /// Spawn the one-row control children. Keeping their mechanical decode/spawn
 /// profiles together prevents the main exhaustive dispatcher from becoming a
 /// second long-form implementation surface.
-fn spawn_row_control_child<A: SpawnsWidgets>(
-    ctx: &mut WasmCtx<'_, A, Manual>,
+fn spawn_row_control_child<A: SpawnsWidgets, M: ReplyMode>(
+    ctx: &mut WasmCtx<'_, A, M>,
     spec: &WidgetChildSpec,
     row: f32,
 ) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Toggle => decode_child::<ToggleConfig>(spec).and_then(|config| {
-            spawn::<ToggleWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: row,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <ToggleWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+            spawn::<ToggleWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
+                lanes,
+                profile: ChildProfile::row::<ToggleWidget>(
+                    row,
+                    FocusEligibility { pointer: true, keyboard: true },
+                    config.state,
+                ),
             })
         }),
         WidgetKind::Segmented => decode_child::<SegmentedConfig>(spec).and_then(|config| {
-            spawn::<SegmentedWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: row,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <SegmentedWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+            spawn::<SegmentedWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
+                lanes,
+                profile: ChildProfile::row::<SegmentedWidget>(
+                    row,
+                    FocusEligibility { pointer: true, keyboard: true },
+                    config.state,
+                ),
             })
         }),
         WidgetKind::Numeric => decode_child::<NumericConfig>(spec).and_then(|config| {
-            spawn::<NumericWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: row,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <NumericWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+            spawn::<NumericWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
+                lanes,
+                profile: ChildProfile::row::<NumericWidget>(
+                    row,
+                    FocusEligibility { pointer: true, keyboard: true },
+                    config.state,
+                ),
             })
         }),
         WidgetKind::Dropdown => decode_child::<DropdownConfig>(spec).and_then(|config| {
-            spawn::<DropdownWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: row,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <DropdownWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+            spawn::<DropdownWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
+                lanes,
+                profile: ChildProfile::row::<DropdownWidget>(
+                    row,
+                    FocusEligibility { pointer: true, keyboard: true },
+                    config.state,
+                ),
             })
         }),
         WidgetKind::TabStrip => decode_child::<TabStripConfig>(spec).and_then(|config| {
-            spawn::<TabStripWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: row,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <TabStripWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+            spawn::<TabStripWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
+                lanes,
+                profile: ChildProfile::row::<TabStripWidget>(
+                    row,
+                    FocusEligibility { pointer: true, keyboard: true },
+                    config.state,
+                ),
             })
         }),
         WidgetKind::MenuBar => decode_child::<MenuBarConfig>(spec).and_then(|config| {
-            spawn::<MenuBarWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
-                reference,
-                width_pixels: None,
-                height_pixels: row,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <MenuBarWidget as Addressable>::NAMESPACE,
-                host_scroll_strip_units: None,
-                wheel_eligible: false,
-                scroll_viewport: None,
+            spawn::<MenuBarWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
+                lanes,
+                profile: ChildProfile::row::<MenuBarWidget>(
+                    row,
+                    FocusEligibility { pointer: true, keyboard: true },
+                    config.state,
+                ),
             })
         }),
         _ => None,
@@ -880,61 +932,17 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
     ]
 }
 
-/// Send a focus transition down: `FocusLost` to the child that lost focus,
-/// then `FocusGained` and the panel's latest [`Modifiers`] to the one that
-/// gained it. Lost still goes first. `keyboard` rides on the gain so the
-/// child knows whether to draw its ring (see [`FocusGained`]). Before the
-/// first `Modifiers` arrives there is none to send, and a child that has none
-/// reads the same no-modifier state.
-fn apply_focus<A>(
-    sends: &mut Sends<'_, A>,
-    transition: FocusTransition,
-    keyboard: bool,
-    modifiers: Option<&Modifiers>,
-) {
-    let FocusTransition { previous, next } = transition;
-    if let Some(prev) = previous {
-        sends.send_to(prev, &FocusLost);
-    }
-    if let Some(gained) = next {
-        sends.send_to(gained, &FocusGained { keyboard });
-        if let Some(modifiers) = modifiers {
-            sends.send_to(gained, modifiers);
-        }
-    }
-}
-
-/// Send hover edges lost-before-gained so sibling crossings cannot leave two
-/// controls hovered during the breadth-first drain.
-fn apply_hover<A>(sends: &mut Sends<'_, A>, transition: HoverTransition) {
-    let HoverTransition { previous, next } = transition;
-    if let Some(previous) = previous {
-        sends.send_to(previous, &HoverLost);
-    }
-    if let Some(next) = next {
-        sends.send_to(next, &HoverGained);
-    }
-}
-
-fn apply_availability<A>(sends: &mut Sends<'_, A>, effects: AvailabilityEffects, modifiers: Option<&Modifiers>) {
-    if let Some(hover) = effects.hover {
-        apply_hover(sends, hover);
-    }
-    if let Some(focus) = effects.focus {
-        apply_focus(sends, focus, false, modifiers);
-    }
-}
-
-/// Spawn one inline widget under the caller's actual logical actor type,
-/// logging and dropping the slot on failure.
-fn spawn<C, A>(ctx: &mut WasmCtx<'_, A, Manual>, subname: &str, config: &C::Config) -> Option<ErasedActorRef>
+/// Spawn one inline widget under the caller's actual logical actor type and
+/// narrow it to the lanes its type covers, logging and dropping the slot on
+/// failure.
+fn spawn<C, A, M: ReplyMode>(ctx: &mut WasmCtx<'_, A, M>, subname: &str, config: &C::Config) -> Option<WidgetLanes>
 where
-    C: ModuleChild + ErasedWasmActor,
+    C: ModuleChild + ErasedWasmActor + WidgetLaneSet,
     <C as WasmActor>::State: ErasedWasmActor,
     A: Spawns<C>,
 {
     match ctx.spawn_inline::<C>(Subname::Named(subname), config) {
-        Ok(child) => Some(child.erase()),
+        Ok(child) => Some(C::lanes(child)),
         Err(error) => {
             tracing::warn!(
                 target: "aether_widget",
@@ -1056,7 +1064,7 @@ impl WasmActor for WidgetPanel {
         let background = quad(self.config.x, self.config.y, self.config.width, self.panel_height, self.theme.surface);
         self.composite.extend_chrome([background]);
         for child in &self.children {
-            ctx.send_to(child.reference, &Collect);
+            ctx.send_to(child.lanes.slot, &Collect);
         }
         if self.composite.is_complete() {
             self.finish(ctx);
@@ -1090,7 +1098,9 @@ impl WasmActor for WidgetPanel {
     #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if let Some(grabbed) = self.focus.grabbed() {
-            ctx.send_to(grabbed, &press);
+            if let Some(control) = self.lanes(grabbed).and_then(|lanes| lanes.control) {
+                ctx.send_to(control, &press);
+            }
             return;
         }
         let target = if press.button == mouse_button::LEFT {
@@ -1100,14 +1110,14 @@ impl WasmActor for WidgetPanel {
             }
             let focusable = self.focus.focus_hit_test(press.x, press.y);
             if let Some(transition) = self.focus.set_focus(focusable) {
-                apply_focus(&mut ctx.sends(), transition, false, self.modifiers.as_ref());
+                self.apply_focus(&mut ctx.sends(), transition, false);
             }
             hit
         } else {
             self.focus.pointer_target(press.x, press.y)
         };
-        if let Some(child) = target {
-            ctx.send_to(child, &press);
+        if let Some(control) = target.and_then(|key| self.lanes(key)?.control) {
+            ctx.send_to(control, &press);
         }
     }
 
@@ -1118,13 +1128,14 @@ impl WasmActor for WidgetPanel {
     /// stands over.
     #[handler::single]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        if let Some(child) = self.focus.pointer_target(release.x, release.y) {
-            ctx.send_to(child, &release);
+        if let Some(control) = self.focus.pointer_target(release.x, release.y).and_then(|key| self.lanes(key)?.control)
+        {
+            ctx.send_to(control, &release);
         }
         if release.button == mouse_button::LEFT
             && let Some(transition) = self.focus.release_capture(release.x, release.y)
         {
-            apply_hover(&mut ctx.sends(), transition);
+            self.apply_hover(&mut ctx.sends(), transition);
         }
     }
 
@@ -1138,10 +1149,10 @@ impl WasmActor for WidgetPanel {
         if self.focus.grabbed().is_none()
             && let Some(transition) = self.focus.update_hover(moved.x, moved.y)
         {
-            apply_hover(&mut ctx.sends(), transition);
+            self.apply_hover(&mut ctx.sends(), transition);
         }
-        if let Some(child) = self.focus.pointer_target(moved.x, moved.y) {
-            ctx.send_to(child, &moved);
+        if let Some(motion) = self.focus.pointer_target(moved.x, moved.y).and_then(|key| self.lanes(key)?.motion) {
+            ctx.send_to(motion, &moved);
         }
     }
 
@@ -1151,8 +1162,8 @@ impl WasmActor for WidgetPanel {
     /// button's drag capture owns move/release, not a separate wheel gesture.
     #[handler::single]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
-        if let Some(child) = self.scroll_focus.hit_test(wheel.x, wheel.y) {
-            ctx.send_to(child, &wheel);
+        if let Some(lane) = self.scroll_focus.hit_test(wheel.x, wheel.y).and_then(|key| self.lanes(key)?.wheel) {
+            ctx.send_to(lane, &wheel);
         }
     }
 
@@ -1166,12 +1177,12 @@ impl WasmActor for WidgetPanel {
                 FocusDirection::Forward
             };
             if let Some(transition) = self.focus.move_focus(direction) {
-                apply_focus(&mut ctx.sends(), transition, true, self.modifiers.as_ref());
+                self.apply_focus(&mut ctx.sends(), transition, true);
             }
             return;
         }
-        if let Some(child) = self.focus.keyboard_target() {
-            ctx.send_to(child, &key);
+        if let Some(control) = self.focused_lanes().and_then(|lanes| lanes.control) {
+            ctx.send_to(control, &key);
         }
     }
 
@@ -1179,24 +1190,24 @@ impl WasmActor for WidgetPanel {
     /// release for exactly-once activation).
     #[handler::single]
     fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
-        if let Some(child) = self.focus.keyboard_target() {
-            ctx.send_to(child, &release);
+        if let Some(key_release) = self.focused_lanes().and_then(|lanes| lanes.key_release) {
+            ctx.send_to(key_release, &release);
         }
     }
 
     /// Committed text forwards to the focused child.
     #[handler::single]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
-        if let Some(child) = self.focus.keyboard_target() {
-            ctx.send_to(child, &input);
+        if let Some(text_entry) = self.focused_lanes().and_then(|lanes| lanes.text_entry) {
+            ctx.send_to(text_entry, &input);
         }
     }
 
     /// An IME composition forwards to the focused child.
     #[handler::single]
     fn on_ime_preedit(&mut self, ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
-        if let Some(child) = self.focus.keyboard_target() {
-            ctx.send_to(child, &preedit);
+        if let Some(text_entry) = self.focused_lanes().and_then(|lanes| lanes.text_entry) {
+            ctx.send_to(text_entry, &preedit);
         }
     }
 
@@ -1204,8 +1215,8 @@ impl WasmActor for WidgetPanel {
     /// it).
     #[handler::single]
     fn on_modifiers(&mut self, ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
-        if let Some(child) = self.focus.keyboard_target() {
-            ctx.send_to(child, &modifiers);
+        if let Some(text_entry) = self.focused_lanes().and_then(|lanes| lanes.text_entry) {
+            ctx.send_to(text_entry, &modifiers);
         }
         self.modifiers = Some(modifiers);
     }
@@ -1218,7 +1229,7 @@ impl WasmActor for WidgetPanel {
             return;
         };
         let effects = self.focus.update_availability(source, &changed.state);
-        apply_availability(&mut ctx.sends(), effects, self.modifiers.as_ref());
+        self.apply_availability(&mut ctx.sends(), effects);
     }
 
     /// Keep content-derived pointer/keyboard eligibility synchronized. Source
@@ -1235,7 +1246,7 @@ impl WasmActor for WidgetPanel {
         let effects = self
             .focus
             .update_eligibility(source, FocusEligibility { pointer: changed.pointer, keyboard: changed.keyboard });
-        apply_availability(&mut ctx.sends(), effects, self.modifiers.as_ref());
+        self.apply_availability(&mut ctx.sends(), effects);
     }
 
     /// Observe one descendant scroll container's exact typed outcome. The

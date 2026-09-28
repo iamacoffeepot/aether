@@ -1,0 +1,49 @@
+error[E0277]: `Child` has no contract row for `Unhandled`
+  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:50:41
+   |
+50 |     let _uncovered = reference.narrow::<Uncovered>();
+   |                                ------   ^^^^^^^^^ no handler for `Unhandled` on this target
+   |                                |
+   |                                required by a bound introduced by this call
+   |
+   = note: a `#[fallback]` does not count as handling a kind
+help: the trait `Contract<Unhandled>` is not implemented for `Child`
+      but trait `Contract<Handled>` is implemented for it
+  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:36:1
+   |
+36 | #[actor(instanced, composable)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `Handled`, found `Unhandled`
+   = note: required for `Child` to implement `CoversRows<(Row<Handled, Silent>, Row<Unhandled, Silent>)>`
+   = note: required for `Uncovered` to implement `CoveredBy<Child>`
+note: required by a bound in `ActorRef::<R>::narrow`
+  --> $WORKSPACE/crates/aether-actor/src/reference/actor_ref.rs
+   |
+   |     pub const fn narrow<P: CoveredBy<R>>(self) -> ProtocolRef<P> {
+   |                            ^^^^^^^^^^^^ required by this bound in `ActorRef::<R>::narrow`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Child` has no contract row for `Unhandled`
+  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:55:37
+   |
+55 |     let _uncovered = child.narrow::<Uncovered>();
+   |                            ------   ^^^^^^^^^ no handler for `Unhandled` on this target
+   |                            |
+   |                            required by a bound introduced by this call
+   |
+   = note: a `#[fallback]` does not count as handling a kind
+help: the trait `Contract<Unhandled>` is not implemented for `Child`
+      but trait `Contract<Handled>` is implemented for it
+  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:36:1
+   |
+36 | #[actor(instanced, composable)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `Handled`, found `Unhandled`
+   = note: required for `Child` to implement `CoversRows<(Row<Handled, Silent>, Row<Unhandled, Silent>)>`
+   = note: required for `Uncovered` to implement `CoveredBy<Child>`
+note: required by a bound in `InlineChild::<C>::narrow`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/child.rs
+   |
+   |     pub const fn narrow<P: CoveredBy<C>>(self) -> ProtocolRef<P> {
+   |                            ^^^^^^^^^^^^ required by this bound in `InlineChild::<C>::narrow`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -47,8 +47,7 @@ use aether_text::TextCapability;
 use crate::set::pump_text_font_metrics;
 use crate::state::InteractionState;
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, Theme};
-use crate::{FocusGained, FocusLost, HoverGained, HoverLost, WidgetFrame};
+use crate::theme::Theme;
 
 /// Where a widget keeps the ambient state [`WidgetDefaults`] maintains: the
 /// rect the panel root assigned it, the theme fanned down to it, its own
@@ -59,7 +58,7 @@ use crate::{FocusGained, FocusLost, HoverGained, HoverLost, WidgetFrame};
 /// bodies are field access and nothing else.
 pub trait WidgetChrome {
     /// The widget's cached layout rect, assigned by the panel root.
-    fn widget_frame(&mut self) -> &mut WidgetFrame;
+    fn widget_frame(&mut self) -> &mut crate::WidgetFrame;
 
     /// The widget's cached theme.
     fn widget_theme(&mut self) -> &mut Theme;
@@ -115,6 +114,9 @@ macro_rules! widget_chrome {
 
 pub(crate) use widget_chrome;
 
+/// The handlers' kind types are spelled from the crate root: the set's marker
+/// bridge pastes them into each adopter's module (ADR-0169), where only a
+/// crate-rooted path is sure to resolve.
 #[handler_set]
 pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability> {
     /// Release any half-finished interaction: an armed press, a live drag, a
@@ -124,7 +126,7 @@ pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability> {
 
     /// Cache the layout rect the root assigned.
     #[handler::single]
-    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
+    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: crate::WidgetFrame) {
         *self.widget_frame() = frame;
     }
 
@@ -134,7 +136,7 @@ pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability> {
     /// against the old one's advances until something else happens to pump
     /// the adapter.
     #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: crate::SetTheme) {
         let font_id = set.theme.font_id;
         *self.widget_theme() = set.theme;
 
@@ -147,26 +149,26 @@ pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability> {
     /// Take focus, carrying through how it arrived so only a keyboard
     /// traversal lights a ring.
     #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: FocusGained) {
+    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: crate::FocusGained) {
         self.widget_state().gain_focus(gained.keyboard);
     }
 
     /// Release keyboard focus, cancelling any activation it was carrying.
     #[handler::single]
-    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: crate::FocusLost) {
         self.widget_state().lose_focus();
         self.cancel_activation();
     }
 
     /// Enter hover.
     #[handler::single]
-    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
+    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: crate::HoverGained) {
         self.widget_state().set_hovered(true);
     }
 
     /// Leave hover.
     #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: crate::HoverLost) {
         self.widget_state().set_hovered(false);
     }
 }

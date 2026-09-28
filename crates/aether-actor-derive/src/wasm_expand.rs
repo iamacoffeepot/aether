@@ -343,16 +343,17 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         opts.handler_set.as_ref().map(|set| (set, &**self_ty)),
     );
 
-    // ADR-0169 leaves an adopted set's `HandlesKind` markers unemitted on this
-    // path. The orphan rule forbids the set declaring them itself (`Self`
-    // precedes the first local type in the trait reference), so they travel
-    // through a generated `macro_rules!` bridge — which a native set emits and
-    // its adopters invoke. A wasm set does not, because nothing on this
-    // transport reads the marker: the widget family addresses its members
-    // parent-to-child by name through `RelativeMailbox::send<K: ActorMail>`, which
-    // carries no `HandlesKind` bound. The scoped consequence is that a wasm
-    // set's kinds are not sendable through the typed flat verbs
-    // (`ctx.send::<R>(&k)`, through `SendableTo<R>`).
+    // ADR-0169: an adopted set's `HandlesKind` markers and `Contract<K>` rows
+    // cannot be declared by the set itself (the orphan rule: `Self` precedes
+    // the first local type in the trait reference), so they travel through
+    // the generated `macro_rules!` bridge the set emits, which this adopter
+    // invokes below with the position just past its own rows (ADR-0231 §10).
+    // A wasm set's bridge shares the set's name in the macro namespace, so it
+    // is reached through the set path this adopter already names.
+    let set_markers = opts.handler_set.as_ref().map(|set| {
+        let base = position(handlers.len());
+        quote! { #set!(#self_ty, #base); }
+    });
     let lineage_manifest_consts = build_actor_lineage_manifest_consts(self_ty, opts);
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
 
@@ -479,8 +480,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // ADR-0231 §1 / §4 / §10: one `Contract<K>` row per handler, each at its
     // handler's position in the actor's `Rows` list, and the actor's
     // `CONTRACTS` list, derived from the same row types. An adopted set's rows
-    // join `CONTRACTS`; a wasm set emits no marker bridge, so its kinds get
-    // list entries but no per-kind row and no `Rows` entry (ADR-0169).
+    // join `CONTRACTS` through its trait const, and its `Rows` entries end
+    // this actor's list through its bridge's `@rows` arm (ADR-0169).
     let contract_rows = handlers.iter().enumerate().map(|(index, h)| {
         contract_row_impl(
             h.class,
@@ -503,7 +504,14 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         .iter()
         .map(|h| RowSpec { class: h.class, reply: &h.reply, kind_ty: &h.kind_ty, cfgs: &h.cfgs })
         .collect();
-    let rows = rows_list(&row_specs, quote! { () })?;
+    let rows =
+        rows_list(&row_specs, opts.handler_set.as_ref().map_or_else(|| quote! { () }, |set| quote! { #set!(@rows) }))?;
+    // A gated set row's slot is an alias the set's bridge defines, pasted
+    // beside this actor's own aliases so both live in the `Contracts` impl's
+    // anonymous block.
+    let set_aliases = opts.handler_set.as_ref().map(|set| quote! { #set!(@aliases); });
+    let local_aliases = &rows.aliases;
+    let aliases = quote! { #local_aliases #set_aliases };
     let contracts_list = contracts_impl(
         &ReplyMarkerSite {
             impl_generics: &impl_generics_ts,
@@ -511,7 +519,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             where_clause: &where_clause_ts,
             cfgs: &[],
         },
-        &rows.aliases,
+        &aliases,
         &rows.list,
         &contract_rows_expr(&contract_elements),
         set_contract_rows.as_ref(),
@@ -682,6 +690,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #(#handles_kind_impls)*
         #(#reply_marker_impls)*
         #(#contract_rows)*
+        #set_markers
         #contracts_list
 
         // iamacoffeepot/aether#2311: the boot lifecycle over the runtime state.
