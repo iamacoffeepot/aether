@@ -12,6 +12,13 @@
 //! weak link back to the ledger because its `Drop` and
 //! [`IntoDeferredReply::into_deferred_reply`] get no ctx, the precedent
 //! `DeferredCompletion` set.
+//!
+//! A ticket also rides a request context (ADR-0243 §4). Its codec writes and
+//! reads only the ticket, through [`Encoder::held`] and
+//! [`Decoder::claim_held`]: the request-context table's encoder parks the
+//! entry, and its decode claims the entry back and hands over the weak ledger
+//! link. Every other encoder and decode refuses, so a stray codec path never
+//! defuses or claims a debt.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -20,7 +27,8 @@ use std::sync::Weak;
 use std::thread;
 
 use aether_actor::ReplyMode;
-use aether_data::ActorMail;
+use aether_data::wire::{self, Decoder, Encoder, WireDecode, WireEncode};
+use aether_data::{ActorMail, CastEligible, LabelNode, Schema, SchemaType};
 
 use super::blocking::{DeferredReply, DispatchId, IntoDeferredReply};
 use crate::actor::native::binding::NativeBinding;
@@ -37,6 +45,35 @@ use crate::actor::native::ctx::NativeCtx;
 /// drops, so a ticket parked in that state finds its entry gone. It
 /// implements [`IntoDeferredReply`], so every staging surface that takes a
 /// deferred reply takes it unchanged.
+///
+/// A request context may carry it (ADR-0243 §4). `Held<R>` has actor reach:
+/// it implements neither `CrossesActors` nor `CrossesWire`, so a kind holding
+/// one declares and stores as a context, while it is never mail:
+///
+/// ```
+/// use aether_kinds::Pong;
+/// use aether_substrate::actor::native::Held;
+///
+/// #[aether_data::kind(name = "doc.held.waiting")]
+/// struct Waiting {
+///     held: Held<Pong>,
+///     tag: u32,
+/// }
+/// ```
+///
+/// ```compile_fail,E0277
+/// use aether_kinds::Pong;
+/// use aether_substrate::actor::native::Held;
+///
+/// #[aether_data::kind(name = "doc.held.waiting")]
+/// struct Waiting {
+///     held: Held<Pong>,
+///     tag: u32,
+/// }
+///
+/// fn mail<K: aether_data::ActorMail>() {}
+/// mail::<Waiting>();
+/// ```
 #[must_use = "answer the held reply or stage it on a successor; dropping it fails fast"]
 pub struct Held<R: ActorMail> {
     id: DispatchId,
@@ -109,6 +146,10 @@ impl<R: ActorMail> IntoDeferredReply for Held<R> {
 }
 
 impl<R: ActorMail> Drop for Held<R> {
+    /// Fails fast when the entry is still held. An entry that is gone (actor
+    /// close settled it) or parked (a stored context's encode took the ticket,
+    /// ADR-0243 §4) claims nothing, so this drop stays silent: the parked
+    /// entry is the context's to claim back.
     fn drop(&mut self) {
         let Some(binding) = self.ledger.upgrade() else {
             return;
@@ -124,6 +165,50 @@ impl<R: ActorMail> Drop for Held<R> {
             thread::panicking(),
             "Held dropped without an answer or successor staging (the hold was released, but the owed reply was lost)"
         );
+    }
+}
+
+/// The ticket's schema names the reply kind it answers, so a context holding
+/// `Held<A>` has another kind id from one holding `Held<B>` (ADR-0243 §4).
+impl<R: ActorMail> Schema for Held<R> {
+    const SCHEMA: SchemaType = SchemaType::Ticket { reply: R::ID };
+    const LABEL: Option<&'static str> = None;
+    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+}
+
+impl<R: ActorMail> CastEligible for Held<R> {
+    const ELIGIBLE: bool = false;
+}
+
+impl<R: ActorMail> WireEncode for Held<R> {
+    /// Refuses: a plain buffer grants no ledger to park the ticket in.
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), wire::Error> {
+        self.encode_to(out)
+    }
+
+    /// Hand the ticket to [`Encoder::held`], which only the request-context
+    /// table's encoder grants: it parks the entry and writes the ticket.
+    fn encode_to<E: Encoder + ?Sized>(&self, enc: &mut E) -> Result<(), wire::Error> {
+        enc.held(self.id.0, R::ID)
+    }
+}
+
+impl<'de, R: ActorMail> WireDecode<'de> for Held<R> {
+    /// Refuses: a bare cursor grants no ledger to claim the ticket from.
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, wire::Error> {
+        Self::decode_from(cursor)
+    }
+
+    /// Read the ticket and claim its entry back through
+    /// [`Decoder::claim_held`]; the claim carries the weak ledger link the
+    /// live ticket keeps.
+    fn decode_from<D: Decoder<'de> + ?Sized>(dec: &mut D) -> Result<Self, wire::Error> {
+        let ticket = u64::decode(dec.cursor())?;
+        let ledger = dec
+            .claim_held(ticket, R::ID)?
+            .downcast::<Weak<NativeBinding>>()
+            .map_err(|_| wire::Error::HeldUnclaimed { ticket, reply: R::ID })?;
+        Ok(Self::new(DispatchId(ticket), ledger))
     }
 }
 
