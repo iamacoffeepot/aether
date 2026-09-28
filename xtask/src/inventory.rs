@@ -62,20 +62,15 @@ pub struct Component {
     /// is the same string `locate_component_wasm` keys on (e.g.
     /// `aether_kit`, `probe`).
     pub stem: String,
-    /// Package features to enable for this component's wasm build. Always
-    /// empty — every discovered component builds with its default features.
-    pub features: Vec<String>,
 }
 
 /// One `cargo build` invocation. Lib components build per-package
 /// (`-p <pkg>`); example components build that package's examples
-/// (`-p <pkg> --examples`). `features` are passed as `--features` when
-/// non-empty (the widget host build); an empty set builds default features.
+/// (`-p <pkg> --examples`), always with default features.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BuildPlan {
     pub package: String,
     pub examples: bool,
-    pub features: Vec<String>,
 }
 
 /// Discover the component set: every workspace package that depends on
@@ -101,7 +96,6 @@ pub fn discover_components(metadata: &Metadata) -> Vec<Component> {
                 package: package.name.to_string(),
                 from_example: target.kind.contains(&TargetKind::Example),
                 stem: target.name.clone(),
-                features: Vec::new(),
             });
         }
     }
@@ -119,11 +113,7 @@ pub fn discover_components(metadata: &Metadata) -> Vec<Component> {
 pub fn build_plans(components: &[Component]) -> Vec<BuildPlan> {
     let mut plans: Vec<BuildPlan> = Vec::new();
     for component in components {
-        let plan = BuildPlan {
-            package: component.package.clone(),
-            examples: component.from_example,
-            features: component.features.clone(),
-        };
+        let plan = BuildPlan { package: component.package.clone(), examples: component.from_example };
         if !plans.contains(&plan) {
             plans.push(plan);
         }

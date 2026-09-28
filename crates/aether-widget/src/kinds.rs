@@ -52,8 +52,7 @@ pub struct Collect;
 /// string, the same address vocabulary lineage addressing speaks. Both are
 /// strings, not tags, because the observers this event serves (a debugger, an
 /// MCP agent) read identity, not an opaque number. Not a kind on its own; only
-/// addressable inside
-/// [`ChildrenChanged::added`].
+/// addressable inside [`ChildrenChanged::added`].
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MembershipEntry {
     pub subname: String,

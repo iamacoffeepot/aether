@@ -206,9 +206,8 @@ pub(crate) enum ChainMode {
 ///
 /// `parent` is threaded from the caller because a by-tag spawn can be
 /// *nested* — an inline child spawning its own child by tag — and the new
-/// child's recorded parent must be that
-/// spawning actor, not the cluster root, so relative addressing
-/// (`ctx.child` / `ctx.parent`) resolves it. The typed
+/// child's recorded parent must be that spawning actor, not the cluster root,
+/// so relative addressing (`ctx.child` / `ctx.parent`) resolves it. The typed
 /// [`WasmCtx::spawn_inline_child`] path passes the same `self.mailbox`.
 pub type SpawnByTagFn = fn(&Registry, u64, ActorTypeTag, bool, &str, &[u8]) -> Result<MailboxId, SpawnError>;
 

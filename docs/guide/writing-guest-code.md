@@ -1,14 +1,8 @@
 # Writing guest code
 
-There is one way to run your own code on a running engine: write a
-**component**. A component is a full actor — its own vocabulary, its own
-mailbox, its own subscriptions — that you compile to wasm and load, either as
-its own instance with its own mail lineage (`load_component`) or compiled
-inline as a child of another actor, settling mail cascades inside that
-actor's cluster (`#[actor]` + `export!` inline children, ADR-0114). Both are
-the same authoring surface — the actor you write,
-[compiled to wasm](recipes/writing-a-component.md) — differing only in how it
-is deployed.
+To run your own code on a running engine, write a **component**: a full actor,
+with its own vocabulary, mailbox, and subscriptions, that you compile to wasm.
+The one authoring surface deploys in two shapes.
 
 ## The two deployment shapes
 
