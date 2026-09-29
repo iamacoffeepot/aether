@@ -47,9 +47,9 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 inventory = { workspace = true }
 
 [dev-dependencies]
-# The `runtime` module's `on_dispatch_traced` tests boot the
-# `aether_substrate::testing` binding fixtures (`unrouted_binding`) over a
-# `HubOutbound` loopback, enabled by the substrate `test-support` feature.
+# The `runtime` module's `on_dispatch_traced` tests boot the cap as a pumped
+# actor on an `aether_substrate::testing` chassis over a `HubOutbound`
+# loopback, enabled by the substrate `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 
 [lints]

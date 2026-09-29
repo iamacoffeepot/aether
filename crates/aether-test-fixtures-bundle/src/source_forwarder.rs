@@ -15,9 +15,8 @@
 //!
 //! A second actor rather than a self-dependency: the observer is loaded twice
 //! in that scenario (a "reader" and, before this split, a "sender"), and a
-//! type cannot declare itself. `Embedded` resolution folds the dependency
-//! under the shared component-host parent, so the forwarder reaches the
-//! observer at the observer's default load name.
+//! type cannot declare itself. A dependency is a root singleton (ADR-0241
+//! §5), so the forwarder reaches the observer at its published name.
 
 #![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and this forwarder is stateless — the same allow `source_observer` and `matrix_sweep` already carry
 

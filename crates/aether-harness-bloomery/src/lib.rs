@@ -60,8 +60,8 @@ pub use seed::SeededJournal;
 
 /// The unit key every harness boot configures: the seeded journal is this
 /// unit's root, so the journal owner answers at
-/// `aether.bloomery.journal:primary` and each bundle root is named
-/// `UnitBundle::name` of this key and the bundle's digest (ADR-0240 D4).
+/// `aether.bloomery.journal:primary` and each bundle root is born at
+/// `aether.bloomery.bundle.<hash>:primary` (ADR-0240 D4).
 pub const UNIT: &str = "primary";
 
 /// A booted bloomery chassis over a seeded scratch journal, with one reply

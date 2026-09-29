@@ -61,9 +61,8 @@ fn base_sources(server_config: HttpServerConfig) -> ConfigSources {
     sources
 }
 
-/// The `http_handler` fixture's `NAMESPACE` const — the subname under
-/// which `WasmTrampoline` registers it, and the last segment of its
-/// full lineage address (`aether.component/aether.embedded:test.web`).
+/// The `http_handler` fixture's `NAMESPACE` const — a root singleton guest,
+/// so also its full address (ADR-0241 §5).
 /// The handler binds the `/` catch-all route in its `wire` hook.
 const HANDLER_NAMESPACE: &str = "test.web";
 
@@ -87,18 +86,14 @@ const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
 /// `name` resolves to its trampoline, answering its canonical address. Panics
 /// after 30s with the address and the parser's last answer.
 fn await_live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> ErasedActorPath {
-    let address = ErasedActorPath::new(&format!("aether.component/aether.embedded:{name}"))
-        .expect("a loaded handler name forms a well-formed actor path");
+    let address = ErasedActorPath::new(name).expect("a loaded handler name forms a well-formed actor path");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let resolved = built.resolve_address(&address);
         if resolved.is_ok() {
             return address;
         }
-        assert!(
-            Instant::now() < deadline,
-            "trampoline {address} did not come up within 30s; last lookup: {resolved:?}"
-        );
+        assert!(Instant::now() < deadline, "guest {address} did not come up within 30s; last lookup: {resolved:?}");
         thread::sleep(Duration::from_millis(25));
     }
 }

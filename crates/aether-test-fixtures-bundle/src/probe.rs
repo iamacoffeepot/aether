@@ -139,6 +139,31 @@ impl WasmActor for Probe {
     }
 }
 
+/// An instanced root key subscriber: each load names its own key, so one
+/// harness hosts several independent subscribers (ADR-0241 §5), where the
+/// singleton [`Probe`] is one per engine.
+pub struct KeyProbe;
+
+#[actor(instanced, root, depends(WindowCapability, SubstrateHarnessObserver))]
+impl WasmActor for KeyProbe {
+    const NAMESPACE: &'static str = "test.key_probe";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(KeyProbe)
+    }
+
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) {
+        ctx.subscribe::<WindowCapability, Key>();
+    }
+
+    /// Broadcasts a `key_observed` for each `Key` dispatch, as [`Probe`]
+    /// does.
+    #[handler::single]
+    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, Key { code, .. }: Key) {
+        ctx.send::<SubstrateHarnessObserver>(&KeyObserved { code });
+    }
+}
+
 /// ADR-0090 c1 typed-config fixture. Exercises the
 /// `WasmActor::Config = ProbeConfig` path end-to-end.
 ///

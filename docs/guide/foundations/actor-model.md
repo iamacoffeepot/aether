@@ -204,9 +204,10 @@ the type at itself, boots it as its module's boot type, or replaces an actor
 with a module whose boot type it is: each is refused with the operation's
 `Err`, naming the type and the placements it does declare, before the module
 publishes or anything is staged. A `child_of(P)` or `composable` record never
-satisfies it. A loaded guest's address is still its host's
-(`aether.component/aether.embedded:NAME`), so a wasm `root` emits no `Root`
-marker impl: `ActorPath::<G>::root()` would name a route that never registers.
+satisfies it. A `load_under` is checked the same way against a `child_of(P)`
+record naming the proven parent's type. A loaded guest is named as a native
+actor is — `NS`, `NS:key`, or `parent/NS:key` — so a wasm `root` emits the same
+`Root` marker impl a native root does.
 
 These are placement permissions, not runtime facts. They do not say that an
 instance is live, that a parent owns or supervises a child, or that the actor
@@ -252,16 +253,20 @@ boundaries such as MCP, configuration, and harness calls may additionally use
 an ADR-0166 short path rooted in an actor namespace:
 
 ```text
-aether.component/:camera
+aether.window/:main
 ```
 
 The substrate expands that spelling from the generated `Root` and `ChildOf`
 inventory before it performs the ordinary canonical registry lookup. With the
-component host's one instanced child family, the address above expands to:
+window capability's one instanced child family, the address above expands to:
 
 ```text
-aether.component/aether.embedded:camera
+aether.window/aether.window.instance:main
 ```
+
+A loaded component needs no short path: it is named by its own namespace, so
+its canonical address is already short (`aether.kit.camera`, or
+`aether.widget:panel` for an instanced one).
 
 A path is `/`-separated steps. After the root, a bare step always names a
 singleton child, `namespace:discriminator` names an instance of that instanced
@@ -680,23 +685,22 @@ one node and the fold of one node is that node: `MailboxId == ActorId`, the
 `aether.window`), and `ctx.send::<AudioCapability>(..)` resolves to it as a
 compile-time const with no runtime lookup.
 
-For a **component** the `NAMESPACE` is the *default load name*, and the loaded
-actor runs under its runtime parent. With the root component host as parent,
-the lineage is `aether.component` followed by the component as an instance
-under the embedding-host class (`aether.embedded`), rendered with one `/` per
-node as `aether.component/aether.embedded:<name>` — the canonical rendered
-address `LoadResult.path` hands back. A nested host contributes its own lineage
-instead. The string is a display rendering of the lineage; the `MailboxId` is
-the fold over the nodes (the host registry parses a written path and folds it
-node by node), never a hash of the joined string.
+For a **component** the name is the one its module publishes for the type
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§5): a singleton sits at the root at `NS`, exactly as a capability does, an
+instanced type at `NS:key`, and one loaded beneath a parent at `parent/NS:key`
+— the canonical rendered address `LoadResult.path` hands back. The string is a
+display rendering of the lineage; the `MailboxId` is the fold over the nodes
+(the host registry parses a written path and folds it node by node), never a
+hash of the joined string.
 
 There is **one addressing verb**: you address a type, and the type declares
 where it lives. `ctx.send::<Camera>(..)` routes through
 `ctx.actor_ref::<Camera>()`, which reads the resolver `Camera` declares and
-selects the routing seed from it — the root for a capability, the caller's
-runtime parent for a loaded component — so the send site says who it is talking
-to and never where that peer sits. Moving the caller under a nested or
-replacement host moves the route without a host lookup or a call-site change.
+selects the routing seed from it — the root for a capability or a loaded root
+singleton — so the send site says who it is talking to and never where that
+peer sits. A declared dependency is always a root singleton, so moving the
+caller changes nothing about the route.
 
 A load name is the one thing the type cannot declare, because it is a runtime
 fact. Replica 0 of a `replicas` fan-out claims the bare base name, so the
@@ -906,11 +910,10 @@ module it was built from; a foreign module comes in through `load_component`, wh
 carries its own code and kinds — the boundary is covered in
 [Components & lifecycle](../systems/components.md).
 
-A component can also run as several instances of one type: load the same wasm under
-different names and each is an independent actor at its own
-`aether.component/aether.embedded:<name>`. The loader in fact hosts every component behind
-an instanced trampoline actor, spawned once per load — so even a single loaded
-component is, underneath, one instance of an instanced host.
+A component can also run as several instances of one type: an `instanced` type
+loaded under different keys is an independent actor at each `NS:key`. The loader
+hosts every component in a native trampoline actor, spawned once per load, but
+the actor is named by the guest's published namespace, never the trampoline's.
 
 ## One model, two hosts
 

@@ -17,8 +17,7 @@
 use std::fs;
 
 use aether_clipboard::{ClipboardCapability, ClipboardParams};
-use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{ErasedActorPath, LoadName};
+use aether_component::ComponentHostCapability;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
@@ -39,10 +38,6 @@ fn load_result(harness: &mut SubstrateHarness, wasm: &[u8], label: &str, export:
     result.reply::<LoadResult>(label).expect("decode LoadResult")
 }
 
-fn key(name: &str) -> LoadName {
-    LoadName::new(name).expect("a valid load name")
-}
-
 fn fixture_wasm() -> Option<Vec<u8>> {
     let wasm_path = require_wasm("aether_test_fixtures_inline_dependency")?;
     Some(fs::read(wasm_path).expect("read fixture wasm"))
@@ -60,10 +55,9 @@ fn an_inline_child_dependency_refuses_its_module_load() {
     };
     assert_eq!(error, REFUSAL, "the refusal names the inline child and the missing namespace");
 
-    // Refusal happens before creation: no trampoline stands under its namespace.
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let unserved = harness.child::<ComponentHostCapability, WasmTrampoline>(&host, key(HOLDER_EXPORT));
-    assert!(unserved.is_err(), "the refused load must not have created anything: {unserved:?}");
+    // Refusal happens before creation: no guest stands at its namespace.
+    let listed = harness.list_components().expect("list components");
+    assert!(!listed.iter().any(|name| name == HOLDER_EXPORT), "the refused load created nothing: {listed:?}");
 
     let mut satisfied = SubstrateHarness::builder()
         .size(64, 48)
@@ -92,10 +86,9 @@ fn a_private_inline_child_dependency_refuses_its_module_load() {
     };
     assert_eq!(error, PRIVATE_REFUSAL, "the refusal names the private child and the missing namespace");
 
-    // Refusal happens before creation: no trampoline stands under its namespace.
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let unserved = harness.child::<ComponentHostCapability, WasmTrampoline>(&host, key(FS_DEMUX_PARENT_EXPORT));
-    assert!(unserved.is_err(), "the refused load must not have created anything: {unserved:?}");
+    // Refusal happens before creation: no guest stands at its namespace.
+    let listed = harness.list_components().expect("list components");
+    assert!(!listed.iter().any(|name| name == FS_DEMUX_PARENT_EXPORT), "the refused load created nothing: {listed:?}");
 }
 
 #[test]
@@ -109,15 +102,19 @@ fn a_replace_toward_an_unmet_inline_dependency_keeps_the_running_module() {
     let bundle = fs::read(bundle_path).expect("read bundle wasm");
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let victim = match load_result(&mut harness, &bundle, "victim", TARGET_EXPORT) {
-        LoadResult::Ok { path, .. } => path.to_string(),
-        LoadResult::Err { error } => panic!("the victim must load: {error}"),
-    };
+    let (victim_ref, victim) = harness
+        .load_any(&LoadComponent {
+            wasm: bundle,
+            name: None,
+            config: Vec::new(),
+            export: Some(TARGET_EXPORT.to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("the victim must load: {error}"));
 
     let operation = HarnessOp::send_and_await_reply(
         &harness.actor_ref::<ComponentHostCapability>(),
         &ReplaceComponent {
-            target: ErasedActorPath::new(&victim).expect("a loaded component's address is an actor path"),
+            target: victim,
             wasm,
             drain_timeout_ms: None,
             config: Vec::new(),
@@ -132,14 +129,8 @@ fn a_replace_toward_an_unmet_inline_dependency_keeps_the_running_module() {
 
     // A refused replacement keeps the running module: the victim still
     // answers `Bump` with exactly one `TickObserved`.
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let victim_trampoline = harness
-        .child::<ComponentHostCapability, WasmTrampoline>(&host, key(TARGET_EXPORT))
-        .expect("the victim is live");
     let baseline = harness.count_observed(TICK_OBSERVED);
-    harness
-        .execute(vec![("bump", HarnessOp::send_and_settle(victim_trampoline.erase(), &Bump))])
-        .expect("bump the victim");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(victim_ref, &Bump))]).expect("bump the victim");
     assert_eq!(
         harness.count_observed(TICK_OBSERVED),
         baseline + 1,

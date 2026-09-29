@@ -165,7 +165,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     // the `spawn_inline_child` host fn stages it: the child's rendered
     // lineage name under the host, folded to its own `MailboxId`.
     let host_name = registry.mailbox_name(host_id).expect("host registers a canonical name");
-    let alias_name = format!("{host_name}/aether.embedded:widget");
+    let alias_name = format!("{host_name}/test.inline.child:widget");
     let alias_id = lineage_mailbox_id(&alias_name);
     let published = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
@@ -397,7 +397,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     // Publish the inline child's alias route onto the live host, exactly as
     // the `spawn_inline_child` host fn stages it.
     let host_name = registry.mailbox_name(host_id).expect("host registers a canonical name");
-    let alias_name = format!("{host_name}/aether.embedded:widget");
+    let alias_name = format!("{host_name}/test.inline.child:widget");
     let alias_id = lineage_mailbox_id(&alias_name);
     let published = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(

@@ -91,7 +91,7 @@ Omit `engine_id` to target the sole supervised engine. The surface:
 
 - **`address`** — any actor's mailbox is queryable, addressed by name. That
   includes chassis mailboxes (`"aether.audio"`, `"aether.render"`) and a loaded
-  component by its full lineage name (`"aether.component/aether.embedded:camera"`).
+  component by its full lineage name, its published name (`"aether.kit.camera"`).
 - **`max`** — caps returned entries; defaults to 100, clamps to 1000.
 - **`level`** — `trace` / `debug` / `info` / `warn` / `error`; filters
   server-side so a noisy ring returns only what you asked for.
@@ -130,7 +130,7 @@ ring. Keep diagnostic emits inside the handler if you want them queryable.
 **Naming another actor in a log line.** Name it by its actor path, never its
 mailbox id. A native capability that holds a proven reference records
 `actor = %ctx.actor_path(reference)`, which answers the actor's canonical path
-(`aether.component/aether.embedded:camera`) even after the actor has departed;
+(`aether.kit.camera`) even after the actor has departed;
 a typed `ActorRef<R>` passes `reference.erase()`. An id that belongs to no
 route has no path, so it prints as its tagged `mbx-…` text, and
 `aether.inventory`'s `Resolve` answers `None` for it: `Resolve` reads a

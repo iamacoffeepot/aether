@@ -30,9 +30,9 @@
 //!
 //! The `WasmTrampoline` actor itself lives in
 //! `aether_component::trampoline` (issue 654) — next to the
-//! `ComponentHostCapability` that spawns it, so the trampoline's
-//! `Addressable::NAMESPACE` is the single cap-owned declaration of the
-//! `aether.embedded` prefix. The substrate still owns the
+//! `ComponentHostCapability` that spawns it. A guest is born under its own
+//! published namespace (ADR-0241 §5, §6), never the trampoline's. The
+//! substrate still owns the
 //! spawn primitives, the `Component`/`ComponentCtx` types, and the
 //! host-fn linker; only the actor wrapper moved.
 

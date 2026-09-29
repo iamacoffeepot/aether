@@ -39,8 +39,8 @@ mod tests {
         let parent_addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.parent").addr;
 
         // The child's first-class lineage address: the parent's
-        // rendered name plus the inline-child node (ADR-0114).
-        let child_addr = format!("{parent_addr}/aether.embedded:widget");
+        // rendered name plus the inline child's own node (ADR-0114, ADR-0241 §6).
+        let child_addr = format!("{parent_addr}/test.inline.child:widget");
 
         // Mail to the child's address: the membrane demuxes it to the
         // co-located child, which replies with the CHILD marker.
@@ -103,7 +103,7 @@ mod tests {
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
         let parent = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.configured_parent");
-        let child_addr = format!("{}/aether.embedded:widget", parent.addr);
+        let child_addr = format!("{}/test.inline.configured_child:widget", parent.addr);
 
         // Baseline: the child's durable counter starts from the spawn
         // config's `initial`, not `0` — proving the spawn-time config path
@@ -153,7 +153,7 @@ mod tests {
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
         let parent = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.stateful_parent");
-        let child_addr = format!("{}/aether.embedded:widget", parent.addr);
+        let child_addr = format!("{}/test.inline.stateful_child:widget", parent.addr);
 
         for _ in 0..BUMPS {
             harness.send(engine, &child_addr, &Bump);
@@ -182,7 +182,7 @@ mod tests {
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
         let parent = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.configured_parent");
-        let child_addr = format!("{}/aether.embedded:widget", parent.addr);
+        let child_addr = format!("{}/test.inline.configured_child:widget", parent.addr);
 
         assert_eq!(
             count(&mut harness, engine, &child_addr),

@@ -196,7 +196,7 @@ when it departs.
 
 An operator or a test subscribes another actor with `aether.window.subscribe`,
 whose `subscription` names the kind and the subscriber's canonical path, as in
-`{"Key": "aether.component/aether.embedded:ui"}`: the path `load_component`
+`{"Key": "ui.root"}`: the path `load_component`
 returns. The path decodes only when the live actor there handles the kind
 silently (ADR-0231 §3), and the manager proves it live at receipt.
 

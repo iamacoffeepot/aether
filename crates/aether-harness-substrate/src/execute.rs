@@ -343,15 +343,16 @@ impl HarnessOp {
     /// [`SubstrateHarness::actor_ref`] returns for it. `parent` stays address
     /// text because it is the `LoadComponentUnder.parent` kind field.
     ///
-    /// This is the public harness composition seam for explicit-parent and
-    /// nested-component scenarios. The component host canonicalizes `parent`
-    /// through the live registry before staging the same loader path used by
-    /// [`LoadComponent`]. Decode the stored reply as a `LoadResult` with
-    /// [`ExecutionResult::reply`]; its `Ok.path` is the child's canonical
-    /// lineage address.
+    /// This is the public harness composition seam for explicit-parent
+    /// scenarios. The component host canonicalizes `parent` through the live
+    /// registry and admits the load only when the selected type declares
+    /// `child_of` the parent's type (ADR-0241 §5), before staging the same
+    /// loader path used by [`LoadComponent`]. Decode the stored reply as a
+    /// `LoadResult` with [`ExecutionResult::reply`]; its `Ok.path` is the
+    /// child's canonical lineage address, `parent/NS:key`.
     ///
     /// Ordinary [`HarnessOp::send_and_await_reply`] with `LoadComponent`
-    /// retains root component-host placement. This constructor does not add a
+    /// places the guest at the root. This constructor does not add a
     /// production hub or MCP load mode.
     #[must_use]
     pub fn load_component_under(

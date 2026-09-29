@@ -51,8 +51,8 @@ pub struct TcpSessionState {
     /// [`TcpConsumer`] (ADR-0230, ADR-0231 §3/§4), so a fan-out through it
     /// compiles only for `SessionData` and `SessionClosed`. Every delivery
     /// inherits the handler's causal chain; a proof rather than a runtime
-    /// name, because a name cannot reach a nested actor such as a loaded
-    /// component at `aether.component/aether.embedded:<name>`.
+    /// name, because a name cannot reach a nested actor such as a component
+    /// loaded beneath a parent at `parent/NS:key`.
     pub consumer: Option<ProtocolRef<TcpConsumer>>,
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,

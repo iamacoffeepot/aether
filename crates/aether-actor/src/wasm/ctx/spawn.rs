@@ -89,7 +89,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// `Subname`-discriminated `Instanced` type declaring `ChildOf<P>`.
     ///
     /// The host folds the child's alias [`MailboxId`]
-    /// (`{parent}/aether.embedded:<subname>`) and registers a route to
+    /// (`{parent}/<C::NAMESPACE>:<subname>`, ADR-0241 §6) and registers a route to
     /// this trampoline's own slot; the SDK then runs `A::init`
     /// **synchronously** and inserts the boxed child into
     /// this ctx's per-component [`Registry`] keyed by the alias. Mail

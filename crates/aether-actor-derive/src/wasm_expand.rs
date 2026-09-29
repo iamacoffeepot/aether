@@ -374,15 +374,14 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `Addressable` trait.
     let namespace_expr = validate_addressable_consts(&consts, self_ty, "WasmActor")?;
     let const_tokens = consts.iter();
-    // ADR-0119: an FFI/wasm component is embedded — it resolves under the
-    // reserved `aether.embedded` scope. Default `Embedded` (keyless ⇒
-    // `Singleton`, reached by `ctx.send::<R>(..)`); `#[actor(instanced)]`
-    // selects `EmbeddedMany` for an inline-spawned child (ADR-0114). Cardinality
-    // is derived from the resolver; nothing emits `impl Singleton` here.
+    // ADR-0241 §5: a guest is named as a native actor is, so its resolver is
+    // the native one: `One` (keyless, reached by `ctx.send::<R>(..)` from the
+    // root), or `Many` for `#[actor(instanced)]`. Cardinality is derived from
+    // the resolver; nothing emits `impl Singleton` here.
     let resolver_ty = if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
-        quote! { ::aether_actor::EmbeddedMany }
+        quote! { ::aether_actor::Many }
     } else {
-        quote! { ::aether_actor::Embedded }
+        quote! { ::aether_actor::One }
     };
     let actor_impl = if consts.is_empty() {
         quote! {}
@@ -394,6 +393,13 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
         }
     };
+    // ADR-0241 §5: a guest declared `root` is placed at the root under its
+    // published name, as a native root is, so it carries the same permission.
+    let root_impl = opts.root.then(|| {
+        quote! {
+            impl #impl_generics ::aether_actor::Root for #self_ty #where_clause {}
+        }
+    });
     let module_child_impl = opts.composable.then(|| {
         quote! {
             impl #impl_generics ::aether_actor::ModuleChild for #self_ty #where_clause {}
@@ -682,6 +688,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
 
     Ok(quote! {
         #actor_impl
+        #root_impl
         #module_child_impl
         #(#child_impls)*
         #declared

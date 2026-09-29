@@ -26,7 +26,7 @@ use std::mem::{self, ManuallyDrop};
 use std::sync::Weak;
 use std::thread;
 
-use aether_actor::{HeldReply, ReplyMode, Target};
+use aether_actor::{HandsOff, HeldReply, ReplyMode};
 use aether_data::wire::{self, Decoder, Encoder, WireDecode, WireEncode};
 use aether_data::{ActorMail, CastEligible, LabelNode, MailId, Schema, SchemaType, Source};
 
@@ -135,17 +135,30 @@ impl<R: ActorMail> Held<R> {
     /// This is the one way a debt leaves its actor. The caller hears from
     /// `target`, stamped as the reply's sender, and keeps that sender as its
     /// reference (ADR-0230 §3); no verb lets one actor reply *as* another.
-    /// `target` is a typed reference checked against `K`: an
-    /// [`ActorRef<T>`](aether_actor::ActorRef) of an actor that handles `K`,
-    /// or a [`ProtocolRef<P>`](aether_actor::ProtocolRef) whose protocol
-    /// lists `K`, such as the control reference a guest birth completes with.
+    /// `target` is a proven reference whose row for `K` replies exactly `R`
+    /// ([`HandsOff`]): an [`ActorRef<T>`](aether_actor::ActorRef) of an actor
+    /// whose handler for `K` returns `R`, or a
+    /// [`ProtocolRef<P>`](aether_actor::ProtocolRef) whose row for `K` is
+    /// `Row<K, R>`, such as the control reference a guest birth completes
+    /// with. An [`ErasedActorRef`](aether_actor::ErasedActorRef) proves no
+    /// row, so handing to one does not compile (#6895):
+    ///
+    /// ```compile_fail,E0277
+    /// use aether_actor::{ErasedActorRef, Single};
+    /// use aether_kinds::{Ping, Pong};
+    /// use aether_substrate::actor::native::{Held, NativeCtx};
+    ///
+    /// fn hand<A>(ctx: &mut NativeCtx<'_, A, Single>, held: Held<Pong>, target: ErasedActorRef) {
+    ///     held.hand_off(ctx, target, &Ping::default());
+    /// }
+    /// ```
     ///
     /// # Panics
     /// Panics when `ctx` belongs to another actor (ADR-0243 §5).
     pub fn hand_off<K: ActorMail, I, A, M: ReplyMode>(
         self,
         ctx: &mut NativeCtx<'_, A, M>,
-        target: impl Target<K, I>,
+        target: impl HandsOff<K, R, I>,
         payload: &K,
     ) {
         let (id, ledger) = self.disarm();
