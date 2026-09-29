@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use super::handlers::{EchoHttpHandler, STREAM_CHUNK_COUNT, StreamHttpHandler, stream_chunk_body};
 use super::support::{
     assert_closed, body_of, boot_buffered, boot_chassis, boot_response_stream, dechunk, keep_alive_config_for, port_of,
-    read_one_chunked_response, read_one_response, round_trip_live,
+    read_one_chunked_response, read_one_response,
 };
 
 /// Two requests round-trip in order on one kept-alive socket (HTTP/1.1
@@ -23,9 +23,6 @@ use super::support::{
 fn keep_alive_serves_sequential_requests_on_one_socket() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
     let port = port_of(&chassis);
-
-    // Poll the async `/` catch-all live before the pipelined round trip.
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
@@ -72,9 +69,6 @@ fn keep_alive_reuses_socket_after_streamed_response() {
     let chassis = boot_response_stream::<StreamHttpHandler>(8);
     let port = port_of(&chassis);
 
-    // Poll the async `/` catch-all live before the persistent-socket reads.
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     let mut carry: Vec<u8> = Vec::new();
@@ -107,9 +101,6 @@ fn streamed_response_honors_explicit_connection_close() {
     let chassis = boot_response_stream::<StreamHttpHandler>(8);
     let port = port_of(&chassis);
 
-    // Poll the async `/` catch-all live before the explicit-close read.
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     let mut carry: Vec<u8> = Vec::new();
@@ -128,9 +119,6 @@ fn streamed_response_honors_explicit_connection_close() {
 fn http_1_0_defaults_to_close() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
     let port = port_of(&chassis);
-
-    // Poll the async `/` catch-all live before the HTTP/1.0 read.
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
@@ -151,9 +139,6 @@ fn http_1_0_defaults_to_close() {
 fn idle_kept_alive_connection_closes_after_timeout() {
     let chassis = boot_chassis::<EchoHttpHandler>(keep_alive_config_for(300));
     let port = port_of(&chassis);
-
-    // Poll the async `/` catch-all live before the kept-alive read.
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");

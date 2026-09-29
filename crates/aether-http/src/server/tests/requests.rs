@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::server::HttpServerCapability;
 
 use super::handlers::{ClosingHttpHandler, EchoHttpHandler, FixedBodyHttpHandler, HeldForwardHttpHandler, SilentPeer};
-use super::support::{body_of, boot_buffered, config_for, port_of, round_trip, round_trip_live, timeout_config_for};
+use super::support::{body_of, boot_buffered, config_for, port_of, round_trip, timeout_config_for};
 
 /// A GET round-trips to the handler and its reply returns as
 /// well-formed HTTP/1.1, carrying the parsed path / query / method.
@@ -20,8 +20,7 @@ use super::support::{body_of, boot_buffered, config_for, port_of, round_trip, ro
 fn get_round_trips_to_handler() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
-    // First request against the async-registered `/` catch-all: poll it live.
-    let response = round_trip_live(port_of(&chassis), b"GET /hello?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let response = round_trip(port_of(&chassis), b"GET /hello?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200 status line, got: {response:?}");
     assert!(response.contains("x-aether-method: Get\r\n"), "{response:?}");
     assert!(response.contains("x-aether-path: /hello\r\n"), "{response:?}");
@@ -45,11 +44,8 @@ fn get_round_trips_to_handler() {
 fn post_round_trips_body() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
-    // First request against the async-registered `/` catch-all: poll it live.
-    let response = round_trip_live(
-        port_of(&chassis),
-        b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
-    );
+    let response =
+        round_trip(port_of(&chassis), b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}");
     assert!(response.contains("x-aether-method: Post\r\n"), "{response:?}");
     assert_eq!(body_of(&response), "hello", "body echoed verbatim");
@@ -159,10 +155,9 @@ fn closing_router_answers_502() {
         .with_actor_configured::<HttpServerCapability>((), config_for(1024))
         .build_passive()
         .expect("caps boot");
+    chassis.await_boot_settled();
 
-    // The closing handler binds `/` via async `wire` mail; poll past the
-    // pre-registration `503` to the one request it holds and closes on.
-    let response = round_trip_live(port_of(&chassis), b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let response = round_trip(port_of(&chassis), b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 502 "), "expected 502, got: {response:?}");
     assert_eq!(body_of(&response), "router closed before answering", "the close answered, not the net: {response:?}");
 }
@@ -182,8 +177,9 @@ fn held_reply_whose_peer_never_answers_is_504() {
         .with_actor_configured::<HttpServerCapability>((), timeout_config_for(1_000))
         .build_passive()
         .expect("caps boot");
+    chassis.await_boot_settled();
 
-    let response = round_trip_live(port_of(&chassis), b"GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let response = round_trip(port_of(&chassis), b"GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 504 "), "expected the request timeout's 504, got: {response:?}");
 }
 
@@ -194,8 +190,7 @@ fn held_reply_whose_peer_never_answers_is_504() {
 fn percent_encoded_path_is_decoded() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
-    // First request against the async-registered `/` catch-all: poll it live.
-    let response = round_trip_live(port_of(&chassis), b"GET /hello%20world?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let response = round_trip(port_of(&chassis), b"GET /hello%20world?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}");
     assert!(response.contains("x-aether-path: /hello world\r\n"), "{response:?}");
     assert!(response.contains("x-aether-query: x=1\r\n"), "{response:?}");
@@ -223,11 +218,6 @@ fn expect_continue_gets_100_continue() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
     let port = port_of(&chassis);
 
-    // Poll the async `/` catch-all live before the interim-status assertion
-    // (a `100 Continue` prefix precedes the dispatched status, so it cannot
-    // itself be distinguished from a pre-registration `503` by prefix).
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-
     let response = round_trip(
         port,
         b"POST /submit HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello",
@@ -244,8 +234,7 @@ fn head_response_suppresses_body() {
     let chassis = boot_buffered::<FixedBodyHttpHandler>(1024);
     let port = port_of(&chassis);
 
-    // First request against the async-registered `/` catch-all: poll it live.
-    let head_response = round_trip_live(port, b"HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let head_response = round_trip(port, b"HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(head_response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {head_response:?}");
     assert!(head_response.contains("Content-Length: 10\r\n"), "{head_response:?}");
     assert_eq!(body_of(&head_response), "", "HEAD must not carry a message body");

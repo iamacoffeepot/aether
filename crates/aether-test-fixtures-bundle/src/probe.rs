@@ -22,9 +22,9 @@
 //!
 //! It declares the observer it reports to, and only the `SubstrateHarness`
 //! registers that observer, so `Probe` loads only there. The render
-//! behaviour lives on `PaintProbe` and the asset-window pull and first-tick
-//! log on `QuietProbe`, each its own actor that declares what it mails
-//! (ADR-0232 §6).
+//! behaviour lives on `PaintProbe` and the asset-window pull and
+//! marker-triggered log on `QuietProbe`, each its own actor that declares
+//! what it mails (ADR-0232 §6).
 //!
 //! ADR-0090 c1: this fixture moved from `aether-test-fixture-probe`'s
 //! `src/lib.rs` to `aether-test-fixtures-bundle/src/probe.rs`; the shared

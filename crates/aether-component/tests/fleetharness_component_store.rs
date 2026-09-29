@@ -15,9 +15,9 @@ mod tests {
 
     use aether_data::{Kind, Schema, SchemaType, wire};
     use aether_kinds::{
-        ComponentSelector, ListComponentBinaries, LogTailResult, ResolveComponentResult, Tick, UploadComponentResult,
+        ComponentSelector, ListComponentBinaries, LogTailResult, ResolveComponentResult, UploadComponentResult,
     };
-    use aether_test_fixtures_kinds::ProbeConfig;
+    use aether_test_fixtures_kinds::{LogMarker, ProbeConfig};
 
     use aether_harness_fleet::{
         FleetHarness, allocate_store_root_for_test, component_wasm_path, dist_component_available,
@@ -45,7 +45,7 @@ mod tests {
 
     /// Upload the probe by staged path and assert the store ingested it
     /// content-addressed with a manifest read from the wasm (no execution
-    /// step): the probe's namespace + handled `Tick`, deduping an
+    /// step): the probe's namespace + handled `LogMarker`, deduping an
     /// identical re-upload. Returns the content hash.
     fn upload_and_assert_manifest(harness: &mut FleetHarness, probe_path: &str) -> String {
         let hash = match harness.upload_component(probe_path, Some("probe")) {
@@ -69,7 +69,10 @@ mod tests {
             "the manifest reports the probe's namespace, got {:?}",
             entry.manifest.namespaces,
         );
-        assert!(entry.manifest.handled_kinds.contains(&Tick::ID), "the manifest reports the probe handles Tick");
+        assert!(
+            entry.manifest.handled_kinds.contains(&LogMarker::ID),
+            "the manifest reports the probe handles LogMarker"
+        );
         assert_eq!(entry.name.as_deref(), Some("probe"), "the name points at it");
 
         // Attribute filters: namespace + handled-kind keep it, a miss drops it.
@@ -90,7 +93,7 @@ mod tests {
             harness
                 .list_component_binaries(&ListComponentBinaries {
                     namespace: None,
-                    handled_kind: Some(Tick::ID),
+                    handled_kind: Some(LogMarker::ID),
                     limit: None,
                     include_history: false,
                 })
@@ -238,7 +241,7 @@ mod tests {
         assert_eq!(
             resolve_hash(
                 &mut harness,
-                ComponentSelector { query: None, namespace: None, handled_kind: Some(Tick::ID) }
+                ComponentSelector { query: None, namespace: None, handled_kind: Some(LogMarker::ID) }
             ),
             hash,
             "the handled-kind attribute selector resolves to the probe hash",
@@ -296,8 +299,8 @@ mod tests {
             .find(|replaced| replaced.namespace == "test.quiet_probe")
             .unwrap_or_else(|| panic!("the replace reports the loaded type: {types:?}"));
         assert!(
-            quiet.capabilities.handlers.iter().any(|h| h.id == Tick::ID),
-            "the republished probe still advertises its Tick handler"
+            quiet.capabilities.handlers.iter().any(|h| h.id == LogMarker::ID),
+            "the republished probe still advertises its LogMarker handler"
         );
     }
 
@@ -356,7 +359,7 @@ mod tests {
         let expected = probe_lineage_addr();
         let names = harness.list_components(engine);
         assert!(names.contains(&expected), "the boot-manifest probe must be registered at {expected}: {names:?}");
-        let delivered = harness.try_send(engine, &expected, &Tick { delta_micros: 16_000 });
+        let delivered = harness.try_send(engine, &expected, &LogMarker);
         assert!(delivered.is_ok(), "a call to the boot-manifest probe right after spawn must deliver: {delivered:?}");
 
         // Best-effort: clean up the staged temp files.

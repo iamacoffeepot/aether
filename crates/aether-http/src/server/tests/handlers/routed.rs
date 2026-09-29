@@ -1,14 +1,18 @@
 //! The routed handler fixtures: actors that claim a path through the typed
 //! `#[http::router]` / `#[http::route]` authoring surface (ADR-0131), the
 //! path-template resource (ADR-0154), and the macro-authored precedence
-//! handlers the routing tests drive.
+//! handlers the routing tests drive, plus the hand-written held-reply router
+//! that releases its own route before answering.
 
 use aether_actor::actor;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
 use crate as http;
-use crate::kinds::{HttpServerRequest, HttpServerResponse, RegisterRouteSelf, UnregisterRouteSelf};
+use crate::kinds::{
+    HttpRouterResult, HttpServerRequest, HttpServerResponse, RegisterRouteResult, RegisterRouteSelf,
+    UnregisterRouteSelf,
+};
 use crate::server::HttpServerCapability;
 
 /// Claims `/api` through the typed authoring surface (`#[http::router]`
@@ -87,16 +91,24 @@ impl NativeActor for ExtractRouteHandler {
     }
 }
 
-/// Claims `/tmp` through the macro surface; on any request the routed
-/// method releases its own route via the raw `unregister_route_self`
-/// (a protocol op the typed surface leaves to the body), so the next
-/// request to `/tmp` falls back to the default handler. The router types
-/// the route's ctx by this actor, so the route reaches the server through
-/// the proven reference its typed ctx mints for the declared dependency.
+/// The held reply [`TmpRouteHandler`] parks in its `UnregisterRouteSelf`
+/// request context until the server's release confirmation takes it back
+/// (ADR-0243 §4).
+#[aether_data::kind(name = "aether.http.test_release_context")]
+struct ReleaseContext {
+    held: Held<HttpRouterResult>,
+}
+
+/// Claims `/tmp` and, on any request, releases its own route before
+/// answering: a hand-written held-reply router (ADR-0243 §4) that holds the
+/// request's reply, sends `UnregisterRouteSelf` with the held reply parked in
+/// its request context, and answers the `tmp` tag from the release's
+/// `RegisterRouteResult`. The server writes the route table inside that
+/// handler, so the `tmp` response means the route is already gone and the
+/// next request to `/tmp` falls back to the `/` catch-all.
 pub struct TmpRouteHandler;
 pub struct TmpRouteHandlerState;
 
-#[http::router]
 #[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for TmpRouteHandler {
     type State = TmpRouteHandlerState;
@@ -107,12 +119,43 @@ impl NativeActor for TmpRouteHandler {
         Ok(TmpRouteHandlerState)
     }
 
-    /// Release `/tmp`, then reply the `tmp` tag.
-    #[http::route(any, "/tmp")]
-    fn on_tmp(_state: &mut TmpRouteHandlerState, mut ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
-        let server = ctx.actor_ref::<HttpServerCapability>();
-        ctx.send_to(server, &UnregisterRouteSelf { prefix: "/tmp".to_string(), method: None });
-        HttpServerResponse { status: 200, headers: Vec::new(), body: b"tmp".to_vec() }
+    fn wire(_state: &mut TmpRouteHandlerState, ctx: &mut NativeCtx<'_>) {
+        ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
+            prefix: "/tmp".to_string(),
+            method: None,
+            shared: false,
+        });
+    }
+
+    /// Hold the reply and release `/tmp`; the release's confirmation answers.
+    #[handler::single]
+    fn on_request(
+        _state: &mut TmpRouteHandlerState,
+        ctx: &mut NativeCtx<'_>,
+        _request: HttpServerRequest,
+    ) -> Pending<HttpRouterResult> {
+        let (pending, held) = ctx.hold::<HttpRouterResult>();
+        let _ = ctx.send_with_context::<HttpServerCapability>(
+            &UnregisterRouteSelf { prefix: "/tmp".to_string(), method: None },
+            ReleaseContext { held },
+        );
+        pending
+    }
+
+    /// Answer the held request once the server confirms the release. A result
+    /// with no release context answers the `wire` registration and is ignored.
+    #[handler::single]
+    fn on_route_result(_state: &mut TmpRouteHandlerState, ctx: &mut NativeCtx<'_>, result: RegisterRouteResult) {
+        let Some(ReleaseContext { held }) = ctx.take_context::<ReleaseContext>() else {
+            return;
+        };
+        let response = match result {
+            RegisterRouteResult::Ok => HttpServerResponse { status: 200, headers: Vec::new(), body: b"tmp".to_vec() },
+            RegisterRouteResult::Err { error } => {
+                HttpServerResponse { status: 500, headers: Vec::new(), body: error.into_bytes() }
+            }
+        };
+        held.answer(ctx, &HttpRouterResult::Response(response));
     }
 }
 

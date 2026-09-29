@@ -7,8 +7,6 @@ use aether_substrate::Subname;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
 
 use crate::server::{HttpServerCapability, HttpServerConfig};
 
@@ -22,37 +20,29 @@ use super::support::{body_of, boot_single_shard_fixed_body, port_of, round_trip}
 /// actor claim `/macro-excl` through the typed macro surface with no
 /// `shared` argument. Both run the same macro-emitted registration, so an
 /// accidental `shared: true` default would let both instances serve; the
-/// exclusive default keeps the route owned by exactly one instance.
+/// exclusive default keeps the route owned by exactly one instance. Each
+/// spawn waits on its own wire root, so alpha's claim settles before beta's
+/// is sent and alpha owns the route.
 #[test]
 fn bare_router_stays_exclusive_second_claim_rejected() {
     let chassis = boot_single_shard_fixed_body();
     chassis
         .spawn_actor::<ExclusiveMacroPoolHandler>(Subname::Named("alpha"), b"excl-macro-alpha", ())
-        .finish()
+        .finish_wire_settled()
         .expect("spawn alpha");
     chassis
         .spawn_actor::<ExclusiveMacroPoolHandler>(Subname::Named("beta"), b"excl-macro-beta", ())
-        .finish()
+        .finish_wire_settled()
         .expect("spawn beta");
     let port = port_of(&chassis);
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let owner = loop {
+    for _ in 0..25 {
         let contested = round_trip(port, b"GET /macro-excl HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        match body_of(&contested) {
-            "excl-macro-alpha" | "excl-macro-beta" => break body_of(&contested).to_string(),
-            _ => {
-                assert!(Instant::now() < deadline, "expected /macro-excl to become live within 10s");
-                thread::sleep(Duration::from_millis(25));
-            }
-        }
-    };
-
-    for _ in 0..24 {
-        let contested = round_trip(port, b"GET /macro-excl HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        let body = body_of(&contested);
-        assert_eq!(body, owner, "bare #[http::router] must stay exclusive; observed a second route member");
-        thread::sleep(Duration::from_millis(10));
+        assert_eq!(
+            body_of(&contested),
+            "excl-macro-alpha",
+            "bare #[http::router] must stay exclusive to its first claimant; full response: {contested:?}",
+        );
     }
 }
 
@@ -76,33 +66,17 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
     // registration, so both join one member set.
     chassis
         .spawn_actor::<SharedMacroPoolHandler>(Subname::Named("alpha"), b"macro-alpha", ())
-        .finish()
+        .finish_wire_settled()
         .expect("spawn alpha");
     chassis
         .spawn_actor::<SharedMacroPoolHandler>(Subname::Named("beta"), b"macro-beta", ())
-        .finish()
+        .finish_wire_settled()
         .expect("spawn beta");
     let port = port_of(&chassis);
 
-    // Wait until both registrations are live: with the set complete a
-    // pair of consecutive requests serves both bodies.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let first = round_trip(port, b"GET /macro-pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        let second = round_trip(port, b"GET /macro-pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        let pair = [body_of(&first).to_string(), body_of(&second).to_string()];
-        if pair.contains(&"macro-alpha".to_string()) && pair.contains(&"macro-beta".to_string()) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "expected macro-alpha+macro-beta across a request pair within 10s; got {pair:?}",
-        );
-        thread::sleep(Duration::from_millis(25));
-    }
-
-    // Steady state: six more requests keep alternating — both members
-    // serve, and only members serve.
+    // Both registrations settled before the first request, so six requests
+    // alternate from any starting cursor: both members serve, and only
+    // members serve.
     let mut alpha = 0;
     let mut beta = 0;
     for _ in 0..6 {
@@ -144,24 +118,12 @@ fn shared_route_spreads_across_members() {
         .with_actor::<SharedBetaHandler>(())
         .build_passive()
         .expect("caps boot");
+    chassis.await_boot_settled();
     let port = port_of(&chassis);
 
-    // Wait until both registrations are live: with the set complete a
-    // pair of consecutive requests serves both bodies.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let first = round_trip(port, b"GET /pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        let second = round_trip(port, b"GET /pool HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        let pair = [body_of(&first).to_string(), body_of(&second).to_string()];
-        if pair.contains(&"alpha".to_string()) && pair.contains(&"beta".to_string()) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "expected alpha+beta across a request pair within 10s; got {pair:?}");
-        thread::sleep(Duration::from_millis(25));
-    }
-
-    // Steady state: six more requests keep alternating — both members
-    // serve, and only members serve.
+    // Both registrations settled before the first request, so six requests
+    // alternate from any starting cursor: both members serve, and only
+    // members serve.
     let mut alpha = 0;
     let mut beta = 0;
     for _ in 0..6 {

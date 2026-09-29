@@ -1,8 +1,8 @@
-//! `SubstrateHarness` actor-log reader proof (issue 1856): load the bundle's
-//! `QuietProbe` export,
-//! advance one tick to fire its first-tick `tracing::info!`, tail its per-actor
-//! `ActorLogRing` (ADR-0081) for the `typed_send_alive` info entry, then walk
-//! the `since` cursor to confirm it does not re-yield the seen entry.
+//! `SubstrateHarness` actor-log reader proof (issue 1856; issue 7107): load
+//! the bundle's `QuietProbe` export, send it a `LogMarker` to fire its
+//! `tracing::info!`, tail its per-actor `ActorLogRing` (ADR-0081) for the
+//! `typed_send_alive` info entry, then walk the `since` cursor to confirm it
+//! does not re-yield the seen entry.
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor` entries are
 // present in this test binary (same rationale as cap_registry.rs).
@@ -15,18 +15,19 @@ mod tests {
     use aether_harness_substrate::test_helpers::require_wasm;
     use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     use aether_kinds::{LoadComponent, LogTailResult};
+    use aether_test_fixtures_kinds::LogMarker;
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared across
     /// `aether.log.*`.
     const LEVEL_INFO: u8 = 2;
 
-    /// Load `probe`, advance one tick, read its reference once with
+    /// Load `probe`, send it a `LogMarker`, read its reference once with
     /// `SubstrateHarness::log_tail` for the `typed_send_alive` info entry,
     /// then re-query past the returned cursor and assert it is not
     /// re-yielded — the in-process counterpart to
-    /// `fleetharness_actor_logs_surface_the_probe_first_tick_entry`.
+    /// `fleetharness_actor_logs_surface_the_probe_marker_entry`.
     #[test]
-    fn substrate_harness_actor_logs_surface_the_probe_first_tick_entry() {
+    fn substrate_harness_actor_logs_surface_the_probe_marker_entry() {
         let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
             return;
         };
@@ -42,11 +43,12 @@ mod tests {
             })
             .expect("load probe");
 
-        harness.execute(vec![("tick", HarnessOp::advance(1))]).expect("advance one tick");
+        harness.execute(vec![("marker", HarnessOp::send_and_settle(probe, &LogMarker))]).expect("send LogMarker");
 
         // The guest's log host fn pushes into the actor's log ring on the
-        // dispatcher thread, inside the tick handler, and `advance` returns
-        // only once the tick's subtree settled — so one read sees the entry.
+        // dispatcher thread, inside the handler, and `send_and_settle`
+        // returns only once the marker's subtree settled — so one read sees
+        // the entry.
         let reply = harness.log_tail(probe, None, None);
         let LogTailResult::Ok { ref entries, next_since, .. } = reply else {
             panic!("LogTail failed: {reply:?}");

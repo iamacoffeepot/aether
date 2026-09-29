@@ -7,9 +7,7 @@ use super::handlers::{
     EchoHttpHandler, FloodHttpHandler, STREAM_CHUNK_COUNT, StreamHttpHandler, StreamIdEchoHandler,
     StreamingUploadHandler, stream_chunk_body,
 };
-use super::support::{
-    body_of, boot_request_stream, boot_response_stream, dechunk, port_of, round_trip, round_trip_live,
-};
+use super::support::{body_of, boot_request_stream, boot_response_stream, dechunk, port_of, round_trip};
 
 /// A streaming handler (ADR-0128) emits its body across more chunks than the
 /// credit window, and the cap streams them as chunked transfer-encoding that
@@ -20,8 +18,7 @@ fn streamed_response_reassembles_across_credit_window() {
     // Window well below the chunk count so credit must replenish.
     let chassis = boot_response_stream::<StreamHttpHandler>(8);
 
-    // First request against the async-registered `/` catch-all: poll it live.
-    let response = round_trip_live(port_of(&chassis), b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let response = round_trip(port_of(&chassis), b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
     assert!(response.contains("Transfer-Encoding: chunked\r\n"), "streamed response is chunked: {response:?}");
     assert!(!response.contains("Content-Length:"), "streamed response omits Content-Length: {response:?}");
@@ -44,8 +41,7 @@ fn over_window_flood_tears_the_stream_down() {
     // Tiny window so the flood overruns credit within a few chunks.
     let chassis = boot_response_stream::<FloodHttpHandler>(2);
 
-    // First request against the async-registered `/` catch-all: poll it live.
-    let response = round_trip_live(port_of(&chassis), b"GET /flood HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let response = round_trip(port_of(&chassis), b"GET /flood HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
     assert!(
         response.contains("Transfer-Encoding: chunked\r\n"),
@@ -63,11 +59,6 @@ fn over_window_flood_tears_the_stream_down() {
 fn large_upload_streams_past_the_buffered_cap() {
     let chassis = boot_request_stream::<StreamingUploadHandler>(4);
     let port = port_of(&chassis);
-
-    // Poll the async `/` catch-all live with a cheap zero-length chunked
-    // upload before the multi-megabyte assertion, so the large body is not
-    // re-sent on each poll iteration.
-    round_trip_live(port, b"POST /warmup HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
 
     // Well past DEFAULT_MAX_REQUEST_BYTES (1 MiB) — a buffered handler would
     // `413` this; the streaming handler takes it incrementally.
@@ -90,8 +81,7 @@ fn chunked_upload_streams_to_streaming_handler() {
     let port = port_of(&chassis);
 
     // "hello" (5) + " world" (6) = 11 body bytes across two chunks.
-    // First request against the async-registered `/` catch-all: poll it live.
-    let response = round_trip_live(
+    let response = round_trip(
         port,
         b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
           5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
@@ -158,8 +148,7 @@ fn buffered_handler_keeps_the_unstreamed_path() {
     let chassis = boot_request_stream::<EchoHttpHandler>(4);
     let port = port_of(&chassis);
 
-    // First request against the async-registered `/` catch-all: poll it live.
-    let response = round_trip_live(port, b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
+    let response = round_trip(port, b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
     assert_eq!(body_of(&response), "hello", "buffered body echoed verbatim");
 }
@@ -180,9 +169,6 @@ fn buffered_handler_keeps_the_unstreamed_path() {
 fn consecutive_response_streams_get_distinct_stream_ids() {
     let chassis = boot_response_stream::<StreamIdEchoHandler>(8);
     let port = port_of(&chassis);
-
-    // Poll the async `/` catch-all live before the measured requests.
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     let first = round_trip(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     let second = round_trip(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
