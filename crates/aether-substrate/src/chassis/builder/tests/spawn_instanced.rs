@@ -7,7 +7,7 @@ use crate::actor::native::ctx::NativeCtx;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
 use crate::mail::MailboxId;
-use crate::testing::{TestChassis, await_settled, await_signal, bare_substrate};
+use crate::testing::{TestChassis, await_signal, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{ActorPath, Addressable, ChildOf};
 use aether_data::LoadName;
@@ -177,14 +177,18 @@ fn instanced_can_spawn_grandchild() {
         .expect("spawn parent");
     let parent_id = parent.id();
 
-    // Trigger parent → grandchild spawn. The handler records the staged
-    // receipt's name before its root settles.
-    let (_, settled) = chassis.send_tracked(parent, &Hatch { tag: 1 }, None);
-    await_settled(&settled, "test.recursive.hatch");
+    // Trigger parent → grandchild spawn. The Hatch root does not settle
+    // here: the staged birth's completion holds it until the parent takes
+    // its `TaskDone`, and this parent has no completion arm, so the hold
+    // stays in its ledger until its close releases it.
+    let _ = chassis.send_tracked(parent, &Hatch { tag: 1 }, None);
 
     // Wait for the grandchild's after_init Ping to dispatch (proves
     // the recursive spawn happened AND the after_init plumbing
-    // works through it).
+    // works through it). The birth is buffered on the parent's outbound
+    // work and committed only at the Hatch turn's flush, after the handler
+    // recorded the staged receipt's name, so the Ping also orders that
+    // write.
     await_signal(&pinged_rx, "test.recursive.grandchild_ping");
     assert_eq!(
         grandchild_received.load(AtomicOrdering::SeqCst),
