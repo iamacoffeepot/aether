@@ -264,7 +264,9 @@ impl NativeActor for HeadlessWindowInstance {
 mod tests {
     use aether_data::{Kind, SessionToken, Uuid};
     use aether_substrate::actor::native::Dispatch;
-    use aether_substrate::testing::{boot_test_chassis_with, decode_session_reply, fresh_substrate_and_rx};
+    use aether_substrate::testing::{
+        await_settled, boot_test_chassis_with, decode_session_reply, fresh_substrate_and_rx,
+    };
     use aether_substrate::{ReplyTarget, Subname};
 
     use super::super::HeadlessWindowCapabilityState;
@@ -302,16 +304,23 @@ mod tests {
             assert!(kinds.contains(&SetWindowCursor::ID), "the headless identity advertises aether.window.set_cursor");
         }
 
-        chassis.send_for_reply(capability, &SetWindowMenu { menus: Vec::new() }, session);
+        let (_, settled) = chassis.send_tracked(capability, &SetWindowMenu { menus: Vec::new() }, Some(session));
+        await_settled(&settled, SetWindowMenu::NAME);
         assert!(matches!(decode_session_reply(&egress), SetWindowMenuResult::Err { .. }), "the root refuses a menu");
-        chassis.send_for_reply(instance, &SetWindowMenu { menus: Vec::new() }, session);
+
+        let (_, settled) = chassis.send_tracked(instance, &SetWindowMenu { menus: Vec::new() }, Some(session));
+        await_settled(&settled, SetWindowMenu::NAME);
         assert!(matches!(decode_session_reply(&egress), SetWindowMenuResult::Err { .. }), "a window refuses a menu");
-        chassis.send_for_reply(capability, &SetWindowCursor { icon: CursorIcon::Move }, session);
+
+        let (_, settled) = chassis.send_tracked(capability, &SetWindowCursor { icon: CursorIcon::Move }, Some(session));
+        await_settled(&settled, SetWindowCursor::NAME);
         assert!(
             matches!(decode_session_reply(&egress), SetWindowCursorResult::Err { .. }),
             "the root refuses a cursor",
         );
-        chassis.send_for_reply(instance, &SetWindowCursor { icon: CursorIcon::Move }, session);
+
+        let (_, settled) = chassis.send_tracked(instance, &SetWindowCursor { icon: CursorIcon::Move }, Some(session));
+        await_settled(&settled, SetWindowCursor::NAME);
         assert!(
             matches!(decode_session_reply(&egress), SetWindowCursorResult::Err { .. }),
             "a window refuses a cursor",
