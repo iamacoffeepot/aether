@@ -5,20 +5,21 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# ADR-0230 §3 fixture: a module whose composable child declares a dependency.
-# `Holder` (the default export) spawns the composable `Needy` inline in
-# `wire`, and `Needy` declares `depends(ClipboardCapability)`, which the
-# substrate harness does not compose unless a scenario asks for it. Loading
-# any export of this module is refused wherever clipboard is absent, so it
-# is standalone: in the shared bundle, every bundle load in every scenario
-# without clipboard would be refused.
+# ADR-0230 fixture: a module whose inline child declares a dependency.
+# `Holder` (the export) spawns its private child `Needy` inline in `wire`, and `Needy` declares `depends(ClipboardCapability)`, which the
+# substrate harness does not compose unless a scenario asks for it. The
+# module loads either way; the host checks `Needy`'s dependency at its spawn
+# (ADR-0241 §4), and `Holder` answers how the spawn ended. It stays
+# standalone so the shared bundle carries no clipboard-dependent child. The
+# `rlib` lets host tests name the holder and the child it spawns.
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 aether-kinds = { path = "../aether-kinds" }
 aether-clipboard = { path = "../aether-clipboard", default-features = false }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 
 [lints]
 workspace = true

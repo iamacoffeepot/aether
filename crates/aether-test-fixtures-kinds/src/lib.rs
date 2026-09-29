@@ -262,6 +262,21 @@ pub struct RespawnResult {
     pub alias_refused: bool,
 }
 
+/// Issue 6867: asks the inline-dependency fixture's holder how the spawn of
+/// its child in `wire` ended. Replied with a [`SpawnOutcome`].
+/// Structured-shaped unit struct.
+#[aether_data::kind(name = "aether.test_fixtures.spawn_outcome_query", default)]
+pub struct SpawnOutcomeQuery;
+
+/// Reply to [`SpawnOutcomeQuery`]: whether the child was spawned, and
+/// whether the host refused it because a dependency its type declares is
+/// not live (ADR-0230).
+#[aether_data::kind(name = "aether.test_fixtures.spawn_outcome", copy, default, eq)]
+pub struct SpawnOutcome {
+    pub spawned: bool,
+    pub dependency_not_live: bool,
+}
+
 /// Issue 2690 typed config for the config-carrying inline-child reload
 /// fixture: the durable counter's starting value. Distinct from the
 /// `()`-config `InlineStatefulChild` — this is the config-bytes case the

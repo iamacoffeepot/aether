@@ -3,10 +3,10 @@
 - **Status:** Proposed
 - **Date:** 2026-09-21
 - **Amended:** 2026-09-23 — §5's deleted `ctx.actor::<R>()` handle is replaced at the call site by flat ctx verbs (`ctx.send::<R>(&k)`, `ctx.subscribe::<P, K>()`, `ctx.send_to(&r, &k)`) proven by `#[actor(depends(R))]`, with no optional peers ([ADR-0232](0232-flat-ctx-send-verbs.md)).
-- **Amended:** 2026-09-23 — §3's declared-dependency check reaches two more births: an inline-spawnable actor's dependencies are checked when its module loads, and a native dependency on a pumped slot passes the birth check on the slot's Claim-stage reservation, with the boot failing if the pump never goes `Live`.
+- **Amended:** 2026-09-23 — §3's declared-dependency check reaches two more births: an inline child's dependencies are checked when it is spawned, and a native dependency on a pumped slot passes the birth check on the slot's Claim-stage reservation, with the boot failing if the pump never goes `Live`.
 - **Amended:** 2026-09-24 — §3's dependency list is written as one `depends(A, B, …)` per `#[actor]`: `depends(R)` is a list of one, and a second `depends(...)` in the same attribute is a compile error that points at the list (#6557). [ADR-0232](0232-flat-ctx-send-verbs.md) §2's example is respelled to match.
 - **Amended:** 2026-09-24 — §3: a wire `Call` names its recipient by `ErasedActorPath`; the engine that hosts the recipient resolves and proves it on arrival, an unresolved path is answered as not present (`RpcError::NotPresent`), and no mailbox id crosses the RPC wire as a recipient or in a reply.
-- **Amended:** 2026-09-24 — §3's module-load check reaches private inline children: the types `export!` lists under `private = [..]` are read from the module's `aether.kinds.inputs.private` section and checked like the exported inline-spawnable actors (#6590).
+- **Amended:** 2026-09-24 — §3's spawn-time check reaches private inline children: the types `export!` lists under `private = [..]` are read from the module's `aether.kinds.inputs.private` section and checked at their spawn like the exported inline-spawnable actors (#6590, #6867).
 - **Amended:** 2026-09-24 — §3's declared-dependency proof `DependsOn<R>` is a safe trait whose impl names `R`'s position in the actor's one `Declared::Depends` list, which `#[actor(depends(..))]` writes and which is the list the pre-`init` check reads on both transports: the native birth check walks it, and `export!` writes a guest's `Dependency` records from it; a hand-written impl for an undeclared `R` repeats an emitted impl (`E0119`) or names a position that holds another dependency or none (`E0277`) ([ADR-0231](0231-protocol-typed-references-and-reply-checks.md) §10; #6614, #6842, #6870).
 - **Amended:** 2026-09-24 — §2: a proven reference's canonical `ErasedActorPath` is readable through the host registry (`NativeCtx::actor_path`) for diagnostics, as text only, never a position or anything sendable; the registry proves each route's name against the ADR-0166 grammar when the route is first published, so the read cannot fail for a reference it minted (#6635).
 - **Amended:** 2026-09-24 — every `ErasedActorRef` is route-backed: an unwound eager spawn, or a chassis boot that fails before its spawn pass, withdraws its `Live` claim, because no reference to the claim can outlive that unwind; any other unwind retires its route to `Dropped`, which keeps its name and is never registered again. So `CancelStarting` and that withdrawal are the only edges that remove a route; and the envelope sender mints through one published-route read, `None` for a stamped position with no route (the chassis sentinel) (#6656).
@@ -303,14 +303,21 @@ ADR-0232's flat verbs exposed two gaps:
 
 - **Inline-spawnable actors.** A composable actor that a guest spawns inline
   through `spawn_inline_child_by_tag` (the kit-widget types, the behavior
-  host's children) runs before the host sees it, and the trampoline stages its
-  alias only afterwards. A `depends(R)` on such an actor compiled a `DependsOn`
-  proof that nothing checked. When the host loads a module, it now also checks
-  the declared dependencies of every inline-spawnable actor in that module, with
-  the same refusal naming the dependency, before anything in the module runs.
-  Private inline children, which the module rebuilds but does not export, are
-  read from the module's `aether.kinds.inputs.private` section and checked the
-  same way (#6590).
+  host's children) runs in the guest, and the host sees it only when the guest
+  asks for its alias. A `depends(R)` on such an actor compiled a `DependsOn`
+  proof that nothing checked. Its spawn is where it stands up, so the check
+  runs there (ADR-0241 §4): the `spawn_inline_child_p32` host fn reads the
+  child type's declared dependencies, and one with no `Live` route refuses the
+  spawn before it allocates the alias, so the child's `init` never runs. The
+  guest gets `SpawnError::DependencyNotLive`, and the host's warning names the
+  child and the missing namespace. A module load checks only the actors it
+  stands up, the requested one and the boot, so a module is never refused over
+  a child it may never spawn. A republish rebuilds each live inline child, so a
+  dependency its successor type adds is checked then, and the replace is
+  refused naming every such instance. Private inline children, which the
+  module rebuilds but does not export, are read from the module's
+  `aether.kinds.inputs.private` section and checked the same way (#6590,
+  #6867).
 - **A native dependency on a pumped slot.** A pumped actor goes `Live` after
   the passive actors' `init`: the desktop driver boots render from its
   Claim-stage reservation, and the harness chassis leaves render to the

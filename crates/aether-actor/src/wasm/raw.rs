@@ -107,8 +107,10 @@ unsafe extern "C" {
     /// name; `subname_ptr/len` is the bare `Named` segment (empty for
     /// `Counter`), copied out of guest memory before the call returns. The
     /// returned id is the ADR-0099 §3 lineage fold of `parent` with the
-    /// child's node; `0` on a host-side error (no memory, OOB, bad UTF-8, no
-    /// spawner, an unresolvable parent, or an undeclared tag).
+    /// child's node; `1` when the child's type declares a dependency with no
+    /// `Live` route (ADR-0230), and `0` on any other host-side error (no
+    /// memory, OOB, bad UTF-8, no spawner, an unresolvable parent, an
+    /// undeclared tag, or a spent name).
     #[link_name = "spawn_inline_child_p32"]
     pub fn spawn_inline_child(parent: u64, tag: u64, is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
     /// ADR-0114 teardown (#4228): retire the alias route

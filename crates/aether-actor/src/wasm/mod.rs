@@ -468,15 +468,24 @@ pub fn __validate_inline_child_placement(
     Ok(())
 }
 
-/// Validate the raw alias a host allocated for an inline child. A zero alias
-/// is the host's failure sentinel, not an address that can enter the inline
-/// registry, so validation occurs before configuration decode or child init.
-/// Both the typed spawn verbs and the by-tag resolver take their alias
-/// through it.
-pub(crate) fn __validate_inline_child_alias(alias: u64) -> Result<aether_data::MailboxId, SpawnError> {
-    use core::num::NonZeroU64;
+/// The `spawn_inline_child_p32` status for a child whose type declares a
+/// dependency with no `Live` route (ADR-0230) — must match
+/// `host_fns::INLINE_SPAWN_DEPENDENCY_NOT_LIVE`. A real alias carries the
+/// mailbox tag in its high nibble, so it is never `1`.
+const INLINE_SPAWN_DEPENDENCY_NOT_LIVE: u64 = 1;
 
-    NonZeroU64::new(alias).map(|alias| aether_data::MailboxId(alias.get())).ok_or(SpawnError::AliasAllocationFailed)
+/// Validate the raw alias a host allocated for an inline child. A zero alias
+/// is the host's failure sentinel and
+/// [`INLINE_SPAWN_DEPENDENCY_NOT_LIVE`] its unmet-dependency status, neither
+/// an address that can enter the inline registry, so validation occurs
+/// before configuration decode or child init. Both the typed spawn verbs and
+/// the by-tag resolver take their alias through it.
+pub(crate) fn __validate_inline_child_alias(alias: u64) -> Result<aether_data::MailboxId, SpawnError> {
+    match alias {
+        0 => Err(SpawnError::AliasAllocationFailed),
+        INLINE_SPAWN_DEPENDENCY_NOT_LIVE => Err(SpawnError::DependencyNotLive),
+        alias => Ok(aether_data::MailboxId(alias)),
+    }
 }
 
 #[cfg(target_family = "wasm")]

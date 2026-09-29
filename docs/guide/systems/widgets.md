@@ -18,11 +18,14 @@ The set is a defaultless grab-bag module (ADR-0138): load a widget by its
 exported**, not a chosen subset, so any of them can be loaded by selector as
 well as spawned inline by a root.
 
-Wherever the module loads, whichever export is selected, it needs the window,
-lifecycle, render, text and clipboard capabilities live. Its actors declare
-each capability they mail (ADR-0230), and a load checks the declarations of
-every actor the module can spawn inline, so a composition missing one of the
-five refuses the load and names the first widget whose dependency is not live.
+Its actors need the window, lifecycle, render, text and clipboard capabilities
+live. Each declares the capabilities it mails (ADR-0230), and the declaration is
+checked where the widget stands up (ADR-0241 §4): a load checks the widget it
+loads, and an inline spawn checks the child it spawns. So a composition missing
+one of the five still loads the module, and refuses each widget that needs the
+missing capability: its load answers `Err`, or its spawn returns
+`SpawnError::DependencyNotLive` and the host's warning names the widget and the
+missing namespace.
 Every shipping chassis composes all five. A `SubstrateHarness` scenario gets
 the window and lifecycle from the harness basics and composes a render (the
 real one, or the `HeadlessRenderCapability` stub when it reads no pixels),

@@ -8,12 +8,12 @@ publish = false
 # Request-correlation fixtures (issues 2791, 5508, 6530): the `test.fs_demux`
 # root and the `test.inline.fs_demux_parent` export, whose private inline
 # child runs the same demux flow. That child declares
-# `depends(FsCapability, SubstrateHarnessObserver)`, and the host checks a
-# private inline child's dependencies when its module loads (ADR-0230 §3), so
-# loading any export of this module needs fs and the harness observer. That is
-# why it is standalone: in the shared bundle, every bundle load without fs
-# roots, and every FleetHarness bundle load, would be refused. The `rlib` lets
-# host tests name the actor types they load and the child the parent spawns.
+# `depends(FsCapability, SubstrateHarnessObserver)`, which the host checks
+# when the parent spawns it (ADR-0241 §4), so the child stands up only where
+# fs and the harness observer are live. The `test.fs_demux` root declares the
+# same dependencies at load. It stays standalone so the shared bundle carries
+# no fs-dependent actor. The `rlib` lets host tests name the actor types they
+# load and the child the parent spawns.
 [lib]
 crate-type = ["cdylib", "rlib"]
 

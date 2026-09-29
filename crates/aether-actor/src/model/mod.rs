@@ -295,10 +295,13 @@ pub fn root_mailbox<C: Root + Addressable<Resolver = One>>() -> MailboxId {
 /// implement [`Root`] when both placements are meaningful.
 pub trait ChildOf<P: Addressable>: Addressable {}
 
-/// A declared load-time dependency (ADR-0230): `Self: DependsOn<R>` means
-/// the actor could not have been created before `R` was `Live` — the host
-/// refuses the load, the module boot actor, or the replacement while `R`
-/// has no `Live` route, before `init`. Declared with `#[actor(depends(R))]`.
+/// A declared dependency (ADR-0230): `Self: DependsOn<R>` means the actor
+/// could not have been created before `R` was `Live`. It is checked where
+/// the actor stands up (ADR-0241 §4): the host refuses the load, the module
+/// boot actor, the republish that rebuilds a live instance, or the inline
+/// spawn ([`SpawnError::DependencyNotLive`](crate::SpawnError::DependencyNotLive))
+/// while `R` has no `Live` route, before `init`. Declared with
+/// `#[actor(depends(R))]`.
 ///
 /// Only keyless actors are declarable: `R: Singleton + CallerAddressable`
 /// with a [`DependencyResolver`] strategy. A keyed actor cannot be a

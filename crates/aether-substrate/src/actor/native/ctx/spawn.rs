@@ -144,8 +144,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// dependent is placed. It is a read and nothing else: no ordering, no
     /// retry, no wait.
     ///
-    /// Its consumers are the component host's loads and module boots, its
-    /// module-wide inline check, and the trampoline's replacement check.
+    /// Its consumers are the component host's loads, module boots, and
+    /// republish pre-checks; the inline spawn host fn asks the same read
+    /// through the guest's binding.
     #[cfg(feature = "wasm")]
     #[must_use]
     pub fn missing_dependency<'d>(&self, dependencies: &'d [Dependency]) -> Option<&'d str> {

@@ -296,7 +296,9 @@ with `depends(R)`. The actor is the first parameter, the reply mode the second
 
 The `ChildOf<RootManager>` bound rejects a missing placement at compile time.
 At runtime the ctx also verifies that its actual registry actor tag is
-`RootManager` before it allocates the child's alias. The child's `init` runs
+`RootManager` before it allocates the child's alias. A child type whose declared
+dependency has no `Live` route is refused before its alias is allocated, as
+`SpawnError::DependencyNotLive`. The child's `init` runs
 in-process during the call, so an `init` failure comes back as
 `SpawnError::InitFailed`, and the returned `InlineChild<Panel>` checks later
 sends against `Panel`'s handlers.
@@ -428,8 +430,8 @@ before any member is touched:
   [Publishing a module](#publishing-a-module)): a dropped namespace, or a row or
   `#[fallback]` a namespace or private child type narrows
   ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §5);
-- an inline-spawnable type, or a member's type, that adds a dependency with no
-  `Live` route ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md));
+- a live instance, a member or an inline child one rebuilds, whose type adds a
+  dependency with no `Live` route ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md));
 - a config: an instance whose type's config kind changed needs a
   `configs` entry `{ path, config }`, decoded strictly as the new kind; an
   unlisted instance with an unchanged kind keeps its stored spawn config; a
@@ -502,21 +504,34 @@ host never checks
 must stay out of other crates' reach. A second `depends(...)` in the same
 attribute is a compile error: every dependency goes in the one list.
 
-A load, a module boot actor, or a replacement whose declared dependency has no
-`Live` route is refused before `init` — the operation replies its `Err` naming
-the actor and the missing namespace (`"<actor> depends on <namespace>, which is
-not live"`), and a refused replacement keeps the running module. There is no
+Dependencies are checked where an actor stands up, and only there
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§4). Publishing a module stands nothing up, so the checks sit at the four
+stand-up sites:
+
+- a load checks the actor it stands up;
+- a module boot checks the boot actor;
+- a republish checks each live instance it rebuilds, loaded or inline, for a
+  dependency its successor type adds;
+- an inline spawn checks the child's type.
+
+At the first three, an actor whose declared dependency has no `Live` route is
+refused before `init` — the operation replies its `Err` naming the actor and
+the missing namespace (`"<actor> depends on <namespace>, which is not live"`),
+and a refused replacement keeps the running module. There is no
 ordering, retry, or wait: two actors that declare each other both refuse. For
 two actors that mail each other both ways, one declares the other and the other
 keeps the envelope sender of its announcement; see
 [Addressing a peer you cannot depend on](../recipes/addressing-a-peer-you-cannot-depend-on.md).
 
-Loading or replacing a module also checks the dependencies of every actor in it
-that can be spawned inline — a `composable` actor, or a `child_of` a type in the
-same module — and refuses with the same message before anything in the module
-runs. A private child, listed under `export!`'s `private = [..]`, is
-checked the same way, so a module whose private child depends on an absent
-actor does not load.
+An inline child, exported or listed under `export!`'s `private = [..]`, is
+checked when it is spawned. A dependency with no `Live` route refuses the spawn
+before the host allocates its alias, so the child's `init` never runs: the verb
+returns `SpawnError::DependencyNotLive`, and the host's warning names the child
+and the missing namespace. The module itself loads whatever its inline children
+declare, so a module is never refused over a child it may never spawn. A
+republish that adds a dependency to a type with no live instance proceeds, and
+the dependency is checked at the type's next spawn.
 
 ## Addressing an actor by path
 
