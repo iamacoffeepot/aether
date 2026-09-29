@@ -21,8 +21,6 @@ use super::{LifecycleCapability, LifecycleGraphData};
 pub use self::config::{
     LifecycleConfig, LifecycleConfigLayer, LifecycleOverlay, LifecycleParams, frame_lifecycle_params,
 };
-#[cfg(test)]
-pub use self::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
 pub use self::settlement::{PendingAdvance, Step, resolve_edge};
 pub use super::subscribers::{StageSubscribers, broadcast_to_subscribers};
 
@@ -149,15 +147,13 @@ impl LifecycleCapabilityState {
     }
 }
 
-/// Construction-level state fixture: a Render→Present→Shutdown
-/// data graph, built directly (no chassis boot),
-/// with the supplied advance timeout. Reachable from
-/// `mod settlement`'s descendant tests via module privacy.
+/// The Render→Present→Shutdown data graph the construction-level fixture
+/// and the booted-cap tests share.
 #[cfg(test)]
-fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
+fn render_present_graph() -> LifecycleGraphData {
     use aether_kinds::{Present, Render, Shutdown};
 
-    let graph = LifecycleGraphData::builder()
+    LifecycleGraphData::builder()
         .state::<Render>()
         .next::<Present>()
         .state::<Present>()
@@ -166,7 +162,15 @@ fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
         .terminal::<Shutdown>()
         .start::<Render>()
         .build()
-        .expect("test setup: graph builds");
+        .expect("test setup: graph builds")
+}
+
+/// Construction-level state fixture: the [`render_present_graph`], built
+/// directly (no chassis boot), with the supplied advance timeout. Reachable
+/// from `mod settlement`'s descendant tests via module privacy.
+#[cfg(test)]
+fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
+    let graph = render_present_graph();
     LifecycleCapabilityState {
         current_state: graph.start(),
         graph,
@@ -175,34 +179,6 @@ fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
         quit_pending: false,
         pending: None,
         advance_timeout,
-        settlement_latency_ewma: None,
-        last_slow_warn: None,
-        monitors: BTreeMap::new(),
-    }
-}
-
-/// A `Tick`→`Shutdown` graph fixture (the round-trip test wants
-/// `Tick` as a declared stage, which [`test_cap`]'s Render-rooted
-/// graph doesn't carry).
-#[cfg(test)]
-fn tick_start_graph_cap() -> LifecycleCapabilityState {
-    use aether_kinds::{Shutdown, Tick};
-
-    let graph = LifecycleGraphData::builder()
-        .state::<Tick>()
-        .next::<Shutdown>()
-        .terminal::<Shutdown>()
-        .start::<Tick>()
-        .build()
-        .expect("test setup: tick graph builds");
-    LifecycleCapabilityState {
-        current_state: graph.start(),
-        graph,
-        subscribers: StageSubscribers::default(),
-        terminal_reached: false,
-        quit_pending: false,
-        pending: None,
-        advance_timeout: Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT),
         settlement_latency_ewma: None,
         last_slow_warn: None,
         monitors: BTreeMap::new(),
@@ -593,53 +569,70 @@ impl NativeActor for LifecycleCapability {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, mpsc};
+    use std::thread;
 
-    use aether_actor::{ActorPath, Addressable, Publisher};
-    use aether_data::{Kind, LoadName};
+    use aether_actor::{ActorPath, ActorRef, HandlesKind, Publisher};
+    use aether_data::{Kind, LoadName, SessionToken, Uuid};
     use aether_kinds::{Present, Render, Shutdown, Tick};
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::Source;
-    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, noop_handler};
-    use aether_substrate::testing::{
-        boot_test_chassis_with, drop_ref, fresh_substrate, registered_binding, registered_ref, unrouted_binding,
-    };
-    use aether_substrate::{BootError, Registry};
+    use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
+    use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, fresh_substrate_and_rx, registered_ref};
+    use aether_substrate::{BootError, PassiveChassis, PumpedSlot, Registry, ReplyTarget, Subname};
 
     use super::*;
     use crate::kinds::LifecycleSubscription;
 
+    /// A stage a [`Listener`] heard, forwarded to the test.
+    #[derive(Debug, PartialEq)]
+    enum Heard {
+        Tick(Tick),
+        Render,
+        Present,
+        Shutdown,
+    }
+
     /// A keyed stage subscriber: silent `Tick`, `Render`, `Present`, and
-    /// `Shutdown` handlers, so its path narrows to a subscriber of each. Each test
-    /// stands a route at one of its keyed paths.
-    struct Listener;
+    /// `Shutdown` handlers, so its path narrows to a subscriber of each, each
+    /// reporting what it heard over its config's channel. A send whose
+    /// receiver the test dropped is discarded. `Quit` closes it, so the
+    /// runtime posts a `MonitorNotice` to every actor watching it.
+    struct Listener {
+        heard: mpsc::Sender<Heard>,
+    }
 
     #[aether_actor::actor(instanced, root, depends(LifecycleCapability))]
     impl NativeActor for Listener {
         const NAMESPACE: &'static str = "test.lifecycle.listener";
-        type Config = ();
+        type Config = mpsc::Sender<Heard>;
 
-        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self)
+        fn init(heard: mpsc::Sender<Heard>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { heard })
         }
 
         #[handler::single]
-        fn on_tick(&mut self, _ctx: &mut NativeCtx<'_>, _tick: Tick) {
-            let _ = self;
+        fn on_tick(&mut self, _ctx: &mut NativeCtx<'_>, tick: Tick) {
+            let _ = self.heard.send(Heard::Tick(tick));
         }
 
         #[handler::single]
         fn on_render(&mut self, _ctx: &mut NativeCtx<'_>, _render: Render) {
-            let _ = self;
+            let _ = self.heard.send(Heard::Render);
         }
 
         #[handler::single]
         fn on_present(&mut self, _ctx: &mut NativeCtx<'_>, _present: Present) {
-            let _ = self;
+            let _ = self.heard.send(Heard::Present);
         }
 
         #[handler::single]
         fn on_shutdown(&mut self, _ctx: &mut NativeCtx<'_>, _shutdown: Shutdown) {
+            let _ = self.heard.send(Heard::Shutdown);
+        }
+
+        #[handler::single]
+        fn on_quit(&mut self, ctx: &mut NativeCtx<'_>, _quit: Quit) {
             let _ = self;
+            ctx.shutdown();
         }
     }
 
@@ -670,71 +663,161 @@ mod tests {
         ActorPath::instance(&LoadName::new(key).expect("a valid key"))
     }
 
-    /// Stand a closure route at `key`'s listener path, answering its proof.
-    fn stand(registry: &Registry, key: &str) -> ErasedActorRef {
-        registered_ref(registry, listener(key).as_erased().as_str(), noop_handler())
+    /// The Tick→Shutdown graph the broadcast and flat-send tests advance
+    /// over: `Tick` is a declared stage there, which [`render_present_graph`]
+    /// does not carry.
+    fn tick_graph() -> LifecycleGraphData {
+        LifecycleGraphData::builder()
+            .state::<Tick>()
+            .next::<Shutdown>()
+            .terminal::<Shutdown>()
+            .start::<Tick>()
+            .build()
+            .expect("test setup: tick graph builds")
     }
 
-    /// Deliver an explicit `subscribe` to `cap` as a handler receives it.
-    fn subscribe(
-        cap: &mut LifecycleCapabilityState,
-        transport: &Arc<NativeBinding>,
-        subscription: LifecycleSubscription,
-    ) -> LifecycleSubscribeResult {
-        let mut ctx = NativeCtx::new_for_actor(transport, Source::NONE, None, None);
-        LifecycleCapability::on_subscribe(cap, &mut ctx, LifecycleSubscribe { subscription })
+    /// The hub session every externally sent request replies to.
+    fn session(correlation: u64) -> ReplyTarget {
+        ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0xFEED)), correlation }
     }
 
-    /// Stand a capturing sink at the lifecycle mailbox: it records each mail
-    /// sent there with its host-stamped `Source`, which is what a handler's
-    /// `ctx.sender()` reads back.
-    fn lifecycle_sink(registry: &Registry) -> mpsc::Receiver<(KindId, Source, Vec<u8>)> {
-        let (tx, rx) = mpsc::channel();
-        let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
-            let captured = (dispatch.kind, dispatch.sender, dispatch.payload.bytes().to_vec());
-            dispatch.discharge();
-            let _ = tx.send(captured);
-        });
-        registered_ref(registry, <LifecycleCapability as Addressable>::NAMESPACE, handler);
-        rx
+    /// A `LifecycleCapability` booted pumped on a bare `TestChassis`, beside
+    /// the registry it routes through, the egress its session replies leave
+    /// through, and the replies read off it but not yet asked for, as
+    /// `(correlation, kind name, payload)`. Nothing the cap receives runs
+    /// until a pump drains its slot, which the helpers below do.
+    struct Booted {
+        registry: Arc<Registry>,
+        chassis: PassiveChassis<TestChassis>,
+        slot: PumpedSlot<LifecycleCapability>,
+        egress: mpsc::Receiver<EgressEvent>,
+        replies: Vec<(u64, String, Vec<u8>)>,
     }
 
-    /// Send `request` to the lifecycle mailbox from `binding` as a `Listener`
-    /// through the flat typed send, answering the `Source` the host stamped.
-    fn stamped_by(
-        binding: &Arc<NativeBinding>,
-        sink: &mpsc::Receiver<(KindId, Source, Vec<u8>)>,
-        request: LifecycleSubscribeSelf,
-    ) -> Source {
-        NativeCtx::<'_, Listener>::new_for_actor(binding, Source::NONE, None, None)
-            .send::<LifecycleCapability>(&request);
-        binding.flush_outbound();
-
-        sink.try_recv().expect("the request reached the lifecycle mailbox").1
+    fn boot_lifecycle(graph: LifecycleGraphData) -> Booted {
+        let (registry, mailer, egress) = fresh_substrate_and_rx();
+        let chassis = boot_bare_test_chassis(&registry, &mailer);
+        let (slot, _wake) = chassis
+            .boot_pumped_actor::<LifecycleCapability>(LifecycleConfig::default(), LifecycleParams { graph })
+            .expect("the lifecycle cap boots pumped");
+        Booted { registry, chassis, slot, egress, replies: Vec::new() }
     }
 
-    /// An explicit `subscribe` proves its subscriber path live once, at
-    /// receipt (ADR-0231 §3): a live path lands its reference in the stage
-    /// set, and a path whose actor has gone replies `Err` naming the path and
-    /// leaves the set alone rather than registering a subscription whose
-    /// broadcasts could never land.
+    impl Booted {
+        /// Mail `request` to the cap as an external session correlated by
+        /// `correlation`: a sender with no local mailbox.
+        fn request<K: Kind>(&self, request: &K, correlation: u64)
+        where
+            LifecycleCapability: HandlesKind<K>,
+        {
+            self.chassis.send_for_reply(self.chassis.actor_ref::<LifecycleCapability>(), request, session(correlation));
+        }
+
+        /// Pump the cap until the session reply correlated by `correlation`
+        /// arrives, decoded as `K`.
+        fn reply<K: Kind>(&mut self, correlation: u64) -> K {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                self.slot.drain_available();
+                while let Ok(event) = self.egress.try_recv() {
+                    if let EgressEvent::ToSession { kind_name, payload, correlation_id, .. } = event {
+                        self.replies.push((correlation_id, kind_name, payload));
+                    }
+                }
+                if let Some(at) = self.replies.iter().position(|(id, ..)| *id == correlation) {
+                    let (_, kind_name, payload) = self.replies.remove(at);
+                    assert_eq!(kind_name, K::NAME, "reply {correlation} is a {}", K::NAME);
+                    return K::decode_from_bytes(&payload).expect("the reply decodes");
+                }
+                assert!(Instant::now() < deadline, "reply {correlation} did not arrive within the deadline");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        /// Subscribe `subscription` from an external session and answer the
+        /// cap's reply.
+        fn subscribe(&mut self, subscription: LifecycleSubscription, correlation: u64) -> LifecycleSubscribeResult {
+            self.request(&LifecycleSubscribe { subscription }, correlation);
+            self.reply(correlation)
+        }
+
+        /// Pump the cap until `stage`'s subscriber set satisfies `done`.
+        fn pump_until(&mut self, what: &str, stage: KindId, done: impl Fn(&[ErasedActorRef]) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                self.slot.drain_available();
+                if done(&self.subscribers_of(stage)) {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "{what} did not happen within the deadline");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        /// Pump the cap until `received` yields.
+        fn pump_recv<T>(&mut self, received: &mpsc::Receiver<T>, what: &str) -> T {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                self.slot.drain_available();
+                if let Ok(value) = received.try_recv() {
+                    return value;
+                }
+                assert!(Instant::now() < deadline, "{what} did not arrive within the deadline");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        fn subscribers_of(&self, stage: KindId) -> Vec<ErasedActorRef> {
+            self.slot.read_state(|state| state.subscribers.subscribers_of(stage)).expect("the lifecycle cap is live")
+        }
+
+        /// Spawn a [`Listener`] at `key` reporting what it hears on `heard`.
+        fn spawn_listener(&self, key: &str, heard: mpsc::Sender<Heard>) -> ActorRef<Listener> {
+            self.chassis
+                .spawn_actor_for_test::<Listener>(Subname::Named(key), heard, ())
+                .finish()
+                .expect("the listener spawns")
+        }
+
+        /// Close `listener` through its own `Quit` handler and wait until its
+        /// route stops answering live.
+        fn close(&self, listener: ActorRef<Listener>) {
+            self.chassis.send_for_reply(listener, &Quit, session(0));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self.chassis.published_contract(listener.erase()).is_some() {
+                assert!(Instant::now() < deadline, "the listener did not close within the deadline");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// The pumped slot's close is the embedder's: the chassis never learns
+    /// about a post-seal pumped actor.
+    impl Drop for Booted {
+        fn drop(&mut self) {
+            self.slot.shutdown();
+        }
+    }
+
+    /// An explicit `subscribe` proves its subscriber path live (ADR-0231 §3):
+    /// a live path lands its reference in the stage set, and a path whose
+    /// actor has closed is refused and leaves the set alone rather than
+    /// registering a subscription whose broadcasts could never land. The
+    /// closed path is requested first, so once the live path's reply is out
+    /// the cap has dispatched both.
     #[test]
     fn explicit_subscribe_holds_a_live_path_and_refuses_one_that_is_gone() {
-        let (registry, mailer) = fresh_substrate();
-        let live = stand(&registry, "live");
-        drop_ref(&registry, stand(&registry, "gone"));
-        let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
-        let transport = unrouted_binding(&mailer);
+        let mut booted = boot_lifecycle(render_present_graph());
+        let (heard, _) = mpsc::channel();
+        let live = booted.spawn_listener("live", heard.clone());
+        booted.close(booted.spawn_listener("gone", heard));
 
-        let held = subscribe(&mut cap, &transport, LifecycleSubscription::Render(listener("live").narrow()));
-        let refused = subscribe(&mut cap, &transport, LifecycleSubscription::Render(listener("gone").narrow()));
+        booted
+            .request(&LifecycleSubscribe { subscription: LifecycleSubscription::Render(listener("gone").narrow()) }, 1);
+        let held = booted.subscribe(LifecycleSubscription::Render(listener("live").narrow()), 2);
 
         assert!(matches!(held, LifecycleSubscribeResult::Ok), "a live path subscribes");
-        let LifecycleSubscribeResult::Err { error, .. } = refused else {
-            panic!("a path whose actor has gone replies Err");
-        };
-        assert!(error.contains(listener("gone").as_erased().as_str()), "the refusal names the path: {error}");
-        assert_eq!(cap.subscribers.subscribers_of(Render::ID), [live], "only the live subscriber is held");
+        assert_eq!(booted.subscribers_of(Render::ID), [live.erase()], "only the live subscriber is held");
     }
 
     /// A departed subscriber's `MonitorNotice` removes it from every stage it
@@ -744,27 +827,22 @@ mod tests {
     /// live subscriber.
     #[test]
     fn monitor_notice_purges_the_departed_subscriber_from_every_stage() {
-        let (registry, mailer) = fresh_substrate();
-        let sink = lifecycle_sink(&registry);
-        let (departed_binding, _departed) =
-            registered_binding(&registry, &mailer, listener("departed").as_erased().as_str(), noop_handler());
-        let survivor = stand(&registry, "survivor");
-        let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
-        let transport = unrouted_binding(&mailer);
-        for subscription in [
-            LifecycleSubscription::Render(listener("departed").narrow()),
-            LifecycleSubscription::Present(listener("departed").narrow()),
-            LifecycleSubscription::Render(listener("survivor").narrow()),
+        let mut booted = boot_lifecycle(render_present_graph());
+        let (heard, _) = mpsc::channel();
+        let departed = booted.spawn_listener("departed", heard.clone());
+        let survivor = booted.spawn_listener("survivor", heard);
+        for (correlation, subscription) in [
+            (1, LifecycleSubscription::Render(listener("departed").narrow())),
+            (2, LifecycleSubscription::Present(listener("departed").narrow())),
+            (3, LifecycleSubscription::Render(listener("survivor").narrow())),
         ] {
-            assert!(matches!(subscribe(&mut cap, &transport, subscription), LifecycleSubscribeResult::Ok));
+            assert!(matches!(booted.subscribe(subscription, correlation), LifecycleSubscribeResult::Ok));
         }
 
-        let departed = stamped_by(&departed_binding, &sink, LifecycleSubscribeSelf { stage: Render::ID.0 });
-        let mut ctx = NativeCtx::new_for_actor(&transport, departed, None, None);
-        LifecycleCapability::on_monitor_notice(&mut cap, &mut ctx, MonitorNotice);
+        booted.close(departed);
+        booted.pump_until("the departed subscriber's purge", Present::ID, <[ErasedActorRef]>::is_empty);
 
-        assert_eq!(cap.subscribers.subscribers_of(Render::ID), [survivor], "the co-subscriber survives");
-        assert!(cap.subscribers.subscribers_of(Present::ID).is_empty(), "the departed leaves every stage");
+        assert_eq!(booted.subscribers_of(Render::ID), [survivor.erase()], "the co-subscriber survives");
     }
 
     /// The broadcast is a typed send of each stage: `Tick` carries the
@@ -773,96 +851,80 @@ mod tests {
     /// every motion subscriber still.
     #[test]
     fn broadcast_sends_tick_with_its_elapsed_time_and_other_stages_empty() {
-        let (registry, mailer) = fresh_substrate();
-        let (tx, rx) = mpsc::channel();
+        let mut booted = boot_lifecycle(tick_graph());
+        let (heard, motion) = mpsc::channel();
+        booted.spawn_listener("motion", heard);
+        for (correlation, subscription) in [
+            (1, LifecycleSubscription::Tick(listener("motion").narrow())),
+            (2, LifecycleSubscription::Shutdown(listener("motion").narrow())),
+        ] {
+            assert!(matches!(booted.subscribe(subscription, correlation), LifecycleSubscribeResult::Ok));
+        }
+
+        for correlation in [3, 4] {
+            booted.request(&LifecycleAdvance { delta_micros: 83_335 }, correlation);
+            booted.reply::<LifecycleAdvanceComplete>(correlation);
+        }
+
+        let wait = Duration::from_secs(5);
+        assert_eq!(motion.recv_timeout(wait), Ok(Heard::Tick(Tick { delta_micros: 83_335 })), "Tick carries its time");
+        assert_eq!(motion.recv_timeout(wait), Ok(Heard::Shutdown), "the terminal stage broadcasts its signal");
+    }
+
+    /// A `subscribe_self` from a non-`Component` source (an external
+    /// session) replies `Err` and subscribes nothing — the reflexive
+    /// form is gated to in-process actors by construction. A gate that
+    /// admitted a sender with no local mailbox would hold a subscriber no
+    /// broadcast can reach.
+    #[test]
+    fn subscribe_self_rejects_non_component_source() {
+        let mut booted = boot_lifecycle(render_present_graph());
+
+        booted.request(&LifecycleSubscribeSelf { stage: Render::ID.0 }, 1);
+
+        assert!(matches!(booted.reply(1), LifecycleSubscribeResult::Err { .. }), "an external session is refused");
+        assert!(booted.subscribers_of(Render::ID).is_empty(), "a non-Component source subscribes nothing");
+    }
+
+    /// Round trip through the host SDK path: the request the cap's
+    /// `Publisher` impl builds for `Tick`, whose sender the host stamps. A
+    /// caller whose `wire` sends it through the flat
+    /// `ctx.send::<LifecycleCapability>` and whose published rows handle
+    /// `Tick` silently lands in the `Tick` set; the same request stamped by a
+    /// closure route, whose empty contract handles nothing, is refused with a
+    /// reply naming it (ADR-0231 §4's guard cast). A cast that admitted any
+    /// sender would fan `Tick` out to an actor with no handler for it.
+    #[test]
+    fn subscribe_request_via_flat_send_lands_a_handling_caller_and_refuses_a_closure_route() {
+        let mut booted = boot_lifecycle(tick_graph());
+        let (tx, replies) = mpsc::channel();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
             let captured = (dispatch.kind, dispatch.payload.bytes().to_vec());
             dispatch.discharge();
             let _ = tx.send(captured);
         });
-        registered_ref(&registry, listener("motion").as_erased().as_str(), handler);
-        let mut cap = tick_start_graph_cap();
-        let transport = unrouted_binding(&mailer);
-        for subscription in [
-            LifecycleSubscription::Tick(listener("motion").narrow()),
-            LifecycleSubscription::Shutdown(listener("motion").narrow()),
-        ] {
-            assert!(matches!(subscribe(&mut cap, &transport, subscription), LifecycleSubscribeResult::Ok));
-        }
+        let closure = registered_ref(&booted.registry, "test.lifecycle.closure_caller", handler);
 
-        let mut ctx: NativeCtx<'_> = NativeCtx::new_for_actor(&transport, Source::NONE, None, None);
-        broadcast_to_subscribers(&mut ctx, &cap.subscribers, Tick::ID, 83_335);
-        broadcast_to_subscribers(&mut ctx, &cap.subscribers, Shutdown::ID, 83_335);
-        drop(ctx);
-        transport.flush_outbound();
+        booted.chassis.send_for_reply(
+            booted.chassis.actor_ref::<LifecycleCapability>(),
+            &<LifecycleCapability as Publisher>::subscribe_request::<Tick>(),
+            ReplyTarget::Actor { to: closure, correlation: 1 },
+        );
+        let (kind, reply) = booted.pump_recv(&replies, "the closure route's reply");
 
-        let (tick_kind, tick) = rx.try_recv().expect("the Tick broadcast arrives");
-        let (shutdown_kind, shutdown) = rx.try_recv().expect("the Shutdown broadcast arrives");
-        assert_eq!((tick_kind, Tick::decode_from_bytes(&tick)), (Tick::ID, Some(Tick { delta_micros: 83_335 })));
-        assert_eq!((shutdown_kind, Shutdown::decode_from_bytes(&shutdown)), (Shutdown::ID, Some(Shutdown)));
-    }
-
-    /// A `subscribe_self` from a non-`Component` source (an external
-    /// session) replies `Err` and subscribes nothing — the reflexive
-    /// form is gated to in-process actors by construction.
-    #[test]
-    fn subscribe_self_rejects_non_component_source() {
-        use aether_data::{SessionToken, Uuid};
-        use aether_substrate::mail::SourceAddr;
-        use aether_substrate::testing::bare_substrate;
-
-        let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
-
-        let (_registry, mailer) = bare_substrate();
-        let transport = unrouted_binding(&mailer);
-        let source = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xFEED))));
-        let mut ctx = NativeCtx::new_for_actor(&transport, source, None, None);
-        LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, LifecycleSubscribeSelf { stage: Render::ID.0 });
-
-        assert!(cap.subscribers.subscribers_of(Render::ID).is_empty(), "a non-Component source subscribes nothing");
-    }
-
-    /// Round trip through the host SDK path: the request the cap's
-    /// `Publisher` impl builds for `Tick`, sent through the flat
-    /// `ctx.send::<LifecycleCapability>`, is a `LifecycleSubscribeSelf` whose
-    /// `Source` the transport stamps to the sender. Delivered to the cap, it
-    /// lands a caller whose published rows handle `Tick` silently in the
-    /// `Tick` set, and refuses a closure route, whose empty contract handles
-    /// nothing (ADR-0231 §4's guard cast). A cast that admitted any sender
-    /// would fan `Tick` out to an actor with no handler for it.
-    #[test]
-    fn subscribe_request_via_flat_send_lands_a_handling_caller_and_refuses_a_closure_route() {
-        let (registry, mailer) = fresh_substrate();
-        let sink = lifecycle_sink(&registry);
-        let mut cap = tick_start_graph_cap();
-        let cap_transport = unrouted_binding(&mailer);
-        let deliver = |cap: &mut LifecycleCapabilityState, (kind, source, bytes): (KindId, Source, Vec<u8>)| {
-            assert_eq!(kind, <LifecycleSubscribeSelf as Kind>::ID, "the flat subscribe sends LifecycleSubscribeSelf");
-            let request = LifecycleSubscribeSelf::decode_from_bytes(&bytes).expect("the request decodes");
-            assert_eq!(request.stage, Tick::ID.0, "the request carries the Tick stage id");
-            let mut ctx = NativeCtx::new_for_actor(&cap_transport, source, None, None);
-            LifecycleCapability::on_subscribe_self(cap, &mut ctx, request)
-        };
-
-        let (closure_binding, _closure) =
-            registered_binding(&registry, &mailer, "test.lifecycle.closure_caller", noop_handler());
-        NativeCtx::<'_, Caller>::new_for_actor(&closure_binding, Source::NONE, None, None)
-            .send::<LifecycleCapability>(&<LifecycleCapability as Publisher>::subscribe_request::<Tick>());
-        closure_binding.flush_outbound();
-        let refused = deliver(&mut cap, sink.try_recv().expect("the closure route's request arrives"));
-
-        let LifecycleSubscribeResult::Err { error, .. } = refused else {
+        assert_eq!(kind, <LifecycleSubscribeResult as Kind>::ID, "the closure route is answered");
+        let Some(LifecycleSubscribeResult::Err { error, .. }) = LifecycleSubscribeResult::decode_from_bytes(&reply)
+        else {
             panic!("a closure route has no Tick handler, so it cannot subscribe");
         };
         assert!(error.contains("test.lifecycle.closure_caller"), "the refusal names the sender: {error}");
-        assert!(cap.subscribers.subscribers_of(Tick::ID).is_empty(), "the refused sender subscribes nothing");
+        assert!(booted.subscribers_of(Tick::ID).is_empty(), "the refused sender subscribes nothing");
 
-        let chassis = boot_test_chassis_with::<Caller>(&registry, &mailer, (), ());
-        let caller = chassis.actor_ref::<Caller>().erase();
-        let held =
-            deliver(&mut cap, sink.recv_timeout(Duration::from_secs(5)).expect("the caller's wire sent its request"));
+        let (mut caller_slot, _wake) = booted.chassis.boot_pumped_actor::<Caller>((), ()).expect("the caller boots");
+        let caller = booted.chassis.actor_ref::<Caller>().erase();
+        booted.pump_until("the caller's wire subscribe", Tick::ID, |held| !held.is_empty());
+        caller_slot.shutdown();
 
-        assert!(matches!(held, LifecycleSubscribeResult::Ok), "a caller handling Tick silently subscribes");
-        assert_eq!(cap.subscribers.subscribers_of(Tick::ID), [caller], "the caller lands in the Tick set");
+        assert_eq!(booted.subscribers_of(Tick::ID), [caller], "the caller lands in the Tick set");
     }
 }
