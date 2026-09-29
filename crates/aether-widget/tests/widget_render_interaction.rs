@@ -41,7 +41,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced};
+use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
 use aether_clipboard::{ClipboardCapability, ClipboardParams, GetClipboardText, GetClipboardTextResult};
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
@@ -65,6 +65,7 @@ use aether_kinds::{
 use aether_math::Rgba;
 use aether_render::RenderCapability;
 use aether_render::{DrawShapes, DrawTexturedQuads, Shape, WHITE_TEXTURE_ID};
+use aether_test_fixtures_bundle::EditorRegionProbe;
 use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
 use aether_widget::set::{ButtonWidget, SliderWidget, VirtualListWidget, text_baseline_y};
@@ -306,16 +307,16 @@ fn load_editor_region(
         .unwrap_or_else(|error| panic!("the editor region's panel is live: {error}"))
 }
 
-fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorRef {
-    harness
-        .load_any(&LoadComponent {
+fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<EditorRegionProbe> {
+    let (probe, _) = harness
+        .load::<EditorRegionProbe>(LoadComponent {
             wasm: fs::read(wasm_path).expect("read fixture wasm"),
             name: Some("region-b".to_owned()),
             config: EditorRegionProbeConfig { name: "region-b".to_owned() }.encode_into_bytes(),
-            export: Some("test.editor_region_probe".to_owned()),
+            export: None,
         })
-        .unwrap_or_else(|error| panic!("load editor region probe: {error}"))
-        .0
+        .unwrap_or_else(|error| panic!("load editor region probe: {error}"));
+    probe
 }
 
 /// Load the shell under its **default** name, so the editor region and the
@@ -376,9 +377,9 @@ fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8]) {
     }
 }
 
-fn drain_editor_probe(harness: &mut SubstrateHarness, probe: ErasedActorRef) -> DrainEditorInputsResult {
+fn drain_editor_probe(harness: &mut SubstrateHarness, probe: ActorRef<EditorRegionProbe>) -> DrainEditorInputsResult {
     harness
-        .execute(vec![("drain-editor-probe", HarnessOp::send_and_await_reply(probe, &DrainEditorInputs))])
+        .execute(vec![("drain-editor-probe", HarnessOp::send_and_await_reply(&probe, &DrainEditorInputs))])
         .expect("drain editor region probe")
         .reply::<DrainEditorInputsResult>("drain-editor-probe")
         .expect("decode DrainEditorInputsResult")
@@ -1018,7 +1019,7 @@ fn bounding_box(result: &FrameCheckResult) -> Option<FrameRect> {
 /// Every log message in the panel's ring, oldest first — the value-up
 /// observation surface (`widget_set`'s idiom).
 fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) -> Vec<String> {
-    match harness.log_tail(panel.erase(), None, None) {
+    match harness.log_tail(&panel, None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }

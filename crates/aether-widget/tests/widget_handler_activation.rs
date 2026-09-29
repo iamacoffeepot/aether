@@ -194,7 +194,7 @@ fn load_panel_with(
 }
 
 fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) -> Vec<String> {
-    match harness.log_tail(panel.erase(), None, None) {
+    match harness.log_tail(&panel, None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|entry| entry.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -285,9 +285,7 @@ fn numeric_focus_lost_commits_the_typed_buffer() {
         assert_eq!(numeric_value(before_numeric[0]), Some(7.0));
         assert_eq!(field(before_numeric[0], "committed"), Some("false"));
         harness
-            // `FocusLost` rides the adopted `WidgetDefaults` set, which carries
-            // no typed marker, so it is sent erased.
-            .execute(vec![("blur", HarnessOp::send_and_settle(numeric.erase(), &FocusLost))])
+            .execute(vec![("blur", HarnessOp::send_and_settle(&numeric, &FocusLost))])
             .expect("numeric focus-lost session");
         let after = panel_log_messages(&mut harness, panel);
         let after_numeric: Vec<&String> =
@@ -352,9 +350,7 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
         // a missing `row` is the leave only on this newly emitted second hover event.
         assert_eq!(field(before_hover[0], "index"), Some("0"));
         harness
-            // `HoverLost` rides the adopted `WidgetDefaults` set, which carries
-            // no typed marker, so it is sent erased.
-            .execute(vec![("leave", HarnessOp::send_and_settle(list.erase(), &HoverLost))])
+            .execute(vec![("leave", HarnessOp::send_and_settle(&list, &HoverLost))])
             .expect("virtual-list hover-lost session");
         let after = panel_log_messages(&mut harness, panel);
         let after_hover: Vec<&String> =

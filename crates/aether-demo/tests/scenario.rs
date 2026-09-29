@@ -18,7 +18,7 @@ use std::fs;
 use std::ops::RangeInclusive;
 use std::path::Path;
 
-use aether_actor::{Addressable, ErasedActorRef};
+use aether_actor::{ActorRef, Addressable};
 use aether_demo::Demo;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
@@ -92,13 +92,17 @@ fn demo_loads_the_subject_and_the_seed_frames_it() {
         .build()
         .expect("boot");
 
-    let mut demo: Option<ErasedActorRef> = None;
+    let mut demo: Option<ActorRef<Demo>> = None;
     for ManifestEntry { wasm, export, config } in entries {
-        let (loaded, _) = harness
-            .load_any(&LoadComponent { wasm, name: None, config, export: Some(export.clone()) })
-            .unwrap_or_else(|error| panic!("load {export}: {error}"));
         if export == Demo::NAMESPACE {
+            let (loaded, _) = harness
+                .load::<Demo>(LoadComponent { wasm, name: None, config, export: Some(export.clone()) })
+                .unwrap_or_else(|error| panic!("load {export}: {error}"));
             demo = Some(loaded);
+        } else {
+            harness
+                .load_any(&LoadComponent { wasm, name: None, config, export: Some(export.clone()) })
+                .unwrap_or_else(|error| panic!("load {export}: {error}"));
         }
     }
     let demo = demo.expect("the manifest boots the demo");
@@ -109,7 +113,7 @@ fn demo_loads_the_subject_and_the_seed_frames_it() {
             (
                 "loaded",
                 HarnessOp::poll_until(
-                    demo,
+                    &demo,
                     &loaded,
                     |reply: &LogTailResult| matches!(reply, LogTailResult::Ok { entries, .. } if !entries.is_empty()),
                 ),

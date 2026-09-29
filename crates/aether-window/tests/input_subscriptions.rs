@@ -18,12 +18,13 @@
 use std::fs;
 use std::path::Path;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::ActorRef;
 use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, TextInput};
+use aether_test_fixtures_bundle::Probe;
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved, UnsubscribeKeys};
 use aether_window::{WindowCapability, window_path};
 
@@ -41,12 +42,12 @@ fn boot_bench() -> SubstrateHarness {
     SubstrateHarness::builder().with_component_host().build().expect("boot")
 }
 
-/// Load the bundle's default export, the singleton `test.probe`, at its
-/// published name.
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> (ErasedActorRef, ErasedActorPath) {
+/// Load the bundle's singleton `test.probe` export at its published name,
+/// typed as `Probe`.
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> (ActorRef<Probe>, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
-        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .load::<Probe>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load_component(test.probe): {error}"))
 }
 
@@ -81,9 +82,9 @@ fn send_keys(harness: &mut SubstrateHarness, count: usize) {
 }
 
 /// Have `probe` unsubscribe itself from `Key` on every window.
-fn unsubscribe_keys(harness: &mut SubstrateHarness, probe: ErasedActorRef) {
+fn unsubscribe_keys(harness: &mut SubstrateHarness, probe: ActorRef<Probe>) {
     harness
-        .execute(vec![("unsub", HarnessOp::send_and_settle(probe, &UnsubscribeKeys))])
+        .execute(vec![("unsub", HarnessOp::send_and_settle(&probe, &UnsubscribeKeys))])
         .expect("unsubscribe sequence");
 }
 

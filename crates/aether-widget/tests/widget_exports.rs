@@ -88,7 +88,7 @@ fn key(subname: &str) -> LoadName {
 }
 
 fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) -> Vec<String> {
-    match harness.log_tail(panel.erase(), None, None) {
+    match harness.log_tail(&panel, None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|entry| entry.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -330,9 +330,7 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
             ("dropdown_commit", HarnessOp::send_and_settle(&dropdown, &Key { window: test_window(), code: KEY_ENTER })),
             (
                 "menu_frame",
-                // The frame kind rides the adopted widget handler set, which
-                // carries no typed marker, so it is sent erased.
-                HarnessOp::send_and_settle(menu.erase(), &WidgetFrame { x: 10.0, y: 10.0, width: 200.0, height: 24.0 }),
+                HarnessOp::send_and_settle(&menu, &WidgetFrame { x: 10.0, y: 10.0, width: 200.0, height: 24.0 }),
             ),
             ("menu_press", HarnessOp::send_and_settle(&menu, &press(20.0, 20.0))),
             ("menu_release", HarnessOp::send_and_settle(&menu, &release(20.0, 20.0))),

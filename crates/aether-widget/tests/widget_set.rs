@@ -118,7 +118,7 @@ fn load_configured_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &P
 
 /// Every log message in the panel's ring, oldest first.
 fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) -> Vec<String> {
-    match harness.log_tail(panel.erase(), None, None) {
+    match harness.log_tail(&panel, None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -243,7 +243,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
         ])
         .expect("external inline-child lineage session");
 
-    let log = match harness.log_tail(panel.erase(), None, None) {
+    let log = match harness.log_tail(&panel, None, None) {
         LogTailResult::Ok { entries, .. } => entries,
         LogTailResult::Err { error } => panic!("log_tail on the loaded panel failed: {error}"),
     };

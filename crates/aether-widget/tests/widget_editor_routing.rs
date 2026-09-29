@@ -22,6 +22,7 @@ use aether_kinds::{
     ImePreedit, Key, KeyRelease, LoadComponent, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
     TextInput,
 };
+use aether_test_fixtures_bundle::EditorRegionProbe;
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
@@ -49,9 +50,9 @@ fn bench(width: u32, height: u32) -> SubstrateHarness {
     .expect("boot")
 }
 
-/// Load one in-bundle actor and return its reference. `name`
-/// is the load name, or `None` to load under the actor's own namespace — which
-/// is what the shell needs, since a region names it by bare type.
+/// Load one in-bundle actor and return its erased reference. `name` is the
+/// load name, or `None` to load under the actor's own namespace — which is
+/// what the shell needs, since a region names it by bare type.
 fn load_actor<K: Kind>(
     harness: &mut SubstrateHarness,
     wasm_path: &Path,
@@ -80,23 +81,29 @@ fn region(name: &str, x_pixels: f32, input_lanes: RegionInputLanes) -> RegionSpe
     }
 }
 
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> ErasedActorRef {
-    load_actor(
-        harness,
-        wasm_path,
-        "test.editor_region_probe",
-        Some(name),
-        &EditorRegionProbeConfig { name: name.to_owned() },
-    )
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> ActorRef<EditorRegionProbe> {
+    let (probe, _) = harness
+        .load::<EditorRegionProbe>(LoadComponent {
+            wasm: fs::read(wasm_path).expect("read wasm component"),
+            name: Some(name.to_owned()),
+            config: EditorRegionProbeConfig { name: name.to_owned() }.encode_into_bytes(),
+            export: None,
+        })
+        .unwrap_or_else(|error| panic!("load the region probe as {name}: {error}"));
+    probe
 }
 
 fn load_shell(harness: &mut SubstrateHarness, wasm_path: &Path, regions: Vec<RegionSpec>) {
     let _shell = load_actor(harness, wasm_path, "aether.widget.editor", None, &EditorConfig { regions });
 }
 
-fn drain(harness: &mut SubstrateHarness, probe: ErasedActorRef, label: &'static str) -> DrainEditorInputsResult {
+fn drain(
+    harness: &mut SubstrateHarness,
+    probe: ActorRef<EditorRegionProbe>,
+    label: &'static str,
+) -> DrainEditorInputsResult {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply(probe, &DrainEditorInputs))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&probe, &DrainEditorInputs))])
         .expect("drain sequence")
         .reply::<DrainEditorInputsResult>(label)
         .expect("decode DrainEditorInputsResult")

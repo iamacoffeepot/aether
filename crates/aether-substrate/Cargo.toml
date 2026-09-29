@@ -170,18 +170,15 @@ aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # iamacoffeepot/aether#3766: the fixture crate whose wasm these tests
 # load, declared so the source→consumer coupling is cargo-visible —
 # determinator re-runs these tests when the fixture changes, and xtask's
-# wasm-consumer rule fires the dist pre-build. The tests locate the built
-# wasm by stem, so the code never imports the crate.
+# wasm-consumer rule fires the dist pre-build. The log-tail test also imports
+# `QuietProbe` for a typed harness load and send.
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 
-# cargo-machete's source-only scan cannot see two edges here. The
-# wasm-coupling dev-dep: the tests load the fixture's built wasm by stem rather
-# than importing the crate, so the cargo edge exists purely for determinator /
-# dist-pre-build visibility (iamacoffeepot/aether#3766). And `clap`, which is
-# reached only through the `#[derive(aether_substrate::Config)]` codegen on
+# cargo-machete's source-only scan cannot see this edge: `clap` is reached
+# only through the `#[derive(aether_substrate::Config)]` codegen on
 # `SettlementConfig` (`#[derive(clap::Args)]` on the emitted overlay).
 [package.metadata.cargo-machete]
-ignored = ["aether-test-fixtures-bundle", "clap"] # aether-suppression-request: the fixture edge exists for determinator/dist visibility (its wasm is loaded by stem, never imported) and `clap` only through the `#[derive(aether_substrate::Config)]` expansion on `SettlementConfig`
+ignored = ["clap"] # aether-suppression-request: reached only through the `#[derive(aether_substrate::Config)]` expansion on `SettlementConfig`
 
 [lints]
 workspace = true
