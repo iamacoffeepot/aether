@@ -10,7 +10,7 @@
 //! - Any request → 200, echoing the request path in the body
 //!   (`hello from aether: {path}`)
 //!
-//! Registered at `aether.component/aether.embedded:test.web` after load.
+//! Registered at `test.web` after load.
 //! The handler binds the `/` catch-all route from its `wire` hook
 //! (ADR-0130/0131), then the e2e test fires real `TcpStream` requests at
 //! the bound port.
@@ -166,7 +166,7 @@ impl StreamProgress {
 /// `HttpResponseStreamEnd`. Each chunk is `"chunk-{i}\n"`, so the client
 /// reassembles a deterministic body.
 ///
-/// Registered at `aether.component/aether.embedded:test.web_stream` after load.
+/// Registered at `test.web_stream` after load.
 pub struct StreamingHttpHandler {
     progress: StreamProgress,
 }
@@ -222,7 +222,7 @@ impl WasmActor for StreamingHttpHandler {
 /// can assert the cap drops an unknown-stream send without tearing the
 /// connection down.
 ///
-/// Registered at `aether.component/aether.embedded:test.web_socket` after load.
+/// Registered at `test.web_socket` after load.
 pub struct WebSocketHandler {
     /// Per-connection upgraded streams (ADR-0133), keyed by `stream_id` and
     /// inserted on that connection's accept-time credit grant. Map
@@ -392,7 +392,7 @@ impl WasmActor for RoutedHttpHandler {
 /// the specific route it registered — the initial response-stream credit
 /// grant must arrive through that route path.
 ///
-/// Registered at `aether.component/aether.embedded:test.web_stream_routed`
+/// Registered at `test.web_stream_routed`
 /// after load.
 pub struct RoutedStreamingHttpHandler {
     progress: StreamProgress,

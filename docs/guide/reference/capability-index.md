@@ -42,7 +42,7 @@ requested binary.
 Content-generation providers are wasm guest components a substrate loads on
 demand rather than native chassis capabilities (ADR-0159). The default
 composition carries none; a workload uploads and loads the one it needs, and
-the loaded component answers at `aether.component/aether.embedded:<namespace>`.
+the loaded component answers at its published name, `<namespace>`.
 No provider component currently ships in the workspace; see
 [Content generation](../systems/content-generation.md) for the pattern.
 

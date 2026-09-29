@@ -38,7 +38,7 @@ use aether_data::{ErasedActorPath, Kind, KindId, LoadName, ReplyContract, Sessio
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, CostTail, CostTailResult};
-use aether_kinds::{LoadComponent, LoadResult, LogTail, LogTailResult, Tick};
+use aether_kinds::{ListComponents, ListComponentsResult, LoadComponent, LoadResult, LogTail, LogTailResult, Tick};
 #[cfg(test)]
 use aether_trace::walk::TreeWalk;
 // The driver sends encode each kind through the descriptor-aware
@@ -946,6 +946,32 @@ impl SubstrateHarness {
             Some(LoadResult::Err { error }) => Err(SubstrateHarnessError::Load(error)),
             None => Err(SubstrateHarnessError::Decode("LoadResult decode failed".to_owned())),
         }
+    }
+
+    /// The component host's `ListComponents` answer: every loaded guest's
+    /// canonical path, read from the publication table (ADR-0241 §3). A test
+    /// that asserts no route stands reads it here, since a refused or retired
+    /// guest leaves no reference to probe.
+    ///
+    /// # Errors
+    ///
+    /// The pump's timeout and decode errors.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the harness composed no component host.
+    pub fn list_components(&mut self) -> Result<Vec<String>, SubstrateHarnessError> {
+        let host = self.passive.actor_ref::<ComponentHostCapability>();
+        let cid = self.fresh_correlation_id();
+        self.passive.send_for_reply(host, &ListComponents {}, self.session_reply(cid));
+
+        let EgressEvent::ToSession { payload, .. } = self.pump_until_event(cid, ListComponentsResult::NAME, None)?
+        else {
+            return Err(SubstrateHarnessError::Decode("expected a session-targeted ListComponentsResult".to_owned()));
+        };
+        ListComponentsResult::decode_from_bytes(&payload)
+            .map(|result| result.names)
+            .ok_or_else(|| SubstrateHarnessError::Decode("ListComponentsResult decode failed".to_owned()))
     }
 
     /// Bytes-level settlement-gated send: push `(kind, bytes)` to the actor

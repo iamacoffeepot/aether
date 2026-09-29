@@ -69,7 +69,7 @@ fn lineage_fold_is_the_node_chain_and_meets_the_canonical_id_at_depth_one() {
     // Tripwire: lookup by path meets registration by name only while the
     // depth-1 fold equals the id a by-name registration takes, and a nested
     // path must fold node by node rather than hash the joined string.
-    for name in ["aether.component", "aether.embedded:camera"] {
+    for name in ["aether.component", "aether.kit.camera:main"] {
         assert_eq!(lineage_mailbox_id(name).0, canonical_mailbox_id(name).0, "{name}");
     }
 

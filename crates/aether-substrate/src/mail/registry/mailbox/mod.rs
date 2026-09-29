@@ -180,8 +180,9 @@ impl Registry {
         let routes = route_publisher.view();
         let kind_publisher = ViewPublisher::new(KindTable::default());
         let kinds = kind_publisher.view();
+        let publications = PublicationTable::native();
         let inventory_publisher = ViewPublisher::new(RegistryInventory {
-            mailboxes: live_inventory(&FxHashMap::default()),
+            mailboxes: live_inventory(&FxHashMap::default(), &publications),
             kinds: Vec::new(),
             mailbox_generation: 0,
             kind_generation: 0,
@@ -194,7 +195,7 @@ impl Registry {
                 next_activation_token: 0,
                 kinds: FxHashMap::default(),
                 name_index: HashMap::default(),
-                publications: PublicationTable::native(),
+                publications,
                 route_publisher,
                 kind_publisher,
                 inventory_publisher,

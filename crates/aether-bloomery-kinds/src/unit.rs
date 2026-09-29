@@ -1,4 +1,5 @@
-//! Unit keys and the load names of a unit's bundle roots (ADR-0240 D4).
+//! Unit keys: the key each of a unit's bundle roots is born under (ADR-0240
+//! D4), as `aether.bloomery.bundle.<hash>:<unit key>`.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -12,19 +13,18 @@ use aether_data::{LabelNode, LoadName, LoadNameError, Schema, SchemaType};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::Digest;
-
-/// A `LoadName` of at most 191 bytes: the key of one unit (ADR-0240).
+/// A `LoadName` of at most [`Self::MAX_BYTES`] bytes: the key of one unit
+/// (ADR-0240).
 ///
 /// Fallible on construction, wire decode, and `Deserialize`, so every key in
-/// hand can name a bundle root through [`UnitBundle::name`].
+/// hand can key a bundle root, `aether.bloomery.bundle.<hash>:<unit key>`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct UnitKey(LoadName);
 
 impl UnitKey {
-    /// The longest key: one 256-byte path segment, less the dash and the 64
-    /// hex characters of the digest that [`UnitBundle::name`] appends.
-    pub const MAX_BYTES: usize = 191;
+    /// The longest key: one load-name segment, since the key is a bundle
+    /// root's whole key segment (ADR-0241 §5).
+    pub const MAX_BYTES: usize = aether_actor::NAMESPACE_SEGMENT_MAX_LEN;
 
     /// Validate `text` as a load name, then against [`Self::MAX_BYTES`].
     ///
@@ -116,48 +116,16 @@ impl<'de> Deserialize<'de> for UnitKey {
     }
 }
 
-/// The load name of a unit's bundle root.
-pub struct UnitBundle;
-
-impl UnitBundle {
-    /// `<key>-<digest>`, the digest as 64 lowercase hex characters.
-    ///
-    /// Every bundle root is a child of the one engine-level
-    /// `aether.component`, so this name is what keeps two units' roots of
-    /// one digest apart and what says, in a log, a trace, or an MCP path,
-    /// which unit a root folds for and which bundle it runs (ADR-0240 I-2,
-    /// I-8). The digest comes last at a fixed width, so the name splits back
-    /// into key and digest even when the key contains dashes; the key's
-    /// 191-byte limit keeps the whole name inside one 256-byte segment.
-    ///
-    /// # Panics
-    ///
-    /// Never in practice: a key is a valid segment of at most
-    /// [`UnitKey::MAX_BYTES`] bytes, and the dash and hex digits keep the
-    /// name a valid segment of at most 256 bytes.
-    #[must_use]
-    pub fn name(key: &UnitKey, digest: &Digest) -> LoadName {
-        LoadName::new(&format!("{key}-{digest}")).expect("a unit key and a digest always form a load name")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_key_limit_is_the_longest_key_that_names_a_bundle_root() {
-        // Tripwire: a bundle-root name is the key, a dash, and 64 hex
-        // characters inside one 256-byte segment, so the key limit is
-        // 256 - 65 = 191.
-        let longest = UnitKey::new(&"k".repeat(UnitKey::MAX_BYTES)).expect("the longest key is accepted");
-        let name = UnitBundle::name(&longest, &Digest::from_bytes([0; 32]));
-
-        assert_eq!(name.as_str().len(), 256);
-        assert_eq!(
-            UnitKey::new(&"k".repeat(UnitKey::MAX_BYTES + 1)),
-            Err(UnitKeyError::TooLong { bytes: UnitKey::MAX_BYTES + 1 })
-        );
+    fn the_key_limit_is_one_load_name_segment() {
+        // Tripwire: a bundle root's key is its whole key segment, so the
+        // longest key is the longest segment a load name admits.
+        assert!(UnitKey::new(&"k".repeat(UnitKey::MAX_BYTES)).is_ok(), "the longest key is accepted");
+        assert!(UnitKey::new(&"k".repeat(UnitKey::MAX_BYTES + 1)).is_err(), "a longer key is refused");
     }
 
     #[test]
@@ -167,14 +135,5 @@ mod tests {
 
         let mut cursor: &[u8] = &bytes;
         assert!(UnitKey::decode(&mut cursor).is_err());
-    }
-
-    #[test]
-    fn a_bundle_name_splits_back_into_key_and_digest() {
-        let digest = Digest::from_bytes([0xab; 32]);
-        let name = UnitBundle::name(&UnitKey::new("a-b-c").expect("key"), &digest);
-
-        assert_eq!(name.as_str().rsplit_once('-'), Some(("a-b-c", "ab".repeat(32).as_str())));
-        assert_eq!(name.as_str(), format!("a-b-c-{digest}"));
     }
 }

@@ -82,33 +82,6 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
         HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root)
     }
 
-    /// Stage a child under an already-`Live` logical parent that shares this
-    /// ctx's physical binding. This is the wasm trampoline seam: an inline
-    /// actor executes inside the root trampoline but its detached child must
-    /// extend the inline actor's lineage. The caller hands in the parent's
-    /// proof (ADR-0230), and the parent's canonical path is read off that
-    /// proof, so the lineage the child extends cannot disagree with the
-    /// position it is born under; native actor code should use
-    /// [`Self::spawn_child`] instead.
-    #[doc(hidden)]
-    pub fn spawn_child_scoped<'b, C>(
-        &'b self,
-        parent: ErasedActorRef,
-        subname: Subname<'b>,
-        config: C::Config,
-        params: C::Params,
-    ) -> HandlerSpawnBuilder<'b, C>
-    where
-        C: aether_actor::ChildOf<A> + Instanced + NativeActor,
-    {
-        let spawner = self.binding.spawner().expect("NativeCtx::spawn_child_scoped requires a chassis-built binding");
-        let sender =
-            Source { addr: SourceAddr::Component(self.binding.self_mailbox()), correlation_id: Source::NO_CORRELATION };
-        let parent = self.scoped_parent(parent);
-        let builder = SpawnBuilder::new_child(Arc::clone(spawner), subname, config, params, sender, parent);
-        HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root)
-    }
-
     /// Stage the birth of a published guest, hosted by the native `H`, under
     /// the guest's own published name (ADR-0241 §5, §6): `NS`, `NS:key`, or
     /// `parent/NS:key`, as [`GuestBirth`] says. The birth holds no native
@@ -124,8 +97,9 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     /// guest's, so no `ActorRef<H>` is minted for it.
     ///
     /// A parented birth's parent is the proof `birth.parent` carries, and its
-    /// lineage is read off that proof, as [`Self::spawn_child_scoped`] reads
-    /// it. The staging actor holds the parent-local key.
+    /// lineage is read off that proof, so the lineage the guest extends cannot
+    /// disagree with the position it is born under. The staging actor holds
+    /// the parent-local key.
     ///
     /// # Panics
     /// Panics if the transport carries no spawner, as [`Self::spawn_child`]
@@ -159,48 +133,22 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     fn scoped_parent(&self, parent: ErasedActorRef) -> ActorRuntimeIdentity {
         ActorRuntimeIdentity::new(parent.id(), None, parent.id().0, self.actor_path(parent))
     }
-
-    /// The namespace of the first declared dependency with no `Live` route
-    /// for a child placed under the calling actor, or `None` when every entry
-    /// is live: [`Self::missing_dependency`] with this ctx's actor as the
-    /// placement parent. A `One` entry folds from
-    /// the root and an `Embedded` entry folds beneath this actor. It is a read
-    /// and nothing else: no ordering, no retry, no wait.
-    ///
-    /// The dependencies are a wasm module's, which arrive per module; a
-    /// native birth checks its own at spawn. Like [`Self::spawn_child`] the
-    /// parent is the ctx's own actor, so the erased ctx has no spelling of it.
-    /// Its consumers are the component host's module boot, which spawns the
-    /// boot trampoline under the host, and its host-placed load.
-    #[cfg(feature = "wasm")]
-    #[must_use]
-    pub fn missing_child_dependency<'d>(&self, dependencies: &'d [Dependency]) -> Option<&'d str> {
-        self.binding.missing_child_dependency(dependencies.iter().map(|d| (d.resolver, d.namespace.as_str())))
-    }
 }
 
-/// The dependency read under a placement the caller names: unlike
-/// [`NativeCtx::missing_child_dependency`], the parent is explicit, so the
-/// erased ctx reaches it too.
+/// The dependency read: every declarable dependency is a root singleton, so
+/// it takes no placement and the erased ctx reaches it too.
 impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
-    /// The namespace of the first declared dependency with no `Live` route
-    /// for an actor placed under `parent`, or `None` when every entry is live.
-    /// A `One` entry folds from the root and an `Embedded` entry folds beneath
-    /// `parent`; `None` is a root placement, which has no parent to host an
-    /// embedded peer, so every `Embedded` entry refuses there. It is a read
-    /// and nothing else: no ordering, no retry, no wait.
+    /// The namespace of the first declared dependency with no `Live` route,
+    /// or `None` when every entry is live. Every entry is a root singleton
+    /// (ADR-0241 §5), so its `One` entry folds from the root wherever the
+    /// dependent is placed. It is a read and nothing else: no ordering, no
+    /// retry, no wait.
     ///
-    /// Its consumers are the component host's load-under placement, beneath
-    /// the proven parent, and its module-wide inline check, with no parent,
-    /// and the trampoline's replacement check, beneath the replaced actor's
-    /// own parent.
+    /// Its consumers are the component host's loads and module boots, its
+    /// module-wide inline check, and the trampoline's replacement check.
     #[cfg(feature = "wasm")]
     #[must_use]
-    pub fn missing_dependency<'d>(
-        &self,
-        parent: Option<ErasedActorRef>,
-        dependencies: &'d [Dependency],
-    ) -> Option<&'d str> {
-        self.binding.missing_dependency(parent, dependencies.iter().map(|d| (d.resolver, d.namespace.as_str())))
+    pub fn missing_dependency<'d>(&self, dependencies: &'d [Dependency]) -> Option<&'d str> {
+        self.binding.missing_dependency(dependencies.iter().map(|d| (d.resolver, d.namespace.as_str())))
     }
 }

@@ -195,6 +195,13 @@ impl PublicationTable {
         self.namespaces.get(namespace).and_then(Published::module_hash) == Some(module)
     }
 
+    /// Whether a published module implements `namespace`, so an actor named
+    /// by it is a guest (ADR-0241 §3): the table, not the name's spelling,
+    /// says which routes a module's code runs behind.
+    pub(super) fn is_module(&self, namespace: &str) -> bool {
+        self.namespaces.get(namespace).and_then(Published::module_hash).is_some()
+    }
+
     /// Who holds `namespace`, or `None` when it is unpublished.
     #[cfg(feature = "wasm")]
     pub(super) fn holder(&self, namespace: &str) -> Option<Holder<'_>> {

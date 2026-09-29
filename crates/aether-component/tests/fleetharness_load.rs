@@ -4,17 +4,14 @@
 //! at its ADR-0099 lineage address.
 
 mod tests {
-    use aether_actor::Addressable;
-    use aether_component::WasmTrampoline;
     use aether_data::Kind;
     use aether_kinds::{LoadComponent, LoadResult};
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// Load the bundle's `QuietProbe` export and assert `LoadResult.path` is
-    /// the `/`-rendered lineage
-    /// `aether.component/aether.embedded:<NAMESPACE>` (ADR-0099
-    /// §3/§4). The selected export's `Addressable::NAMESPACE` is
+    /// the guest's own published name, `<NAMESPACE>` for a singleton
+    /// (ADR-0241 §5). The selected export's `Addressable::NAMESPACE` is
     /// `test.quiet_probe` — distinct from the wasm stem
     /// (`aether_test_fixtures_bundle`), so this also pins that the
     /// registered name comes from the selected export's namespace, not the
@@ -29,8 +26,7 @@ mod tests {
         let engine = harness.spawn_headless();
         let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
 
-        let expected = format!("aether.component/{}:test.quiet_probe", WasmTrampoline::NAMESPACE);
-        assert_eq!(addr, expected, "LoadResult.path should be the ADR-0099 lineage address");
+        assert_eq!(addr, "test.quiet_probe", "LoadResult.path should be the guest's published name");
 
         // The recorded trace captures the load as a first-class
         // CallRecord: a LoadComponent call to a forked engine that

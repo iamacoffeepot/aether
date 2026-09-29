@@ -20,9 +20,10 @@
 //! `aether_actor::export!(public = […], generators = [aether_bloomery_bundle::bundle])`
 //! collects framework-owned `actors` envelopes and an `exports` selection,
 //! selects the bloomery reactor extension on exported paths, keeps ordinary
-//! actors in the export list, and generates one digest-loaded root at
-//! `aether.bloomery.bundle` (`aether_bloomery_kinds::BUNDLE_NAMESPACE`)
-//! wrapping [`Root`]. Reactor envelopes stay on their original types. The root
+//! actors in the export list, and generates one digest-loaded root declared
+//! at `aether.bloomery.bundle` (`aether_bloomery_kinds::BUNDLE_NAMESPACE`)
+//! wrapping [`Root`], born per unit at
+//! `aether.bloomery.bundle.<module hash>:<unit key>`. Reactor envelopes stay on their original types. The root
 //! takes no config, owns the views, calls each reactor's `evaluate` directly,
 //! and answers `Warm` / `Event` / `StatusQuery` to its caller. A request with
 //! no reply target is ignored. Evaluation encodes outputs through the mail

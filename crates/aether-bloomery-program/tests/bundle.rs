@@ -8,11 +8,11 @@ use aether_bloomery_kinds::{
     Ref, Refusal, Utf8Text, artifact_digest,
 };
 use aether_bloomery_program::declarations;
-use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{Cites, Kind, LoadName, Storage};
+use aether_component::ComponentHostCapability;
+use aether_data::{Cites, Kind, Storage};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::LoadComponent;
+use aether_kinds::{ListComponents, ListComponentsResult, LoadComponent};
 use wasmparser::{Parser, Payload};
 
 const SECTION_NAME: &str = "aether.bloomery.programs";
@@ -91,7 +91,6 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
     };
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let digest = artifact_digest(OpaqueBytes::ID, &wasm);
-    let expected_name = format!("aether.component/aether.embedded:{digest}");
 
     assert_fixture_section(&wasm);
 
@@ -105,7 +104,13 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
             export: Some(BUNDLE_NAMESPACE.to_owned()),
         })
         .unwrap_or_else(|error| panic!("program fixture load failed: {error}"));
-    assert_eq!(path.to_string(), expected_name, "root is named by the OpaqueBytes artifact digest");
+    let (namespace, key) = path.as_str().split_once(':').expect("a bundle root is keyed");
+    assert_eq!(key, digest.to_string(), "the root is keyed by its load name");
+    let hash = namespace.strip_prefix(BUNDLE_NAMESPACE).and_then(|hash| hash.strip_prefix('.'));
+    assert!(
+        hash.is_some_and(|hash| hash.len() == 64),
+        "the root publishes as {BUNDLE_NAMESPACE}.<module hash>: {namespace}"
+    );
 
     let text = "hello";
     let text_artifact = ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec());
@@ -132,17 +137,17 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
     assert_eq!(result, expected_encoded.digest());
     assert_eq!(staged, vec![EncodedArtifact::text("summary:hello"), expected_encoded]);
 
-    // The bundle root and its per-seq inline child are generated types the
-    // test cannot name, so both are looked up as the host sees them: the root
-    // is the trampoline keyed by its load name, and the seq child's alias —
-    // keyed by its seq beneath the root — resolves to that trampoline's
-    // endpoint.
+    // The per-seq inline child is a generated type the test cannot name, so
+    // its absence is read as the host lists its guests: the child's alias,
+    // keyed by its seq beneath the root the load reply named, stands no more.
+    let seq_child = format!("{path}/{BUNDLE_NAMESPACE}.invocation:1");
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let trampoline = harness
-        .child::<ComponentHostCapability, WasmTrampoline>(&host, LoadName::new(&digest.to_string())?)
-        .expect("the bundle root is live");
-    let orphan = harness.child::<WasmTrampoline, WasmTrampoline>(&trampoline, LoadName::new("1")?);
-    assert!(orphan.is_err(), "a completed invocation must despawn its seq child; got {orphan:?}");
+    let listed = harness
+        .execute(vec![("list", HarnessOp::send_and_await_reply(&host, &ListComponents {}))])
+        .expect("list components");
+    let names = listed.reply::<ListComponentsResult>("list").expect("decode ListComponentsResult").names;
+    assert!(names.contains(&path.to_string()), "the bundle root is listed: {names:?}");
+    assert!(!names.contains(&seq_child), "a completed invocation must despawn its seq child; got {names:?}");
 
     let refuse_input = RefuseInput { marker: 1 };
     let refuse_artifact = closure_of(&refuse_input)?;

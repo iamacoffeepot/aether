@@ -65,9 +65,11 @@ call, because the load already proved `R` live
 (`crates/aether-actor/src/wasm/ctx/receive.rs`). Neither verb exists on the
 erased ctx, so spell the ctx's actor as `Self`.
 
-`R` must be keyless: a root singleton (`One`, like a chassis capability) or a
-co-hosted peer (`Embedded`). The shell is a keyless singleton loaded under its
-default name, which is what lets a region name it by bare type. Which resolver
+`R` must be a root singleton (`One`), a chassis capability or a loaded guest
+alike. The shell is a singleton guest named at the root by its published
+namespace
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§5), which is what lets a region name it by bare type. Which resolver
 an actor gets is
 [ADR-0119](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0119-actor-addressing-via-a-resolver-strategy.md);
 how the position follows the actor when it is re-parented is

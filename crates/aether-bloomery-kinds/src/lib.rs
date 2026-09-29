@@ -52,4 +52,4 @@ pub use reactor::{
 };
 pub use reference::Ref;
 pub use tree::{Name, NameError, Node, Path, PathError, Tree};
-pub use unit::{UnitBundle, UnitKey, UnitKeyError};
+pub use unit::{UnitKey, UnitKeyError};

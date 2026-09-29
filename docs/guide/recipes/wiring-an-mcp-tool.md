@@ -62,7 +62,7 @@ pub struct ActorCostArgs {
     #[serde(default)]
     pub engine_id: Option<String>,
     /// Address of the actor to query (e.g. `"aether.audio"`,
-    /// `"aether.component/aether.embedded:camera"`, or an ADR-0166 short path).
+    /// a loaded component's `"aether.kit.camera"`, or an ADR-0166 short path).
     pub address: String,
     /// Optional kind-id filter (tagged `knd-XXXX-XXXX-XXXX` or raw
     /// decimal). Omitted dumps every handler row the actor declares.
@@ -162,8 +162,8 @@ The skeleton every tool follows:
    malformed id, so a bad id is rejected before any mail moves.
 2. **Build the typed request kind, then resolve the recipient before you
    address it.** An address the agent typed is often a rendered lineage —
-   `aether.component/aether.embedded:web`, the form `load_component`
-   hands back — or an ADR-0166 short path.
+   `web` or `aether.widget:panel`, the form `load_component` hands back —
+   or an ADR-0166 short path.
    `mcp.resolve_engine_path(engine, address)` takes either form and asks the
    selected engine for the canonical `ErasedActorPath` through the inventory
    cap's `resolve_address`. Pass that path to `engine_envelope_to(engine,

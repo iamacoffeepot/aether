@@ -1,22 +1,22 @@
-//! ADR-0119 parent-scope amendment: `#[actor]` gives a wasm actor
-//! `type Resolver = Embedded`, so a caller that declares it as a dependency
-//! reaches its default-named instance beneath the caller's runtime parent by
-//! bare type, through `actor_ref` and the flat typed send.
+//! ADR-0241 §5: `#[actor(root)]` gives a wasm actor `type Resolver = One`
+//! and the `Root` permission a native root carries, so a caller that declares
+//! it as a dependency reaches the root singleton by bare type, through
+//! `actor_ref` and the flat typed send.
 
 use aether_actor::{ActorInitError, Mail, WasmActor, WasmCtx, WasmInitCtx, actor};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.embedded_peer.ping")]
+#[kind(name = "test.root_peer.ping")]
 struct Ping {
     seq: u32,
 }
 
 struct Peer;
 
-#[actor]
+#[actor(root)]
 impl WasmActor for Peer {
-    const NAMESPACE: &'static str = "test.embedded_peer.peer";
+    const NAMESPACE: &'static str = "test.root_peer.peer";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self)
@@ -30,7 +30,7 @@ struct Caller;
 
 #[actor(depends(Peer))]
 impl WasmActor for Caller {
-    const NAMESPACE: &'static str = "test.embedded_peer.caller";
+    const NAMESPACE: &'static str = "test.root_peer.caller";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self)
@@ -45,4 +45,8 @@ fn send_by_type(ctx: &mut WasmCtx<'_, Caller>) {
     ctx.send::<Peer>(&Ping { seq: 1 });
 }
 
-fn main() {}
+fn requires_root_singleton<T: aether_actor::Root + aether_actor::Addressable<Resolver = aether_actor::One>>() {}
+
+fn main() {
+    requires_root_singleton::<Peer>();
+}

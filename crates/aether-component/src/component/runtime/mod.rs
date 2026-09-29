@@ -24,7 +24,8 @@ mod load;
 mod placement;
 
 use super::{ComponentHostCapability, LoadResult};
-use crate::trampoline::WasmTrampoline;
+use crate::component::LoadDelivered;
+use crate::kinds::BootTeardown;
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
 pub use self::config::ComponentHostParams;
@@ -43,7 +44,7 @@ pub use aether_actor::Manual;
 // module. No sibling-cap imports: drop-time cleanup rides the ADR-0079
 // vacate/close `MonitorNotice` (each cap monitors its registrants and purges
 // its own rows), so the host names no peer cap's type or kinds.
-use aether_actor::{ActorRef, ErasedActorRef, OutboundReply, ProtocolRef, Single};
+use aether_actor::{ErasedActorRef, OutboundReply, ProtocolRef, Single};
 use aether_data::ErasedActorPath;
 use aether_data::{MailboxCategory, Source};
 
@@ -54,7 +55,7 @@ use aether_data::BlobHash;
 use wasmtime::{Engine, Linker};
 
 use aether_substrate::actor::native::{
-    Erased, NativeActor, NativeCtx, NativeInitCtx, Pending, RegistryBatchResult, SpawnOutcome, TaskDone,
+    Erased, GuestOutcome, NativeActor, NativeCtx, NativeInitCtx, Pending, RegistryBatchResult, TaskDone,
 };
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::actor::wasm::module::{Module, ModuleCache};
@@ -114,9 +115,17 @@ pub struct ComponentHostCapabilityState {
     /// a boot actor is one lookup rather than a scan over every module.
     boot_actors: HashSet<ErasedActorRef>,
     /// Actor-local reservations for module boots that have been staged but are
-    /// not authoritative `Live` yet. Same-hash loads and replacements retain
-    /// their own move-only deferred replies here and join the first boot result.
+    /// not authoritative `Live` yet. Same-hash loads and replacements wait
+    /// here and join the first boot result: a load by its id, a replacement
+    /// with the deferred reply it keeps until #6867.
     pending_boots: HashMap<BlobHash, load::PendingBoot>,
+    /// Every load in flight (ADR-0243 §9): its held reply and prepared inputs,
+    /// keyed by the id its staged work's contexts carry, from the staged
+    /// module publish until the guest's birth answers it or hands it off. At
+    /// host close the ledger answers each held reply `unanswered`.
+    loads: HashMap<load::LoadId, load::LoadInFlight>,
+    /// The next [`load::LoadId`] a load takes.
+    next_load: u64,
     /// ADR-0147: a loaded non-boot actor → the content hash of the module it
     /// came from. The key is the actor's proof, taken from its spawn outcome or
     /// proven once at the receipt of a drop / replace (ADR-0230). Populated only
@@ -131,15 +140,13 @@ pub struct ComponentHostCapabilityState {
     /// replacement module are parked here across the hop. Empty except while a
     /// replace is settling.
     pub pending_replace: HashMap<u64, PendingReplace>,
-    /// Host-owned proof that each successfully spawned trampoline accepts the
-    /// component drop row. The guest's public receive surface deliberately
-    /// replaces the trampoline's native surface, so an external path cannot
-    /// recover this proof by casting after load. Retain it across guest unload
-    /// and refill because the trampoline slot remains the same actor.
-    ///
-    /// Issue #6923's guest-control protocol should replace this transitional
-    /// table once framework control rows have their own published surface.
-    drop_targets: HashMap<ErasedActorRef, ProtocolRef<ComponentDrop>>,
+    /// Host-owned control proof of each successfully born guest, keyed by its
+    /// erased reference: the [`GuestControl`] rows its trampoline serves. The
+    /// guest's public receive surface deliberately replaces the trampoline's
+    /// native surface, so an external path cannot recover this proof by
+    /// casting after load. Retained across guest unload and refill because
+    /// the trampoline slot remains the same actor.
+    drop_targets: HashMap<ErasedActorRef, ProtocolRef<GuestControl>>,
     /// Last replace/drop operation sequence allocated for each actor, keyed by
     /// the proof taken at the drop / replace receipt. A replace reserves its
     /// sequence when forwarded; a drop reserves the next sequence and
@@ -172,10 +179,10 @@ pub struct PendingReplace {
     pub boot_operation: u64,
 }
 
-/// ADR-0147: one module's boot singleton. `boot` is the boot trampoline's
-/// proven reference, taken from its spawn outcome (spawned through the same
+/// ADR-0147: one module's boot singleton. `boot` is the boot guest's control
+/// proof, taken from its birth outcome (born through the same
 /// `WasmTrampoline` path as any export), which the teardown sends
-/// [`BootTeardown`](crate::kinds::BootTeardown) through;
+/// [`BootTeardown`] through;
 /// `refcount` counts the module's live **non-boot** actors — boot never counts
 /// itself, so its own drop could never be the one that zeroes the count. The
 /// `pending_requests` counts requested actors whose trampoline birth has been
@@ -184,16 +191,20 @@ pub struct PendingReplace {
 /// zero-refcount boot alive, and its later rejection performs the final
 /// orphan check.
 pub struct BootEntry {
-    pub boot: ActorRef<WasmTrampoline>,
-    pub refcount: u32,
-    pub pending_requests: u32,
+    boot: ProtocolRef<GuestControl>,
+    refcount: u32,
+    pending_requests: u32,
 }
 
-/// The exact component teardown row an externally addressed drop must prove
-/// before it may change host bookkeeping or be forwarded.
+/// The rows the component host controls a guest through: its trampoline's
+/// own framework rows, never the guest's published surface. A guest birth
+/// completes with this proof (ADR-0241 §6), and the host hands a load's
+/// reply off, forwards a drop, and tears a module boot down through it.
 #[aether_actor::protocol]
-trait ComponentDrop {
+trait GuestControl {
+    fn load_delivered(mail: LoadDelivered) -> LoadResult;
     fn drop_component(mail: DropComponent) -> DropResult;
+    fn boot_teardown(mail: BootTeardown);
 }
 
 #[runtime]
@@ -222,6 +233,8 @@ impl NativeActor for ComponentHostCapability {
             boot_registry: HashMap::new(),
             boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
+            loads: HashMap::new(),
+            next_load: 0,
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
             drop_targets: HashMap::new(),
@@ -240,16 +253,14 @@ impl NativeActor for ComponentHostCapability {
     /// Pass the wasm bytes plus an optional `name`. The cap publishes the
     /// module (ADR-0241 §3): admission checks its exported namespaces and
     /// their contracts, and the kinds the wasm declared in its `aether.kinds`
-    /// section register. On Ok it keys the selected type by its cardinality
-    /// (ADR-0241 §5): a singleton by its namespace, where a load that names
-    /// any key is refused before the publish; an instanced type by the load's
-    /// `name`, or by a spawn counter when it names none. It spawns a
-    /// [`WasmTrampoline`] under
-    /// `aether.embedded:KEY`, and hands the trampoline the held reply: the
-    /// loaded trampoline itself replies `LoadResult::Ok { path, capabilities }`,
-    /// where `path` is its full lineage address — agents send subsequent mail
-    /// to that address, and an actor requester keeps the reply's stamped
-    /// sender as its reference.
+    /// section register. On Ok it spawns the selected type as a guest under
+    /// its own published name (ADR-0241 §5): a singleton at `NS`, where a
+    /// load that names any key is refused before the publish; an instanced
+    /// type at `NS:name`, or `NS:<counter>` when the load names none. The
+    /// loaded guest itself replies `LoadResult::Ok { path, capabilities }`,
+    /// where `path` is that name — agents send subsequent mail to that
+    /// address, and an actor requester keeps the reply's stamped sender as
+    /// its reference.
     /// Errors (bad wire bytes, a publish admission refuses, kind conflict,
     /// name conflict, invalid wasm, instantiation trap) come back from the
     /// host as `LoadResult::Err`.
@@ -264,10 +275,9 @@ impl NativeActor for ComponentHostCapability {
         pending
     }
 
-    /// Load a component beneath a caller-selected live logical parent for a
-    /// `SubstrateHarness` composition scenario. Ordinary `LoadComponent`
-    /// continues to place the requested trampoline beneath this component
-    /// host; this handler is the explicit test-harness seam for nested peers.
+    /// Load a component beneath a live parent, at `parent/NS:key`. The
+    /// selected type must declare `child_of` the parent's type (ADR-0241
+    /// §5); any other placement is refused before the module publishes.
     /// Its `LoadResult` is held and answered the same way `on_load_component`'s is.
     #[handler::single]
     fn on_load_component_under(
@@ -280,25 +290,39 @@ impl NativeActor for ComponentHostCapability {
         pending
     }
 
-    /// A load's or a replace's module publish settled (ADR-0241 §3/§4): a
-    /// load continues to the module boot and the requested actor, a replace
-    /// is forwarded to its trampoline, and a refusal answers the caller.
+    /// A load's module publish settled (ADR-0241 §3): a commit continues to
+    /// the module boot and the requested guest, and a refusal answers the
+    /// caller.
     #[handler(task)]
-    fn on_module_published(
+    fn on_load_published(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_, Self, Single>,
-        done: TaskDone<RegistryBatchResult, load::ModulePublication>,
+        done: TaskDone<RegistryBatchResult>,
     ) {
-        state.finish_publish(ctx, done);
+        state.finish_load_publish(ctx, done);
     }
 
+    /// A replace's module publish settled (ADR-0241 §4): a commit forwards
+    /// the replace to its trampoline, and a refusal answers the caller.
     #[handler(task)]
-    fn on_component_spawn_done(
+    fn on_replace_published(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_, Self, Single>,
-        done: TaskDone<SpawnOutcome<WasmTrampoline>, load::SpawnContext>,
+        done: TaskDone<RegistryBatchResult, load::ReplacePublication>,
     ) {
-        state.finish_spawn(ctx, done);
+        state.finish_replace_publish(ctx, done);
+    }
+
+    /// A staged guest birth settled (ADR-0241 §6): a module boot releases
+    /// the loads and replacements waiting on it, and a requested guest takes
+    /// over its load's held reply.
+    #[handler(task)]
+    fn on_guest_born(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Self, Single>,
+        done: TaskDone<GuestOutcome<GuestControl>>,
+    ) {
+        state.finish_guest_birth(ctx, done);
     }
 
     /// Refresh the hub's registry projection after a coalesced publication.
@@ -325,7 +349,7 @@ impl NativeActor for ComponentHostCapability {
     ///
     /// # Agent
     /// `DropComponent { target }`. The `target` is the component's actor
-    /// path, canonical (`LoadResult.path`) or short (`aether.component/:NAME`).
+    /// path, `LoadResult.path`: `NS`, `NS:key`, or `parent/NS:key`.
     #[handler::manual]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: DropComponent) {
         // ADR-0230: prove the address at receipt. An address with no live
@@ -389,7 +413,7 @@ impl NativeActor for ComponentHostCapability {
     ///
     /// # Agent
     /// `ReplaceComponent { target, wasm, drain_timeout_ms, config, export }`,
-    /// where `target` is the component's canonical or short actor path.
+    /// where `target` is the component's actor path, `LoadResult.path`.
     /// `drain_timeout_ms` is accepted for wire compatibility but
     /// ignored under the trampoline's binding-stable replace.
     /// `export` (ADR-0096) names which exported actor type of the
@@ -431,9 +455,11 @@ impl NativeActor for ComponentHostCapability {
     ///
     /// Reads the registry's live mailbox snapshot — the same coherent
     /// inventory projected to the hub by `RegistryChanged` — and keeps only
-    /// the [`MailboxCategory::Trampoline`] entries, the loaded-component set.
-    /// Chassis caps are boot-present and static, so the trampolines are
-    /// the only registry membership a readiness poll cares about. The
+    /// the [`MailboxCategory::Trampoline`] entries, the guests: routes whose
+    /// namespace a published module implements, read from the publication
+    /// table (ADR-0241 §3), and their inline children. Chassis caps are
+    /// boot-present and static, so the guests are the only registry
+    /// membership a readiness poll cares about. The
     /// reply is names only: the mailbox id is a deterministic hash-chain
     /// over the lineage the name renders (ADR-0099) and routing is the
     /// substrate's job, so the caller never needs the handle.
@@ -443,7 +469,7 @@ impl NativeActor for ComponentHostCapability {
     /// guaranteed present from boot, so the send always resolves and the
     /// reply is a definitive snapshot. Reply `ListComponentsResult {
     /// names }` lists every currently-loaded component's full lineage
-    /// address (`aether.component/aether.embedded:NAME`). Poll it after a
+    /// address (`NS`, `NS:key`, or `parent/NS:key`). Poll it after a
     /// boot-manifest spawn (ADR-0116) to learn deterministically when a
     /// requested component is loaded, instead of inferring liveness by
     /// proxy.
@@ -472,7 +498,7 @@ impl NativeActor for ComponentHostCapability {
     /// # Agent
     /// `DescribeComponent { name }` to the `aether.component` mailbox, where
     /// `name` is the lineage address `ListComponents` / `LoadResult.path`
-    /// hand back (`aether.embedded:NAME`). Reply `DescribeComponentResult::Ok
+    /// hand back (`NS`, `NS:key`, or `parent/NS:key`). Reply `DescribeComponentResult::Ok
     /// { capabilities }` carries the full handler kinds, docs, fallback, and
     /// config kind; `Err { error }` means nothing is registered at that name.
     /// Name-addressed so a boot-manifest-loaded component (ADR-0116), whose
@@ -563,6 +589,8 @@ mod tests {
             boot_registry: HashMap::new(),
             boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
+            loads: HashMap::new(),
+            next_load: 0,
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
             drop_targets: HashMap::new(),
@@ -634,6 +662,8 @@ mod tests {
             boot_registry: HashMap::new(),
             boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
+            loads: HashMap::new(),
+            next_load: 0,
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
             drop_targets: HashMap::new(),

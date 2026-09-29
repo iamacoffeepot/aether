@@ -80,8 +80,7 @@ fn checked_in_boot_manifest_boots_the_demo() {
     let env = CommonEnv::resolve(cli).expect("resolve the headless env");
     let built = HeadlessChassis::build(env).expect("every boot entry in demo.boot.json loads");
 
-    let demo = ErasedActorPath::new(&format!("aether.component/aether.embedded:{}", Demo::NAMESPACE))
-        .expect("a well-formed actor path");
+    let demo = ErasedActorPath::new(Demo::NAMESPACE).expect("a well-formed actor path");
     let resolved = built.resolve_address(&demo);
     assert!(resolved.is_ok(), "the demo component {demo} is not live when build returns: {resolved:?}");
 }

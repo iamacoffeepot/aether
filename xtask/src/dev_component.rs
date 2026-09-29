@@ -36,7 +36,7 @@ pub struct DevComponentArgs {
     /// Component artifact stem. Required when the package exposes more than one component.
     #[arg(long)]
     target: Option<String>,
-    /// Existing component address (`aether.component/:NAME` or its canonical lineage) to replace on the first pass.
+    /// Existing component address (its published name: `NS`, `NS:key`, or `parent/NS:key`) to replace on the first pass.
     #[arg(long, value_parser = parse_address)]
     address: Option<String>,
     /// Actor namespace to select on the first load. Conflicts with `--address`.
@@ -183,7 +183,7 @@ fn select_component(metadata: &Metadata, package: &str, target: Option<&str>) ->
 /// tools address a component by its lineage address.
 fn parse_address(value: &str) -> Result<String, String> {
     if value.starts_with("mbx-") {
-        return Err("pass the component's lineage address (aether.component/:NAME), not a mailbox id".to_string());
+        return Err("pass the component's lineage address (NS, NS:key, or parent/NS:key), not a mailbox id".to_string());
     }
     ErasedActorPath::new(value).map(|_| value.to_string()).map_err(|error| format!("address: {error}"))
 }

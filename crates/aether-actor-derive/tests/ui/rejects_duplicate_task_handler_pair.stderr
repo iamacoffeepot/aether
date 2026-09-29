@@ -1,0 +1,5 @@
+error: two #[handler(task)] methods share the `TaskDone<O, C>` output and context types (also on `on_first_done`) — completions route by the `(O, C)` pair, so a duplicate pair is ambiguous (ADR-0093 §3). Give each task handler a distinct output or context type.
+  --> tests/ui/rejects_duplicate_task_handler_pair.rs:66:8
+   |
+66 |     fn on_second_done(
+   |        ^^^^^^^^^^^^^^

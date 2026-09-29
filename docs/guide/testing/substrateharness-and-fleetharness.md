@@ -162,12 +162,12 @@ let loaded = result.reply::<LoadResult>("load-worker")?;
 
 The component host resolves `parent_name` through the live registry, uses its
 canonical path as the new actor's lineage, and returns the ordinary
-`LoadResult`. On success, `LoadResult::Ok.path` is the canonical child address,
-for example `PARENT/aether.embedded:worker`; an unknown parent produces
-`LoadResult::Err`. This makes parent-relative typed addressing testable across
-explicit and nested component scopes.
-Ordinary `LoadComponent` mail still loads beneath `aether.component`, and this
-harness constructor does not add an MCP or production-hub load mode.
+`LoadResult`. It admits the load only when the selected type declares
+`child_of` the parent's type (ADR-0241 §5). On success, `LoadResult::Ok.path`
+is the canonical child address, for example `PARENT/example.worker:worker`; an
+unknown parent or an undeclared placement produces `LoadResult::Err`.
+Ordinary `LoadComponent` mail loads at the root, and this harness constructor
+does not add an MCP or production-hub load mode.
 
 A load reply carries the component's path and no position: the loaded
 trampoline sends the successful reply itself, so the reference to the loaded

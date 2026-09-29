@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
-use aether_component::{ComponentHostCapability, WasmTrampoline};
+use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
@@ -490,11 +490,12 @@ fn despawn_inline_child_retires_the_alias_address() {
 
 /// ADR-0168 §1: a settlement-gated load covers the inline child's alias.
 ///
-/// The alias route a `WasmTrampoline` publishes from its `wire` hook is a
+/// The alias route a guest's trampoline publishes from its `wire` hook is a
 /// birth-completing effect of the trampoline's own birth, so it holds the
 /// chain that staged that birth — the `aether.component.load` chain. Settling
 /// that chain therefore means the child is addressable, and this sequence
-/// probes it in the very next op with no polling and no slack.
+/// reads its published route in the very next op with no polling and no
+/// slack.
 ///
 /// This is the sequence iamacoffeepot/aether#4186 measured failing: `wire` ran
 /// on a rootless ctx, the alias batch held nothing, and `Settled` fired while
@@ -504,12 +505,13 @@ fn despawn_inline_child_retires_the_alias_address() {
 ///
 // Tripwire: the load chain's `Settled` covers the alias publication. Cutting
 // the causing chain out of the `wire` ctx — or reverting the staged effect to
-// the context's own root — puts the probe back in a race with the owner's
+// the context's own root — puts the read back in a race with the owner's
 // apply, which is the defect class ADR-0168 was written for.
 #[test]
 fn settled_load_covers_the_inline_child_alias_publication() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const PARENT_EXPORT: &str = "test.inline.despawn_parent";
+    const CHILD_NAMESPACE: &str = "test.inline.despawn_child";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
@@ -532,23 +534,15 @@ fn settled_load_covers_the_inline_child_alias_publication() {
         )])
         .expect("the load chain settles");
 
-    // A settle carries no reply, so the loaded parent is reached as what it
-    // is to the host: the trampoline child keyed by its load name. The inline
-    // child's alias resolves to that trampoline's endpoint, keyed `widget`
-    // beneath it, so it is looked up as a trampoline too and probed erased.
-    let parent = harness
-        .child::<ComponentHostCapability, WasmTrampoline>(&host, key(PARENT_EXPORT))
-        .expect("the settled load's trampoline is live");
-    let child = harness
-        .child::<WasmTrampoline, WasmTrampoline>(&parent, key("widget"))
-        .expect("a settled load must leave the inline child addressable");
-    let reached = harness
-        .execute(vec![("probe", HarnessOp::send_and_await_reply(child.erase(), &InlineProbe))])
-        .expect("the inline child answers");
-    assert_eq!(
-        reached.reply::<InlineEcho>("probe").expect("decode InlineEcho"),
-        InlineEcho { who: INLINE_WHO_CHILD },
-        "the probe reaches the live child, so the alias was published inside the load's settlement",
+    // A settle carries no reply, so the loaded parent's reference is not in
+    // hand; the inline child's alias is read as the host publishes its guests.
+    // The inventory publishes with the route in one owner write, so a listed
+    // alias is an addressable one.
+    let child = format!("{PARENT_EXPORT}/{CHILD_NAMESPACE}:widget");
+    let listed = harness.list_components().expect("list components");
+    assert!(
+        listed.contains(&child),
+        "a settled load must leave the inline child's alias published; listed: {listed:?}",
     );
 }
 

@@ -4,11 +4,13 @@
 //! Two modules, one capability. [`component`] is the `aether.component`
 //! mailbox itself, the [`ComponentHostCapability`] singleton that receives
 //! `aether.component.{load,drop,replace}`. [`trampoline`] is the
-//! [`WasmTrampoline`] native actor that every loaded wasm component runs as,
-//! one instance per component, addressed at `aether.embedded:NAME`.
+//! [`WasmTrampoline`] native actor that every loaded wasm component runs in,
+//! one instance per component, named by the guest's own published namespace:
+//! `NS`, `NS:key`, or `parent/NS:key` (ADR-0241 §5).
 //!
-//! `LoadComponent` reaches the capability, which spawns a trampoline child and
-//! instantiates the guest wasm `Component` against that trampoline's binding.
+//! `LoadComponent` reaches the capability, which spawns a trampoline under the
+//! guest's name and instantiates the guest wasm `Component` against that
+//! trampoline's binding.
 //! `DropComponent` and `ReplaceComponent` are forwarded to the addressed
 //! trampoline with the original `reply_to` intact, so the trampoline answers
 //! the caller directly. The capability keeps no per-component bookkeeping: the

@@ -49,7 +49,7 @@ impl EditorShell {
     }
 }
 
-// Keyless `Embedded` singleton, so a region can name the shell by bare type
+// A root singleton guest (ADR-0241 §5), so a region can name the shell by bare type
 // from its own `wire` and announce itself. Its cardinality is not a choice:
 // the shell subscribes *every* window's nine raw input kinds (a window
 // subscribe covers every window), so a second shell in one engine is a

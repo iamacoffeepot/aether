@@ -1,11 +1,11 @@
-//! Parent-relative component-peer routing fixture (issue #4535).
+//! Component-peer routing fixture (issue #4535, ADR-0241 §5).
 //!
 //! `ParentPeerCaller` receives `Bump` and forwards it through
-//! `ctx.send::<ParentPeerTarget>`, which resolves the target by type from the
-//! caller's scope. The target emits the existing
-//! `TickObserved` marker to the substrate-harness observer. A harness scenario
-//! can therefore load both actors beneath an explicit logical parent and
-//! observe whether the caller selected the target from that same parent scope.
+//! `ctx.send::<ParentPeerTarget>`, which resolves the target by type as a
+//! root singleton. The target emits the existing `TickObserved` marker to the
+//! substrate-harness observer. A harness scenario can therefore load both
+//! actors and observe whether the caller reached the target at its published
+//! name.
 
 #![allow(clippy::unused_self)]
 
@@ -14,7 +14,7 @@ use aether_test_fixtures_kinds::{Bump, SubstrateHarnessObserver, TickObserved};
 
 pub struct ParentPeerCaller;
 
-#[actor(depends(ParentPeerTarget))]
+#[actor(root, depends(ParentPeerTarget))]
 impl WasmActor for ParentPeerCaller {
     const NAMESPACE: &'static str = "test.parent_peer.caller";
 

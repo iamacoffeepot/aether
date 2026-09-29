@@ -68,7 +68,13 @@ fn reactor_root_loads_by_digest_and_answers_its_caller() {
         return;
     };
     let (digest, root, path) = load_root(&mut harness, &wasm_path);
-    assert_eq!(path.to_string(), format!("aether.component/aether.embedded:{digest}"));
+    let (namespace, key) = path.as_str().split_once(':').expect("a bundle root is keyed");
+    assert_eq!(key, digest, "the root is keyed by its load name");
+    let hash = namespace.strip_prefix(BUNDLE_NAMESPACE).and_then(|hash| hash.strip_prefix('.'));
+    assert!(
+        hash.is_some_and(|hash| hash.len() == 64),
+        "the root publishes as {BUNDLE_NAMESPACE}.<module hash>: {namespace}"
+    );
 
     let program = digest_ref::<Program>(1);
     let tree = digest_ref::<Tree>(2);

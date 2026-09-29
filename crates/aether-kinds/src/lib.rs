@@ -630,8 +630,10 @@ mod control_plane {
     }
 
     /// `aether.component.load` — request the substrate load a WASM
-    /// component into a freshly allocated mailbox. Carries the raw
-    /// WASM bytes and an optional human-readable name. The
+    /// component into a freshly allocated mailbox at its published name
+    /// (ADR-0241 §5): `NS` for a singleton, which a load names no key for,
+    /// or `NS:name` for an instanced type, `NS:<counter>` when `name` is
+    /// `None`. Carries the raw WASM bytes and the optional key. The
     /// component's kind vocabulary ships embedded in the wasm's
     /// `aether.kinds` custom section (ADR-0028) — the substrate
     /// reads it directly and the loader doesn't need to declare
@@ -664,10 +666,12 @@ mod control_plane {
     }
 
     /// `aether.component.load_under` — test-harness composition request for
-    /// loading a component beneath an already-live logical parent. The
-    /// component host resolves `parent` to its registry-canonical address,
-    /// then runs its `load` through the ordinary component loader and replies
-    /// with [`LoadResult`].
+    /// loading a component beneath an already-live logical parent, at
+    /// `parent/NS:key`. The component host resolves `parent` to its
+    /// registry-canonical address, admits the load only when the selected
+    /// type declares `child_of` the parent's type (ADR-0241 §5), then runs
+    /// its `load` through the ordinary component loader and replies with
+    /// [`LoadResult`].
     ///
     /// This is additive harness infrastructure rather than a replacement for
     /// [`LoadComponent`]: production load callers keep the established
@@ -866,8 +870,8 @@ mod control_plane {
     pub struct ListComponents {}
 
     /// Reply to `ListComponents` (issue 2020): the ADR-0099 lineage name of
-    /// every currently-loaded component (each registered at
-    /// `aether.component/<name>`). `names` only — no mailbox id: the id is a
+    /// every currently-loaded component (each registered at its published
+    /// name, `NS`, `NS:key`, or `parent/NS:key`, ADR-0241 §5). `names` only — no mailbox id: the id is a
     /// deterministic hash-chain over the lineage the `name` already renders
     /// (ADR-0099), and routing is the substrate's job (a caller addresses by
     /// its lineage address and the substrate resolves it), so the handle has
@@ -880,16 +884,16 @@ mod control_plane {
     /// `aether.component.describe` — introspect one loaded component's
     /// ADR-0033 receive-side `ComponentCapabilities` (handler kinds, docs,
     /// fallback, config kind), addressed to its `aether.component` mailbox
-    /// by lineage `name` (the `aether.component/<name>` address that
-    /// `ListComponents` / `LoadResult.path` hand back; iamacoffeepot/aether#2421).
+    /// by lineage `name` (the address that `ListComponents` /
+    /// `LoadResult.path` hand back; iamacoffeepot/aether#2421).
     /// Name-addressed because a boot-manifest-loaded component never returns
     /// a load reply to its spawner — the substrate is the only process that
     /// always holds the live loaded set, so it owns the answer. Reply:
     /// `DescribeComponentResult`.
     #[aether_data::kind(name = "aether.component.describe")]
     pub struct DescribeComponent {
-        /// The component's ADR-0099 lineage name (e.g.
-        /// `aether.embedded:aether.camera`), as returned by
+        /// The component's ADR-0099 lineage name (e.g. `aether.kit.camera`),
+        /// as returned by
         /// `ListComponentsResult.names` or `LoadResult.path`.
         pub name: String,
     }

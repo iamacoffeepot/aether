@@ -2,7 +2,8 @@
 
 /// Declared namespace of the one generated bundle root, which the export selector names: the driver loads every bundle
 /// with `export: Some(BUNDLE_NAMESPACE)`. Every bundle is content-addressed, so the root publishes as
-/// `aether.bloomery.bundle.<module hash>` (ADR-0241 §3) and every built bundle is its own publication.
+/// `aether.bloomery.bundle.<module hash>` (ADR-0241 §3) and every built bundle is its own publication; the driver keys
+/// each root by its unit, so a root is born at `aether.bloomery.bundle.<module hash>:<unit key>` (ADR-0240 D4).
 pub const BUNDLE_NAMESPACE: &str = "aether.bloomery.bundle";
 /// Custom-section name of a bundle's program declarations.
 pub const PROGRAMS_SECTION: &str = "aether.bloomery.programs";

@@ -980,8 +980,8 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
 }
 
 /// Tripwire: a consumer that is a *nested* actor still receives its
-/// session mail. A loaded wasm component lives at the ADR-0099 lineage
-/// path `aether.component/aether.embedded:<name>`, which is precisely
+/// session mail. A wasm component loaded beneath a parent lives at the
+/// ADR-0099 lineage path `parent/NS:key` (ADR-0241 §5), which is precisely
 /// what the `consumer` field exists to serve. The written lineage path
 /// is proven at decode through the registry's fold, so a nested consumer
 /// is reachable; resolving it as a flat name would refuse every bind
