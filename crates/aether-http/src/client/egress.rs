@@ -233,10 +233,6 @@ impl<R: ActorMail> PerSenderEgress<R> {
 /// a gate the test opens, so the test decides when each fetch finishes.
 #[cfg(test)]
 mod tests {
-    // `#[handler]` methods take their decoded payload by value per the
-    // ADR-0033 dispatch ABI.
-    #![allow(clippy::needless_pass_by_value)]
-
     use super::PerSenderEgress;
     use aether_actor::ErasedActorRef;
     use aether_data::{Kind, Source, SourceAddr};

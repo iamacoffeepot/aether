@@ -7,10 +7,6 @@
 //! built on it holds each request's reply itself, so a request's chain
 //! settles when that request is answered.
 
-// `#[handler]` methods take their decoded payload by value per the
-// ADR-0033 dispatch ABI.
-#![allow(clippy::needless_pass_by_value)]
-
 use std::collections::HashSet;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -195,6 +191,8 @@ enum Seen {
     Completed { step: u32, in_reply_to: Option<RequestId>, note: Option<Note>, sender: bool },
     /// A probe found the context stored under its request, or not.
     Probed(bool),
+    /// The actor began closing.
+    Closing,
 }
 
 #[derive(Clone)]
@@ -234,10 +232,11 @@ impl NativeActor for StageProbe {
     }
 
     #[aether_actor::handler::single]
-    #[allow(clippy::unused_self)]
     fn on_strand(&mut self, ctx: &mut NativeCtx<'_>, _strand: Strand) -> Pending<Worked> {
         let (pending, held) = ctx.hold::<Worked>();
-        ctx.stage_blocking_with::<Step, Stranded>(Stranded { held }).start(ctx, || Step { step: 0 });
+        let task = ctx.stage_blocking_with::<Step, Stranded>(Stranded { held });
+        self.see(Seen::Staged(task.request()));
+        task.start(ctx, || Step { step: 0 });
         pending
     }
 
@@ -260,8 +259,8 @@ impl NativeActor for StageProbe {
     }
 
     #[aether_actor::handler::single]
-    #[allow(clippy::unused_self)]
     fn on_close(&mut self, ctx: &mut NativeCtx<'_>, _close: Close) {
+        self.see(Seen::Closing);
         ctx.shutdown();
     }
 
@@ -420,6 +419,7 @@ fn an_unstarted_task_is_released_at_actor_close() {
     assert!(settled.recv_timeout(QUIET).is_err(), "an unstarted task holds the chain it was staged on");
 
     let _ = chassis.send_tracked(actor, &Close, None);
+    assert_eq!(seen.recv_timeout(PATIENCE), Ok(Seen::Closing), "the close reached the actor");
     settled.recv_timeout(PATIENCE).expect("closing the actor releases the chain its unstarted task held");
     assert_eq!(record.reason(), None, "an unstarted task owes nothing, so its close fails nothing");
     drop(chassis);
