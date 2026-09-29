@@ -91,11 +91,11 @@ fn cost_kinds(harness: &SubstrateHarness, actor: ErasedActorRef) -> Vec<KindId> 
 
 /// `NativeCtx::sync_guest` unions the trampoline's own measured framework arms
 /// with the guest's handlers (iamacoffeepot/aether#4269), and releasing the
-/// guest drops its rows before re-seeding those arms. A sync that seeded only
-/// the guest's kinds would leave the arms that outlive a drop unmeasured, and
-/// one that skipped the drop would leave a dropped guest's handlers measured.
+/// guest drops its rows. A sync that seeded only the guest's kinds would leave
+/// the replace arm unmeasured across a replace, and one that skipped the
+/// release would leave a dropped guest's handlers measured.
 #[test]
-fn replace_and_drop_keep_framework_arms_measured() {
+fn replace_keeps_framework_arms_measured_and_drop_releases_guest_rows() {
     let Some(bundle_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
@@ -133,9 +133,10 @@ fn replace_and_drop_keep_framework_arms_measured() {
     if let DropResult::Err { error } = dropped.reply::<DropResult>("drop").expect("decode DropResult") {
         panic!("drop_component: {error}");
     }
+    // The guest's rows leave in the drop handler, before its reply. The
+    // closing trampoline's own rows leave with it later, so only the guest's
+    // absence is ordered by the reply.
     let released = cost_kinds(&harness, swappable);
-    assert!(released.contains(&ReplaceComponent::ID), "an empty slot still measures the replace arm that refills it");
-    assert!(released.contains(&DropComponent::ID), "an empty slot still measures the drop arm");
     assert!(!released.contains(&Bump::ID), "a dropped guest's handler leaves the table");
     assert!(!released.contains(&InlineProbe::ID), "a dropped guest's handler leaves the table");
 }

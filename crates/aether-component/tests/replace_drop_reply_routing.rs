@@ -16,15 +16,14 @@ mod tests {
 
     use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
-    /// Load the `probe` component, drop its guest, refill the surviving
-    /// trampoline with `ReplaceComponent`, and drop it again. Each operation
-    /// draws its `*Result::Ok` as a streamed reply event ahead
-    /// of `ReplyEnd`. The drop routes through the component host's
-    /// `forward_to` and the replace through its tracked forward; before
-    /// the issue-1466 fix the forward let the call settle before the
-    /// trampoline replied, so the reply set came back empty. The replace
-    /// explicitly selects `QuietProbe` while refilling the empty trampoline
-    /// and checks only its dependencies, which headless serves.
+    /// Load the `probe` component, replace it in place, and drop it. Each
+    /// forwarded operation draws its `*Result::Ok` as a streamed reply event
+    /// ahead of `ReplyEnd`. The replace routes through the component host's
+    /// tracked forward and the drop through its `forward_to`; before the
+    /// issue-1466 fix the forward let the call settle before the trampoline
+    /// replied, so the reply set came back empty. The replace selects
+    /// `QuietProbe` again and checks only its dependencies, which headless
+    /// serves.
     #[test]
     fn forwarded_replace_and_drop_route_their_reply() {
         if !dist_component_available("aether_test_fixtures_bundle") {
@@ -51,22 +50,8 @@ mod tests {
             LoadResult::Err { error } => panic!("probe load failed: {error}"),
         };
 
-        // The loaded guest publishes only its own rows, which do not include
-        // the native DropComponent handler. The host-owned proof retained at
-        // spawn must still make the first external drop succeed.
-        let first_drop_replies =
-            harness.send::<DropComponent>(engine, "aether.component", &DropComponent { target: path.clone() });
-        assert!(
-            !first_drop_replies.is_empty(),
-            "DropComponent drew zero reply events — the forwarded reply settled before the trampoline replied (issue 1466)",
-        );
-        match decode_reply::<DropResult>(&first_drop_replies) {
-            DropResult::Ok => {}
-            DropResult::Err { error } => panic!("first drop failed: {error}"),
-        }
-
-        // Refill the now-empty trampoline with the same probe. The reply set
-        // is empty before the issue-1466 fix (`ReplyEnd` with zero events).
+        // The reply set is empty before the issue-1466 fix (`ReplyEnd` with
+        // zero events).
         let replace_replies = harness.send::<ReplaceComponent>(
             engine,
             "aether.component",
@@ -87,8 +72,9 @@ mod tests {
             ReplaceResult::Err { error } => panic!("replace failed: {error}"),
         }
 
-        // The proof belongs to the trampoline slot, so it survives the guest's
-        // unload/refill cycle and authorizes a second drop at the stable path.
+        // The loaded guest publishes only its own rows, which do not include
+        // the native DropComponent handler. The host-owned proof retained at
+        // spawn, and kept across the replace, must still make the drop succeed.
         let drop_replies = harness.send::<DropComponent>(engine, "aether.component", &DropComponent { target: path });
         assert!(
             !drop_replies.is_empty(),
@@ -96,7 +82,7 @@ mod tests {
         );
         match decode_reply::<DropResult>(&drop_replies) {
             DropResult::Ok => {}
-            DropResult::Err { error } => panic!("second drop failed: {error}"),
+            DropResult::Err { error } => panic!("drop failed: {error}"),
         }
     }
 

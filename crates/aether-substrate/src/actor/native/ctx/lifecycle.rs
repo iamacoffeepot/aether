@@ -148,11 +148,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// registered after the vacate watch the mailbox's next occupant
     /// (or its eventual close).
     ///
-    /// The one production caller is the wasm trampoline's
-    /// `DropComponent` handler — a component drop is a wasm unload
-    /// behind a still-addressable, refillable mailbox, which the
-    /// close fan-out never reaches by design. Self-service only: an
-    /// actor can declare its own mailbox vacated, never a peer's.
+    /// The one production caller is the wasm trampoline's module-boot
+    /// `BootTeardown` handler, which releases its guest behind a mailbox
+    /// that stays addressable, so the close fan-out never reaches it. A
+    /// `DropComponent` closes its trampoline instead (ADR-0241 §8).
+    /// Self-service only: an actor can declare its own mailbox vacated,
+    /// never a peer's.
     ///
     /// The departing occupant is a whole cluster (ADR-0114 §2): the
     /// mailbox itself plus every inline-child alias folded onto it, each

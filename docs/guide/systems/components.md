@@ -126,7 +126,7 @@ mailbox:
 | kind | does | reply |
 |---|---|---|
 | `aether.component.load` | compile, publish its module (admission), register its kinds, instantiate, publish a mailbox | `LoadResult` |
-| `aether.component.drop` | tear down the guest and clear its capabilities; leave the trampoline slot empty | `DropResult` |
+| `aether.component.drop` | run the guest's `unwire` and close the instance; its name tombstones | `DropResult` |
 | `aether.component.replace` | hot-swap the wasm behind a stable mailbox | `ReplaceResult` |
 
 `LoadResult::Ok` carries the component's canonical **`path`** (so a caller that
@@ -193,9 +193,12 @@ placements it does declare, before the module publishes or anything is staged. A
 type whose only placement is a parent — `child_of(P)` or `composable` — is reached
 through that parent, never loaded at the host.
 
-Dropping does not make the lineage a fresh reusable component name. The empty
-trampoline remains registered at that address for the engine lifetime; terminate
-the engine when the whole slot must disappear.
+A drop closes the instance, and its name tombstones for the engine's lifetime
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§8). Its route reads `Dropped`, so mail to it drops, every watcher receives a
+`MonitorNotice`, and a later load of the same name is refused as retired. A
+replace or a second drop at the path is refused. Load under a new name to bring
+the component back.
 
 In practice you drive this through the MCP harness — `load_component(engine_id,
 selector, name?, config?, config_path?, export?)`, `replace_component(...)`,
@@ -450,7 +453,7 @@ its hooks ran does not undo them ([ADR-0016](https://github.com/iamacoffeepot/ae
   Its `unwire` / `on_dehydrate` effects, and any mail the candidate sent from
   `on_rehydrate`, are not undone, and its `wire` does not run again.
 
-Another replace can refill the empty trampoline a drop leaves. Only a fully successful replace
+A replace needs a live instance: one at a dropped path is refused. Only a fully successful replace
 returns `ReplaceResult::Ok` with the new component's capabilities so the hub's
 cached view reflects the swapped binary.
 

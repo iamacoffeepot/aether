@@ -37,11 +37,11 @@ the load.
 Inspect that kind with `describe_kinds` before constructing params. Await its
 `aether.component.drop_result`; do not fire-and-forget cleanup.
 
-In current code, drop unloads the wasm, clears the trampoline's capabilities and
-cost cells, and purges capability-owned subscriptions/routes. It does **not**
-destroy the trampoline. The lineage name and mailbox remain as an empty,
-replaceable slot until the substrate terminates. Consequently, drop releases
-guest state but does not make the same load name available to a fresh load.
+Drop runs the guest's `unwire`, releases the wasm, and closes the instance
+(ADR-0241 §8). The close purges capability-owned subscriptions and routes
+through each watcher's `MonitorNotice`, and the name tombstones for the engine's
+lifetime: a later load of it is refused as retired, and a replace or second drop
+at the path is refused. Load under a new name to bring the component back.
 
 ## Upload before selector
 
@@ -196,9 +196,9 @@ replacement is unambiguous.
 On success the trampoline mailbox stays stable and the returned capabilities
 describe the replacement actor type. An omitted export reuses the actor type the
 trampoline currently hosts; it does not necessarily select the new module's
-default entry. The replacement must keep every handler row of the hosted type,
-including on a refill after a drop: a dropped or changed row is refused and a
-changed reply means loading under a new name.
+default entry. The replacement must keep every handler row of the hosted type: a dropped or
+changed row is refused and a changed reply means loading under a new name. A
+dropped instance cannot be replaced.
 
 There is no drain phase and no drain timeout. ADR-0038 made the splice
 structural, so the replace kind's `drain_timeout_ms` field is vestigial wire
@@ -223,10 +223,10 @@ For a task-owned instance in a shared engine:
 - [ ] Require `aether.component.drop_result` success.
 - [ ] Do not use a same-process `describe_component` cache hit or lingering kind
       descriptor as unload confirmation.
-- [ ] Record that the lineage/mailbox is an empty slot, not a freed name.
+- [ ] Record that the name is retired, not freed: a reload needs a new name.
 
 For an engine wholly owned by the task, terminating the engine is the simpler
-complete cleanup: all its live registries, empty slots, and components die with
+complete cleanup: all its live registries and components die with
 it. This does not delete the hub's stored component artifacts.
 
 ## Source routes
@@ -239,7 +239,7 @@ it. This does not delete the hub's stored component artifacts.
 - Hub artifact store: `crates/aether-fleet/src/store/`
 - Component host load/list/describe/drop/replace:
   `crates/aether-component/src/component/`
-- Empty-slot drop behavior:
+- Drop-closes-the-instance behavior:
   `crates/aether-component/src/trampoline/runtime/mod.rs`
 - Trampoline replace behavior:
   `crates/aether-component/src/trampoline/runtime/replace.rs`

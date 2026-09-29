@@ -4,8 +4,8 @@
 //! type the slot hosts is refused with `ReplaceResult::Err` before the old
 //! instance is touched, so the old module keeps serving; a replacement that
 //! only adds rows succeeds, and the added row then binds the next replace. A
-//! refill after `DropComponent` is held to the dropped module's rows. A
-//! `#[fallback]` counts like a row: one may be added, and a replacement that
+//! replace after `DropComponent` is refused, because the drop closed the
+//! instance (ADR-0241 §8). A `#[fallback]` counts like a row: one may be added, and a replacement that
 //! drops it is refused. The fixtures are the bundle's `test.contract.*`
 //! exports.
 
@@ -119,8 +119,10 @@ fn an_added_row_is_accepted_and_then_binds() {
     assert_eq!(error, fixture.refusal(INLINE_PROBE), "the added row binds the next replace");
 }
 
+/// Catches a drop that leaves an empty slot a replace can refill: the
+/// dropped instance is closed, so the host refuses the replace.
 #[test]
-fn a_refill_after_drop_is_held_to_the_dropped_contract() {
+fn a_replace_after_drop_is_refused() {
     let Some(mut fixture) = Fixture::start() else {
         return;
     };
@@ -132,14 +134,10 @@ fn a_refill_after_drop_is_held_to_the_dropped_contract() {
         panic!("the victim must drop: {error}");
     }
 
-    let ReplaceResult::Err { error } = fixture.replace("refill-dropped", DROPPED_EXPORT) else {
-        panic!("a refill that drops a row of the dropped module must be refused");
+    let ReplaceResult::Err { error } = fixture.replace("replace-dropped", BASE_EXPORT) else {
+        panic!("a replace after drop must be refused");
     };
-    assert_eq!(error, fixture.refusal(COUNT_QUERY), "the refill is held to the dropped module's rows");
-
-    if let ReplaceResult::Err { error } = fixture.replace("refill-base", BASE_EXPORT) {
-        panic!("a refill that keeps the dropped module's rows must succeed: {error}");
-    }
+    assert!(error.contains(fixture.victim.as_str()), "the refusal names the dropped path: {error}");
 }
 
 #[test]
