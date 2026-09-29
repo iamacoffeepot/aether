@@ -1,150 +1,109 @@
 //! Shared named-window forwarding plus the fail-fast headless runtime.
 
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
-use std::collections::HashMap;
-
 use aether_actor::runtime;
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_actor::{DependsOn, Manual, ReplyMode, handler_set};
+use aether_actor::{DependsOn, HeldReply, ReplyMode, handler_set};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_data::Kind;
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_substrate::InboundMail;
+use aether_substrate::actor::native::{Held, Pending};
 
 use super::{BootError, NativeActor, NativeCtx, NativeInitCtx, unsupported};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-use crate::{
-    ApplyWindowCommand, ApplyWindowCommandResult, RetireWindow, WindowCapability, WindowCommand, WindowForwardContext,
-};
+use crate::{ApplyWindowCommand, ApplyWindowCommandResult, RetireWindow, WindowCapability, WindowCommand};
 use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, HeadlessWindowInstance, RequestWindowRedraw,
     RequestWindowRedrawResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult,
     SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
 };
 
-/// Retained public requests for one concrete forwarding child, keyed by a
-/// child-local request number. A public request need not carry a lineage id,
-/// so the key is minted here rather than read off the inbound.
+/// State of one concrete forwarding child. It keeps none: each public
+/// request's held reply rides the context stored under its forward.
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub struct WindowInstanceState {
-    pending: HashMap<u64, InboundMail>,
-    next_request: u64,
+pub struct WindowInstanceState;
+
+/// The context stored under a forwarded [`ApplyWindowCommand`]: the public
+/// request's held reply (ADR-0243 §4), in the variant naming its command. The
+/// completion claims it back and answers it with the manager's result.
+///
+/// Only a window-bearing runtime forwards, so it carries the same gate as
+/// the handlers that store it. It is a reply context, never mail, so it stays
+/// private beside its only user.
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+#[aether_data::kind(name = "aether.window.internal.forward_context")]
+enum WindowForwardContext {
+    Close(Held<CloseWindowResult>),
+    SetMode(Held<SetWindowModeResult>),
+    SetTitle(Held<SetWindowTitleResult>),
+    SetMenu(Held<SetWindowMenuResult>),
+    SetCursor(Held<SetWindowCursorResult>),
+    Focus(Held<FocusWindowResult>),
+    RequestRedraw(Held<RequestWindowRedrawResult>),
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-impl WindowInstanceState {
-    pub(super) fn new() -> Self {
-        Self { pending: HashMap::new(), next_request: 0 }
+impl WindowForwardContext {
+    /// Answer the held request with its own command's `Err`, carrying `error`.
+    fn refuse<A, M: ReplyMode>(self, ctx: &mut NativeCtx<'_, A, M>, error: String) {
+        match self {
+            Self::Close(held) => held.answer(ctx, &CloseWindowResult::Err { error }),
+            Self::SetMode(held) => held.answer(ctx, &SetWindowModeResult::Err { error }),
+            Self::SetTitle(held) => held.answer(ctx, &SetWindowTitleResult::Err { error }),
+            Self::SetMenu(held) => held.answer(ctx, &SetWindowMenuResult::Err { error }),
+            Self::SetCursor(held) => held.answer(ctx, &SetWindowCursorResult::Err { error }),
+            Self::Focus(held) => held.answer(ctx, &FocusWindowResult::Err { error }),
+            Self::RequestRedraw(held) => held.answer(ctx, &RequestWindowRedrawResult::Err { error }),
+        }
     }
 }
 
+/// Hold the public request's reply and forward `command` to the manager, the
+/// held reply riding the forward's context in the variant `context` names.
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub(super) fn forward<A: DependsOn<WindowCapability>>(
-    state: &mut WindowInstanceState,
-    ctx: &mut NativeCtx<'_, A, Manual>,
+fn forward<A: DependsOn<WindowCapability>, R: HeldReply>(
+    ctx: &mut NativeCtx<'_, A>,
     command: WindowCommand,
-) {
-    let inbound = ctx.take_inbound();
-    let request = state.next_request;
-    state.next_request = request.wrapping_add(1);
-    if state.pending.insert(request, inbound).is_some() {
-        ctx.fatal_abort(format!("duplicate retained window request {request}"));
-    }
-    let _ =
-        ctx.send_with_context::<WindowCapability>(&ApplyWindowCommand { command }, WindowForwardContext { request });
+    context: fn(Held<R>) -> WindowForwardContext,
+) -> Pending<R> {
+    let (pending, held) = ctx.hold::<R>();
+    let _ = ctx.send_with_context::<WindowCapability>(&ApplyWindowCommand { command }, context(held));
+    pending
 }
 
+/// Answer the public request the manager just resolved, from the held reply
+/// its forward's context carries. A successful close retires this endpoint.
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub(super) fn complete<A, M: ReplyMode>(
-    state: &mut WindowInstanceState,
-    ctx: &mut NativeCtx<'_, A, M>,
-    result: ApplyWindowCommandResult,
-) {
+fn complete<A, M: ReplyMode>(ctx: &mut NativeCtx<'_, A, M>, result: ApplyWindowCommandResult) {
     let Some(context) = ctx.take_context::<WindowForwardContext>() else {
         ctx.fatal_abort("window child received an uncorrelated manager result".to_owned());
     };
-    let Some(inbound) = state.pending.remove(&context.request) else {
-        ctx.fatal_abort(format!("window child has no retained request {}", context.request));
-    };
 
-    let close_succeeded = match result {
-        ApplyWindowCommandResult::Close(reply) if inbound.kind() == CloseWindow::ID => {
-            let succeeded = matches!(reply, CloseWindowResult::Ok);
-            inbound.reply(&reply);
-            succeeded
+    match (result, context) {
+        (ApplyWindowCommandResult::Close(reply), WindowForwardContext::Close(held)) => {
+            let closed = matches!(reply, CloseWindowResult::Ok);
+            held.answer(ctx, &reply);
+            if closed {
+                ctx.shutdown();
+            }
         }
-        ApplyWindowCommandResult::SetMode(reply) if inbound.kind() == SetWindowMode::ID => {
-            inbound.reply(&reply);
-            false
+        (ApplyWindowCommandResult::SetMode(reply), WindowForwardContext::SetMode(held)) => held.answer(ctx, &reply),
+        (ApplyWindowCommandResult::SetTitle(reply), WindowForwardContext::SetTitle(held)) => held.answer(ctx, &reply),
+        (ApplyWindowCommandResult::SetMenu(reply), WindowForwardContext::SetMenu(held)) => held.answer(ctx, &reply),
+        (ApplyWindowCommandResult::SetCursor(reply), WindowForwardContext::SetCursor(held)) => {
+            held.answer(ctx, &reply);
         }
-        ApplyWindowCommandResult::SetTitle(reply) if inbound.kind() == SetWindowTitle::ID => {
-            inbound.reply(&reply);
-            false
+        (ApplyWindowCommandResult::Focus(reply), WindowForwardContext::Focus(held)) => held.answer(ctx, &reply),
+        (ApplyWindowCommandResult::RequestRedraw(reply), WindowForwardContext::RequestRedraw(held)) => {
+            held.answer(ctx, &reply);
         }
-        ApplyWindowCommandResult::SetMenu(reply) if inbound.kind() == SetWindowMenu::ID => {
-            inbound.reply(&reply);
-            false
+        (ApplyWindowCommandResult::Unanswered { error }, context) => context.refuse(ctx, error),
+        (result, context) => {
+            ctx.fatal_abort(format!("window child manager result {result:?} does not match retained {context:?}"))
         }
-        ApplyWindowCommandResult::SetCursor(reply) if inbound.kind() == SetWindowCursor::ID => {
-            inbound.reply(&reply);
-            false
-        }
-        ApplyWindowCommandResult::Focus(reply) if inbound.kind() == FocusWindow::ID => {
-            inbound.reply(&reply);
-            false
-        }
-        ApplyWindowCommandResult::RequestRedraw(reply) if inbound.kind() == RequestWindowRedraw::ID => {
-            inbound.reply(&reply);
-            false
-        }
-        result => ctx.fatal_abort(format!(
-            "window child manager result {result:?} does not match retained kind {:?}",
-            inbound.kind()
-        )),
-    };
-    if close_succeeded {
-        ctx.shutdown();
     }
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub(super) fn retire<A, M: ReplyMode>(
-    _state: &mut WindowInstanceState,
-    ctx: &mut NativeCtx<'_, A, M>,
-    _mail: RetireWindow,
-) {
+fn retire<A, M: ReplyMode>(ctx: &mut NativeCtx<'_, A, M>, _mail: RetireWindow) {
     ctx.shutdown();
-}
-
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub(super) fn unwire(state: &mut WindowInstanceState) {
-    for (_, inbound) in state.pending.drain() {
-        let error = "window endpoint shutting down".to_owned();
-        match inbound.kind() {
-            kind if kind == CloseWindow::ID => {
-                inbound.reply(&CloseWindowResult::Err { error });
-            }
-            kind if kind == SetWindowMode::ID => {
-                inbound.reply(&SetWindowModeResult::Err { error });
-            }
-            kind if kind == SetWindowTitle::ID => {
-                inbound.reply(&SetWindowTitleResult::Err { error });
-            }
-            kind if kind == SetWindowMenu::ID => {
-                inbound.reply(&SetWindowMenuResult::Err { error });
-            }
-            kind if kind == SetWindowCursor::ID => {
-                inbound.reply(&SetWindowCursorResult::Err { error });
-            }
-            kind if kind == FocusWindow::ID => {
-                inbound.reply(&FocusWindowResult::Err { error });
-            }
-            kind if kind == RequestWindowRedraw::ID => {
-                inbound.reply(&RequestWindowRedrawResult::Err { error });
-            }
-            _ => {}
-        }
-    }
 }
 
 /// The whole receive surface of a pooled window endpoint (ADR-0169).
@@ -153,69 +112,86 @@ pub(super) fn unwire(state: &mut WindowInstanceState) {
 /// in which manager it forwards to, and the manager is reached through
 /// [`WindowCapability`], the neutral alias. So the seven handlers are identical
 /// across the family down to the token, and an adopter contributes only its
-/// identity plus the one accessor below.
+/// identity.
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 #[handler_set]
 pub trait WindowEndpoint: DependsOn<WindowCapability> {
-    /// The retained-request state these handlers forward through.
-    fn endpoint(state: &mut Self::State) -> &mut WindowInstanceState;
-
     /// Ask the manager to close this window.
-    #[handler::manual]
-    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _mail: CloseWindow) {
-        forward(Self::endpoint(state), ctx, WindowCommand::Close);
+    #[handler::single]
+    fn on_close(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: CloseWindow) -> Pending<CloseWindowResult> {
+        forward(ctx, WindowCommand::Close, WindowForwardContext::Close)
     }
 
     /// Ask the manager to change this window's presentation mode.
-    #[handler::manual]
-    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: SetWindowMode) {
+    #[handler::single]
+    fn on_set_mode(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: SetWindowMode,
+    ) -> Pending<SetWindowModeResult> {
         forward(
-            Self::endpoint(state),
             ctx,
             WindowCommand::SetMode { mode: mail.mode, width: mail.width, height: mail.height },
-        );
+            WindowForwardContext::SetMode,
+        )
     }
 
     /// Ask the manager to retitle this window.
-    #[handler::manual]
-    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: SetWindowTitle) {
-        forward(Self::endpoint(state), ctx, WindowCommand::SetTitle { title: mail.title });
+    #[handler::single]
+    fn on_set_title(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: SetWindowTitle,
+    ) -> Pending<SetWindowTitleResult> {
+        forward(ctx, WindowCommand::SetTitle { title: mail.title }, WindowForwardContext::SetTitle)
     }
 
     /// Ask the manager to install this window's native menu bar.
-    #[handler::manual]
-    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: SetWindowMenu) {
-        forward(Self::endpoint(state), ctx, WindowCommand::SetMenu { menus: mail.menus });
+    #[handler::single]
+    fn on_set_menu(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: SetWindowMenu,
+    ) -> Pending<SetWindowMenuResult> {
+        forward(ctx, WindowCommand::SetMenu { menus: mail.menus }, WindowForwardContext::SetMenu)
     }
 
     /// Ask the manager to set this window's pointer shape.
-    #[handler::manual]
-    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: SetWindowCursor) {
-        forward(Self::endpoint(state), ctx, WindowCommand::SetCursor { icon: mail.icon });
+    #[handler::single]
+    fn on_set_cursor(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: SetWindowCursor,
+    ) -> Pending<SetWindowCursorResult> {
+        forward(ctx, WindowCommand::SetCursor { icon: mail.icon }, WindowForwardContext::SetCursor)
     }
 
     /// Ask the manager to bring this window to the foreground.
-    #[handler::manual]
-    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _mail: FocusWindow) {
-        forward(Self::endpoint(state), ctx, WindowCommand::Focus);
+    #[handler::single]
+    fn on_focus(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> Pending<FocusWindowResult> {
+        forward(ctx, WindowCommand::Focus, WindowForwardContext::Focus)
     }
 
     /// Ask the manager to schedule this window for redraw.
-    #[handler::manual]
-    fn on_request_redraw(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _mail: RequestWindowRedraw) {
-        forward(Self::endpoint(state), ctx, WindowCommand::RequestRedraw);
+    #[handler::single]
+    fn on_request_redraw(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        _mail: RequestWindowRedraw,
+    ) -> Pending<RequestWindowRedrawResult> {
+        forward(ctx, WindowCommand::RequestRedraw, WindowForwardContext::RequestRedraw)
     }
 
-    /// Answer the retained public request the manager just resolved.
+    /// Answer the held public request the manager just resolved.
     #[handler::single]
-    fn on_command_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ApplyWindowCommandResult) {
-        complete(Self::endpoint(state), ctx, result);
+    fn on_command_result(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ApplyWindowCommandResult) {
+        complete(ctx, result);
     }
 
     /// Shut down: the manager is retiring this endpoint.
     #[handler::single]
-    fn on_retire(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: RetireWindow) {
-        retire(Self::endpoint(state), ctx, mail);
+    fn on_retire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: RetireWindow) {
+        retire(ctx, mail);
     }
 }
 

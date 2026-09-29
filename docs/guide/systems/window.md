@@ -108,6 +108,10 @@ The request/reply families are:
 | `focus` | named child; no input | request acknowledgement |
 | `request_redraw` | named child; no input | request acknowledgement |
 
+A window endpoint that closes while one of its commands is still in flight
+answers that command's `Err`. The manager answers a pending create's `Err` the
+same way.
+
 `WindowSpec::name` is an immutable actor instance segment: it cannot be empty,
 contain whitespace or `:`, or duplicate a pending or live window name. The
 native actor tombstone also prevents reuse of a closed name during the same

@@ -1,11 +1,11 @@
 //! Pooled forwarding runtime for one synthetic window endpoint.
 
 use aether_actor::runtime;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate::SyntheticWindowInstance;
-use crate::runtime::instance::{WindowEndpoint, WindowInstanceState, unwire};
+use crate::runtime::instance::{WindowEndpoint, WindowInstanceState};
 
 #[runtime(handler_set(WindowEndpoint))]
 impl NativeActor for SyntheticWindowInstance {
@@ -15,18 +15,10 @@ impl NativeActor for SyntheticWindowInstance {
     const NAMESPACE: &'static str = crate::WINDOW_INSTANCE_NAMESPACE;
 
     fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<WindowInstanceState, BootError> {
-        Ok(WindowInstanceState::new())
-    }
-
-    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        unwire(state);
+        Ok(WindowInstanceState)
     }
 }
 
 impl WindowEndpoint for SyntheticWindowInstance {
     type State = WindowInstanceState;
-
-    fn endpoint(state: &mut Self::State) -> &mut WindowInstanceState {
-        state
-    }
 }
