@@ -32,16 +32,17 @@ impl WasmTrampolineState {
     }
 
     /// Retire the logical inline-child routes a guest call despawned (#4228),
-    /// the teardown mirror of [`Self::stage_inline_aliases`]. Each alias fires
-    /// its departure notices here, from this actor's own turn, so a cap keying
-    /// rows on the child's stamped identity (ADR-0114 §4) reclaims them; the
-    /// route retirement itself is staged through the owner alongside.
+    /// the teardown mirror of [`Self::stage_inline_aliases`]. Each alias closes
+    /// here, from this actor's own turn: it tombstones (ADR-0241 §8), so its
+    /// key is never spawned again, and fires its departure notices, so a cap
+    /// keying rows on the child's stamped identity (ADR-0114 §4) reclaims them;
+    /// the route retirement itself is staged through the owner alongside.
     pub fn stage_inline_alias_retirements<A>(
         ctx: &mut NativeCtx<'_, A, Single>,
         aliases: Vec<PreparedAliasRetirement>,
     ) {
         for alias in aliases {
-            ctx.vacate_alias(&alias);
+            ctx.close_alias(&alias);
             let context = InlineAliasContext { alias: alias.rendered_name.to_string() };
             let _ = ctx.stage_registry_batch(RegistryBatch::retire_alias(alias), context);
         }

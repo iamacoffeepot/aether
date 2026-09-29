@@ -90,7 +90,7 @@ impl Deref for PooledSlots {
     }
 }
 
-use crate::actor::monitor::{notify_alias_departures, notify_departure};
+use crate::actor::monitor::{Departure, notify_alias_departures, notify_departure};
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
@@ -706,10 +706,11 @@ where
 ///
 /// The closing actor's inline-child aliases (ADR-0114 §2) depart with it, so
 /// each of those addresses fans out under its own name too — see
-/// `notify_alias_departures`. Only `self_id` is tombstoned: an alias is
-/// served by this slot rather than owning one, and the retired name is the
-/// actor's. An alias resolves through its target, so it reads `Dropped`
-/// with it.
+/// `notify_alias_departures`. Each alias closes with it and tombstones
+/// (ADR-0241 §8), so a watch on it is refused and its key is never spawned
+/// again; only `self_id` goes `Dead`, because an alias is served by this slot
+/// rather than owning one. An alias resolves through its target, so its route
+/// reads `Dropped` with it.
 ///
 /// The key release sits between the registry close and the fan-out on
 /// purpose. A watcher that re-stages the dead child's subname the moment its
@@ -741,5 +742,5 @@ pub fn finalize_close_and_fan_out(
     binding.mailer().registry().submit_logged(EffectBatch::new(vec![RegistryEffect::DropMailbox(self_id)]));
     binding.release_parent_child_reservation();
     notify_departure(binding, self_id, watchers);
-    notify_alias_departures(actor_registry, binding, self_id);
+    notify_alias_departures(actor_registry, binding, self_id, Departure::Close);
 }

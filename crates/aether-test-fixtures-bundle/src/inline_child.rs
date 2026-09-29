@@ -38,7 +38,11 @@
 //! ADR-0114 inline-child teardown fixture (#1939). The entry
 //! `InlineDespawnParent` spawns a co-located `InlineDespawnChild` in
 //! `wire` and stores the returned alias, so a `DespawnChild` trigger to
-//! the parent tears the child down via `ctx.despawn_inline_child`.
+//! the parent tears the child down via `ctx.despawn_inline_child`. A
+//! `RespawnChild` trigger spawns a child at the `respawn` key, keeps it as the
+//! one a later `DespawnChild` tears down, and reports whether the host refused
+//! its alias — which it does once that key's child was despawned (ADR-0241
+//! §8).
 //!
 //! Consumers load this actor from the `inline_child` bundle with
 //! `export: Some("test.inline.despawn_parent")`.
@@ -89,7 +93,7 @@ use aether_actor::{
 };
 use aether_test_fixtures_kinds::{
     Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT,
-    InlineConfiguredChildConfig, InlineEcho, InlineProbe, TagSpawnQuery, TagSpawnReport,
+    InlineConfiguredChildConfig, InlineEcho, InlineProbe, RespawnChild, RespawnReport, TagSpawnQuery, TagSpawnReport,
 };
 
 /// Durable state the `InlineStatefulChild` carries across `replace_component`.
@@ -264,6 +268,23 @@ impl WasmActor for InlineDespawnParent {
     fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _trigger: DespawnChild) {
         if let Some(child) = self.child {
             let _ = ctx.despawn_inline_child(child);
+        }
+    }
+
+    /// Spawn a child at the `respawn` key, keep it as the child the
+    /// `DespawnChild` handler tears down, and report whether the host refused
+    /// its alias. The alias publication is staged from this handler, so it
+    /// rides the trigger's chain. Once that key's child was despawned, its
+    /// name is spent (ADR-0241 §8): the host allocates no alias and the spawn
+    /// fails before a child is built.
+    #[handler::single]
+    fn on_respawn(&mut self, ctx: &mut WasmCtx<'_>, _trigger: RespawnChild) -> RespawnReport {
+        match ctx.spawn_inline_child::<InlineDespawnParent, InlineDespawnChild>(Subname::Named("respawn"), &()) {
+            Ok(child) => {
+                self.child = Some(child.erase());
+                RespawnReport { alias_refused: false }
+            }
+            Err(error) => RespawnReport { alias_refused: matches!(error, SpawnError::AliasAllocationFailed) },
         }
     }
 

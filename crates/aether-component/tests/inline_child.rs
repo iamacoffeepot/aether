@@ -27,7 +27,7 @@ use aether_test_fixtures_bundle::{
 use aether_test_fixtures_fs_demux::{InlineFsDemuxChild, InlineFsDemuxParent};
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, FsDemuxReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
-    InlineProbe, RunFsDemux, TagSpawnQuery, TagSpawnReport,
+    InlineProbe, RespawnChild, RespawnReport, RunFsDemux, TagSpawnQuery, TagSpawnReport,
 };
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -485,6 +485,59 @@ fn despawn_inline_child_retires_the_alias_address() {
         parent.reply::<InlineEcho>("parent").expect("decode post-teardown InlineEcho"),
         InlineEcho { who: INLINE_WHO_PARENT },
         "the host component survives its inline child's teardown",
+    );
+}
+
+/// ADR-0241 §8: a despawned inline child's name is spent, so spawning its key
+/// again is refused before any id reaches the guest. Loads
+/// `InlineDespawnParent`, spawns a child at its `respawn` key, despawns it,
+/// and spawns the key again; the parent reports whether the host refused the
+/// alias. Before this, the host handed the guest the despawned alias's id,
+/// the guest built a child there, and the owner refused to publish the route
+/// with only a warn log — a child that could never be addressed.
+///
+/// Every step settles its chain. The spawn is staged from the trigger's
+/// handler, so its alias publication rides that chain and the despawn closes
+/// a published alias; the despawn closes it from the parent's own turn, so
+/// the tombstone is in before the re-spawn is dispatched.
+#[test]
+fn a_despawned_inline_key_is_refused_when_respawned() {
+    const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
+
+    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
+        return;
+    };
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    let (parent, _) = harness
+        .load::<InlineDespawnParent>(LoadComponent {
+            wasm,
+            name: None,
+            config: Vec::new(),
+            export: Some("test.inline.despawn_parent".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("inline_child_despawn load failed: {error}"));
+
+    // Positive control: the key is spawnable, so a later refusal is the
+    // despawn's doing.
+    harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle::<RespawnChild>(&parent, &RespawnChild))])
+        .expect("the first spawn must settle");
+    harness
+        .child::<InlineDespawnParent, InlineDespawnChild>(&parent, key("respawn"))
+        .unwrap_or_else(|error| panic!("the first spawn of the key must publish its alias: {error}"));
+
+    let respawned = harness
+        .execute(vec![
+            ("despawn", HarnessOp::send_and_settle::<DespawnChild>(&parent, &DespawnChild)),
+            ("respawn", HarnessOp::send_and_await_reply(&parent, &RespawnChild)),
+        ])
+        .expect("the despawn settles and the re-spawn answers");
+    assert_eq!(
+        respawned.reply::<RespawnReport>("respawn").expect("decode RespawnReport"),
+        RespawnReport { alias_refused: true },
+        "a despawned child's key must be refused before the guest is handed an alias the owner never publishes",
     );
 }
 
