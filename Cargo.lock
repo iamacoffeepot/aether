@@ -503,6 +503,7 @@ dependencies = [
  "aether-data",
  "aether-harness-fleet",
  "aether-harness-substrate",
+ "aether-inventory",
  "aether-kinds",
  "aether-kit",
  "aether-rpc",
@@ -514,6 +515,7 @@ dependencies = [
  "aether-test-fixtures-fs-demux",
  "aether-test-fixtures-inline-dependency",
  "aether-test-fixtures-kinds",
+ "aether-test-fixtures-short-path",
  "aether-test-fixtures-stateful-reshaped",
  "aether-test-fixtures-stateful-typed",
  "inventory",
@@ -1158,6 +1160,14 @@ dependencies = [
  "aether-data",
  "aether-harness-substrate",
  "aether-kinds",
+ "aether-test-fixtures-kinds",
+]
+
+[[package]]
+name = "aether-test-fixtures-short-path"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
  "aether-test-fixtures-kinds",
 ]
 
