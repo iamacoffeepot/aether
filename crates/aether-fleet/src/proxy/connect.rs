@@ -280,12 +280,12 @@ fn is_transient_connect_error(e: &RpcClientError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::FleetProxy;
+    use aether_actor::actor;
     use aether_codec::frame::{read_frame, write_frame};
-    use aether_data::Source;
     use aether_rpc::{HelloAck, WIRE_VERSION, WireFrame};
-    use aether_substrate::actor::native::NativeBinding;
-    use aether_substrate::testing::{cleanup, fresh_substrate, manual_dispatch_ctx, scratch_dir, unrouted_binding};
+    use aether_substrate::PassiveChassis;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, PumpedSlot};
+    use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, cleanup, fresh_substrate, scratch_dir};
     use std::io::BufReader;
     use std::net::TcpListener;
     use std::path::PathBuf;
@@ -307,7 +307,7 @@ mod tests {
         let dir = scratch_dir("aether-fleet", "fast-fail");
         let mut target = forked(Command::new("true").spawn().expect("spawn a trivially-exiting child"), &dir);
         let budget = Duration::from_secs(30);
-        let (_binding, wake) = test_wake();
+        let (_chassis, _minter, wake) = test_wake();
 
         let start = Instant::now();
         let result = connect_proxy(&mut target, &wake, Some(budget));
@@ -327,7 +327,7 @@ mod tests {
     fn an_exited_child_that_reported_no_port_is_child_exited() {
         let dir = scratch_dir("aether-fleet", "no-report");
         let mut target = forked(exited_child(), &dir);
-        let (_binding, wake) = test_wake();
+        let (_chassis, _minter, wake) = test_wake();
 
         assert_child_exited(&connect_proxy(&mut target, &wake, Some(Duration::from_secs(5))));
         cleanup(&dir);
@@ -351,7 +351,7 @@ mod tests {
             unreachable!("forked builds a forked target")
         };
         fs::write(port_file, format!("{port}\n")).expect("write the port report");
-        let (_binding, wake) = test_wake();
+        let (_chassis, _minter, wake) = test_wake();
 
         let result = thread::scope(|scope| {
             scope.spawn(|| answer_one_handshake(&foreign));
@@ -362,13 +362,38 @@ mod tests {
         cleanup(&dir);
     }
 
-    /// A proxy wake over a test binding, returned beside the binding: the
-    /// wake holds it weakly, and a sidecar spawn refuses once it is gone.
-    fn test_wake() -> (Arc<NativeBinding>, SelfWake<RpcInboundReady>) {
-        let (_registry, mailer) = fresh_substrate();
-        let binding = unrouted_binding(&mailer);
-        let wake = manual_dispatch_ctx::<FleetProxy>(&binding, Source::NONE).self_wake();
-        (binding, wake)
+    /// An actor booted pumped, so a host turn on it mints the wake a
+    /// proxy connection holds. The actor macro wants a handler, so it counts
+    /// the wakes of that kind it takes.
+    struct WakeMinter {
+        wakes: u64,
+    }
+
+    #[actor(root)]
+    impl NativeActor for WakeMinter {
+        type Config = ();
+        type Params = ();
+        const NAMESPACE: &'static str = "test.fleet.wake_minter";
+
+        fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { wakes: 0 })
+        }
+
+        #[handler::single]
+        fn on_inbound_ready(&mut self, _ctx: &mut NativeCtx<'_>, _ready: RpcInboundReady) {
+            self.wakes += 1;
+        }
+    }
+
+    /// A proxy wake minted by a booted actor, returned beside its chassis and
+    /// slot: the wake holds the actor weakly, and a sidecar spawn refuses once
+    /// it is gone.
+    fn test_wake() -> (PassiveChassis<TestChassis>, PumpedSlot<WakeMinter>, SelfWake<RpcInboundReady>) {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = boot_bare_test_chassis(&registry, &mailer);
+        let (mut minter, _pump_wake) = chassis.boot_pumped_actor::<WakeMinter>((), ()).expect("the minter boots");
+        let wake = minter.host_turn(|_, ctx| ctx.self_wake()).expect("the minter is live");
+        (chassis, minter, wake)
     }
 
     /// A forked target over `child`, reporting through `rpc.port` in `dir`.

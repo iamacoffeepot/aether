@@ -525,16 +525,42 @@ mod client {
     #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
     mod tests {
         use super::{RpcClient, RpcClientError, raw_reader_spawn};
-        use crate::{HelloAck, PeerKind, RpcInboundReady, RpcServerCapability, WIRE_VERSION, WireFrame};
+        use crate::{HelloAck, PeerKind, RpcInboundReady, WIRE_VERSION, WireFrame};
+        use aether_actor::actor;
         use aether_codec::frame::{read_frame, write_frame};
-        use aether_data::Source;
-        use aether_substrate::testing::{fresh_substrate, manual_dispatch_ctx, unrouted_binding};
+        use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+        use aether_substrate::chassis::error::BootError;
+        use aether_substrate::runtime::lifecycle::{FatalAbortRecord, PanicAborter, RecordingAborter};
+        use aether_substrate::testing::{boot_bare_test_chassis_aborting_into, fresh_substrate};
         use std::io::BufReader;
         use std::net::{TcpListener, TcpStream};
-        use std::sync::mpsc;
+        use std::sync::{Arc, mpsc};
         use std::thread;
         use std::thread::JoinHandle;
         use std::time::Duration;
+
+        /// An actor booted pumped, so a host turn on it mints the wake a
+        /// reader connection holds. The actor macro wants a handler, so it
+        /// counts the wakes of that kind it takes.
+        struct WakeMinter {
+            wakes: u64,
+        }
+
+        #[actor(root)]
+        impl NativeActor for WakeMinter {
+            type Config = ();
+            type Params = ();
+            const NAMESPACE: &'static str = "test.rpc.wake_minter";
+
+            fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { wakes: 0 })
+            }
+
+            #[handler::single]
+            fn on_inbound_ready(&mut self, _ctx: &mut NativeCtx<'_>, _ready: RpcInboundReady) {
+                self.wakes += 1;
+            }
+        }
 
         fn substrate_peer_kind() -> PeerKind {
             PeerKind::Substrate { engine_name: "test".into(), engine_version: "0.1.0".into(), kinds: vec![] }
@@ -589,19 +615,21 @@ mod client {
 
         /// A panic on the reader thread of a [`RpcClient::connect_fail_fast`]
         /// connection, here raised by `on_frame` on the EOF path, escalates
-        /// through the aborter of the actor that minted the wake. The test
-        /// binding's aborter is `PanicAborter`, so the joined payload is the
-        /// aborter's own message naming the sidecar site and the panic.
+        /// through the aborter of the chassis whose actor minted the wake: the
+        /// test's recording aborter holds the reason naming the sidecar site and
+        /// the panic, and its `PanicAborter` unwinds the reader.
         ///
         /// Before issue 6558 the reader ran on a raw spawn, so a reader panic
         /// reached no aborter: the fleet proxy learned of it only by heartbeat
         /// eviction, and never with the heartbeat disabled.
         #[test]
         fn a_reader_panic_under_connect_fail_fast_reaches_the_actors_aborter() {
-            let (_registry, mailer) = fresh_substrate();
-            let binding = unrouted_binding(&mailer);
-            let wake =
-                manual_dispatch_ctx::<RpcServerCapability>(&binding, Source::NONE).self_wake::<RpcInboundReady>();
+            let (registry, mailer) = fresh_substrate();
+            let record = Arc::new(FatalAbortRecord::new());
+            let aborter = Arc::new(RecordingAborter::new(Arc::new(PanicAborter), Arc::clone(&record)));
+            let chassis = boot_bare_test_chassis_aborting_into(&registry, &mailer, aborter);
+            let (mut minter, _pump_wake) = chassis.boot_pumped_actor::<WakeMinter>((), ()).expect("the minter boots");
+            let wake = minter.host_turn(|_, ctx| ctx.self_wake::<RpcInboundReady>()).expect("the minter is live");
             let (port, server) = fake_server(|mut stream| {
                 let mut reader = BufReader::new(stream.try_clone().expect("clone"));
                 let _hello: WireFrame = read_frame(&mut reader).expect("read Hello");
@@ -618,15 +646,9 @@ mod client {
                 })
                 .expect("client connects");
             server.join().expect("fake server thread");
-            let payload =
-                conn.reader.thread.take().expect("reader thread handle").join().expect_err("the reader panics");
-            let reason = payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-                .unwrap_or_default();
+            conn.reader.thread.take().expect("reader thread handle").join().expect_err("the reader panics");
+            let reason = record.reason().expect("the chassis aborter ran");
 
-            assert!(reason.contains("fatal abort"), "the aborter ran: {reason}");
             assert!(reason.contains("sidecar thread aether-rpc-client-reader"), "reason names the site: {reason}");
             assert!(reason.contains("reader probe 6558"), "reason carries the payload: {reason}");
         }
