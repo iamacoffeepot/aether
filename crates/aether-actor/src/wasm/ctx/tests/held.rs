@@ -18,10 +18,11 @@ use core::panic::AssertUnwindSafe;
 use aether_data::{Kind, RequestId, wire};
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx};
-use crate::mail::{PriorState, ReplyHandle};
+use crate::mail::{Mail, PriorState, ReplyHandle};
 use crate::model::ctx::{Erased, Manual};
 use crate::request_context::split_state_envelope;
 use crate::wasm::ctx::{CapturedState, Held, WasmDropCtx};
+use crate::wasm::{ActorInitError, WasmInitCtx};
 
 #[aether_data::kind(name = "test.held.answer")]
 struct Answer {
@@ -45,6 +46,11 @@ struct PlainState {
     label: String,
 }
 
+#[aether_data::kind(name = "test.held.ask")]
+struct Ask {
+    value: u32,
+}
+
 const ACTOR: u64 = 0x10;
 
 /// A ctx dispatching mail whose reply handle is `handle`.
@@ -54,12 +60,42 @@ fn ctx_for(registry: &Registry, handle: u32) -> WasmCtx<'_, Erased, Manual> {
     ctx
 }
 
-/// Hold a reply on `handle` and return its ticket, the receipt defused as the
-/// `#[actor]` macro defuses it.
+/// Holds `Answer` on the mail it is asked and parks the ticket in its state
+/// (the `Deferrer` pattern in `tests/dispatch.rs`), so [`hold_on`] reaches a
+/// hold through a real generated arm rather than a hand-built ctx and a
+/// direct `hold` call.
+struct Holder {
+    parked: Option<Held<Answer>>,
+}
+
+#[crate::actor]
+impl crate::WasmActor for Holder {
+    const NAMESPACE: &'static str = "test.held.holder";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self { parked: None })
+    }
+
+    #[handler::single]
+    fn on_ask(&mut self, ctx: &mut WasmCtx<'_>, _ask: Ask) -> crate::Pending<Answer> {
+        let (pending, held) = ctx.hold::<Answer>();
+        self.parked = Some(held);
+        pending
+    }
+}
+
+/// Hold a reply on `handle` and return its ticket, dispatching a real
+/// [`Holder`] mail so the `#[actor]`-generated `Manual` arm accepts the
+/// returned receipt.
 fn hold_on(registry: &Registry, handle: u32) -> Held<Answer> {
-    let (pending, held) = ctx_for(registry, handle).as_single().hold::<Answer>();
-    pending.__defuse();
-    held
+    let mut holder = Holder { parked: None };
+    let payload = Ask { value: 0 }.encode_into_bytes();
+    // SAFETY: `payload` outlives the `Mail` built over it.
+    let mail = unsafe { Mail::__from_ptr(Ask::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, handle, ACTOR) };
+    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(ACTOR, registry, NO_INBOUND_SOURCE);
+    let rc = <Holder as crate::WasmDispatch<Holder>>::dispatch(&mut holder, &mut ctx, mail);
+    assert_eq!(rc, crate::DISPATCH_HANDLED_HOLD, "a single `-> Pending<R>` arm reports the hold");
+    holder.parked.take().expect("the handler parked its ticket")
 }
 
 /// Stand in for `Held::answer` on the host: release the ticket and forget the
@@ -69,18 +105,39 @@ fn discharge(registry: &Registry, held: Held<Answer>) {
     mem::forget(held);
 }
 
-/// Two holds in one dispatch would owe two replies to one request.
+/// A handler whose own dispatch calls `hold` twice, the misuse `hold`'s
+/// own guard catches: two holds in one dispatch would owe two replies to
+/// one request.
+struct DoubleHolder;
+
+#[crate::actor]
+impl crate::WasmActor for DoubleHolder {
+    const NAMESPACE: &'static str = "test.held.double_holder";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self)
+    }
+
+    #[handler::single]
+    fn on_ask(&mut self, ctx: &mut WasmCtx<'_>, _ask: Ask) -> crate::Pending<Answer> {
+        let _ = self;
+        let (pending, held) = ctx.hold::<Answer>();
+        mem::forget(pending);
+        mem::forget(held);
+        ctx.hold::<Answer>().0
+    }
+}
+
 #[test]
 #[should_panic(expected = "`hold` called twice in one dispatch")]
 fn second_hold_panics() {
     let registry = Registry::new();
-    let mut ctx = ctx_for(&registry, 5);
-    let single = ctx.as_single();
-
-    let (pending, held) = single.hold::<Answer>();
-    pending.__defuse();
-    mem::forget(held);
-    let _ = single.hold::<Answer>();
+    let mut holder = DoubleHolder;
+    let payload = Ask { value: 0 }.encode_into_bytes();
+    // SAFETY: `payload` outlives the `Mail` built over it.
+    let mail = unsafe { Mail::__from_ptr(Ask::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, 5, ACTOR) };
+    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(ACTOR, &registry, NO_INBOUND_SOURCE);
+    let _ = <DoubleHolder as crate::WasmDispatch<DoubleHolder>>::dispatch(&mut holder, &mut ctx, mail);
 }
 
 /// A handler that holds and discards its receipt would report a reply it
@@ -94,10 +151,10 @@ fn unreturned_pending_panics() {
     drop(pending);
 }
 
-/// The receipt the macro defuses must not trap, or every deferred handler
-/// would.
+/// The receipt the dispatch view accepts must not trap, or every deferred
+/// handler would.
 #[test]
-fn defused_pending_is_silent() {
+fn accepted_pending_is_silent() {
     let registry = Registry::new();
     let held = hold_on(&registry, 5);
     discharge(&registry, held);

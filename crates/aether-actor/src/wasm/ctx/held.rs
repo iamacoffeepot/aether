@@ -3,18 +3,19 @@
 //! that answers it later.
 //!
 //! [`WasmCtx::hold`] mints the pair. The receipt goes back to the `#[actor]`
-//! macro, which defuses it and reports `DISPATCH_HANDLED_HOLD`, so the host
-//! keeps the dispatch's reply handle and holds the requester's settlement.
-//! The ticket is that reply handle. It lives in the actor's state, or travels
-//! by value in a request context or in saved state, and [`Held::answer`]
-//! sends the one reply it owes.
+//! macro, which accepts it through `WasmCtx::<A, Manual>::__accept_pending`
+//! and reports `DISPATCH_HANDLED_HOLD`, so the host keeps the dispatch's
+//! reply handle and holds the requester's settlement. The ticket is that
+//! reply handle. It lives in the actor's state, or travels by value in a
+//! request context or in saved state, and [`Held::answer`] sends the one
+//! reply it owes.
 //!
 //! A ticket encodes only through the codec hooks the runtime grants
 //! (`Encoder::held` / `DecodeCtx::claim_held`): the request-context table and
 //! the dehydrate encoder park it, and a context take or a rehydrate decode
 //! claims it back. Any other encode refuses and leaves the ticket armed.
-//! Dropping a ticket that is still armed, or a receipt the macro did not
-//! defuse, panics (ADR-0063).
+//! Dropping a ticket that is still armed, or a receipt the dispatch view did
+//! not accept, panics (ADR-0063).
 
 use core::cell::Cell;
 use core::fmt;
@@ -35,11 +36,11 @@ use crate::wasm::bridge::mail;
 /// (ADR-0243 §2): `-> Pending<R>` declares that the handler's row replies
 /// `R`, through the [`Held<R>`] minted beside it.
 ///
-/// It is phantom and holds nothing. The `#[actor]` macro defuses the one its
+/// It is phantom and holds nothing. The dispatch view accepts the one its
 /// handler returns. A receipt dropped anywhere else panics, because a handler
 /// that armed a hold and discarded the receipt would declare a reply it
 /// never reports.
-#[must_use = "return the receipt from the handler: the `#[actor]` macro defuses it"]
+#[must_use = "return the receipt from the handler: the dispatch view accepts it"]
 pub struct Pending<R> {
     _reply: PhantomData<fn() -> R>,
 }
@@ -49,10 +50,12 @@ impl<R> Pending<R> {
         Self { _reply: PhantomData }
     }
 
-    /// Not part of the public API; the `#[actor]` macro calls it on the
-    /// receipt a `-> Pending<R>` handler returned.
-    #[doc(hidden)]
-    pub fn __defuse(self) {
+    /// Accept the receipt as returned from its handler. Reachable only from
+    /// `WasmCtx::<A, Manual>::__accept_pending`, which the `#[actor]` macro
+    /// calls on the value a `-> Pending<R>` handler returns; a single handler
+    /// never holds that view, so it cannot disarm its own receipt and
+    /// declare a false row.
+    pub(crate) fn disarm(self) {
         mem::forget(self);
     }
 }

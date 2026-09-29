@@ -442,7 +442,8 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         // handler is called with the downgraded `as_single()` view and the
         // macro auto-replies a `-> R` return through `OutboundReply::reply`
         // on the `Manual` ctx (`-> ()` returns nothing; for `-> Pending<R>` the
-        // macro defuses the returned receipt, ADR-0243 §7). A manual handler is called with
+        // macro accepts the returned receipt through the `Manual` view's
+        // `__accept_pending`, ADR-0243 §7). A manual handler is called with
         // the `Manual` ctx directly and issues its own replies — no
         // auto-reply, regardless of return type.
         // Folded shape: dispatch is a `NativeActor` associated fn over
@@ -470,7 +471,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             (HandlerClass::Single, HandlerReply::Deferred(_)) => quote! {
                 let __aether_pending = #self_ty::#method_ident(
                     __aether_state, __aether_ctx.as_single() #erase, __aether_decoded);
-                ::aether_substrate::actor::native::Pending::__defuse(__aether_pending);
+                __aether_ctx.__accept_pending(__aether_pending);
             },
             (HandlerClass::Manual, _) => quote! {
                 #self_ty::#method_ident(__aether_state, __aether_ctx #erase, __aether_decoded);

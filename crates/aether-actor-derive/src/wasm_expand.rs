@@ -898,9 +898,10 @@ fn build_dispatch_body(
         // `DISPATCH_HANDLED_RELEASE`, so the substrate frees the dispatch's
         // reply handle, and a manual arm returns `DISPATCH_HANDLED`, so the
         // handle it may have kept stays live. ADR-0243 §6: a single
-        // `-> Pending<R>` arm defuses the receipt its handler returned and
-        // returns `DISPATCH_HANDLED_HOLD`, so the substrate keeps the handle
-        // and holds the requester's settlement for the `Held<R>` minted beside
+        // `-> Pending<R>` arm accepts the receipt its handler returned,
+        // through the `Manual` view's `__accept_pending`, and returns
+        // `DISPATCH_HANDLED_HOLD`, so the substrate keeps the handle and
+        // holds the requester's settlement for the `Held<R>` minted beside
         // the receipt.
         let (call, rc) = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => (
@@ -919,7 +920,7 @@ fn build_dispatch_body(
             (HandlerClass::Single, HandlerReply::Deferred(_)) => (
                 quote! {
                     let __aether_pending = self.#method(#ctx.as_single(), __aether_decoded);
-                    ::aether_actor::Pending::__defuse(__aether_pending);
+                    __aether_ctx.__accept_pending(__aether_pending);
                 },
                 quote! { ::aether_actor::DISPATCH_HANDLED_HOLD },
             ),

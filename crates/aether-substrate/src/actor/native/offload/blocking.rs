@@ -102,7 +102,7 @@ pub struct DispatchId(pub u64);
 /// [`Held<R>`]: crate::actor::native::offload::held::Held
 pub struct Pending<R: ActorMail> {
     dispatch_id: DispatchId,
-    /// Set at mint; cleared only by [`Pending::__defuse`], the framework's
+    /// Set at mint; cleared only by [`Pending::disarm`], the dispatch view's
     /// acknowledgement that the handler returned the receipt.
     armed: bool,
     /// `fn() -> R` so `Pending<R>` is covariant in `R` and stays
@@ -128,14 +128,12 @@ impl<R: ActorMail> Pending<R> {
         self.dispatch_id
     }
 
-    /// Accept the receipt as returned from its handler. The `#[actor]` and
-    /// `#[handler_set]` native dispatch arms call this on the value a
-    /// `-> Pending<R>` handler returns; a test that calls a handler directly
-    /// stands in for that dispatch and calls it too. Not an escape for handler
-    /// code: a handler that discards its receipt would declare a row that
-    /// hides the reply it owes.
-    #[doc(hidden)]
-    pub fn __defuse(mut self) {
+    /// Accept the receipt as returned from its handler. Reachable only from
+    /// `NativeCtx::<A, Manual>::__accept_pending`, which the `#[actor]` and
+    /// `#[handler_set]` native dispatch arms call on the value a
+    /// `-> Pending<R>` handler returns; a single handler never holds that
+    /// view, so it cannot disarm its own receipt and declare a false row.
+    pub(crate) fn disarm(mut self) {
         self.armed = false;
     }
 }
@@ -1945,11 +1943,11 @@ mod tests {
         owed.abandon_for_actor_close();
     }
 
-    /// Catches a `Pending` whose `Drop` never fires, or a `__defuse` that
-    /// leaves the receipt armed: a discarded receipt is a handler hiding the
-    /// reply it owes behind a false row (ADR-0243 §7).
+    /// A discarded receipt is a handler hiding the reply it owes behind a
+    /// false row (ADR-0243 §7), so `Pending`'s `Drop` fails fast when it is
+    /// still armed.
     #[test]
-    fn dropping_an_armed_pending_panics_and_a_defused_one_does_not() {
+    fn dropping_an_armed_pending_panics() {
         let payload = catch_unwind(|| drop(Pending::<Answer>::new(DispatchId(1))))
             .expect_err("an armed receipt dropped outside an unwind fails fast");
         let message =
@@ -1958,7 +1956,5 @@ mod tests {
             message.is_some_and(|message| message.starts_with("Pending<test.dispatch_blocking.answer> dropped")),
             "the panic names the receipt's reply kind"
         );
-
-        Pending::<Answer>::new(DispatchId(2)).__defuse();
     }
 }

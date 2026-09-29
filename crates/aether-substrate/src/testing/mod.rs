@@ -41,9 +41,9 @@ use aether_actor::{ErasedActorRef, Manual, Root};
 use aether_data::{Kind, KindId, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
 use aether_kinds::descriptors;
 
+use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
-use crate::actor::native::{NativeActor, TaskCompletionWake};
 use crate::chassis::Chassis;
 use crate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use crate::chassis::error::BootError;
@@ -133,9 +133,9 @@ pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
 ///
 /// The binding's own id is the one the registry refuses to register, so
 /// mail addressed to it — an ADR-0093 completion wake, a self-send — never
-/// lands in an inbox: it bubbles to the mailer's outbound, where
-/// [`drive_task_completion`] and the egress drains read it. Reach for
-/// [`registered_binding`] when that mail must reach a handler instead.
+/// lands in an inbox: it bubbles to the mailer's outbound, where the egress
+/// drains read it. Reach for [`registered_binding`] when that mail must
+/// reach a handler instead.
 pub fn unrouted_binding(mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
     Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), MailboxId(0)))
 }
@@ -301,49 +301,6 @@ pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(registry).with_outbound(outbound));
     (mailer, rx)
-}
-
-/// Drive an ADR-0093 dispatch completion through `cap`'s `#[handler(task)]`
-/// arm the way the chassis trampoline would.
-///
-/// A cap's request handler calls `TaskQueue::submit` (or a `dispatch_blocking`
-/// verb), which spawns a real worker thread that runs the closure (the stub
-/// adapter + staging) and pushes a [`TaskCompletionWake`] at the cap's own
-/// mailbox. Under [`unrouted_binding`] that mailbox is unregistered, so the
-/// wake bubbles to the loopback outbound as an
-/// [`EgressEvent::UnresolvedMail`]. This helper drains egress until that wake
-/// lands, then routes it through `A::dispatch(TaskCompletionWake::ID,
-/// payload)` — the same entry the chassis dispatcher uses — so the cap's task
-/// handler runs (a queue's `complete`, answering the request's held reply
-/// from the queue, or a worker's `done.resolve(ctx)`).
-///
-/// The driving `NativeCtx` carries the wake's correlation as its reply
-/// source, as the dispatcher's ctx for the wake would: a staged task's wake
-/// is correlated to the task's request (ADR-0243 §9), which its completion
-/// reads from `in_reply_to`, and a worker's wake carries none.
-pub fn drive_task_completion<A>(state: &mut A::State, binding: &Arc<NativeBinding>, rx: &Receiver<EgressEvent>)
-where
-    // Dispatch is a `NativeActor` assoc fn over `&mut Self::State` (ADR-0122
-    // identity/runtime split). The param is the associated projection, so `A`
-    // is not inferable from it — every call site names it via turbofish.
-    A: NativeActor,
-{
-    let (payload, correlation) = loop {
-        let event =
-            rx.recv_timeout(Duration::from_secs(2)).expect("test: dispatch completion wake arrives within deadline");
-        if let EgressEvent::UnresolvedMail { kind_id, payload, correlation_id, .. } = event
-            && kind_id == TaskCompletionWake::ID
-        {
-            break (payload, correlation_id);
-        }
-    };
-    // ADR-0112: route through the macro dispatch seam, which carries the
-    // `Manual` ctx. Issue 4158: that seam is also typed by the actor, so build
-    // it via `new_for_actor` — `new_dispatching` names none.
-    let wake_source = Source::with_correlation(SourceAddr::None, correlation);
-    let mut ctx = NativeCtx::new_for_actor(binding, wake_source, None, None);
-    A::dispatch(state, &mut ctx, TaskCompletionWake::ID, &payload)
-        .expect("test: task completion routes to a #[handler(task)] arm");
 }
 
 /// Drain egress until a `ToSession` reply of kind `K` arrives, decoding

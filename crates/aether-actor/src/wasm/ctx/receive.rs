@@ -157,6 +157,16 @@ impl<'a, A> WasmCtx<'a, A, Manual> {
         unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, Single>>() }
     }
 
+    /// Accept a returned [`Pending<R>`](super::Pending) receipt. The
+    /// `#[actor]` macro calls this on the value a `-> Pending<R>` handler
+    /// returns, once its `as_single` reborrow has ended; a single handler
+    /// never holds this `<Manual>` view, so it cannot disarm its own receipt
+    /// and declare a false `Silent` row.
+    #[doc(hidden)]
+    pub fn __accept_pending<R>(&mut self, pending: super::Pending<R>) {
+        pending.disarm();
+    }
+
     /// Reply target for the mail currently being dispatched. Mirrors
     /// [`OutboundReply::reply_target`](crate::OutboundReply::reply_target).
     ///

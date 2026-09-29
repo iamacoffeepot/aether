@@ -75,7 +75,7 @@ impl crate::WasmActor for Deferrer {
 /// ADR-0243 §6: a single `-> Pending<R>` arm reports `DISPATCH_HANDLED_HOLD`,
 /// so the host keeps the reply handle its `Held` answers through. An arm
 /// that reported `DISPATCH_HANDLED_RELEASE` would free the handle under the
-/// debt, and one that failed to defuse the receipt would trap.
+/// debt, and one that failed to accept the receipt would trap.
 #[test]
 fn deferred_arm_returns_hold() {
     let registry = Registry::new();

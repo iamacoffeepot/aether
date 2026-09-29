@@ -370,23 +370,30 @@ shims are wasm32-only and belong to *components*, not capabilities; a
 native cap has nothing to cross-compile.) Text's in-crate pattern, in its
 `#[cfg(all(test, feature = "runtime"))] mod tests`:
 
-1. Build a `NativeBinding` over a loopback mailer with `ctx_binding()`,
-   which wraps `aether_substrate::testing::unrouted_binding` over
-   `test_mailer_and_rx()`'s mailer — `test_mailer_and_rx()` gives a `Mailer`
-   plus the `Receiver<EgressEvent>` its outbound bubbles to. The test names
-   no mailbox id: the binding's own mailbox is never registered, so its
-   self-addressed mail bubbles to that receiver too.
-2. Construct fresh state (`TextCapabilityState::new()`) and a `NativeCtx`
-   over the binding, then call the handler directly:
-   `TextCapability::on_load_font(&mut state, &mut ctx, LoadFont { … })`.
-   A direct call to a `-> Pending<R>` handler stands in for the dispatch,
-   so it must `.__defuse()` the returned receipt; an armed receipt dropped
-   anywhere else panics.
-3. Assert what the handler *sent* by draining egress with
-   `assert_next_send_kind::<K>(&binding, &rx)` (which flushes the buffered
-   outbound first, the way `NativeCtx`'s drop would at the end of a real
-   turn), and assert what it *replied* with
-   `decode_session_reply::<R>(&rx)`.
+1. Boot the cap pumped on a real chassis, driven the way a pumped chassis
+   driver drives its slot (ADR-0161 §Decision 2): `fresh_substrate()` gives
+   the `(Arc<Registry>, Arc<Mailer>)` seed, `boot_bare_test_chassis(&registry,
+   &mailer)` builds the passive chassis over it, and
+   `PumpedDriver::boot(chassis, config, params)` boots the cap on that
+   chassis and drains once. Register a stand-in for each cap it depends on
+   first, with `testing::registered_ref` — text's fixture stands in at
+   `aether.render` and `aether.fs`, each forwarding the dispatch it receives
+   onto a channel the test reads.
+2. Send mail through the pumped slot, never call a handler directly:
+   `cap.send_and_settle(cap.chassis().actor_ref::<TextCapability>(), &LoadFont { … }, None)`
+   tracks the send as a chassis root and pumps the slot until that root
+   settles, so the mail runs through the cap's `#[actor]`-generated dispatch
+   exactly as production would — including a `-> Pending<R>` handler's
+   `Manual` arm, which accepts the returned receipt itself. The test never
+   hand-disarms a `Pending`.
+3. Assert what the handler *sent* by reading the stand-in's channel (the
+   `registered_ref` closure forwards each dispatch it receives), and assert
+   what it *replied* with by sending as a session-origin mail
+   (`Some(ReplyTarget::Session { session, correlation })`) and decoding the
+   settled root's `EgressEvent::ToSession` off the egress receiver
+   `fresh_substrate_and_rx` returns beside the seed. For a look at state no
+   sent or replied mail exposes, `cap.host_turn(|state, ctx| { … })` runs a
+   closure directly against `State` between sends.
 
 A test that needs a proven peer (a subscriber, a sender, a shard) registers
 it with `testing::registered_ref`, which returns the peer's reference, and

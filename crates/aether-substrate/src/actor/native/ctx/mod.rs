@@ -35,10 +35,11 @@
 use std::sync::Arc;
 
 use aether_actor::{Manual, ReplyMode, Single};
-use aether_data::MailId;
+use aether_data::{ActorMail, MailId};
 use core::marker::PhantomData;
 use core::ptr;
 
+use crate::actor::native::Pending;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
 #[cfg(feature = "wasm")]
@@ -329,6 +330,16 @@ impl<'a, A> NativeCtx<'a, A, Manual> {
         // The reborrow swaps the marker without touching any real field and
         // only removes capability, never adds it.
         unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, A, Single>>() }
+    }
+
+    /// Accept a returned [`Pending<R>`] receipt. The `#[actor]` and
+    /// `#[handler_set]` native dispatch arms call this on the value a
+    /// `-> Pending<R>` handler returns, once its `as_single` reborrow has
+    /// ended; a single handler never holds this `<Manual>` view, so it
+    /// cannot disarm its own receipt and declare a false `Silent` row.
+    #[doc(hidden)]
+    pub fn __accept_pending<R: ActorMail>(&mut self, pending: Pending<R>) {
+        pending.disarm();
     }
 
     /// #1757: the per-dispatch constructor — moves the single dispatched
