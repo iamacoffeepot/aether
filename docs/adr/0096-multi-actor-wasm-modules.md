@@ -3,6 +3,7 @@
 - **Status:** Accepted (hosted-actor addressing later revised by [ADR-0099](0099-actor-identity-and-addressing.md); the actor-type tag here is reused as the ActorId; the default-entry clause of §3 later superseded by [ADR-0138](0138-opt-in-default-entry-for-multi-actor-modules.md))
 - **Date:** 2026-06-06
 - **Amended:** 2026-09-24 — `export!` takes keyed entries only; the multi-actor form is spelled `export!(public = [A, B, …])` (issue 6584).
+- **Amended:** 2026-09-29 — Section 3: a replace takes no export selector; `ReplaceComponent` republishes a module's whole export set (issue 7067).
 
 ## Context
 
@@ -40,6 +41,8 @@ A loaded instance learns which exported type it is at `init`, from a tag threade
 ### 3. The load path selects the type
 
 Loading a multi-actor module names which exported type the instance becomes. `LoadComponent` and the MCP `load_component` tool gain an optional **export selector** — the target type's `NAMESPACE` — defaulting to a designated entry type when omitted, so single-actor modules and "load the main one" both work unspecified. Each loaded instance is one actor of one type, addressed as today at `aether.component.trampoline:<name>`. The `aether.kinds.inputs` manifest (ADR-0033) grows from one handler set to one per exported type, which makes a module's exported actors introspectable — an agent reads the available exports and picks which to load, and `describe_component` reports the loaded instance's type.
+
+A replace takes no export selector (amended 2026-09-29, issue 7067): `ReplaceComponent` names no type, because it republishes a module's whole export set as one group ([ADR-0241](0241-code-is-published-not-loaded.md) §7), not one instance's type.
 
 ## Consequences
 

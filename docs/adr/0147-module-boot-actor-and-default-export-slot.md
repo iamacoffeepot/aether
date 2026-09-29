@@ -3,6 +3,7 @@
 - **Status:** Accepted (shipped — module boot and default-export loading in `crates/aether-component/src/component/runtime/load.rs`, covered by `crates/aether-component/tests/boot.rs`)
 - **Date:** 2026-07-11
 - **Amended:** 2026-09-24 — `export!` takes keyed entries only, in any order; the boot slot is spelled `export!(boot = B, public = [A, …])`, optionally with `default = D` (issue 6584).
+- **Amended:** 2026-09-29 — Section 1: the boot instance is no longer refcounted against the module's other actors or torn down with them; a module that declares a boot, or whose new version adds or removes one, is not replaceable (issue 7067).
 
 ## Context
 
@@ -38,7 +39,9 @@ aether_actor::export!(
 
 The `boot` type instantiates on **every** load of the module, whatever export selector the caller named. It is not a default and cannot be selected; it is unconditional.
 
-Its cardinality is **one instance per `(engine, module content hash)`**, not one per load. The content-addressed component store (ADR-0116) already supplies the key. The instance is refcounted against the actors loaded from that module and torn down with the last of them. Five selector loads of the kit produce five actors and one `Boot`.
+Its cardinality is **one instance per `(engine, module content hash)`**, not one per load. The content-addressed component store (ADR-0116) already supplies the key. Five selector loads of the kit produce five actors and one `Boot`.
+
+**Amended 2026-09-29 (issue 7067):** the boot instance is spawned once, at the module's first publish, and is neither refcounted against the actors loaded from that module nor torn down when they close — the earlier refcount-and-teardown sentence above is superseded. A module that declares a boot, or whose new version would add or remove one, is not replaceable ([ADR-0241](0241-code-is-published-not-loaded.md) §4, §8): the boot is spawned once and never republished, so allowing the rest of the module to swap under it would leave it running stale code.
 
 ### 2. `entry` is renamed `default`
 

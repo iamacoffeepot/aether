@@ -7,6 +7,7 @@
 - **Amended:** 2026-09-22 — Section 8's `MonitorNotice` became fieldless: the host stamps the departed actor as the notice's envelope sender, so a watcher reads it from `ctx.sender()` as the proven reference it monitored (ADR-0230) and no position is handed out. An inline-child alias departs under its own notice, sent from the alias. `MonitorHandle` no longer exposes its target.
 - **Amended:** 2026-09-24 — Section 8's `MonitorNotice` is engine-only mail ([ADR-0233](0233-engine-only-mail.md)): only the host's `notify_departure` sends it, a typed actor send of it does not compile, and every raw-`KindId` door refuses it.
 - **Amended:** 2026-09-24 — Section 5's `NativeInitCtx::self_id()` is removed (issue 6350): `init` sends nothing (issue 703), and no actor reads its own position ([ADR-0230](0230-proven-actor-references.md)).
+- **Amended:** 2026-09-29 — Section 8's vacate amendment retires: `DropComponent`, its one production caller, becomes a close request under [ADR-0241](0241-code-is-published-not-loaded.md) §8, and a wasm component drop now closes and tombstones like any other actor (issue 7067).
 
 ## Context
 
@@ -237,6 +238,8 @@ fn vacate(&self);                                    // on NativeCtx — self-se
 `vacate` drains `monitors_of[self]` and fires one `MonitorNotice` per watcher, exactly as close does, but without tombstoning and without walking the reverse index — the forward-drain third of the close transaction. The slot stays Live: `monitor()` keeps working against it, and registrations made after the vacate watch the next occupant (or the eventual close). `MonitorNotice` therefore means "the actor occupying `target` is gone; state keyed by `target` is stale" — fired at most once per registration, on vacate or close, whichever comes first. A watcher that re-registers after a notice is watching a fresh occupancy. Self-service only: an actor declares its *own* mailbox vacated (the trampoline's `DropComponent` handler is the production caller); there is no vacate-a-peer API, for the same reason there is no force-kill primitive.
 
 Replace still does not fire either event — the occupant continues (ADR-0022). Drop fires vacate; close fires the full transaction.
+
+**Retired (amended 2026-09-29, issue 7067).** Vacate's one production caller, the trampoline's `DropComponent` handler, is gone: under [ADR-0241](0241-code-is-published-not-loaded.md) §8, a component drop is a close request like any other, so it fires the full close transaction — tombstone included — not vacate. `vacate` itself is unused and retires with it; a watched mailbox's occupant now departs only by closing.
 
 ## Consequences
 

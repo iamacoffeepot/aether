@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-08
 - **Accepted:** 2026-06-09 (implemented by iamacoffeepot/aether#1480)
+- **Amended:** 2026-09-29 — `replace_component` is now an atomic group republish; a dehydrate refusal or an `on_rehydrate` failure in any live instance aborts every member of the group, not just the one that failed (issue 7067).
 
 ## Context
 
@@ -33,6 +34,8 @@ Make `on_dehydrate` / `on_rehydrate` default-no-op methods on `WasmActor`, besid
 5. **The host changes by one name only.** `handle_replace`'s logic is unchanged — it reconstructs the same exported type via `init_typed_p32(self.type_tag)` before calling `on_rehydrate_p32`, so the box is already the correct type and there is no re-tagging at rehydrate. The single edit is the save-hook lookup string: `get_typed_func(…, "on_replace")` becomes `"on_dehydrate"`. Export signatures are unchanged.
 
 6. **Retire `Replaceable` and the flags.** Remove the `Replaceable` subtrait and the `export!(X, replaceable)` arm; do not introduce a `replaceable` marker on `#[actor]` or `export!`. The state-bundle protocol (ADR-0016 / ADR-0040) — versioned opaque payload, `save_state` / `PriorState` — is unchanged; only the opt-in gating retires. Migration is free: no `export!(X, replaceable)` call site and no `impl Replaceable` exists in the tree.
+
+**Amended 2026-09-29 (issue 7067):** `replace_component` is now an atomic group republish ([ADR-0241](0241-code-is-published-not-loaded.md) §7): every live instance of every republished namespace prepares — old guest kept, candidate dehydrated and rehydrated as above — before any of them commits. A dehydrate refusal or an `on_rehydrate` failure in any one member aborts every member, not just the failing one; each reinstates its old guest and runs `wire` again, so `handle_replace`'s per-instance logic above now runs once per member of a group instead of once per swap.
 
 ### Revises ADR-0016
 
