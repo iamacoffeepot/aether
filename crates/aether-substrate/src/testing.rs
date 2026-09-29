@@ -244,6 +244,20 @@ pub fn boot_bare_test_chassis(registry: &Arc<Registry>, mailer: &Arc<Mailer>) ->
     Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer)).build_passive().expect("test chassis boots")
 }
 
+/// [`boot_bare_test_chassis`] whose chassis escalates a fatal abort into
+/// `aborter`, for a test that boots its own pumped actor and reads the reason
+/// a fail-fast path on that actor gave.
+pub fn boot_bare_test_chassis_aborting_into(
+    registry: &Arc<Registry>,
+    mailer: &Arc<Mailer>,
+    aborter: Arc<dyn FatalAborter>,
+) -> PassiveChassis<TestChassis> {
+    Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
+        .with_aborter(aborter)
+        .build_passive()
+        .expect("test chassis boots")
+}
+
 /// [`boot_test_chassis_with`] whose chassis escalates a fatal abort into
 /// `aborter` instead of the default [`PanicAborter`](crate::runtime::lifecycle::PanicAborter),
 /// so a test can wrap it in a
