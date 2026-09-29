@@ -17,7 +17,8 @@
 //!
 //! A test that owns a pumped actor drives it through [`PumpedDriver`],
 //! which waits the way a pumped chassis driver does (ADR-0161 §Decision 2);
-//! a test that waits on a pooled actor's chain uses [`await_settled`].
+//! a test that waits on a pooled actor's chain uses [`await_settled`], and
+//! one that waits on a detached effect uses [`await_signal`].
 
 #![allow(
     clippy::must_use_candidate,
@@ -57,7 +58,7 @@ use crate::runtime::lifecycle::FatalAborter;
 
 mod pumped;
 
-pub use pumped::{PumpedDriver, await_settled};
+pub use pumped::{PumpedDriver, await_settled, await_signal};
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
 /// drives the chassis through `Builder::<TestChassis>::new(...)` directly

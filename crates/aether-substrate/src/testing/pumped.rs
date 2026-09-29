@@ -10,7 +10,11 @@
 //!
 //! A test that waits on a pooled actor's chain has no slot to pump, so it
 //! waits on the tracked root's settlement receiver through [`await_settled`],
-//! the gate a chassis waits on for the same signal.
+//! the gate a chassis waits on for the same signal. An effect outside the
+//! chain — a detached send, a close-tail notice — never settles a root the
+//! test holds, so the observing actor signals a test channel and the test
+//! waits on it through [`await_signal`], under the same cap and named as the
+//! signal it is rather than as settlement.
 
 use std::time::Instant;
 
@@ -175,8 +179,17 @@ impl<A: Root + NativeActor> Drop for PumpedDriver<A> {
 /// pump. `gate` names the wait in the slow-log and in the panic at the
 /// settlement cap.
 pub fn await_settled(settled: &Receiver<()>, gate: &str) {
+    await_signal(settled, gate);
+}
+
+/// Wait for one `()` on `signal` — a test channel an observing actor sends
+/// on when an effect outside any tracked chain lands — under the same
+/// escalating patience as [`await_settled`]. `gate` names the wait in the
+/// slow-log and in the panic at the settlement cap; a disconnected channel
+/// panics as a wedge.
+pub fn await_signal(signal: &Receiver<()>, gate: &str) {
     let _ = await_internal_signal(
-        settled,
+        signal,
         gate,
         frame_loop::DRAIN_BUDGET,
         SettlementConfig::from_env().to_cap(),

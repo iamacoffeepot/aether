@@ -7,16 +7,13 @@ use crate::actor::native::ctx::NativeCtx;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
 use crate::mail::MailboxId;
-use crate::mail::registry;
-use crate::testing::{TestChassis, bare_substrate};
+use crate::testing::{TestChassis, await_signal, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{ActorPath, Addressable, ChildOf};
 use aether_data::LoadName;
+use crossbeam_channel::Sender;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::thread;
-use std::time::Duration;
-use std::time::Instant;
 
 /// Issue 607 Phase 5.5 verify: an instanced parent's handler calls
 /// `ctx.spawn_child::<Grandchild>(...)` to launch an instanced
@@ -38,7 +35,6 @@ use std::time::Instant;
 #[test]
 fn instanced_can_spawn_grandchild() {
     use crate::actor::native::spawn::Subname;
-    use crate::mail::registry::MailboxEntry;
     use aether_actor::HandlesKind;
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -52,8 +48,11 @@ fn instanced_can_spawn_grandchild() {
     // Self-shutdown trigger for the parent.
     pod_kind!(Quit { tag: u32 }, "test.recursive.quit", 0xC00C_C00C_C00C_C00C);
 
+    // Counts its Pings and signals the test on each: the test holds no
+    // proof of the grandchild, so its `after_init` Ping is observed here.
     struct Grandchild {
         received: Arc<AtomicU32>,
+        pinged: Sender<()>,
     }
     impl Addressable for Grandchild {
         const NAMESPACE: &'static str = "test.recursive.grandchild";
@@ -62,12 +61,12 @@ fn instanced_can_spawn_grandchild() {
     impl HandlesKind<Ping> for Grandchild {}
     impl aether_actor::Lifecycle<Self> for Grandchild {
         type Config = ();
-        type Params = Arc<AtomicU32>;
+        type Params = (Arc<AtomicU32>, Sender<()>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a, Self>;
-        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { received: params })
+        fn init((): (), (received, pinged): Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { received, pinged })
         }
     }
     impl aether_actor::Declared for Grandchild {
@@ -87,6 +86,7 @@ fn instanced_can_spawn_grandchild() {
             if kind.0 == Ping::ID.0 {
                 let _ = Ping::decode_from_bytes(payload)?;
                 state.received.fetch_add(1, AtomicOrdering::SeqCst);
+                let _ = state.pinged.send(());
                 return Some(());
             }
             None
@@ -95,6 +95,7 @@ fn instanced_can_spawn_grandchild() {
 
     struct Parent {
         grandchild_received: Arc<AtomicU32>,
+        grandchild_pinged: Sender<()>,
         spawned_name: Arc<Mutex<Option<String>>>,
     }
     impl Addressable for Parent {
@@ -106,16 +107,16 @@ fn instanced_can_spawn_grandchild() {
     impl HandlesKind<Quit> for Parent {}
     impl aether_actor::Lifecycle<Self> for Parent {
         type Config = ();
-        type Params = (Arc<AtomicU32>, Arc<Mutex<Option<String>>>);
+        type Params = (Arc<AtomicU32>, Sender<()>, Arc<Mutex<Option<String>>>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a, Self>;
         fn init(
             (): (),
-            (grandchild_received, spawned_name): Self::Params,
+            (grandchild_received, grandchild_pinged, spawned_name): Self::Params,
             _ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
-            Ok(Self { grandchild_received, spawned_name })
+            Ok(Self { grandchild_received, grandchild_pinged, spawned_name })
         }
     }
     impl aether_actor::Declared for Parent {
@@ -139,8 +140,9 @@ fn instanced_can_spawn_grandchild() {
                 // grandchild. Pre-load a Ping so the grandchild's
                 // first envelope dispatches without an external
                 // mail step.
+                let grandchild_params = (Arc::clone(&state.grandchild_received), state.grandchild_pinged.clone());
                 let receipt = ctx
-                    .spawn_child::<Grandchild>(Subname::Named("only"), (), Arc::clone(&state.grandchild_received))
+                    .spawn_child::<Grandchild>(Subname::Named("only"), (), grandchild_params)
                     .after_init(Ping { tag: 0xCAFE })
                     .stage()
                     .expect("recursive spawn must succeed");
@@ -163,34 +165,31 @@ fn instanced_can_spawn_grandchild() {
         .expect("empty chassis boots");
 
     let grandchild_received = Arc::new(AtomicU32::new(0));
+    let (grandchild_pinged, pinged_rx) = crossbeam_channel::unbounded();
     let spawned_name = Arc::new(Mutex::new(None));
-    let parent_id = chassis
-        .spawn_actor::<Parent>(Subname::Named("p1"), (), (Arc::clone(&grandchild_received), Arc::clone(&spawned_name)))
-        .finish_commit()
+    let parent = chassis
+        .spawn_actor_for_test::<Parent>(
+            Subname::Named("p1"),
+            (),
+            (Arc::clone(&grandchild_received), grandchild_pinged, Arc::clone(&spawned_name)),
+        )
+        .finish()
         .expect("spawn parent");
+    let parent_id = parent.id();
 
-    // Trigger parent → grandchild spawn.
-    let MailboxEntry::Inbox { handler: parent_handler, .. } =
-        registry.entry_at(parent_id).expect("parent sink registered")
-    else {
-        panic!("expected mailbox entry for parent");
-    };
-    parent_handler.enqueue(registry::test_owned_dispatch(
-        <Hatch as Kind>::ID,
-        &(Hatch { tag: 1 }).encode_into_bytes(),
-        1,
-    ));
+    // Trigger parent → grandchild spawn. The Hatch root does not settle
+    // here: the staged birth's completion holds it until the parent takes
+    // its `TaskDone`, and this parent has no completion arm, so the hold
+    // stays in its ledger until its close releases it.
+    let _ = chassis.send_tracked(parent, &Hatch { tag: 1 }, None);
 
     // Wait for the grandchild's after_init Ping to dispatch (proves
     // the recursive spawn happened AND the after_init plumbing
-    // works through it).
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while (grandchild_received.load(AtomicOrdering::SeqCst) == 0
-        || spawned_name.lock().expect("spawned-name mutex poisoned").is_none())
-        && Instant::now() < deadline
-    {
-        thread::sleep(Duration::from_millis(5));
-    }
+    // works through it). The birth is buffered on the parent's outbound
+    // work and committed only at the Hatch turn's flush, after the handler
+    // recorded the staged receipt's name, so the Ping also orders that
+    // write.
+    await_signal(&pinged_rx, "test.recursive.grandchild_ping");
     assert_eq!(
         grandchild_received.load(AtomicOrdering::SeqCst),
         1,
@@ -238,17 +237,8 @@ fn instanced_can_spawn_grandchild() {
     // Closing the parent does NOT cascade-close the grandchild.
     // Parent-child shutdown coupling is opt-in via monitor; without
     // it, the grandchild keeps running.
-    parent_handler.enqueue(registry::test_owned_dispatch(
-        <Quit as Kind>::ID,
-        &(Quit { tag: 1 }).encode_into_bytes(),
-        1,
-    ));
-
-    // Wait for parent slot to flip Dead.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().is_live_at(parent_id) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    let _ = chassis.send_tracked(parent, &Quit { tag: 1 }, None);
+    chassis.await_closed(parent.erase());
     assert!(chassis.actor_registry().is_tombstoned(parent_id), "parent should have tombstoned");
     // Grandchild survives — no cascade.
     assert!(
