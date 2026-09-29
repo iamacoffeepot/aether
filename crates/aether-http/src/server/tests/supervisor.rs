@@ -11,14 +11,15 @@ use aether_substrate::testing::{TestChassis, drop_ref, fresh_substrate, register
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use crate::server::shard::HttpDispatchShard;
 use crate::server::{HttpServerCapability, HttpServerConfig, HttpServerHandle};
 
 use super::handlers::EchoHttpHandler;
-use super::support::{boot_chassis, config_for, port_of, read_one_response, round_trip, round_trip_live};
+use super::support::{
+    boot_chassis, config_for, port_of, read_one_response, read_status_line, round_trip, round_trip_live,
+};
 
 fn shard_canonical_name(index: usize) -> String {
     format!(
@@ -71,8 +72,9 @@ fn disabled_http_server_claims_mailbox_and_binds_nothing() {
 /// and closed before a reader thread is spawned; it never reaches the
 /// handler. `dispatch_shards` is pinned above one so the ceiling is
 /// provably global across shards (ADR-0135) — the two held connections
-/// land on different shards round-robin, and the supervisor still
-/// refuses the third against the shared live count.
+/// land on different shards round-robin, each proven live by its
+/// completed keep-alive response, and the supervisor still refuses the
+/// third against the shared live count.
 ///
 /// Tripwire: without the assignment-time capacity guard in
 /// `HttpSupervisorState::assign_peer`, this connection is accepted and
@@ -86,6 +88,9 @@ fn over_capacity_connection_is_503() {
         enabled: true,
         bind_addr: "127.0.0.1:0".to_string(),
         request_timeout_millis: 5_000,
+        // Keeps the idle timeout from freeing a slot before the third
+        // connect races the held two.
+        keep_alive_timeout_millis: 60_000,
         max_connections,
         dispatch_shards: 2,
         ..HttpServerConfig::default()
@@ -93,20 +98,25 @@ fn over_capacity_connection_is_503() {
 
     let port = port_of(&chassis);
 
-    // Fill the connection table: each socket sends a partial request
-    // head (no terminating blank line), so its reader thread blocks
-    // waiting for more bytes and its `ConnState` stays resident.
+    // Poll the async `/` catch-all live first: a held request that beat
+    // the registration would be refused for "no handler" and closed
+    // (releasing its slot) instead of staying resident, which would
+    // race the ceiling this test exercises.
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
+    // Fill the connection table: each socket completes a keep-alive
+    // request and reads its response, proving the connection was
+    // charged to `live_connections` at dispatch, then stays open, since
+    // the charge is released only when the connection closes.
     let mut held = Vec::new();
     for _ in 0..max_connections {
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-        stream.write_all(b"GET / HTTP/1.1\r\n").expect("write partial request head");
-        stream.flush().expect("flush partial request head");
+        stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
+        stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write keep-alive request");
+        stream.flush().expect("flush keep-alive request");
+        read_one_response(&mut stream, &mut Vec::new());
         held.push(stream);
     }
-
-    // Give the dispatcher a moment to drain the `PeerAccepted` events
-    // into `connections` before the next connect.
-    thread::sleep(Duration::from_millis(200));
 
     let response = round_trip(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 503 "), "expected 503, got: {response:?}");
@@ -283,8 +293,14 @@ fn stalled_peer_does_not_block_sibling_connections() {
     stalled.write_all(&request).expect("write stalled request");
     stalled.flush().expect("flush stalled request");
 
-    // Give the echo time to dispatch and its response write to park.
-    thread::sleep(Duration::from_millis(300));
+    // Read only A's status line: enough to prove the reader has begun
+    // writing the 16 MiB response, but not enough to drain it, so the
+    // write parks against A's unread receive window.
+    stalled.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
+    assert!(
+        read_status_line(&mut stalled).starts_with("HTTP/1.1 200"),
+        "stalled peer's response must begin before its write can park",
+    );
 
     // Connection B on the same (sole) shard round-trips promptly.
     let response = round_trip(port, b"GET /probe HTTP/1.1\r\nHost: localhost\r\n\r\n");
