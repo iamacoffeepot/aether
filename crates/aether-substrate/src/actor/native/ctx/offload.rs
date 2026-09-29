@@ -1,25 +1,29 @@
 //! Moving work off the actor's own thread.
 //!
-//! Two shapes, both ADR-0080 §12 / ADR-0093. A raw worker thread
+//! Three shapes, all ADR-0080 §12 / ADR-0093. A raw worker thread
 //! (`spawn_inherit` / `spawn_detached`) runs a closure that sends nothing,
 //! either holding this handler's causal chain open or holding none. A
+//! staged task (`stage_blocking*`, ADR-0243 §9) owes no reply: staging takes
+//! the settlement hold on this turn's chain and parks it in the per-actor
+//! in-flight ledger, the task starts when its stager says, and its
+//! completion runs correlated to the task's request on that chain. A
 //! hold-until-resolve dispatch (`dispatch_blocking*`) acquires the
-//! settlement hold eagerly on this thread, parks it in the per-actor
-//! in-flight ledger, and replies from a later handler turn when the
-//! completion wake lands.
+//! settlement hold the same way, but arms a reply to the current caller and
+//! replies from a later handler turn when the completion wake lands.
 
 use std::ptr;
 use std::sync::{Arc, Weak};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
 use aether_actor::{Addressable, ReplyMode, Singleton};
-use aether_data::ActorMail;
+use aether_data::{ActorMail, Kind, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::blocking::{DeferredCompletion, DeferredReply, DispatchId, Pending, TaskDone};
 use crate::actor::native::offload::fail_fast;
 use crate::actor::native::offload::held::Held;
 use crate::actor::native::offload::self_wake::SelfWake;
+use crate::actor::native::offload::staged_task::StagedTask;
 use crate::actor::native::offload::thread;
 use crate::mail::Source;
 use crate::runtime::trace::SettlementHold;
@@ -82,9 +86,41 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         SelfWake::new(self.binding)
     }
 
+    /// Stage blocking work that owes no reply (ADR-0243 §9): mint its
+    /// request id from the counter outbound requests use, take the
+    /// settlement hold on this turn's chain (the in-flight root, or the
+    /// causing chain of a `wire` ctx), and arm a ledger entry that owes
+    /// nothing. The chain is fixed here; [`StagedTask::start`] only spawns
+    /// the worker, so work staged in one request's turn and started from
+    /// another's still holds the first request's chain.
+    ///
+    /// The `#[handler(task)]` completion runs correlated to the task's
+    /// request, on that chain: its sends inherit it, `ctx.in_reply_to()` is
+    /// [`StagedTask::request`], and its `TaskDone<O>` is discharged with
+    /// `into_output`. A task that carries a context stages with
+    /// [`Self::stage_blocking_with`].
+    pub fn stage_blocking<O: Send + 'static>(&mut self) -> StagedTask<O> {
+        let request = RequestId(self.binding.mint_correlation());
+        StagedTask::new(request, self.binding.dispatch_stage(self.acquire_settlement_hold(), request))
+    }
+
+    /// [`Self::stage_blocking`] with a context: `context` is stored in the
+    /// request-context table under the task's request id, as
+    /// `send_with_context` stores a request's, and the completion takes it
+    /// with `ctx.take_context::<C>()`. A completion that leaves a context
+    /// holding a live `Held` untaken fails fast (ADR-0243 §7). Dropping the
+    /// task unstarted removes the context.
+    pub fn stage_blocking_with<O: Send + 'static, C: Kind>(&mut self, context: C) -> StagedTask<O> {
+        let request = RequestId(self.binding.mint_correlation());
+        self.binding.store_request_context(request, context);
+        StagedTask::new(request, self.binding.dispatch_stage(self.acquire_settlement_hold(), request))
+            .with_context::<C>(self.binding)
+    }
+
     /// ADR-0093 hold-until-resolve dispatch: run the blocking closure
     /// `f` on a worker thread and reply to the current caller in a
-    /// *later* handler turn, when the worker's output lands.
+    /// *later* handler turn, when the worker's output lands. Work that owes
+    /// no reply stages with [`Self::stage_blocking`] instead.
     ///
     /// The settlement hold is acquired **eagerly on this thread, before
     /// the worker spawns** (so `HoldOpen` precedes this handler's
@@ -128,8 +164,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Context-carrying variant of [`Self::dispatch_blocking`]: dispatches
     /// as [`Self::dispatch_blocking_with`] does, parking `cx` for the
     /// completion, and returns the [`Pending<R>`] receipt for the armed
-    /// dispatch (ADR-0109, ADR-0243 §3). A bounded queue that runs a request
-    /// at once returns this receipt from its `submit`.
+    /// dispatch (ADR-0109, ADR-0243 §3). Work that owes no reply stages with
+    /// [`Self::stage_blocking_with`] instead.
     pub fn dispatch_blocking_with_pending<O, R, C, F>(&mut self, cx: C, f: F) -> Pending<R>
     where
         O: Send + 'static,
@@ -147,9 +183,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// the ticket was taken from, on the chain it kept open, and the
     /// returned id is the one the ticket's [`Pending<R>`] receipt carries.
     ///
-    /// A bounded queue takes a [`Held`] with [`Self::hold`] when it accepts
-    /// a request it cannot run yet, returns the receipt, and hands the
-    /// ticket here when a slot frees.
+    /// A bounded queue does not use this: it holds each request's reply
+    /// with [`Self::hold`], keeps the [`Held`] itself, and stages the work
+    /// with [`Self::stage_blocking`] in the request's own turn (ADR-0243 §9).
     ///
     /// # Panics
     /// Panics when `held` belongs to another actor, and when its entry is
@@ -185,10 +221,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         // and capture the reply target from *this* handler, then hand them
         // to the resumed core. A handler turn with no in-flight root yields
         // no hold, and the dispatch it starts is then outside settlement
-        // (ADR-0168 §2). A bounded `TaskQueue`
-        // instead holds the reply at accept time and hands it to
-        // `dispatch_blocking_held_with` when a slot frees, so a deferred
-        // request keeps its own chain held and replies to its own caller.
+        // (ADR-0168 §2). A bounded `TaskQueue` instead holds the reply and
+        // stages the work in the request's own turn, so a deferred request
+        // keeps its own chain held and is answered from the queue.
         let hold = self.acquire_settlement_hold();
         let reply_to = self.reply_target();
         self.dispatch_blocking_resumed_with(hold, reply_to, cx, f)
@@ -201,8 +236,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// request finally dispatches from a later handler turn — so the
     /// deferred work keeps its *own* chain held and replies to its *own*
     /// caller, not the completion handler's. A bounded queue holds a
-    /// [`Held`] instead and dispatches through
-    /// [`Self::dispatch_blocking_held_with`].
+    /// [`Held`] instead and stages its work with [`Self::stage_blocking`].
     pub fn dispatch_blocking_resumed<O, F>(
         &mut self,
         hold: Option<SettlementHold>,
@@ -235,10 +269,11 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.spawn_blocking_worker(completion, f)
     }
 
-    /// The single worker spawn site for every `dispatch_blocking*` path:
-    /// spawn the worker that runs `f`, fills `completion`'s ledger entry
-    /// with the output, and wakes the actor. Returns the entry's id.
-    fn spawn_blocking_worker<O, F>(&self, completion: DeferredCompletion<O>, f: F) -> DispatchId
+    /// The single worker spawn site for every `dispatch_blocking*` path and
+    /// for [`StagedTask::start`]: spawn the worker that runs `f`, fills
+    /// `completion`'s ledger entry with the output, and wakes the actor.
+    /// Returns the entry's id.
+    pub(crate) fn spawn_blocking_worker<O, F>(&self, completion: DeferredCompletion<O>, f: F) -> DispatchId
     where
         O: Send + 'static,
         F: FnOnce() -> O + Send + 'static,
@@ -359,10 +394,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// (future) `#[handler(task)]` macro — and, for now, a hand-wired
     /// completion handler — calls this and then `resolve`s the result.
     ///
+    /// A staged task's settlement hold moves onto this ctx, which releases
+    /// it when the completion handler ends, after the handler's sends are
+    /// counted on the chain it keeps open (ADR-0243 §9).
+    ///
     /// `None` for an unknown id (cancelled or double-landed) or an `O` /
     /// `C` that doesn't match the dispatch's types (a wiring bug).
     pub fn take_task_done<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
-        self.binding.dispatch_take::<O, C>(id)
+        self.binding.dispatch_take::<O, C>(id).map(|done| self.keep_task_hold(done))
     }
 
     /// Non-consuming sibling of [`Self::take_task_done`]: probe the
@@ -381,6 +420,15 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// `None` for an unknown id (cancelled / double-landed), an unfilled
     /// output, or an `O` / `C` that doesn't match this entry's dispatch.
     pub fn try_take_task_done<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
-        self.binding.dispatch_try_take::<O, C>(id)
+        self.binding.dispatch_try_take::<O, C>(id).map(|done| self.keep_task_hold(done))
+    }
+
+    /// Move a staged task's settlement hold from its completion onto this
+    /// ctx, whose drop releases it after the handler-end flush.
+    fn keep_task_hold<O, C>(&mut self, mut done: TaskDone<O, C>) -> TaskDone<O, C> {
+        if let Some(hold) = done.take_task_hold() {
+            self.task_holds.push(hold);
+        }
+        done
     }
 }

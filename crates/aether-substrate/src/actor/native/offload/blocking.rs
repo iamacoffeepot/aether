@@ -23,14 +23,17 @@
 //!   chassis aborter (ADR-0063) — a lost reply is never silent.
 //! - the in-flight ledger (`InflightTable`) — a per-actor map from
 //!   `DispatchId` to its held `(hold, reply_to, context)` plus a
-//!   completion output slot the worker fills. Lives behind a `&self`
+//!   completion output slot the worker fills. A staged task's entry
+//!   (ADR-0243 §9) holds only its hold, its request id, and the output
+//!   slot: it owes no reply. Lives behind a `&self`
 //!   interior-mutability `Mutex` on [`NativeBinding`](crate::actor::native::binding),
 //!   like `outbound` / `burst_producer`; the single logical writer is the
 //!   actor's own dispatch thread.
 //! - [`TaskCompletionWake`] — a substrate-internal framework kind the
 //!   worker pushes (carrying just the `DispatchId`) to the actor's own
 //!   mailbox, the same loopback-wake mechanism `InFlightDispatch`'s
-//!   worker uses to wake the actor.
+//!   worker uses to wake the actor. A staged task's wake is correlated to
+//!   its request and carries the chain its hold keeps open.
 //!
 //! The request side and completion routing live on
 //! [`NativeCtx`](crate::actor::native::ctx): `dispatch_blocking` /
@@ -82,7 +85,7 @@ pub struct DispatchId(pub u64);
 /// [`NativeCtx::dispatch_blocking`] and
 /// [`NativeCtx::dispatch_blocking_with_pending`], so every receipt names an
 /// armed ledger entry (ADR-0109 §3, ADR-0243 §3). A bounded queue returns
-/// one of those receipts from its `submit`.
+/// the receipt its `hold` minted from its `submit`.
 ///
 /// The receipt must be returned from the handler that minted it: the
 /// `#[actor]` / `#[handler_set]` dispatch takes the returned receipt as the
@@ -249,22 +252,25 @@ struct InflightEntry {
     /// The [`SettlementHold`] acquired eagerly in the arming handler
     /// (before it returned), keeping the chain root open across the
     /// deferral. Released only after the re-reply, via
-    /// [`TaskDone::resolve`] or `Held::answer`. `None` when the arming
-    /// context had no chain to hold, in which case the obligation is
-    /// invisible to settlement (ADR-0168 §2).
+    /// [`TaskDone::resolve`] or `Held::answer`, or, for a staged task, when
+    /// its completion's ctx drops. `None` when the arming context had no
+    /// chain to hold, in which case the obligation is invisible to
+    /// settlement (ADR-0168 §2).
     hold: Option<SettlementHold>,
-    /// The originating caller's reply target, captured when armed. The
-    /// re-reply routes through this.
-    reply_to: Source,
-    /// What answers the obligation.
+    /// What answers the obligation, and where its reply goes when it owes
+    /// one.
     state: EntryState,
 }
 
-/// What answers one ledger entry (ADR-0243 §1).
+/// What answers one ledger entry (ADR-0243 §1). Every state but
+/// [`Self::Task`] owes the caller whose reply target it carries.
 enum EntryState {
     /// An offload worker produces the output a later completion replies
     /// with (ADR-0093).
     Worker {
+        /// The originating caller's reply target, captured when armed. The
+        /// re-reply routes through this.
+        reply_to: Source,
         /// The opt-in completion context (`()` for the bare
         /// [`dispatch_blocking`](NativeCtx::dispatch_blocking)). Boxed so
         /// heterogeneous `C`s share one table type; downcast in
@@ -277,11 +283,16 @@ enum EntryState {
     },
     /// Armed by [`NativeCtx::hold`] with no worker: the `Held` ticket that
     /// names this entry answers it, from any handler on the actor.
-    Held,
+    Held {
+        /// The caller the ticket answers.
+        reply_to: Source,
+    },
     /// A held entry whose ticket sits in the encoded bytes of a stored
     /// request context (ADR-0243 §4). Only a decode of that context under
     /// the same `request` and `reply` claims it back to [`Self::Held`].
     Parked {
+        /// The caller the ticket answers.
+        reply_to: Source,
         /// The request whose context carries the ticket.
         request: RequestId,
         /// The reply kind the ticket answers.
@@ -289,6 +300,18 @@ enum EntryState {
         /// The stored context's kind name, for the untaken-reply failure
         /// (ADR-0243 §7).
         context_name: &'static str,
+    },
+    /// Work staged by [`NativeCtx::stage_blocking`] (ADR-0243 §9). It owes
+    /// no reply, so it has no reply target: its completion wakes the actor
+    /// correlated to `request`, on the chain its hold keeps open, and takes
+    /// the context stored under `request` from the ctx.
+    Task {
+        /// The request id staging minted, from the counter outbound requests
+        /// use.
+        request: RequestId,
+        /// The worker's output, filled once; `None` until the worker
+        /// finishes.
+        output: Option<Box<dyn Any + Send>>,
     },
 }
 
@@ -328,26 +351,60 @@ impl InflightTable {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FillOutcome {
-    Filled,
+    /// This fill won; the actor is woken as the entry's state says.
+    Filled(CompletionWake),
     AlreadyFilled,
     Missing,
 }
 
+/// What a peek at a completion's entry found, before it is taken.
+enum Probe {
+    /// The worker has not filled its output yet.
+    Unfilled,
+    /// The output or context is not the `(O, C)` the taker asked for.
+    Mismatched,
+    /// The output is filled and both types match.
+    Matched,
+}
+
+/// How a winning fill wakes the actor.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CompletionWake {
+    /// A worker entry's unchained, uncorrelated loopback wake: its completion
+    /// replies through the target the entry captured.
+    Unchained,
+    /// A staged task's wake (ADR-0243 §9): correlated to `request`, and on
+    /// the chain `root` the entry's hold keeps open.
+    Task { request: RequestId, root: Option<MailId> },
+}
+
 /// A move-only dispatch completion (ADR-0093 §3-§4). Carries the
-/// worker's `output`, the originating [`Source`], the held
-/// [`SettlementHold`], and an opt-in context `C` (unit by default).
+/// worker's `output`, the held [`SettlementHold`], an opt-in context `C`
+/// (unit by default), and, for a completion that owes a reply, the
+/// originating [`Source`].
+///
+/// Two kinds of work complete as one: a worker armed by a reply-arming
+/// verb (`dispatch_blocking*`), which owes its caller the reply it
+/// `resolve`s, and a task staged by [`NativeCtx::stage_blocking`], which
+/// owes nothing (ADR-0243 §9). A staged task's completion is discharged by
+/// [`Self::into_output`]; its context is taken from the ctx with
+/// `take_context`, so its `C` is always `()`, and a `resolve*` call on it
+/// panics.
 ///
 /// Move-only by construction — no `Clone` / `Copy` — so the held state
 /// can't be duplicated and the hold's release can't be issued twice. The
 /// consuming `resolve` family re-replies **first**, then drops the hold,
 /// making the `Sent`-before-`Release` ordering (ADR-0080 §12) structural
-/// rather than a remembered drop order. Dropping a `TaskDone` without
-/// resolving releases the hold and then panics outside an unwind, in every
-/// build, which the scheduler escalates through the chassis aborter
-/// (ADR-0063) — catching the silent lost reply that discipline misses.
+/// rather than a remembered drop order. Dropping a `TaskDone` that owes a
+/// reply without resolving it releases the hold and then panics outside an
+/// unwind, in every build, which the scheduler escalates through the
+/// chassis aborter (ADR-0063) — catching the silent lost reply that
+/// discipline misses.
 #[must_use = "a TaskDone holds the chain open; resolve it (or resolve_err) to send the deferred reply and release the hold"]
 pub struct TaskDone<O, C = ()> {
-    output: O,
+    /// The worker's output, `None` only once [`Self::into_output`] moved it
+    /// out.
+    output: Option<O>,
     context: C,
     /// The chain the dispatch keeps open, absent when the dispatching
     /// context had none to give (ADR-0168 §2). Also `take`n out by
@@ -355,7 +412,9 @@ pub struct TaskDone<O, C = ()> {
     /// `Drop` nothing to do — `resolved` rather than this field is what
     /// separates a resolved completion from a lost one.
     hold: Option<SettlementHold>,
-    reply_to: Source,
+    /// The caller a worker's completion owes, `None` for a staged task,
+    /// which owes nothing (ADR-0243 §9).
+    reply_to: Option<Source>,
     /// Set true by every `resolve*` path before it consumes `self`, so
     /// `Drop` can tell a resolved completion (clean) from a dropped-
     /// without-resolve one (the lost-reply bug).
@@ -495,17 +554,61 @@ impl IntoDeferredReply for DeferredReply {
 }
 
 impl<O, C> IntoDeferredReply for TaskDone<O, C> {
+    /// # Panics
+    /// Panics on a staged task's completion, which owes no reply to carry
+    /// (ADR-0243 §9).
     fn into_deferred_reply(mut self) -> DeferredReply {
+        let reply_to = self.owed_reply_to();
         self.resolved = true;
-        DeferredReply { hold: self.hold.take(), reply_to: self.reply_to, consumed: false }
+        DeferredReply { hold: self.hold.take(), reply_to, consumed: false }
     }
 }
 
 impl<O, C> TaskDone<O, C> {
     /// Borrow the worker's output. The common `resolve` re-replies this
     /// directly; `resolve_with` maps it.
+    ///
+    /// # Panics
+    /// Never in practice: only [`Self::into_output`] moves the output out,
+    /// and it consumes the completion.
     pub fn output(&self) -> &O {
-        &self.output
+        self.output.as_ref().expect("a TaskDone holds its output until into_output consumes it")
+    }
+
+    /// Take the worker's output, discharging a staged task's completion
+    /// (ADR-0243 §9): a staged task owes no reply, so its completion
+    /// answers whatever it serves from actor state, with this output.
+    ///
+    /// # Panics
+    /// Panics on a completion that owes a reply, which must be resolved
+    /// instead so the reply it owes is sent.
+    pub fn into_output(mut self) -> O {
+        assert!(
+            self.reply_to.is_none(),
+            "TaskDone::into_output on a completion that owes a reply: resolve it so the caller is answered"
+        );
+        self.resolved = true;
+        drop(self.hold.take());
+        self.output.take().expect("a TaskDone holds its output until into_output consumes it")
+    }
+
+    /// Hand a staged task's settlement hold to the ctx whose handler takes
+    /// its completion, so the chain it keeps open stays open until that
+    /// handler's sends are counted (ADR-0243 §9). `None` for a completion
+    /// that owes a reply, which keeps its hold until it is resolved.
+    pub(crate) fn take_task_hold(&mut self) -> Option<SettlementHold> {
+        if self.reply_to.is_some() {
+            return None;
+        }
+        self.hold.take()
+    }
+
+    /// The caller this completion owes.
+    ///
+    /// # Panics
+    /// Panics on a staged task's completion, which owes nothing.
+    fn owed_reply_to(&self) -> Source {
+        self.reply_to.expect("a staged task owes no reply (ADR-0243 §9)")
     }
 
     /// Borrow the opt-in completion context (`()` for the bare
@@ -537,11 +640,15 @@ impl<O, C> TaskDone<O, C> {
     /// Re-reply the carried `output` through the carried `reply_to`,
     /// then release the hold (ADR-0093 §4). The worker already shaped
     /// `output` into the reply value, so this is the common one-liner.
+    ///
+    /// # Panics
+    /// Panics on a staged task's completion, which owes no reply (ADR-0243
+    /// §9).
     pub fn resolve<A>(mut self, ctx: &mut NativeCtx<'_, A, Single>)
     where
         O: ActorMail,
     {
-        ctx.reply_to_target(self.reply_to, &self.output, self.hold_root(), None);
+        ctx.reply_to_target(self.owed_reply_to(), self.output(), self.hold_root(), None);
         self.release();
     }
 
@@ -549,13 +656,18 @@ impl<O, C> TaskDone<O, C> {
     /// through the carried `reply_to`, then release the hold. For
     /// completion handlers that shape a different reply from the carried
     /// output (and context, when present) than the raw `output`.
+    ///
+    /// # Panics
+    /// Panics on a staged task's completion, which owes no reply (ADR-0243
+    /// §9).
     pub fn resolve_with<R, F, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, f: F)
     where
         R: ActorMail,
         F: FnOnce(&O, &C) -> R,
     {
-        let reply = f(&self.output, &self.context);
-        ctx.reply_to_target(self.reply_to, &reply, self.hold_root(), None);
+        let reply_to = self.owed_reply_to();
+        let reply = f(self.output(), &self.context);
+        ctx.reply_to_target(reply_to, &reply, self.hold_root(), None);
         self.release();
     }
 
@@ -567,11 +679,15 @@ impl<O, C> TaskDone<O, C> {
     /// computed by the handler rather than built in a ctx-less closure.
     /// Re-replies **first**, then releases the hold (`Sent` before
     /// `Release`, ADR-0080 §12), like the rest of the `resolve*` family.
+    ///
+    /// # Panics
+    /// Panics on a staged task's completion, which owes no reply (ADR-0243
+    /// §9).
     pub fn resolve_value<R, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, reply: &R)
     where
         R: ActorMail,
     {
-        ctx.reply_to_target(self.reply_to, reply, self.hold_root(), None);
+        ctx.reply_to_target(self.owed_reply_to(), reply, self.hold_root(), None);
         self.release();
     }
 
@@ -589,13 +705,17 @@ impl<O, C> TaskDone<O, C> {
     /// Its consumer is the component host, which hands a successful load to
     /// the trampoline it just spawned, so the requester takes its reference
     /// to the loaded actor from the reply's stamped sender (ADR-0230 §3).
+    ///
+    /// # Panics
+    /// Panics on a staged task's completion, which owes no reply to hand
+    /// off (ADR-0243 §9).
     pub fn hand_off<R, K, A, M>(mut self, ctx: &mut NativeCtx<'_, A, M>, target: &ActorRef<R>, payload: &K)
     where
         R: HandlesKind<K>,
         K: ActorMail,
         M: ReplyMode,
     {
-        ctx.push_handed_off(target.erase(), payload, self.hold_root(), self.reply_to);
+        ctx.push_handed_off(target.erase(), payload, self.hold_root(), self.owed_reply_to());
         self.release();
     }
 
@@ -632,7 +752,8 @@ impl<O, C> TaskDone<O, C> {
     /// the `TaskDone` and returns `()` discharges the chain without
     /// replying. Unlike dropping an un-resolved `TaskDone` (a lost reply),
     /// this is a deliberate signature choice, so it releases cleanly and
-    /// skips the lost-reply panic.
+    /// skips the lost-reply panic. A staged task's completion, which owes
+    /// nothing, discharges the same way.
     pub fn release_no_reply(mut self) {
         self.release();
     }
@@ -641,28 +762,33 @@ impl<O, C> TaskDone<O, C> {
     /// through the carried `reply_to`, then release the hold. The
     /// carried `output` is discarded — used when the completion is a
     /// failure rather than a result.
+    ///
+    /// # Panics
+    /// Panics on a staged task's completion, which owes no reply (ADR-0243
+    /// §9).
     pub fn resolve_err<E, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, err: &E)
     where
         E: ActorMail,
     {
-        ctx.reply_to_target(self.reply_to, err, self.hold_root(), None);
+        ctx.reply_to_target(self.owed_reply_to(), err, self.hold_root(), None);
         self.release();
     }
 }
 
 impl<O, C> Drop for TaskDone<O, C> {
-    /// A `TaskDone` dropped without a `resolve*` call is a lost reply:
-    /// the caller was owed a deferred reply that never went out. Release
-    /// the hold so the chain can still settle (a stuck hold would wedge
-    /// settlement forever), then panic outside an unwind, in every build,
-    /// so the scheduler escalates the bug through the chassis aborter
-    /// (ADR-0063; ADR-0093 §4 / Consequences). A panic already unwinding
-    /// past the completion stays the one reported.
+    /// A `TaskDone` that owes a reply, dropped without a `resolve*` call, is
+    /// a lost reply: the caller was owed a deferred reply that never went
+    /// out. Release the hold so the chain can still settle (a stuck hold
+    /// would wedge settlement forever), then panic outside an unwind, in
+    /// every build, so the scheduler escalates the bug through the chassis
+    /// aborter (ADR-0063; ADR-0093 §4 / Consequences). A panic already
+    /// unwinding past the completion stays the one reported. A staged task's
+    /// completion owes nothing, so its drop only releases its hold.
     fn drop(&mut self) {
         if !self.resolved {
             drop(self.hold.take());
             assert!(
-                thread::panicking(),
+                self.reply_to.is_none() || thread::panicking(),
                 "TaskDone dropped without resolve — the deferred reply was never sent (the \
                  carried hold has been released so settlement isn't wedged, but the caller is \
                  owed a reply that never went out)"
@@ -678,7 +804,7 @@ impl InflightTable {
     /// worker.
     fn insert(&mut self, hold: Option<SettlementHold>, reply_to: Source, context: Box<dyn Any + Send>) -> DispatchId {
         let id = self.mint_id();
-        self.entries.insert(id, InflightEntry { hold, reply_to, state: EntryState::Worker { context, output: None } });
+        self.entries.insert(id, InflightEntry { hold, state: EntryState::Worker { reply_to, context, output: None } });
         id
     }
 
@@ -686,7 +812,16 @@ impl InflightTable {
     /// [`DispatchId`]. Only its `Held` ticket claims it back.
     fn insert_held(&mut self, hold: Option<SettlementHold>, reply_to: Source) -> DispatchId {
         let id = self.mint_id();
-        self.entries.insert(id, InflightEntry { hold, reply_to, state: EntryState::Held });
+        self.entries.insert(id, InflightEntry { hold, state: EntryState::Held { reply_to } });
+        id
+    }
+
+    /// Insert a staged task's entry (ADR-0243 §9) and return its
+    /// [`DispatchId`]: it keeps the staging turn's hold, owes no reply, and
+    /// waits for its worker's output under `request`.
+    fn insert_task(&mut self, hold: Option<SettlementHold>, request: RequestId) -> DispatchId {
+        let id = self.mint_id();
+        self.entries.insert(id, InflightEntry { hold, state: EntryState::Task { request, output: None } });
         id
     }
 
@@ -695,11 +830,11 @@ impl InflightTable {
     /// entry, which is left in place: a held ticket never discharges a
     /// worker's obligation.
     fn claim_held(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
-        if !matches!(self.entries.get(&id)?.state, EntryState::Held) {
+        let EntryState::Held { reply_to } = self.entries.get(&id)?.state else {
             return None;
-        }
+        };
         let entry = self.entries.remove(&id)?;
-        Some((entry.hold, entry.reply_to))
+        Some((entry.hold, reply_to))
     }
 
     /// Hand the held entry `id` to a worker (ADR-0243 §3): it keeps its hold
@@ -711,17 +846,19 @@ impl InflightTable {
     /// Panics when `id` names no held entry: an unknown id, an entry a
     /// worker already answers, or one parked in a stored context.
     fn attach_worker(&mut self, id: DispatchId, context: Box<dyn Any + Send>) {
-        self.entries
-            .get_mut(&id)
-            .filter(|entry| matches!(entry.state, EntryState::Held))
-            .expect("a worker attached to a ledger entry that is not held")
-            .state = EntryState::Worker { context, output: None };
+        let entry = self.entries.get_mut(&id).expect("a worker attached to a ledger entry that is not held");
+        let EntryState::Held { reply_to } = entry.state else {
+            panic!("a worker attached to a ledger entry that is not held");
+        };
+        entry.state = EntryState::Worker { reply_to, context, output: None };
     }
 
-    /// Remove every entry no worker answers, parked ones included, and hand
-    /// back their holds, for the actor-close tail to release with no reply
-    /// (ADR-0243 §1). Worker entries stay: their workers' fills and wakes
-    /// still find them, and the binding's drop settles them as before.
+    /// Remove every entry no worker answers, parked ones and staged tasks
+    /// included, and hand back their holds, for the actor-close tail to
+    /// release with no reply (ADR-0243 §1): a staged task owes nothing, and
+    /// a closing actor handles no completion. Worker entries stay: their
+    /// workers' fills and wakes still find them, and the binding's drop
+    /// settles them as before.
     fn settle_held_for_actor_close(&mut self) -> Vec<Option<SettlementHold>> {
         self.parked.clear();
         self.entries
@@ -736,8 +873,9 @@ impl InflightTable {
     fn state_of(&self, id: DispatchId) -> Option<&'static str> {
         self.entries.get(&id).map(|entry| match entry.state {
             EntryState::Worker { .. } => "worker",
-            EntryState::Held => "held",
+            EntryState::Held { .. } => "held",
             EntryState::Parked { .. } => "parked",
+            EntryState::Task { .. } => "task",
         })
     }
 
@@ -753,12 +891,12 @@ impl InflightTable {
         reply: KindId,
         context_name: &'static str,
     ) -> Result<(), wire::Error> {
-        let entry = self
-            .entries
-            .get_mut(&id)
-            .filter(|entry| matches!(entry.state, EntryState::Held))
-            .ok_or(wire::Error::HeldUnclaimed { ticket: id.0, reply })?;
-        entry.state = EntryState::Parked { request, reply, context_name };
+        let unclaimed = || wire::Error::HeldUnclaimed { ticket: id.0, reply };
+        let entry = self.entries.get_mut(&id).ok_or_else(unclaimed)?;
+        let EntryState::Held { reply_to } = entry.state else {
+            return Err(unclaimed());
+        };
+        entry.state = EntryState::Parked { reply_to, request, reply, context_name };
         self.parked.entry(request).or_default().push(id);
         Ok(())
     }
@@ -770,12 +908,15 @@ impl InflightTable {
     /// [`wire::Error::HeldUnclaimed`] when `id` is not parked under both
     /// `request` and `reply`.
     fn unpark(&mut self, id: DispatchId, request: RequestId, reply: KindId) -> Result<(), wire::Error> {
-        let entry = self
-            .entries
-            .get_mut(&id)
-            .filter(|entry| matches!(entry.state, EntryState::Parked { request: r, reply: k, .. } if r == request && k == reply))
-            .ok_or(wire::Error::HeldUnclaimed { ticket: id.0, reply })?;
-        entry.state = EntryState::Held;
+        let unclaimed = || wire::Error::HeldUnclaimed { ticket: id.0, reply };
+        let entry = self.entries.get_mut(&id).ok_or_else(unclaimed)?;
+        let EntryState::Parked { reply_to, request: parked_request, reply: parked_reply, .. } = entry.state else {
+            return Err(unclaimed());
+        };
+        if parked_request != request || parked_reply != reply {
+            return Err(unclaimed());
+        }
+        entry.state = EntryState::Held { reply_to };
         if let Some(ids) = self.parked.get_mut(&request) {
             ids.retain(|parked| *parked != id);
             if ids.is_empty() {
@@ -794,35 +935,44 @@ impl InflightTable {
         })
     }
 
-    /// Fill the worker's `output` into the named entry's completion slot.
-    /// Called once, on the worker thread, under the table lock. A no-op
-    /// for an unknown id (the dispatch was cancelled out of the table
-    /// before the worker finished) or an entry no worker answers.
+    /// Fill the worker's `output` into the named entry's completion slot and
+    /// say how the winning fill wakes the actor: a worker entry's unchained
+    /// wake, or a staged task's wake correlated to its request on the chain
+    /// its hold keeps open. Called once, on the worker thread, under the
+    /// table lock. A no-op for an unknown id (the dispatch was cancelled out
+    /// of the table before the worker finished) or an entry no worker
+    /// answers.
     fn fill_output(&mut self, id: DispatchId, output: Box<dyn Any + Send>) -> FillOutcome {
-        let Some(InflightEntry { state: EntryState::Worker { output: slot, .. }, .. }) = self.entries.get_mut(&id)
-        else {
+        let Some(InflightEntry { hold, state }) = self.entries.get_mut(&id) else {
             return FillOutcome::Missing;
+        };
+        let (slot, wake) = match state {
+            EntryState::Worker { output: slot, .. } => (slot, CompletionWake::Unchained),
+            EntryState::Task { request, output: slot } => {
+                (slot, CompletionWake::Task { request: *request, root: hold.as_ref().map(SettlementHold::root) })
+            }
+            EntryState::Held { .. } | EntryState::Parked { .. } => return FillOutcome::Missing,
         };
         if slot.is_some() {
             return FillOutcome::AlreadyFilled;
         }
         *slot = Some(output);
-        FillOutcome::Filled
+        FillOutcome::Filled(wake)
     }
 
-    /// Remove the named entry and hand back its parked `(hold, reply_to)`
+    /// Remove the named entry and hand back its hold, if it holds one,
     /// **without** any `O` / `C` downcast — the worker never ran, so there
     /// is no output to type. The spawn-error branch calls this to release
-    /// the eagerly-acquired hold when arming failed: the caller drops the
-    /// returned hold, settling the chain the dispatch would otherwise wedge
-    /// forever. A no-op (`None`) for an unknown id, and for an entry no
-    /// worker answers, which is left in place for its `Held` ticket.
-    fn abandon(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
-        if !matches!(self.entries.get(&id)?.state, EntryState::Worker { .. }) {
+    /// the eagerly-acquired hold when arming failed, and an unstarted staged
+    /// task's drop calls it to give its chain back: the caller drops the
+    /// returned hold, settling the chain the entry would otherwise wedge
+    /// forever. A no-op for an unknown id, and for an entry no worker
+    /// answers, which is left in place for its `Held` ticket.
+    fn abandon(&mut self, id: DispatchId) -> Option<SettlementHold> {
+        if !matches!(self.entries.get(&id)?.state, EntryState::Worker { .. } | EntryState::Task { .. }) {
             return None;
         }
-        let entry = self.entries.remove(&id)?;
-        Some((entry.hold, entry.reply_to))
+        self.entries.remove(&id)?.hold
     }
 
     /// Remove the named entry and downcast its boxed `context` + filled
@@ -835,33 +985,56 @@ impl InflightTable {
     /// it `debug_assert`s loudly (distinct from the benign unfilled case)
     /// and returns `None` with the entry retained. An entry no worker
     /// answers is never taken.
+    ///
+    /// A worker entry rebuilds a completion that owes its captured caller.
+    /// A staged task's rebuilds one that owes nothing, with a `()` context:
+    /// its context is a kind stored under its request, taken from the ctx
+    /// (ADR-0243 §9).
     fn take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
-        let EntryState::Worker { context, output } = &self.entries.get(&id)?.state else {
-            return None;
-        };
         // Peek-then-remove, the same discipline `try_take` uses: probe the
         // boxed `output` + `context` without disturbing the entry. An
         // unfilled output slot returns `None` quietly (a later wake completes
         // the still-parked entry). A type mismatch against a *filled* output
         // is a wiring bug — loud in debug, `None` in release — and never
         // removes the entry, so the parked hold stays reclaimable.
-        let output = output.as_deref()?;
-        if output.downcast_ref::<O>().is_none() || context.downcast_ref::<C>().is_none() {
-            debug_assert!(
-                false,
-                "dispatch completion type mismatch: the task handler's (O, C) do not match the \
-                 dispatch's — a wiring bug (the entry is retained, not bare-dropped)"
-            );
-            return None;
+        match self.probe::<O, C>(id)? {
+            Probe::Unfilled => return None,
+            Probe::Mismatched => {
+                debug_assert!(
+                    false,
+                    "dispatch completion type mismatch: the task handler's (O, C) do not match the \
+                     dispatch's — a wiring bug (the entry is retained, not bare-dropped)"
+                );
+                return None;
+            }
+            Probe::Matched => {}
         }
         // Both probes passed — safe to remove and rebuild.
-        let InflightEntry { hold, reply_to, state } = self.entries.remove(&id)?;
-        let EntryState::Worker { context, output } = state else {
-            return None;
+        let InflightEntry { hold, state } = self.entries.remove(&id)?;
+        let (output, context, reply_to) = match state {
+            EntryState::Worker { reply_to, context, output } => (output?, context, Some(reply_to)),
+            EntryState::Task { output, .. } => (output?, Box::new(()) as Box<dyn Any + Send>, None),
+            EntryState::Held { .. } | EntryState::Parked { .. } => return None,
         };
-        let output = output?.downcast::<O>().ok()?;
+        let output = output.downcast::<O>().ok()?;
         let context = context.downcast::<C>().ok()?;
-        Some(TaskDone { output: *output, context: *context, hold, reply_to, resolved: false })
+        Some(TaskDone { output: Some(*output), context: *context, hold, reply_to, resolved: false })
+    }
+
+    /// Probe the named entry's output and context against `O` / `C` without
+    /// disturbing it. `None` for an unknown id or an entry no worker
+    /// answers. A staged task's context is always `()`.
+    fn probe<O: 'static, C: 'static>(&self, id: DispatchId) -> Option<Probe> {
+        let (output, context): (_, &dyn Any) = match &self.entries.get(&id)?.state {
+            EntryState::Worker { context, output, .. } => (output.as_deref(), &**context),
+            EntryState::Task { output, .. } => (output.as_deref(), &()),
+            EntryState::Held { .. } | EntryState::Parked { .. } => return None,
+        };
+        Some(match output {
+            None => Probe::Unfilled,
+            Some(output) if output.is::<O>() && context.is::<C>() => Probe::Matched,
+            Some(_) => Probe::Mismatched,
+        })
     }
 
     /// Non-consuming peek-then-take (ADR-0093 §3, peek variant). Look the
@@ -881,14 +1054,12 @@ impl InflightTable {
     /// the unknown-id case, since the wake lands after the fill), or a type
     /// mismatch on either downcast.
     fn try_take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
-        let EntryState::Worker { context, output } = &self.entries.get(&id)?.state else {
-            return None;
-        };
         // Probe both boxes without disturbing the entry — an unfilled
         // output slot or a type mismatch on either box short-circuits to
         // `None` (the entry stays intact for a later handler to claim).
-        output.as_deref()?.downcast_ref::<O>()?;
-        context.downcast_ref::<C>()?;
+        if !matches!(self.probe::<O, C>(id)?, Probe::Matched) {
+            return None;
+        }
         // Both match — now it's safe to remove and rebuild.
         self.take(id)
     }
@@ -917,8 +1088,12 @@ impl InflightTable {
         self.take(id)
     }
 
-    pub(crate) fn dispatch_abandon(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
+    pub(crate) fn dispatch_abandon(&mut self, id: DispatchId) -> Option<SettlementHold> {
         self.abandon(id)
+    }
+
+    pub(crate) fn dispatch_insert_task(&mut self, hold: Option<SettlementHold>, request: RequestId) -> DispatchId {
+        self.insert_task(hold, request)
     }
 
     pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
@@ -1107,8 +1282,8 @@ mod tests {
     }
 
     /// The resumed entry uses the *supplied* `(hold, reply_to)`, not the
-    /// dispatching ctx's — the property a bounded `TaskQueue` relies on
-    /// when it drains a buffered request from a *different* handler's turn.
+    /// dispatching ctx's — the property a caller that captured them at
+    /// accept relies on when it dispatches from a *different* handler's turn.
     /// Accept on one root/caller, dispatch via `dispatch_blocking_resumed`
     /// from a ctx with a different root and reply target, then assert the
     /// *accept* chain is the one held and the *original* caller is replied
@@ -1130,7 +1305,7 @@ mod tests {
         let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 77);
 
         // "Accept": acquire the hold on the accept root + capture the
-        // caller, as a TaskQueue does when buffering an over-limit request.
+        // caller, as a caller deferring a request's dispatch does.
         let buffered_hold = {
             let ctx = NativeCtx::new(&binding, caller_reply_to, None, Some(accept_root));
             ctx.acquire_settlement_hold()
@@ -1232,7 +1407,7 @@ mod tests {
         assert_eq!(counter.held_open(root), 1, "hold acquired");
 
         let done: TaskDone<u64, ()> =
-            TaskDone { output: 1, context: (), hold: Some(hold), reply_to: Source::NONE, resolved: false };
+            TaskDone { output: Some(1), context: (), hold: Some(hold), reply_to: Some(Source::NONE), resolved: false };
         // The drop releases the hold (verified indirectly: the chain
         // returns to 0 even as the panic unwinds) then panics.
         drop(done);
@@ -1250,8 +1425,13 @@ mod tests {
         assert_eq!(counter.held_open(root), 1);
 
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let done: TaskDone<u64, ()> =
-                TaskDone { output: 1, context: (), hold: Some(hold), reply_to: Source::NONE, resolved: false };
+            let done: TaskDone<u64, ()> = TaskDone {
+                output: Some(1),
+                context: (),
+                hold: Some(hold),
+                reply_to: Some(Source::NONE),
+                resolved: false,
+            };
             drop(done);
         }));
         // The drop panics after releasing, so the hold is already gone.
@@ -1331,7 +1511,10 @@ mod tests {
             Box::new(String::from("typed context")),
         );
 
-        assert_eq!(table.dispatch_fill_output(id, Box::new(Answer { value: 1 })), FillOutcome::Filled);
+        assert_eq!(
+            table.dispatch_fill_output(id, Box::new(Answer { value: 1 })),
+            FillOutcome::Filled(CompletionWake::Unchained)
+        );
         assert_eq!(table.dispatch_fill_output(id, Box::new(Answer { value: 2 })), FillOutcome::AlreadyFilled);
 
         let done =
@@ -1356,7 +1539,10 @@ mod tests {
         let mut table = InflightTable::new();
         let id =
             table.dispatch_insert(Some(mailer.acquire_settlement_hold(root_id(14))), Source::NONE, Box::new(23_u16));
-        assert_eq!(table.dispatch_fill_output(id, Box::new(Answer { value: 55 })), FillOutcome::Filled);
+        assert_eq!(
+            table.dispatch_fill_output(id, Box::new(Answer { value: 55 })),
+            FillOutcome::Filled(CompletionWake::Unchained)
+        );
 
         let done = table.dispatch_take::<Answer, u16>(id).expect("matching typed take succeeds");
         assert_eq!(*done.output(), Answer { value: 55 });

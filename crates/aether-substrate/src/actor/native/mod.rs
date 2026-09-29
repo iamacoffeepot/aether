@@ -88,6 +88,7 @@ pub use offload::blocking::{DeferredReply, DispatchId, IntoDeferredReply, Pendin
 pub use offload::check_in::{BlobCheckIn, BlobSlab};
 pub use offload::held::Held;
 pub use offload::self_wake::SelfWake;
+pub use offload::staged_task::StagedTask;
 pub use probe::ActorProbe;
 pub use slot::pumped::PumpedSlot;
 pub use spawn::{HandlerSpawnBuilder, SpawnBuilder, SpawnError, SpawnOutcome, SpawnReceipt, Spawner, Subname};

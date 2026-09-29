@@ -1,42 +1,37 @@
-//! Cap-level rate-limit + queue helper over the ADR-0093 hold-until-
-//! resolve dispatch primitive (`NativeCtx::dispatch_blocking`).
+//! Cap-level rate-limit + queue helper over staged blocking work
+//! (ADR-0093, ADR-0243 §9).
 //!
 //! The content-gen caps make long-tail blocking provider calls
 //! (multi-second image gen, the `claude` subprocess) that must not block
-//! the single-threaded actor's mail intake. The substrate's
-//! `dispatch_blocking` primitive (ADR-0093) owns the spawn + the hold
-//! lifecycle + the completion routing; this helper adds only the one
-//! thing the framework deliberately doesn't centralise: the per-cap
-//! concurrency bound + pending queue that rate-limits the paid provider
-//! endpoints (ADR-0050 §2).
+//! the single-threaded actor's mail intake. The substrate owns the worker
+//! spawn, the settlement hold, and the completion routing; this helper adds
+//! only the one thing the framework deliberately doesn't centralise: the
+//! per-cap concurrency bound + waiting queue that rate-limits the paid
+//! provider endpoints (ADR-0050 §2).
 //!
-//! Under the bound, [`TaskQueue::submit`] hands the work straight to
-//! `ctx.dispatch_blocking_with_pending`. Over the bound, it holds the reply
-//! *now* with `ctx.hold` — a [`Held`](super::held::Held) ticket to a ledger
-//! entry that keeps a settlement hold on the current root plus the
-//! originating reply target —
-//! and buffers a thunk that, when a slot later frees, attaches the work to
-//! that same entry via `ctx.dispatch_blocking_held_with(held, (), work)`, so
-//! the deferred request keeps *its own* chain held, replies to *its own*
-//! caller (iamacoffeepot/aether#1031), and answers the receipt `submit`
-//! returned. [`TaskQueue::on_complete`], called from the cap's
-//! `#[handler(task)]` after `resolve`, frees the slot and hands it straight
-//! to the next buffered task. At actor close the ledger settles every
-//! buffered ticket's entry before the queue drops with the actor's state.
+//! [`TaskQueue::submit`] runs in the request's own turn. It holds the
+//! request's reply with `ctx.hold`, keeps the [`Held<R>`] ticket, and stages
+//! the work with `ctx.stage_blocking`, so the task takes the request's chain
+//! there, whether it starts at once or waits for a slot. A staged task owes
+//! no reply: the queue answers from its own table. [`TaskQueue::complete`],
+//! the whole body of the cap's `#[handler(task)]`, finds the finished task's
+//! `Held` by the request its completion is correlated to, answers it with
+//! the worker's output, and starts the next waiting task, whose chain is
+//! still the waiting request's own. So a request's chain settles when that
+//! request is answered, never when another request's work finishes.
 //!
-//! Everything `InFlightDispatch` used to own beyond the slot count + the
-//! pending queue — the `request_id` correlation map, the hold accounting,
-//! the raw worker spawn — now lives in the substrate's in-flight ledger
-//! (ADR-0093 §2). This helper owns only the slot count, the pending
-//! queue, and the hold-handoff.
+//! At actor close the ledger settles every held reply and every unstarted
+//! task before the queue drops with the actor's state.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
-use aether_actor::Single;
+use aether_actor::ReplyMode;
+use aether_data::{ActorMail, RequestId};
 
 use crate::actor::native::NativeCtx;
-use crate::actor::native::offload::blocking::Pending;
-use aether_data::ActorMail;
+use crate::actor::native::offload::blocking::{Pending, TaskDone};
+use crate::actor::native::offload::held::Held;
+use crate::actor::native::offload::staged_task::StagedTask;
 
 /// Default per-cap concurrency bound when a cap doesn't override it.
 /// Doubles as rate-limit throttling for the paid provider endpoints
@@ -44,230 +39,89 @@ use aether_data::ActorMail;
 /// the rest queue.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 4;
 
-/// A buffered dispatch thunk: attaches an over-bound request's work to its
-/// held reply via `dispatch_blocking_held_with` when a slot frees. Built on
-/// the actor thread and run on the actor thread, so the actor IS the mutual
-/// exclusion — but the thunk is `Send` so the embedding cap (a
-/// `NativeActor`, which is `Send + 'static`) can hold the queue in its
-/// state. Everything the thunk closes over (`work`, the `Held` ticket) is
-/// already `Send`.
-type PendingDispatch = Box<dyn FnOnce(&mut NativeCtx<'_>) + Send>;
+/// A waiting request's work, run on the worker thread when its task starts.
+/// `Send` so the embedding cap (a `NativeActor`, which is `Send + 'static`)
+/// can hold the queue in its state.
+type Work<R> = Box<dyn FnOnce() -> R + Send>;
 
-/// Cap-level rate-limit + queue over the substrate's hold-until-resolve
-/// dispatch (ADR-0093). Lives in the cap's plain (lock-free) actor state;
-/// every method runs on the single-threaded dispatcher (the actor IS the
-/// mutual exclusion — no `Semaphore`, no `Mutex`).
-pub struct TaskQueue {
-    max: usize,
-    in_flight: usize,
-    pending: VecDeque<PendingDispatch>,
+/// A request waiting for a slot: its task, staged in its own turn, the reply
+/// it is owed, and the work its task runs once started.
+struct Waiting<R: ActorMail> {
+    task: StagedTask<R>,
+    held: Held<R>,
+    work: Work<R>,
 }
 
-impl TaskQueue {
+/// Cap-level rate-limit + queue over staged blocking work, answering each
+/// request with one `R`. Lives in the cap's plain (lock-free) actor state;
+/// every method runs on the single-threaded dispatcher (the actor IS the
+/// mutual exclusion — no `Semaphore`, no `Mutex`).
+pub struct TaskQueue<R: ActorMail> {
+    max: usize,
+    /// The reply each started task answers, keyed by the task's request.
+    running: HashMap<RequestId, Held<R>>,
+    waiting: VecDeque<Waiting<R>>,
+}
+
+impl<R: ActorMail + Send + 'static> TaskQueue<R> {
     /// Build a queue bounded at `max` concurrent provider calls. A `max`
     /// of 0 is clamped to 1 — a zero bound would queue forever.
     #[must_use]
     pub fn new(max: usize) -> Self {
-        Self { max: max.max(1), in_flight: 0, pending: VecDeque::new() }
+        Self { max: max.max(1), running: HashMap::new(), waiting: VecDeque::new() }
     }
 
     /// How many provider calls are running right now. Exposed for the
     /// cap's `engine_logs` tracing and for tests.
     #[must_use]
     pub fn in_flight(&self) -> usize {
-        self.in_flight
+        self.running.len()
     }
 
     /// How many requests are waiting for a free in-flight slot.
     #[must_use]
     pub fn pending(&self) -> usize {
-        self.pending.len()
+        self.waiting.len()
     }
 
-    /// Accept a unit of blocking work. Under the bound, dispatch it now
-    /// via [`NativeCtx::dispatch_blocking_with_pending`] (which acquires the
-    /// hold + reply target from `ctx`). Over the bound, hold the reply
-    /// *now* with [`NativeCtx::hold`] and buffer a thunk that attaches the
-    /// work to that held entry via [`NativeCtx::dispatch_blocking_held_with`]
-    /// when a slot later frees, so the deferred dispatch keeps *this* chain
-    /// held and replies to *this* caller (iamacoffeepot/aether#1031).
-    /// Either way the returned receipt names the ledger entry the work's
-    /// completion answers.
+    /// Accept a unit of blocking work in the request's own turn: hold its
+    /// reply, stage its task on its chain, and start the task now when a
+    /// slot is free, or when [`Self::complete`] frees one. The returned
+    /// receipt declares the handler's `-> Pending<R>` row.
     ///
     /// # Panics
-    /// Queuing takes this dispatch's one [`NativeCtx::hold`], so a handler
-    /// that already holds a reply panics when its request queues.
-    pub fn submit<O, F, M, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, work: F) -> Pending<O>
+    /// Takes this dispatch's one [`NativeCtx::hold`], so a handler that
+    /// already holds a reply panics.
+    pub fn submit<F, A, M>(&mut self, ctx: &mut NativeCtx<'_, A, M>, work: F) -> Pending<R>
     where
-        O: ActorMail + Send + 'static,
-        F: FnOnce() -> O + Send + 'static,
-        M: aether_actor::ReplyMode,
+        F: FnOnce() -> R + Send + 'static,
+        M: ReplyMode,
     {
-        if self.in_flight < self.max {
-            self.in_flight += 1;
-            return ctx.dispatch_blocking_with_pending::<O, O, _, _>((), work);
+        let (pending, held) = ctx.hold::<R>();
+        let task = ctx.stage_blocking::<R>();
+        if self.running.len() < self.max {
+            self.running.insert(task.start(ctx, work), held);
+        } else {
+            self.waiting.push_back(Waiting { task, held, work: Box::new(work) });
         }
-
-        // Hold the reply at accept time so the buffered request stays held
-        // from accept -> its eventual re-reply, exactly like the immediate
-        // path's `Finished` is preceded by `HoldOpen`.
-        let (pending, held) = ctx.hold::<O>();
-        self.pending.push_back(Box::new(move |ctx: &mut NativeCtx<'_>| {
-            ctx.dispatch_blocking_held_with(held, (), work);
-        }));
         pending
     }
 
-    /// Call from the cap's `#[handler(task)]` after `resolve`. Frees the
-    /// completed slot, handing it straight to the next buffered task if
-    /// there is one (so `in_flight` is unchanged on a drain) or
-    /// decrementing the count when the queue is empty.
-    // The buffered thunks are stored erased (they only re-dispatch, never
-    // spawn), so a typed caller's ctx erases on the way in — issue 4158.
-    pub fn on_complete<A>(&mut self, ctx: &mut NativeCtx<'_, A, Single>) {
-        match self.pending.pop_front() {
-            Some(next) => next(ctx.erase()),
-            None => self.in_flight = self.in_flight.saturating_sub(1),
+    /// The cap's `#[handler(task)]` body: answer the finished task's request
+    /// with its output, then start the next waiting task in the freed slot.
+    ///
+    /// # Panics
+    /// Panics when `ctx` is not dispatching the completion of a task this
+    /// queue started.
+    pub fn complete<A>(&mut self, ctx: &mut NativeCtx<'_, A>, done: TaskDone<R>) {
+        let held = ctx
+            .in_reply_to()
+            .and_then(|request| self.running.remove(&request))
+            .expect("a TaskQueue completion names a task the queue started");
+        held.answer(ctx, &done.into_output());
+
+        if let Some(Waiting { task, held, work }) = self.waiting.pop_front() {
+            self.running.insert(task.start(ctx, work), held);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::TaskQueue;
-    use crate::actor::native::binding::NativeBinding;
-    use crate::actor::native::ctx::NativeCtx;
-    use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr};
-    use std::sync::Arc;
-
-    use crate::testing::{boot_authority, fresh_substrate};
-
-    /// A `#[repr(C)]` `Pod` reply kind the worker produces and `resolve`
-    /// re-replies. Hand-rolled `Kind` (cast-shape) so the tests don't
-    /// depend on the kind inventory.
-    #[repr(C)]
-    #[derive(
-        Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize,
-    )]
-    struct Answer {
-        value: u64,
-    }
-
-    impl Kind for Answer {
-        const NAME: &'static str = "test.task_queue.answer";
-        const ID: KindId = KindId(0xD15B_0CC2_0000_0001);
-        aether_data::pod_kind_codec!();
-    }
-
-    impl aether_data::ActorMail for Answer {}
-    impl aether_data::CrossesActors for Answer {}
-
-    /// A synthetic chain root for a request — the value the cap handler
-    /// would read from `ctx.in_flight_root()`. Distinct per `cid` so a
-    /// multi-request test keeps each chain's hold accounting separate.
-    fn root_id(cid: u64) -> MailId {
-        MailId { sender: MailboxId(1), correlation_id: cid }
-    }
-
-    fn session_reply_to(corr: u64) -> Source {
-        Source::with_correlation(SourceAddr::Session(aether_data::SessionToken(aether_data::Uuid::nil())), corr)
-    }
-
-    #[test]
-    fn new_clamps_zero_bound_to_one() {
-        let q = TaskQueue::new(0);
-        assert_eq!(q.in_flight(), 0);
-        assert_eq!(q.max, 1, "a zero bound clamps to 1 so the first submit dispatches");
-    }
-
-    /// Under the bound `submit` dispatches immediately (in-flight bumps,
-    /// nothing queues); over the bound it buffers (in-flight pinned at the
-    /// bound, the surplus lands in `pending`).
-    #[test]
-    fn submit_under_bound_dispatches_and_overflow_queues() {
-        let (registry, mailer) = fresh_substrate();
-        // Register a sink for the worker's completion-wake push so it
-        // routes to a real inbox rather than warn-dropping.
-        let actor_mailbox = registry.register_inbox(&boot_authority(), "test.task_queue.actor", Arc::new(|_d| {}));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-
-        let mut q = TaskQueue::new(2);
-        // Three submits against a bound of 2: two dispatch, one queues.
-        for cid in 1..=3 {
-            let mut ctx = NativeCtx::new(&binding, session_reply_to(cid), None, Some(root_id(cid)));
-            q.submit(&mut ctx, move || Answer { value: cid }).__defuse();
-        }
-        assert_eq!(q.in_flight(), 2, "two dispatched under the bound of 2");
-        assert_eq!(q.pending(), 1, "the third request queued");
-
-        // The actor closes with the third request still queued: the ledger
-        // settles its held entry before the queue drops with the actor's
-        // state, as the close tail does.
-        binding.settle_held_for_actor_close();
-    }
-
-    /// The queued request's chain is held from accept (its `hold` at
-    /// `submit` time), and `on_complete` drains it: a buffered request
-    /// dispatches when a slot frees, with `in_flight` unchanged, and its
-    /// worker attaches to the ledger entry its receipt named rather than
-    /// arming a fresh one and stranding the held entry.
-    #[test]
-    fn on_complete_drains_pending_and_holds_queued_chain() {
-        let (registry, mailer) = fresh_substrate();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let actor_mailbox = registry.register_inbox(&boot_authority(), "test.task_queue.actor2", Arc::new(|_d| {}));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-
-        // Bound of 1 so the second submit queues.
-        let mut q = TaskQueue::new(1);
-        let root_a = root_id(1);
-        let root_b = root_id(2);
-        {
-            let mut ctx = NativeCtx::new(&binding, session_reply_to(1), None, Some(root_a));
-            q.submit(&mut ctx, || Answer { value: 1 }).__defuse();
-        }
-        let queued = {
-            let mut ctx = NativeCtx::new(&binding, session_reply_to(2), None, Some(root_b));
-            q.submit(&mut ctx, || Answer { value: 2 })
-        };
-        assert_eq!(q.in_flight(), 1);
-        assert_eq!(q.pending(), 1, "the second request queued");
-        assert_eq!(
-            binding.dispatch_state_of(queued.dispatch_id()),
-            Some("held"),
-            "the queued receipt names a held entry"
-        );
-        assert_eq!(
-            counter.held_open(root_b),
-            1,
-            "the queued request holds its chain from accept (iamacoffeepot/aether#1031)"
-        );
-
-        // First completion: drains the queued request, dispatching it.
-        // `in_flight` stays 1 (one freed, one dispatched), pending empties.
-        {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-            q.on_complete(&mut ctx);
-        }
-        assert_eq!(q.in_flight(), 1, "one freed, one drained -> still 1 in flight");
-        assert_eq!(q.pending(), 0);
-        assert_eq!(
-            binding.dispatch_state_of(queued.dispatch_id()),
-            Some("worker"),
-            "the drained worker answers the entry the queued receipt named"
-        );
-        queued.__defuse();
-        assert_eq!(
-            counter.held_open(root_b),
-            1,
-            "the drained request's chain stays held until its own completion resolves"
-        );
-
-        // Second completion: nothing queued, so the slot frees.
-        {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-            q.on_complete(&mut ctx);
-        }
-        assert_eq!(q.in_flight(), 0, "in-flight returns to 0 once the queue is empty");
     }
 }

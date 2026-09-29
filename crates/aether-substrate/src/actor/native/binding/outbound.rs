@@ -102,6 +102,14 @@ pub struct OutboundSend<'a> {
 }
 
 impl NativeBinding {
+    /// Mint the next id from this actor's correlation counter: the id an
+    /// outbound request is correlated by, and the one a staged task's
+    /// completion is correlated by (ADR-0243 §9), so the two never collide
+    /// in the request-context table. Never [`Source::NO_CORRELATION`].
+    pub(crate) fn mint_correlation(&self) -> u64 {
+        self.correlation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
     /// ADR-0087 / 2b: the buffering counterpart to
     /// [`Self::push_envelope_returning_root_before_push`], used by the per-handler
     /// send surface ([`super::ctx::NativeCtx`](crate::actor::native::ctx::NativeCtx)).
@@ -156,7 +164,7 @@ impl NativeBinding {
         reply_to_override: Option<Source>,
     ) -> MailId {
         let OutboundSend { recipient, kind, bytes, attachments, count, parent_mail, inherited_root } = send;
-        let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
+        let correlation = self.mint_correlation();
         let reply_to = reply_to_override
             .unwrap_or_else(|| Source::with_correlation(SourceAddr::Component(self.self_mailbox()), correlation));
         let mail_id = MailId::new(self.self_mailbox(), correlation);

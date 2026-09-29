@@ -1,11 +1,11 @@
 //! The `aether.bloomery.workspace` runtime half (ADR-0122 split), compiled only under
 //! `feature = "runtime"`.
 //!
-//! Each `Import` and each `Run` runs on a worker thread through ADR-0093's
-//! hold-until-resolve dispatch: the handler submits the whole sequence and
-//! returns at once, the caller's settlement chain stays held until the
-//! `#[handler(task)]` completion re-replies the result, and a request that
-//! cannot start yet queues rather than being dropped. Imports are bounded by
+//! Each `Import` and each `Run` runs on a worker thread as a staged task
+//! (ADR-0243 §9): the handler holds the caller's reply, stages the whole
+//! sequence, and returns at once, the caller's settlement chain stays held
+//! until the `#[handler(task)]` completion answers the result, and a request
+//! that cannot start yet queues rather than being dropped. Imports are bounded by
 //! a cap-level [`TaskQueue`] counting requests; runs are provisioned
 //! (ADR-0237 decision 9) and admitted in FIFO order against the host budget
 //! by [`provision::RunQueue`]. No dispatcher thread ever blocks on the
@@ -34,7 +34,7 @@ pub use aether_substrate::chassis::error::BootError;
 use crate::{Import, ImportResult, Run, RunResult, WorkspaceCapability, WorkspaceConfig};
 use engine::{Endpoint, Engine};
 use import::Importer;
-use provision::{Admitted, Amounts, Budget, CpuSet, Estimates, Headroom, RunQueue};
+use provision::{Amounts, Budget, CpuSet, Estimates, Headroom, RunQueue};
 use run::{Ran, Runner};
 
 /// Composer-supplied construction params (ADR-0156 §3): the live artifact
@@ -52,7 +52,7 @@ pub struct WorkspaceParams {
 /// once, and the run queue that provisions and admits every run.
 pub struct WorkspaceCapabilityState {
     importer: Importer,
-    imports: TaskQueue,
+    imports: TaskQueue<ImportResult>,
     runs: RunQueue,
 }
 
@@ -150,12 +150,11 @@ impl NativeActor for WorkspaceCapability {
         state.imports.submit(ctx, move || importer.answer(&mail.image))
     }
 
-    /// ADR-0093 completion: re-reply the worker's result to the original
-    /// caller, then free the slot for the next queued request.
+    /// Completion of an import: the queue answers the original caller with
+    /// the worker's result, then starts the next queued import.
     #[handler(task)]
     fn on_import_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<ImportResult>) {
-        done.resolve(ctx);
-        state.imports.on_complete(ctx);
+        state.imports.complete(ctx, done);
     }
 
     /// Run steps over a stored tree in a stored environment.
@@ -179,11 +178,11 @@ impl NativeActor for WorkspaceCapability {
         state.runs.submit(ctx, mail)
     }
 
-    /// ADR-0093 completion: learn from the run, release its budget, re-reply
-    /// its result to the original caller, then admit the runs waiting at the
-    /// front while they fit.
+    /// Completion of a run: learn from it, release its budget, answer its
+    /// caller with its result, then admit the runs waiting at the front
+    /// while they fit.
     #[handler(task)]
-    fn on_run_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<Ran, Admitted>) {
+    fn on_run_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<Ran>) {
         state.runs.complete(ctx, done);
     }
 }

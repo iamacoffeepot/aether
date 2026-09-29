@@ -26,4 +26,4 @@ mod tests;
 pub use budget::Budget;
 pub use cpuset::CpuSet;
 pub use estimate::{Amounts, Estimates, Headroom};
-pub use queue::{Admitted, RunQueue};
+pub use queue::RunQueue;
