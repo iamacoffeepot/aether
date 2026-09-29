@@ -12,10 +12,8 @@
 //! hard panic there.
 
 use std::fs;
-use std::thread;
-use std::time::{Duration, Instant};
 
-use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced};
+use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId, LoadName, ReplyContract};
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -27,8 +25,6 @@ use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, InlineEcho, Inli
 
 const BUNDLE: &str = "aether_test_fixtures_bundle";
 const EXTENDED_EXPORT: &str = "test.contract.extended";
-
-type Published = (Vec<(KindId, ReplyContract)>, bool);
 
 /// `rows` sorted by kind, the order a published contract holds them in.
 fn sorted(mut rows: Vec<(KindId, ReplyContract)>) -> Vec<(KindId, ReplyContract)> {
@@ -44,38 +40,20 @@ fn load_request(wasm: Vec<u8>) -> LoadComponent {
     LoadComponent { wasm, name: None, config: Vec::new(), export: None }
 }
 
-/// Poll `actor`'s published contract until it equals `expected`, to a bounded
-/// deadline. A republish is staged at the trampoline's turn flush and applied
-/// by the registry owner with no chain the reply's settlement covers, so the
-/// reply does not order it.
-fn await_published(harness: &SubstrateHarness, actor: ErasedActorRef, expected: &Published) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let published = harness.published_contract(actor);
-        if published.as_ref() == Some(expected) {
-            return;
-        }
-        assert!(Instant::now() < deadline, "the published contract never became {expected:?}; last {published:?}");
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// The `C` inline child keyed `name` beneath `parent`, once its alias is live.
-/// The alias is a registry-owner batch the parent's `wire` stages, which the
-/// load reply does not order, so poll to a bounded deadline.
+/// The `C` inline child keyed `name` beneath `parent`, once its alias is
+/// live. The parent's `wire` stages its alias batch while the activation
+/// hold is set; the owner's catch-up submits that batch before it promotes
+/// the spawn, so the caller's already-returned load reply proves the batch
+/// is queued, and the barrier proves the owner has applied it.
 fn await_child<P, C>(harness: &SubstrateHarness, parent: ActorRef<P>, name: &str) -> ActorRef<C>
 where
     P: Addressable,
     C: ChildOf<P> + Instanced,
 {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match harness.child::<P, C>(&parent, LoadName::new(name).expect("a valid instance key")) {
-            Ok(child) => return child,
-            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Err(error) => panic!("inline child {name} never went live within 5s: {error}"),
-        }
-    }
+    harness.await_registry_applied();
+    harness
+        .child::<P, C>(&parent, LoadName::new(name).expect("a valid instance key"))
+        .unwrap_or_else(|error| panic!("inline child {name} must be live: {error}"))
 }
 
 /// A loaded trampoline publishes its guest's rows and fallback flag, and
@@ -110,8 +88,10 @@ fn a_loaded_component_publishes_its_guest_contract_through_replace() {
     if let ReplaceResult::Err { error } = replaced.reply::<ReplaceResult>("replace").expect("decode ReplaceResult") {
         panic!("a replace that only adds a row must succeed: {error}");
     }
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(&victim, &Bump))]).expect("bump the replaced actor");
+    harness.await_registry_applied();
     let extended = (sorted([base, vec![(InlineProbe::ID, ReplyContract::None)]].concat()), false);
-    await_published(&harness, victim.erase(), &extended);
+    assert_eq!(harness.published_contract(victim.erase()), Some(extended));
 }
 
 /// An inline child's alias publishes its own type's rows: an exported child

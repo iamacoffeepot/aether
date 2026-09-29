@@ -11,8 +11,6 @@
 //! a hard panic there.
 
 use std::fs;
-use std::thread;
-use std::time::{Duration, Instant};
 
 use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
 use aether_component::ComponentHostCapability;
@@ -42,30 +40,25 @@ fn key(text: &str) -> LoadName {
 
 /// The `C` inline child keyed `key` beneath `parent`, once its alias is live.
 ///
-/// An awaited `LoadResult::Ok` is not a barrier for the child becoming
-/// addressable (iamacoffeepot/aether#4186). The load reply rides the
-/// trampoline birth's own `SpawnOutcome`, while the child's alias is a
-/// *second* registry-owner batch the trampoline stages from its `wire`
-/// hook — and `wire` runs on a ctx with no root, so that batch
-/// holds no chain and the load's settlement never covered it. ADR-0165's
-/// activation suffix submits the batch and deliberately does not wait for
-/// the owner to apply it, so nothing orders the alias against the reply.
-/// There is no ordering to assert here, only a child to observe going live:
-/// poll to a bounded deadline so the test measures the outcome rather than
-/// the runner. A child that never appears still fails, just after 5s.
+/// An awaited `LoadResult::Ok` is not itself the ordering proof
+/// (iamacoffeepot/aether#4186): the load reply rides the trampoline birth's
+/// own `SpawnOutcome`, while the child's alias is a *second* registry-owner
+/// batch the trampoline stages from its `wire` hook. What does order them is
+/// the owner's one FIFO queue: ADR-0165's activation suffix submits the
+/// alias batch while the activation hold is set, and the owner's catch-up
+/// releases the outbound — submitting that batch — before it promotes the
+/// spawn, so the load reply the caller already holds proves the batch is
+/// queued ahead of anything submitted after. The barrier proves the owner
+/// has applied it.
 fn await_child<P, C>(harness: &SubstrateHarness, parent: ActorRef<P>, name: &str) -> ActorRef<C>
 where
     P: Addressable,
     C: ChildOf<P> + Instanced,
 {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match harness.child::<P, C>(&parent, key(name)) {
-            Ok(child) => return child,
-            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Err(error) => panic!("inline child {name} never went live within 5s: {error}"),
-        }
-    }
+    harness.await_registry_applied();
+    harness
+        .child::<P, C>(&parent, key(name))
+        .unwrap_or_else(|error| panic!("inline child {name} must be live: {error}"))
 }
 
 /// ADR-0114 §5: an inline child carries its `type State` across a

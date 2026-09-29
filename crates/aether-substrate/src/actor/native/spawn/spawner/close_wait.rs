@@ -7,7 +7,6 @@ use crate::chassis::frame_loop;
 use crate::chassis::settlement::{TerminalDisposition, await_internal_signal};
 use crate::config::SettlementConfig;
 use crate::mail::MailboxId;
-use crate::mail::registry::effect::{EffectBatch, RegistryEffectError};
 
 use super::Spawner;
 
@@ -19,7 +18,7 @@ impl Spawner {
     /// Two existing signals compose the proof. The slot's close-done
     /// sender fires after `finalize_registry` has queued the
     /// `DropMailbox` on the owner (an already-closed slot fires it at
-    /// once through `set_close_done_tx`'s fast path). An empty batch
+    /// once through `set_close_done_tx`'s fast path). [`Self::await_registry_applied`]
     /// submitted after that lands behind the drop in the owner's one
     /// FIFO queue, and the owner applies and publishes a whole drain
     /// before completing any batch in it, so the barrier's completion
@@ -50,13 +49,6 @@ impl Spawner {
         slot.set_close_done_tx(tx);
         let _ = await_internal_signal(&rx, gate, frame_loop::DRAIN_BUDGET, cap, TerminalDisposition::Panic, None);
 
-        let Some(barrier) = self.registry.submit(EffectBatch::new(Vec::new())) else {
-            return;
-        };
-        match barrier.wait_timeout(cap) {
-            Ok(Ok(_) | Err(RegistryEffectError::OwnerClosed)) => {}
-            Ok(Err(error)) => panic!("{gate}: the registry owner refused the empty barrier batch: {error}"),
-            Err(error) => panic!("{gate}: the registry owner did not complete the barrier within {cap:?}: {error}"),
-        }
+        self.await_registry_applied(gate);
     }
 }

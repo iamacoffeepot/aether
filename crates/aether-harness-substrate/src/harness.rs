@@ -620,6 +620,21 @@ impl SubstrateHarness {
         Self::builder().size(width, height).build()
     }
 
+    /// Block until the registry owner has applied and published every
+    /// batch submitted before this call — see
+    /// [`PassiveChassis::await_registry_applied`] for the FIFO argument
+    /// and its precondition: this proves only an effect the caller already
+    /// knows, through a real ordering signal, was submitted before the
+    /// call.
+    ///
+    /// # Panics
+    /// Panics when the registry owner refuses the barrier batch or does
+    /// not complete it within the settlement cap.
+    #[cfg(feature = "test-support")]
+    pub fn await_registry_applied(&self) {
+        self.passive.await_registry_applied();
+    }
+
     fn start_inner(builder: SubstrateHarnessBuilder) -> Result<Self, SubstrateHarnessError> {
         let SubstrateHarnessBuilder {
             width,
