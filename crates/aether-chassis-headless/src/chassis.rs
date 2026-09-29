@@ -113,9 +113,8 @@ impl BootableChassis for HeadlessChassis {
     /// Compose the headless capability chain — the single claim/build path
     /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
     /// so the manifest roster can never drift from what boots. Composes the
-    /// common caps plus the headless render / audio / clipboard /
-    /// substrate-harness / lifecycle caps and the always-claim RPC + HTTP servers
-    /// (ADR-0155 §3). The RPC server is composed held: `boot_standard` binds it
+    /// common caps plus the tick-only lifecycle cap and the always-claim RPC +
+    /// HTTP servers (ADR-0155 §3); it composes nothing it cannot serve. The RPC server is composed held: `boot_standard` binds it
     /// only after every boot component has loaded (issue #6413). Returns the
     /// composed builder before the driver is installed:
     /// [`Chassis::build`] adds the timer driver and starts, while the describe /

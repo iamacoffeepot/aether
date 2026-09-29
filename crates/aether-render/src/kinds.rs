@@ -991,8 +991,9 @@ pub struct ProgramPass {
 ///
 /// Reply: `ProgramRegisterResult`; `program_id` is session-scoped,
 /// assigned like texture and instrument ids. The headless chassis
-/// composes no render actor, and a register before the render GPU boots (desktop: before the first window
-/// attaches) replies `Err` rather than parking.
+/// composes no render actor, and a register before the render GPU boots
+/// (desktop: before the first window attaches) replies `Err` rather than
+/// parking.
 #[aether_data::kind(name = "aether.render.program.register")]
 pub struct ProgramRegister {
     pub wgsl: String,
