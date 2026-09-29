@@ -15,6 +15,7 @@ mod tests {
     use aether_harness_substrate::test_helpers::require_wasm;
     use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     use aether_kinds::{LoadComponent, LogTailResult};
+    use aether_test_fixtures_bundle::QuietProbe;
     use aether_test_fixtures_kinds::LogMarker;
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared across
@@ -35,21 +36,16 @@ mod tests {
 
         let wasm = fs::read(&wasm_path).expect("read probe wasm");
         let (probe, _) = harness
-            .load_any(&LoadComponent {
-                wasm,
-                name: None,
-                config: Vec::new(),
-                export: Some("test.quiet_probe".to_owned()),
-            })
+            .load::<QuietProbe>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
             .expect("load probe");
 
-        harness.execute(vec![("marker", HarnessOp::send_and_settle(probe, &LogMarker))]).expect("send LogMarker");
+        harness.execute(vec![("marker", HarnessOp::send_and_settle(&probe, &LogMarker))]).expect("send LogMarker");
 
         // The guest's log host fn pushes into the actor's log ring on the
         // dispatcher thread, inside the handler, and `send_and_settle`
         // returns only once the marker's subtree settled — so one read sees
         // the entry.
-        let reply = harness.log_tail(probe, None, None);
+        let reply = harness.log_tail(&probe, None, None);
         let LogTailResult::Ok { ref entries, next_since, .. } = reply else {
             panic!("LogTail failed: {reply:?}");
         };
@@ -63,7 +59,7 @@ mod tests {
 
         // Walk the cursor: a re-query past `next_since` must not re-yield
         // the entry we already consumed.
-        match harness.log_tail(probe, Some(next_since), None) {
+        match harness.log_tail(&probe, Some(next_since), None) {
             LogTailResult::Ok { entries, .. } => assert!(
                 entries.iter().all(|e| e.sequence != entry.sequence),
                 "the `since` cursor should not re-yield the already-seen entry \

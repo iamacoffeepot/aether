@@ -22,10 +22,18 @@ use aether_window::{
 /// Local twin of the runtime's crate-private `RetireWindow`
 /// (`aether.window.internal.retire`) — the manager-private request a window
 /// child retires itself on. Same `#[kind(name)]` and shape, so the `KindId`
-/// and wire bytes match; the child is addressed erased because the twin is not
-/// the kind its handler names.
+/// and wire bytes match; the child is cast against the test-local
+/// `WindowRetire` protocol below, since the twin is not the kind its handler
+/// names.
 #[aether_data::kind(name = "aether.window.internal.retire", copy, eq)]
 struct RetireWindow;
+
+/// The departing window child's retire row, as a test names a fixture it
+/// cannot type with the runtime's crate-private handler.
+#[aether_actor::protocol]
+trait WindowRetire {
+    fn retire(mail: RetireWindow);
+}
 
 fn spec(name: &str, title: &str) -> WindowSpec {
     WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
@@ -273,9 +281,10 @@ fn unexpected_child_departure_closes_only_its_window() {
     let first = harness
         .child::<WindowCapability, WindowInstance>(&window, window_key("first"))
         .expect("the first window is live");
+    let first = harness.cast::<WindowRetire>(first.erase()).expect("the departing window answers its retire row");
     harness
         .execute(vec![
-            ("depart-first", HarnessOp::send_and_settle(first.erase(), &RetireWindow)),
+            ("depart-first", HarnessOp::send_and_settle(&first, &RetireWindow)),
             ("remaining", HarnessOp::send_and_await_reply(&window, &ListWindows)),
         ])
         .expect("unexpected child departure settles");

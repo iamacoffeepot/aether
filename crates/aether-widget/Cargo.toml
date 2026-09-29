@@ -77,18 +77,13 @@ aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture
 # new hash through `aether_substrate::testing::successor_wasm`.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # The widget/editor scenarios load the `test.editor_region_probe` /
-# `test.ui_widget` fixture actors: the typed request/reply kinds come from the
-# fixtures kinds rlib, and the wasm-body dependency below keeps `xtask affected`
+# `test.ui_widget` fixture actors: the tests import their actor types (typed
+# harness loads and sends) and the typed request/reply kinds come from the
+# fixtures kinds rlib; the wasm-body dependency also keeps `xtask affected`
 # selecting these tests (this crate executes that wasm at test time) when the
 # fixture bundle changes — cargo's graph cannot see a runtime wasm load.
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
-
-# `aether-test-fixtures-bundle` is a runtime wasm coupling (loaded by stem at
-# test time), never a source-level import, so the source-only scan cannot see
-# it.
-[package.metadata.cargo-machete]
-ignored = ["aether-test-fixtures-bundle"]
 
 [lints]
 workspace = true
