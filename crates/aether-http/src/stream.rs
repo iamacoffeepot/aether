@@ -17,7 +17,8 @@
 //! counterparty is still whoever dispatched, so a mock or a middleware that
 //! covers the sink stands in for the cap. A handle is constructed once (from
 //! the first credit grant, or the request-stream open), stored on the
-//! handler, and used from later handlers to emit the stream. Every send is a detached chain root at the stored counterparty
+//! handler, and used from later handlers to emit the stream. Every send is a
+//! detached chain root at the stored counterparty
 //! ([`MailSender::send_detached_to`]): the data-phase mails are per-message
 //! causal chains (ADR-0128 / ADR-0132), so a chunk is attributed to its own
 //! root rather than to whatever handler happened to emit it, and a handler

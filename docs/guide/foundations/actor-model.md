@@ -475,8 +475,8 @@ means carrying an `M: ReplyMode` parameter it doesn't read. `ctx.sends()` hands
 out `Sends<'_, A>`, typed by the handler's actor — the outbound verbs that take
 a proof (`send_to`, plus `send_detached_to` through `MailSender`, both taking a
 typed target: an `ActorRef<R>` or a `ProtocolRef<P>` such as a sender cast with
-`ctx.cast`) with the marker dropped — so the helper takes `&mut Sends<'_, A>` and every handler
-class can call it. The view sends only through a reference it is handed: the
+`ctx.cast`) with the marker dropped — so the helper takes
+`&mut Sends<'_, A>` and every handler class can call it. The view sends only through a reference it is handed: the
 actor mints one with `ctx.actor_ref::<RenderCapability>()` in `wire` and keeps
 it in a field, because minting it in the same call as `ctx.sends()` would not
 borrow-check. `Sends<'_>` alone names the erased view:

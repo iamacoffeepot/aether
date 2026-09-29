@@ -123,8 +123,8 @@ impl StreamProgress {
     /// stream's entry on its first grant (ADR-0133 — the counterparty that
     /// dispatched it, cast to the `ResponseSink` it covers, so chunks flow
     /// back to whoever paced the stream rather than a hard-coded cap
-    /// singleton), emit up to `credit.credit` more
-    /// chunks, and terminate once all [`STREAM_CHUNK_COUNT`] have gone out.
+    /// singleton), emit up to `credit.credit` more chunks, and terminate once
+    /// all [`STREAM_CHUNK_COUNT`] have gone out.
     ///
     /// A grant arriving after its own stream's terminator is ignored:
     /// spending it would overrun the window and the cap would tear the
@@ -297,9 +297,8 @@ impl WasmActor for WebSocketHandler {
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
         // ADR-0133: capture the connection handle from the accept-time
         // credit grant — its counterparty is whoever owns the socket, cast
-        // to the `WebSocketSink` it covers. A
-        // repeat grant for a known stream_id is a no-op: this connection
-        // has already been greeted.
+        // to the `WebSocketSink` it covers. A repeat grant for a known
+        // stream_id is a no-op: this connection has already been greeted.
         if self.connections.contains_key(&credit.stream_id) {
             return;
         }

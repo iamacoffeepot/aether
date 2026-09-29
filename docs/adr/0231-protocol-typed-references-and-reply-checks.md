@@ -655,8 +655,8 @@ and reads the same published rows the contextual decode reads.
 
 It is a ctx verb over a sealed `CastTarget`, beside `resolve`, on a native
 ctx and on a guest ctx, and the rule each target admits is a method of that
-sealed trait. It is not a method
-on `ErasedActorRef` over a public `ProveCtx` trait: any crate could implement
+sealed trait. It is not a method on `ErasedActorRef` over a public
+`ProveCtx` trait: any crate could implement
 such a trait and hand the mint rows of its own choosing, so the cast reads
 the registry's published rows through the ctx and nothing else (R-0005).
 Two arms are built: `Subscriber<K>`, and the protocol arm, which every

@@ -29,6 +29,7 @@
 
 use core::fmt;
 use std::error::Error;
+use std::sync::Arc;
 
 use aether_actor::{
     __mint_actor_ref, __mint_erased_actor_ref, __mint_protocol_ref, ActorRef, CastTarget, ErasedActorRef, Instanced,
@@ -36,6 +37,7 @@ use aether_actor::{
 };
 use aether_data::{LoadName, MailboxCategory, ReplyContract};
 
+use crate::mail::registry::RouteContract;
 use crate::mail::{KindId, MailboxId};
 
 use super::resolve::{ResolvedRoute, resolve_route};
@@ -339,8 +341,8 @@ impl Registry {
     /// `NativeBinding::published_rows_at`, the read behind the wasm guest's
     /// `published_rows_p32` host fn, whose guest applies the same
     /// `CastTarget::admits` rule and mints its own reference.
-    pub(crate) fn published_rows_at(&self, position: MailboxId) -> Option<Vec<(KindId, ReplyContract)>> {
-        self.published_contract(position).map(|contract| contract.into_rows().to_vec())
+    pub(crate) fn published_rows_at(&self, position: MailboxId) -> Option<Arc<[(KindId, ReplyContract)]>> {
+        self.published_contract(position).map(RouteContract::into_rows)
     }
 
     /// Type an erased reference the caller already holds as the protocol `T`

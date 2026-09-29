@@ -712,7 +712,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "aether",
         "published_rows_p32",
         |mut caller: Caller<'_, ComponentCtx>, position: u64| -> wasmtime::Result<u64> {
-            let answer = __PublishedRows { rows: caller.data().binding.published_rows_at(MailboxId(position)) };
+            let rows = caller.data().binding.published_rows_at(MailboxId(position)).map(|rows| rows.to_vec());
+            let answer = __PublishedRows { rows };
             let bytes = wire::to_vec(&answer)
                 .map_err(|error| wasmtime::Error::msg(format!("published_rows: encode failed: {error}")))?;
             deliver_bytes_to_guest(&mut caller, &bytes)

@@ -308,7 +308,7 @@ impl NativeBinding {
     /// `Registry::published_rows_at` answers them: the read behind the wasm
     /// guest's `WasmCtx::cast`, through the `published_rows_p32` host fn.
     #[cfg(feature = "wasm")]
-    pub(crate) fn published_rows_at(&self, position: MailboxId) -> Option<Vec<(KindId, ReplyContract)>> {
+    pub(crate) fn published_rows_at(&self, position: MailboxId) -> Option<Arc<[(KindId, ReplyContract)]>> {
         self.mailer.registry().published_rows_at(position)
     }
 
