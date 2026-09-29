@@ -2,31 +2,68 @@
 //! recovers the typed context the request stored, exactly once, and a `Held`
 //! the context carries comes back live (ADR-0243 §4).
 
-use std::sync::Arc;
-
 use aether_data::wire::{self, HeldClaim, HeldLedger, LedgerEncoder};
-use aether_data::{Kind, KindId, MailboxId, RequestId};
+use aether_data::{Kind, KindId};
 
-use crate::actor::native::NativeCtx;
-use crate::actor::native::binding::NativeBinding;
-use crate::mail::{Source, SourceAddr};
-use crate::testing::bare_substrate;
+use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use crate::chassis::error::BootError;
+use crate::testing::{PumpedDriver, bare_substrate, boot_test_chassis_with};
 
 use super::support::{
-    Bouncer, HeldContext, HeldRig, HoldReq, LedgerRead, NativeRequestContext, ParkReq, Poke, TestReply,
+    Bouncer, HeldContext, HeldRig, HoldReq, LedgerRead, NativeRequestContext, ParkReq, Poke, Poked, TestReply,
 };
 
+/// Asks a [`Recaller`] to send [`Bouncer`] a [`Poke`] that stores a context.
+#[aether_data::kind(name = "test.native_ctx.recall", copy)]
+struct Recall {
+    value: u32,
+}
+
+/// A pumped root that stores a context with each request it sends and takes
+/// it twice from the reply's turn.
+#[derive(Default)]
+struct Recaller {
+    /// What the reply turn's first and second takes returned.
+    taken: Option<(Option<NativeRequestContext>, Option<NativeRequestContext>)>,
+}
+
+#[aether_actor::actor(singleton, root, depends(Bouncer))]
+impl NativeActor for Recaller {
+    const NAMESPACE: &'static str = "test.native_ctx.recaller";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self::default())
+    }
+
+    #[handler::single]
+    fn on_recall(&mut self, ctx: &mut NativeCtx<'_>, recall: Recall) {
+        let _ = self;
+        let _request = ctx.send_with_context::<Bouncer>(&Poke, NativeRequestContext { value: recall.value });
+    }
+
+    #[handler::single]
+    fn on_poked(&mut self, ctx: &mut NativeCtx<'_>, _poked: Poked) {
+        self.taken = Some((ctx.take_context::<NativeRequestContext>(), ctx.take_context::<NativeRequestContext>()));
+    }
+}
+
+/// Catches a take keyed by anything but the reply's correlation, or one that
+/// leaves the context behind: the reply turn recovers the stored context,
+/// and a second take finds nothing.
 #[test]
 fn native_ctx_take_context_consumes_stored_reply_context() {
-    let (_registry, mailer) = bare_substrate();
-    let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF10)));
-    binding.store_request_context(RequestId(77), NativeRequestContext { value: 9 });
+    let (registry, mailer) = bare_substrate();
+    let mut driver =
+        PumpedDriver::<Recaller>::boot(boot_test_chassis_with::<Bouncer>(&registry, &mailer, (), ()), (), ());
+    let recaller = driver.chassis().actor_ref::<Recaller>();
 
-    let reply_source = Source::with_correlation(SourceAddr::None, 77);
-    let mut ctx = NativeCtx::new(&binding, reply_source, None, None);
+    driver.send_and_settle(recaller, &Recall { value: 9 }, None);
 
-    assert_eq!(ctx.take_context::<NativeRequestContext>(), Some(NativeRequestContext { value: 9 }));
-    assert_eq!(ctx.take_context::<NativeRequestContext>(), None);
+    assert_eq!(
+        driver.read_state(|recaller| recaller.taken.clone()).flatten(),
+        Some((Some(NativeRequestContext { value: 9 }), None)),
+    );
 }
 
 /// Catches a `Held` drop that fires when its context parks, and a claim that

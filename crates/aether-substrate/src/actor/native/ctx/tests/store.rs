@@ -1,27 +1,21 @@
 //! `check_in` lands in the engine's own blob store.
 
-use std::sync::Arc;
-
-use aether_data::MailboxId;
-
-use crate::actor::native::NativeCtx;
-use crate::actor::native::binding::NativeBinding;
-use crate::mail::Source;
-use crate::testing::bare_substrate;
+use super::support::ReaderRig;
 
 /// Catches the verb reaching some store other than the engine's: the bytes
-/// must count against the binding mailer's store while the `Blob` lives.
+/// must count against the actor's mailer's store while the `Blob` lives.
 #[test]
 fn check_in_holds_bytes_in_the_mailers_store_until_the_blob_drops() {
-    let (_registry, mailer) = bare_substrate();
-    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00B1_0B00)));
-    let ctx: NativeCtx<'_> = NativeCtx::new(&binding, Source::NONE, None, None);
+    let mut rig = ReaderRig::boot();
 
-    let blob = ctx.check_in(b"closure member".as_slice().into());
+    let blob = rig
+        .driver
+        .host_turn(|_reader, ctx| ctx.check_in(b"closure member".as_slice().into()))
+        .expect("the reader is live");
 
-    assert_eq!(mailer.blob_store().resident_bytes(), b"closure member".len());
+    assert_eq!(rig.mailer.blob_store().resident_bytes(), b"closure member".len());
 
     drop(blob);
 
-    assert_eq!(mailer.blob_store().resident_bytes(), 0);
+    assert_eq!(rig.mailer.blob_store().resident_bytes(), 0);
 }
