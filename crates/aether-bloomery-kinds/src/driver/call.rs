@@ -1,5 +1,7 @@
 //! Native call mail: ask the driver to run one program from outside the journal.
 
+use aether_actor::HeldReply;
+
 use crate::{Detail, Digest, Fault, Head, NativeOrigin, OpaqueBytes, ProgramName, Transition};
 
 /// Ask the driver to run program `name` from the bundle `program` resolves to, over `input`.
@@ -46,6 +48,12 @@ pub enum CallOutcome {
     },
 }
 
+impl HeldReply for CallOutcome {
+    fn unanswered() -> Self {
+        Self::Refused { key: 0, reason: CallRefusal::Closed }
+    }
+}
+
 /// Why a [`Call`] was refused before anything was recorded.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Schema)]
 pub enum CallRefusal {
@@ -55,4 +63,6 @@ pub enum CallRefusal {
     KeyReused,
     /// The journal backend refused the `Requested` append.
     Journal { reason: Detail },
+    /// The driver closed before the call was answered (ADR-0243 §1).
+    Closed,
 }

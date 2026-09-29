@@ -6,7 +6,7 @@
 //! kinds. Kind ids are `fnv1a_64(name, schema)`, so moving declarations
 //! does not change any id or alter wire compatibility.
 
-use aether_actor::ProtocolPath;
+use aether_actor::{HeldReply, ProtocolPath};
 use serde::{Deserialize, Serialize};
 
 /// What a tcp session delivers to its consumer: every reassembled frame and
@@ -113,6 +113,12 @@ pub enum ConnectResult {
     Err { addr: String, error: String },
 }
 
+impl HeldReply for ConnectResult {
+    fn unanswered() -> Self {
+        Self::Err { addr: String::new(), error: "tcp capability closed before the connect completed".into() }
+    }
+}
+
 /// Reply to `BindListener`. `Ok` carries the resolved listener
 /// name (the deterministic subname under
 /// `aether.tcp.listener:<name>`) and the actually-bound local port
@@ -126,6 +132,12 @@ pub enum ConnectResult {
 pub enum BindListenerResult {
     Ok { listener_name: String, local_port: u16 },
     Err { addr: String, error: String },
+}
+
+impl HeldReply for BindListenerResult {
+    fn unanswered() -> Self {
+        Self::Err { addr: String::new(), error: "tcp capability closed before the bind completed".into() }
+    }
 }
 
 /// `aether.tcp.unbind_listener` — request the singleton
@@ -150,6 +162,12 @@ pub struct UnbindListener {
 pub enum UnbindListenerResult {
     Ok { listener_name: String },
     Err { listener_name: String, error: String },
+}
+
+impl HeldReply for UnbindListenerResult {
+    fn unanswered() -> Self {
+        Self::Err { listener_name: String::new(), error: "tcp capability closed before the unbind completed".into() }
+    }
 }
 
 /// `aether.tcp.list_listeners` — enumerate every live listener

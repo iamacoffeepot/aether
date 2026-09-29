@@ -7,7 +7,7 @@
 //! typed-path vocabulary (all three unconditional dependencies), so the
 //! `default-features = false` wasm consumers keep compiling.
 
-use aether_actor::{ProtocolPath, Undeclared};
+use aether_actor::{HeldReply, ProtocolPath, Undeclared};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
@@ -86,7 +86,8 @@ pub struct HttpHeader {
 /// surface to the operator. `InvalidUrl` carries the offending
 /// URL text; `AdapterError` is the catchall preserving backend-
 /// specific detail (DNS failure, TLS handshake, connection
-/// refused, etc.) as free-form text.
+/// refused, etc.) as free-form text. `Closed` is the answer a caller
+/// receives when the capability closes before its fetch answered.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum HttpError {
     InvalidUrl(String),
@@ -95,6 +96,8 @@ pub enum HttpError {
     AllowlistDenied,
     Disabled,
     AdapterError(String),
+    /// The capability closed before the fetch answered (ADR-0243 §1).
+    Closed,
 }
 
 /// `aether.http.fetch` — request the substrate perform an HTTP
@@ -147,6 +150,12 @@ pub enum FetchResult {
         url: String,
         error: HttpError,
     },
+}
+
+impl HeldReply for FetchResult {
+    fn unanswered() -> Self {
+        Self::Err { request_id: 0, url: String::new(), error: HttpError::Closed }
+    }
 }
 
 // ADR-0108 HTTP server kinds. Two public kinds shared by the server

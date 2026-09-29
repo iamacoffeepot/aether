@@ -38,8 +38,8 @@
 //! relayed [`ApiCall`] each hold a typed reply (ADR-0243), are fed to the
 //! core, and keep the held ticket keyed by the returned [`CallerId`]; each
 //! reply kind recovers its ticket from the request context and feeds the
-//! matching core continuation. Actor close settles every held ticket before
-//! the state drops.
+//! matching core continuation. Actor close answers every held ticket with its
+//! reply kind's `unanswered()` before the state drops (ADR-0243 §1).
 //!
 //! A program API call relays the same way as a fetch (ADR-0240 D6): the
 //! invocation sends [`ApiCall`] to its bundle root, the root relays it here,

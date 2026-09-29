@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
-use aether_actor::{Addressable, HandlesKind, Manual};
+use aether_actor::{Addressable, HandlesKind, HeldReply, Manual};
 use aether_data::{Kind, KindId};
 
 use crate::actor::native::{Dispatch, Held, NativeActor, NativeCtx, NativeInitCtx};
@@ -103,6 +103,14 @@ pub(super) struct NativeRequestContext {
 #[aether_data::kind(name = "test.native_held_reply", copy, partial_eq)]
 pub(super) struct TestReply {
     pub(super) value: u32,
+}
+
+// A sentinel: no ctx test closes the actor holding a `TestReply` and reads
+// the answer.
+impl HeldReply for TestReply {
+    fn unanswered() -> Self {
+        Self { value: u32::MAX }
+    }
 }
 
 /// A request context carrying a held reply (ADR-0243 §4), which parks in the

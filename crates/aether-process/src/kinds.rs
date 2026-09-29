@@ -12,6 +12,7 @@
 //! variants). `run` is request/reply and
 //! the reply always arrives.
 
+use aether_actor::HeldReply;
 use serde::{Deserialize, Serialize};
 
 /// One explicit child-environment entry. The child's environment is
@@ -47,6 +48,8 @@ pub enum ProcessError {
     /// The OS returned an error while waiting on the child. Carries the
     /// OS detail.
     WaitFailed { detail: String },
+    /// The capability closed before the run answered (ADR-0243 §1).
+    Closed,
 }
 
 /// `aether.process.run` — run a permitted binary to completion and
@@ -107,4 +110,10 @@ pub enum RunResult {
     Err {
         error: ProcessError,
     },
+}
+
+impl HeldReply for RunResult {
+    fn unanswered() -> Self {
+        Self::Err { error: ProcessError::Closed }
+    }
 }

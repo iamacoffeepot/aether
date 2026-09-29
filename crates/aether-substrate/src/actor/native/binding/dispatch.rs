@@ -7,8 +7,9 @@ use std::sync::{Arc, Weak};
 
 use super::NativeBinding;
 use super::offload::blocking::{
-    CompletionWake, DeferredCompletion, DispatchId, FillOutcome, TaskCompletionWake, TaskDone,
+    CompletionWake, DeferredCompletion, DispatchId, FillOutcome, OwedAtClose, TaskCompletionWake, TaskDone,
 };
+use super::offload::held::AnswerUnanswered;
 use crate::mail::{KindId, Mail, Source, SourceAddr};
 use crate::runtime::trace::SettlementHold;
 use aether_data::{Kind, RequestId, wire};
@@ -165,8 +166,8 @@ impl NativeBinding {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_try_take(id)
     }
 
-    /// Arm a ledger entry no worker answers (ADR-0243 §1) and return its
-    /// [`DispatchId`] with the weak
+    /// Arm a ledger entry no worker answers (ADR-0243 §1), with the `answer`
+    /// actor close sends for it, and return its [`DispatchId`] with the weak
     /// link its [`Held`](super::offload::held::Held) ticket keeps back to
     /// this ledger.
     ///
@@ -177,12 +178,13 @@ impl NativeBinding {
         self: &Arc<Self>,
         hold: Option<SettlementHold>,
         reply_to: Source,
+        answer: AnswerUnanswered,
     ) -> (DispatchId, Weak<Self>) {
         let id = self
             .inflight
             .lock()
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_insert_held(hold, reply_to);
+            .dispatch_insert_held(hold, reply_to, answer);
         (id, Arc::downgrade(self))
     }
 
@@ -218,23 +220,28 @@ impl NativeBinding {
         DeferredCompletion::new(Arc::downgrade(self), id)
     }
 
-    /// Release every held entry and staged task still in the ledger with no
-    /// reply and no panic, because the actor that owes them is closing
-    /// (ADR-0243 §1, §9). The close paths call it before the actor's state
-    /// drops, so a `Held` or an unstarted staged task parked in that state
-    /// then finds its entry gone and drops silently. The holds release after
-    /// the ledger lock is released.
+    /// Answer every held and parked entry still in the ledger with its reply
+    /// kind's `unanswered` value, and release every staged task with no
+    /// reply, because the actor that owes them is closing (ADR-0243 §1, §9).
+    /// Each answer is sent before its hold releases, so `Sent` precedes
+    /// `Release` as for `Held::answer`. The entries are collected under the
+    /// ledger lock and answered after it is released, because a reply may
+    /// route synchronously into an inbox handler. The close paths call it
+    /// before the actor's state drops, so a `Held` or an unstarted staged
+    /// task parked in that state then finds its entry gone and drops
+    /// silently.
     ///
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn settle_held_for_actor_close(&self) {
-        let holds = self
-            .inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_settle_held_for_actor_close();
-        drop(holds);
+    pub(crate) fn answer_held_for_actor_close(&self) {
+        let (owed, released) =
+            self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_close_for_actor();
+        for OwedAtClose { hold, reply_to, answer } in owed {
+            answer(self, reply_to, hold.as_ref().map(SettlementHold::root));
+            drop(hold);
+        }
+        drop(released);
     }
 
     /// Park the held entry `id` in the request context stored under

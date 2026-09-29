@@ -45,7 +45,10 @@ pub fn caller(registry: &Registry, name: &str) -> (ErasedActorRef, mpsc::Receive
         name,
         Arc::new(move |dispatch: OwnedDispatch| {
             dispatch.discharge();
-            tx.send(dispatch).expect("capture reply");
+            // The journal answers each watch still parked when the chassis
+            // tears it down (ADR-0243 §1), which may be after the test has
+            // dropped its receiver.
+            let _ = tx.send(dispatch);
         }),
     );
     (mailbox, rx)

@@ -1129,7 +1129,7 @@ fn await_processed_waits_for_routing_and_its_appends() {
     assert!(world.abort.is_none());
 
     let replied = processed_by(&world, caller).expect("the barrier answers after the outcome");
-    assert_eq!(replied.head, world.head());
+    assert_eq!(replied, Processed::Head { head: world.head() });
 }
 
 #[test]
@@ -1155,7 +1155,7 @@ fn barrier_waits_for_the_seq_being_routed() {
     let manual = world.drive(follow);
     assert!(manual.is_empty());
     assert!(world.abort.is_none());
-    assert_eq!(processed_by(&world, caller).map(|reply| reply.head), Some(world.head()));
+    assert_eq!(processed_by(&world, caller), Some(Processed::Head { head: world.head() }));
 }
 
 #[test]

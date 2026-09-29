@@ -180,7 +180,7 @@ impl ProgramCore {
             });
         self.routing.awaiters = waiting;
         for (caller, _) in ready {
-            out.push(Command::Processed { caller, reply: Processed { head } });
+            out.push(Command::Processed { caller, reply: Processed::Head { head } });
         }
     }
 

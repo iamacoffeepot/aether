@@ -2,6 +2,8 @@
 
 use alloc::string::String;
 
+use aether_actor::HeldReply;
+
 /// Watch the journal head, answered once it passes `after`.
 ///
 /// A watch whose `after` is already behind the head is answered at once
@@ -38,4 +40,10 @@ pub enum WatchHeadResult {
         /// Human-readable failure.
         message: String,
     },
+}
+
+impl HeldReply for WatchHeadResult {
+    fn unanswered() -> Self {
+        Self::Err { message: String::from("bloomery journal closed before answering") }
+    }
 }

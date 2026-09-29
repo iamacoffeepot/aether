@@ -5,9 +5,9 @@ use std::fs;
 
 use aether_bloomery_journal::{Batch, JournalReader, Seq};
 use aether_bloomery_kinds::{
-    Activated, Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult, OpaqueBytes, ProgramName, ProgramRef,
-    ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, RuleName, Transition,
-    Utf8Text,
+    Activated, Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult, OpaqueBytes, Processed, ProgramName,
+    ProgramRef, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, RuleName,
+    Transition, Utf8Text,
 };
 use aether_bloomery_view::{Activations, HeadActivation};
 use aether_harness_bloomery::{BloomeryHarness, Record};
@@ -197,7 +197,7 @@ fn await_processed_waits_for_a_live_append_it_is_woken_for() -> Result<(), Box<d
         harness.move_head(&MoveHead::new(&head, Ref::from_digest(staged), 1)),
         MoveHeadResult::Committed { seq: 2 }
     );
-    assert_eq!(harness.wait(barrier).head, 2);
+    assert_eq!(harness.wait(barrier), Processed::Head { head: 2 });
     Ok(())
 }
 

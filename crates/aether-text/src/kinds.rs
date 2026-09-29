@@ -13,6 +13,7 @@
 //! kinds reference them via `use aether_kinds::{FontMetrics, QuadSpace}` —
 //! the existing `capabilities → kinds` direction.
 
+use aether_actor::HeldReply;
 use aether_kinds::{ClipRect, FontMetrics, QuadSpace};
 use aether_math::Rgba;
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,16 @@ pub struct LoadFontBytes {
 pub enum LoadFontResult {
     Ok { font_id: u32, name: String, resident_bytes: u64 },
     Err { namespace: String, path: String, error: String },
+}
+
+impl HeldReply for LoadFontResult {
+    fn unanswered() -> Self {
+        Self::Err {
+            namespace: String::new(),
+            path: String::new(),
+            error: "text capability closed before answering".into(),
+        }
+    }
 }
 
 /// `aether.text.draw` — lay out and draw `text` in the font named by
@@ -126,4 +137,10 @@ pub struct FontMetricsRequest {
 pub enum FontMetricsResult {
     Ok { metrics: FontMetrics },
     Err { error: String },
+}
+
+impl HeldReply for FontMetricsResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "text capability closed before answering".into() }
+    }
 }

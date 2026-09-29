@@ -245,12 +245,20 @@ impl NativeActor for FleetProxy {
         })
     }
 
-    /// Abandon every forward still open, since this actor is closing and
-    /// can no longer answer it. The hub's RPC server monitors this proxy
-    /// and closes each wire call still in flight here when it departs.
-    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+    /// Answer every forward still open with a `CallSettled::Err`, since
+    /// this actor is closing and its engine can no longer settle the call
+    /// (ADR-0243 §1). The relay is manual (ADR-0243 §8), so the proxy answers
+    /// with the terminal it knows. The hub's RPC server closes the wire call
+    /// on that answer, and its monitor of this proxy then finds the call
+    /// already closed.
+    fn unwire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         for (_, owed) in state.in_flight.drain() {
-            owed.abandon_for_actor_close();
+            owed.reply(
+                ctx,
+                &CallSettled::Err {
+                    error: RpcError::Other { reason: "engine proxy closed before the call settled".into() },
+                },
+            );
         }
     }
 

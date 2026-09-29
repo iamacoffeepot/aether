@@ -17,6 +17,7 @@ mod write;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_actor::HeldReply;
 use aether_data::KindId;
 
 use crate::{ClosureArtifact, Digest, Entry, Seq};
@@ -141,4 +142,13 @@ pub enum ReadArtifactResult {
         /// Human-readable failure.
         message: String,
     },
+}
+
+impl HeldReply for ReadArtifactResult {
+    fn unanswered() -> Self {
+        Self::Err {
+            digest: Digest::from_bytes([0; 32]),
+            message: String::from("bloomery journal closed before answering"),
+        }
+    }
 }

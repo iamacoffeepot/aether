@@ -160,7 +160,7 @@ fn a_killed_engine_restarts_over_its_journal_and_faults_the_in_flight_call_inter
     let summarize_program = ProgramRef::new(bundle.digest(), summarize_name.clone());
     let stall_program = ProgramRef::new(bundle.digest(), stall_name.clone());
 
-    assert_eq!(await_driver(&mut fleet, engine, 1), Processed { head: 1 });
+    assert_eq!(await_driver(&mut fleet, engine, 1), Processed::Head { head: 1 });
 
     let first = call(&mut fleet, engine, &request(&summarize_name, summarize_input, &origin, 1));
     let CallOutcome::Transition { key: 1, seq: 3, transition } = first.clone() else {
@@ -191,7 +191,7 @@ fn a_killed_engine_restarts_over_its_journal_and_faults_the_in_flight_call_inter
     in_flight.expect_err("the caller of the in-flight call gets an error when its engine dies");
 
     let successor = fleet.await_restart(engine);
-    assert_eq!(await_driver(&mut fleet, successor, 4), Processed { head: 5 });
+    assert_eq!(await_driver(&mut fleet, successor, 4), Processed::Head { head: 5 });
     let interrupted = Fault { program: stall_program.clone(), input: stall_input, reason: FaultReason::Interrupted };
     seeded.assert_appended(
         Seq(3),

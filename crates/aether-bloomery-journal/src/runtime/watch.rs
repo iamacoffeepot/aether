@@ -19,8 +19,9 @@ use crate::MAX_HEAD_WATCHERS;
 /// Held `WatchHead` replies, keyed by the exclusive sequence boundary
 /// they are waiting to pass.
 ///
-/// Actor close settles the held entries before the state drops, so a
-/// ticket still parked here at close drops silently.
+/// Actor close answers the held entries with `WatchHeadResult::Err` before
+/// the state drops (ADR-0243 §1), so a ticket still parked here at close
+/// drops silently.
 pub struct Watchers {
     by_after: BTreeMap<u64, Vec<Held<WatchHeadResult>>>,
     count: usize,

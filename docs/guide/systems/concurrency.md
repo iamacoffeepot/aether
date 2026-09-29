@@ -197,8 +197,9 @@ registry batch) owes no reply: the `Held` waits in state under the key the
 task's context names, and the completion answers it. The component host's
 `continue_from` and `stage_registry_batch_from`, which carry a `Held` onto a
 successor that answers the same caller, remain until #7008. A second `hold` in one dispatch panics. Dropping a `Held` unanswered
-releases the hold and panics; an actor that closes with tickets still parked
-settles them silently.
+releases the hold and panics; an actor that closes with tickets still live or
+parked answers each with its reply kind's `unanswered()` (the `HeldReply`
+trait) before releasing its hold.
 
 ## The offload shapes, and the hold
 
