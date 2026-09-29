@@ -122,8 +122,9 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// [`InboundMail`](crate::chassis::inbox::InboundMail) guard for a deferred reply. One envelope in one
     /// place: the detector for a missed settlement is `Option::is_some`,
     /// so a double-settle is structurally unrepresentable. `None` for the
-    /// ctxs that dispatch nothing (init / close-hook / chassis-root /
-    /// cap-test fixtures built through [`Self::new`]).
+    /// ctxs that dispatch nothing (the `wire` hook built through
+    /// [`Self::for_wire`], the pumped host turn and close hooks built through
+    /// [`Self::new_for_actor`]).
     inbound: Option<Envelope>,
     /// ADR-0243 §7: set by the first [`Self::hold`] of this dispatch, so a
     /// second one panics — two debts on one request would send two replies.
@@ -147,8 +148,8 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// dispatcher builds the typed form because it knows the actor, and
     /// `#[actor]` types every handler ctx that omits its actor by it
     /// (ADR-0231 §7); [`Self::erase`] downgrades to [`Erased`] for a handler
-    /// that spells `Erased`. The type default is [`Erased`], for a ctx built
-    /// where no actor is in scope.
+    /// that spells `Erased`. The type default is [`Erased`], so a signature
+    /// that names no actor reads as that view.
     _actor: PhantomData<fn() -> A>,
 }
 /// The actor marker of a ctx that names no actor, and so cannot parent a
@@ -157,68 +158,31 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
 /// [`NativeCtx::spawn_child`] lives only on the typed form, so the parent of
 /// a staged birth is read off the ctx rather than declared beside it — a
 /// caller has no way to name a parent the runtime will then contradict.
-/// Every ctx built where no actor is in scope — the chassis root, a cap-side
-/// test fixture — is this form, and loses only a call it could not have made
-/// correctly. Inside `#[actor]` a method receives this view only by spelling
-/// `Erased` in its ctx; one that omits its actor is typed by it (ADR-0231 §7).
+/// The runtime builds every ctx typed by its actor, so this form is only
+/// ever the [`NativeCtx::erase`] view, which loses only a call it could not
+/// have made correctly. Inside `#[actor]` a method receives this view only by
+/// spelling `Erased` in its ctx; one that omits its actor is typed by it
+/// (ADR-0231 §7).
 ///
 /// A type-position marker like [`Single`] / [`Manual`], never a value: it is
 /// only ever the `A` of a `NativeCtx`, so it carries no impls of its own.
 pub use aether_actor::Erased;
-impl<'a> NativeCtx<'a, Erased, Single> {
-    /// Inbound-less constructor for a ctx that names no actor. Cap-side test
-    /// fixtures in the per-cap crates reach for it directly so they can drive
-    /// a handler method without spinning up a full chassis; that's why it's
-    /// `pub` rather than `pub(crate)`. The lifecycle hooks do not use it: the
-    /// runtime builds their ctx typed by the actor ([`Self::new_for_actor`]
-    /// for the close hook, `for_wire` for `wire`).
-    ///
-    /// ADR-0112: stays `<Single>` so those ~hundred fixtures that call
-    /// handler methods directly keep their single-mode ctx unchanged.
-    /// Build a `<Manual>` ctx for driving the macro dispatch trampoline
-    /// with [`Self::new_dispatching`].
-    ///
-    /// It also stays [`Erased`]: it backs a fixture driving a handler that
-    /// spells `Erased`, so nothing here could parent a child. A handler that
-    /// omits its actor is typed by it, and a fixture driving one builds its
-    /// ctx with [`Self::new_for_actor`].
-    pub fn new(
-        binding: &'a Arc<NativeBinding>,
-        sender: Source,
-        in_flight_mail_id: Option<MailId>,
-        in_flight_root: Option<MailId>,
-    ) -> Self {
-        Self {
-            binding,
-            source: sender,
-            in_flight_mail_id,
-            in_flight_root,
-            causing_chain: None,
-            inbound: None,
-            held_this_dispatch: false,
-            task_holds: Vec::new(),
-            _mode: PhantomData,
-            _actor: PhantomData,
-        }
-    }
-}
-
 impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
-    /// The actor-naming counterpart of [`Self::new`] / [`Self::new_dispatching`]
-    /// (issue 4158): the same inbound-less ctx, typed by the actor it
-    /// dispatches for, so the handler it drives reaches [`Self::spawn_child`].
-    /// The reply mode comes from the use site rather than from a second
-    /// constructor.
+    /// The inbound-less ctx the runtime builds for a turn that dispatches no
+    /// mail, typed by the actor it runs for so the hook it drives reaches
+    /// [`Self::spawn_child`] (issue 4158). The reply mode comes from the use
+    /// site rather than from a second constructor.
     ///
     /// `binding` must be that actor's own binding — the birth lands under
     /// whatever identity the binding carries, and `A` is what the child's
-    /// `ChildOf<A>` permission is checked against. The pumped host turn
+    /// `ChildOf<A>` permission is checked against. The only callers are the
+    /// pumped host turn
     /// ([`PumpedSlot::host_turn`](super::slot::pumped::PumpedSlot::host_turn))
     /// and both slots' close hooks, which hand the `unwire` hook a ctx typed
-    /// by its actor, are the production callers and derive both from the same
-    /// slot; a cap-side fixture driving a spawning handler names its own actor
-    /// here.
-    pub fn new_for_actor(
+    /// by its actor and derive both from the same slot. It is visible only
+    /// inside `actor::native`, so no test outside the native runtime can
+    /// hand-build a ctx and call a handler around `dispatch_envelope`.
+    pub(in crate::actor::native) fn new_for_actor(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
         in_flight_mail_id: Option<MailId>,
@@ -297,34 +261,6 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
     }
 }
 
-impl<'a> NativeCtx<'a, Erased, Manual> {
-    /// ADR-0112: an inbound-less `<Manual>` ctx for driving the
-    /// macro-emitted `NativeDispatch::__aether_dispatch_envelope` (which
-    /// carries the most-permissive view) from a cross-crate trampoline
-    /// test. The `<Single>` [`Self::new`] backs fixtures that call handler
-    /// methods directly; this one backs fixtures that route through the
-    /// dispatch seam.
-    pub fn new_dispatching(
-        binding: &'a Arc<NativeBinding>,
-        sender: Source,
-        in_flight_mail_id: Option<MailId>,
-        in_flight_root: Option<MailId>,
-    ) -> Self {
-        Self {
-            binding,
-            source: sender,
-            in_flight_mail_id,
-            in_flight_root,
-            causing_chain: None,
-            inbound: None,
-            held_this_dispatch: false,
-            task_holds: Vec::new(),
-            _mode: PhantomData,
-            _actor: PhantomData,
-        }
-    }
-}
-
 impl<'a, A> NativeCtx<'a, A, Manual> {
     /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
     /// [`Single`] ctx, dropping the `OutboundReply` surface. The
@@ -358,9 +294,9 @@ impl<'a, A> NativeCtx<'a, A, Manual> {
     /// [`Self::take_inbound`] (and so the dispatcher's settlement tail
     /// settles exactly one owner). Only the native dispatcher
     /// ([`DispatcherSlot::dispatch_one`](crate::actor::native::slot::dispatcher))
-    /// builds these; the inbound-less [`Self::new`] backs the
-    /// close-hook / chassis-root / cap-test ctxs that dispatch nothing.
-    pub(crate) fn with_inbound(
+    /// builds these; [`Self::new_for_actor`] backs the inbound-less
+    /// host-turn and close-hook ctxs.
+    pub(in crate::actor::native) fn with_inbound(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
         in_flight_mail_id: Option<MailId>,

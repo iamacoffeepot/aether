@@ -41,22 +41,19 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aether_actor::{ErasedActorRef, Manual, Root};
-use aether_data::{Kind, KindId, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
+use aether_actor::{ErasedActorRef, Root};
+use aether_data::{Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
 use aether_kinds::descriptors;
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
-use crate::actor::native::ctx::NativeCtx;
 use crate::chassis::Chassis;
 use crate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use crate::chassis::error::BootError;
 use crate::config::ConfigMember;
-use crate::mail::MailRef;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry::{BootAuthority, InboxHandler, NameConflict, Registry, lineage_mailbox_id};
-use crate::mail::registry::{DispatchParts, OwnedDispatch};
 use crate::runtime::lifecycle::FatalAborter;
 
 mod pumped;
@@ -134,8 +131,7 @@ pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
 }
 
 /// A spawner-less binding over `mailer` whose own mailbox is never
-/// registered — the stand-in caller a cap test hands a `NativeCtx` when it
-/// drives a handler directly over its `State`.
+/// registered.
 ///
 /// The binding's own id is the one the registry refuses to register, so
 /// mail addressed to it — an ADR-0093 completion wake, a self-send — never
@@ -365,29 +361,6 @@ pub fn token_root(correlation: u64) -> MailId {
 /// (e.g. an `aether.fs` read) carries back into a cap's result handler.
 pub fn fs_reply_source(correlation_id: u64) -> Source {
     Source::with_correlation(SourceAddr::None, correlation_id)
-}
-
-/// A [`Manual`] dispatch ctx whose inbound is *armed*, so a
-/// `#[handler::manual]` cap test can exercise the
-/// [`take_inbound`](NativeCtx::take_inbound) reply edge.
-///
-/// [`NativeCtx::new_dispatching`] carries no envelope, so a handler that
-/// retains its inbound panics under it — which leaves the guard edge
-/// reachable only through a real dispatcher. Since that edge is the one
-/// that answers a `SourceAddr::Component` sender (the hub outbound does
-/// not), a cap test without this fixture can only assert the session
-/// shape and passes while the wire shape is broken.
-pub fn manual_dispatch_ctx<A>(binding: &Arc<NativeBinding>, sender: Source) -> NativeCtx<'_, A, Manual> {
-    NativeCtx::with_inbound(
-        binding,
-        sender,
-        None,
-        None,
-        OwnedDispatch::disarmed_at(
-            DispatchParts { sender, ..DispatchParts::new(KindId(0), MailRef::from(Vec::new())) },
-            binding.self_mailbox(),
-        ),
-    )
 }
 
 /// Manual tempdir under the system temp root, namespaced by `prefix` and
