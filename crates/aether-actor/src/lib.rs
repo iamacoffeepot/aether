@@ -37,6 +37,7 @@ extern crate self as aether_actor;
 
 pub mod asset;
 mod blob;
+mod held_reply;
 pub mod local;
 pub mod log;
 pub mod mail;
@@ -51,6 +52,7 @@ pub use asset::{AssetCatalog, AssetInfo, AssetWindow};
 #[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
 pub use blob::guest::__mint_guest_blob;
+pub use held_reply::HeldReply;
 pub use local::Local;
 pub use model::ctx::{Erased, MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;

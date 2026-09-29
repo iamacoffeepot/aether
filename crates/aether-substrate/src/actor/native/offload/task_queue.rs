@@ -20,12 +20,14 @@
 //! still the waiting request's own. So a request's chain settles when that
 //! request is answered, never when another request's work finishes.
 //!
-//! At actor close the ledger settles every held reply and every unstarted
-//! task before the queue drops with the actor's state.
+//! Before the queue drops with the actor's state, an actor close while the
+//! engine keeps running answers every held reply with its `R::unanswered()`,
+//! an engine teardown settles them silently, and either releases every
+//! unstarted task (ADR-0243 §1).
 
 use std::collections::{HashMap, VecDeque};
 
-use aether_actor::ReplyMode;
+use aether_actor::{HeldReply, ReplyMode};
 use aether_data::{ActorMail, RequestId};
 
 use crate::actor::native::NativeCtx;
@@ -63,7 +65,7 @@ pub struct TaskQueue<R: ActorMail> {
     waiting: VecDeque<Waiting<R>>,
 }
 
-impl<R: ActorMail + Send + 'static> TaskQueue<R> {
+impl<R: HeldReply + Send + 'static> TaskQueue<R> {
     /// Build a queue bounded at `max` concurrent provider calls. A `max`
     /// of 0 is clamped to 1 — a zero bound would queue forever.
     #[must_use]

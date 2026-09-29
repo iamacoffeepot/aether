@@ -23,7 +23,7 @@
 // impls ride the macro's `not(wasm)` gate rather than a feature. The kind types
 // stay always-on so their `Kind`-derived inventory submissions register for the
 // test substrate's registry walk.
-use aether_actor::actor;
+use aether_actor::{HeldReply, actor};
 use aether_substrate::actor::native::TaskQueue;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 use aether_substrate::chassis::error::BootError;
@@ -85,6 +85,14 @@ pub struct DeferredEchoRequest {
 #[aether_data::kind(name = "aether.rpc.test.deferred_echo_reply", copy, default, eq)]
 pub struct DeferredEchoReply {
     pub value: u64,
+}
+
+// A sentinel: the echo actor answers every request before the test tears it
+// down, so this reply never reaches a caller that reads it.
+impl HeldReply for DeferredEchoReply {
+    fn unanswered() -> Self {
+        Self { value: u64::MAX }
+    }
 }
 
 /// Test-only actor that answers [`DeferredEchoRequest`] off-thread through

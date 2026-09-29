@@ -1,6 +1,7 @@
 //! The import request: a digest-pinned image into a stored tree (ADR-0237
 //! decision 3, amended 2026-09-25).
 
+use aether_actor::HeldReply;
 use aether_bloomery_kinds::{Detail, Ref, Tree};
 
 use crate::kinds::image::ImageRef;
@@ -28,4 +29,10 @@ pub enum ImportResult {
         /// The bounded fault text naming the cause.
         detail: Detail,
     },
+}
+
+impl HeldReply for ImportResult {
+    fn unanswered() -> Self {
+        Self::Failed { detail: Detail::new("workspace capability closed before the import answered") }
+    }
 }

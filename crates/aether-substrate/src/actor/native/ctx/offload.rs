@@ -15,13 +15,13 @@ use std::ptr;
 use std::sync::{Arc, Weak};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
-use aether_actor::{Addressable, ReplyMode, Singleton};
+use aether_actor::{Addressable, HeldReply, ReplyMode, Singleton};
 use aether_data::{ActorMail, Kind, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::blocking::{DeferredCompletion, DeferredReply, DispatchId, Pending, TaskDone};
 use crate::actor::native::offload::fail_fast;
-use crate::actor::native::offload::held::Held;
+use crate::actor::native::offload::held::{Held, answer_unanswered};
 use crate::actor::native::offload::self_wake::SelfWake;
 use crate::actor::native::offload::staged_task::StagedTask;
 use crate::actor::native::offload::thread;
@@ -331,18 +331,22 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// The handler returns the [`Pending<R>`] receipt, which declares its
     /// row `-> Pending<R>`, and keeps the [`Held<R>`] debt in state or on a
-    /// successor until [`Held::answer`] sends the one `R`.
+    /// successor until [`Held::answer`] sends the one `R`. When the actor
+    /// closes first while the engine keeps running, the close tail sends
+    /// [`HeldReply::unanswered`] in its place, which is why `R` must
+    /// implement [`HeldReply`]; an engine teardown settles it silently.
     ///
     /// # Panics
     /// Panics on a second `hold` in one dispatch (ADR-0243 §7): two debts
     /// on one request would send two replies.
-    pub fn hold<R: ActorMail>(&mut self) -> (Pending<R>, Held<R>) {
+    pub fn hold<R: HeldReply>(&mut self) -> (Pending<R>, Held<R>) {
         assert!(
             !self.held_this_dispatch,
             "a second NativeCtx::hold in one dispatch: one request owes one reply (ADR-0243 §7)"
         );
         self.held_this_dispatch = true;
-        let (id, ledger) = self.binding.dispatch_hold(self.acquire_settlement_hold(), self.reply_target());
+        let (id, ledger) =
+            self.binding.dispatch_hold(self.acquire_settlement_hold(), self.reply_target(), answer_unanswered::<R>);
         (Pending::new(id), Held::new(id, ledger))
     }
 

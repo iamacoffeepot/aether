@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::{ErasedActorRef, HeldReply};
 use aether_data::{Kind, RequestId, Source, SourceAddr};
 use aether_substrate::actor::native::{Held, Pending, SpawnOutcome, StagedTask, TaskDone, TaskQueue};
 use aether_substrate::mail::MailRef;
@@ -56,6 +56,13 @@ struct Work {
 #[aether_data::kind(name = "test.staged_task.worked", copy)]
 struct Worked {
     gate: u32,
+}
+
+// A sentinel: no test here closes an actor while it still owes a `Worked`.
+impl HeldReply for Worked {
+    fn unanswered() -> Self {
+        Self { gate: u32::MAX }
+    }
 }
 
 /// The wiring a [`QueueProbe`] reports through: the gates its workers pass,

@@ -317,6 +317,10 @@ pub struct Routing {
     pub page: VecDeque<JournalEntry>,
     /// Outstanding `WatchHead`, if any.
     pub watch: Option<WatchTicket>,
+    /// Set when the journal ended the watch because it closed
+    /// (`WatchHeadResult::Ended`): there is no journal left to watch, so
+    /// routing arms no further watch.
+    pub watch_ended: bool,
     /// Barrier waiters: caller and `through`.
     pub awaiters: Vec<(CallerId, u64)>,
     /// Derived records of the in-flight routing append, if any.
@@ -348,6 +352,7 @@ impl Routing {
             read: None,
             page: VecDeque::new(),
             watch: None,
+            watch_ended: false,
             awaiters: Vec::new(),
             appending: None,
             committed: None,

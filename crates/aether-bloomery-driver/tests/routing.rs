@@ -14,7 +14,7 @@ use aether_bloomery_kinds::{
     AppendRecords, AwaitProcessed, Call, CallInput, CallProgram, ClosureArtifact, Detail, Digest, DriverRecord,
     EncodedArtifact, Evaluated, FaultReason, Head, HeadChange, Invoked, NativeOrigin, OpaqueBytes, Processed,
     ProgramName, ProgramRef, ReactorIntent, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref,
-    RequestSource, RuleName, SetHeads, Status, Utf8Text, artifact_digest,
+    RequestSource, RuleName, SetHeads, Status, Utf8Text, WatchHeadResult, artifact_digest,
 };
 use aether_data::Kind;
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
@@ -475,6 +475,27 @@ fn watch_wakes_routing_for_entries_others_append() {
     assert!(world.abort.is_none());
     assert_eq!(watch_count(&world), 1);
     assert_eq!(watches_for(&world), vec![0, 1]);
+}
+
+#[test]
+fn an_ended_watch_stops_following_without_aborting() {
+    // Catches a driver that treats the watch a closing journal ends
+    // (`WatchHeadResult::Ended`, ADR-0243 §1) as a failure and aborts the
+    // engine, or that re-arms a watch on a journal that is gone.
+    let (mut world, commands) = World::open();
+    assert!(world.drive(commands).is_empty());
+    let (ticket, _) = world.parked.pop().expect("idle routing parks one watch");
+    let watches = watches_for(&world).len();
+
+    let follow = world.core.on_watched(ticket, WatchHeadResult::Ended);
+    assert!(world.drive(follow).is_empty());
+    assert!(world.abort.is_none(), "an ended watch is not a failure: {:?}", world.abort);
+
+    let caller = await_processed(&mut world, 0);
+    assert!(world.abort.is_none());
+    assert!(processed_by(&world, caller).is_some(), "the driver still answers after its watch ended");
+    assert_eq!(watch_count(&world), 0, "no watch is parked on the closed journal");
+    assert_eq!(watches_for(&world).len(), watches, "the driver arms no new watch once the journal is gone");
 }
 
 /// Script one input's closure.
@@ -1245,7 +1266,7 @@ fn await_processed_waits_for_routing_and_its_appends() {
     assert!(world.abort.is_none());
 
     let replied = processed_by(&world, caller).expect("the barrier answers after the outcome");
-    assert_eq!(replied.head, world.head());
+    assert_eq!(replied, Processed::Head { head: world.head() });
 }
 
 #[test]
@@ -1271,7 +1292,7 @@ fn barrier_waits_for_the_seq_being_routed() {
     let manual = world.drive(follow);
     assert!(manual.is_empty());
     assert!(world.abort.is_none());
-    assert_eq!(processed_by(&world, caller).map(|reply| reply.head), Some(world.head()));
+    assert_eq!(processed_by(&world, caller), Some(Processed::Head { head: world.head() }));
 }
 
 #[test]

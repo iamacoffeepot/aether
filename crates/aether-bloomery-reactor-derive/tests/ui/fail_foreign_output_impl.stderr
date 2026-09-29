@@ -9,6 +9,7 @@ help: the trait `aether_bloomery_reactor::evaluate::sealed::Sealed` is not imple
   |
 4 | struct Publication {
   | ^^^^^^^^^^^^^^^^^^
+  = note: `Publication` implements similarly named trait `aether_actor::model::contract::sealed::Sealed`, but not `aether_bloomery_reactor::evaluate::sealed::Sealed`
 help: the following other types implement trait `aether_bloomery_reactor::evaluate::sealed::Sealed`
  --> $WORKSPACE/crates/aether-bloomery-reactor/src/evaluate.rs
   |

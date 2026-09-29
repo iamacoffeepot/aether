@@ -32,6 +32,10 @@ impl ProgramCore {
             WatchHeadResult::Err { message } => {
                 self.abort(format!("journal watch failed: {message}"), &mut out);
             }
+            // The journal closed while the engine keeps running (ADR-0243
+            // §1). A long-poll that ends is not a failure: stop following,
+            // with no abort and no new watch, since the journal is gone.
+            WatchHeadResult::Ended => self.routing.watch_ended = true,
             WatchHeadResult::Advanced { head } => {
                 if head > self.journal.cursor() {
                     self.journal.set_target(head);
@@ -180,7 +184,7 @@ impl ProgramCore {
             });
         self.routing.awaiters = waiting;
         for (caller, _) in ready {
-            out.push(Command::Processed { caller, reply: Processed { head } });
+            out.push(Command::Processed { caller, reply: Processed::Head { head } });
         }
     }
 
@@ -193,7 +197,7 @@ impl ProgramCore {
 
     /// Hold exactly one watch while routing is idle at the journal head.
     fn ensure_watch(&mut self, out: &mut Vec<Command>) {
-        if self.routing.watch.is_some() {
+        if self.routing.watch.is_some() || self.routing.watch_ended {
             return;
         }
         let ticket = self.mint(WatchTicket::mint);

@@ -74,9 +74,9 @@ const TRIPWIRE_CALL_PROGRAM_V2: KindId = KindId(0x2917_43a7_6596_2e0b);
 const TRIPWIRE_LEGACY_SET_HEAD: KindId = KindId(0x2842_0dd2_d83a_65e8);
 const TRIPWIRE_SET_HEADS: KindId = KindId(0x2f03_537c_84d9_dd5d);
 const TRIPWIRE_CALL: KindId = KindId(0x2dcc_bc68_65cc_027a);
-const TRIPWIRE_CALL_OUTCOME: KindId = KindId(0x2001_04b9_b5ad_b9c4);
+const TRIPWIRE_CALL_OUTCOME: KindId = KindId(0x2ed5_fa91_cb11_9000);
 const TRIPWIRE_AWAIT_PROCESSED: KindId = KindId(0x28c8_2171_74e2_f5b0);
-const TRIPWIRE_PROCESSED: KindId = KindId(0x2389_3dd7_e7c2_f075);
+const TRIPWIRE_PROCESSED: KindId = KindId(0x2f9f_49f9_0af8_5287);
 
 #[test]
 fn call_program_decodes_both_wire_generations_without_fallback() {
