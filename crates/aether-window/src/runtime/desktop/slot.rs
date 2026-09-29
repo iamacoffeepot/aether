@@ -16,7 +16,7 @@ use crate::{WindowCapability, WindowParams};
 /// application thread whose winit callbacks realize its host actions.
 ///
 /// [`Self::boot`] is the only way to mint one, so a host turn through it
-/// always reaches [`DesktopWindows`]: the application never handles a
+/// always reaches the desktop backend: the application never handles a
 /// synthetic manager, and the desktop backend never runs pooled.
 pub struct DesktopWindowSlot {
     slot: PumpedSlot<WindowCapability>,
