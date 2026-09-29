@@ -55,10 +55,9 @@ libc = "0.2"
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
-# The runtime unit tests boot the dispatch loopback through the canonical
-# `aether_substrate::testing` fixture, enabled by the substrate `test-support`
-# feature.
-aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# The `run` integration tests boot the real cap in the in-process harness and
+# assert on its replies.
+aether-harness-substrate = { path = "../aether-harness-substrate" }
 
 # cargo-machete (the CI unused-deps gate) scans source without resolving
 # features, so it cannot see that `clap` and `confique` are used only through

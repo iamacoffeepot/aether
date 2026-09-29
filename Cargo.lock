@@ -862,6 +862,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-data",
+ "aether-harness-substrate",
  "aether-substrate",
  "clap",
  "confique",
