@@ -28,6 +28,8 @@ use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::{Drainable, WakeHandle, WakeSink};
 
+#[cfg(any(test, feature = "test-support"))]
+mod close_wait;
 pub(super) mod commit;
 pub(super) mod prepare;
 mod teardown;
