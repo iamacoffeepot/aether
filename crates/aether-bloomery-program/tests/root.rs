@@ -143,8 +143,8 @@ fn stray_seq_finishes_nothing() {
 #[test]
 fn dispatch_runs_the_named_entry() {
     // Catches fall-through to the first entry or a missing rejection.
-    let encoded = EncodedArtifact::new(&Count { n: 4 }).expect("encode input");
-    let closure = ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec());
+    let (kind, bytes, _) = EncodedArtifact::new(&Count { n: 4 }).expect("encode input").into_parts();
+    let closure = ClosureArtifact::new(kind, bytes);
     let invoke = Invoke::new(
         9,
         ProgramName::new(Second::NAME).expect("valid name"),

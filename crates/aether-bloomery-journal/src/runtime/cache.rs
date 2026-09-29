@@ -28,6 +28,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use aether_bloomery_kinds::ClosureArtifact;
@@ -54,6 +55,14 @@ impl ReadCacheBudget {
     #[must_use]
     pub const fn new(bytes: u64) -> Self {
         Self(bytes)
+    }
+
+    /// One unit's equal share of an engine-wide `total_bytes` split among
+    /// `units` journals: the floor of the division, so the shares never sum
+    /// past the total. One unit's share is the whole total.
+    #[must_use]
+    pub const fn share(total_bytes: u64, units: NonZeroUsize) -> Self {
+        Self(total_bytes / units.get() as u64)
     }
 
     /// The budget in bytes.
@@ -227,6 +236,8 @@ impl State {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use aether_bloomery_kinds::artifact_digest;
     use aether_data::{Blob, KindId};
 
@@ -247,6 +258,17 @@ mod tests {
 
     fn held_bytes(cache: &ReadCache) -> u64 {
         cache.lock().held_bytes
+    }
+
+    #[test]
+    fn a_share_is_the_floor_of_an_equal_split() {
+        // Catches handing each unit the whole total, or a rounded-up share whose sum exceeds it.
+        let units = NonZeroUsize::new(3).expect("three units");
+        let share = ReadCacheBudget::share(100, units).bytes();
+
+        assert_eq!(share, 33);
+        assert!(share * 3 <= 100);
+        assert_eq!(ReadCacheBudget::share(100, NonZeroUsize::MIN).bytes(), 100);
     }
 
     #[test]

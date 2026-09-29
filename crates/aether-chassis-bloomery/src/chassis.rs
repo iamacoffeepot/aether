@@ -22,6 +22,7 @@
 
 use std::io;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use aether_bloomery_journal::{ArtifactStore, Journal, ReadCacheBudget};
@@ -98,6 +99,14 @@ impl BloomeryChassis {
         // with no units configured.
         let bloomery = mem::take(&mut env.bloomery);
         let (units, limit) = bloomery.to_units_and_limit()?;
+        // `read_cache_bytes` is the engine total, split equally among the
+        // units (ADR-0240 I-6). The share is taken from the whole lowered list;
+        // an empty list is refused by `sole_unit` on the next line, so its
+        // one-unit fallback never mounts a journal.
+        let read_cache = ReadCacheBudget::share(
+            bloomery.read_cache_bytes,
+            NonZeroUsize::new(units.len()).unwrap_or(NonZeroUsize::MIN),
+        );
         let unit = config::sole_unit(units)?;
         // Open the root before wasmtime too: a root another engine holds, or
         // one that cannot be created, refuses boot here, naming the root.
@@ -118,7 +127,7 @@ impl BloomeryChassis {
         let builder = composed::<Self>(&mut boot, base, env)?;
         validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         let built = builder.driver(SignalDriverCapability::new(boot)).build()?;
-        let mounted = mount::mount(&built, &unit.key, journal, limit, ReadCacheBudget::new(bloomery.read_cache_bytes))?;
+        let mounted = mount::mount(&built, &unit.key, journal, limit, read_cache)?;
         tracing::info!(
             unit = %unit.key,
             journal_root = %unit.root.display(),

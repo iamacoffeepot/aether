@@ -4,8 +4,12 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery_kinds::{Digest, EncodedArtifact, OpaqueBytes, Ref, Utf8Text, artifact_blob, hash_bytes};
-use aether_data::{Citation, Citations, Cites, Kind, Storage, StorageData, StorageError};
+use aether_bloomery_kinds::{
+    ArtifactCitation, Digest, EncodedArtifact, OpaqueBytes, Ref, Utf8Text, artifact_blob, artifact_prefix, hash_bytes,
+};
+use aether_data::{
+    Blob, BlobReader, Citation, Citations, Cites, Kind, KindId, MAX_READ_BYTES, Storage, StorageData, StorageError,
+};
 
 use crate::Seq;
 use crate::runtime::draft::{Draft, DraftError};
@@ -56,20 +60,14 @@ impl Batch {
 
     /// Stage an already-encoded artifact under its own kind prefix.
     ///
-    /// Identical blob bytes in one batch are one entry. Its citations are
-    /// verified by `append` like any other staged blob's.
+    /// The payload is read out of its [`Blob`] a [`BlobReader`] window at a
+    /// time into the batch's one prefixed buffer; the fenced writes carry
+    /// small driver and program values. Identical blob bytes in one batch are
+    /// one entry. Its citations are verified by `append` like any other
+    /// staged blob's.
     pub fn stage_artifact(&mut self, artifact: EncodedArtifact) -> Digest {
-        let (kind, payload, citations) = artifact.into_parts();
-        self.insert_blob(
-            artifact_blob(kind, &payload),
-            citations
-                .into_iter()
-                .map(|citation| {
-                    let (kind, bytes) = citation.into_parts();
-                    Citation { kind, bytes }
-                })
-                .collect(),
-        )
+        let (kind, payload, artifact_citations) = artifact.into_parts();
+        self.insert_blob(prefixed(kind, &payload), citations(artifact_citations))
     }
 
     /// Encode `event` and push it.
@@ -124,6 +122,36 @@ impl Batch {
             self.staged.push(Staged { digest, bytes, citations });
         }
         digest
+    }
+}
+
+/// The store's citations for an artifact's carried ones, moving their bytes.
+pub fn citations(carried: Vec<ArtifactCitation>) -> Vec<Citation> {
+    carried
+        .into_iter()
+        .map(|citation| {
+            let (kind, bytes) = citation.into_parts();
+            Citation { kind, bytes }
+        })
+        .collect()
+}
+
+/// `kind`'s prefix followed by every byte of `payload`, each window read
+/// straight into its place and no window larger than what remains.
+fn prefixed(kind: KindId, payload: &Blob) -> Vec<u8> {
+    let reader = BlobReader::open(payload);
+    let mut blob = artifact_prefix(kind).to_vec();
+    let mut offset = 0;
+    loop {
+        let start = blob.len();
+        let rest = reader.len().saturating_sub(offset);
+        blob.resize(start + usize::try_from(rest).map_or(MAX_READ_BYTES, |rest| rest.min(MAX_READ_BYTES)), 0);
+        let copied = reader.read_range(offset, &mut blob[start..]);
+        blob.truncate(start + copied);
+        if copied == 0 {
+            return blob;
+        }
+        offset += copied as u64;
     }
 }
 

@@ -347,7 +347,10 @@ impl World {
             return AppendRecordsResult::Conflict { actual: self.head() };
         }
         for artifact in request.artifacts() {
-            self.artifacts.insert(artifact.digest(), (artifact.kind(), artifact.bytes().to_vec()));
+            let digest = artifact.digest();
+            let (kind, payload, _) = artifact.clone().into_parts();
+            let payload = ClosureArtifact::new(kind, payload).load(digest).expect("a staged payload reads whole");
+            self.artifacts.insert(digest, (kind, payload));
         }
         for record in request.records() {
             let (cause, kind, bytes) = encode_record(record);

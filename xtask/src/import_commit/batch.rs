@@ -21,7 +21,7 @@ pub(super) fn split(artifacts: Vec<Staged>, budget_bytes: usize) -> Result<Vec<V
     let mut batch = Vec::new();
     let mut batch_bytes = 0;
     for Staged { path, artifact } in artifacts {
-        let size_bytes = artifact.bytes().len();
+        let size_bytes = usize::try_from(artifact.len())?;
         if size_bytes > budget_bytes {
             bail!("`{path}` is {size_bytes} bytes, over the {budget_bytes}-byte publish budget (half the frame cap)");
         }

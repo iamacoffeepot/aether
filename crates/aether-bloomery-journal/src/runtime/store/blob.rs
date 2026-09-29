@@ -5,7 +5,7 @@ use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::mem;
 
 use aether_bloomery_kinds::{ArtifactHasher, Digest, OpaqueBytes, Ref, artifact_prefix};
-use aether_data::Kind;
+use aether_data::{Citation, Kind, KindId};
 use tempfile::NamedTempFile;
 
 use super::ArtifactBatch;
@@ -15,9 +15,11 @@ use crate::runtime::journal::JournalError;
 /// Length of the kind prefix every blob file starts with.
 const PREFIX_BYTES: u64 = 8;
 
-/// One [`OpaqueBytes`] blob being streamed into its batch.
+/// One artifact blob being streamed into its batch.
 ///
-/// Opened by [`ArtifactBatch::blob`] with the payload length it must reach.
+/// Opened by [`ArtifactBatch::blob`] with the payload length it must reach,
+/// as an [`OpaqueBytes`] blob with no citations; [`ArtifactBatch::stage_blob`]
+/// opens one under any kind with the citations its row records.
 /// Each chunk is written to a temp file in `blobs/tmp/` and hashed; memory
 /// is bounded by the caller's chunk, never by the blob. Dropping it before
 /// [`BlobFile::finish`] deletes the temp file and records nothing. A chunk
@@ -27,20 +29,28 @@ pub struct BlobFile<'batch> {
     batch: &'batch mut ArtifactBatch,
     staged: NamedTempFile,
     hasher: ArtifactHasher,
+    citations: Vec<Citation>,
     expected_bytes: u64,
     written_bytes: u64,
     broken: bool,
 }
 
 impl<'batch> BlobFile<'batch> {
-    /// Create the temp file and write and hash the [`OpaqueBytes`] prefix.
-    pub(super) fn open(batch: &'batch mut ArtifactBatch, expected_bytes: u64) -> Result<Self, JournalError> {
+    /// Create the temp file and write and hash `kind`'s prefix. `citations`
+    /// go on the row the blob records once it is placed.
+    pub(super) fn open(
+        batch: &'batch mut ArtifactBatch,
+        kind: KindId,
+        expected_bytes: u64,
+        citations: Vec<Citation>,
+    ) -> Result<Self, JournalError> {
         let mut staged = batch.blobs.temp_file()?;
-        staged.write_all(&artifact_prefix(OpaqueBytes::ID)).map_err(|error| JournalError::io(staged.path(), error))?;
+        staged.write_all(&artifact_prefix(kind)).map_err(|error| JournalError::io(staged.path(), error))?;
         Ok(Self {
             batch,
             staged,
-            hasher: ArtifactHasher::new(OpaqueBytes::ID),
+            hasher: ArtifactHasher::new(kind),
+            citations,
             expected_bytes,
             written_bytes: 0,
             broken: false,
@@ -83,15 +93,21 @@ impl<'batch> BlobFile<'batch> {
     /// the blob was opened with; the temp file is deleted. [`JournalError::Io`]
     /// when the sync or rename fails, or when a chunk's write failed.
     pub fn finish(self) -> Result<Ref<OpaqueBytes>, JournalError> {
+        self.place().map(Ref::from_digest)
+    }
+
+    /// [`Self::finish`] under whatever kind the blob was opened with,
+    /// returning its digest and recording its citations on its row.
+    pub(super) fn place(self) -> Result<Digest, JournalError> {
         self.refuse_if_broken()?;
-        let Self { batch, staged, hasher, expected_bytes, written_bytes, broken: _ } = self;
+        let Self { batch, staged, hasher, citations, expected_bytes, written_bytes, broken: _ } = self;
         if written_bytes != expected_bytes {
             return Err(JournalError::BlobLength { expected_bytes, actual_bytes: written_bytes });
         }
         let digest = hasher.finish();
         batch.blobs.place(&digest, staged)?;
-        batch.record(digest, PREFIX_BYTES.checked_add(written_bytes).ok_or(JournalError::IntegerRange)?, Vec::new());
-        Ok(Ref::from_digest(digest))
+        batch.record(digest, PREFIX_BYTES.checked_add(written_bytes).ok_or(JournalError::IntegerRange)?, citations);
+        Ok(digest)
     }
 
     /// Refuse to go on once a chunk's write has failed: the file may hold

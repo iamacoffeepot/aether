@@ -9,6 +9,12 @@
 //! digest-named artifact files, the streaming artifact store, and the actor's
 //! state; its module documentation describes the storage design.
 //!
+//! The journal owner covers [`aether_bloomery_kinds::ArtifactStorage`]: it
+//! reads artifacts and closures and answers `Stage`, the unfenced,
+//! content-addressed write that stores artifacts with no event and no head
+//! move, so a store user stages through the journal and the journal stays the
+//! only writer of its root. The coverage is checked here, at compile time.
+//!
 //! `no_std` without the `runtime` feature, so a wasm guest can name the
 //! journal actor and send it kind-checked mail.
 
@@ -45,7 +51,16 @@ pub const MAX_HEAD_WATCHERS: usize = 64;
 #[actor(instanced, root)]
 pub struct JournalActor;
 
-use aether_actor::actor;
+use aether_actor::{CoveredBy, actor};
+use aether_bloomery_kinds::ArtifactStorage;
+
+// The journal owner is the one target of `ArtifactStorage` (ADR-0240 D7).
+// Checking coverage here turns a handler change that drops or reshapes one of
+// its rows into this crate's build error rather than its first consumer's.
+const _: () = {
+    const fn covered<P: CoveredBy<R>, R>() {}
+    covered::<ArtifactStorage, JournalActor>();
+};
 
 #[cfg(feature = "runtime")]
 mod runtime;

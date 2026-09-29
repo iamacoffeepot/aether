@@ -169,11 +169,11 @@ fn small_batches(label: &str) -> Result<(Digest, Vec<Vec<EncodedArtifact>>)> {
     let built = build(&read_commit(repo.path(), &sha)?)?;
 
     let budget_bytes =
-        built.artifacts.iter().map(|staged| staged.artifact.bytes().len()).max().context("no artifacts")?;
+        usize::try_from(built.artifacts.iter().map(|staged| staged.artifact.len()).max().context("no artifacts")?)?;
     let batches = split(built.artifacts, budget_bytes)?;
     assert!(batches.len() > 1, "the budget forced {} batch", batches.len());
     for batch in &batches {
-        assert!(batch.iter().map(|artifact| artifact.bytes().len()).sum::<usize>() <= budget_bytes);
+        assert!(batch.iter().map(EncodedArtifact::len).sum::<u64>() <= u64::try_from(budget_bytes)?);
     }
     Ok((built.root, batches))
 }

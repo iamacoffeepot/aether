@@ -40,8 +40,8 @@ fn encoded<K: Storage + Clone + Cites>(value: &K) -> Result<EncodedArtifact, Box
 }
 
 fn closure_of<K: Storage + Clone + Cites>(value: &K) -> Result<ClosureArtifact, Box<dyn Error>> {
-    let encoded = encoded(value)?;
-    Ok(ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec()))
+    let (kind, bytes, _) = encoded(value)?.into_parts();
+    Ok(ClosureArtifact::new(kind, bytes))
 }
 
 fn program_name(name: &str) -> ProgramName {
@@ -133,7 +133,6 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
     assert_eq!(seq, 1);
     let expected = SummarizeResult { text: Ref::of_text("summary:hello") };
     let expected_encoded = encoded(&expected)?;
-    assert_eq!(result, artifact_digest(SummarizeResult::ID, expected_encoded.bytes()));
     assert_eq!(result, expected_encoded.digest());
     assert_eq!(staged, vec![EncodedArtifact::text("summary:hello"), expected_encoded]);
 

@@ -5,7 +5,7 @@ use std::error::Error;
 
 use aether_bloomery_kinds::{
     ClosureArtifact, Detail, Digest, EncodedArtifact, ExecutorFault, Invoke, Invoked, Mode, OpaqueBytes, ProgramApi,
-    ProgramName, ReadArtifactResult, Ref, Refusal, Tree, Utf8Text, artifact_digest,
+    ProgramName, ReadArtifactResult, Ref, Refusal, Tree, Utf8Text,
 };
 use aether_bloomery_program::{
     Async, AsyncProgram, AsyncSession, Env, Http, InjectedApi, Pending, PendingCall, PollResult, Process, Program,
@@ -25,8 +25,8 @@ fn encoded<K: Storage + Clone + Cites>(value: &K) -> Result<EncodedArtifact, Box
 }
 
 fn closure_of<K: Storage + Clone + Cites>(value: &K) -> Result<ClosureArtifact, Box<dyn Error>> {
-    let encoded = encoded(value)?;
-    Ok(ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec()))
+    let (kind, bytes, _) = encoded(value)?.into_parts();
+    Ok(ClosureArtifact::new(kind, bytes))
 }
 
 fn send<P: SyncProgram>(input: Digest, closure: Vec<ClosureArtifact>) -> Invoked {
@@ -254,7 +254,6 @@ fn completed_reads_a_closure_child_and_stages_cited_text() -> Result<(), Box<dyn
     assert_eq!(seq, 7);
     let expected = CiteResult { text: Ref::of_text("hello") };
     let expected_encoded = encoded(&expected)?;
-    assert_eq!(result, artifact_digest(CiteResult::ID, expected_encoded.bytes()));
     assert_eq!(result, expected_encoded.digest());
     assert_eq!(staged, vec![EncodedArtifact::text("hello"), expected_encoded]);
     Ok(())

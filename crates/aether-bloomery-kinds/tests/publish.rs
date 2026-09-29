@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use aether_bloomery_kinds::{Digest, EncodedArtifact, Head, Publish, Ref, Tree, artifact_digest};
+use aether_bloomery_kinds::{ClosureArtifact, Digest, EncodedArtifact, Head, Publish, Ref, Tree, artifact_digest};
 use aether_data::{Kind, Storage};
 
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
@@ -22,8 +22,11 @@ fn encoded_artifact_keeps_nested_citations_and_a_decodable_payload() -> Result<(
     assert_eq!(artifact.citations().len(), 1);
     assert_eq!(artifact.citations()[0].kind(), Tree::ID);
     assert_eq!(artifact.citations()[0].bytes(), tree.digest().as_bytes());
-    assert_eq!(Document::decode_storage(artifact.bytes())?.value, document);
-    assert_eq!(artifact.digest(), artifact_digest(Document::ID, artifact.bytes()));
+    let digest = artifact.digest();
+    let (kind, payload, _) = artifact.into_parts();
+    let payload = ClosureArtifact::new(kind, payload).load(digest)?;
+    assert_eq!(Document::decode_storage(&payload)?.value, document);
+    assert_eq!(digest, artifact_digest(Document::ID, &payload));
     Ok(())
 }
 
