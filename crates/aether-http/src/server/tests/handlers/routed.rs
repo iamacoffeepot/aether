@@ -12,7 +12,7 @@ use crate::kinds::{HttpServerRequest, HttpServerResponse, RegisterRouteSelf, Unr
 use crate::server::HttpServerCapability;
 
 /// Claims `/api` through the typed authoring surface (`#[http::router]`
-/// / `#[http::route]`, ADR-0131): the macro emits the router's manual
+/// / `#[http::route]`, ADR-0131): the macro emits the router's
 /// `HttpServerRequest` handler and injects its `wire` registration. The
 /// handler echoes the decoded path, proving the payload round-tripped as a
 /// request (not merely that dispatch picked the right mailbox).
@@ -245,8 +245,8 @@ impl NativeActor for EchoPeer {
     }
 }
 
-/// A peer that receives `EchoAsk` and never replies — the downstream a
-/// deferred route's `502` settlement net catches.
+/// A peer that receives `EchoAsk` and never replies — the downstream whose
+/// deferred route keeps its reply held until the server's `504` timeout.
 pub struct SilentPeer;
 pub struct SilentPeerState;
 
@@ -260,17 +260,18 @@ impl NativeActor for SilentPeer {
         Ok(SilentPeerState)
     }
 
-    // Deliberately manual + no reply: the deferred route's downstream
-    // chain settles without an answer, arming the `504`.
+    // Deliberately manual + no reply: the deferred route's held reply keeps
+    // the request's chain open, so the server answers `504` at its timeout.
     #[handler::manual]
     fn on_ask(_state: &mut SilentPeerState, _ctx: &mut NativeCtx<'_, Erased, Manual>, _ask: EchoAsk) {}
 }
 
 /// A deferred-route handler (ADR-0154 §2): `/echo` forwards to
 /// [`EchoPeer`] and answers on its `EchoSay` reply; `/blackhole`
-/// forwards to [`SilentPeer`] and is answered `502` by the settlement
-/// net when that chain settles without a reply. `ctx.defer(..)` forwards to
-/// a declared dependency, hence `depends` names both peers.
+/// forwards to [`SilentPeer`], which never replies, so its held reply keeps
+/// the request open until the server answers `504` at its request timeout
+/// (ADR-0243 §7). `ctx.defer(..)` forwards to a declared dependency, hence
+/// `depends` names both peers.
 pub struct DeferRouteHandler;
 pub struct DeferRouteHandlerState;
 
@@ -288,12 +289,13 @@ impl NativeActor for DeferRouteHandler {
     /// `GET /echo` — forward to the echo peer by type, answer on its
     /// reply. `defer(&request)` captures the request; `.to::<R>()` forwards it.
     #[http::route(Get, "/echo")]
-    fn echo(_state: &mut DeferRouteHandlerState, mut ctx: http::Ctx<'_, NativeCtx<'_, Self, Manual>>) -> http::Outcome {
+    fn echo(_state: &mut DeferRouteHandlerState, mut ctx: http::Ctx<'_, NativeCtx<'_>>) -> http::Outcome {
         ctx.defer(&EchoAsk { text: "hi".to_string() }).to::<EchoPeer>()
     }
 
     /// `GET /echo/{word}` — a synchronous route on the deferred `/echo`
-    /// routes' claim, so the router's one handler answers both kinds of arm.
+    /// routes' claim, so the router's one held-reply handler answers both
+    /// kinds of arm.
     #[http::route(Get, "/echo/{word}")]
     fn echo_now(
         _state: &mut DeferRouteHandlerState,
@@ -303,36 +305,29 @@ impl NativeActor for DeferRouteHandler {
         HttpServerResponse { status: 200, headers: Vec::new(), body: format!("now:{}", word.0).into_bytes() }
     }
 
-    /// `GET /blackhole` — forward to the silent peer; it settles without a
-    /// reply, so the server's own `502` net answers.
+    /// `GET /blackhole` — forward to the silent peer; it never replies, so the
+    /// held reply keeps the request open until the server's `504`.
     #[http::route(Get, "/blackhole")]
-    fn blackhole(
-        _state: &mut DeferRouteHandlerState,
-        mut ctx: http::Ctx<'_, NativeCtx<'_, Self, Manual>>,
-    ) -> http::Outcome {
+    fn blackhole(_state: &mut DeferRouteHandlerState, mut ctx: http::Ctx<'_, NativeCtx<'_>>) -> http::Outcome {
         ctx.defer(&EchoAsk { text: "void".to_string() }).to::<SilentPeer>()
     }
 
     /// Map the peer's `EchoSay` reply into the response answered through
-    /// the held request obligation.
+    /// the router's held reply.
     ///
-    /// Literal `#[cfg(test)]` must ride the generated `#[handler::manual]`
+    /// Literal `#[cfg(test)]` must ride the generated `#[handler::single]`
     /// glue (the actor `handler_cfgs` contract). This fixture compiles with
     /// `cfg(test)`, so the predicate is true and the deferred-route
     /// end-to-end test still exercises `EchoSay` dispatch through cfg-gated
     /// glue.
     #[cfg(test)]
     #[http::reply]
-    fn on_say(
-        _state: &mut DeferRouteHandlerState,
-        _ctx: &mut NativeCtx<'_, Self, Manual>,
-        say: EchoSay,
-    ) -> HttpServerResponse {
+    fn on_say(_state: &mut DeferRouteHandlerState, _ctx: &mut NativeCtx<'_>, say: EchoSay) -> HttpServerResponse {
         HttpServerResponse { status: 200, headers: Vec::new(), body: format!("echoed:{}", say.text).into_bytes() }
     }
 
     /// Regression: `syn` does not evaluate `cfg`, so `#[http::router]` used
-    /// to emit `#[handler::manual]` reply glue unconditionally. A
+    /// to emit reply glue unconditionally. A
     /// `#[cfg(not(test))]` reply method then produced glue that named
     /// [`GatedOutReply`] — a kind that does not exist under `cfg(test)`.
     /// Both predicates must ride the generated handler so every derived
@@ -343,7 +338,7 @@ impl NativeActor for DeferRouteHandler {
     #[http::reply]
     fn on_gated_out(
         _state: &mut DeferRouteHandlerState,
-        _ctx: &mut NativeCtx<'_, Self, Manual>,
+        _ctx: &mut NativeCtx<'_>,
         _reply: GatedOutReply,
     ) -> HttpServerResponse {
         HttpServerResponse { status: 200, headers: Vec::new(), body: Vec::new() }

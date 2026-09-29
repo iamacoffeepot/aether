@@ -4,7 +4,7 @@
 //! server's shared `runtime` module; this file carries only the shard's
 //! `#[runtime] impl`: boot from the supervisor-built [`HttpShardSeed`], the
 //! sidecar drain, the stream/websocket/credit handlers, settlement, and the
-//! reply-interception fallback.
+//! two typed reply handlers.
 
 // `#[handler]` methods take their decoded payload by value per the ADR-0033
 // dispatch ABI; the macro-generated trampoline owns the decoded bytes so
@@ -17,8 +17,9 @@
 #[allow(clippy::wildcard_imports)]
 use crate::server::runtime::*;
 
-use crate::kinds::HttpInboundReady;
+use crate::kinds::{HttpInboundReady, HttpRouterReply};
 use aether_actor::runtime;
+use aether_data::RequestId;
 
 use super::HttpDispatchShard;
 
@@ -174,9 +175,8 @@ impl NativeActor for HttpDispatchShard {
 
     /// A streaming handler's inbound-body credit grant (ADR-0128), the inverse
     /// of the cap → handler [`HttpStreamCredit`]. Matched by the payload's
-    /// `stream_id` against the `request_streams` table — a typed handler, not
-    /// the reply-interception fallback, so a credit grant is never mistaken for
-    /// the handler's final `HttpServerResponse`.
+    /// `stream_id` against the `request_streams` table, so a credit grant is
+    /// never mistaken for the handler's final `HttpServerResponse`.
     ///
     /// # Agent
     /// Not user-callable — a streaming handler sends this after receiving
@@ -250,75 +250,53 @@ impl NativeActor for HttpDispatchShard {
         }
     }
 
-    /// Reply interception. Any mail addressed at this shard that isn't one
-    /// of the typed wake / settlement kinds is treated as the handler's
-    /// reply; if its `correlation_id` matches an in-flight request and
-    /// it is an [`HttpServerResponse`], format the HTTP/1.1 response,
-    /// write it to the held socket, and close.
+    /// A router's reply to a dispatched request (ADR-0108 §5, ADR-0128,
+    /// ADR-0129), keyed by the request's in-flight correlation, which the
+    /// reply echoes. A buffered response is written to the held socket, a
+    /// stream open starts the chunked response, and a websocket accept
+    /// upgrades the connection. A reply for no in-flight request (already
+    /// answered, timed out, or never ours) is dropped.
     ///
     /// # Agent
-    /// Not user-callable — this is the cap's reply-interception path. A
-    /// by-value `#[handler]` can't read the inbound `sender.correlation_id`,
-    /// so reply correlation goes through this envelope fallback
-    /// (ADR-0108 §5). The handler's one-shot reply is either an
-    /// [`HttpServerResponse`] (buffered, ADR-0108) or an
-    /// [`HttpResponseStreamOpen`] (streamed, ADR-0128); both key on the
-    /// request's in-flight correlation id. The mid-stream chunk / end mails
-    /// carry a fresh send-correlation and are routed to their own
-    /// `#[handler]`s ([`Self::on_response_chunk`] / [`Self::on_response_stream_end`]
-    /// / [`Self::on_websocket_message`]), keyed by their explicit `stream_id`
+    /// Not user-callable — this is the cap's reply-interception path: the
+    /// one `HttpRouter` row's reply. The mid-stream chunk / end mails carry a
+    /// fresh send-correlation and are routed to their own handlers
+    /// ([`Self::on_response_chunk`] / [`Self::on_response_stream_end`] /
+    /// [`Self::on_websocket_message`]), keyed by their explicit `stream_id`
     /// payload — a second correlation regime living beside this one.
-    #[fallback]
-    fn on_any(state: &mut Self::State, ctx: &mut NativeCtx<'_>, env: &Envelope) {
-        let correlation = env.sender.correlation_id;
+    #[handler::single]
+    fn on_router_reply(state: &mut Self::State, ctx: &mut NativeCtx<'_>, reply: HttpRouterReply) {
+        let Some(RequestId(correlation)) = ctx.in_reply_to() else {
+            return;
+        };
         let Some(pending) = state.in_flight.get(&correlation).copied() else {
             return;
         };
-        // ADR-0129: the handler accepted the upgrade. `WebSocketAccept` is a
-        // one-shot reply (correlation-echoed) keyed on the handshake request's
-        // in-flight correlation, like `HttpResponseStreamOpen`.
-        if env.kind == <WebSocketAccept as Kind>::ID {
-            if let Some(accept) = WebSocketAccept::decode_from_bytes(env.payload.bytes()) {
+        match reply {
+            HttpRouterReply::Response(response) => state.finish_buffered(correlation, pending, &response),
+            HttpRouterReply::Stream(open) => state.open_stream(ctx, correlation, pending.conn_id, &open),
+            HttpRouterReply::WebSocket(accept) => {
                 state.accept_websocket(ctx, correlation, pending.conn_id, pending.handler, &accept);
-            } else {
-                state.in_flight.remove(&correlation);
-                state.respond_and_finish(
-                    pending.conn_id,
-                    render_status_response(502, "malformed websocket accept"),
-                    false,
-                );
             }
+        }
+    }
+
+    /// A streamed upload's buffered response (ADR-0128): the handler's reply
+    /// to [`HttpRequestStreamEnd`], which is not an `HttpRouter` reply. It
+    /// rides the terminator's correlation, which the upload's in-flight
+    /// entry is keyed by.
+    ///
+    /// # Agent
+    /// Not user-callable — a request-streaming handler replies this to the
+    /// terminator once it has drained the body.
+    #[handler::single]
+    fn on_stream_end_reply(state: &mut Self::State, ctx: &mut NativeCtx<'_>, response: HttpServerResponse) {
+        let Some(RequestId(correlation)) = ctx.in_reply_to() else {
             return;
-        }
-        if env.kind == <HttpResponseStreamOpen as Kind>::ID {
-            if let Some(open) = HttpResponseStreamOpen::decode_from_bytes(env.payload.bytes()) {
-                state.open_stream(ctx, correlation, pending.conn_id, &open);
-            } else {
-                state.in_flight.remove(&correlation);
-                state.respond_and_finish(pending.conn_id, render_status_response(502, "malformed stream open"), false);
-            }
+        };
+        let Some(pending) = state.in_flight.get(&correlation).copied() else {
             return;
-        }
-        if env.kind != <HttpServerResponse as Kind>::ID {
-            // Unexpected kind with a matching correlation — leave the
-            // in-flight entry for the settlement / timeout safety net.
-            return;
-        }
-        if let Some(response) = HttpServerResponse::decode_from_bytes(env.payload.bytes()) {
-            let is_head = pending.method == HttpMethod::Head;
-            let bytes = render_handler_response(&response, is_head, pending.keep_alive);
-            state.in_flight.remove(&correlation);
-            // The parked reader writes the bytes (ADR-0135 §3): on
-            // keep-alive it loops into the next request; otherwise it
-            // exits into the normal ReaderClosed teardown (HTTP/1.0, or
-            // `Connection: close`).
-            state.respond_and_finish(pending.conn_id, bytes, pending.keep_alive);
-        } else {
-            // A cap-level error ends the connection (canned responses stay
-            // `Connection: close`), which keeps the keep-alive path scoped to
-            // the normal success round-trip.
-            state.in_flight.remove(&correlation);
-            state.respond_and_finish(pending.conn_id, render_status_response(502, "malformed handler response"), false);
-        }
+        };
+        state.finish_buffered(correlation, pending, &response);
     }
 }

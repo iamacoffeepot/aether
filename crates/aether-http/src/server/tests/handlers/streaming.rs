@@ -2,12 +2,12 @@
 //! handlers that pace chunks against credit, a flooder that ignores it, and
 //! the request-side streaming upload handler.
 
-use aether_actor::{Manual, OutboundReply, actor};
+use aether_actor::actor;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate::kinds::{
-    HttpHeader, HttpRequestChunk, HttpRequestStreamEnd, HttpRequestStreamOpen, HttpResponseStreamOpen,
+    HttpHeader, HttpRequestChunk, HttpRequestStreamEnd, HttpRequestStreamOpen, HttpResponseStreamOpen, HttpRouterReply,
     HttpServerRequest, HttpServerResponse, HttpStreamCredit,
 };
 use crate::server::HttpServerCapability;
@@ -28,7 +28,7 @@ pub fn stream_chunk_body(index: u32) -> Vec<u8> {
 }
 
 /// A well-behaved response-streaming handler (ADR-0128): replies
-/// `HttpResponseStreamOpen`, then emits [`STREAM_CHUNK_COUNT`] chunks
+/// `HttpRouterReply::Stream`, then emits [`STREAM_CHUNK_COUNT`] chunks
 /// paced strictly against the credit it is granted, and terminates with
 /// `HttpResponseStreamEnd`.
 pub struct StreamHttpHandler;
@@ -55,14 +55,14 @@ impl NativeActor for StreamHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::manual]
-    fn on_request(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _request: HttpServerRequest) {
+    #[handler::single]
+    fn on_request(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterReply {
         state.next_index = 0;
         state.ended = false;
-        ctx.reply(&HttpResponseStreamOpen {
+        HttpRouterReply::Stream(HttpResponseStreamOpen {
             status: 200,
             headers: vec![HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() }],
-        });
+        })
     }
 
     /// Spend the granted credit: send up to `credit.credit` more chunks,
@@ -116,13 +116,13 @@ impl NativeActor for StreamIdEchoHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::manual]
-    fn on_request(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _request: HttpServerRequest) {
+    #[handler::single]
+    fn on_request(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterReply {
         state.emitted = false;
-        ctx.reply(&HttpResponseStreamOpen {
+        HttpRouterReply::Stream(HttpResponseStreamOpen {
             status: 200,
             headers: vec![HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() }],
-        });
+        })
     }
 
     #[handler::single]
@@ -147,7 +147,7 @@ impl NativeActor for StreamIdEchoHandler {
 pub const FLOOD_CHUNK_COUNT: u32 = 200;
 
 /// A misbehaving response-streaming handler (ADR-0128 trust boundary):
-/// it replies `HttpResponseStreamOpen`, then on its first credit ignores
+/// it replies `HttpRouterReply::Stream`, then on its first credit ignores
 /// the granted amount entirely and floods [`FLOOD_CHUNK_COUNT`] chunks.
 pub struct FloodHttpHandler;
 
@@ -171,9 +171,9 @@ impl NativeActor for FloodHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::manual]
-    fn on_request(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _request: HttpServerRequest) {
-        ctx.reply(&HttpResponseStreamOpen { status: 200, headers: Vec::new() });
+    #[handler::single]
+    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterReply {
+        HttpRouterReply::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
     }
 
     #[handler::single]
@@ -232,13 +232,13 @@ impl NativeActor for StreamingUploadHandler {
     /// A route holder covers `HttpRouter`, so this handler takes the
     /// buffered request too. The cap streams every body to it except a
     /// websocket upgrade's, which it declines.
-    #[handler::manual]
-    fn on_request(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _request: HttpServerRequest) {
-        ctx.reply(&HttpServerResponse {
+    #[handler::single]
+    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterReply {
+        HttpRouterReply::Response(HttpServerResponse {
             status: 400,
             headers: Vec::new(),
             body: b"upload expects a streamed body".to_vec(),
-        });
+        })
     }
 
     #[handler::single]

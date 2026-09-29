@@ -56,7 +56,7 @@ impl HttpShardState {
     /// Finish an inbound request stream (ADR-0128): send the handler an
     /// `HttpRequestStreamEnd` and record it as the in-flight request whose
     /// buffered `HttpServerResponse` reply, riding the terminator's envelope
-    /// correlation, the reply-interception path writes back — so a streamed
+    /// correlation, the shard's stream-end reply handler writes back — so a streamed
     /// upload answers with one ordinary response and the settlement safety net
     /// still `502`s a handler that drops without replying.
     pub fn end_request_stream<A: HandlesKind<Settled>>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId) {
@@ -87,7 +87,8 @@ impl HttpShardState {
         self.signal_reader(conn_id, ReaderControl::Credit { credit });
     }
 
-    /// Promote a buffered request to a response stream (ADR-0128): drop its
+    /// Promote a buffered request to a response stream on the handler's
+    /// `HttpRouterReply::Stream` reply (ADR-0128): drop its
     /// in-flight entry so the settlement safety net no longer trips `502` on
     /// this chain, write the chunked response head, spawn the per-connection
     /// writer thread, and grant the handler its initial credit window.

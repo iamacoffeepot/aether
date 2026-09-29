@@ -1,11 +1,11 @@
 //! Minimal native handler actors behind the server in the integration
-//! tests: one that replies `200` echoing the request, one that drops
-//! the request without replying (the `502` safety-net path), two
+//! tests: one that replies `200` echoing the request, one that closes
+//! before answering its held reply (the close-time `502` path), two
 //! response-streaming handlers (ADR-0128) — a well-behaved one that
 //! paces chunks against credit, and a flooder that ignores credit —
 //! plus the routed handlers. Most route handlers author their routes
 //! through the typed `#[http::router]` / `#[http::route]` surface
-//! (ADR-0131) — the macro emits the router's one manual request handler and
+//! (ADR-0131) — the macro emits the router's one request handler and
 //! injects its `register_route_self` registration — so the tests exercise what a
 //! component author writes. The conflict-`Err` and idempotent
 //! double-claim handlers stay on the raw registration surface, so a
@@ -29,7 +29,7 @@ mod streaming;
 // `EchoHttpHandler` is also the `HttpRouter`-covering fixture the runtime's
 // own unit tests narrow a handler path from, so the basic fixtures reach the
 // whole `server` module rather than this test tree alone.
-pub(in crate::server) use basic::{EchoHttpHandler, FixedBodyHttpHandler, SilentHttpHandler};
+pub(in crate::server) use basic::{ClosingHttpHandler, EchoHttpHandler, FixedBodyHttpHandler};
 pub(super) use routed::{
     ApiRouteHandler, ApiV2Handler, BookRouteHandler, DeferRouteHandler, EchoPeer, ExtractRouteHandler,
     MethodAnyHandler, MethodPostHandler, NestedRouteHandler, SilentPeer, TmpRouteHandler, WiredRouteHandler,

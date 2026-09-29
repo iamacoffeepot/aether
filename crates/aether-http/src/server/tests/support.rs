@@ -24,6 +24,12 @@ pub(super) fn config_for(max_request_bytes: usize) -> HttpServerConfig {
     }
 }
 
+/// [`config_for`] with a short `request_timeout_millis`, for a test that
+/// waits out the server's `504`.
+pub(super) fn timeout_config_for(request_timeout_millis: u64) -> HttpServerConfig {
+    HttpServerConfig { request_timeout_millis, ..config_for(1024) }
+}
+
 /// Server config for the streaming tests (ADR-0128): a small credit window
 /// so a multi-chunk response must replenish credit repeatedly, and a flood
 /// overruns it fast.

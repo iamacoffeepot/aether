@@ -15,14 +15,15 @@
 //! mailbox).
 
 use super::HttpServerCapability;
-use crate::kinds::{HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd, WebSocketClose, WebSocketMessage};
+use crate::kinds::{
+    HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd, HttpServerResponse, WebSocketClose, WebSocketMessage,
+};
 use aether_kinds::trace::Settled;
 
 /// `aether.http.server.shard` **identity** (ADR-0122 identity/runtime split,
 /// ADR-0135). A ZST carrying only the addressing — `Addressable`, the
-/// per-handler `HandlesKind` markers, the `#[fallback]` reply-interception
-/// marker, and the instanced name-inventory entry, all emitted always-on by
-/// `#[actor]`. The state-bearing runtime (`HttpShardState`, the
+/// per-handler `HandlesKind` markers (the two reply kinds among them), and the
+/// instanced name-inventory entry, all emitted always-on by `#[actor]`. The state-bearing runtime (`HttpShardState`, the
 /// per-connection machine) lives behind the one `feature = "runtime"` gate.
 #[actor(instanced, child_of(HttpServerCapability))]
 pub struct HttpDispatchShard;

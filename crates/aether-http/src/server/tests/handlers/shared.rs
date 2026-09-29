@@ -2,12 +2,12 @@
 //! prefix `shared: true` and so join a round-robin member set, plus the bare
 //! (exclusive-by-default) router the negative case pins.
 
-use aether_actor::{Manual, OutboundReply, actor};
+use aether_actor::actor;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate as http;
-use crate::kinds::{HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
+use crate::kinds::{HttpRouterReply, HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
 use crate::server::HttpServerCapability;
 
 /// A routed handler whose `wire` registers each claim `shared: true`
@@ -37,17 +37,17 @@ macro_rules! shared_routed_handler {
                 });)+
             }
 
-            #[handler::manual]
+            #[handler::single]
             fn on_request(
                 _state: &mut Self::State,
-                ctx: &mut NativeCtx<'_, Self, Manual>,
+                _ctx: &mut NativeCtx<'_>,
                 _request: HttpServerRequest,
-            ) {
-                ctx.reply(&HttpServerResponse {
+            ) -> HttpRouterReply {
+                HttpRouterReply::Response(HttpServerResponse {
                     status: 200,
                     headers: Vec::new(),
                     body: $tag.to_vec(),
-                });
+                })
             }
         }
     };

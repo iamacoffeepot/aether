@@ -1,12 +1,13 @@
 //! The buffered `/` catch-all fixtures: one handler that replies `200`
 //! echoing the request, one that replies a fixed non-empty body, and one that
-//! drops the request without replying (the `502` safety-net path).
+//! holds the request's reply and closes before answering (the close-time
+//! `502` path).
 
-use aether_actor::{Manual, OutboundReply, actor};
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_actor::actor;
+use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
-use crate::kinds::{HttpHeader, HttpServerRequest, HttpServerResponse};
+use crate::kinds::{HttpHeader, HttpRouterReply, HttpServerRequest, HttpServerResponse};
 use crate::server::HttpServerCapability;
 
 use super::bind_catch_all;
@@ -34,8 +35,8 @@ impl NativeActor for EchoHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::manual]
-    fn on_request(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, request: HttpServerRequest) {
+    #[handler::single]
+    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, request: HttpServerRequest) -> HttpRouterReply {
         let headers = vec![
             HttpHeader { name: "x-aether-method".to_string(), value: format!("{:?}", request.method) },
             HttpHeader { name: "x-aether-path".to_string(), value: request.path.clone() },
@@ -43,7 +44,7 @@ impl NativeActor for EchoHttpHandler {
             HttpHeader { name: "x-aether-peer-addr".to_string(), value: request.peer_addr.clone() },
             HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() },
         ];
-        ctx.reply(&HttpServerResponse { status: 200, headers, body: request.body });
+        HttpRouterReply::Response(HttpServerResponse { status: 200, headers, body: request.body })
     }
 }
 
@@ -70,39 +71,50 @@ impl NativeActor for FixedBodyHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::manual]
-    fn on_request(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _request: HttpServerRequest) {
-        ctx.reply(&HttpServerResponse {
+    #[handler::single]
+    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterReply {
+        HttpRouterReply::Response(HttpServerResponse {
             status: 200,
             headers: vec![HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() }],
             body: b"fixed body".to_vec(),
-        });
+        })
     }
 }
 
-/// Receives the request and returns without replying — the response-less
-/// chain the `502` settlement safety net covers.
-pub struct SilentHttpHandler;
+/// Holds the request's reply, parks the ticket in its state, and closes
+/// itself before answering: the actor close that answers every live held
+/// reply with its `unanswered` value (ADR-0243 §1), which for
+/// `HttpRouterReply` is a `502`.
+pub struct ClosingHttpHandler;
 
-/// Empty runtime state for the stateless silent handler (ADR-0122).
-pub struct SilentHttpHandlerState;
+/// The held reply the closing handler never answers.
+pub struct ClosingHttpHandlerState {
+    parked: Option<Held<HttpRouterReply>>,
+}
 
 #[actor(singleton, root, depends(HttpServerCapability))]
-impl NativeActor for SilentHttpHandler {
-    type State = SilentHttpHandlerState;
+impl NativeActor for ClosingHttpHandler {
+    type State = ClosingHttpHandlerState;
     type Config = ();
-    const NAMESPACE: &'static str = "aether.http.test_silent_handler";
+    const NAMESPACE: &'static str = "aether.http.test_closing_handler";
 
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<SilentHttpHandlerState, BootError> {
-        Ok(SilentHttpHandlerState)
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<ClosingHttpHandlerState, BootError> {
+        Ok(ClosingHttpHandlerState { parked: None })
     }
 
     fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         bind_catch_all(ctx);
     }
 
-    #[handler::manual]
-    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_, Self, Manual>, _request: HttpServerRequest) {
-        // Intentionally drops the request without replying.
+    #[handler::single]
+    fn on_request(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        _request: HttpServerRequest,
+    ) -> Pending<HttpRouterReply> {
+        let (pending, held) = ctx.hold::<HttpRouterReply>();
+        state.parked = Some(held);
+        ctx.shutdown();
+        pending
     }
 }

@@ -7,7 +7,7 @@
 //! ```text
 //! TcpStream → HttpServerCapability → aether.component.load (wasm guest)
 //!           → HttpServerRequest dispatch → WasmActor::on_request
-//!           → HttpServerResponse reply → formatted HTTP/1.1 response
+//!           → HttpRouterReply reply → formatted HTTP/1.1 response
 //! ```
 //!
 //! Heavy: boots a full headless chassis with a real wasm guest, so it

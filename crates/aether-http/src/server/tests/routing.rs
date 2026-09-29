@@ -23,22 +23,27 @@ use super::handlers::{
 };
 use super::support::{
     body_of, config_for, keep_alive_config_for, poll_body, port_of, read_one_response, round_trip, round_trip_live,
+    timeout_config_for,
 };
 
 /// Boot the server (first, so the routed handlers' `wire` registrations
 /// find its mailbox live) with [`FixedBodyHttpHandler`] as the `/`
 /// catch-all (its `wire` binds `prefix: "/"`), then the given routed
 /// handlers.
+/// The server takes `config_for(1024)` unless a leading `config: …;` names one.
 macro_rules! routed_chassis {
-    ($($handler:ty),+ $(,)?) => {{
+    (config: $config:expr; $($handler:ty),+ $(,)?) => {{
         let (registry, mailer) = fresh_substrate();
         Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor_configured::<HttpServerCapability>((), config_for(1024))
+            .with_actor_configured::<HttpServerCapability>((), $config)
             .with_actor::<FixedBodyHttpHandler>(())
             $(.with_actor::<$handler>(()))+
             .build_passive()
             .expect("caps boot")
     }};
+    ($($handler:ty),+ $(,)?) => {
+        routed_chassis!(config: config_for(1024); $($handler),+)
+    };
 }
 
 /// A `wire`-registered route dispatches to its router — the router's
@@ -112,40 +117,47 @@ fn path_template_routes_dispatch_and_capture() {
 }
 
 /// ADR-0154 §2 deferred routes end to end (relay pattern): `GET /echo`
-/// forwards its request to a peer by type via `defer(&request).to::<EchoPeer>()` — an
-/// inherited `send_with_context` that keeps the request's chain open — and
-/// the reply route answers on the peer's `EchoSay`. `GET /blackhole` forwards
-/// to a peer that settles without replying, so the request's chain settles
-/// response-less and the server's own `502` net answers. Both peers are
+/// forwards its request to a peer by type via `defer(&request).to::<EchoPeer>()`,
+/// which holds the router's reply and parks the ticket in the forwarded
+/// request's context, and the reply route answers the held reply on the
+/// peer's `EchoSay`. Catches a `to()` whose held reply the reply route never
+/// claims, which would wait out the timeout into a `504`.
+///
+/// `GET /blackhole` forwards to a peer that never replies. The held reply
+/// keeps the request's chain open (ADR-0243 §7), so the server answers `504`
+/// at its request timeout. Catches a held reply released early, which would
+/// let the chain settle and the settlement net answer `502`. Both peers are
 /// declared dependencies of the router, which `ctx.defer(..)` forwards to.
 #[test]
 fn deferred_route_forwards_and_answers_on_reply() {
-    let chassis = routed_chassis!(DeferRouteHandler, EchoPeer, SilentPeer);
+    let chassis = routed_chassis!(config: timeout_config_for(1_000); DeferRouteHandler, EchoPeer, SilentPeer);
     let port = port_of(&chassis);
 
     // The reply arrives from the peer and the reply route answers the held
     // request; poll it live past the async route registration.
     poll_body(port, b"GET /echo HTTP/1.1\r\nHost: localhost\r\n\r\n", "echoed:hi");
 
-    // The silent peer settles its inbound without replying, so the request's
-    // chain settles response-less and the server answers `502`. Before the
-    // `/blackhole` registration lands the path takes the `/` catch-all (a
-    // 200), so poll until the 502 appears.
+    // The silent peer never replies, so the held reply keeps the request
+    // open until the server's `504`. Before the `/blackhole` registration
+    // lands the path takes the `/` catch-all (a 200), so poll until the
+    // routed answer appears and require it to be the timeout.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let response = round_trip(port, b"GET /blackhole HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        if response.starts_with("HTTP/1.1 502 ") {
+        if !response.starts_with("HTTP/1.1 200 ") && !response.starts_with("HTTP/1.1 503 ") {
+            assert!(response.starts_with("HTTP/1.1 504 "), "expected the request timeout's 504, got: {response:?}");
             break;
         }
-        assert!(Instant::now() < deadline, "expected a 502 within 10s; last response: {response:?}");
+        assert!(Instant::now() < deadline, "expected a 504 within 10s; last response: {response:?}");
         thread::sleep(Duration::from_millis(50));
     }
 }
 
 /// A router whose one claim carries a deferred route (`/echo`) and a
-/// synchronous one (`/echo/{word}`) answers both through its one manual
-/// handler. Catches glue that drops a synchronous arm's reply, which the
-/// server would answer `502` once the chain settled response-less.
+/// synchronous one (`/echo/{word}`) answers both through its one handler,
+/// which holds its reply. Catches glue whose synchronous arm holds its reply
+/// and never answers it, which the server would answer `504` at its
+/// timeout.
 #[test]
 fn a_router_mixing_synchronous_and_deferred_routes_on_one_claim_answers_both() {
     let chassis = routed_chassis!(DeferRouteHandler, EchoPeer, SilentPeer);

@@ -2,7 +2,7 @@
 //! recipe (issue 1762, ADR-0108). Not a demo, not exemplary — its only
 //! job is to prove the `aether.http.server` guest load path end to end:
 //! `HttpServerCapability` dispatches an `HttpServerRequest` here; this
-//! actor path-matches and replies `HttpServerResponse`; the cap formats
+//! actor path-matches and replies `HttpRouterReply::Response`; the cap formats
 //! the HTTP/1.1 response and writes it to the client socket.
 //!
 //! Behaviour:
@@ -24,14 +24,14 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use aether_actor::{ActorInitError, DependsOn, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, DependsOn, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_http as http;
 use aether_http::HttpServerCapability;
 use aether_http::kinds::{
-    HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse, HttpStreamCredit, RegisterRouteSelf,
-    WebSocketAccept, WebSocketClose, WebSocketMessage,
+    HttpResponseStreamOpen, HttpRouterReply, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
+    RegisterRouteSelf, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use aether_http::{ResponseStream, WebSocketStream};
 use aether_kinds::DropComponent;
@@ -66,13 +66,13 @@ impl WasmActor for HttpHandler {
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches it on
     /// every inbound request; this actor binds the `/` catch-all in `wire`.
-    #[handler::manual]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, req: HttpServerRequest) {
-        ctx.reply(&HttpServerResponse {
+    #[handler::single]
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpRouterReply {
+        HttpRouterReply::Response(HttpServerResponse {
             status: 200,
             headers: Vec::new(),
             body: format!("hello from aether: {}", req.path).into_bytes(),
-        });
+        })
     }
 }
 
@@ -160,7 +160,7 @@ impl StreamProgress {
 }
 
 /// Reference response-streaming handler fixture (ADR-0128) for the
-/// `serving-http` streaming e2e test. It replies `HttpResponseStreamOpen`
+/// `serving-http` streaming e2e test. It replies `HttpRouterReply::Stream`
 /// instead of `HttpServerResponse`, emits `STREAM_CHUNK_COUNT` chunks paced
 /// against the cap's `HttpStreamCredit` grants, and terminates with
 /// `HttpResponseStreamEnd`. Each chunk is `"chunk-{i}\n"`, so the client
@@ -191,9 +191,9 @@ impl WasmActor for StreamingHttpHandler {
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches it on
     /// every inbound request; this actor binds the `/` catch-all in `wire`.
-    #[handler::manual]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _req: HttpServerRequest) {
-        ctx.reply(&HttpResponseStreamOpen { status: 200, headers: Vec::new() });
+    #[handler::single]
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterReply {
+        HttpRouterReply::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
     }
 
     /// Spend the granted credit: emit up to `credit.credit` more chunks, then
@@ -248,11 +248,12 @@ impl WasmActor for WebSocketHandler {
     ///
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches an
-    /// `HttpServerRequest` for a websocket upgrade; replying `WebSocketAccept`
-    /// completes the handshake, `HttpServerResponse` declines it.
-    #[handler::manual]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _req: HttpServerRequest) {
-        ctx.reply(&WebSocketAccept { subprotocol: None, headers: Vec::new() });
+    /// `HttpServerRequest` for a websocket upgrade; replying
+    /// `HttpRouterReply::WebSocket` completes the handshake,
+    /// `HttpRouterReply::Response` declines it.
+    #[handler::single]
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterReply {
+        HttpRouterReply::WebSocket(WebSocketAccept { subprotocol: None, headers: Vec::new() })
     }
 
     /// Echo one inbound message back to the peer by its `stream_id`
@@ -325,7 +326,7 @@ impl WasmActor for WebSocketHandler {
 
 /// Routed sibling of [`HttpHandler`] for the ADR-0130 drop-purge e2e
 /// test, authored through the typed route surface (`#[http::router]` /
-/// `#[http::route]`, ADR-0131): the macro emits the router's one manual
+/// `#[http::route]`, ADR-0131): the macro emits the router's one
 /// request handler and injects the `register_route_self` registration, so
 /// this fixture is
 /// the wasm32 + `Lifecycle<S>` universality proof for the macro layer.
@@ -385,7 +386,7 @@ impl WasmActor for RoutedHttpHandler {
 /// route** (ADR-0128 streaming × ADR-0131 route dispatch). It claims
 /// `/routed-stream` for its own mailbox with a raw `RegisterRouteSelf` from
 /// `wire`, then behaves exactly like [`StreamingHttpHandler`]: replies
-/// `HttpResponseStreamOpen` and emits `STREAM_CHUNK_COUNT` credit-paced
+/// `HttpRouterReply::Stream` and emits `STREAM_CHUNK_COUNT` credit-paced
 /// `"chunk-{i}\n"` chunks. Unlike the other fixtures it does **not** claim
 /// the `/` catch-all, so a `/routed-stream` request can only reach it via
 /// the specific route it registered — the initial response-stream credit
@@ -425,9 +426,9 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// Not sent manually — the `aether.http.server` cap dispatches it on a
     /// request matching the `/routed-stream` route this actor claimed in
     /// `wire`.
-    #[handler::manual]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _req: HttpServerRequest) {
-        ctx.reply(&HttpResponseStreamOpen { status: 200, headers: Vec::new() });
+    #[handler::single]
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterReply {
+        HttpRouterReply::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
     }
 
     /// Spend the granted credit exactly as [`StreamingHttpHandler`] does. On
