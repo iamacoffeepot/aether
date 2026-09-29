@@ -46,7 +46,9 @@
 //! invocation sends [`ApiCall`] to its bundle root, the root relays it here,
 //! and the core maps `Http` to the http capability and `Workspace` to the
 //! held workspace, refusing any other API; the provider's reply comes back
-//! under an [`ApiTicket`] and answers the held call.
+//! under an [`ApiTicket`] and answers the held call. The shell sends a
+//! relayed workspace run over the unit's own journal as its `source`, written
+//! once at `init` from the unit key (ADR-0240 D7).
 
 mod bundles;
 mod core;
@@ -63,12 +65,12 @@ pub use self::core::{
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
 
-use aether_actor::{ActorRef, ErasedActorRef, runtime};
+use aether_actor::{ActorPath, ActorRef, ErasedActorRef, ProtocolPath, runtime};
 use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
-    ApiCall, ApiCallResult, AppendRecordsResult, AwaitProcessed, Call, CallOutcome, ClosureLimit, Digest, Evaluated,
-    Invoked, Processed, ReadArtifact, ReadArtifactResult, ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed,
-    WatchHeadResult,
+    ApiCall, ApiCallResult, AppendRecordsResult, ArtifactStorage, AwaitProcessed, Call, CallOutcome, ClosureLimit,
+    Digest, Evaluated, Invoked, Processed, ReadArtifact, ReadArtifactResult, ReadClosureResult, ReadEventsResult,
+    Status, UnitKey, Warmed, WatchHeadResult,
 };
 use aether_bloomery_workspace::WorkspaceCapability;
 use aether_http::FetchResult;
@@ -103,14 +105,18 @@ pub struct DriverParams {
 }
 
 /// [`BundleDriver`] runtime state: the sans-io program core, the unit and
-/// journal it folds for, the workspace its programs run through, the core's
-/// startup commands until `wire` performs them, the held replies it owes,
-/// and each loaded bundle's root.
+/// journal it folds for, the workspace its programs run through and the
+/// source their runs read and stage through, the core's startup commands
+/// until `wire` performs them, the held replies it owes, and each loaded
+/// bundle's root.
 pub struct BundleDriverState {
     core: ProgramCore,
     unit: UnitKey,
     journal: ActorRef<JournalActor>,
     workspace: ActorRef<WorkspaceCapability>,
+    /// The unit's journal as the storage every relayed run names, written
+    /// from the unit key: `aether.bloomery.journal:<unit key>`.
+    source: ProtocolPath<ArtifactStorage>,
     startup: Vec<Command>,
     callers: HashMap<CallerId, Caller>,
     /// The digest each in-flight load was issued for, keyed by its ticket.
@@ -148,8 +154,10 @@ impl NativeActor for BundleDriver {
     ) -> Result<BundleDriverState, BootError> {
         let DriverParams { unit, journal, workspace } = params;
         let (core, startup) = ProgramCore::start(limit);
+        let source = ActorPath::<JournalActor>::instance(unit.as_load_name()).narrow::<ArtifactStorage>();
         Ok(BundleDriverState {
             core,
+            source,
             unit,
             journal,
             workspace,

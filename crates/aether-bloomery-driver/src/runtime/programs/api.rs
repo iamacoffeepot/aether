@@ -3,7 +3,10 @@
 //! An invocation sends each API call to its bundle root, which relays it to
 //! the driver that sent the `Invoke`. The driver maps the API to a provider
 //! it holds, decoding the one request kind that API carries, or refuses it
-//! at once. A mapped call parks under an [`ApiTicket`] until the provider
+//! at once. A `Workspace` call carries a `RunRequest`, which names no
+//! storage; the shell sends it on as a `Run` over its own unit's journal, so
+//! a program cannot name the storage its run reads and writes (ADR-0240
+//! I-5). A mapped call parks under an [`ApiTicket`] until the provider
 //! answers; each caller is answered exactly once.
 
 use aether_bloomery_kinds::{ApiCall, ApiCallResult, Detail, ProgramApi, Refusal};
@@ -38,7 +41,7 @@ impl ProgramCore {
         let command = match api {
             ProgramApi::Http => decode::<aether_http::Fetch>(kind, &payload)
                 .map(|request| Command::Fetch { ticket: self.park_api(caller, call), request }),
-            ProgramApi::Workspace => decode::<aether_bloomery_workspace::Run>(kind, &payload)
+            ProgramApi::Workspace => decode::<aether_bloomery_workspace::RunRequest>(kind, &payload)
                 .map(|request| Command::RunWorkspace { ticket: self.park_api(caller, call), request }),
             ProgramApi::Process => Err(format!("{api:?} has no provider in this unit")),
         };

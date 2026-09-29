@@ -10,11 +10,12 @@
 //! own deny-by-default allowlist, so a fetch reaches only the hosts an
 //! operator names with `--http-allowlist` / `AETHER_HTTP_ALLOWLIST` and every
 //! other fetch is answered with a refusal, and the `aether.bloomery.workspace` actor
-//! (ADR-0237 decision 8), which imports digest-pinned images into the journal
+//! (ADR-0237 decision 8), which runs steps and imports digest-pinned images
 //! through the Docker Engine API at `--workspace-endpoint` /
-//! `AETHER_WORKSPACE_ENDPOINT`. A credential rides the HTTP capability:
-//! `--http-secrets` binds a secret from the `--secrets-dir` directory to an
-//! allowlisted host (ADR-0235), so no program carries one. The workspace
+//! `AETHER_WORKSPACE_ENDPOINT`, reading and staging through the journal each
+//! request names as its `source` (ADR-0240 D7). A credential rides the HTTP
+//! capability: `--http-secrets` binds a secret from the `--secrets-dir`
+//! directory to an allowlisted host (ADR-0235), so no program carries one. The workspace
 //! actor is the engine's only route to a container; `aether.process` is not
 //! composed, and no TCP, HTTP-serving, or fs capability rides this engine,
 //! while the RPC server and the inventory composed with it keep it drivable
@@ -25,8 +26,8 @@ use std::mem;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use aether_bloomery_journal::{ArtifactStore, Journal, ReadCacheBudget};
-use aether_bloomery_workspace::{WorkspaceCapability, WorkspaceParams};
+use aether_bloomery_journal::{Journal, ReadCacheBudget};
+use aether_bloomery_workspace::WorkspaceCapability;
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
     chassis_residual_knobs, install_frame_size, with_rpc_server,
@@ -70,11 +71,10 @@ impl Chassis for BloomeryChassis {
 
 impl BloomeryChassis {
     /// Build the bloomery chassis: the hub's prologue with headless's lift —
-    /// lower the bloomery knobs, open the unit's journal root and hand its artifact
-    /// store to the env, stand up the substrate, re-apply the resolved
-    /// log filter, lift the base out of the env, compose the shared stratum
-    /// plus the component host, HTTP egress, the workspace actor, and the held
-    /// RPC server, sweep for unknown env
+    /// lower the bloomery knobs, open the unit's journal root, stand up the
+    /// substrate, re-apply the resolved log filter, lift the base out of the
+    /// env, compose the shared stratum plus the component host, HTTP egress,
+    /// the workspace actor, and the held RPC server, sweep for unknown env
     /// keys, install the signal-blocking driver, mount the journal owner and
     /// the bundle driver, and only then open the RPC server's bind gate. The
     /// order is build, mount, bind: until the gate opens a dial is refused, so
@@ -117,10 +117,6 @@ impl BloomeryChassis {
                 unit.key
             ))))
         })?;
-        // The workspace actor writes its imports through this store, which
-        // shares the root's lock; only this seam sets it, so no embedder can
-        // compose the workspace over a root the chassis did not open.
-        env.artifacts = Some(journal.artifact_store());
         let mut boot = SubstrateBoot::build()?;
         apply_filter(&env.runtime.log_filter);
         let base = mem::take(&mut env.base);
@@ -160,21 +156,13 @@ pub struct BloomeryEnv {
     /// closure limit at the top of [`BloomeryChassis::build_mounted`], then applied off
     /// the builder at the mount seam.
     pub bloomery: BloomeryConfig,
-    /// The artifact store of the journal [`BloomeryChassis::build_mounted`]
-    /// opened, which it sets right after opening the root. `None` everywhere
-    /// else — `from_cli`, `resolve_env`, and [`BloomeryEnv::new`] — so the
-    /// describe / print-config composition lists the workspace actor without
-    /// a store and never boots it.
-    artifacts: Option<ArtifactStore>,
 }
 
 impl BloomeryEnv {
-    /// An env over `base`, `runtime`, and `bloomery`, with no artifact store:
-    /// [`BloomeryChassis::build_mounted`] supplies it from the journal root it
-    /// opens.
+    /// An env over `base`, `runtime`, and `bloomery`.
     #[must_use]
     pub fn new(base: ChassisBase, runtime: RuntimeConfig, bloomery: BloomeryConfig) -> Self {
-        Self { base, runtime, bloomery, artifacts: None }
+        Self { base, runtime, bloomery }
     }
 }
 
@@ -220,13 +208,12 @@ impl BootableChassis for BloomeryChassis {
     /// so the manifest roster can never drift from what boots. Adds only the
     /// component host (which the driver's `Command::Load` targets), HTTP
     /// egress for Sampled programs (ADR-0234 decision 7), the workspace actor
-    /// over the env's artifact store (ADR-0237 decision 8), the RPC server
+    /// (ADR-0237 decision 8), which holds no store and reads and stages
+    /// through each request's source (ADR-0240 D7), the RPC server
     /// (ADR-0155 §3) composed held so [`BloomeryChassis::build_mounted`] binds
     /// it after the mount, the inventory `with_rpc_server` composes beside it
     /// so MCP can resolve addresses and kinds, and the bloomery config
-    /// declaration. The env's
-    /// store is `None` on the describe / print-config path, which composes the
-    /// workspace to list it and never boots it.
+    /// declaration.
     ///
     /// HTTP resolves `HttpConfig` off the source stack with no chassis-side
     /// override, so its compiled defaults hold: an empty allowlist answers
@@ -234,7 +221,7 @@ impl BootableChassis for BloomeryChassis {
     /// unconditionally is what makes a program's fetch always answered on the
     /// one engine that runs programs. `aether.process`, TCP, HTTP-serving,
     /// and fs capabilities are not composed.
-    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: Self::Env) -> Result<Builder<Self>, BootError> {
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, _env: Self::Env) -> Result<Builder<Self>, BootError> {
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
@@ -244,7 +231,7 @@ impl BootableChassis for BloomeryChassis {
             builder
                 .with_actor::<ComponentHostCapability>(component_host_params)
                 .with_actor::<HttpCapability>(())
-                .with_actor::<WorkspaceCapability>(WorkspaceParams { artifacts: env.artifacts }),
+                .with_actor::<WorkspaceCapability>(()),
         )
         .declare_config_member::<BloomeryConfig>())
     }

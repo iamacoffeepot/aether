@@ -5,7 +5,7 @@ use std::fmt;
 
 use aether_bloomery_kinds::{Digest, hash_bytes};
 
-use crate::Run;
+use crate::RunRequest;
 
 /// The domain tag every run key's hash input starts with.
 const DOMAIN: &[u8] = b"aether.workspace.run-key.v1";
@@ -26,7 +26,7 @@ impl RunKey {
     /// args (count, then each), and its env (count, then each key and value,
     /// in the order given). Every count is a u64 LE and every byte string is
     /// prefixed by its length as one, so `["ab"]` and `["a", "b"]` differ.
-    pub fn of(run: &Run) -> Self {
+    pub fn of(run: &RunRequest) -> Self {
         let mut input = Vec::from(DOMAIN);
         field(&mut input, run.environment.digest().as_bytes());
         let steps = run.steps.as_slice();

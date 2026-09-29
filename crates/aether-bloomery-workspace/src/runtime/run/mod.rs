@@ -2,10 +2,11 @@
 //! a stored tree in a stored environment, each in its own container, run on
 //! the actor's worker thread.
 //!
-//! 1. [`resolve`] loads the environment and every input from one artifact
-//!    batch, checks the tree's `rust-toolchain.toml` against what the
-//!    environment provides, resolves each step's tool to an executable in the
-//!    root, and compares the environment's platform with the daemon's.
+//! 1. [`resolve`] loads the environment and prefetches the run tree and every
+//!    mount from the run's source, checks the tree's `rust-toolchain.toml`
+//!    against what the environment provides, resolves each step's tool to an
+//!    executable in the root, and compares the environment's platform with
+//!    the daemon's.
 //! 2. [`environment`] makes sure the daemon holds the environment's image,
 //!    importing the root as a filesystem tar when it does not.
 //! 3. [`volumes`] creates the `/work` volume and one volume per mount, and
@@ -17,17 +18,21 @@
 //!    while it runs. The steps stop after the first non-zero exit.
 //! 5. [`output`] decodes the last container's `/work` into a tree, minus
 //!    `scratch`.
-//! 6. [`cleanup`] removes every container and volume on every path; then the
-//!    batch commits, before the reply, only for an `Ok`.
+//! 6. [`cleanup`] removes every container and volume on every path; then,
+//!    for an `Ok`, the last stage is answered before the reply.
+//!
+//! Every read and stage goes through the run's [`StorageSession`]: outputs
+//! are staged as they are produced, and a run that ends any other way than
+//! `Ok` leaves what it staged cited by nothing (ADR-0240 D7).
 //!
 //! [`answer`] is the one place a sequence's end becomes a [`RunResult`]: an
 //! executor failure after the request was accepted is `Failed { detail }`,
 //! never a refusal. The detail is [`RunError::cause`]: the failed call or the
 //! in-tree path and the class of failure, never a host path, a socket, or the
-//! daemon's words, because the driver records it; the log keeps the full
-//! text. Beside the result, [`Runner::answer`] hands back what it
-//! observed of the run — its peak memory and wall time — for the estimate,
-//! which never reaches the result.
+//! daemon's or the source's words, because the driver records it; the log
+//! keeps the full text. Beside the result, [`Runner::answer`] hands back what
+//! it observed of the run — its peak memory and wall time — for the
+//! estimate, which never reaches the result.
 
 mod cleanup;
 mod environment;
@@ -44,14 +49,13 @@ use std::fmt;
 use std::io;
 use std::time::{Duration, Instant};
 
-use aether_bloomery_journal::{AppendError, ArtifactBatch, ArtifactStore, GetError, JournalError};
 use aether_bloomery_kinds::{Detail, Ref, Tree};
 use aether_bloomery_tar::{DecodeError, EncodeError, Limits, encode};
 
 use super::engine::{ContainerId, Engine, EngineError, UploadError};
-use super::journal::{JournalSource, SourceError};
 use super::provision::CpuSet;
-use crate::{Outcome, Refusal, Resource, Run, RunResult};
+use super::storage::{StorageError, StorageSession};
+use crate::{Outcome, Refusal, Resource, RunRequest, RunResult};
 use cleanup::{Cleanup, CleanupError};
 use resolve::Resolved;
 use volumes::Volumes;
@@ -79,7 +83,6 @@ pub struct Allotment {
 #[derive(Clone)]
 pub struct Runner {
     pub engine: Engine,
-    pub artifacts: ArtifactStore,
     /// Each step's process and thread count.
     pub pids: u32,
     /// The bounds the output `/work` decodes under.
@@ -106,25 +109,29 @@ pub struct Observed {
 }
 
 impl Runner {
-    /// Run the sequence under `allotment` and answer it.
-    pub fn answer(&self, run: &Run, allotment: &Allotment) -> Ran {
-        match self.sequence(run, allotment) {
+    /// Run the sequence under `allotment`, reading and staging through
+    /// `session`, and answer it.
+    pub fn answer(&self, run: &RunRequest, allotment: &Allotment, mut session: StorageSession) -> Ran {
+        match self.sequence(run, allotment, &mut session) {
             Ok((outcome, observed)) => Ran { result: answer(Ok(outcome)), observed },
             Err(stop) => Ran { result: answer(Err(stop)), observed: Observed::default() },
         }
     }
 
-    /// Resolve, run in the daemon, clean up, then commit.
-    fn sequence(&self, run: &Run, allotment: &Allotment) -> Result<(Outcome, Observed), Stop> {
-        let mut batch =
-            self.artifacts.batch().map_err(|error| RunError::Journal { during: "opening a batch", error })?;
-        let resolved = resolve::resolve(&batch, run)?;
+    /// Resolve, run in the daemon, clean up, then wait for the last stage.
+    fn sequence(
+        &self,
+        run: &RunRequest,
+        allotment: &Allotment,
+        session: &mut StorageSession,
+    ) -> Result<(Outcome, Observed), Stop> {
+        let resolved = resolve::resolve(session, run)?;
         resolve::platform(&self.engine, &resolved.environment.platform)?;
 
         let mut cleanup = Cleanup::new(&self.engine);
-        let ran = self.in_daemon(&mut batch, run, &resolved, allotment, &mut cleanup);
+        let ran = self.in_daemon(session, run, &resolved, allotment, &mut cleanup);
         let finished = settle(ran, cleanup.finish())?;
-        batch.commit().map_err(RunError::Commit)?;
+        session.finish().map_err(|error| RunError::storage("staging the run's outputs", error))?;
         Ok(finished)
     }
 
@@ -133,14 +140,14 @@ impl Runner {
     /// of the steps that ran.
     fn in_daemon(
         &self,
-        batch: &mut ArtifactBatch,
-        run: &Run,
+        session: &mut StorageSession,
+        run: &RunRequest,
         resolved: &Resolved,
         allotment: &Allotment,
         cleanup: &mut Cleanup<'_>,
     ) -> Result<(Outcome, Observed), Stop> {
-        let image = environment::ensure(&self.engine, batch, &run.environment, &resolved.environment.root)?;
-        let volumes = volumes::prepare(&self.engine, cleanup, batch, &image, &run.mounts)?;
+        let image = environment::ensure(&self.engine, session, &run.environment, &resolved.environment.root)?;
+        let volumes = volumes::prepare(&self.engine, cleanup, session, &image, &run.mounts)?;
         let sandbox = step::Sandbox {
             image: &image,
             volumes: &volumes,
@@ -160,9 +167,9 @@ impl Runner {
         for (step, tool) in run.steps.as_slice().iter().zip(&resolved.tools) {
             let container = step::create(&self.engine, cleanup, &sandbox, tool, step)?;
             if last.is_none() {
-                write_tree(&self.engine, batch, &container, Volumes::WORK_PATH, &run.tree)?;
+                write_tree(&self.engine, session, &container, Volumes::WORK_PATH, &run.tree)?;
             }
-            let ran = step::run(&self.engine, batch, &container, step, tool, deadline)?;
+            let ran = step::run(&self.engine, session, &container, step, tool, deadline)?;
             let exited_zero = ran.outcome.exit_code == Some(0);
             peak_memory_bytes = peak_memory_bytes.max(ran.peak_memory_bytes);
             exited = ran.exited;
@@ -175,7 +182,7 @@ impl Runner {
         let last = last.ok_or_else(|| RunError::Shape("a run with no steps reached the daemon".to_owned()))?;
         let observed = Observed { peak_memory_bytes, wall: Some(exited.saturating_duration_since(started)) };
 
-        let tree = output::collect(&self.engine, batch, &last, &run.scratch, self.output)?;
+        let tree = output::collect(&self.engine, session, &last, &run.scratch, self.output)?;
         Ok((Outcome { steps, tree }, observed))
     }
 }
@@ -218,13 +225,13 @@ fn settle<T>(ran: Result<T, Stop>, removed: Result<(), CleanupError>) -> Result<
 /// Stream the stored tree `tree` into the container at the absolute `path`.
 fn write_tree(
     engine: &Engine,
-    batch: &ArtifactBatch,
+    session: &mut StorageSession,
     container: &ContainerId,
     path: &str,
     tree: &Ref<Tree>,
 ) -> Result<(), Stop> {
     engine
-        .put_archive(container, path, |out| encode(tree, &mut JournalSource::new(batch), out))
+        .put_archive(container, path, |out| encode(tree, &mut session.reader(), out))
         .map_err(|error| upload_stop(format!("writing {path} into container {container}"), error))
 }
 
@@ -280,23 +287,20 @@ pub enum RunError {
     Engine { call: String, error: EngineError },
     /// Streaming a stored tree into the daemon failed for a reason other than
     /// a missing artifact.
-    Upload { call: String, error: EncodeError<SourceError> },
-    /// A journal batch operation failed.
-    Journal { during: &'static str, error: JournalError },
-    /// A stored artifact did not load.
-    Load { during: String, error: GetError },
+    Upload { call: String, error: EncodeError<StorageError> },
+    /// A read or a stage through the run's source failed; `during` names the
+    /// step.
+    Storage { during: String, error: StorageError },
     /// A stored blob did not read back whole.
     Read { during: String, error: io::Error },
     /// Reading a step's log stream failed.
     Logs { call: String, error: io::Error },
     /// The output `/work` is not a tree under the canonical rules and the
-    /// output bounds, or did not store.
-    Output(DecodeError<JournalError>),
+    /// output bounds, or did not stage.
+    Output(DecodeError<StorageError>),
     /// Something the daemon or a tree answered is not the shape the run
     /// needs.
     Shape(String),
-    /// The batch did not commit.
-    Commit(AppendError),
     /// A container or volume could not be removed; `after` is how the run
     /// ended before that, if it had already ended.
     Cleanup { error: CleanupError, after: Option<Box<Stop>> },
@@ -311,17 +315,20 @@ impl RunError {
         Detail::new(self.cause_text())
     }
 
+    /// A failed read or stage during `during`.
+    fn storage(during: impl Into<String>, error: StorageError) -> Self {
+        Self::Storage { during: during.into(), error }
+    }
+
     fn cause_text(&self) -> String {
         match self {
             Self::Engine { call, error } => format!("{call}: {}", error.cause()),
             Self::Upload { call, error } => format!("{call}: {}", upload_cause(error)),
-            Self::Journal { during, .. } => format!("{during}: the journal failed"),
-            Self::Load { during, error } => format!("{during}: {}", load_cause(error)),
+            Self::Storage { during, error } => format!("{during}: {}", error.class()),
             Self::Read { during, error } => format!("{during}: the stored blob did not read back ({})", error.kind()),
             Self::Logs { call, error } => format!("{call}: the log stream failed ({})", error.kind()),
             Self::Output(error) => format!("decoding the output /work: {}", output_cause(error)),
             Self::Shape(detail) => detail.clone(),
-            Self::Commit(_) => "committing the run's artifacts: the journal failed".to_owned(),
             Self::Cleanup { error, after: None } => format!("cleaning up: {}", error.cause()),
             Self::Cleanup { error, after: Some(after) } => {
                 format!("{}; cleaning up also failed: {}", after.cause(), error.cause())
@@ -330,33 +337,22 @@ impl RunError {
     }
 }
 
-/// A failed tree upload's class: which side broke, never the journal's or the
+/// A failed tree upload's class: which side broke, never the source's or the
 /// transport's words.
-fn upload_cause(error: &EncodeError<SourceError>) -> String {
+fn upload_cause(error: &EncodeError<StorageError>) -> String {
     match error {
-        EncodeError::Source(SourceError::Missing(digest)) => format!("the journal stores no artifact {digest}"),
-        EncodeError::Source(SourceError::Get(_)) => "loading a tree: the journal failed".to_owned(),
-        EncodeError::Source(SourceError::Journal(_)) => "opening a blob: the journal failed".to_owned(),
+        EncodeError::Source(error) => format!("reading the tree: {}", error.class()),
         EncodeError::Write(error) => format!("writing the archive failed ({})", error.kind()),
         EncodeError::BlobRead(error) => format!("reading a blob failed ({})", error.kind()),
         EncodeError::BlobLength { .. } | EncodeError::TooDeep => error.to_string(),
     }
 }
 
-/// A failed artifact load's class.
-fn load_cause(error: &GetError) -> &'static str {
-    match error {
-        GetError::Journal(_) => "the journal failed",
-        GetError::Decode(_) => "the stored artifact did not decode",
-        GetError::PrefixMismatch { .. } => "the stored artifact is another kind",
-    }
-}
-
 /// A failed output decode's class. A refused entry keeps its in-tree path and
 /// the tree rule it broke.
-fn output_cause(error: &DecodeError<JournalError>) -> String {
+fn output_cause(error: &DecodeError<StorageError>) -> String {
     match error {
-        DecodeError::Sink(_) => "storing it in the journal failed".to_owned(),
+        DecodeError::Sink(error) => format!("staging it: {}", error.class()),
         DecodeError::Read(error) => format!("reading the archive failed ({})", error.kind()),
         DecodeError::Refused { .. } => error.to_string(),
     }
@@ -367,13 +363,11 @@ impl fmt::Display for RunError {
         match self {
             Self::Engine { call, error } => write!(f, "{call}: {error}"),
             Self::Upload { call, error } => write!(f, "{call}: {error}"),
-            Self::Journal { during, error } => write!(f, "{during}: {error}"),
-            Self::Load { during, error } => write!(f, "{during}: {error}"),
+            Self::Storage { during, error } => write!(f, "{during}: {error}"),
             Self::Read { during, error } => write!(f, "{during}: {error}"),
             Self::Logs { call, error } => write!(f, "{call}: {error}"),
             Self::Output(error) => write!(f, "decoding the output /work: {error}"),
             Self::Shape(detail) => f.write_str(detail),
-            Self::Commit(error) => write!(f, "committing the run's artifacts: {error}"),
             Self::Cleanup { error, after: None } => write!(f, "cleaning up: {error}"),
             Self::Cleanup { error, after: Some(after) } => write!(f, "{after}; cleaning up also failed: {error}"),
         }
@@ -385,11 +379,9 @@ impl Error for RunError {
         match self {
             Self::Engine { error, .. } => Some(error),
             Self::Upload { error, .. } => Some(error),
-            Self::Journal { error, .. } => Some(error),
-            Self::Load { error, .. } => Some(error),
+            Self::Storage { error, .. } => Some(error),
             Self::Read { error, .. } | Self::Logs { error, .. } => Some(error),
             Self::Output(error) => Some(error),
-            Self::Commit(error) => Some(error),
             Self::Cleanup { error, .. } => Some(error),
             Self::Shape(_) => None,
         }
@@ -401,14 +393,23 @@ fn engine_failed(call: impl fmt::Display) -> impl FnOnce(EngineError) -> RunErro
     move |error| RunError::Engine { call: call.to_string(), error }
 }
 
-/// Map a failed tree upload: an artifact the journal lacks is the input's
+/// Map a failed tree upload: an artifact the source lacks is the input's
 /// fault (`InputMissing`); anything else is the executor's.
-fn upload_stop(call: String, error: UploadError<EncodeError<SourceError>>) -> Stop {
+fn upload_stop(call: String, error: UploadError<EncodeError<StorageError>>) -> Stop {
     match error {
         UploadError::Engine(error) => Stop::failed(RunError::Engine { call, error }),
-        UploadError::Body(EncodeError::Source(SourceError::Missing(digest))) => {
+        UploadError::Body(EncodeError::Source(StorageError::Missing(digest))) => {
             Stop::refused(Refusal::InputMissing(digest))
         }
         UploadError::Body(error) => Stop::failed(RunError::Upload { call, error }),
+    }
+}
+
+/// Map a failed read or stage: an artifact the source lacks is the input's
+/// fault (`InputMissing`); anything else is the executor's, during `during`.
+fn storage_stop(during: impl Into<String>, error: StorageError) -> Stop {
+    match error {
+        StorageError::Missing(digest) => Stop::refused(Refusal::InputMissing(digest)),
+        error => Stop::failed(RunError::storage(during, error)),
     }
 }

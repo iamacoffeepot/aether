@@ -1,6 +1,6 @@
 //! One step: its container under the sandbox pins (ADR-0237 decision 4) and
 //! the run's allotment (decision 9), its stdin, its bounded wait, its peak
-//! memory, its exit, and its logs as blobs.
+//! memory, its exit, and its logs as blobs staged to the run's source.
 //!
 //! | Pin | Container setting |
 //! |---|---|
@@ -34,16 +34,17 @@ use std::iter;
 use std::thread;
 use std::time::Instant;
 
-use aether_bloomery_journal::{ArtifactBatch, VerifiedBlob};
 use aether_bloomery_kinds::{OpaqueBytes, Ref};
+use aether_bloomery_tar::{BlobWriter, TreeSink};
 use serde_json::{Value, json};
 
 use super::cleanup::Cleanup;
 use super::volumes::{RUN_LABEL, Volumes, volume_mount};
-use super::{Allotment, RunError, Stop, engine_failed};
+use super::{Allotment, RunError, Stop, engine_failed, storage_stop};
 use crate::runtime::engine::logs::{self, Demux, Output};
 use crate::runtime::engine::{ContainerId, Engine, Transport, Waited, stats};
-use crate::{EnvVar, Network, Refusal, Resource, Scratch, Step, StepOutcome, ToolRecord};
+use crate::runtime::storage::{StorageSession, StoredBlob};
+use crate::{EnvVar, Network, Resource, Scratch, Step, StepOutcome, ToolRecord};
 
 /// The fixed `SOURCE_DATE_EPOCH`: 1980-01-01T00:00:00Z, the tar codec's mtime.
 const SOURCE_DATE_EPOCH: &str = "315532800";
@@ -161,16 +162,17 @@ pub struct StepRan {
     pub exited: Instant,
 }
 
-/// Run the created container to its end and store its outputs in `batch`.
+/// Run the created container to its end and stage its outputs through
+/// `session`.
 pub fn run(
     engine: &Engine,
-    batch: &mut ArtifactBatch,
+    session: &mut StorageSession,
     container: &ContainerId,
     step: &Step,
     tool: &ToolRecord,
     deadline: Instant,
 ) -> Result<StepRan, Stop> {
-    let stdin = step.stdin.as_ref().map(|blob| attach(engine, batch, container, blob)).transpose()?;
+    let stdin = step.stdin.as_ref().map(|blob| attach(engine, session, container, blob)).transpose()?;
     let peak_memory_bytes = execute(engine, container, stdin, deadline)?;
     let exited = Instant::now();
 
@@ -188,8 +190,8 @@ pub fn run(
             logs::count(body)
                 .map_err(|error| RunError::Logs { call: format!("counting the logs of container {container}"), error })
         })?;
-    let stdout = store_output(engine, batch, container, Output::Stdout, lengths.of(Output::Stdout))?;
-    let stderr = store_output(engine, batch, container, Output::Stderr, lengths.of(Output::Stderr))?;
+    let stdout = store_output(engine, session, container, Output::Stdout, lengths.of(Output::Stdout))?;
+    let stderr = store_output(engine, session, container, Output::Stderr, lengths.of(Output::Stderr))?;
     let outcome = StepOutcome { exit_code: Some(code), stdout, stderr, tool: tool.clone() };
     Ok(StepRan { outcome, peak_memory_bytes, exited })
 }
@@ -197,20 +199,20 @@ pub fn run(
 /// The hijacked stdin connection and the blob to write into it.
 struct Stdin {
     connection: Transport,
-    blob: VerifiedBlob,
+    blob: StoredBlob,
 }
 
 /// Attach to the container's stdin before it starts.
 fn attach(
     engine: &Engine,
-    batch: &ArtifactBatch,
+    session: &mut StorageSession,
     container: &ContainerId,
     blob: &Ref<OpaqueBytes>,
 ) -> Result<Stdin, Stop> {
-    let reader = batch
-        .blob_reader(blob)
-        .map_err(|error| RunError::Journal { during: "opening a stdin blob", error })?
-        .ok_or_else(|| Stop::refused(Refusal::InputMissing(blob.digest())))?;
+    let reader = session
+        .reader()
+        .open(blob)
+        .map_err(|error| storage_stop(format!("opening the stdin blob {}", blob.digest()), error))?;
     let connection = engine
         .attach_stdin(container)
         .map_err(engine_failed(format!("attaching to the stdin of container {container}")))?;
@@ -291,10 +293,11 @@ fn feed(mut stdin: Stdin) -> io::Result<()> {
     }
 }
 
-/// Stream one output of the container's logs into a blob of `len` bytes.
+/// Stream one output of the container's logs into a blob of `len` bytes,
+/// staged through `session`.
 fn store_output(
     engine: &Engine,
-    batch: &mut ArtifactBatch,
+    session: &mut StorageSession,
     container: &ContainerId,
     output: Output,
     len: u64,
@@ -308,14 +311,16 @@ fn store_output(
         engine.logs(container, output == Output::Stdout, output == Output::Stderr).map_err(engine_failed(&call))?;
     let mut demux = Demux::new(body, output);
 
-    let mut blob = batch.blob(len).map_err(|error| RunError::Journal { during: "opening a log blob", error })?;
+    let staging = |error| RunError::storage(format!("staging the {name} of container {container}"), error);
+    let mut sink = session.sink();
+    let mut blob = sink.begin_blob(len).map_err(staging)?;
     let mut buffer = vec![0; COPY_BUFFER_BYTES];
     loop {
         let read = demux.read(&mut buffer).map_err(|error| RunError::Logs { call: call.clone(), error })?;
         if read == 0 {
             break;
         }
-        blob.write_chunk(&buffer[..read]).map_err(|error| RunError::Journal { during: "storing a log", error })?;
+        blob.write_chunk(&buffer[..read]).map_err(staging)?;
     }
-    Ok(blob.finish().map_err(|error| RunError::Journal { during: "storing a log", error })?)
+    Ok(blob.finish().map_err(staging)?)
 }

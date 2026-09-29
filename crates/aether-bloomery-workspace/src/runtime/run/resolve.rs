@@ -1,23 +1,28 @@
 //! Everything a run can be refused for before any container exists.
 //!
-//! The journal-only checks run first, in this order, so a refusal they find
-//! never contacts the daemon: every input the request cites is stored
-//! (`InputMissing`), the tree's `rust-toolchain.toml` asks for what the
+//! The checks over the run's source come first, in this order, so a refusal
+//! they find never contacts the daemon: every input the request cites is
+//! stored (`InputMissing`), the tree's `rust-toolchain.toml` asks for what the
 //! environment provides (`ToolchainMismatch`), and each step's tool resolves
 //! to an executable in the root (`UnknownTool`). Then [`platform`] compares
 //! the environment's platform with the daemon's (`PlatformMismatch`).
+//!
+//! The run tree and each mount are prefetched before the checks, so
+//! `rust-toolchain.toml`, the mounts, and the later writes into containers
+//! read from the session's map. The environment root is walked on demand, a
+//! few reads per tool.
 
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::str;
 
-use aether_bloomery_journal::ArtifactBatch;
 use aether_bloomery_kinds::{Name, Node, OpaqueBytes, Ref, Tree};
 use aether_data::Storage;
 
-use super::{RunError, Stop, engine_failed};
+use super::{RunError, Stop, engine_failed, storage_stop};
 use crate::runtime::engine::Engine;
-use crate::{Environment, Platform, Provides, Refusal, Run, RustToolchain, ToolName, ToolRecord};
+use crate::runtime::storage::{SourceReader, StorageSession};
+use crate::{Environment, Platform, Provides, Refusal, RunRequest, RustToolchain, ToolName, ToolRecord};
 
 /// The file a tree names its toolchain in, at its root.
 const TOOLCHAIN_FILE: &str = "rust-toolchain.toml";
@@ -32,20 +37,28 @@ pub struct Resolved {
     pub tools: Vec<ToolRecord>,
 }
 
-/// Load and check everything the journal holds for `run`.
-pub fn resolve(batch: &ArtifactBatch, run: &Run) -> Result<Resolved, Stop> {
-    let environment: Environment = load(batch, &run.environment, "the environment")?;
-    let tree: Tree = load(batch, &run.tree, "the run tree")?;
+/// Load and check everything the run's source holds for `run`.
+pub fn resolve(session: &mut StorageSession, run: &RunRequest) -> Result<Resolved, Stop> {
+    let mut reader = session.reader();
+    let environment: Environment = load(&mut reader, &run.environment, "the environment")?;
+    prefetch(&mut reader, &run.tree, "the run tree")?;
+    let tree: Tree = load(&mut reader, &run.tree, "the run tree")?;
     for mount in run.mounts.as_slice() {
-        load::<Tree>(batch, &mount.tree, "a mount tree")?;
+        prefetch(&mut reader, &mount.tree, "a mount tree")?;
     }
     for stdin in run.steps.as_slice().iter().filter_map(|step| step.stdin.as_ref()) {
-        present(batch, stdin)?;
+        reader
+            .require(stdin)
+            .map_err(|error| storage_stop(format!("reading the stdin blob {}", stdin.digest()), error))?;
     }
 
-    toolchain(batch, &tree, &environment.provides)?;
-    let tools =
-        run.steps.as_slice().iter().map(|step| tool(batch, &environment, &step.tool)).collect::<Result<_, _>>()?;
+    toolchain(&mut reader, &tree, &environment.provides)?;
+    let tools = run
+        .steps
+        .as_slice()
+        .iter()
+        .map(|step| tool(&mut reader, &environment, &step.tool))
+        .collect::<Result<_, _>>()?;
     Ok(Resolved { environment, tools })
 }
 
@@ -78,37 +91,29 @@ pub fn platform(engine: &Engine, wanted: &Platform) -> Result<(), Stop> {
     }
 }
 
-/// Load the committed artifact `artifact` names, or refuse the run as
-/// `InputMissing` when the journal lacks it.
-fn load<K: Storage>(batch: &ArtifactBatch, artifact: &Ref<K>, what: &str) -> Result<K, Stop> {
-    let digest = artifact.digest();
-    batch
-        .get::<K>(&digest)
-        .map_err(|error| RunError::Load { during: format!("loading {what} {digest}"), error })?
-        .ok_or_else(|| Stop::refused(Refusal::InputMissing(digest)))
+/// Load the stored artifact `artifact` names, or refuse the run as
+/// `InputMissing` when the source lacks it.
+fn load<K: Storage>(reader: &mut SourceReader<'_>, artifact: &Ref<K>, what: &str) -> Result<K, Stop> {
+    reader.load(artifact).map_err(|error| storage_stop(format!("loading {what} {}", artifact.digest()), error))
 }
 
-/// Refuse the run as `InputMissing` unless `blob` is committed.
-fn present(batch: &ArtifactBatch, blob: &Ref<OpaqueBytes>) -> Result<(), Stop> {
-    let digest = blob.digest();
-    batch
-        .blob_reader(blob)
-        .map_err(|error| RunError::Journal { during: "opening a stdin blob", error })?
-        .map(drop)
-        .ok_or_else(|| Stop::refused(Refusal::InputMissing(digest)))
+/// Read `tree`'s closure into the session, or refuse the run as
+/// `InputMissing` naming the first member the source lacks.
+fn prefetch(reader: &mut SourceReader<'_>, tree: &Ref<Tree>, what: &str) -> Result<(), Stop> {
+    reader.prefetch(tree).map_err(|error| storage_stop(format!("reading {what} {}", tree.digest()), error))
 }
 
 /// Check the tree's `rust-toolchain.toml`, when it has one: its channel must
 /// be the one the environment provides, and its components and targets a
 /// subset of the provided ones.
-fn toolchain(batch: &ArtifactBatch, tree: &Tree, provides: &Provides) -> Result<(), Stop> {
+fn toolchain(reader: &mut SourceReader<'_>, tree: &Tree, provides: &Provides) -> Result<(), Stop> {
     let Some(node) = tree.entries().get(&name_of(TOOLCHAIN_FILE)?) else {
         return Ok(());
     };
     let (Node::File(blob) | Node::Executable(blob)) = node else {
         return Err(RunError::Shape(format!("{TOOLCHAIN_FILE} is not a regular file")).into());
     };
-    let wants = parse_toolchain(&read_small(batch, blob)?)?;
+    let wants = parse_toolchain(&read_small(reader, blob)?)?;
 
     let satisfied = provides.rust.as_ref().is_some_and(|provided| {
         provided.channel() == wants.channel()
@@ -125,14 +130,11 @@ fn toolchain(batch: &ArtifactBatch, tree: &Tree, provides: &Provides) -> Result<
     }
 }
 
-/// Read the whole of a small committed blob, verified against its digest.
-fn read_small(batch: &ArtifactBatch, blob: &Ref<OpaqueBytes>) -> Result<Vec<u8>, Stop> {
+/// Read the whole of a small stored blob, verified against its digest.
+fn read_small(reader: &mut SourceReader<'_>, blob: &Ref<OpaqueBytes>) -> Result<Vec<u8>, Stop> {
     let during = format!("reading {TOOLCHAIN_FILE}");
-    let reader = batch
-        .blob_reader(blob)
-        .map_err(|error| RunError::Journal { during: "opening rust-toolchain.toml", error })?
-        .ok_or_else(|| Stop::refused(Refusal::InputMissing(blob.digest())))?;
-    if reader.payload_len() > TOOLCHAIN_FILE_MAX_BYTES {
+    let reader = reader.open(blob).map_err(|error| storage_stop(format!("opening {TOOLCHAIN_FILE}"), error))?;
+    if reader.len() > TOOLCHAIN_FILE_MAX_BYTES {
         return Err(RunError::Shape(format!("{TOOLCHAIN_FILE} is larger than 64 KiB")).into());
     }
     let mut bytes = Vec::new();
@@ -179,12 +181,12 @@ fn subset(wanted: &[String], provided: &[String]) -> bool {
 /// Resolve `name` through the environment's tool table to the
 /// `Node::Executable` its path holds in the root, walking one directory per
 /// segment. Anything else there, or no such name, is `UnknownTool`.
-fn tool(batch: &ArtifactBatch, environment: &Environment, name: &ToolName) -> Result<ToolRecord, Stop> {
+fn tool(reader: &mut SourceReader<'_>, environment: &Environment, name: &ToolName) -> Result<ToolRecord, Stop> {
     let unknown = || Stop::refused(Refusal::UnknownTool(name.clone()));
     let tools = environment.tools.as_slice();
     let entry = tools.binary_search_by(|tool| tool.name.cmp(name)).map(|index| &tools[index]).map_err(|_| unknown())?;
 
-    let mut directory: Tree = load(batch, &environment.root, "the environment root")?;
+    let mut directory: Tree = load(reader, &environment.root, "the environment root")?;
     let mut segments = entry.path.as_str().split('/').peekable();
     while let Some(segment) = segments.next() {
         let node = directory.entries().get(&name_of(segment)?).cloned();
@@ -192,7 +194,7 @@ fn tool(batch: &ArtifactBatch, environment: &Environment, name: &ToolName) -> Re
             (Some(Node::Executable(file)), None) => {
                 return Ok(ToolRecord { name: name.clone(), path: entry.path.clone(), file });
             }
-            (Some(Node::Directory(child)), Some(_)) => directory = load(batch, &child, "an environment directory")?,
+            (Some(Node::Directory(child)), Some(_)) => directory = load(reader, &child, "an environment directory")?,
             _ => return Err(unknown()),
         }
     }

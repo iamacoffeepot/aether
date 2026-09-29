@@ -14,7 +14,7 @@ use super::key::RunKey;
 use super::queue::Admission;
 use crate::runtime::run::{Allotment, Observed};
 use crate::{
-    EnvVar, Mount, Mounts, Network, Outcome, Refusal, Resource, Run, RunResult, Scratch, Step, Steps, ToolName,
+    EnvVar, Mount, Mounts, Network, Outcome, Refusal, Resource, RunRequest, RunResult, Scratch, Step, Steps, ToolName,
     TreePath,
 };
 
@@ -63,8 +63,8 @@ fn step(tool: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Step, Box<dyn
 }
 
 /// A run of `steps` in the environment whose digest is all `environment`.
-fn run(environment: u8, steps: Vec<Step>) -> Result<Run, Box<dyn Error>> {
-    Ok(Run {
+fn run(environment: u8, steps: Vec<Step>) -> Result<RunRequest, Box<dyn Error>> {
+    Ok(RunRequest {
         tree: Ref::from_digest(Digest::from_bytes([1; 32])),
         environment: Ref::from_digest(Digest::from_bytes([environment; 32])),
         mounts: Mounts::new(Vec::new())?,
@@ -74,7 +74,7 @@ fn run(environment: u8, steps: Vec<Step>) -> Result<Run, Box<dyn Error>> {
     })
 }
 
-fn key(run: &Run) -> RunKey {
+fn key(run: &RunRequest) -> RunKey {
     RunKey::of(run)
 }
 
@@ -123,11 +123,14 @@ fn the_run_key_covers_the_environment_and_each_steps_tool_args_and_env_and_nothi
     let mut stdin = base.steps.as_slice().to_vec();
     stdin[0].stdin = Some(Ref::of_bytes(b"input"));
     let same = [
-        Run { tree: Ref::from_digest(Digest::from_bytes([9; 32])), ..base.clone() },
-        Run { mounts: Mounts::new(vec![Mount { at: TreePath::new("vendor")?, tree: base.tree }])?, ..base.clone() },
-        Run { scratch: Scratch::new(vec![TreePath::new("target")?])?, ..base.clone() },
-        Run { network: Network::On, ..base.clone() },
-        Run { steps: Steps::new(stdin)?, ..base.clone() },
+        RunRequest { tree: Ref::from_digest(Digest::from_bytes([9; 32])), ..base.clone() },
+        RunRequest {
+            mounts: Mounts::new(vec![Mount { at: TreePath::new("vendor")?, tree: base.tree }])?,
+            ..base.clone()
+        },
+        RunRequest { scratch: Scratch::new(vec![TreePath::new("target")?])?, ..base.clone() },
+        RunRequest { network: Network::On, ..base.clone() },
+        RunRequest { steps: Steps::new(stdin)?, ..base.clone() },
     ];
     for other in &same {
         assert_eq!(key(other), key(&base), "{other:?}");

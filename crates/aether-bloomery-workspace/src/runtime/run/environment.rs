@@ -3,22 +3,22 @@
 //!
 //! The image is `aether-workspace-environment:<hex>`. Before every run its
 //! label `aether.workspace.environment` must equal `<hex>`. When the daemon
-//! holds no such image, the root tree streams as a filesystem tar to
-//! `POST /images/create?fromSrc=-`, which applies the label, and the image is
-//! inspected again. The imported image has no `Env` of its own, so every
-//! variable a step sees is constructed per step.
+//! holds no such image, and only then, the root is prefetched from the run's
+//! source and streams as a filesystem tar to `POST /images/create?fromSrc=-`,
+//! which applies the label, and the image is inspected again. The imported
+//! image has no `Env` of its own, so every variable a step sees is
+//! constructed per step.
 //!
 //! A daemon that answers but cannot produce the image, and an image whose
 //! label does not match, are `Refused(EnvironmentUnavailable)`, the one place
 //! that refusal is used. A transport failure is `Failed`.
 
-use aether_bloomery_journal::ArtifactBatch;
 use aether_bloomery_kinds::{Ref, Tree};
 use aether_bloomery_tar::{EncodeError, encode};
 
-use super::{Stop, engine_failed, upload_stop};
+use super::{Stop, engine_failed, storage_stop, upload_stop};
 use crate::runtime::engine::{Engine, EngineError, UploadError};
-use crate::runtime::journal::{JournalSource, SourceError};
+use crate::runtime::storage::{StorageError, StorageSession};
 use crate::{Environment, Refusal};
 
 /// The repository every environment image is tagged under.
@@ -31,7 +31,7 @@ const LABEL: &str = "aether.workspace.environment";
 /// does not, and return the image's reference.
 pub fn ensure(
     engine: &Engine,
-    batch: &ArtifactBatch,
+    session: &mut StorageSession,
     environment: &Ref<Environment>,
     root: &Ref<Tree>,
 ) -> Result<String, Stop> {
@@ -43,9 +43,13 @@ pub fn ensure(
         return labelled(labels.get(LABEL), &hex).map(|()| reference);
     }
     tracing::info!(target: "aether_bloomery_workspace", image = %reference, "importing the environment image");
+    session
+        .reader()
+        .prefetch(root)
+        .map_err(|error| storage_stop(format!("reading the environment root {}", root.digest()), error))?;
     engine
         .import_image(REPOSITORY, &hex, &[format!("LABEL {LABEL}={hex}")], |out| {
-            encode(root, &mut JournalSource::new(batch), out)
+            encode(root, &mut session.reader(), out)
         })
         .map_err(|error| import_stop(format!("importing image {reference}"), error))?;
     let labels = inspect()?.ok_or_else(|| Stop::refused(Refusal::EnvironmentUnavailable))?;
@@ -63,7 +67,7 @@ fn labelled(label: Option<&String>, hex: &str) -> Result<(), Stop> {
 
 /// A daemon that answered the import with a refusal cannot provide the
 /// environment; every other failure maps as any tree upload's does.
-fn import_stop(call: String, error: UploadError<EncodeError<SourceError>>) -> Stop {
+fn import_stop(call: String, error: UploadError<EncodeError<StorageError>>) -> Stop {
     match error {
         UploadError::Engine(EngineError::Status { .. } | EngineError::Pull(_)) => {
             Stop::refused(Refusal::EnvironmentUnavailable)

@@ -579,7 +579,7 @@ impl AsyncProgram for SampledWorkspace {
             env: Vec::new(),
             stdin: None,
         };
-        let run = aether_bloomery_workspace::Run {
+        let run = aether_bloomery_workspace::RunRequest {
             tree: input.tree,
             environment: input.environment,
             mounts: aether_bloomery_workspace::Mounts::new(Vec::new()).map_err(|_| Refusal::InputDecode)?,
@@ -642,12 +642,13 @@ fn step_outcome(stdout: &[u8]) -> Result<aether_bloomery_workspace::Outcome, Box
 
 #[test]
 fn a_workspace_run_targets_the_workspace_and_hands_the_program_its_outcome_or_refusal() -> Result<(), Box<dyn Error>> {
-    // Catches a wrong `api_target` row or reply kind, an outcome that does not
-    // reach the program, and a workspace refusal that ends the invocation
-    // instead of reaching the program as `Ok(Err(..))`.
+    // Catches a wrong `api_target` row or reply kind, a captured payload that
+    // is not the source-free `RunRequest` the driver relays, an outcome that
+    // does not reach the program, and a workspace refusal that ends the
+    // invocation instead of reaching the program as `Ok(Err(..))`.
     let (_, pending) = start_workspace()?;
     assert_eq!(pending.api, ProgramApi::Workspace);
-    assert_eq!(pending.kind_id, aether_bloomery_workspace::Run::ID);
+    assert_eq!(pending.kind_id, aether_bloomery_workspace::RunRequest::ID);
     assert_eq!(pending.expected_reply, aether_bloomery_workspace::RunResult::ID);
 
     let (ran, _) = answer_workspace(&aether_bloomery_workspace::RunResult::Ok(step_outcome(b"checked")?))?;

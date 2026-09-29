@@ -23,10 +23,12 @@
 //! the same digest again, which appends one more head-move event.
 //!
 //! The journal owner and the bundle driver are instanced roots in native-only
-//! crates, so the script cannot name their types. It proves both paths once
-//! at `wire` with `resolve_path` and keeps the two proofs. Bootstrap is
-//! ordinary mail from an ordinary component, which is why it lives in its own
-//! throwaway crate rather than in the workspace or the engine.
+//! crates. The script names the journal owner's type through the journal's
+//! identity half, so its config path is typed and each import names that
+//! journal as its storage `source`; it proves both paths once at `wire` with
+//! `resolve_path` and keeps the two proofs. Bootstrap is ordinary mail from an
+//! ordinary component, which is why it lives in its own throwaway crate rather
+//! than in the workspace or the engine.
 
 #![forbid(unsafe_code)]
 
@@ -35,9 +37,12 @@ mod phase;
 
 use std::mem;
 
-use aether_actor::{ActorInitError, ErasedActorRef, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
-use aether_bloomery_kinds::{CallOutcome, PublishResult, ReadArtifact, ReadArtifactResult, ReadHead, ReadHeadResult};
-use aether_bloomery_workspace::{Import, ImportResult, WorkspaceCapability};
+use aether_actor::{ActorInitError, ActorPath, ErasedActorRef, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
+use aether_bloomery_journal::JournalActor;
+use aether_bloomery_kinds::{
+    ArtifactStorage, CallOutcome, PublishResult, ReadArtifact, ReadArtifactResult, ReadHead, ReadHeadResult,
+};
+use aether_bloomery_workspace::{ImageRef, Import, ImportResult, WorkspaceCapability};
 use aether_data::ErasedActorPath;
 
 use config::Bootstrap;
@@ -64,7 +69,7 @@ impl WasmActor for EnvironmentBootstrap {
     /// Prove both peers, then import the base. A refused path is logged and
     /// nothing is sent.
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-        let Some(journal) = prove(ctx, &self.config.journal) else {
+        let Some(journal) = prove(ctx, self.config.journal.as_erased()) else {
             self.run = Run::Stopped;
             return;
         };
@@ -74,7 +79,7 @@ impl WasmActor for EnvironmentBootstrap {
         };
 
         tracing::info!(image = self.config.base.as_str(), "importing the base image");
-        ctx.send::<WorkspaceCapability>(&Import { image: self.config.base.clone() });
+        ctx.send::<WorkspaceCapability>(&import(&self.config.base, &self.config.journal));
         self.run = Run::Live { peers: Peers { journal, driver }, phase: Phase::ImportingBase };
     }
 
@@ -88,7 +93,7 @@ impl WasmActor for EnvironmentBootstrap {
         self.run = match (phase, result) {
             (Phase::ImportingBase, ImportResult::Ok { tree }) => {
                 tracing::info!(tree = %tree.digest(), "imported the base; importing the toolchain");
-                ctx.send::<WorkspaceCapability>(&Import { image: self.config.toolchain.clone() });
+                ctx.send::<WorkspaceCapability>(&import(&self.config.toolchain, &self.config.journal));
                 live(peers, Phase::ImportingToolchain { base: tree })
             }
             (Phase::ImportingToolchain { base }, ImportResult::Ok { tree }) => {
@@ -234,6 +239,11 @@ impl EnvironmentBootstrap {
             }
         }
     }
+}
+
+/// The import of `image`, staged into `journal`.
+fn import(image: &ImageRef, journal: &ActorPath<JournalActor>) -> Import {
+    Import { image: image.clone(), source: journal.narrow::<ArtifactStorage>() }
 }
 
 /// Prove `path`, or log the refusal naming it.

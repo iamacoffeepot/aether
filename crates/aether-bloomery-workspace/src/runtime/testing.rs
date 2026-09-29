@@ -43,8 +43,6 @@ use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
 };
 #[cfg(test)]
-use rusqlite::{Connection, OpenFlags};
-#[cfg(test)]
 use rustls::crypto::ring;
 #[cfg(test)]
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -764,16 +762,4 @@ fn split_ustar(path: &str) -> (&str, &str) {
 fn octal(field: &mut [u8], value: u64) {
     let digits = field.len() - 1;
     field[..digits].copy_from_slice(format!("{value:0digits$o}").as_bytes());
-}
-
-/// The artifact rows committed under the journal `root`, counted on a
-/// read-only connection of the test's own.
-///
-/// # Errors
-///
-/// When the database cannot be opened or queried.
-#[cfg(test)]
-pub fn artifact_rows(root: &Path) -> Result<i64, rusqlite::Error> {
-    let conn = Connection::open_with_flags(root.join("journal.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    conn.query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
 }

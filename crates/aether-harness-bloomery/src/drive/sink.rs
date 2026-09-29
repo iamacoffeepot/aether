@@ -8,6 +8,7 @@
 use std::sync::mpsc;
 
 use aether_bloomery_kinds::{CallOutcome, MoveHeadResult, Processed, PublishResult, WatchHeadResult};
+use aether_bloomery_workspace::{ImportResult, RunResult};
 use aether_kinds::LoadResult;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -29,6 +30,11 @@ pub enum Reply {
     Load(Box<LoadResult>),
     /// The journal owner's answer to a `WatchHead`.
     Watch(WatchHeadResult),
+    /// The workspace's answer to an `Import`.
+    Import(ImportResult),
+    /// The workspace's answer to a `Run`, boxed: an outcome carries every
+    /// step's record.
+    Run(Box<RunResult>),
 }
 
 /// A reply and the correlation the harness minted for the request it answers.
@@ -85,5 +91,15 @@ impl NativeActor for ReplySink {
     #[aether_actor::handler::single]
     fn on_watch_head_result(&mut self, ctx: &mut NativeCtx<'_>, result: WatchHeadResult) {
         self.forward(ctx, Reply::Watch(result));
+    }
+
+    #[aether_actor::handler::single]
+    fn on_import_result(&mut self, ctx: &mut NativeCtx<'_>, result: ImportResult) {
+        self.forward(ctx, Reply::Import(result));
+    }
+
+    #[aether_actor::handler::single]
+    fn on_run_result(&mut self, ctx: &mut NativeCtx<'_>, result: RunResult) {
+        self.forward(ctx, Reply::Run(Box::new(result)));
     }
 }

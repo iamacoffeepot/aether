@@ -10,9 +10,9 @@
 //! deny-by-default allowlist, so a fetch reaches only the hosts an operator
 //! names with `--http-allowlist` and any other fetch is recorded as a refusal.
 //! The other is the `aether.bloomery.workspace` actor (ADR-0237 decision 8), which
-//! imports digest-pinned images into the journal through the Docker Engine
-//! API at `--workspace-endpoint`, writing only through the store of the
-//! journal this engine opened.
+//! runs steps and imports digest-pinned images through the Docker Engine API
+//! at `--workspace-endpoint`, reading and staging only through the journal
+//! each request names as its source (ADR-0240 D7).
 //!
 //! The composition answers ADR-0226's deferred "chassis mounting": the driver
 //! and the journal become RPC-addressable mailboxes on this engine, so journal

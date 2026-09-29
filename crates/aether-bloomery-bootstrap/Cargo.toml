@@ -21,6 +21,9 @@ aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 # The identity half only: `WorkspaceCapability`, `Import`, and `Environment`.
 aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-features = false }
+# The identity half only: `JournalActor`, which types the config's journal
+# path, so the imports can name it as their storage source.
+aether-bloomery-journal = { path = "../aether-bloomery-journal", default-features = false }
 # `MergeInput`, the `environment.merge` input the script stages. `library`
 # strips the bundle's own `export!` entry surface (one `export!` per wasm
 # module); `xtask dist` builds each component package in its own cargo

@@ -4,13 +4,14 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_bloomery_kinds::{OpaqueBytes, Ref, Tree};
+use aether_actor::ProtocolPath;
+use aether_bloomery_kinds::{ArtifactStorage, OpaqueBytes, Ref, Tree};
 
 use crate::kinds::environment::{Environment, ToolName};
 use crate::kinds::order::{self, OrderError};
 use crate::kinds::path::{TreePath, covers};
 
-/// Most steps one [`Run`] may carry.
+/// Most steps one [`RunRequest`] may carry.
 pub const MAX_STEPS: usize = 64;
 
 const ENV_KEY_MAX_BYTES: usize = 256;
@@ -299,13 +300,17 @@ impl Steps {
     }
 }
 
-/// Run `steps` over `tree` in `environment`. Answered with one
-/// [`crate::RunResult`]; nothing is held open between runs.
+/// The run a program asks for: `steps` over `tree` in `environment`, and
+/// every other field of [`Run`] but its `source` (ADR-0237 decision 7).
 ///
-/// The request names no resource amounts: cores, memory, and the deadline are
-/// the executor's to choose.
-#[aether_data::kind(name = "aether.workspace.run", eq, no_serde)]
-pub struct Run {
+/// A program's `Workspace` call carries this, and the driver that relays it
+/// adds the source, the journal of the program's own unit, so a program can
+/// never name the storage its run reads and writes (ADR-0240 I-5).
+///
+/// It names no resource amounts: cores, memory, and the deadline are the
+/// executor's to choose.
+#[aether_data::kind(name = "aether.workspace.run_request", eq, no_serde)]
+pub struct RunRequest {
     /// Written out at `/work`.
     pub tree: Ref<Tree>,
     /// The whole visible root filesystem and its tool table.
@@ -318,6 +323,22 @@ pub struct Run {
     pub scratch: Scratch,
     /// Whether the run may reach the network.
     pub network: Network,
+}
+
+/// Run `request` over the storage `source` names. Answered with one
+/// [`crate::RunResult`]; nothing is held open between runs.
+///
+/// Every input is read from `source` and every output staged to it; the
+/// workspace holds no store of its own (ADR-0240 D7). The source is proven to
+/// cover [`ArtifactStorage`] when the mail decodes, and proven live when the
+/// workspace receives it: one that is not live is answered
+/// `Refused(SourceUnavailable)` before anything is queued.
+#[aether_data::kind(name = "aether.workspace.run", eq, no_serde)]
+pub struct Run {
+    /// Where the run's inputs are read from and its outputs staged to.
+    pub source: ProtocolPath<ArtifactStorage>,
+    /// What to run.
+    pub request: RunRequest,
 }
 
 #[cfg(test)]
