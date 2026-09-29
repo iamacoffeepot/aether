@@ -225,9 +225,6 @@ pub trait WindowManagerSurface {
 
 #[cfg(all(test, feature = "synthetic"))]
 mod tests {
-    use std::thread;
-    use std::time::{Duration, Instant};
-
     use aether_data::LoadName;
     use aether_substrate::testing::await_settled;
 
@@ -261,11 +258,8 @@ mod tests {
         let too_late = rig.push(&SetWindowTitle { title: "too late".to_owned() });
         let (_, retired) = rig.chassis().send_tracked(child, &RetireWindow, None);
         await_settled(&retired, "the child retires");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while main_child(&rig).is_ok() {
-            assert!(Instant::now() < deadline, "the child's route did not drop within the deadline");
-            thread::sleep(Duration::from_millis(1));
-        }
+        rig.chassis().await_closed(child.erase());
+        assert!(main_child(&rig).is_err(), "the retired child's route is dropped");
         rig.driver.settle(&[too_late]);
 
         let SetWindowTitleResult::Err { error } = rig.reply::<SetWindowTitleResult>() else {
