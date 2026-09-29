@@ -6,7 +6,10 @@ use std::any::Any;
 use std::sync::{Arc, Weak};
 
 use super::NativeBinding;
-use crate::mail::{KindId, Mail, Source};
+use super::offload::blocking::{
+    CompletionWake, DeferredCompletion, DispatchId, FillOutcome, TaskCompletionWake, TaskDone,
+};
+use crate::mail::{KindId, Mail, Source, SourceAddr};
 use crate::runtime::trace::SettlementHold;
 use aether_data::{Kind, RequestId, wire};
 
@@ -19,9 +22,8 @@ use aether_data::{Kind, RequestId, wire};
 /// logical writer).
 impl NativeBinding {
     /// Insert a freshly-minted in-flight dispatch entry and return its
-    /// [`DispatchId`](super::offload::blocking::DispatchId). Called on
-    /// the actor thread at dispatch time, after the hold is acquired and
-    /// before the worker spawns. `hold` is `None` when the dispatching
+    /// [`DispatchId`]. Called on the actor thread at dispatch time, after
+    /// the hold is acquired and before the worker spawns. `hold` is `None` when the dispatching
     /// context carried no chain to hold (ADR-0168 §2).
     ///
     /// # Panics
@@ -32,7 +34,7 @@ impl NativeBinding {
         hold: Option<SettlementHold>,
         reply_to: Source,
         context: Box<dyn Any + Send>,
-    ) -> super::offload::blocking::DispatchId {
+    ) -> DispatchId {
         self.inflight
             .lock()
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
@@ -46,37 +48,74 @@ impl NativeBinding {
         hold: Option<SettlementHold>,
         reply_to: Source,
         context: C,
-    ) -> super::offload::blocking::DeferredCompletion<O>
+    ) -> DeferredCompletion<O>
     where
         C: Send + 'static,
     {
         let dispatch_id = self.dispatch_insert(hold, reply_to, Box::new(context));
-        super::offload::blocking::DeferredCompletion::new(Arc::downgrade(self), dispatch_id)
+        DeferredCompletion::new(Arc::downgrade(self), dispatch_id)
     }
 
-    /// Shared deferred-completion tail. Fill the named dispatch's output
-    /// slot under the ledger mutex, drop the lock, then push exactly one
-    /// [`TaskCompletionWake`](super::offload::blocking::TaskCompletionWake)
-    /// for the winning fill.
+    /// Arm a staged task's ledger entry (ADR-0243 §9): it keeps `hold`, the
+    /// staging turn's chain, owes no reply, and completes correlated to
+    /// `request`. The returned move-only capability retains this binding
+    /// only weakly.
     ///
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn dispatch_complete<O>(&self, id: super::offload::blocking::DispatchId, output: O)
-    where
-        O: Send + 'static,
-    {
-        if self
+    pub(crate) fn dispatch_stage<O>(
+        self: &Arc<Self>,
+        hold: Option<SettlementHold>,
+        request: RequestId,
+    ) -> DeferredCompletion<O> {
+        let dispatch_id = self
             .inflight
             .lock()
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_fill_output(id, Box::new(output))
-            == super::offload::blocking::FillOutcome::Filled
-        {
-            self.wake_self(
-                super::offload::blocking::TaskCompletionWake::ID,
-                super::offload::blocking::TaskCompletionWake { dispatch_id: id.0 }.encode_into_bytes(),
-            );
+            .dispatch_insert_task(hold, request);
+        DeferredCompletion::new(Arc::downgrade(self), dispatch_id)
+    }
+
+    /// Shared deferred-completion tail. Fill the named dispatch's output
+    /// slot under the ledger mutex, drop the lock, then push exactly one
+    /// [`TaskCompletionWake`] for the winning fill.
+    ///
+    /// A worker entry's wake is the unchained loopback [`Self::wake_self`]
+    /// pushes. A staged task's wake is correlated to its request, so its
+    /// completion reads the request from `in_reply_to` and takes the context
+    /// stored under it, and carries the root its hold keeps open, so the
+    /// completion's sends inherit the staging chain (ADR-0243 §9). It has no
+    /// mail id: settlement counts no in-flight mail for it, and `sender()`
+    /// names no one. The entry keeps the hold through the fill, and the
+    /// completion's ctx takes it and releases it when that handler ends, so
+    /// the chain stays open from staging until every send the completion
+    /// makes is counted.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn dispatch_complete<O>(&self, id: DispatchId, output: O)
+    where
+        O: Send + 'static,
+    {
+        let filled = self
+            .inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_fill_output(id, Box::new(output));
+        let FillOutcome::Filled(wake) = filled else {
+            return;
+        };
+
+        let bytes = TaskCompletionWake { dispatch_id: id.0 }.encode_into_bytes();
+        match wake {
+            CompletionWake::Unchained => self.wake_self(TaskCompletionWake::ID, bytes),
+            CompletionWake::Task { request, root } => self.mailer.push(
+                Mail::new(self.self_mailbox(), TaskCompletionWake::ID, bytes, 1)
+                    .with_reply_to(Source::with_correlation(SourceAddr::None, request.0))
+                    .with_lineage(None, root, None),
+            ),
         }
     }
 
@@ -89,39 +128,32 @@ impl NativeBinding {
         self.mailer.push(Mail::new(self.self_mailbox(), kind, bytes, 1));
     }
 
-    /// Remove the named dispatch entry and rebuild its
-    /// [`TaskDone`](super::offload::blocking::TaskDone). Called on the
-    /// actor thread when the completion-wake mail lands.
+    /// Remove the named dispatch entry and rebuild its [`TaskDone`]. Called
+    /// on the actor thread when the completion-wake mail lands.
     ///
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn dispatch_take<O: 'static, C: 'static>(
-        &self,
-        id: super::offload::blocking::DispatchId,
-    ) -> Option<super::offload::blocking::TaskDone<O, C>> {
+    pub(crate) fn dispatch_take<O: 'static, C: 'static>(&self, id: DispatchId) -> Option<TaskDone<O, C>> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_take(id)
     }
 
-    /// Remove the named dispatch entry and hand back its parked
-    /// `(Option<SettlementHold>, Source)` without any downcast — the
-    /// release path for a worker that never armed. The spawn-error branch of
-    /// the `dispatch_blocking*` worker spawn calls this and drops the returned
-    /// hold so the chain settles.
+    /// Remove the named dispatch entry and hand back its hold without any
+    /// downcast — the release path for a worker that never ran. The
+    /// spawn-error branch of the `dispatch_blocking*` worker spawn and an
+    /// unstarted staged task's drop call this and drop the returned hold,
+    /// after the ledger lock is released, so the chain settles.
     ///
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn dispatch_abandon(
-        &self,
-        id: super::offload::blocking::DispatchId,
-    ) -> Option<(Option<SettlementHold>, Source)> {
+    pub(crate) fn dispatch_abandon(&self, id: DispatchId) -> Option<SettlementHold> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_abandon(id)
     }
 
     /// Non-consuming peek-then-take of the named dispatch entry: probe its
     /// boxed output + context against `O` / `C` and only remove + rebuild
-    /// the [`TaskDone`](super::offload::blocking::TaskDone) on a match,
+    /// the [`TaskDone`] on a match,
     /// leaving the entry intact on a mismatch. The `#[handler(task)]`
     /// dispatch chain calls this to route a completion to the right
     /// output-typed handler without a wrong-type probe consuming the entry.
@@ -129,15 +161,12 @@ impl NativeBinding {
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(
-        &self,
-        id: super::offload::blocking::DispatchId,
-    ) -> Option<super::offload::blocking::TaskDone<O, C>> {
+    pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(&self, id: DispatchId) -> Option<TaskDone<O, C>> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_try_take(id)
     }
 
     /// Arm a ledger entry no worker answers (ADR-0243 §1) and return its
-    /// [`DispatchId`](super::offload::blocking::DispatchId) with the weak
+    /// [`DispatchId`] with the weak
     /// link its [`Held`](super::offload::held::Held) ticket keeps back to
     /// this ledger.
     ///
@@ -148,7 +177,7 @@ impl NativeBinding {
         self: &Arc<Self>,
         hold: Option<SettlementHold>,
         reply_to: Source,
-    ) -> (super::offload::blocking::DispatchId, Weak<Self>) {
+    ) -> (DispatchId, Weak<Self>) {
         let id = self
             .inflight
             .lock()
@@ -164,10 +193,7 @@ impl NativeBinding {
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn dispatch_claim_held(
-        &self,
-        id: super::offload::blocking::DispatchId,
-    ) -> Option<(Option<SettlementHold>, Source)> {
+    pub(crate) fn dispatch_claim_held(&self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_claim_held(id)
     }
 
@@ -182,21 +208,22 @@ impl NativeBinding {
     /// ADR-0063 — and when `id` names no held entry.
     pub(crate) fn dispatch_attach_worker<O>(
         self: &Arc<Self>,
-        id: super::offload::blocking::DispatchId,
+        id: DispatchId,
         context: Box<dyn Any + Send>,
-    ) -> super::offload::blocking::DeferredCompletion<O> {
+    ) -> DeferredCompletion<O> {
         self.inflight
             .lock()
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
             .dispatch_attach_worker(id, context);
-        super::offload::blocking::DeferredCompletion::new(Arc::downgrade(self), id)
+        DeferredCompletion::new(Arc::downgrade(self), id)
     }
 
-    /// Release every held entry still in the ledger with no reply and no
-    /// panic, because the actor that owes them is closing (ADR-0243 §1). The
-    /// close paths call it before the actor's state drops, so a `Held`
-    /// parked in that state then finds its entry gone and drops silently.
-    /// The holds release after the ledger lock is released.
+    /// Release every held entry and staged task still in the ledger with no
+    /// reply and no panic, because the actor that owes them is closing
+    /// (ADR-0243 §1, §9). The close paths call it before the actor's state
+    /// drops, so a `Held` or an unstarted staged task parked in that state
+    /// then finds its entry gone and drops silently. The holds release after
+    /// the ledger lock is released.
     ///
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
@@ -223,7 +250,7 @@ impl NativeBinding {
     /// ADR-0063.
     pub(crate) fn dispatch_park(
         &self,
-        id: super::offload::blocking::DispatchId,
+        id: DispatchId,
         request: RequestId,
         reply: KindId,
         context_name: &'static str,
@@ -246,12 +273,7 @@ impl NativeBinding {
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn dispatch_unpark(
-        &self,
-        id: super::offload::blocking::DispatchId,
-        request: RequestId,
-        reply: KindId,
-    ) -> Result<(), wire::Error> {
+    pub(crate) fn dispatch_unpark(&self, id: DispatchId, request: RequestId, reply: KindId) -> Result<(), wire::Error> {
         self.inflight
             .lock()
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
@@ -274,7 +296,7 @@ impl NativeBinding {
 
     /// The named ledger entry's state, for tests.
     #[cfg(test)]
-    pub(crate) fn dispatch_state_of(&self, id: super::offload::blocking::DispatchId) -> Option<&'static str> {
+    pub(crate) fn dispatch_state_of(&self, id: DispatchId) -> Option<&'static str> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_state_of(id)
     }
 }

@@ -152,6 +152,22 @@ where
     close_done_tx: Mutex<Option<crossbeam_channel::Sender<()>>>,
 }
 
+impl<A> Drop for DispatcherSlot<A>
+where
+    A: NativeActor,
+{
+    /// A slot dropped with its actor still in it never ran its close cycle:
+    /// the chassis teardown drops a root actor's last strong reference after
+    /// flagging shutdown, with nothing left to wake it. That is still the
+    /// actor closing, so its ledger settles the held replies and staged tasks
+    /// first (ADR-0243 §1, §9), and a `Held` or unstarted task in the actor's
+    /// state then drops silently with it, as the close tail would have it.
+    /// A slot whose close cycle ran finds the ledger already settled.
+    fn drop(&mut self) {
+        self.binding.settle_held_for_actor_close();
+    }
+}
+
 impl<A> DispatcherSlot<A>
 where
     A: NativeActor,

@@ -124,8 +124,8 @@ const MAX_ARTIFACT_READS_IN_FLIGHT: usize = 4;
 pub struct JournalActorState {
     journal: Journal,
     watchers: Watchers,
-    closures: TaskQueue,
-    artifacts: TaskQueue,
+    closures: TaskQueue<ReadClosureResult>,
+    artifacts: TaskQueue<ReadArtifactResult>,
     cache: ReadCache,
 }
 
@@ -206,12 +206,11 @@ impl NativeActor for JournalActor {
         state.artifacts.submit(ctx, move || artifact_reply(digest, reader.read_artifact(&digest, &check_in, &cache)))
     }
 
-    /// ADR-0093 completion of an artifact read: reply to the request's own
-    /// caller, then free the read's slot for the next queued read.
+    /// Completion of an artifact read: the queue answers the request's own
+    /// caller, then starts the next queued read in the freed slot.
     #[handler(task)]
     fn on_read_artifact_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<ReadArtifactResult>) {
-        done.resolve(ctx);
-        state.artifacts.on_complete(ctx);
+        state.artifacts.complete(ctx, done);
     }
 
     /// Read an artifact's transitive closure under the requested byte limit.
@@ -241,12 +240,11 @@ impl NativeActor for JournalActor {
         })
     }
 
-    /// ADR-0093 completion of a closure walk: reply to the request's own
-    /// caller, then free the walk's slot for the next queued read.
+    /// Completion of a closure walk: the queue answers the request's own
+    /// caller, then starts the next queued read in the freed slot.
     #[handler(task)]
     fn on_read_closure_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<ReadClosureResult>) {
-        done.resolve(ctx);
-        state.closures.on_complete(ctx);
+        state.closures.complete(ctx, done);
     }
 
     #[handler::single]

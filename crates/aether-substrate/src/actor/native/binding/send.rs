@@ -25,7 +25,7 @@ impl NativeBinding {
         before_push: impl FnOnce(MailId),
     ) -> MailId {
         let OutboundSend { recipient, kind, bytes, attachments, count, parent_mail, inherited_root } = send;
-        let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
+        let correlation = self.mint_correlation();
         let recipient_id = MailboxId(recipient);
         let reply_to = Source::with_correlation(SourceAddr::Component(self.self_mailbox()), correlation);
         let mail_id = MailId::new(self.self_mailbox(), correlation);

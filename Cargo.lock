@@ -721,7 +721,6 @@ dependencies = [
  "aether-test-fixtures-bundle",
  "aether-trace",
  "base64 0.22.1",
- "bytemuck",
  "clap",
  "confique",
  "httparse",

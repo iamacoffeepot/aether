@@ -10,7 +10,8 @@
 //! their provider calls): the closure owns the resolved command and runs
 //! the deadline / drain / reap loop (the `runner` module) off the
 //! dispatcher on a worker thread, and a `#[handler(task)]` completion
-//! re-replies the `run_result` through the caller's held reply target.
+//! answers the `run_result` through the reply the queue holds for the
+//! caller.
 //! The caller's settlement chain stays held across the whole run, so
 //! `send_mail_traced` observes it as one in-flight unit.
 
@@ -51,7 +52,7 @@ pub struct ProcessCapabilityState {
     allowlist: HashMap<String, PathBuf>,
     default_timeout: Duration,
     work_root: PathBuf,
-    tasks: TaskQueue,
+    tasks: TaskQueue<RunResult>,
 }
 
 #[cfg(test)]
@@ -135,13 +136,11 @@ impl NativeActor for ProcessCapability {
         })
     }
 
-    /// ADR-0093 completion for a finished run: re-reply the worker's
-    /// `run_result` to the original caller (drops the hold), then free
-    /// the in-flight slot (draining the next queued run).
+    /// Completion of a finished run: the queue answers the run's caller
+    /// with the worker's `run_result`, then starts the next waiting run.
     #[handler(task)]
     fn on_run_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<RunResult>) {
-        done.resolve(ctx);
-        state.tasks.on_complete(ctx);
+        state.tasks.complete(ctx, done);
     }
 }
 

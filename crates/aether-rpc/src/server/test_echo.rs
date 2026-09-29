@@ -67,10 +67,10 @@ impl NativeActor for TestEchoActor {
 }
 
 /// Deferred-echo request — like [`TestEchoRequest`] but the actor
-/// answers it through the ADR-0093 hold-until-resolve dispatch
-/// (`TaskQueue` over `ctx.dispatch_blocking`): the handler spawns an
-/// off-thread worker, and a `#[handler(task)]` completion re-replies when
-/// the worker finishes. Exercises the settlement-hold contract
+/// answers it through a [`TaskQueue`] over staged blocking work
+/// (ADR-0243 §9): the handler holds the reply and stages an off-thread
+/// worker, and a `#[handler(task)]` completion answers when the worker
+/// finishes. Exercises the settlement-hold contract
 /// (iamacoffeepot/aether#1031) end-to-end: the chain must stay open across
 /// the spawn so the RPC `Call`'s settlement subscription only fires after
 /// the deferred reply.
@@ -87,16 +87,15 @@ pub struct DeferredEchoReply {
     pub value: u64,
 }
 
-/// Test-only actor that answers [`DeferredEchoRequest`] off-thread via the
-/// ADR-0093 hold-until-resolve dispatch ([`TaskQueue`]
-/// over `ctx.dispatch_blocking`), reproducing the production content-gen
-/// caps' deferred-reply shape (submit -> spawned worker -> completion wake
-/// -> re-reply). The whole point is that the reply happens *after* the
+/// Test-only actor that answers [`DeferredEchoRequest`] off-thread through
+/// a [`TaskQueue`], reproducing the production queue users' deferred-reply
+/// shape (submit -> spawned worker -> completion wake -> answer from the
+/// queue). The whole point is that the reply happens *after* the
 /// handler returns, so the framework-held settlement hold must keep the
 /// chain open across the gap. Holds the [`TaskQueue`] the deferred handler
 /// submits onto.
 pub struct DeferredEchoActor {
-    tasks: TaskQueue,
+    tasks: TaskQueue<DeferredEchoReply>,
 }
 
 #[actor(singleton, root)]
@@ -125,12 +124,11 @@ impl NativeActor for DeferredEchoActor {
         })
     }
 
-    /// ADR-0093 completion: re-reply to the original caller (drops the
-    /// hold after the reply — `Sent` precedes `Release`), then free the
-    /// in-flight slot.
+    /// Completion: the queue answers the original caller (releasing the
+    /// held reply's hold after the reply — `Sent` precedes `Release`), then
+    /// starts the next waiting echo.
     #[handler(task)]
     fn on_deferred_echo_done(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<DeferredEchoReply>) {
-        done.resolve(ctx);
-        self.tasks.on_complete(ctx);
+        self.tasks.complete(ctx, done);
     }
 }

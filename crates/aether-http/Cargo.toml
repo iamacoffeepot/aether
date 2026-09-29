@@ -61,9 +61,6 @@ aether-kinds = { path = "../aether-kinds" }
 # unaffected.
 aether-http-derive = { path = "../aether-http-derive" }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
-# `HttpMethod` is a `Pod`/`Zeroable` wire enum, and `stream.rs` bounds its
-# chunk sends on `NoUninit`.
-bytemuck = { workspace = true, features = ["derive"] }
 # Native-only runtime half — gated so wasm/marker builds skip the substrate
 # runtime.
 aether-substrate = { path = "../aether-substrate", optional = true }

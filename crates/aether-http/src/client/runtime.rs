@@ -16,7 +16,7 @@
 use super::egress::PerSenderEgress;
 use super::secrets::{HostSecrets, request_headers};
 use super::{HttpCapability, HttpConfig};
-use aether_actor::{ErasedActorRef, runtime};
+use aether_actor::runtime;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -81,7 +81,7 @@ impl HttpAdapter for DisabledHttpAdapter {
 pub struct HttpCapabilityState {
     pub adapter: Arc<dyn HttpAdapter>,
     pub default_timeout: Duration,
-    egress: PerSenderEgress,
+    egress: PerSenderEgress<FetchResult>,
 }
 
 #[cfg(test)]
@@ -160,20 +160,14 @@ impl NativeActor for HttpCapability {
         })
     }
 
-    /// ADR-0093 completion for a finished fetch: re-reply the worker's
-    /// `FetchResult` to the original caller (dropping the hold), then free the
-    /// sender's slot — which drains that sender's (or a peer's) next queued
-    /// fetch. The completing sender's key — its proven envelope sender, or
-    /// `None` for the shared bucket — rides through as the `TaskDone` context.
+    /// Completion of a finished fetch: the egress dispatcher answers the
+    /// original caller with the worker's `FetchResult`, then frees the
+    /// sender's slot — which starts that sender's (or a peer's) next queued
+    /// fetch. The dispatcher finds the fetch's reply and sender key by the
+    /// request the completion is correlated to.
     #[handler(task)]
-    fn on_fetch_done(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<FetchResult, Option<ErasedActorRef>>,
-    ) {
-        let sender = *done.context();
-        done.resolve(ctx);
-        state.egress.on_complete(ctx, sender);
+    fn on_fetch_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<FetchResult>) {
+        state.egress.complete(ctx, done);
     }
 }
 

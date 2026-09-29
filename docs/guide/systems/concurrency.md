@@ -116,6 +116,42 @@ the chassis `FatalAborter` the same way the scheduler escalates a handler panic,
 and no completion lands. Return an expected failure as a value instead — a
 `Result`-shaped output — and map it to an error reply in the completion.
 
+**Staged work owes no reply → `stage_blocking` + `StagedTask`.** Work that is
+not itself the answer to the current caller stages instead
+([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)
+§9). `ctx.stage_blocking::<O>()`, or `ctx.stage_blocking_with::<O, C>(context)`
+with a context kind, fixes the task's chain in the turn that stages it: it mints
+the task's request id from the counter outbound requests use, takes the
+settlement hold on this turn's chain, and stores the context under the id.
+`StagedTask::start(ctx, work)` only spawns the worker, from whichever turn calls
+it. The `#[handler(task)]` completion runs correlated to the task's request on
+the staging chain: `ctx.in_reply_to()` is the task's `request()`, the context
+comes back with `ctx.take_context::<C>()`, its sends inherit the chain, and
+`done.into_output()` discharges it, because nothing is owed. A completion that
+leaves a context holding a live `Held` untaken fails fast, as a reply handler
+does. Dropping an unstarted task releases its chain and removes its context.
+
+**A bounded queue holds each reply and stages each request's work.** A native
+capability that bounds its concurrent blocking calls uses `TaskQueue<R>`
+(`aether-http`'s per-sender egress and the workspace run queue are the same
+shape). `submit` runs in the request's own turn: it holds the reply with
+`ctx.hold::<R>()`, keeps the `Held<R>`, and stages the work, so the task holds
+that request's chain whether it starts now or waits for a slot. The completion
+is one line:
+
+```rust
+#[handler(task)]
+fn on_run_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<RunResult>) {
+    state.tasks.complete(ctx, done);   // answer the Held, then start the next waiting task
+}
+```
+
+`complete` finds the finished task's `Held` by the request its completion is
+correlated to, answers it with the output, and starts the next waiting task in
+the freed slot. The waiting task's chain is still its own request's, so a
+request's chain settles when that request is answered, never when another
+request's work finishes.
+
 **3. Heavy async compute → off-thread, by reference.** Multi-step compute that
 produces handles belongs off the actor thread entirely; stage it through the
 offload primitives below and pass results by handle rather than copying them
@@ -149,22 +185,23 @@ the same caller. A second `hold` in one dispatch panics. Dropping a `Held` unans
 releases the hold and panics; an actor that closes with tickets still parked
 settles them silently.
 
-## The three offload shapes, and the hold
+## The offload shapes, and the hold
 
 Settlement — how `send_mail_traced` knows a chain of mail is *fully* done rather
 than guessing with a timeout — requires every unit of in-flight work to stay
 visible to the trace umbrella. A raw `std::thread::spawn` pushes rootless mail
 the umbrella can't see, silently opting the work out. So offloading goes through
-one of three sanctioned primitives, which differ only in *how long they hold the
-causal chain open*:
+one of the sanctioned primitives below, which differ only in *how long they hold
+the causal chain open*:
 
 | primitive | holds the chain? | for |
 |---|---|---|
 | `spawn_inherit` | yes — for the worker thread's lifetime | offloaded work that replies *before* the worker ends |
 | `spawn_detached` | no — the worker holds no chain and sends no mail | true fire-and-forget background work |
 | `dispatch_blocking` (hold-until-resolve) | yes — until you `resolve`, *outliving* the worker | the "reply in a later turn" shape above |
+| `stage_blocking` (staged task) | yes — the staging turn's chain, until the completion handler ends | work that owes no reply, and a bounded queue's waiting work |
 
-A panic in any of the three is fatal
+A panic in any of them is fatal
 ([ADR-0063](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0063-fail-fast-on-abnormal-component-lifecycle.md)):
 the worker escalates it through the chassis aborter with the panic payload in the
 reason, as the scheduler does for a handler panic.
@@ -191,7 +228,7 @@ Some work genuinely blocks at the *edges* of the engine — a TCP listener's
 real OS thread, deliberately: it's blocking I/O that *should* live off the
 scheduler, isolated so it can't pin a pool worker. That's the **exception** — a
 handful of infrastructure capabilities — not how actors run, and not something to
-reach for from ordinary actor logic (use one of the three shapes above). It's a
+reach for from ordinary actor logic (use one of the shapes above). It's a
 cap-local spawn, scoped tightly to the blocking call ([ADR-0050](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0050-llm-completion-sink.md)).
 
 A cap spawns that thread from the handle `ctx.self_wake::<K>()` returns (on the

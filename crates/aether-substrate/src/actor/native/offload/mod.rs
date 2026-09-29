@@ -14,6 +14,10 @@
 //!   *later* handler turn. The worker pushes a result and dies, and the reply
 //!   is sent from a subsequent invocation, so the hold has to outlive the
 //!   worker and neither thread shape fits.
+//! - [`staged_task`] — ADR-0243 §9 staged work: blocking work that owes no
+//!   reply, takes its chain when it is staged, and starts when its stager
+//!   says. Its completion runs correlated to the task's request on that
+//!   chain and takes its context from the ctx.
 //! - [`held`] — ADR-0243 typed held replies: the [`held::Held`] debt a
 //!   handler keeps while its `Pending<R>` receipt declares the reply, for a
 //!   reply a later handler turn sends that no worker produces.
@@ -28,10 +32,11 @@
 //!   in: a panic on any of these threads is fatal (ADR-0063) and escalates
 //!   through the chassis aborter, as the scheduler escalates a handler panic.
 //!
-//! [`task_queue`] sits above [`blocking`] rather than beside it: the framework
-//! owns the spawn, hold, and completion routing, and the one thing it
-//! deliberately does not centralise is a per-cap concurrency bound. That bound
-//! is what rate-limits the paid provider endpoints (ADR-0050 §2).
+//! [`task_queue`] sits above [`staged_task`] and [`held`] rather than beside
+//! them: the framework owns the spawn, hold, and completion routing, and the
+//! one thing it deliberately does not centralise is a per-cap concurrency
+//! bound. That bound is what rate-limits the paid provider endpoints
+//! (ADR-0050 §2).
 //!
 //! Not to be confused with [`super::spawn`], which brings new *actors* into
 //! being rather than moving work off an existing one.
@@ -41,5 +46,6 @@ pub mod check_in;
 pub(crate) mod fail_fast;
 pub mod held;
 pub mod self_wake;
+pub mod staged_task;
 pub mod task_queue;
 pub mod thread;

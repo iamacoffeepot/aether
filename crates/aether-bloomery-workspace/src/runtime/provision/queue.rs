@@ -9,16 +9,18 @@
 //! clamped to the whole budget, the front always fits once the host is idle.
 //!
 //! [`RunQueue`] carries those decisions out on the actor thread, the way
-//! `aether-http`'s per-sender egress queue does: an admitted run dispatches
-//! through `dispatch_blocking_with_pending`, and a queued one holds its reply
-//! at accept (`ctx.hold`) and attaches its worker to that held entry later
-//! through `dispatch_blocking_held_with`, so its caller's chain stays held
-//! from accept to reply and the worker answers the receipt `submit` returned.
+//! `aether-http`'s per-sender egress queue does: every run holds its reply
+//! (`ctx.hold`) and stages its task (`ctx.stage_blocking`) in its own
+//! request's turn, so its caller's chain stays held from accept to reply
+//! (ADR-0243 §9). Its task starts when the run is admitted, now or from a
+//! later completion's turn, with work built from the allotment admission
+//! gave it, and the queue answers the held reply from the task's output.
 //! No dispatcher thread ever waits.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
-use aether_substrate::actor::native::{Held, NativeCtx, Pending, TaskDone};
+use aether_data::RequestId;
+use aether_substrate::actor::native::{Held, NativeCtx, Pending, StagedTask, TaskDone};
 
 use super::budget::Budget;
 use super::estimate::{Amounts, Estimates};
@@ -26,7 +28,7 @@ use super::key::RunKey;
 use crate::runtime::run::{Allotment, Observed, Ran, Runner};
 use crate::{Run, RunResult, WorkspaceCapability};
 
-/// A run's dispatch context: its key and what it was given, so the
+/// An admitted run's key and what it was given, kept while it runs so the
 /// completion can learn from it and release it.
 #[derive(Debug, Clone)]
 pub struct Admitted {
@@ -92,37 +94,41 @@ impl<W> Admission<W> {
     }
 }
 
-/// A run waiting for the budget, with the reply it owes its caller.
+/// A run waiting for the budget: its task, staged in its own request's
+/// turn, and the reply it owes its caller.
 struct Waiting {
     run: Run,
+    task: StagedTask<Ran>,
     held: Held<RunResult>,
 }
 
 /// Provisioned runs: the runner each admitted run clones onto its worker,
-/// and the admission it waits in.
+/// the admission it waits in, and the reply and allotment of each running
+/// run, keyed by its task's request.
 pub struct RunQueue {
     runner: Runner,
     admission: Admission<Waiting>,
+    running: HashMap<RequestId, (Held<RunResult>, Admitted)>,
 }
 
 impl RunQueue {
     pub fn new(runner: Runner, budget: Budget, estimates: Estimates) -> Self {
-        Self { runner, admission: Admission::new(budget, estimates) }
+        Self { runner, admission: Admission::new(budget, estimates), running: HashMap::new() }
     }
 
-    /// Accept `run`: dispatch it now when it is admitted, or queue it with
-    /// its held reply.
+    /// Accept `run` in its own turn: hold its reply and stage its task, then
+    /// start the task now when the run is admitted, or queue it.
     pub fn submit(&mut self, ctx: &mut NativeCtx<'_, WorkspaceCapability>, run: Run) -> Pending<RunResult> {
         let key = RunKey::of(&run);
+        let (pending, held) = ctx.hold::<RunResult>();
+        let task = ctx.stage_blocking::<Ran>();
         if let Some(admitted) = self.admission.admit_now(key) {
-            self.log_admitted(&admitted);
-            let work = self.work(&admitted, run);
-            return ctx.dispatch_blocking_with_pending::<Ran, RunResult, _, _>(admitted, work);
+            self.start(ctx, admitted, Waiting { run, task, held });
+            return pending;
         }
 
         let amounts = self.admission.amounts(&key);
-        let (pending, held) = ctx.hold::<RunResult>();
-        self.admission.enqueue(key, Waiting { run, held });
+        self.admission.enqueue(key, Waiting { run, task, held });
         tracing::info!(
             target: "aether_bloomery_workspace",
             %key,
@@ -135,16 +141,32 @@ impl RunQueue {
         pending
     }
 
-    /// A run finished: learn from it, release its budget, reply to its
+    /// A run finished: learn from it, release its budget, answer its
     /// caller, then admit from the front while the front fits.
-    pub fn complete(&mut self, ctx: &mut NativeCtx<'_, WorkspaceCapability>, done: TaskDone<Ran, Admitted>) {
-        self.admission.finish(done.context(), &done.output().result, &done.output().observed);
-        done.resolve_with(ctx, |ran, _| ran.result.clone());
-        while let Some((admitted, Waiting { run, held })) = self.admission.next() {
-            self.log_admitted(&admitted);
-            let work = self.work(&admitted, run);
-            ctx.dispatch_blocking_held_with(held, admitted, work);
+    ///
+    /// # Panics
+    /// Panics when `ctx` is not dispatching the completion of a run this
+    /// queue started.
+    pub fn complete(&mut self, ctx: &mut NativeCtx<'_, WorkspaceCapability>, done: TaskDone<Ran>) {
+        let (held, admitted) = ctx
+            .in_reply_to()
+            .and_then(|request| self.running.remove(&request))
+            .expect("a RunQueue completion names a run the queue started");
+        let Ran { result, observed } = done.into_output();
+        self.admission.finish(&admitted, &result, &observed);
+        held.answer(ctx, &result);
+        while let Some((admitted, waiting)) = self.admission.next() {
+            self.start(ctx, admitted, waiting);
         }
+    }
+
+    /// Start an admitted run's staged task with work built from its
+    /// allotment, and keep its reply and allotment until it completes.
+    fn start(&mut self, ctx: &NativeCtx<'_, WorkspaceCapability>, admitted: Admitted, waiting: Waiting) {
+        let Waiting { run, task, held } = waiting;
+        self.log_admitted(&admitted);
+        let request = task.start(ctx, self.work(&admitted, run));
+        self.running.insert(request, (held, admitted));
     }
 
     /// The worker's whole job for one admitted run.

@@ -47,6 +47,7 @@ use crate::mail::Source;
 #[cfg(feature = "wasm")]
 use crate::mail::outbound::HubOutbound;
 use crate::runtime::effect_chain::EffectChain;
+use crate::runtime::trace::SettlementHold;
 
 mod address;
 #[cfg(feature = "wasm")]
@@ -127,6 +128,14 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// [`Self::as_single`] and [`Self::erase`] view the same storage, so one
     /// dispatch shares one flag across its views.
     held_this_dispatch: bool,
+    /// ADR-0243 §9: the settlement hold of each staged task whose completion
+    /// this ctx took. A task's wake is no counted mail, so its chain stays
+    /// open on this hold until the completion handler ends. The field drops
+    /// after [`Drop::drop`]'s handler-end flush, and every send the handler
+    /// made was counted when it was buffered, so the chain cannot settle
+    /// before the completion's effects are in flight. Empty, and so
+    /// unallocated, on every other dispatch.
+    task_holds: Vec<SettlementHold>,
     /// ADR-0112: phantom reply-mode marker (a ZST, layout-neutral) that
     /// selects which reply surface this ctx exposes. Defaults to
     /// [`Single`], so the common `NativeCtx<'_>` signature is unchanged.
@@ -185,6 +194,7 @@ impl<'a> NativeCtx<'a, Erased, Single> {
             causing_chain: None,
             inbound: None,
             held_this_dispatch: false,
+            task_holds: Vec::new(),
             _mode: PhantomData,
             _actor: PhantomData,
         }
@@ -220,6 +230,7 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
             causing_chain: None,
             inbound: None,
             held_this_dispatch: false,
+            task_holds: Vec::new(),
             _mode: PhantomData,
             _actor: PhantomData,
         }
@@ -250,6 +261,7 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
             causing_chain: chain.held_root(),
             inbound: None,
             held_this_dispatch: false,
+            task_holds: Vec::new(),
             _mode: PhantomData,
             _actor: PhantomData,
         }
@@ -294,6 +306,7 @@ impl<'a> NativeCtx<'a, Erased, Manual> {
             causing_chain: None,
             inbound: None,
             held_this_dispatch: false,
+            task_holds: Vec::new(),
             _mode: PhantomData,
             _actor: PhantomData,
         }
@@ -340,6 +353,7 @@ impl<'a, A> NativeCtx<'a, A, Manual> {
             causing_chain: None,
             inbound: Some(inbound),
             held_this_dispatch: false,
+            task_holds: Vec::new(),
             _mode: PhantomData,
             _actor: PhantomData,
         }
@@ -369,7 +383,8 @@ impl<M: ReplyMode, A> Drop for NativeCtx<'_, A, M> {
     /// ring burst and routes them, covering the main dispatch loop, the
     /// shutdown-drain loop, and `unwire` with a single hook (no
     /// per-call-site flush to forget and silently drop mail).
-    /// Idempotent — an empty buffer no-ops.
+    /// Idempotent — an empty buffer no-ops. A staged task's hold this ctx
+    /// took drops with its field, after this flush (ADR-0243 §9).
     fn drop(&mut self) {
         self.binding.flush_outbound();
     }
