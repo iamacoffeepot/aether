@@ -795,17 +795,19 @@ mod control_plane {
         pub name: String,
     }
 
-    /// `aether.component.drop` — unload the component at `target`, its
+    /// `aether.component.drop` — close the component at `target`, its
     /// canonical or short actor path. The component host proves the path
-    /// once at receipt. Reply: `DropResult`.
+    /// once at receipt. The instance runs its `unwire` and closes, and its
+    /// name tombstones: a later load of it is refused as retired, and a
+    /// replace or drop at it is refused (ADR-0241 §8). Reply: `DropResult`.
     #[aether_data::kind(name = "aether.component.drop")]
     pub struct DropComponent {
         pub target: aether_data::ErasedActorPath,
     }
 
-    /// Reply to `DropComponent`. `Ok` on success; `Err` if the
-    /// address named nothing live, wasn't a component, or was already
-    /// dropped.
+    /// Reply to `DropComponent`. `Ok` once the instance has released its
+    /// guest and begun closing; `Err` if the address named nothing live,
+    /// wasn't a component, or was already dropped.
     #[aether_data::kind(name = "aether.component.drop_result")]
     pub enum DropResult {
         Ok,

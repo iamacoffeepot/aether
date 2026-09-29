@@ -376,12 +376,11 @@ impl NativeActor for LifecycleCapability {
 
     /// Purge a departed subscriber (ADR-0079 §8 amended). The substrate
     /// fires one notice per [`LifecycleCapabilityState::watch`]ed
-    /// subscriber when it vacates (the wasm trampoline on
-    /// `DropComponent`) or closes, so a dropped component's stage
-    /// broadcasts stop landing at its mailbox without any drop-time
+    /// subscriber when it closes (the wasm trampoline on `DropComponent`)
+    /// or vacates (a module boot on teardown), so a dropped component's
+    /// stage broadcasts stop landing at its mailbox without any drop-time
     /// fan-out from the component host. Releasing the handle keeps the
-    /// monitor map bounded by live subscribers; a later occupant of
-    /// the same mailbox re-registers through its own subscribe.
+    /// monitor map bounded by live subscribers.
     ///
     /// The host stamps the departed actor as the notice's sender, so
     /// `ctx.sender()` is the same erased key both tables are keyed by

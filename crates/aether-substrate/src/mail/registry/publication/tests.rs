@@ -3,7 +3,8 @@
 //! The rule tests run [`admit`] over hand-built surfaces, so each names one
 //! rule without wasm. The native test reads the real link-time inventory, and
 //! the registry tests publish checked-in WAT modules through the owner, so
-//! the table they exercise is the one a load stages.
+//! the table they exercise is the one a load stages, and the short-path index
+//! they resolve through is the one that publish republishes.
 
 use std::any::{TypeId, type_name};
 use std::fmt::Write as _;
@@ -12,10 +13,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::{Addressable, One};
-use aether_data::name_inventory::{NameEntry, NativeTypeEntry, ParamKind, TemplateEntry, inventory};
+use aether_data::name_inventory::{
+    ChildEntry, NameEntry, NativeTypeEntry, ParamKind, RootEntry, TemplateEntry, inventory,
+};
 use aether_data::{
-    Blob, BlobHash, CONTENT_ADDRESSED_SECTION, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, MAILBOX_DOMAIN,
-    MailboxCategory, ReplyContract, THREAD_DOMAIN, wire,
+    ACTOR_LINEAGE_SECTION, ACTOR_LINEAGE_SECTION_VERSION, ActorId, ActorLineageRecord, Blob, BlobHash,
+    CONTENT_ADDRESSED_SECTION, ErasedActorPath, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, MAILBOX_DOMAIN,
+    MailboxCategory, PRIVATE_INPUTS_SECTION, ReplyContract, THREAD_DOMAIN, wire,
 };
 use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 use wasmtime::Engine;
@@ -29,7 +33,8 @@ use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, RegistryApplied, RegistryBatch, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::{
-    AdoptRefused, ContractBreak, Registry, RouteContract, canonical_mailbox_id, lineage_mailbox_id, noop_handler,
+    AddressResolutionError, AdoptRefused, ContractBreak, Registry, RouteContract, canonical_mailbox_id,
+    lineage_mailbox_id, noop_handler,
 };
 use crate::scheduler::WakeSink;
 use crate::store::BlobStore;
@@ -39,6 +44,9 @@ const NATIVE_SINGLETON: &str = "test.publication.native_singleton";
 const NATIVE_INSTANCED: &str = "test.publication.native_instanced";
 const THREAD_NAMED: &str = "test.publication.thread_named";
 const OTHER_TEMPLATE: &str = "test.publication.other_template";
+/// A native root whose one declared instanced child is [`NATIVE_INSTANCED`],
+/// so `NATIVE_ROOT/:k` is a native short path.
+const NATIVE_ROOT: &str = "test.publication.native_root";
 
 inventory::submit! { NameEntry { domain: MAILBOX_DOMAIN, name: NATIVE_SINGLETON } }
 inventory::submit! {
@@ -47,6 +55,16 @@ inventory::submit! {
 inventory::submit! { NameEntry { domain: THREAD_DOMAIN, name: THREAD_NAMED } }
 inventory::submit! {
     TemplateEntry { domain: MAILBOX_DOMAIN, prefix: OTHER_TEMPLATE, template: "-{subname}", param: ParamKind::Dynamic }
+}
+inventory::submit! { NameEntry { domain: MAILBOX_DOMAIN, name: NATIVE_ROOT } }
+inventory::submit! { RootEntry { actor: ActorId::singleton(NATIVE_ROOT), namespace: NATIVE_ROOT } }
+inventory::submit! {
+    ChildEntry {
+        parent: ActorId::singleton(NATIVE_ROOT),
+        child: ActorId::singleton(NATIVE_INSTANCED),
+        parent_namespace: NATIVE_ROOT,
+        child_namespace: NATIVE_INSTANCED,
+    }
 }
 
 /// Two linked types sharing [`NATIVE_SINGLETON`], the way a chassis picks one
@@ -301,25 +319,37 @@ impl Fixture {
     }
 
     fn build(&self, groups: &[(&str, &[KindId])], marker: &str) -> Module {
-        let mut section = Vec::new();
-        for (namespace, rows) in groups {
-            let boundary = InputsRecord::ActorBoundary { namespace: (*namespace).to_owned().into() };
-            let handlers = rows.iter().map(|id| InputsRecord::Handler {
-                id: *id,
-                name: id.to_string().into(),
-                doc: None,
-                reply: ReplyContract::None,
-            });
-            for record in iter::once(boundary).chain(handlers) {
-                section.push(INPUTS_SECTION_VERSION);
-                section.extend(wire::to_vec(&record).expect("encode an inputs record"));
-            }
-        }
-        let escaped = section.iter().fold(String::new(), |mut escaped, byte| {
-            write!(escaped, "\\{byte:02x}").expect("write to a String");
-            escaped
+        let exported = inputs_section(groups.iter().map(|(namespace, rows)| (*namespace, *rows, false)));
+        let wat = format!(r#"(module {} {marker} (func (export "noop")))"#, custom(INPUTS_SECTION, &exported));
+        self.check_in(&wat)
+    }
+
+    /// A module exporting each `(namespace, rows)` group and declaring each
+    /// `(namespace, instanced)` private group, with `lineage` as its
+    /// placement records.
+    fn placed_module(
+        &self,
+        exported: &[(&str, &[KindId])],
+        private: &[(&str, bool)],
+        lineage: &[ActorLineageRecord],
+    ) -> Module {
+        let exported = inputs_section(exported.iter().map(|(namespace, rows)| (*namespace, *rows, false)));
+        let private = inputs_section(private.iter().map(|(namespace, instanced)| (*namespace, &[][..], *instanced)));
+        let lineage = lineage.iter().fold(Vec::new(), |mut section, record| {
+            section.push(ACTOR_LINEAGE_SECTION_VERSION);
+            section.extend(wire::to_vec(record).expect("encode a lineage record"));
+            section
         });
-        let wat = format!(r#"(module (@custom "{INPUTS_SECTION}" "{escaped}") {marker} (func (export "noop")))"#);
+        let wat = format!(
+            r#"(module {} {} {} (func (export "noop")))"#,
+            custom(INPUTS_SECTION, &exported),
+            custom(PRIVATE_INPUTS_SECTION, &private),
+            custom(ACTOR_LINEAGE_SECTION, &lineage),
+        );
+        self.check_in(&wat)
+    }
+
+    fn check_in(&self, wat: &str) -> Module {
         let code = Blob::from(wat::parse_str(wat).expect("parse the fixture WAT"));
         self.modules.check_in(&self.blobs, &code).expect("check the module in")
     }
@@ -333,6 +363,36 @@ impl Fixture {
     fn publish(&self, module: &Module) -> Result<(), String> {
         self.apply(RegistryBatch::publish_module(module).into_effects()).map(drop).map_err(|error| error.to_string())
     }
+}
+
+/// One inputs section of boundary-led groups, each `(namespace, rows,
+/// instanced)` group's handlers replying nothing.
+fn inputs_section<'a>(groups: impl Iterator<Item = (&'a str, &'a [KindId], bool)>) -> Vec<u8> {
+    let mut section = Vec::new();
+    for (namespace, rows, instanced) in groups {
+        let boundary = InputsRecord::ActorBoundary { namespace: namespace.to_owned().into() };
+        let handlers = rows.iter().map(|id| InputsRecord::Handler {
+            id: *id,
+            name: id.to_string().into(),
+            doc: None,
+            reply: ReplyContract::None,
+        });
+        let cardinality = instanced.then_some(InputsRecord::Instanced);
+        for record in iter::once(boundary).chain(handlers).chain(cardinality) {
+            section.push(INPUTS_SECTION_VERSION);
+            section.extend(wire::to_vec(&record).expect("encode an inputs record"));
+        }
+    }
+    section
+}
+
+/// A WAT custom section named `name` holding `bytes`.
+fn custom(name: &str, bytes: &[u8]) -> String {
+    let escaped = bytes.iter().fold(String::new(), |mut escaped, byte| {
+        write!(escaped, "\\{byte:02x}").expect("write to a String");
+        escaped
+    });
+    format!(r#"(@custom "{name}" "{escaped}")"#)
 }
 
 // Catches: admission comparing against the first publication of a namespace
@@ -448,4 +508,46 @@ fn loaded_adopts_only_a_published_guest() {
         fixture.registry.loaded::<Guest>(resolve("test.publication.not_a_guest")),
         Err(AdoptRefused::NotComponent)
     );
+}
+
+// Catches: an address index built once from link-time facts, so a hole
+// beneath a published guest never fills; a module whose private group
+// redeclares a native namespace switching that native short path off as
+// contradictory; and a module's malformed namespace failing the whole index.
+#[test]
+fn a_publish_extends_the_short_path_index_without_touching_native_paths() {
+    const PARENT: &str = "test.publication.guest_parent";
+    const CHILD: &str = "test.publication.guest_child";
+    const MALFORMED: &str = "test.publication.Malformed Namespace";
+    let fixture = Fixture::new();
+    let native = format!("{NATIVE_ROOT}/{NATIVE_INSTANCED}:k");
+    let guest = format!("{PARENT}/{CHILD}:k");
+    fixture.register(&native);
+    fixture.register(&guest);
+    let expand = |short: &str| {
+        let path = ErasedActorPath::new(short).expect("a well-formed short path");
+        fixture.registry.resolve_address(&path).map(|resolved| resolved.canonical_path)
+    };
+
+    assert_eq!(expand(&format!("{PARENT}/:k")), Err(AddressResolutionError::UnknownRoot { root: PARENT.to_owned() }));
+
+    let child = |parent: &str, child: &str| ActorLineageRecord::Child {
+        parent: ActorId::singleton(parent).0,
+        child: ActorId::singleton(child).0,
+        parent_namespace: parent.to_owned().into(),
+        child_namespace: child.to_owned().into(),
+    };
+    let module = fixture.placed_module(
+        &[(PARENT, &[KEPT])],
+        &[(CHILD, true), (NATIVE_INSTANCED, false), (MALFORMED, true)],
+        &[
+            ActorLineageRecord::Root { actor: ActorId::singleton(PARENT).0, namespace: PARENT.into() },
+            child(PARENT, CHILD),
+            child(PARENT, MALFORMED),
+        ],
+    );
+    fixture.publish(&module).expect("publish the guest module");
+
+    assert_eq!(expand(&format!("{PARENT}/:k")), Ok(guest));
+    assert_eq!(expand(&format!("{NATIVE_ROOT}/:k")), Ok(native), "a module cannot switch off a native short path");
 }

@@ -28,6 +28,8 @@ use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::{Drainable, WakeHandle, WakeSink};
 
+#[cfg(any(test, feature = "test-support"))]
+mod close_wait;
 pub(super) mod commit;
 pub(super) mod prepare;
 mod teardown;
@@ -77,6 +79,11 @@ pub struct Spawner {
     /// chassis teardown — without it, a freshly-`signal_shutdown`-ed
     /// slot whose inbox is empty would never enter `run_cycle` to
     /// observe the flag.
+    ///
+    /// Issue #7074: the test-support `Spawner::await_closed` finds a
+    /// self-closing actor's slot here to install its close-done sender,
+    /// so a test waits on the actor's real close instead of polling its
+    /// route.
     pub(in crate::actor::native::spawn) instanced_slots: Mutex<HashMap<MailboxId, InstancedSlotEntry>>,
     /// Issue 1990: the per-actor ring capacities resolved at chassis
     /// boot. Every actor spawned through [`Self::build`] seeds its

@@ -173,29 +173,30 @@ impl NativeActor for WasmTrampoline {
         WasmTrampolineState::stage_inline_alias_retirements(ctx, retired);
     }
 
-    /// Drop the **wasm component**. Runs the guest's `unwire`
-    /// pre-shutdown hook, then drops the `Component`. The trampoline itself
-    /// stays alive — the guest's mailbox
-    /// remains addressable and reusable: agents can refill it via
-    /// `ReplaceComponent` without minting a new name. To kill
-    /// the trampoline (tombstone the subname), terminate the
-    /// substrate.
-    ///
-    /// Mail arriving in the dropped state falls through to
-    /// [`Self::forward_to_wasm`], which warn-drops because
-    /// `state.component` is `None`.
+    /// Close this instance (ADR-0241 §8). Releases the guest, which runs its
+    /// `unwire` pre-shutdown hook and drops the `Component`, then shuts the
+    /// trampoline down. The close tail tombstones the name, retires its route
+    /// to `Dropped`, and sends each watcher of the mailbox and of its
+    /// inline-child aliases a `MonitorNotice`. A later load of the name is
+    /// refused as retired, and nothing refills it.
     #[handler::single]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: DropComponent) -> DropResult {
-        state.unload(ctx);
+        state.release_guest(ctx);
+        ctx.shutdown();
         DropResult::Ok
     }
 
     /// The component host's module-boot teardown (ADR-0147): the host sends
-    /// it when the module's last non-boot actor unloads. The trampoline
-    /// unloads its guest as [`Self::on_drop_component`] does, with no reply.
+    /// it when the module's last non-boot actor departs. The trampoline
+    /// releases its guest and vacates its mailbox, with no reply, and stays
+    /// an empty slot until the substrate stops.
     #[handler::single]
     fn on_boot_teardown(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: BootTeardown) {
-        state.unload(ctx);
+        state.release_guest(ctx);
+        // ADR-0079 §8 (amended, issue 3741): drain this trampoline's
+        // watchers and fire one `MonitorNotice` each, so every cap holding
+        // state keyed by this mailbox purges its own rows.
+        ctx.vacate();
     }
 
     /// Replace the wasm component with a fresh module. ADR-0022 +
@@ -256,7 +257,7 @@ impl NativeActor for WasmTrampoline {
                     target: "aether_component",
                     actor = %ctx.path(),
                     kind = %ctx.kind_label(env.kind),
-                    "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",
+                    "mail to trampoline with no wasm loaded (guest released); discarded",
                 );
                 return true;
             };

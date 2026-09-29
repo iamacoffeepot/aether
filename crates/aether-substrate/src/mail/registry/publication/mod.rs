@@ -19,6 +19,8 @@
 //! contracts it already applies. It is not an actor and has no address.
 
 use std::any::{TypeId, type_name};
+#[cfg(feature = "wasm")]
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -221,6 +223,22 @@ impl PublicationTable {
         for namespace in publication.surface.exported_namespaces() {
             self.namespaces.insert(Arc::clone(namespace), Published::Module(Arc::clone(&publication)));
         }
+    }
+
+    /// Every distinct published module, once each however many namespaces it
+    /// holds, for the address index to read placement from (ADR-0241 §5). A
+    /// content-addressed module is left out: its namespaces carry its hash, so
+    /// no typed path names them, and its bundle roots are instanced (§3).
+    #[cfg(feature = "wasm")]
+    pub(super) fn modules(&self) -> impl Iterator<Item = &Module> {
+        let mut seen = HashSet::new();
+        self.namespaces
+            .values()
+            .filter_map(|published| match published {
+                Published::Native(_) => None,
+                Published::Module(publication) => Some(&publication.module),
+            })
+            .filter(move |module| !module.manifest().content_addressed() && seen.insert(module.hash()))
     }
 
     /// The linked types and the hold at a native `namespace`, for tests.

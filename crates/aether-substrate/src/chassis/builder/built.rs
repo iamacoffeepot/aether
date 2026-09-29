@@ -566,6 +566,27 @@ impl<C: Chassis> PassiveChassis<C> {
         spawn_actor(&self.booted, subname, config, params)
     }
 
+    /// Block until the pooled instanced `actor` has run its close cycle and
+    /// the registry owner has applied its route drop, so
+    /// [`Self::published_contract`] answers `None` once this returns — the
+    /// **test-scoped** wait for an actor's close, gated on the
+    /// `test-support` feature like [`Self::spawn_actor_for_test`].
+    ///
+    /// It waits on the slot's own close-done signal and then on an empty
+    /// barrier batch through the FIFO registry owner, never on the clock. An
+    /// actor that has already closed returns at once. One waiter per actor
+    /// at a time: a second concurrent call on the same actor displaces the
+    /// first.
+    ///
+    /// # Panics
+    /// Panics when `actor` is not a pooled instanced actor (a singleton or a
+    /// pumped slot has no close-done signal here), or when the close does not
+    /// apply within the settlement cap (`AETHER_SETTLEMENT_CAP_SECS`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn await_closed(&self, actor: ErasedActorRef) {
+        self.booted.spawner.await_closed(actor.id(), "testing.await_closed");
+    }
+
     chassis_accessors!();
 }
 

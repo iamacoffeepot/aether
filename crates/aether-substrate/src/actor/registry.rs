@@ -314,20 +314,23 @@ impl ActorRegistry {
     /// before calling. Nothing here re-checks the actors map, which would
     /// only ever refuse.
     ///
-    /// Infallible for the same reason `vacate_actor` is: an alias is never
-    /// tombstoned. Its occupant departs when the parent's does, and the
-    /// departure fan-out drains this index by alias, so a registration that
-    /// races that fan-out either drains with it or watches the mailbox's next
-    /// occupant — the vacate semantics ADR-0079 §8 already states for a
-    /// refillable slot.
-    pub(crate) fn register_alias_monitor(&self, watcher: MailboxId, alias: MailboxId) {
-        self.monitors_of
-            .write()
-            .expect("monitors_of lock poisoned; fail-fast per ADR-0063")
-            .entry(alias)
-            .or_default()
-            .push(MonitorEntry { watcher });
+    /// The one refusal is [`MonitorError::TargetTombstoned`]: an inline child
+    /// ends by closing and its alias tombstones (ADR-0241 §8,
+    /// [`Self::close_alias`]), so a despawned or parent-closed alias is never
+    /// watched again. The tombstone is re-checked under the `monitors_of`
+    /// write guard, as [`Self::register_monitor`] re-checks it, so a
+    /// registration that races `close_alias` either lands before its drain
+    /// and drains with it, or observes the tombstone and refuses.
+    pub(crate) fn register_alias_monitor(&self, watcher: MailboxId, alias: MailboxId) -> Result<(), MonitorError> {
+        {
+            let mut forward = self.monitors_of.write().expect("monitors_of lock poisoned; fail-fast per ADR-0063");
+            if self.is_tombstoned(alias) {
+                return Err(MonitorError::TargetTombstoned);
+            }
+            forward.entry(alias).or_default().push(MonitorEntry { watcher });
+        }
         self.link_watcher(watcher, alias);
+        Ok(())
     }
 
     /// Insert the reverse `monitoring[watcher]` edge, only ever after the
@@ -389,6 +392,29 @@ impl ActorRegistry {
         // liveness and observes this `mark_dead`, so no send can leak a
         // registration past the close.
         self.mark_dead(id);
+        self.drain_closed(id)
+    }
+
+    /// ADR-0241 §8: close an inline child's `alias`, which ends with its child
+    /// — on a despawn, or when the parent it is folded onto closes. The same
+    /// transaction as [`Self::close_actor`] in the same order, tombstone first
+    /// and then the drain, less the `Dead` slot: an alias is served by its
+    /// parent's slot and owns none (ADR-0114 §2).
+    ///
+    /// The tombstone is the synchronous authority the inline spawn host fn and
+    /// [`Self::register_alias_monitor`] read, so a despawned key is refused
+    /// before an id reaches the guest and a despawned alias is never watched
+    /// again. Idempotent, like `close_actor`.
+    pub(crate) fn close_alias(&self, alias: MailboxId) -> Vec<MailboxId> {
+        self.tombstones.write().expect("tombstones lock poisoned; fail-fast per ADR-0063").insert(alias);
+        self.drain_closed(alias)
+    }
+
+    /// The drain half of a close: take `monitors_of[id]` whole as the watcher
+    /// list to fan out, then prune `id` from each target it was watching.
+    /// Runs only after `id` is tombstoned, so a registration serialized after
+    /// the forward drain re-checks and refuses.
+    fn drain_closed(&self, id: MailboxId) -> Vec<MailboxId> {
         // Forward index: take the watcher list whole.
         let watchers: Vec<MailboxId> = self
             .monitors_of
@@ -430,6 +456,10 @@ impl ActorRegistry {
     /// stale reverse edge is cleaned idempotently by the watcher's
     /// `MonitorHandle::Drop` (or its own close). Idempotent — a second
     /// vacate returns an empty watcher list.
+    ///
+    /// A vacate drains an inline child's alias the same way, untombstoned:
+    /// the alias departs with the occupant, and a refill's guest may spawn
+    /// the same key again.
     pub(crate) fn vacate_actor(&self, id: MailboxId) -> Vec<MailboxId> {
         self.monitors_of
             .write()

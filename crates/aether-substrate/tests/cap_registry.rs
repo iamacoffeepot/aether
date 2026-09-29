@@ -131,8 +131,8 @@ fn cap_registry_updates_on_replace() {
     assert!(harness.accepts(swappable, Bump::ID));
 }
 
-/// `aether.component.drop` clears the dropped mailbox's caps — once
-/// the wasm is unloaded the mailbox accepts nothing.
+/// `aether.component.drop` clears the dropped mailbox's caps — the guest
+/// is released before the drop replies, so the mailbox accepts nothing.
 #[test]
 fn cap_registry_clears_on_drop() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {

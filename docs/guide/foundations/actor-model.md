@@ -264,9 +264,21 @@ window capability's one instanced child family, the address above expands to:
 aether.window/aether.window.instance:main
 ```
 
-A loaded component needs no short path: it is named by its own namespace, so
-its canonical address is already short (`aether.kit.camera`, or
-`aether.widget:panel` for an instanced one).
+The same expansion reads every published module's lineage (ADR-0241 §5): its
+`#[actor(root)]` exports, each exported and private type's cardinality, its
+`child_of(..)` edges, and a `composable` type as a child of every type the
+module declares. The index is rebuilt in the registry-owner apply that
+publishes a module, and a module's facts about a native namespace are ignored,
+so a module never changes a native short path.
+
+A loaded component needs no short path to reach it: it is named by its own
+namespace, so its canonical address is already short (`aether.kit.camera`, or
+`aether.widget:panel` for an instanced one). Its children are reached by a hole
+beneath it: `game.world/:north/:gate` for an inline child and its own inline
+child, or `game.world/:k` for a guest a `load_under` placed at
+`game.world/NS:k`. A `composable` type is a candidate beneath every parent in
+its module, so a hole beneath a parent that declares another instanced child
+as well is ambiguous.
 
 A path is `/`-separated steps. After the root, a bare step always names a
 singleton child, `namespace:discriminator` names an instance of that instanced
@@ -909,6 +921,15 @@ erased `erase()` reference as the table's identity key. A component spawns withi
 module it was built from; a foreign module comes in through `load_component`, which
 carries its own code and kinds — the boundary is covered in
 [Components & lifecycle](../systems/components.md).
+
+An inline child ends by closing, as any actor does
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §8):
+`ctx.despawn_inline_child(child)` closes it, and so does its parent's close.
+Each watcher gets a `MonitorNotice` sent from the child, and the child's name
+tombstones. The name is spent: a later `monitor` of it is refused with
+`TargetTombstoned`, and spawning the same key beneath the same parent fails with
+`SpawnError::AliasAllocationFailed`. A parent that wants a fresh child after a
+despawn spawns it under a new key, such as `Subname::Counter`.
 
 A component can also run as several instances of one type: an `instanced` type
 loaded under different keys is an independent actor at each `NS:key`. The loader

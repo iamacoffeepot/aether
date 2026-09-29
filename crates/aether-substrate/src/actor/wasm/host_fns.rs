@@ -169,7 +169,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // instanced(<child NS>, subname)))` under the child type's own namespace
     // (ADR-0241 §6), so the synchronous prediction
     // matches a `Call`-by-name resolution. On any host-side error (no memory, OOB,
-    // bad UTF-8, no spawner, missing parent name, or an undeclared tag) it
+    // bad UTF-8, no spawner, missing parent name, an undeclared tag, or a
+    // tombstoned alias whose child was despawned or whose parent closed) it
     // warn-logs and returns 0 without staging — the child simply never
     // becomes addressable.
     //
@@ -257,6 +258,19 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 aether_data::Tag::Mailbox,
                 aether_data::fold_lineage(parent.0, child_node),
             ));
+            // ADR-0241 §8: a despawned or parent-closed inline child's name
+            // is spent. Refuse the re-spawn here, before the guest holds an id
+            // the owner would never publish, reading the same tombstone native
+            // spawn admission reads.
+            if caller.data().binding.spawner().is_some_and(|spawner| spawner.actor_registry().is_tombstoned(alias_id)) {
+                tracing::warn!(
+                    target: "aether_substrate::component",
+                    %alias_id,
+                    component = %caller.data().actor_name(),
+                    "spawn_inline_child: the child's name is retired",
+                );
+                return 0;
+            }
             let target_parent = caller.data().sender;
             let alias_name = format!("{parent_name}/{}:{full_subname}", child.namespace);
             caller.data_mut().stage_alias(PreparedAliasRoute::new(alias_id, alias_name, target_parent, child.contract));
