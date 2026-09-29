@@ -42,8 +42,8 @@ fn boot_bench() -> SubstrateHarness {
     SubstrateHarness::builder().with_component_host().build().expect("boot")
 }
 
-/// Load the bundle's default export, the singleton `test.probe`, at its
-/// published name, typed as `Probe`.
+/// Load the bundle's singleton `test.probe` export at its published name,
+/// typed as `Probe`.
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> (ActorRef<Probe>, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness

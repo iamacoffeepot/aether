@@ -50,10 +50,9 @@ fn bench(width: u32, height: u32) -> SubstrateHarness {
     .expect("boot")
 }
 
-/// Load the shell and return its erased reference — the only caller left,
-/// since the probe below loads typed. `name` is the load name, or `None` to
-/// load under the actor's own namespace, which is what the shell needs, since
-/// a region names it by bare type.
+/// Load one in-bundle actor and return its erased reference. `name` is the
+/// load name, or `None` to load under the actor's own namespace — which is
+/// what the shell needs, since a region names it by bare type.
 fn load_actor<K: Kind>(
     harness: &mut SubstrateHarness,
     wasm_path: &Path,

@@ -28,8 +28,8 @@ use aether_window::{
 #[aether_data::kind(name = "aether.window.internal.retire", copy, eq)]
 struct RetireWindow;
 
-/// The departing window child's retire row, as a test names a fixture it
-/// cannot type with the runtime's crate-private handler.
+/// The window child's retire row, named here because the runtime's
+/// `RetireWindow` is crate-private; casting the child proves it publishes it.
 #[aether_actor::protocol]
 trait WindowRetire {
     fn retire(mail: RetireWindow);
