@@ -572,12 +572,12 @@ mod tests {
     use std::thread;
 
     use aether_actor::{ActorPath, ActorRef, HandlesKind, Publisher};
-    use aether_data::{Kind, LoadName, SessionToken, Uuid};
+    use aether_data::{Kind, LoadName, MailId, SessionToken, Uuid};
     use aether_kinds::{Present, Render, Shutdown, Tick};
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
-    use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, fresh_substrate_and_rx, registered_ref};
-    use aether_substrate::{BootError, PassiveChassis, PumpedSlot, Registry, ReplyTarget, Subname};
+    use aether_substrate::testing::{PumpedDriver, boot_bare_test_chassis, fresh_substrate_and_rx, registered_ref};
+    use aether_substrate::{BootError, Registry, ReplyTarget, Subname};
 
     use super::*;
     use crate::kinds::LifecycleSubscription;
@@ -681,130 +681,103 @@ mod tests {
         ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0xFEED)), correlation }
     }
 
-    /// A `LifecycleCapability` booted pumped on a bare `TestChassis`, beside
-    /// the registry it routes through, the egress its session replies leave
-    /// through, and the replies read off it but not yet asked for, as
-    /// `(correlation, kind name, payload)`. Nothing the cap receives runs
-    /// until a pump drains its slot, which the helpers below do.
+    /// A `LifecycleCapability` booted pumped on a bare `TestChassis` and
+    /// driven the way a pumped chassis driver drives it, beside the registry
+    /// it routes through, the egress its session replies leave through, and
+    /// the replies read off it but not yet asked for, as
+    /// `(correlation, kind name, payload)`.
     struct Booted {
         registry: Arc<Registry>,
-        chassis: PassiveChassis<TestChassis>,
-        slot: PumpedSlot<LifecycleCapability>,
+        driver: PumpedDriver<LifecycleCapability>,
         egress: mpsc::Receiver<EgressEvent>,
         replies: Vec<(u64, String, Vec<u8>)>,
     }
 
     fn boot_lifecycle(graph: LifecycleGraphData) -> Booted {
         let (registry, mailer, egress) = fresh_substrate_and_rx();
-        let chassis = boot_bare_test_chassis(&registry, &mailer);
-        let (slot, _wake) = chassis
-            .boot_pumped_actor::<LifecycleCapability>(LifecycleConfig::default(), LifecycleParams { graph })
-            .expect("the lifecycle cap boots pumped");
-        Booted { registry, chassis, slot, egress, replies: Vec::new() }
+        let driver = PumpedDriver::boot(
+            boot_bare_test_chassis(&registry, &mailer),
+            LifecycleConfig::default(),
+            LifecycleParams { graph },
+        );
+        Booted { registry, driver, egress, replies: Vec::new() }
     }
 
     impl Booted {
         /// Mail `request` to the cap as an external session correlated by
-        /// `correlation`: a sender with no local mailbox.
-        fn request<K: Kind>(&self, request: &K, correlation: u64)
+        /// `correlation` — a sender with no local mailbox — and return its
+        /// tracked root. Nothing runs until the root is settled.
+        fn request<K: Kind>(&self, request: &K, correlation: u64) -> MailId
         where
             LifecycleCapability: HandlesKind<K>,
         {
-            self.chassis.send_for_reply(self.chassis.actor_ref::<LifecycleCapability>(), request, session(correlation));
+            let lifecycle = self.driver.chassis().actor_ref::<LifecycleCapability>();
+            self.driver.send_tracked(lifecycle, request, Some(session(correlation)))
         }
 
-        /// Pump the cap until the session reply correlated by `correlation`
-        /// arrives, decoded as `K`.
+        /// The session reply correlated by `correlation`, decoded as `K`. The
+        /// wait that covers a request returns only after its reply is sent,
+        /// so the reply is read here, never waited on.
         fn reply<K: Kind>(&mut self, correlation: u64) -> K {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                self.slot.drain_available();
-                while let Ok(event) = self.egress.try_recv() {
-                    if let EgressEvent::ToSession { kind_name, payload, correlation_id, .. } = event {
-                        self.replies.push((correlation_id, kind_name, payload));
-                    }
+            for event in self.egress.try_iter() {
+                if let EgressEvent::ToSession { kind_name, payload, correlation_id, .. } = event {
+                    self.replies.push((correlation_id, kind_name, payload));
                 }
-                if let Some(at) = self.replies.iter().position(|(id, ..)| *id == correlation) {
-                    let (_, kind_name, payload) = self.replies.remove(at);
-                    assert_eq!(kind_name, K::NAME, "reply {correlation} is a {}", K::NAME);
-                    return K::decode_from_bytes(&payload).expect("the reply decodes");
-                }
-                assert!(Instant::now() < deadline, "reply {correlation} did not arrive within the deadline");
-                thread::sleep(Duration::from_millis(5));
             }
+            let at = self
+                .replies
+                .iter()
+                .position(|(id, ..)| *id == correlation)
+                .unwrap_or_else(|| panic!("reply {correlation} was not sent before its root settled"));
+            let (_, kind_name, payload) = self.replies.remove(at);
+            assert_eq!(kind_name, K::NAME, "reply {correlation} is a {}", K::NAME);
+            K::decode_from_bytes(&payload).expect("the reply decodes")
         }
 
         /// Subscribe `subscription` from an external session and answer the
         /// cap's reply.
         fn subscribe(&mut self, subscription: LifecycleSubscription, correlation: u64) -> LifecycleSubscribeResult {
-            self.request(&LifecycleSubscribe { subscription }, correlation);
+            let root = self.request(&LifecycleSubscribe { subscription }, correlation);
+            self.driver.settle(&[root]);
             self.reply(correlation)
         }
 
-        /// Pump the cap until `stage`'s subscriber set satisfies `done`.
-        fn pump_until(&mut self, what: &str, stage: KindId, done: impl Fn(&[ErasedActorRef]) -> bool) {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                self.slot.drain_available();
-                if done(&self.subscribers_of(stage)) {
-                    return;
-                }
-                assert!(Instant::now() < deadline, "{what} did not happen within the deadline");
-                thread::sleep(Duration::from_millis(5));
-            }
-        }
-
-        /// Pump the cap until `received` yields.
-        fn pump_recv<T>(&mut self, received: &mpsc::Receiver<T>, what: &str) -> T {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                self.slot.drain_available();
-                if let Ok(value) = received.try_recv() {
-                    return value;
-                }
-                assert!(Instant::now() < deadline, "{what} did not arrive within the deadline");
-                thread::sleep(Duration::from_millis(5));
-            }
-        }
-
         fn subscribers_of(&self, stage: KindId) -> Vec<ErasedActorRef> {
-            self.slot.read_state(|state| state.subscribers.subscribers_of(stage)).expect("the lifecycle cap is live")
+            self.driver.read_state(|state| state.subscribers.subscribers_of(stage)).expect("the lifecycle cap is live")
         }
 
         /// Spawn a [`Listener`] at `key` reporting what it hears on `heard`.
         fn spawn_listener(&self, key: &str, heard: mpsc::Sender<Heard>) -> ActorRef<Listener> {
-            self.chassis
+            self.driver
+                .chassis()
                 .spawn_actor_for_test::<Listener>(Subname::Named(key), heard, ())
                 .finish()
                 .expect("the listener spawns")
         }
 
-        /// Close `listener` through its own `Quit` handler and wait until its
-        /// route stops answering live.
+        /// Close `listener` through its own `Quit` handler.
+        fn quit(&self, listener: ActorRef<Listener>) {
+            self.driver.chassis().send_for_reply(listener, &Quit, session(0));
+        }
+
+        /// [`Self::quit`], then wait until the listener's route stops
+        /// answering live. The route retires in the close tail, past the
+        /// `Quit` chain's settlement and outside any signal a test can wait
+        /// on (#7062), so this one wait still polls.
         fn close(&self, listener: ActorRef<Listener>) {
-            self.chassis.send_for_reply(listener, &Quit, session(0));
+            self.quit(listener);
             let deadline = Instant::now() + Duration::from_secs(5);
-            while self.chassis.published_contract(listener.erase()).is_some() {
+            while self.driver.chassis().published_contract(listener.erase()).is_some() {
                 assert!(Instant::now() < deadline, "the listener did not close within the deadline");
                 thread::sleep(Duration::from_millis(5));
             }
         }
     }
 
-    /// The pumped slot's close is the embedder's: the chassis never learns
-    /// about a post-seal pumped actor.
-    impl Drop for Booted {
-        fn drop(&mut self) {
-            self.slot.shutdown();
-        }
-    }
-
     /// An explicit `subscribe` proves its subscriber path live (ADR-0231 §3):
     /// a live path lands its reference in the stage set, and a path whose
     /// actor has closed is refused and leaves the set alone rather than
-    /// registering a subscription whose broadcasts could never land. The
-    /// closed path is requested first, so once the live path's reply is out
-    /// the cap has dispatched both.
+    /// registering a subscription whose broadcasts could never land.
     #[test]
     fn explicit_subscribe_holds_a_live_path_and_refuses_one_that_is_gone() {
         let mut booted = boot_lifecycle(render_present_graph());
@@ -812,11 +785,13 @@ mod tests {
         let live = booted.spawn_listener("live", heard.clone());
         booted.close(booted.spawn_listener("gone", heard));
 
-        booted
+        let gone = booted
             .request(&LifecycleSubscribe { subscription: LifecycleSubscription::Render(listener("gone").narrow()) }, 1);
-        let held = booted.subscribe(LifecycleSubscription::Render(listener("live").narrow()), 2);
+        let held = booted
+            .request(&LifecycleSubscribe { subscription: LifecycleSubscription::Render(listener("live").narrow()) }, 2);
+        booted.driver.settle(&[gone, held]);
 
-        assert!(matches!(held, LifecycleSubscribeResult::Ok), "a live path subscribes");
+        assert!(matches!(booted.reply(2), LifecycleSubscribeResult::Ok), "a live path subscribes");
         assert_eq!(booted.subscribers_of(Render::ID), [live.erase()], "only the live subscriber is held");
     }
 
@@ -839,8 +814,10 @@ mod tests {
             assert!(matches!(booted.subscribe(subscription, correlation), LifecycleSubscribeResult::Ok));
         }
 
-        booted.close(departed);
-        booted.pump_until("the departed subscriber's purge", Present::ID, <[ErasedActorRef]>::is_empty);
+        booted.quit(departed);
+        booted.driver.pump_until("the departed subscriber's purge", |state| {
+            state.subscribers.subscribers_of(Present::ID).is_empty()
+        });
 
         assert_eq!(booted.subscribers_of(Render::ID), [survivor.erase()], "the co-subscriber survives");
     }
@@ -861,14 +838,21 @@ mod tests {
             assert!(matches!(booted.subscribe(subscription, correlation), LifecycleSubscribeResult::Ok));
         }
 
+        // Each advance's broadcast rides its root, so the listener has heard
+        // it once the root settles; the cap replies on its own `Settled`
+        // notice for that root, which the pump then drains.
         for correlation in [3, 4] {
-            booted.request(&LifecycleAdvance { delta_micros: 83_335 }, correlation);
+            let root = booted.request(&LifecycleAdvance { delta_micros: 83_335 }, correlation);
+            booted.driver.settle(&[root]);
+            booted.driver.pump_until("the advance's settlement notice", |state| state.pending.is_none());
             booted.reply::<LifecycleAdvanceComplete>(correlation);
         }
 
-        let wait = Duration::from_secs(5);
-        assert_eq!(motion.recv_timeout(wait), Ok(Heard::Tick(Tick { delta_micros: 83_335 })), "Tick carries its time");
-        assert_eq!(motion.recv_timeout(wait), Ok(Heard::Shutdown), "the terminal stage broadcasts its signal");
+        assert_eq!(
+            motion.try_iter().collect::<Vec<_>>(),
+            [Heard::Tick(Tick { delta_micros: 83_335 }), Heard::Shutdown],
+            "Tick carries its time and the terminal stage broadcasts its signal"
+        );
     }
 
     /// A `subscribe_self` from a non-`Component` source (an external
@@ -880,7 +864,8 @@ mod tests {
     fn subscribe_self_rejects_non_component_source() {
         let mut booted = boot_lifecycle(render_present_graph());
 
-        booted.request(&LifecycleSubscribeSelf { stage: Render::ID.0 }, 1);
+        let root = booted.request(&LifecycleSubscribeSelf { stage: Render::ID.0 }, 1);
+        booted.driver.settle(&[root]);
 
         assert!(matches!(booted.reply(1), LifecycleSubscribeResult::Err { .. }), "an external session is refused");
         assert!(booted.subscribers_of(Render::ID).is_empty(), "a non-Component source subscribes nothing");
@@ -905,12 +890,20 @@ mod tests {
         });
         let closure = registered_ref(&booted.registry, "test.lifecycle.closure_caller", handler);
 
-        booted.chassis.send_for_reply(
-            booted.chassis.actor_ref::<LifecycleCapability>(),
+        // The closure route discharges its reply without settling it, so the
+        // request's root never settles: the reply routes inline while the
+        // driver drains the cap, and only that drain can deliver it.
+        booted.driver.send_tracked(
+            booted.driver.chassis().actor_ref::<LifecycleCapability>(),
             &<LifecycleCapability as Publisher>::subscribe_request::<Tick>(),
-            ReplyTarget::Actor { to: closure, correlation: 1 },
+            Some(ReplyTarget::Actor { to: closure, correlation: 1 }),
         );
-        let (kind, reply) = booted.pump_recv(&replies, "the closure route's reply");
+        let mut received = None;
+        booted.driver.pump_until("the closure route's reply", |_| {
+            received = received.take().or_else(|| replies.try_recv().ok());
+            received.is_some()
+        });
+        let (kind, reply) = received.expect("the pump returned on the reply");
 
         assert_eq!(kind, <LifecycleSubscribeResult as Kind>::ID, "the closure route is answered");
         let Some(LifecycleSubscribeResult::Err { error, .. }) = LifecycleSubscribeResult::decode_from_bytes(&reply)
@@ -920,9 +913,12 @@ mod tests {
         assert!(error.contains("test.lifecycle.closure_caller"), "the refusal names the sender: {error}");
         assert!(booted.subscribers_of(Tick::ID).is_empty(), "the refused sender subscribes nothing");
 
-        let (mut caller_slot, _wake) = booted.chassis.boot_pumped_actor::<Caller>((), ()).expect("the caller boots");
-        let caller = booted.chassis.actor_ref::<Caller>().erase();
-        booted.pump_until("the caller's wire subscribe", Tick::ID, |held| !held.is_empty());
+        let (mut caller_slot, _wake) =
+            booted.driver.chassis().boot_pumped_actor::<Caller>((), ()).expect("the caller boots");
+        let caller = booted.driver.chassis().actor_ref::<Caller>().erase();
+        booted
+            .driver
+            .pump_until("the caller's wire subscribe", |state| !state.subscribers.subscribers_of(Tick::ID).is_empty());
         caller_slot.shutdown();
 
         assert_eq!(booted.subscribers_of(Tick::ID), [caller], "the caller lands in the Tick set");

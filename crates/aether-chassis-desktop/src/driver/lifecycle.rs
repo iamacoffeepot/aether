@@ -47,7 +47,6 @@ pub(super) fn consume_lifecycle_reply(mail: InboundMail) -> LifecycleReplyOutcom
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, mpsc};
-    use std::time::Duration;
 
     use aether_kinds::{LifecycleAdvance, Shutdown, Tick};
     use aether_lifecycle::{LifecycleCapability, LifecycleConfig, LifecycleGraphData, LifecycleParams};
@@ -57,6 +56,7 @@ mod tests {
     use aether_substrate::testing::{boot_test_chassis_with, fresh_substrate, registered_ref};
 
     use super::*;
+    use crate::driver::FRAME_SETTLEMENT_CAP;
 
     /// iamacoffeepot/aether#1704: the lifecycle reply inbox is a
     /// hand-rolled `claim_mailbox` consumer, so it must run the ADR-0094
@@ -104,7 +104,7 @@ mod tests {
             [("the Tick advance", Some(<Shutdown as Kind>::ID.0)), ("the terminal advance", Some(0))]
         {
             lifecycle.push_root(&LifecycleAdvance { delta_micros: 0 }, Some(&inbox));
-            let mail = inbox.recv_timeout(Duration::from_secs(5)).expect("the advance's reply reaches the inbox");
+            let mail = inbox.recv_timeout(FRAME_SETTLEMENT_CAP).expect("the advance's reply reaches the inbox");
             let LifecycleReplyOutcome::Complete(next) = consume_lifecycle_reply(mail) else {
                 panic!("{stage}'s reply is the advance-complete arm");
             };
