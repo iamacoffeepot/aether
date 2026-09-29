@@ -368,7 +368,7 @@ impl Registry {
 
 /// The engine's published route contracts for a decode (ADR-0231 §3, §4):
 /// the rows the `Live` or `Dropped` route standing under exactly `path`
-/// published, through [`Registry::route_rows`]. Coverage is decided by the
+/// published, through `Registry::route_rows`. Coverage is decided by the
 /// decode's context, never here, and liveness by the receiver's `resolve`.
 impl PublishedRoutes for Registry {
     fn published_rows(&self, path: &ErasedActorPath) -> Option<Arc<[(KindId, ReplyContract)]>> {
