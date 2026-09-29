@@ -204,6 +204,14 @@ wake, and the wait returns when the roots settle. Boot the actor through
 - **A chain whose actors all dispatch on the pool.** There is no slot to pump:
   send tracked through the chassis and `testing::await_settled` on the root's
   settlement receiver, under the same patience a chassis gate gets.
+- **A detached effect that lands on a pooled actor** — a `MonitorNotice` from a
+  close tail, a `wire` or `send_detached` send, a child's `after_init` mail.
+  No root the test holds covers it, so the observing actor signals a test
+  channel and the test waits with `testing::await_signal`, which names the
+  wait as the signal it is rather than as settlement. A FIFO tracked barrier
+  (a tracked send of the same kind to the same inbox) fits only mail already
+  in the inbox: an actor's own sends flush onto the pool, so a barrier the
+  test delivers directly can overtake them.
 - **An actor's close taking effect.** A pooled instanced actor's route drop
   lands at the registry owner after its closing chain settles, so neither
   settlement nor its `MonitorNotice` proves the route is gone. Call

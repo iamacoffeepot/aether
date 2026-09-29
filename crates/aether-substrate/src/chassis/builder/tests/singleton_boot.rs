@@ -6,27 +6,21 @@ use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
-use crate::mail::registry;
-use crate::testing::{TestChassis, bare_substrate};
+use crate::testing::{TestChassis, await_settled, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, HandlesKind};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
-use std::thread;
-use std::time::Duration;
-use std::time::Instant;
 
 /// Issue 552 stage 1: end-to-end smoke for the new
 /// [`Builder::with_actor`] boot path. Boots a hand-rolled
-/// `NativeActor` fixture, looks its mailbox up in the
-/// [`registry`], pushes one envelope at that mailbox, and
-/// asserts the dispatcher routed it to the right handler.
+/// `NativeActor` fixture, sends one tracked mail through its
+/// composed reference, and asserts the dispatcher routed it to the right handler.
 /// Stage 1 lands the infrastructure; stage 2 migrates
 /// real caps onto it. This test is the load-bearing acceptance
 /// gate.
 #[test]
 fn with_actor_boots_dispatches_and_tears_down() {
-    use crate::mail::registry::MailboxEntry;
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -96,28 +90,12 @@ fn with_actor_boots_dispatches_and_tears_down() {
     // The cap is owned by its dispatcher thread; the test verifies
     // the cap is alive via the mail dispatch round-trip below.
 
-    // Push one envelope at the cap's mailbox via the registry's
-    // sink handler. The dispatcher thread pulls from its inbox
-    // and routes through __aether_dispatch_envelope → on_ping.
-    let mailbox_id = registry.lookup(<ProbeCap as Addressable>::NAMESPACE).expect("with_actor claimed the mailbox");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(mailbox_id).expect("sink registered") else {
-        panic!("ProbeCap claim must be a sink entry");
-    };
-
-    let payload = Ping { tag: 0xDEAD_BEEF };
-    let bytes = payload.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(<Ping as Kind>::ID, &bytes, 1));
-
-    // Wait briefly for the dispatcher thread to dispatch.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert_eq!(
-        received.load(AtomicOrdering::SeqCst),
-        1,
-        "dispatcher should have routed Ping → on_ping within the wait budget"
-    );
+    // Send one tracked mail through the cap's composed reference.
+    // The dispatcher pulls from its inbox and routes through
+    // __aether_dispatch_envelope → on_ping before the root settles.
+    let (_, settled) = chassis.send_tracked(chassis.actor_ref::<ProbeCap>(), &Ping { tag: 0xDEAD_BEEF }, None);
+    await_settled(&settled, "test.with_actor.ping");
+    assert_eq!(received.load(AtomicOrdering::SeqCst), 1, "dispatcher should have routed Ping → on_ping");
 
     drop(chassis);
 }
@@ -130,7 +108,6 @@ fn with_actor_boots_dispatches_and_tears_down() {
 /// the stamping wiring can't silently regress.
 #[test]
 fn with_actor_stamps_local_for_init_and_handler() {
-    use crate::mail::registry::MailboxEntry;
     use aether_actor::Local;
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -208,24 +185,14 @@ fn with_actor_stamps_local_for_init_and_handler() {
         .build_passive()
         .expect("LocalProbe boots");
 
-    let mailbox_id = registry.lookup(<LocalProbe as Addressable>::NAMESPACE).expect("with_actor claimed the mailbox");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(mailbox_id).expect("sink registered") else {
-        panic!("LocalProbe claim must be a sink entry");
-    };
-
     // Three dispatches. Init seeded 100; the handler bumps once
     // per dispatch and snapshots — so observed should walk
-    // 101, 102, 103 in order. We assert the final 103 with a
-    // wait budget to cover dispatcher-thread scheduling.
-    for seq in 0..3 {
-        let payload = Tick { seq };
-        let bytes = payload.encode_into_bytes();
-        handler.enqueue(registry::test_owned_dispatch(<Tick as Kind>::ID, &bytes, 1));
-    }
-
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while observed.load(AtomicOrdering::SeqCst) != 103 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
+    // 101, 102, 103 in order. Each root settles once its handler
+    // has run.
+    let probe = chassis.actor_ref::<LocalProbe>();
+    let roots: Vec<_> = (0..3).map(|seq| chassis.send_tracked(probe, &Tick { seq }, None).1).collect();
+    for settled in &roots {
+        await_settled(settled, "test.local.tick");
     }
     assert_eq!(
         observed.load(AtomicOrdering::SeqCst),
@@ -309,15 +276,12 @@ fn actor_ref_reaches_each_composed_cap_and_only_it() {
     let ping = ComposedPing { tag: 7 };
     let left_ref = chassis.actor_ref::<ComposedLeft>();
     let right_ref = chassis.actor_ref::<ComposedRight>();
-    let _left_settled = chassis.send_tracked(left_ref, &ping, None);
-    let _right_settled = chassis.send_tracked(right_ref, &ping, None);
-    let _right_again = chassis.send_tracked(right_ref, &ping, None);
-
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while (left.load(AtomicOrdering::SeqCst), right.load(AtomicOrdering::SeqCst)) != (1, 2) && Instant::now() < deadline
-    {
-        thread::sleep(Duration::from_millis(5));
-    }
+    let (_, left_settled) = chassis.send_tracked(left_ref, &ping, None);
+    let (_, right_settled) = chassis.send_tracked(right_ref, &ping, None);
+    let (_, right_again) = chassis.send_tracked(right_ref, &ping, None);
+    await_settled(&left_settled, "test.composed.left");
+    await_settled(&right_settled, "test.composed.right");
+    await_settled(&right_again, "test.composed.right_again");
     assert_eq!(left.load(AtomicOrdering::SeqCst), 1, "the left cap receives only the mail sent to its reference");
     assert_eq!(right.load(AtomicOrdering::SeqCst), 2, "the right cap receives only the mail sent to its reference");
 
