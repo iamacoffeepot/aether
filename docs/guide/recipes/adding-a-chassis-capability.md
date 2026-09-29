@@ -408,13 +408,13 @@ token as `testing::token_root(n)`, so it names no mailbox. The in-flight
 lineage a `NativeCtx` constructor takes is optional: `None` for a context with
 no inbound chain, `Some(root)` for one running inside a chain.
 
-Three tests anchor the held-reply flow:
-`load_font_forwards_read_with_context` drives `on_load_font` and asserts the
-forwarded `aether.fs.read` has a nonzero correlation id;
-`read_err_replies_load_font_err_via_request_context` feeds its correlated
-`ReadResult::Err` and asserts the cap relays `LoadFontResult::Err` to the caller;
-and `same_path_loads_answer_their_own_request_contexts` proves concurrent reads
-for the same path still reply to their respective sessions.
+Two scenario tests in `aether-text`'s `text_scenario.rs` anchor the held-reply
+flow. Each sends two `load_font`s and a `font_metrics` grab for one path before
+any is dispatched, so the later requests join the first one's read.
+`requests_for_one_font_share_one_read_and_each_get_their_own_reply` proves the
+three share one `aether.fs.read` and that each is answered in its own reply
+kind. `a_failed_font_read_answers_every_request_waiting_on_it` proves a failed
+read answers every waiting request, not just the one that started it.
 
 For an end-to-end check across the real in-process boundaries — rendering, the
 frame loop, and the capabilities explicitly installed by its reduced builder —
