@@ -8,7 +8,6 @@
 //! `SpawnOutcomeQuery`, so a test reads the guest's own `SpawnError`.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and `Needy` is stateless — the same allow the defaultless fixture carries
 
 use aether_actor::{ActorInitError, SpawnError, Subname, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_clipboard::ClipboardCapability;
@@ -44,19 +43,23 @@ impl WasmActor for Holder {
 }
 
 /// The private inline child whose declared dependency the host checks when
-/// `Holder` spawns it.
-pub struct Needy;
+/// `Holder` spawns it. It counts the `Ping`s it receives.
+pub struct Needy {
+    pings: u32,
+}
 
 #[actor(instanced, child_of(Holder), depends(ClipboardCapability))]
 impl WasmActor for Needy {
     const NAMESPACE: &'static str = "test.inline_dependency.needy";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Needy)
+        Ok(Needy { pings: 0 })
     }
 
     #[handler::single]
-    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {
+        self.pings += 1;
+    }
 }
 
 aether_actor::export!(public = [Holder], private = [Needy]);
