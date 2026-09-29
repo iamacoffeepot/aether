@@ -11,7 +11,9 @@
 //! `CountQuery` replies with the live value. It overrides `on_dehydrate`
 //! to save the counter and `on_rehydrate` to restore it, so replacing it
 //! with the same wasm at the same mailbox id keeps the count instead of
-//! resetting to the fresh-`init` zero. `Sidecar` is a second trivial
+//! resetting to the fresh-`init` zero. Its `wire` reports `WireObserved`
+//! to the harness observer, so a test can count how often it is wired.
+//! `Sidecar` is a second trivial
 //! export that makes this a genuine multi-actor module
 //! (`export!(public = [Counter, Sidecar])`), exercising the boxed `ErasedWasmActor`
 //! hot-swap path.
@@ -19,8 +21,11 @@
 //! `RehydrateTrap` is a failure-injection export (#6134): it keeps every
 //! handler row `Counter` has, so the ADR-0231 §5 contract check accepts it
 //! as `Counter`'s replacement, and its `on_rehydrate` traps, so a replace
-//! of a `Counter` that saved state fails at rehydrate. A test uses it to
-//! show the replace rolls back to the running `Counter` (ADR-0016 §4).
+//! of a `Counter` that saved state fails at rehydrate. Before trapping it
+//! reports `TickObserved` to the harness observer, which must never arrive:
+//! a candidate's mail is held until commit. A test uses it to show the
+//! replace rolls back to the running `Counter`, wired again, and that the
+//! candidate's mail never leaves (ADR-0016 §4, ADR-0241 §7).
 
 // `#[handler]` / `#[fallback]` methods take `&mut self` to match the
 // dispatch ABI even when stateless.
@@ -28,8 +33,8 @@
 
 use std::process;
 
-use aether_actor::{ActorInitError, Mail, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor};
-use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
+use aether_actor::{ActorInitError, Mail, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx, actor};
+use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, SubstrateHarnessObserver, TickObserved, WireObserved};
 
 /// Entry export — the first type in the `export!` list. Holds a counter
 /// that must survive `replace_component`.
@@ -37,12 +42,17 @@ pub struct Counter {
     count: u32,
 }
 
-#[actor(root)]
+#[actor(root, depends(SubstrateHarnessObserver))]
 impl WasmActor for Counter {
     const NAMESPACE: &'static str = "test.stateful.counter";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Counter { count: 0 })
+    }
+
+    /// Report each run of the hook, so a test can count it.
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+        ctx.send::<SubstrateHarnessObserver>(&WireObserved);
     }
 
     /// Increment the in-memory counter.
@@ -100,7 +110,7 @@ pub struct RehydrateTrap {
     count: u32,
 }
 
-#[actor(root)]
+#[actor(root, depends(SubstrateHarnessObserver))]
 impl WasmActor for RehydrateTrap {
     const NAMESPACE: &'static str = "test.stateful.rehydrate_trap";
 
@@ -120,9 +130,11 @@ impl WasmActor for RehydrateTrap {
         CountReport { count: self.count }
     }
 
-    /// Trap the wasm instance: `abort` lowers to `unreachable`, which the
+    /// Report `TickObserved`, which the host must hold and discard, then
+    /// trap the wasm instance: `abort` lowers to `unreachable`, which the
     /// host reports as an `on_rehydrate` failure.
-    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+        ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
         process::abort();
     }
 }

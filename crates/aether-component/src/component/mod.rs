@@ -110,6 +110,12 @@ pub struct LoadDelivered {
     pub capabilities: aether_kinds::ComponentCapabilities,
 }
 
+// The prepare, commit and abort rows a republish drives each guest through
+// (ADR-0241 §7), always compiled in beside `LoadDelivered`.
+mod control;
+
+pub use control::{Abort, Aborted, Commit, Committed, Prepare, Prepared};
+
 // The runtime half — the whole `aether_substrate` / `wasmtime`-typed surface
 // (imports, `ComponentHostCapabilityState`, and the `#[runtime] impl
 // NativeActor`) — lives in `runtime.rs`, gated once here. The

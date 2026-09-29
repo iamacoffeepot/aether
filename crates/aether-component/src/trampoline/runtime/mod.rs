@@ -9,14 +9,16 @@
 //!
 //! The cap is heavy and already decomposed, so unlike `aether.fs`'s
 //! single-file `runtime.rs` the runtime half is a directory module:
-//! [`state`] (the field-bearing `WasmTrampolineState`), [`config`] (the
-//! `WasmTrampolineConfig` init bundle), [`replace`] (the inherent replace
-//! impl on the state), and [`contract`] (the replace-time
-//! contract refusal, ADR-0231 §5).
+//! [`state`] (the field-bearing `WasmTrampolineState` and its guest
+//! [`Slot`](state::Slot)), [`config`] (the `WasmTrampolineConfig` init
+//! bundle), [`republish`] (one member's prepare, commit and abort, ADR-0241
+//! §7), [`replace`] (the single-instance replace over them), and
+//! [`contract`] (the replace-time contract refusal, ADR-0231 §5).
 
 mod config;
 mod contract;
 mod replace;
+mod republish;
 mod state;
 
 pub use config::WasmTrampolineConfig;
@@ -31,7 +33,7 @@ pub use std::io;
 pub use std::sync::Arc;
 
 use super::WasmTrampoline;
-use crate::component::LoadDelivered;
+use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare, Prepared};
 pub use aether_actor::Local;
 use aether_actor::{Single, runtime};
 use aether_kinds::ComponentCapabilities;
@@ -46,12 +48,19 @@ pub use aether_substrate::actor::wasm::component::Component;
 pub use aether_substrate::chassis::error::BootError;
 #[allow(unused_imports, reason = "runtime facade retains its established KindId re-export")]
 pub use aether_substrate::mail::{CostCell, CostCells, KindId};
+use republish::CandidateType;
+use state::Slot;
 
 /// The trampoline hosts a wasm guest, and its receive surface is that
 /// guest's: the substrate reads it here through [`NativeCtx::sync_guest`].
 impl GuestHost for WasmTrampoline {
     fn guest(state: &WasmTrampolineState) -> Option<&ComponentCapabilities> {
-        state.component.as_ref().map(|_| &state.capabilities)
+        // A prepared slot still hosts its kept guest: the candidate's surface
+        // is registered only on commit.
+        match state.slot {
+            Slot::Live(_) | Slot::Prepared(_) => Some(&state.capabilities),
+            Slot::Released => None,
+        }
     }
 }
 
@@ -123,16 +132,15 @@ impl NativeActor for WasmTrampoline {
         CostCells::try_with_mut(|cells| cells.seed(seeded));
 
         Ok(WasmTrampolineState {
-            component: Some(component),
+            slot: Slot::Live(Box::new(component)),
             engine: config.engine,
             linker: config.linker,
             outbound: config.outbound,
             capabilities: config.capabilities,
             type_tag: config.type_tag,
+            config: config.config,
             module: config.module,
             modules: config.modules,
-            retired_correlations: None,
-            retired_replies: None,
         })
     }
 
@@ -152,24 +160,9 @@ impl NativeActor for WasmTrampoline {
     /// `ctx.resolve_live`, silently dropping subscribes.
     fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         ctx.sync_guest(state);
-        let (aliases, retired) = state.component.as_mut().map_or_else(Default::default, |component| {
-            if let Err(e) = component.wire() {
-                tracing::error!(
-                    target: "aether_component",
-                    error = %e,
-                    "wasm guest `wire` hook returned error",
-                );
-            }
-            // ADR-0163 §3 (#3984): the asset load window closes when `wire`
-            // returns — it lets go of the asset blobs so
-            // `asset_fetch_p32` traps thereafter, retaining the catalog
-            // metadata for the instance's life. Runs whether or not `wire`
-            // errored; the window's job (init + wire) is done either way.
-            component.close_load_window();
-            (component.drain_pending_aliases(), component.drain_pending_alias_retirements())
-        });
-        WasmTrampolineState::stage_inline_aliases(ctx, aliases);
-        WasmTrampolineState::stage_inline_alias_retirements(ctx, retired);
+        if let Slot::Live(component) = &mut state.slot {
+            WasmTrampolineState::wire_guest(ctx, component);
+        }
     }
 
     /// Close this instance (ADR-0241 §8). Releases the guest, which runs its
@@ -188,10 +181,9 @@ impl NativeActor for WasmTrampoline {
     /// Replace the wasm component with a fresh module. ADR-0022 +
     /// ADR-0038 splice invariants hold because the trampoline's
     /// inbox is the framework binding, which outlives the
-    /// `Component` swap. `on_dehydrate` runs on the old instance,
-    /// `take_saved_state` lifts any rehydration bundle, the new
-    /// module instantiates against the same binding, and
-    /// `on_rehydrate` runs on the fresh side.
+    /// `Component` swap. The replace prepares a candidate and, when it is
+    /// ready, commits it in the same turn (ADR-0241 §7); a refused prepare
+    /// leaves the old guest wired and serving.
     #[handler::single]
     fn on_replace_component(
         state: &mut Self::State,
@@ -220,6 +212,48 @@ impl NativeActor for WasmTrampoline {
         LoadResult::Ok { path, capabilities }
     }
 
+    /// Prepare a candidate of this guest's type from `code` beside the
+    /// running guest (ADR-0241 §7). Until a commit or an abort, mail for the
+    /// guest waits at its inbox gate and nothing the candidate sends leaves.
+    /// A refusal leaves the running guest in place, wired again if its hooks
+    /// had run.
+    #[handler::single]
+    fn on_prepare(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Prepare) -> Prepared {
+        let Prepare { code, config } = payload;
+        let module = match state.modules.check_in(&ctx.blob_check_in(), &code) {
+            Ok(module) => module,
+            Err(error) => return Prepared::Refused { error },
+        };
+        let (group, type_tag) = match state.resolve_replace_target(None, module.manifest().actors()) {
+            Ok(resolved) => resolved,
+            Err(error) => return Prepared::Refused { error },
+        };
+        let mut capabilities = group.map(|group| group.capabilities.clone()).unwrap_or_default();
+        capabilities.assets = module.manifest().asset_catalog().to_vec();
+
+        let target = ctx.path();
+        state.prepare(ctx, &target, CandidateType { module, type_tag, capabilities }, config)
+    }
+
+    /// Install the prepared candidate (ADR-0241 §7): its held mail leaves on
+    /// this commit's chain, and the mail the gate queued is delivered to it
+    /// in order. A commit with nothing prepared is a host bug and aborts the
+    /// substrate.
+    #[handler::single]
+    fn on_commit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Commit) -> Committed {
+        state.commit(ctx);
+        Committed
+    }
+
+    /// Discard the prepared candidate and its held mail, and reinstate the
+    /// running guest, wired again, with the mail the gate queued (ADR-0241
+    /// §7). With nothing prepared it answers at once.
+    #[handler::single]
+    fn on_abort(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Abort) -> Aborted {
+        state.abort(ctx);
+        Aborted
+    }
+
     #[handler(task)]
     fn on_inline_alias_done(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<RegistryBatchResult>) {
         WasmTrampolineState::finish_inline_aliases(ctx, done);
@@ -232,38 +266,23 @@ impl NativeActor for WasmTrampoline {
     /// (none matched), and called this fallback. The envelope goes
     /// to `Component::deliver` as routed, and the guest's
     /// `receive_p32` dispatch shim does the rest.
+    ///
+    /// While a republish is prepared the inbox gate is closed (ADR-0241
+    /// §7): the mail is taken off the dispatcher, so its chain stays open,
+    /// and waits in order for the commit or abort to deliver it to the guest
+    /// that wins. The trampoline's typed rows are never gated.
     #[fallback]
     fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, env: &Envelope) -> bool {
-        // Deliver the inbound, then drain the inline-child aliases and
-        // retirements the guest staged during `deliver`. The block scopes
-        // the `&mut component` borrow to the guest call.
-        let (aliases, retired) = {
-            let Some(component) = state.component.as_mut() else {
-                tracing::warn!(
-                    target: "aether_component",
-                    actor = %ctx.path(),
-                    kind = %ctx.kind_label(env.kind),
-                    "mail to trampoline with no wasm loaded (guest released); discarded",
-                );
-                return true;
-            };
-            // The routed envelope already carries the recipient (the
-            // inline-child alias when one was addressed, ADR-0114 §2) and
-            // the inbound lineage (#722) that `deliver` threads to the guest.
-            if let Err(e) = component.deliver(env) {
-                // ADR-0063 fail-fast: a wasm trap (or host-fn error
-                // returned through `Component::deliver`) kills the
-                // substrate. Wedge detection (CPU-loop guests) waits
-                // on a future epoch-deadline ADR — symmetric with
-                // native actors, which have no wedge guard either
-                // today.
-                let kind = ctx.kind_label(env.kind);
-                ctx.fatal_abort(format!("component {} (kind {kind}) trapped: {e}", ctx.path()));
-            }
-            (component.drain_pending_aliases(), component.drain_pending_alias_retirements())
-        };
-        WasmTrampolineState::stage_inline_aliases(ctx, aliases);
-        WasmTrampolineState::stage_inline_alias_retirements(ctx, retired);
+        match &mut state.slot {
+            Slot::Live(component) => WasmTrampolineState::deliver_to_guest(ctx, component, env),
+            Slot::Prepared(prepared) => prepared.gated.push_back(ctx.take_inbound()),
+            Slot::Released => tracing::warn!(
+                target: "aether_component",
+                actor = %ctx.path(),
+                kind = %ctx.kind_label(env.kind),
+                "mail to trampoline with no wasm loaded (guest released); discarded",
+            ),
+        }
         true
     }
 }

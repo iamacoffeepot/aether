@@ -63,6 +63,13 @@ pub struct BootObserved {
     pub marker: u64,
 }
 
+/// Report the stateful-replace `Counter` fixture mails the harness observer
+/// from its `wire` hook, once per run of the hook. A scenario counts it to
+/// prove a guest reinstated after a failed replace runs `wire` again
+/// (ADR-0241 §7).
+#[aether_data::kind(name = "aether.test_fixture.wire_observed", default)]
+pub struct WireObserved;
+
 /// ADR-0147 boot fixture: broadcast the module's `boot` actor emits from
 /// its `unwire` hook, once when the boot singleton closes on a drop
 /// addressed at it. The scenario asserts it stays at zero while every widget
