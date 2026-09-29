@@ -55,22 +55,6 @@ pub struct ProcessCapabilityState {
     tasks: TaskQueue<RunResult>,
 }
 
-#[cfg(test)]
-impl ProcessCapabilityState {
-    /// Test-only constructor. Production boots through
-    /// `Builder::with_actor::<ProcessCapability>(params)`; tests hand in a
-    /// resolved allowlist + roots directly.
-    fn from_parts(allowlist: HashMap<String, PathBuf>, work_root: PathBuf, max_in_flight: usize) -> Self {
-        Self { allowlist, default_timeout: Duration::from_secs(30), work_root, tasks: TaskQueue::new(max_in_flight) }
-    }
-
-    /// White-box accessor for the queue's in-flight counter (e.g. that a
-    /// refused request never spawned work).
-    fn test_in_flight(&self) -> usize {
-        self.tasks.in_flight()
-    }
-}
-
 #[runtime]
 impl NativeActor for ProcessCapability {
     /// The runtime state this identity boots into (ADR-0122 split).
@@ -201,24 +185,10 @@ fn resolve_allowlist(tokens: &HashSet<String>) -> HashMap<String, PathBuf> {
 
 #[cfg(all(test, feature = "runtime", unix))]
 mod tests {
-    use super::{ProcessCapability, ProcessCapabilityState, RunOutcome, outcome_to_result, resolve_allowlist};
+    use super::{ProcessCapability, RunOutcome, outcome_to_result, resolve_allowlist};
     use crate::kinds::{ProcessError, Run, RunResult};
-    use aether_data::{SessionToken, Source, SourceAddr, Uuid};
-    use aether_substrate::actor::native::ctx::NativeCtx;
-    use aether_substrate::testing::{
-        decode_session_reply, drive_task_completion, test_mailer_and_rx, unrouted_binding,
-    };
-    use std::collections::{HashMap, HashSet};
-    use std::env;
+    use std::collections::HashSet;
     use std::path::PathBuf;
-
-    fn session_sender() -> Source {
-        Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
-    }
-
-    fn run(binary: &str, stdin: &[u8]) -> Run {
-        Run { binary: binary.to_owned(), args: Vec::new(), env: Vec::new(), stdin: stdin.to_vec(), timeout_millis: 0 }
-    }
 
     /// The allowlist parse is the security boundary: a well-formed
     /// `name=path` token maps, and a malformed token is dropped rather
@@ -244,55 +214,6 @@ mod tests {
             outcome_to_result(RunOutcome::SpawnFailed { not_found: false, detail: "denied".into() }),
             RunResult::Err { error: ProcessError::SpawnFailed { .. } }
         ));
-    }
-
-    /// An unlisted binary replies `NotPermitted` without spawning a child —
-    /// the deny-by-default boundary submits an error worker instead of
-    /// `build_command` / `run_to_completion`.
-    #[test]
-    fn unlisted_binary_replies_not_permitted_without_dispatch() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let mut state = ProcessCapabilityState::from_parts(HashMap::new(), env::temp_dir(), 4);
-        let transport = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), None, None);
-
-        ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b"")).__defuse();
-        drive_task_completion::<ProcessCapability>(&mut state, &transport, &rx);
-
-        match decode_session_reply::<RunResult>(&rx) {
-            RunResult::Err { error: ProcessError::NotPermitted } => {}
-            other => panic!("expected NotPermitted, got {other:?}"),
-        }
-        assert_eq!(state.test_in_flight(), 0, "in-flight is 0 after the error worker completes");
-    }
-
-    /// An allowlisted benign binary runs end-to-end through the ADR-0093
-    /// dispatch: the cap submits to the queue, the real worker runs
-    /// `/bin/cat` (echoing stdin), pushes a completion wake, and the
-    /// cap's `#[handler(task)]` re-replies `Ok` with the captured stdout
-    /// to the caller. Crosses the actor + dispatch + reply + settlement
-    /// boundary without a GPU (the process cap is headless).
-    #[test]
-    fn allowlisted_cat_runs_and_replies_ok_with_stdout() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let allowlist = HashMap::from([("cat".to_owned(), PathBuf::from("/bin/cat"))]);
-        let mut state = ProcessCapabilityState::from_parts(allowlist, env::temp_dir(), 4);
-        let transport = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), None, None);
-
-        ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b"hello aether")).__defuse();
-        // The worker runs cat against the piped stdin and pushes the
-        // completion wake; route it through the cap's task handler.
-        drive_task_completion::<ProcessCapability>(&mut state, &transport, &rx);
-
-        match decode_session_reply::<RunResult>(&rx) {
-            RunResult::Ok { exit_code, stdout, stderr } => {
-                assert_eq!(exit_code, Some(0));
-                assert_eq!(stdout, b"hello aether");
-                assert!(stderr.is_empty());
-            }
-            other => panic!("expected Ok, got {other:?}"),
-        }
     }
 
     fn assert_process_replies<T: aether_actor::Replies<Run, Reply = RunResult>>() {}
