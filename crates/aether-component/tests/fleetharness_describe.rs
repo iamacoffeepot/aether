@@ -7,15 +7,15 @@
 
 mod tests {
     use aether_data::Kind;
-    use aether_kinds::{DescribeComponent, DescribeComponentResult, Tick};
-    use aether_test_fixtures_kinds::AssetProbe;
+    use aether_kinds::{DescribeComponent, DescribeComponentResult};
+    use aether_test_fixtures_kinds::{AssetProbe, LogMarker};
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// Load the bundle's `QuietProbe` export, then send
     /// `aether.component.describe` addressed by the lineage name the load
     /// hands back and assert the reply carries the probe's real handler
-    /// kinds (`Tick`, `AssetProbe`). This pins the name →
+    /// kinds (`LogMarker`, `AssetProbe`). This pins the name →
     /// substrate-retained-caps path over the wire: the substrate
     /// resolves the name to its mailbox id and serves the full
     /// `ComponentCapabilities` it retained at load, not the lossy projection.
@@ -43,13 +43,13 @@ mod tests {
             }
         };
 
-        // The quiet probe (`test.quiet_probe`) typed-handles Tick and
+        // The quiet probe (`test.quiet_probe`) typed-handles LogMarker and
         // AssetProbe. Asserting both round-trip proves the wire carried the
         // full retained handler set, not an empty stub.
         let handler_ids: Vec<_> = capabilities.handlers.iter().map(|h| h.id).collect();
         assert!(
-            handler_ids.contains(&<Tick as Kind>::ID),
-            "the described caps should carry the probe's Tick handler, got {handler_ids:?}",
+            handler_ids.contains(&<LogMarker as Kind>::ID),
+            "the described caps should carry the probe's LogMarker handler, got {handler_ids:?}",
         );
         assert!(
             handler_ids.contains(&<AssetProbe as Kind>::ID),

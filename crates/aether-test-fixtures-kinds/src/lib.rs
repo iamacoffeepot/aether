@@ -148,6 +148,13 @@ pub struct ConfigQuery;
 #[aether_data::kind(name = "aether.test_fixtures.asset_probe", default)]
 pub struct AssetProbe;
 
+/// Issue 7107: driver kind for the `QuietProbe` fixture's log-ring proof. The
+/// `QuietProbe` fixture writes one `typed_send_alive` info line per delivery,
+/// so the log-ring tests send this instead of waiting on a tick to fire it.
+/// No-payload trigger, structured unit struct like [`AssetProbe`].
+#[aether_data::kind(name = "aether.test_fixtures.log_marker", default)]
+pub struct LogMarker;
+
 /// Reply kind for [`AssetProbe`]: the length and a wrapping-sum checksum of
 /// the bytes the fixture pulled through `AssetWindow::asset` in `wire`,
 /// stashed in state and surfaced from a post-`wire` handler. Lets a test

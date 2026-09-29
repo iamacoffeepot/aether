@@ -1,27 +1,28 @@
-//! `FleetHarness` `actor_logs` proof (issue 1459, Tier-A): load the
-//! bundle's `QuietProbe` export into a forked substrate and tail its per-actor
-//! `ActorLogRing` (ADR-0081) for the one-shot `typed_send_alive` entry
-//! the probe emits on its first tick, assert the substrate-side substring
-//! filter across the real RPC hop, then walk the `since` cursor to confirm
-//! it does not re-yield the seen entry.
+//! `FleetHarness` `actor_logs` proof (issue 1459, Tier-A; issue 7107): load
+//! the bundle's `QuietProbe` export into a forked substrate, send it a
+//! `LogMarker`, and tail its per-actor `ActorLogRing` (ADR-0081) for the
+//! `typed_send_alive` entry it writes on delivery, assert the substrate-side
+//! substring filter across the real RPC hop, then walk the `since` cursor to
+//! confirm it does not re-yield the seen entry.
 
 mod tests {
     use aether_kinds::LogTailResult;
+    use aether_test_fixtures_kinds::LogMarker;
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available, poll_until};
+    use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared
     /// across `aether.log.*`.
     const LEVEL_INFO: u8 = 2;
     const MESSAGE_SUBSTRING: &str = "typed_send_alive";
 
-    /// Load `probe`, poll its lineage address with `LogTail` until the
-    /// `typed_send_alive` info entry appears, then re-query past the
-    /// returned cursor and assert it is not re-yielded — the
-    /// `actor_logs` row: a per-actor ring read plus a `since`-cursor
+    /// Load `probe`, send it a `LogMarker`, then tail its lineage address
+    /// with `LogTail` for the `typed_send_alive` info entry it wrote, and
+    /// re-query past the returned cursor and assert it is not re-yielded —
+    /// the `actor_logs` row: a per-actor ring read plus a `since`-cursor
     /// walk.
     #[test]
-    fn fleetharness_actor_logs_surface_the_probe_first_tick_entry() {
+    fn fleetharness_actor_logs_surface_the_probe_marker_entry() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
@@ -29,33 +30,20 @@ mod tests {
         let engine = harness.spawn_headless();
         let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
 
-        let mut last_reply = None;
-        let mut found = None;
-        poll_until(|| {
-            let reply = harness.log_tail(engine, &addr, None, Some(MESSAGE_SUBSTRING.to_owned()));
-            if let LogTailResult::Ok { entries, .. } = &reply {
-                assert!(
-                    entries.iter().all(|entry| entry.message.contains(MESSAGE_SUBSTRING)),
-                    "the substrate-side contains filter must remove non-matching entries before the RPC reply: {entries:?}",
-                );
-            }
-            if let LogTailResult::Ok { entries, next_since, .. } = &reply
-                && let Some(entry) = entries.iter().find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
-            {
-                found = Some((entry.clone(), *next_since));
-                true
-            } else {
-                last_reply = Some(reply);
-                false
-            }
-        });
-
-        let (entry, next_since) = found.unwrap_or_else(|| {
-            panic!(
-                "probe's `typed_send_alive` info entry never appeared within the poll \
-                 budget; last reply: {last_reply:?}",
-            )
-        });
+        harness.send(engine, &addr, &LogMarker);
+        let reply = harness.log_tail(engine, &addr, None, Some(MESSAGE_SUBSTRING.to_owned()));
+        let LogTailResult::Ok { entries, next_since, .. } = reply else {
+            panic!("LogTail failed: {reply:?}");
+        };
+        assert!(
+            entries.iter().all(|entry| entry.message.contains(MESSAGE_SUBSTRING)),
+            "the substrate-side contains filter must remove non-matching entries before the RPC reply: {entries:?}",
+        );
+        let entry = entries
+            .iter()
+            .find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
+            .unwrap_or_else(|| panic!("probe's `typed_send_alive` info entry is not in the ring: {entries:?}"))
+            .clone();
 
         // The ring's per-actor sequence starts at 1 (ADR-0081).
         assert!(entry.sequence >= 1, "a buffered entry should carry a 1-based ring sequence, got {}", entry.sequence);
