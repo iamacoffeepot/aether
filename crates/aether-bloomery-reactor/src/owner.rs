@@ -4,8 +4,12 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::any::{Any, TypeId, type_name};
+use core::future::Future;
+use core::pin::pin;
+use core::task::{Context, Poll, Waker};
 
 use aether_bloomery_kinds::{Entry, Seq};
+use aether_bloomery_view::ArtifactResolver;
 
 use crate::error::{PrepareError, seq_mismatch};
 use crate::params::Params;
@@ -113,7 +117,22 @@ impl Owner {
     ///
     /// [`PrepareError`] when a view cannot be constructed or advanced.
     pub fn warm<S: ViewSet>(&mut self) -> Result<(), PrepareError> {
-        self.catch_up::<S>()
+        let (mut resolver, driver) = ArtifactResolver::operation();
+        let result = {
+            let mut future = pin!(self.catch_up_with::<S>(&mut resolver));
+            match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+                Poll::Ready(result) => result,
+                Poll::Pending => {
+                    let pending = driver.take_pending();
+                    driver.cancel();
+                    return Err(PrepareError::AsyncRequired { digest: pending.map(|pending| pending.digest) });
+                }
+            }
+        };
+        if let Some(error) = driver.finish() {
+            return Err(PrepareError::Resolve(error));
+        }
+        result
     }
 
     /// Borrow a constructed, unpoisoned view.
@@ -131,17 +150,25 @@ impl Owner {
     /// [`PrepareError`] when the trigger, catch-up, or a poisoned view fails.
     pub fn prepare<T: Trigger, L: Params<T>>(&mut self) -> Result<Option<(T, L::Value)>, PrepareError> {
         let trigger = T::from_entry(self.prefix.last().ok_or(PrepareError::Empty)?).map_err(PrepareError::Trigger)?;
-        self.catch_up::<L::Views>()?;
+        self.warm::<L::Views>()?;
         let refs = L::Views::refs(|id| self.slot_ref(id))
             .ok_or(PrepareError::Poisoned { view: type_name::<L::Views>(), last_trusted_cursor: self.cursor() })?;
         Ok(L::resolve(&trigger, refs).map(|value| (trigger, value)))
     }
 
-    fn catch_up<S: ViewSet>(&mut self) -> Result<(), PrepareError> {
+    async fn catch_up_with<S: ViewSet>(&mut self, artifacts: &mut ArtifactResolver) -> Result<(), PrepareError> {
+        self.warm_ctors(unique_ctors::<S>(), artifacts).await
+    }
+
+    pub(crate) async fn warm_ctors(
+        &mut self,
+        ctors: Vec<ViewCtor>,
+        artifacts: &mut ArtifactResolver,
+    ) -> Result<(), PrepareError> {
         let target = self.cursor();
-        for ctor in unique_ctors::<S>() {
+        for ctor in ctors {
             self.ensure_constructed(ctor)?;
-            self.advance_to(ctor, target)?;
+            self.advance_to(ctor, target, artifacts).await?;
         }
         Ok(())
     }
@@ -174,7 +201,12 @@ impl Owner {
         Ok(())
     }
 
-    fn advance_to(&mut self, ctor: ViewCtor, target: Seq) -> Result<(), PrepareError> {
+    async fn advance_to(
+        &mut self,
+        ctor: ViewCtor,
+        target: Seq,
+        artifacts: &mut ArtifactResolver,
+    ) -> Result<(), PrepareError> {
         let slot = self
             .slots
             .get_mut(&ctor.id)
@@ -185,11 +217,13 @@ impl Owner {
         }
         let entries = suffix(&self.prefix, self.base, last_trusted_cursor, target)?;
         slot.poisoned = true;
-        let advanced = slot
-            .inner
-            .as_mut()
-            .ok_or(PrepareError::Poisoned { view: ctor.name, last_trusted_cursor })?
-            .advance(entries);
+        let Some(inner) = slot.inner.as_mut() else {
+            return Err(PrepareError::Poisoned { view: ctor.name, last_trusted_cursor });
+        };
+        let advanced = inner.advance(entries, artifacts).await;
+        if let Some(error) = artifacts.finish() {
+            return Err(PrepareError::Resolve(error));
+        }
         match advanced {
             Ok(()) => {
                 let actual = slot
@@ -264,6 +298,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::error::Error;
     use core::fmt;
+    use core::future::{Ready, ready};
     use core::ops::RangeInclusive;
 
     use aether_bloomery_kinds::{Entry, Seq};
@@ -291,6 +326,7 @@ mod tests {
 
     impl<const TAG: u8> View for Counter<TAG> {
         type Error = Gap;
+        type Advance<'a> = Ready<Result<(), Self::Error>>;
 
         fn empty() -> Self {
             Self { cursor: Seq(0), folded: 0 }
@@ -300,15 +336,21 @@ mod tests {
             self.cursor
         }
 
-        fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error> {
-            if entries.first().is_some_and(|first| first.seq.0 != self.cursor.0 + 1) {
-                return Err(Gap);
-            }
-            self.folded += entries.len() as u64;
-            if let Some(last) = entries.last() {
-                self.cursor = last.seq;
-            }
-            Ok(())
+        fn advance<'a>(
+            &'a mut self,
+            entries: &'a [Entry],
+            _artifacts: &'a mut aether_bloomery_view::ArtifactResolver,
+        ) -> Self::Advance<'a> {
+            ready((|| {
+                if entries.first().is_some_and(|first| first.seq.0 != self.cursor.0 + 1) {
+                    return Err(Gap);
+                }
+                self.folded += entries.len() as u64;
+                if let Some(last) = entries.last() {
+                    self.cursor = last.seq;
+                }
+                Ok(())
+            })())
         }
     }
 

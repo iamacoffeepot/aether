@@ -42,10 +42,16 @@ struct Fold {
     method: ImplItemFn,
     event_ty: Type,
     fallible: bool,
+    asynchronous: bool,
 }
 
-/// Generate an ordinary View implementation from typed #[fold] methods on a
-/// fixed aggregate.
+/// Generate a `View` implementation from typed `#[fold]` methods on a fixed
+/// aggregate.
+///
+/// Synchronous folds keep the existing `fn(&mut self, Event)` shape. An
+/// asynchronous fold takes an additional `&mut ArtifactResolver`, which reads
+/// immutable artifacts named by journal data. Generated asynchronous advances
+/// are `Send`, matching the reactor owner's erased continuation boundary.
 #[proc_macro_attribute]
 pub fn view(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as ViewArgs);
@@ -164,9 +170,7 @@ fn parse_fold(mut method: ImplItemFn) -> syn::Result<Fold> {
     if matches!(sig.ident.to_string().as_str(), "empty" | "cursor" | "advance") {
         return Err(syn::Error::new_spanned(&sig.ident, "#[fold] method name conflicts with a generated View method"));
     }
-    if let Some(asyncness) = &sig.asyncness {
-        return Err(syn::Error::new_spanned(asyncness, "#[fold] methods are synchronous; remove `async`"));
-    }
+    let asynchronous = sig.asyncness.is_some();
     if let Some(constness) = &sig.constness {
         return Err(syn::Error::new_spanned(constness, "#[fold] methods cannot be `const`"));
     }
@@ -182,10 +186,19 @@ fn parse_fold(mut method: ImplItemFn) -> syn::Result<Fold> {
     if !sig.generics.params.is_empty() || sig.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(&sig.generics, "#[fold] methods cannot be generic"));
     }
-    if sig.inputs.len() != 2 {
+    let expected_inputs = if asynchronous {
+        3
+    } else {
+        2
+    };
+    if sig.inputs.len() != expected_inputs {
         return Err(syn::Error::new_spanned(
             &sig.inputs,
-            "#[fold] methods take exactly `&mut self` and one owned typed event",
+            if asynchronous {
+                "async #[fold] methods take `&mut self`, one owned typed event, and `&mut ArtifactResolver`"
+            } else {
+                "#[fold] methods take exactly `&mut self` and one owned typed event"
+            },
         ));
     }
 
@@ -205,9 +218,37 @@ fn parse_fold(mut method: ImplItemFn) -> syn::Result<Fold> {
         return Err(syn::Error::new_spanned(&event.ty, "#[fold] event parameters are owned values"));
     }
 
+    if asynchronous {
+        require_async_resolver(sig)?;
+    }
+
     let event_ty = (*event.ty).clone();
     let fallible = classify_output(&sig.output)?;
-    Ok(Fold { method, event_ty, fallible })
+    if asynchronous && !fallible {
+        return Err(syn::Error::new_spanned(&sig.output, "async #[fold] methods return `Result<(), E>`"));
+    }
+    Ok(Fold { method, event_ty, fallible, asynchronous })
+}
+
+fn require_async_resolver(sig: &syn::Signature) -> syn::Result<()> {
+    let Some(FnArg::Typed(resolver)) = sig.inputs.iter().nth(2) else {
+        return Err(syn::Error::new_spanned(&sig.inputs, "async #[fold] methods need `&mut ArtifactResolver`"));
+    };
+    let Type::Reference(reference) = &*resolver.ty else {
+        return Err(syn::Error::new_spanned(&resolver.ty, "async #[fold] resolver must be `&mut ArtifactResolver`"));
+    };
+    let Type::Path(path) = &*reference.elem else {
+        return Err(syn::Error::new_spanned(&resolver.ty, "async #[fold] resolver must be `&mut ArtifactResolver`"));
+    };
+    if reference.mutability.is_none()
+        || reference.lifetime.is_some()
+        || !path.path.segments.last().is_some_and(|segment| {
+            segment.ident == "ArtifactResolver" && matches!(segment.arguments, PathArguments::None)
+        })
+    {
+        return Err(syn::Error::new_spanned(&resolver.ty, "async #[fold] resolver must be `&mut ArtifactResolver`"));
+    }
+    Ok(())
 }
 
 fn classify_output(output: &ReturnType) -> syn::Result<bool> {
@@ -251,17 +292,78 @@ fn output_error(output: &ReturnType) -> syn::Error {
 fn expand(def: ViewDef) -> TokenStream2 {
     let ViewDef { attrs, self_ty, cursor, folds } = def;
     let methods = folds.iter().map(|fold| &fold.method);
-    let dispatches = folds.iter().map(expand_dispatch);
+    let dispatches: Vec<_> = folds.iter().map(expand_dispatch).collect();
+    let asynchronous = folds.iter().any(|fold| fold.asynchronous);
+    let resolver = if asynchronous {
+        quote! { artifacts }
+    } else {
+        quote! { _artifacts }
+    };
+    let sync_helper = if asynchronous {
+        TokenStream2::new()
+    } else {
+        quote! {
+            fn __aether_bloomery_advance(
+                &mut self,
+                entries: &[::aether_bloomery_view::__macro_internals::Entry],
+            ) -> ::core::result::Result<(), ::aether_bloomery_view::__macro_internals::ViewFoldError> {
+                for entry in entries {
+                    ::aether_bloomery_view::__macro_internals::check_next(self.#cursor, entry.seq)?;
+                    #(#dispatches)*
+                    self.#cursor.set(entry.seq);
+                }
+                Ok(())
+            }
+        }
+    };
+    let (advance_ty, advance_body) = if asynchronous {
+        (
+            quote! {
+                ::aether_bloomery_view::__macro_internals::Pin<
+                    ::aether_bloomery_view::__macro_internals::Box<
+                        dyn ::aether_bloomery_view::__macro_internals::Future<
+                            Output = ::core::result::Result<(), Self::Error>,
+                        > + ::core::marker::Send + 'a,
+                    >,
+                >
+            },
+            quote! {
+                ::aether_bloomery_view::__macro_internals::Box::pin(async move {
+                    for entry in entries {
+                        ::aether_bloomery_view::__macro_internals::check_next(self.#cursor, entry.seq)?;
+                        #(#dispatches)*
+                        self.#cursor.set(entry.seq);
+                    }
+                    Ok(())
+                })
+            },
+        )
+    } else {
+        (
+            quote! {
+                ::aether_bloomery_view::__macro_internals::SyncAdvance<'a, Self, Self::Error>
+            },
+            quote! {
+                ::aether_bloomery_view::__macro_internals::SyncAdvance::new(
+                    self,
+                    entries,
+                    Self::__aether_bloomery_advance,
+                )
+            },
+        )
+    };
 
     quote! {
         #(#attrs)*
         impl #self_ty {
             #(#methods)*
+            #sync_helper
         }
 
         #(#attrs)*
         impl ::aether_bloomery_view::View for #self_ty {
             type Error = ::aether_bloomery_view::__macro_internals::ViewFoldError;
+            type Advance<'a> = #advance_ty where Self: 'a;
 
             fn empty() -> Self {
                 <Self as ::core::default::Default>::default()
@@ -271,16 +373,12 @@ fn expand(def: ViewDef) -> TokenStream2 {
                 self.#cursor.get()
             }
 
-            fn advance(
-                &mut self,
-                entries: &[::aether_bloomery_view::__macro_internals::Entry],
-            ) -> ::core::result::Result<(), Self::Error> {
-                for entry in entries {
-                    ::aether_bloomery_view::__macro_internals::check_next(self.#cursor, entry.seq)?;
-                    #(#dispatches)*
-                    self.#cursor.set(entry.seq);
-                }
-                Ok(())
+            fn advance<'a>(
+                &'a mut self,
+                entries: &'a [::aether_bloomery_view::__macro_internals::Entry],
+                #resolver: &'a mut ::aether_bloomery_view::ArtifactResolver,
+            ) -> Self::Advance<'a> {
+                #advance_body
             }
         }
     }
@@ -289,9 +387,14 @@ fn expand(def: ViewDef) -> TokenStream2 {
 fn expand_dispatch(fold: &Fold) -> TokenStream2 {
     let ident = &fold.method.sig.ident;
     let event_ty = &fold.event_ty;
+    let invoke = if fold.asynchronous {
+        quote! { self.#ident(event, artifacts).await }
+    } else {
+        quote! { self.#ident(event) }
+    };
     let call = if fold.fallible {
         quote_spanned! { ident.span() =>
-            if let ::core::result::Result::Err(source) = self.#ident(event) {
+            if let ::core::result::Result::Err(source) = #invoke {
                 return ::core::result::Result::Err(
                     ::aether_bloomery_view::__macro_internals::ViewFoldError::handler(
                         stringify!(#ident),

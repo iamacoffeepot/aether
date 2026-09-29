@@ -12,7 +12,7 @@ use aether_data::{ErasedActorPath, Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::LoadComponent;
-use aether_test_fixtures_kinds::REACTOR_FOLD_FAIL_KIND;
+use aether_test_fixtures_kinds::{REACTOR_FOLD_FAIL_KIND, ResolverReceipt};
 use wasmparser::{Parser, Payload};
 
 fn digest_ref<K>(byte: u8) -> Ref<K> {
@@ -152,14 +152,14 @@ fn section_bytes(wasm: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn bundle_section_declares_both_reactors_with_their_rule_kinds() {
+fn bundle_section_declares_all_reactors_with_their_rule_kinds() {
     // Catches the bundle not emitting, emitting for the generated root, or recording the wrong type's id.
     let Some(wasm_path) = require_wasm("aether_test_fixtures_reactor") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let decoded = reactor_declarations(&section_bytes(&wasm)).expect("aether.bloomery.reactors decodes");
-    assert_eq!(decoded.len(), 2, "the custom section lists both reactors");
+    assert_eq!(decoded.len(), 3, "the custom section lists all reactors");
     let publisher = decoded
         .iter()
         .find(|declaration| declaration.name().as_str() == "test.bloomery.source.publisher")
@@ -176,4 +176,12 @@ fn bundle_section_declares_both_reactors_with_their_rule_kinds() {
     assert_eq!(witness.rules()[0].name().as_str(), "note_heads");
     assert_eq!(witness.rules()[0].trigger(), HeadMoved::<Tree>::ID);
     assert_eq!(witness.rules()[0].output(), SetHeads::ID);
+    let resolver = decoded
+        .iter()
+        .find(|declaration| declaration.name().as_str() == "test.bloomery.resolver.publisher")
+        .expect("resolver publisher declaration");
+    assert_eq!(resolver.rules().len(), 1);
+    assert_eq!(resolver.rules()[0].name().as_str(), "publish_resolved");
+    assert_eq!(resolver.rules()[0].trigger(), HeadMoved::<ResolverReceipt>::ID);
+    assert_eq!(resolver.rules()[0].output(), SetHeads::ID);
 }

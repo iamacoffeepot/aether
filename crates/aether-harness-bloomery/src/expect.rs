@@ -146,7 +146,7 @@ impl SeededJournal {
     #[must_use]
     pub fn fold<V: View>(&self) -> V {
         let mut view = V::empty();
-        view.advance(&self.entries_after(Seq(0)))
+        view.advance_ready(&self.entries_after(Seq(0)))
             .unwrap_or_else(|error| panic!("fold the journal through the view: {error}"));
         view
     }

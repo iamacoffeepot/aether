@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-16
+- **Amended:** 2026-09-28 — bundle-owned folds may resolve immutable typed artifacts through the existing driver fetch route (issue #7026).
 
 ## Context
 
@@ -51,6 +52,53 @@ immutable reactor bundle
         -> owned prepared data -> reactor actor
         -> owned prepared data -> reactor actor
 ```
+
+### Artifact-backed folds
+
+The generated bundle root now hosts the shared views owner and evaluates its
+reactors locally, as developed by [ADR-0225](0225-reactor-bundles-load-by-digest.md)
+and [ADR-0226](0226-native-bundle-driver.md). View dependencies are inferred
+from direct parameters and named guards. Exporting a reactor brings its view
+implementations into the bundle; authors do not export a separate view list.
+
+A fold may resolve immutable `Ref<K>` values through a read-only
+`ArtifactResolver`. References come from the supplied entries, accumulated
+view state, or an artifact already decoded by the fold. One event can require
+zero, one, or several reads. The initial implementation permits one outstanding
+read per active fold; it does not preload the event's transitive closure.
+
+Resolution composes three existing boundaries:
+
+1. Ordered journal delivery fixes the prefix being folded. Resolving bytes
+   never samples a newer head binding.
+2. Content-addressed typed references fix the requested values. The resolver
+   checks the claimed digest, kind, complete content hash, and storage decode.
+3. The bundle retains the live fold continuation and its held reply while a
+   fetch travels through the driver. Resumption continues after the same
+   await; it does not replay mutations performed before the read.
+
+All required views must finish before the root acknowledges `Warm` or
+evaluates an `Event`. During suspension, `Status` reports the previous trusted
+boundary, and another delivery cannot overtake the active operation. A failed
+read or fold poisons the operation and exposes no partially prepared inputs.
+Ignoring a resolver error in author code cannot turn it into successful
+advancement. The already recorded source event is not rolled back.
+
+The resolver grants no staging, head writes, program invocation, general
+actor mail, or current-head lookup. It reuses the existing artifact mail path
+and driver cache; no direct host ABI or persistent per-view artifact cache is
+introduced. Applications remain responsible for retaining referenced content
+through typed storage citations. Resolution does not make an opaque embedded
+digest a citation.
+
+`View::advance` is awaitable and receives the resolver explicitly. Existing
+synchronous authored fold bodies remain valid. The portable trait does not
+require every view to implement `Clone`, `Publish`, or `Send`; the erased
+actor owner requires sendable views and continuations. Generated async
+`#[view]` folds require `Send` futures, matching async program authoring.
+This explicit macro restriction lets stable Rust erase the authored future
+without losing the owner's sendability guarantee. Manual portable view
+implementations may still return non-`Send` futures.
 
 ## Consequences
 

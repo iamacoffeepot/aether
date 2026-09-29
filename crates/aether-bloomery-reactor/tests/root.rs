@@ -3,15 +3,19 @@
 use std::cell::Cell;
 use std::error::Error;
 use std::fmt;
+use std::future::{Future, Ready, poll_fn, ready};
+use std::mem::forget;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 
 use aether_bloomery_kinds::{
-    Digest, Entry, Evaluated, Event, Head, HeadMoved, JournalEntry, Ref, RuleRecord, Seq, SetHeads, Tree, Warm,
-    WarmEntries, Warmed, reactor_record_len, write_reactor_record,
+    ClosureArtifact, Digest, EncodedArtifact, Entry, Evaluated, Event, Head, HeadMoved, JournalEntry,
+    ReadArtifactResult, Ref, RuleRecord, Seq, SetHeads, Tree, Warm, WarmEntries, Warmed, reactor_record_len,
+    write_reactor_record,
 };
-use aether_bloomery_reactor::{Nil, Owner, PrepareError, Reactor, Root, reactor};
-use aether_bloomery_view::{Publish, PublishError, View};
-use aether_data::{Kind, KindId, Storage, StorageData};
+use aether_bloomery_reactor::{Completion, Nil, Owner, PrepareError, Reactor, Root, RootPoll, reactor};
+use aether_bloomery_view::{ArtifactResolver, Publish, PublishError, ResolveError, View, ViewCursor, view};
+use aether_data::{Cites, Kind, KindId, Storage, StorageData};
 
 const PUBLISHED: Head<Tree> = Head::new("published");
 
@@ -49,6 +53,7 @@ impl Error for Boom {}
 
 impl View for CountView {
     type Error = Boom;
+    type Advance<'a> = Ready<Result<(), Self::Error>>;
 
     fn empty() -> Self {
         VIEWS_BUILT.with(|built| built.update(|count| count + 1));
@@ -59,15 +64,17 @@ impl View for CountView {
         self.cursor
     }
 
-    fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error> {
-        if entries.iter().any(|entry| entry.kind == KindId(0xdead)) {
-            return Err(Boom);
-        }
-        ENTRIES_FOLDED.with(|folded| folded.update(|count| count + entries.len() as u64));
-        if let Some(last) = entries.last() {
-            self.cursor = last.seq;
-        }
-        Ok(())
+    fn advance<'a>(&'a mut self, entries: &'a [Entry], _artifacts: &'a mut ArtifactResolver) -> Self::Advance<'a> {
+        ready((|| {
+            if entries.iter().any(|entry| entry.kind == KindId(0xdead)) {
+                return Err(Boom);
+            }
+            ENTRIES_FOLDED.with(|folded| folded.update(|count| count + entries.len() as u64));
+            if let Some(last) = entries.last() {
+                self.cursor = last.seq;
+            }
+            Ok(())
+        })())
     }
 }
 
@@ -161,6 +168,189 @@ fn warm_of(entries: Vec<JournalEntry>) -> Warm {
 
 type Pair = Root<(Publisher, (Witness, Nil))>;
 type BoomPair = Root<(Publisher, (BoomReactor, Nil))>;
+
+#[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.root.resolved-note")]
+struct ResolvedNote {
+    value: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.root.resolved-envelope")]
+struct ResolvedEnvelope {
+    note: Ref<ResolvedNote>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.root.resolve-event")]
+struct ResolveEvent {
+    envelope: Ref<ResolvedEnvelope>,
+    ignore_error: bool,
+    retain_read: bool,
+}
+
+#[derive(Default)]
+struct ResolvedView {
+    cursor: ViewCursor,
+    value: u64,
+    starts: u64,
+    firsts: u64,
+}
+
+#[view(cursor = cursor)]
+impl View for ResolvedView {
+    #[fold]
+    async fn resolve(&mut self, event: ResolveEvent, artifacts: &mut ArtifactResolver) -> Result<(), ResolveError> {
+        self.starts += 1;
+        if event.retain_read {
+            let mut read = Box::pin(artifacts.read(event.envelope));
+            poll_fn(|cx| {
+                assert!(Future::poll(read.as_mut(), cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            forget(read);
+            return Ok(());
+        }
+        let envelope = match artifacts.read(event.envelope).await {
+            Ok(envelope) => envelope,
+            Err(_error) if event.ignore_error => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        self.firsts += 1;
+        self.value = artifacts.read(envelope.note).await?.value;
+        Ok(())
+    }
+}
+
+struct ResolverReactor;
+
+struct ResolvedValue;
+
+impl aether_bloomery_reactor::Guard<ResolveEvent> for ResolvedValue {
+    type Views = ResolvedView;
+
+    fn resolve(_trigger: &ResolveEvent, view: &ResolvedView) -> Option<Self> {
+        (view.value == 42 && view.starts == 1 && view.firsts == 1).then_some(Self)
+    }
+}
+
+#[reactor]
+impl Reactor for ResolverReactor {
+    const NAMESPACE: &'static str = "test.bloomery.root.resolver";
+
+    #[rule]
+    fn observe(&self, _event: ResolveEvent, _resolved: ResolvedValue) -> SetHeads {
+        SetHeads::new(Vec::new())
+    }
+}
+
+type ResolverRoot = Root<(ResolverReactor, Nil)>;
+
+fn closure_of<K: Storage + Clone + Cites>(value: &K) -> (Ref<K>, ClosureArtifact) {
+    let encoded = EncodedArtifact::new(value).expect("artifact encode");
+    let artifact = ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec());
+    (Ref::from_digest(artifact.claimed().unverified()), artifact)
+}
+
+fn resolve_entry(seq: u64, event: ResolveEvent) -> JournalEntry {
+    JournalEntry {
+        seq,
+        kind: ResolveEvent::ID,
+        cause: None,
+        recorded_at_millis: 0,
+        bytes: ResolveEvent::encode_storage(&StorageData::from_value(event)).expect("storage encode"),
+    }
+}
+
+#[test]
+fn live_async_fold_retains_one_future_across_nested_reads() {
+    let (note, note_artifact) = closure_of(&ResolvedNote { value: 42 });
+    let (envelope, envelope_artifact) = closure_of(&ResolvedEnvelope { note });
+    let event = Event::new(resolve_entry(1, ResolveEvent { envelope, ignore_error: false, retain_read: false }));
+    let mut root = ResolverRoot::new().expect("names");
+
+    let RootPoll::NeedArtifact(first) = root.start_event(event.clone()) else {
+        panic!("first read should suspend");
+    };
+    assert_eq!(first.digest, envelope.digest());
+    assert_eq!(root.status().cursor(), 0);
+
+    let RootPoll::Complete(Completion::Evaluated(rejected)) = root.start_event(event) else {
+        panic!("concurrent event should be rejected");
+    };
+    assert!(matches!(rejected, Evaluated::OutOfSequence { seq: 1, expected: 1 }));
+    assert_eq!(root.status().cursor(), 0);
+
+    let Some(RootPoll::NeedArtifact(second)) = root.fulfill(ReadArtifactResult::Found { artifact: envelope_artifact })
+    else {
+        panic!("second read should suspend");
+    };
+    assert_eq!(second.digest, note.digest());
+
+    let Some(RootPoll::Complete(Completion::Evaluated(done))) =
+        root.fulfill(ReadArtifactResult::Found { artifact: note_artifact })
+    else {
+        panic!("fold should complete");
+    };
+    let Evaluated::Completed { seq: 1, intents } = done else {
+        panic!("fold should evaluate successfully");
+    };
+    assert_eq!(intents.len(), 1, "the guard observes each pre-await mutation exactly once");
+    assert_eq!(root.status().cursor(), 1);
+}
+
+#[test]
+fn ignored_resolver_failure_still_poisons_at_frozen_prefix() {
+    let (envelope, _) = closure_of(&ResolvedEnvelope { note: digest_ref(8) });
+    let event = Event::new(resolve_entry(1, ResolveEvent { envelope, ignore_error: true, retain_read: false }));
+    let mut root = ResolverRoot::new().expect("names");
+
+    assert!(matches!(root.start_event(event), RootPoll::NeedArtifact(_)));
+    let Some(RootPoll::Complete(Completion::Evaluated(poisoned))) =
+        root.fulfill(ReadArtifactResult::Missing { digest: envelope.digest() })
+    else {
+        panic!("missing result should terminate the fold");
+    };
+    assert!(matches!(poisoned, Evaluated::Poisoned { seq: 1, last_trusted: 0, .. }));
+    assert!(root.status().poisoned());
+    assert_eq!(root.status().cursor(), 0);
+}
+
+#[test]
+fn warm_async_fold_replays_without_evaluating() {
+    let (note, note_artifact) = closure_of(&ResolvedNote { value: 42 });
+    let (envelope, envelope_artifact) = closure_of(&ResolvedEnvelope { note });
+    let warm = warm_of(vec![resolve_entry(1, ResolveEvent { envelope, ignore_error: false, retain_read: false })]);
+    let mut root = ResolverRoot::new().expect("names");
+
+    assert!(matches!(root.start_warm(warm), RootPoll::NeedArtifact(_)));
+    assert!(matches!(
+        root.fulfill(ReadArtifactResult::Found { artifact: envelope_artifact }),
+        Some(RootPoll::NeedArtifact(_))
+    ));
+    let Some(RootPoll::Complete(Completion::Warmed(done))) =
+        root.fulfill(ReadArtifactResult::Found { artifact: note_artifact })
+    else {
+        panic!("warm replay should complete");
+    };
+    assert!(matches!(done, Warmed::Folded { through: 1 }));
+    assert_eq!(root.status().cursor(), 1);
+}
+
+#[test]
+fn retained_outstanding_read_cannot_publish_a_trusted_cursor() {
+    let (envelope, _) = closure_of(&ResolvedEnvelope { note: digest_ref(13) });
+    let event = Event::new(resolve_entry(1, ResolveEvent { envelope, ignore_error: false, retain_read: true }));
+    let mut root = ResolverRoot::new().expect("names");
+
+    let RootPoll::Complete(Completion::Evaluated(poisoned)) = root.start_event(event) else {
+        panic!("retained read must terminate the fold before transport");
+    };
+    assert!(matches!(poisoned, Evaluated::Poisoned { seq: 1, last_trusted: 0, .. }));
+    assert!(root.status().poisoned());
+    assert_eq!(root.status().cursor(), 0);
+}
 
 #[test]
 fn out_of_sequence_changes_nothing() {

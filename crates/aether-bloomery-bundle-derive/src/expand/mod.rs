@@ -18,6 +18,7 @@ use aether_bloomery_kinds::BUNDLE_NAMESPACE;
 use crate::classify::{Roles, classify};
 use crate::input::{Envelope, GenerateInput, NamespaceTok};
 
+mod artifacts;
 mod programs;
 mod reactors;
 mod root;
@@ -36,13 +37,17 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
     let roles = classify(&input)?;
     let GenerateInput { remaining_generators, boot, default, actors, exports, private } = input;
     let root = format_ident!("{ROOT_IDENT}");
-    let pieces = match &roles {
+    let mut pieces = vec![artifacts::pieces(
+        matches!(roles, Roles::Programs(_) | Roles::Both { .. }),
+        matches!(roles, Roles::Reactors(_) | Roles::Both { .. }),
+    )];
+    pieces.extend(match &roles {
         Roles::Programs(programs) => vec![programs::pieces(&root, programs)],
         Roles::Reactors(reactors) => vec![reactors::pieces(reactors)],
         Roles::Both { programs, reactors } => {
             vec![programs::pieces(&root, programs), reactors::pieces(reactors)]
         }
-    };
+    });
     let bundle = root::expand_root(&root, &pieces);
     let boot_tokens = optional_type_tokens(boot.as_ref());
     let default_tokens = default.as_ref().map_or_else(|| quote! { { #root } }, |ty| quote! { { #ty } });

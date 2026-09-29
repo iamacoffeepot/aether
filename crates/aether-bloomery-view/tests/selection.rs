@@ -89,7 +89,7 @@ fn each_event_uses_its_predecessor_prefix_across_set_and_bundle_moves() -> Resul
         moved(7, &ALPHA, a)?,
     ];
     let mut heads = Heads::new();
-    heads.advance(&entries[..3])?;
+    heads.advance_ready(&entries[..3])?;
 
     for (event, expected) in
         [(4, vec![(ALPHA, a), (BETA, b)]), (5, vec![(ALPHA, c), (BETA, b)]), (6, vec![(ALPHA, c), (BETA, c)])]

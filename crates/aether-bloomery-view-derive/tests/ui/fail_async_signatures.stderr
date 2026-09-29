@@ -1,0 +1,27 @@
+error: async #[fold] resolver must be `&mut ArtifactResolver`
+  --> tests/ui/fail_async_signatures.rs:15:58
+   |
+15 |     async fn event(&mut self, _event: Event, _artifacts: &ArtifactResolver) -> Result<(), ResolveError> {
+   |                                                          ^^^^^^^^^^^^^^^^^
+
+error: async #[fold] methods return `Result<(), E>`
+  --> tests/ui/fail_async_signatures.rs:25:1
+   |
+25 | #[view(cursor = cursor)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `view` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: async #[fold] resolver must be `&mut ArtifactResolver`
+  --> tests/ui/fail_async_signatures.rs:39:58
+   |
+39 |     async fn event(&mut self, _event: Event, _artifacts: &mut u64) -> Result<(), ResolveError> {
+   |                                                          ^^^^^^^^
+
+warning: unused imports: `ArtifactResolver`, `ResolveError`, and `View`
+ --> tests/ui/fail_async_signatures.rs:1:28
+  |
+1 | use aether_bloomery_view::{ArtifactResolver, ResolveError, View, ViewCursor, view};
+  |                            ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

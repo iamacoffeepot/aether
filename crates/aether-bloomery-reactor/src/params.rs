@@ -54,7 +54,13 @@ impl<T: Trigger> Params<T> for Nil {
     }
 }
 
-impl<T: Trigger, V: Publish + Send, Rest: Params<T>> Params<T> for Arg<AsView, V, Rest> {
+impl<T, V, Rest> Params<T> for Arg<AsView, V, Rest>
+where
+    T: Trigger,
+    V: Publish + Send,
+    for<'a> V::Advance<'a>: Send,
+    Rest: Params<T>,
+{
     type Views = And<V, Rest::Views>;
     type Value = (V, Rest::Value);
 

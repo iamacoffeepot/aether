@@ -224,10 +224,10 @@ fn incremental_fold_across_chunks_matches_rebuild_from_zero() -> Result<(), Box<
 
     let mut chunked = Heads::new();
     for chunk in entries.chunks(PAGE) {
-        chunked.advance(chunk)?;
+        chunked.advance_ready(chunk)?;
     }
     let mut rebuilt = Heads::new();
-    rebuilt.advance(&entries)?;
+    rebuilt.advance_ready(&entries)?;
 
     let trim = Head::<Program>::new("trim");
     let hash = Head::<Program>::new("hash");

@@ -273,6 +273,7 @@ dependencies = [
  "aether-bloomery-kinds",
  "aether-bloomery-view-derive",
  "aether-data",
+ "spin",
 ]
 
 [[package]]
@@ -1088,9 +1089,12 @@ dependencies = [
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-bloomery-reactor",
+ "aether-bloomery-view",
+ "aether-component",
  "aether-data",
  "aether-harness-substrate",
  "aether-kinds",
+ "aether-substrate",
  "aether-test-fixtures-kinds",
  "wasmparser 0.246.2",
 ]
@@ -5547,6 +5551,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "spirv"

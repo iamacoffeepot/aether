@@ -5,7 +5,7 @@ use aether_actor::{DISPATCH_HANDLED_HOLD, DISPATCH_HANDLED_RELEASE};
 
 use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::reply_table::{HeldChain, NO_REPLY_HANDLE, ReplyEntry};
-use crate::mail::SourceAddr;
+use crate::mail::{Source, SourceAddr};
 
 use super::instantiate::Placement;
 use super::{Component, MAX_DELIVERABLE_MAIL_BYTES, SMALL_REGION_BYTES};
@@ -48,15 +48,17 @@ impl Component {
     }
 
     /// Resolve the inbound mail's source `MailboxId` for the trailing
-    /// `receive_p32` frame slot (issue 2001). A peer-component origin
-    /// (`SourceAddr::Component`) yields that mailbox's raw id; every other
-    /// origin — session, remote engine, or no reply target — yields
-    /// `NO_INBOUND_SOURCE` (0). Mirrors what `source_of_p32` resolved from
-    /// the reply table, but reads the inbound's `SourceAddr` directly (the
-    /// same value the reply entry is built from) without a table lookup.
-    fn resolve_inbound_source(addr: &SourceAddr) -> u64 {
-        match addr {
+    /// `receive_p32` frame slot. A peer-component origin carries its source
+    /// directly. A correlated reply has `SourceAddr::None`, so it recovers
+    /// the replier from the reply's stamped mail id, matching `NativeCtx`.
+    /// Session, remote-engine, uncorrelated, and unstamped mail remain
+    /// sourceless.
+    fn resolve_inbound_source(env: &Envelope) -> u64 {
+        match env.sender.addr {
             SourceAddr::Component(m) => m.0,
+            SourceAddr::None if env.sender.correlation_id != Source::NO_CORRELATION => {
+                env.mail_id.map_or(NO_INBOUND_SOURCE, |id| id.sender.0)
+            }
             _ => NO_INBOUND_SOURCE,
         }
     }
@@ -151,13 +153,11 @@ impl Component {
         // sent to. For a normally-addressed actor this equals the actor's
         // own mailbox id.
         //
-        // Issue 2001: thread the resolved inbound source as the trailing
-        // slot too, so the guest's `WasmCtx::sender` is a single
-        // ctx-field read on both the in-place and top-level paths and the
-        // `source_of_p32` host round-trip can be retired. Resolved exactly
-        // as `source_of_p32` did — a peer-component origin yields its
-        // `MailboxId`, every other origin yields `NO_INBOUND_SOURCE` (0).
-        let source = Self::resolve_inbound_source(&env.sender.addr);
+        // Thread the resolved inbound source as the trailing slot so the
+        // guest's `WasmCtx::sender` is a single ctx-field read. Requests carry
+        // the peer in `SourceAddr`; replies recover the replier from their
+        // stamped mail id, as `NativeCtx::sender` does.
+        let source = Self::resolve_inbound_source(env);
         // ADR-0238 decision 3: pin each attached entry for this receive call
         // only, so the guest's decode can take a hold on a tag-1 hash
         // (`blob_hold_p32`). The payload was written verbatim: a hash names

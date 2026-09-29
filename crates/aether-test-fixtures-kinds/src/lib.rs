@@ -521,16 +521,41 @@ pub struct SummarizeInput {
     pub text: Ref<Utf8Text>,
 }
 
+/// Nested value fetched by the artifact-backed reactor view fixtures.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.resolver.value")]
+pub struct ResolverValue {
+    pub value: u64,
+}
+
+/// Trigger artifact whose typed citation makes the fixture perform a second read.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.resolver.receipt")]
+pub struct ResolverReceipt {
+    pub value: Ref<ResolverValue>,
+    pub marker: u64,
+}
+
+/// Head whose moves are folded by the artifact-backed fixture view.
+pub const RESOLVER_INPUT: Head<ResolverReceipt> = Head::new("test.bloomery.resolver.input");
+
+/// Head moved only after the fixture view decoded the nested value.
+pub const RESOLVER_PUBLISHED: Head<ResolverReceipt> = Head::new("test.bloomery.resolver.published");
+
 /// Program-bundle head the summarize-caller reactor rule names.
 pub const SUMMARIZE_BUNDLE: Head<OpaqueBytes> = Head::new("test.bloomery.summarize.bundle");
 
 /// Program the summarize-caller reactor rule invokes.
 pub const SUMMARIZE_PROGRAM: &str = "test.program.summarize";
 
+/// Async mixed-bundle program used alongside an in-flight resolving view.
+pub const ASYNC_SUMMARIZE_PROGRAM: &str = "test.program.async_summarize";
+
 /// Bundle head the mixed fixture's reactor rule names for its own program.
 pub const MIXED_BUNDLE: Head<OpaqueBytes> = Head::new("test.bloomery.mixed.bundle");
 
 const _: () = assert!(ProgramName::is_valid(SUMMARIZE_PROGRAM));
+const _: () = assert!(ProgramName::is_valid(ASYNC_SUMMARIZE_PROGRAM));
 
 /// Issue 6400: trigger that makes the correlation-carry requester send one
 /// [`CarriedRequest`] carrying `tag`, with the same `tag` bound as the

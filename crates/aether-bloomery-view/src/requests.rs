@@ -3,6 +3,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::error::Error;
 use core::fmt;
+use core::future::{Ready, ready};
 
 use crate::sequence::{SequenceError, check_next};
 use crate::view::View;
@@ -200,6 +201,7 @@ impl Default for Requests {
 
 impl View for Requests {
     type Error = RequestFoldError;
+    type Advance<'a> = Ready<Result<(), Self::Error>>;
 
     fn empty() -> Self {
         Self::new()
@@ -209,11 +211,17 @@ impl View for Requests {
         self.cursor
     }
 
-    fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error> {
-        for entry in entries {
-            self.apply(entry)?;
-        }
-        Ok(())
+    fn advance<'a>(
+        &'a mut self,
+        entries: &'a [Entry],
+        _artifacts: &'a mut crate::ArtifactResolver,
+    ) -> Self::Advance<'a> {
+        ready((|| {
+            for entry in entries {
+                self.apply(entry)?;
+            }
+            Ok(())
+        })())
     }
 }
 

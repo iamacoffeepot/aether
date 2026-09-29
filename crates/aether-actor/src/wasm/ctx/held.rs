@@ -108,6 +108,17 @@ impl<R> Held<R> {
     pub(super) const fn ticket(&self) -> u32 {
         self.ticket
     }
+
+    /// Whether this ticket came from mail without a reply target.
+    ///
+    /// Not part of the public API; generated bundle roots use this to retain
+    /// the historical behavior of ignoring one-way requests before starting
+    /// work that might need a deferred reply.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn __is_detached(&self) -> bool {
+        self.ticket == NO_REPLY_HANDLE
+    }
 }
 
 impl<R: ActorMail> Held<R> {

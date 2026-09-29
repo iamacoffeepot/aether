@@ -1,5 +1,5 @@
-//! Reactor-bundle fixture: two reactors share one views owner inside a
-//! digest-loaded root, and both publish the triggering tree as a `SetHeads`.
+//! Reactor-bundle fixture: synchronous reactors share one views owner inside a
+//! digest-loaded root, alongside an artifact-backed asynchronous view.
 //!
 //! Authors declare reactors and guards. `export!(public = […], generators = [aether_bloomery_bundle::bundle])`
 //! generates one root at [`aether_bloomery_kinds::BUNDLE_NAMESPACE`]. Load it
@@ -9,12 +9,15 @@ use std::collections::BTreeMap;
 
 use core::error::Error;
 use core::fmt;
+use core::future::{Ready, ready};
 
-use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Seq, SetHeads, Tree};
+use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Ref, Seq, SetHeads, Tree};
 use aether_bloomery_reactor::{And, Guard, reactor};
-use aether_bloomery_view::{Heads, Publish, PublishError, View, ViewCursor, view};
+use aether_bloomery_view::{ArtifactResolver, Heads, Publish, PublishError, ResolveError, View, ViewCursor, view};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
-use aether_test_fixtures_kinds::REACTOR_FOLD_FAIL_KIND;
+use aether_test_fixtures_kinds::{
+    REACTOR_FOLD_FAIL_KIND, RESOLVER_INPUT, RESOLVER_PUBLISHED, ResolverReceipt, ResolverValue,
+};
 
 const CURRENT: Head<Program> = Head::new("current");
 const PUBLISHED: Head<Tree> = Head::new("published");
@@ -44,6 +47,7 @@ impl Error for FoldBoom {}
 
 impl View for FoldTally {
     type Error = FoldBoom;
+    type Advance<'a> = Ready<Result<(), Self::Error>>;
 
     fn empty() -> Self {
         Self { cursor: Seq(0) }
@@ -53,14 +57,16 @@ impl View for FoldTally {
         self.cursor
     }
 
-    fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error> {
-        if entries.iter().any(|entry| entry.kind == REACTOR_FOLD_FAIL_KIND) {
-            return Err(FoldBoom);
-        }
-        if let Some(last) = entries.last() {
-            self.cursor = last.seq;
-        }
-        Ok(())
+    fn advance<'a>(&'a mut self, entries: &'a [Entry], _artifacts: &'a mut ArtifactResolver) -> Self::Advance<'a> {
+        ready((|| {
+            if entries.iter().any(|entry| entry.kind == REACTOR_FOLD_FAIL_KIND) {
+                return Err(FoldBoom);
+            }
+            if let Some(last) = entries.last() {
+                self.cursor = last.seq;
+            }
+            Ok(())
+        })())
     }
 }
 
@@ -153,4 +159,56 @@ impl Reactor for SourceWitness {
     }
 }
 
-aether_actor::export!(public = [SourcePublisher, SourceWitness], generators = [aether_bloomery_bundle::bundle]);
+#[derive(Default)]
+struct ResolvedReceipts {
+    cursor: ViewCursor,
+    receipt: Option<Ref<ResolverReceipt>>,
+    value: u64,
+}
+
+#[view(cursor = cursor)]
+impl View for ResolvedReceipts {
+    #[fold]
+    async fn moved(
+        &mut self,
+        change: HeadMoved<ResolverReceipt>,
+        artifacts: &mut ArtifactResolver,
+    ) -> Result<(), ResolveError> {
+        if change.head() != &RESOLVER_INPUT {
+            return Ok(());
+        }
+        let receipt = artifacts.read(change.to()).await?;
+        let ResolverValue { value } = artifacts.read(receipt.value).await?;
+        self.receipt = Some(change.to());
+        self.value = value;
+        Ok(())
+    }
+}
+
+struct Resolved(Ref<ResolverReceipt>);
+
+impl Guard<HeadMoved<ResolverReceipt>> for Resolved {
+    type Views = ResolvedReceipts;
+
+    fn resolve(trigger: &HeadMoved<ResolverReceipt>, view: &ResolvedReceipts) -> Option<Self> {
+        (trigger.head() == &RESOLVER_INPUT && view.receipt == Some(trigger.to()) && view.value == 42)
+            .then_some(Self(trigger.to()))
+    }
+}
+
+pub struct ResolverPublisher;
+
+#[reactor]
+impl Reactor for ResolverPublisher {
+    const NAMESPACE: &'static str = "test.bloomery.resolver.publisher";
+
+    #[rule]
+    fn publish_resolved(&self, _change: HeadMoved<ResolverReceipt>, resolved: Resolved) -> SetHeads {
+        SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&RESOLVER_PUBLISHED, None, resolved.0)])
+    }
+}
+
+aether_actor::export!(
+    public = [SourcePublisher, SourceWitness, ResolverPublisher],
+    generators = [aether_bloomery_bundle::bundle]
+);

@@ -32,7 +32,6 @@ pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
         let programs = #state {
             root: #program::Root::new(&#table),
             invokers: #program::__macro_internals::BTreeMap::new(),
-            fetches: #program::__macro_internals::BTreeMap::new(),
             calls: #program::__macro_internals::BTreeMap::new(),
         };
     };
@@ -63,12 +62,6 @@ fn expand_state(state: &Ident, program: &TokenStream2) -> TokenStream2 {
             /// Each live invocation's `Invoke` sender, keyed by the invocation.
             invokers: #program::__macro_internals::BTreeMap<
                 ::aether_actor::ErasedActorRef,
-                ::aether_actor::ErasedActorRef,
-            >,
-            /// The invocation each relayed fetch answers to, keyed by the
-            /// root's own request.
-            fetches: #program::__macro_internals::BTreeMap<
-                #program::__macro_internals::RequestId,
                 ::aether_actor::ErasedActorRef,
             >,
             /// The invocation each relayed API call answers to, keyed by the
@@ -171,22 +164,13 @@ fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
             };
             ctx.send_to(invoker, &request);
             let fetch = #program::__macro_internals::RequestId(ctx.prev_correlation());
-            self.programs.fetches.insert(fetch, sender);
-        }
-
-        #[handler::manual]
-        fn on_read_artifact_result(
-            &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
-            result: #program::kinds::ReadArtifactResult,
-        ) {
-            let Some(fetch) = ctx.in_reply_to() else {
-                return;
-            };
-            let Some(invocation) = self.programs.fetches.remove(&fetch) else {
-                return;
-            };
-            ctx.send_to(invocation, &result);
+            self.artifacts.routes.insert(
+                fetch,
+                __AetherBloomeryBundleArtifactRoute::Program {
+                    driver: invoker,
+                    invocation: sender,
+                },
+            );
         }
 
         #[handler::manual]

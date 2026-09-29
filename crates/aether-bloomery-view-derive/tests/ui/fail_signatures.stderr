@@ -1,8 +1,8 @@
-error: #[fold] methods are synchronous; remove `async`
-  --> tests/ui/fail_signatures.rs:20:5
+error: async #[fold] methods take `&mut self`, one owned typed event, and `&mut ArtifactResolver`
+  --> tests/ui/fail_signatures.rs:20:20
    |
 20 |     async fn event(&mut self, _event: Event) {}
-   |     ^^^^^
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: #[fold] methods cannot be `const`
   --> tests/ui/fail_signatures.rs:27:5

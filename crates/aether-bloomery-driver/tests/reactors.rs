@@ -5,14 +5,17 @@ use std::fs;
 
 use aether_bloomery_journal::{Batch, JournalReader, Seq};
 use aether_bloomery_kinds::{
-    Activated, Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult, OpaqueBytes, Processed, ProgramName,
-    ProgramRef, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, RuleName,
-    Transition, Utf8Text,
+    Activated, ActivationRejected, Call, CallOutcome, Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult,
+    NativeOrigin, OpaqueBytes, Processed, ProgramName, ProgramRef, ReactionFailed, ReactorName, ReactorSet,
+    RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, RuleName, Transition, Utf8Text,
 };
-use aether_bloomery_view::{Activations, HeadActivation};
+use aether_bloomery_view::{Activations, HeadActivation, Heads};
 use aether_harness_bloomery::{BloomeryHarness, Record};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_test_fixtures_kinds::{MIXED_BUNDLE, SUMMARIZE_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
+use aether_test_fixtures_kinds::{
+    ASYNC_SUMMARIZE_PROGRAM, MIXED_BUNDLE, RESOLVER_INPUT, RESOLVER_PUBLISHED, ResolverReceipt, ResolverValue,
+    SUMMARIZE_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput,
+};
 
 /// The input head the reactor fixtures watch.
 const INPUT: Head<SummarizeInput> = Head::new("test.bloomery.summarize.input");
@@ -182,6 +185,26 @@ fn seed_barrier_batch() -> Result<(Batch, Digest), Box<dyn Error>> {
     Ok((batch, second.digest()))
 }
 
+fn stage_resolver_receipt(
+    batch: &mut Batch,
+    marker: u64,
+    value: u64,
+) -> Result<(Ref<ResolverValue>, Ref<ResolverReceipt>), Box<dyn Error>> {
+    let value = batch.stage_encoded(&ResolverValue { value })?;
+    let receipt = batch.stage_encoded(&ResolverReceipt { value, marker })?;
+    Ok((value, receipt))
+}
+
+fn activate(mut harness: BloomeryHarness, seed: &Seed, through: Seq) -> (BloomeryHarness, Seq) {
+    assert_eq!(harness.settle(through), through);
+    assert_eq!(
+        harness.move_head(&MoveHead::new(&ReactorSet::ROOT, Ref::from_digest(seed.set), through.0)),
+        MoveHeadResult::Committed { seq: through.0 + 1 }
+    );
+    let activated = harness.settle(Seq(through.0 + 1));
+    (harness, activated)
+}
+
 #[test]
 fn await_processed_waits_for_a_live_append_it_is_woken_for() -> Result<(), Box<dyn Error>> {
     // Catches a warn-dropped `WatchHeadResult` (routing never wakes for another
@@ -259,5 +282,91 @@ fn a_mixed_bundle_serves_its_reactor_and_its_program_from_one_load() -> Result<(
     harness.assert_appended(Seq(2), &reaction_records(&seed, "test.bloomery.mixed.caller")?);
     let transition = harness.record::<Transition>(Seq(7));
     assert!(harness.stores(&transition.result), "the staged result is stored");
+    Ok(())
+}
+
+#[test]
+fn historical_and_live_resolving_views_produce_the_same_intent() -> Result<(), Box<dyn Error>> {
+    let Some(reactor_path) = require_wasm("aether_test_fixtures_reactor") else {
+        return Ok(());
+    };
+    let Some(program_path) = require_wasm("aether_test_fixtures_program") else {
+        return Ok(());
+    };
+    let reactor_wasm = fs::read(&reactor_path)?;
+    let program_wasm = fs::read(&program_path)?;
+    let (mut batch, seed) = seed_batch(Bundles::Split { program: &program_wasm, reactor: &reactor_wasm })?;
+    let (_, historical) = stage_resolver_receipt(&mut batch, 1, 42)?;
+    let (_, live) = stage_resolver_receipt(&mut batch, 2, 42)?;
+    batch.push_event(&RecordedHeadMove::new(RecordedHead::from(&RESOLVER_INPUT), historical.digest()), None)?;
+
+    let (mut harness, activated) = activate(BloomeryHarness::start([batch]), &seed, Seq(3));
+    assert_eq!(activated, Seq(5), "activation waits for historical artifact-backed warming");
+    assert_eq!(
+        harness.move_head(&MoveHead::new(&RESOLVER_INPUT, live, activated.0)),
+        MoveHeadResult::Committed { seq: 6 }
+    );
+    assert_eq!(harness.settle(Seq(6)), Seq(7));
+    assert_eq!(harness.fold::<Heads>().get(&RESOLVER_PUBLISHED), Some(live));
+    Ok(())
+}
+
+#[test]
+fn mixed_bundle_correlates_simultaneous_program_and_view_fetches() -> Result<(), Box<dyn Error>> {
+    let Some(mixed_path) = require_wasm("aether_test_fixtures_mixed_bundle") else {
+        return Ok(());
+    };
+    let mixed_wasm = fs::read(&mixed_path)?;
+    let (mut batch, seed) = seed_batch(Bundles::Mixed(&mixed_wasm))?;
+    let (_, receipt) = stage_resolver_receipt(&mut batch, 3, 42)?;
+    let (mut harness, activated) = activate(BloomeryHarness::start([batch]), &seed, Seq(2));
+    assert_eq!(activated, Seq(4));
+
+    let moved = harness.begin_move_head(&MoveHead::new(&RESOLVER_INPUT, receipt, activated.0));
+    let call = harness.begin_call(&Call {
+        program: MIXED_BUNDLE,
+        name: ProgramName::new(ASYNC_SUMMARIZE_PROGRAM)?,
+        input: seed.input,
+        origin: NativeOrigin::new("test.resolver.concurrent")?,
+        key: 91,
+    });
+    assert_eq!(harness.wait(moved), MoveHeadResult::Committed { seq: 5 });
+    assert!(matches!(harness.wait(call), CallOutcome::Transition { key: 91, .. }));
+    let _ = harness.settle(Seq(5));
+    assert_eq!(harness.fold::<Heads>().get(&RESOLVER_PUBLISHED), Some(receipt));
+    Ok(())
+}
+
+#[test]
+fn missing_nested_artifact_fails_the_real_wasm_fold_without_an_intent() -> Result<(), Box<dyn Error>> {
+    let Some(reactor_path) = require_wasm("aether_test_fixtures_reactor") else {
+        return Ok(());
+    };
+    let Some(program_path) = require_wasm("aether_test_fixtures_program") else {
+        return Ok(());
+    };
+    let reactor_wasm = fs::read(&reactor_path)?;
+    let program_wasm = fs::read(&program_path)?;
+    let (mut batch, seed) = seed_batch(Bundles::Split { program: &program_wasm, reactor: &reactor_wasm })?;
+    let (value, receipt) = stage_resolver_receipt(&mut batch, 4, 42)?;
+    let (mut harness, activated) = activate(BloomeryHarness::start([batch]), &seed, Seq(2));
+    assert_eq!(activated, Seq(4));
+
+    let hex = value.digest().to_string();
+    fs::remove_file(harness.journal_path().join("blobs").join(&hex[..2]).join(hex))?;
+    assert_eq!(
+        harness.move_head(&MoveHead::new(&RESOLVER_INPUT, receipt, activated.0)),
+        MoveHeadResult::Committed { seq: 5 }
+    );
+    assert_eq!(harness.settle(Seq(5)), Seq(7));
+    let failed = harness.record::<ReactionFailed>(Seq(6));
+    assert_eq!(failed.bundle, seed.reactor);
+    assert_eq!(failed.reactor, None);
+    assert!(failed.reason.as_str().contains("could not be read"), "{}", failed.reason.as_str());
+    let rejected = harness.record::<ActivationRejected>(Seq(7));
+    assert_eq!(rejected.head, seed.member);
+    assert_eq!(rejected.bundle, seed.reactor);
+    assert_eq!(rejected.reason, failed.reason);
+    assert_eq!(harness.fold::<Heads>().get(&RESOLVER_PUBLISHED), None);
     Ok(())
 }

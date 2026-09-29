@@ -1,5 +1,6 @@
 //! Reactor protocol mail: `WarmEntries` validation and pinned kind ids.
 
+use aether_actor::HeldReply;
 use aether_bloomery_kinds::{
     Evaluated, Event, JournalEntry, Status, StatusQuery, Warm, WarmEntries, WarmEntriesError, Warmed,
 };
@@ -51,6 +52,12 @@ fn reactor_protocol_kind_ids_are_pinned() {
     assert_eq!(Evaluated::ID, TRIPWIRE_EVALUATED);
     assert_eq!(StatusQuery::ID, TRIPWIRE_STATUS_QUERY);
     assert_eq!(Status::ID, TRIPWIRE_STATUS);
+}
+
+#[test]
+fn held_reactor_replies_fail_closed_with_uncorrelated_sequences() {
+    assert!(matches!(Warmed::unanswered(), Warmed::Poisoned { last_trusted: 0, .. }));
+    assert!(matches!(Evaluated::unanswered(), Evaluated::Poisoned { seq: 0, last_trusted: 0, .. }));
 }
 
 const TRIPWIRE_WARM: KindId = KindId(0x2ff5_d120_60f2_d51e);

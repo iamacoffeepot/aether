@@ -3,6 +3,7 @@
 use std::convert::Infallible;
 use std::error::Error;
 use std::fmt;
+use std::future::{Ready, ready};
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -45,6 +46,7 @@ struct Probe {
 
 impl View for Probe {
     type Error = Infallible;
+    type Advance<'a> = Ready<Result<(), Self::Error>>;
 
     fn empty() -> Self {
         CONSTRUCTS.fetch_add(1, Ordering::Relaxed);
@@ -55,14 +57,20 @@ impl View for Probe {
         self.cursor
     }
 
-    fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error> {
-        if let Some(first) = entries.first() {
-            assert_eq!(first.seq.0, self.cursor.0 + 1, "catch-up must not replay an already-folded entry");
-        }
-        if let Some(last) = entries.last() {
-            self.cursor = last.seq;
-        }
-        Ok(())
+    fn advance<'a>(
+        &'a mut self,
+        entries: &'a [Entry],
+        _artifacts: &'a mut aether_bloomery_view::ArtifactResolver,
+    ) -> Self::Advance<'a> {
+        ready({
+            if let Some(first) = entries.first() {
+                assert_eq!(first.seq.0, self.cursor.0 + 1, "catch-up must not replay an already-folded entry");
+            }
+            if let Some(last) = entries.last() {
+                self.cursor = last.seq;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -83,6 +91,7 @@ struct Stuck {
 
 impl View for Stuck {
     type Error = Infallible;
+    type Advance<'a> = Ready<Result<(), Self::Error>>;
 
     fn empty() -> Self {
         Self { cursor: Seq(0) }
@@ -92,8 +101,12 @@ impl View for Stuck {
         self.cursor
     }
 
-    fn advance(&mut self, _entries: &[Entry]) -> Result<(), Self::Error> {
-        Ok(())
+    fn advance<'a>(
+        &'a mut self,
+        _entries: &'a [Entry],
+        _artifacts: &'a mut aether_bloomery_view::ArtifactResolver,
+    ) -> Self::Advance<'a> {
+        ready(Ok(()))
     }
 }
 
@@ -112,6 +125,7 @@ struct NonzeroEmpty;
 
 impl View for NonzeroEmpty {
     type Error = Infallible;
+    type Advance<'a> = Ready<Result<(), Self::Error>>;
 
     fn empty() -> Self {
         Self
@@ -121,8 +135,12 @@ impl View for NonzeroEmpty {
         Seq(1)
     }
 
-    fn advance(&mut self, _entries: &[Entry]) -> Result<(), Self::Error> {
-        Ok(())
+    fn advance<'a>(
+        &'a mut self,
+        _entries: &'a [Entry],
+        _artifacts: &'a mut aether_bloomery_view::ArtifactResolver,
+    ) -> Self::Advance<'a> {
+        ready(Ok(()))
     }
 }
 
@@ -156,6 +174,7 @@ struct Exploding {
 
 impl View for Exploding {
     type Error = Boom;
+    type Advance<'a> = Ready<Result<(), Self::Error>>;
 
     fn empty() -> Self {
         Self { cursor: Seq(0) }
@@ -165,10 +184,16 @@ impl View for Exploding {
         self.cursor
     }
 
-    fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error> {
-        ADVANCES.fetch_add(1, Ordering::Relaxed);
-        self.cursor = entries.last().expect("nonempty fold").seq;
-        Err(Boom)
+    fn advance<'a>(
+        &'a mut self,
+        entries: &'a [Entry],
+        _artifacts: &'a mut aether_bloomery_view::ArtifactResolver,
+    ) -> Self::Advance<'a> {
+        ready({
+            ADVANCES.fetch_add(1, Ordering::Relaxed);
+            self.cursor = entries.last().expect("nonempty fold").seq;
+            Err(Boom)
+        })
     }
 }
 

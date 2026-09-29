@@ -14,7 +14,7 @@ use aether_data::{Cites, ErasedActorPath, Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::LoadComponent;
-use aether_test_fixtures_kinds::{MIXED_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
+use aether_test_fixtures_kinds::{ASYNC_SUMMARIZE_PROGRAM, MIXED_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 use wasmparser::{Parser, Payload};
 
 fn moved_to<K: Kind + 'static>(seq: u64, head: &'static str, to: Ref<K>) -> JournalEntry {
@@ -77,8 +77,10 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
     let digest = artifact_digest(OpaqueBytes::ID, &wasm).to_string();
 
     let programs = declarations(&section_bytes(&wasm, PROGRAMS_SECTION)).expect("programs section decodes");
-    assert_eq!(programs.len(), 1, "the programs section lists the one program");
-    assert_eq!(programs[0].program.name.as_str(), SUMMARIZE_PROGRAM);
+    assert_eq!(programs.len(), 2, "the programs section lists both programs");
+    let names: Vec<_> = programs.iter().map(|declared| declared.program.name.as_str()).collect();
+    assert!(names.contains(&SUMMARIZE_PROGRAM), "{names:?}");
+    assert!(names.contains(&ASYNC_SUMMARIZE_PROGRAM), "{names:?}");
     let reactors = reactor_declarations(&section_bytes(&wasm, REACTORS_SECTION)).expect("reactors section decodes");
     assert_eq!(reactors.len(), 1, "the reactors section lists the one reactor");
     assert_eq!(reactors[0].name().as_str(), "test.bloomery.mixed.caller");

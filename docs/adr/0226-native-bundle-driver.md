@@ -13,6 +13,7 @@
 - **Amended:** 2026-09-25 — decision 10: `ReadClosure` answers with shared `Blob` values rather than inline bytes, and `ClosureLimit::MAX_BYTES` rises from 16 MiB to 4 GiB (ADR-0238 decision 10).
 - **Amended:** 2026-09-28 — decisions 6, 8, and 10: reactor calls may carry a fresh encoded input that the driver persists atomically with `Requested`; digest-only v1 intents remain decodable under their pinned kind id (issue #7011).
 - **Amended:** 2026-09-28 — decisions 6 and 8: `SetHeads` atomically validates and appends an ordered list of typed head changes; original `SetHead` intents remain decodable under their pinned kind id (issue #7016).
+- **Amended:** 2026-09-28 — decision 12: bundle-owned view folds resolve typed artifacts through the same driver fetch service while holding their Warm/Event reply (issue #7026).
 
 ## Context
 
@@ -315,6 +316,51 @@ Nothing on main can carry any of this yet:
     The driver pulls events with `ReadEvents` and uses `WatchHead` to
     wake. Its outbound mail is `LoadComponent`, the root protocols of
     ADR-0224 and ADR-0225, and the journal commands.
+
+12. **View artifact resolution.** A bundle-owned fold can request an
+    immutable artifact using the existing `ReadArtifact` mail. Its root sends
+    the request to the driver that supplied the active `Warm` or `Event`.
+    The driver services this fetch while awaiting the fold's reply, using
+    the same 64 MiB found-artifact cache and coalesced journal reads used by
+    programs. Fetch service must not wait for journal-fold progress: doing
+    so would deadlock the operation whose fold needs the artifact.
+
+    A root has one artifact-result dispatcher. It checks both the root's
+    request id and expected driver before consuming a route, then delivers
+    the result to the waiting program invocation or view continuation.
+    Unknown, duplicate, late, and wrong-sender replies cannot consume a
+    different operation's response. Mixed bundles share the dispatcher
+    without changing program API-call routing.
+
+    A reply has no reply target, but still has a sender. For correlated
+    replies, WASM dispatch recovers that sender from the reply's mail
+    identity, matching the native context, and fills the existing inbound
+    source frame slot. This enables the expected-driver check without
+    granting a reply-of-a-reply target or changing the ABI shape.
+
+    The fold validates digest, kind, full content hash, and storage decode
+    even when the driver supplies cached content. It may discover another
+    reference in the decoded value and request that next. The initial view
+    resolver allows one outstanding read per active fold and releases its
+    transport bytes after decoding; it adds no persistent bundle cache.
+
+    The root retains the exact entries, continuation, previous trusted
+    cursor, and typed held reply until every required view finishes.
+    `Warm` remains fold-only; `Event` evaluates rules only after this
+    boundary. A pending fetch advances neither the reported trusted cursor
+    nor reactor evaluation. Another Warm/Event cannot replace or overtake
+    the active operation. Dropping a held reply inside a live guest can emit
+    its typed fallback. Host-driven component unload instead settles the host
+    hold unanswered and discards the guest continuation; no ticket survives
+    unload.
+
+    Missing content, invalid data, transport failure, and fold errors use
+    existing `Warmed::Poisoned` / `Evaluated::Poisoned` outcomes. These are
+    view-preparation failures, not successful defaults or declined guards;
+    no new program fault reason or journal event is introduced. Restart
+    and batched warming resolve the same immutable references from the
+    same historical prefix. Typed citations must retain those artifacts;
+    this fetch service does not alter retention reachability.
 
 ## Consequences
 

@@ -149,6 +149,15 @@ impl BloomeryHarness {
         outcome
     }
 
+    /// Send one `Call` without waiting, so a scenario can put another driver
+    /// operation in flight before observing the outcome.
+    ///
+    /// The caller must pass the returned request to [`Self::wait`] and use
+    /// [`Self::settle`] when it needs the call's complete causal chain.
+    pub fn begin_call(&mut self, call: &Call) -> Pending<CallOutcome> {
+        self.request(self.mounted.driver, call)
+    }
+
     /// Send one fenced `MoveHead` to the journal owner and wait for its result.
     ///
     /// # Panics
@@ -157,6 +166,12 @@ impl BloomeryHarness {
     pub fn move_head(&mut self, move_head: &MoveHead) -> MoveHeadResult {
         let pending = self.request(self.mounted.journal, move_head);
         self.wait(pending)
+    }
+
+    /// Send one fenced `MoveHead` without waiting, so another request can be
+    /// placed in flight before either reply is observed.
+    pub fn begin_move_head(&mut self, move_head: &MoveHead) -> Pending<MoveHeadResult> {
+        self.request(self.mounted.journal, move_head)
     }
 
     /// Send one fenced `Publish` to the journal owner and wait for its result:

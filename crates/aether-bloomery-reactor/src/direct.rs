@@ -17,7 +17,11 @@ pub trait Direct: Publish + Send {
     fn from_views(views: <Self::Views as ViewSet>::Refs<'_>) -> Self;
 }
 
-impl<V: Publish + Send> Direct for V {
+impl<V> Direct for V
+where
+    V: Publish + Send,
+    for<'a> V::Advance<'a>: Send,
+{
     type Views = V;
 
     fn from_views(view: &V) -> Self {

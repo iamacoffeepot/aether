@@ -8,6 +8,101 @@ architectural decision about bundle-owned views. This companion preserves the
 authoring examples, runtime exploration, and implementation seams. Accepting
 that ADR does not settle the execution or lifecycle choices discussed here.
 
+## Current artifact-resolution pipeline
+
+The original exploration below retains candidate peer-actor and `EventBatch`
+shapes. The implemented bundle architecture is described by ADR-0225 and
+ADR-0226: one generated root hosts the shared view owner, uses `Warm` for
+fold-only batches, and evaluates reactor rules locally after a live `Event`.
+The artifact-resolution extension in issue #7026 applies to that root.
+
+Views already belong to the bundle. Exported reactors identify their direct
+view parameters and guard dependencies through the trait-based dependency
+visitor. This supplies the concrete constructors and deduplicates shared
+instances. No separate view export declaration is needed.
+
+An artifact-backed fold receives a read-only resolver. For an application
+with a stored `Receipt` kind and a `ReceiptTotals` aggregate, a handler can
+look like this:
+
+```rust
+#[fold]
+async fn committed(
+    &mut self,
+    moved: HeadMoved<Receipt>,
+    artifacts: &mut ArtifactResolver,
+) -> Result<(), ResolveError> {
+    let receipt = artifacts.read(moved.to()).await?;
+    self.apply_receipt(receipt);
+    Ok(())
+}
+```
+
+The handler belongs in a `#[view(cursor = cursor)] impl View` block. Query
+helpers such as `apply_receipt` remain ordinary inherent methods. Synchronous
+`#[fold]` bodies keep their existing signatures. The portable `View::advance`
+contract is awaitable and takes the resolver explicitly; callers implementing
+that trait manually migrate their advancement method.
+
+Generated async folds require `Send` futures, as async programs already do.
+Values retained across an await must therefore be safe to move between
+threads. This does not run a fold concurrently. Existing synchronous authored
+folds and manual portable views keep their previous freedom from a blanket
+`Send` bound; the reactor owner requires sendable continuations.
+
+The computation itself selects the artifacts. It can use a reference in an
+entry, its accumulated state, or a value returned by an earlier read. Several
+sequential reads may belong to one event; there is no one-artifact-per-event
+restriction. There is initially one outstanding read per active fold.
+
+```text
+Warm range or live Event fixes a journal prefix
+    -> infer and catch up every required view
+    -> fold requests Ref<K>
+    -> root holds its reply and retains the live continuation
+    -> ReadArtifact -> sending driver -> existing cache / journal owner
+    -> verify reply correlation and sender
+    -> verify requested digest, kind, full content hash, storage decode
+    -> resume the same fold, possibly requesting another reference
+    -> validate all required view cursors
+    -> Warmed, or prepare inputs and evaluate live rules
+```
+
+These boundaries compose rather than substitute for one another. Journal
+order determines which references are relevant. Content addressing preserves
+their values while delivery is suspended. Holding the continuation preserves
+mutations already performed by the fold. Holding the typed reply prevents
+scheduling settlement from being mistaken for completed preparation.
+
+While a read is pending, the root reports its previous trusted cursor,
+retains entries required by the calculation, and admits no overtaking
+Warm/Event. Guards and rules cannot borrow a partially advanced view. A read
+failure poisons the fold even if the handler catches its error; failure never
+becomes a default aggregate or a guard decline. The recorded source event
+remains in history. Teardown drops the continuation and releases transport
+buffers. A live guest that drops its held reply can emit the typed fallback.
+Host-driven component unload settles the host hold unanswered and discards the
+guest continuation.
+
+Program and view fetches share one generated reply dispatcher. Request id
+and expected driver identify the destination before a route is consumed.
+This allows both roles in one bundle without duplicate result handlers or
+reply collisions. The existing driver can answer artifact reads while it
+waits for Warm/Event completion. Its 64 MiB cache and read coalescing remain
+the shared fetch policy; the view resolver adds no persistent cache.
+
+Replay requires both the same ordered entries and the referenced immutable
+content. Applications must retain that content through storage citations.
+Opaque JSON containing a digest does not acquire citation edges merely
+because a view can fetch it. Receipt encoding and retention remain the
+application integration's responsibility.
+
+Validation crosses these boundaries: mutate before an await and prove it
+happens once, follow nested references, reject invalid and misrouted replies,
+compare batched warming with live folding and restart, and run the actual
+WASM bundle against the native driver's fetch service. A scripted successful
+`Evaluated` reply cannot establish that this composition works.
+
 ## Context
 
 Bloomery needs journal-defined reactors whose executable meaning remains
@@ -365,19 +460,29 @@ prepare reactions at every relevant intermediate event boundary.
 This is the essential difference in the generated views actor:
 
 ```rust
-fn on_event(&mut self, event: Event) -> Result<PreparedDeliveries, ViewError> {
-    self.views.advance(std::slice::from_ref(&event.entry))?;
+async fn prepare_event(
+    &mut self,
+    event: Event,
+    artifacts: &mut ArtifactResolver,
+) -> Result<PreparedDeliveries, ViewError> {
+    self.views.advance(std::slice::from_ref(&event.entry), artifacts).await?;
     self.prepare_matching_inputs(&event.entry)
 }
 
-fn on_event_batch(&mut self, batch: EventBatch) -> Result<(), ViewError> {
-    self.views.advance(&batch.entries)
+async fn warm_views(
+    &mut self,
+    batch: EventBatch,
+    artifacts: &mut ArtifactResolver,
+) -> Result<(), ViewError> {
+    self.views.advance(&batch.entries, artifacts).await
 }
 ```
 
-These methods assume all required views have been warmed to the preceding
-position. The generated handler sends the prepared deliveries through the
-existing actor mail path and retains their lifecycle correlation.
+These schematic futures assume all required views have been warmed to the
+preceding position. They describe the calculation, not asynchronous actor
+handlers: generated handlers retain and poll the live continuation, send
+artifact requests, and resume it on correlated replies. The implementation
+uses `Warm` for the fold-only batch shown here as `EventBatch`.
 
 ### 6. Place construction and updates in the application lifecycle
 

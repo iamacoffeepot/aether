@@ -53,6 +53,7 @@ impl Owner {
     where
         T: Trigger,
         D: Direct,
+        for<'a> D::Advance<'a>: Send,
         G: Guard<T>,
     {
         match self.prepare::<T, ViewArg<D, GuardArg<G>>>()? {
@@ -74,6 +75,7 @@ pub fn prepare<T, D, G>(entries: &[Entry]) -> Result<Option<Prepared<T, D, G>>, 
 where
     T: Trigger,
     D: Direct,
+    for<'a> D::Advance<'a>: Send,
     G: Guard<T>,
 {
     let mut owner = Owner::new();

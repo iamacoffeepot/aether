@@ -3,8 +3,13 @@
 use alloc::boxed::Box;
 use core::error::Error;
 use core::fmt;
+use core::future::Future;
+use core::marker::PhantomData;
+use core::mem;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
-use aether_bloomery_kinds::{DecodeError, Seq};
+use aether_bloomery_kinds::{DecodeError, Entry, Seq};
 
 use crate::sequence::{SequenceError, check_next as check_sequence};
 
@@ -111,3 +116,43 @@ impl From<SequenceError> for ViewFoldError {
 pub fn check_next(cursor: ViewCursor, actual: Seq) -> Result<(), ViewFoldError> {
     check_sequence(cursor.get(), actual).map_err(ViewFoldError::from)
 }
+
+/// Immediately-polled synchronous authored fold without storing its result.
+///
+/// Its `Send` implementation depends on the view borrow, not on the handler's
+/// error type, so the reactor owner applies its existing `V: Send` boundary
+/// without strengthening the portable [`crate::View`] contract.
+#[doc(hidden)]
+pub struct SyncAdvance<'a, V, E> {
+    state: SyncAdvanceState<'a, V>,
+    entries: &'a [Entry],
+    apply: fn(&mut V, &[Entry]) -> Result<(), E>,
+    _error: PhantomData<fn() -> E>,
+}
+
+enum SyncAdvanceState<'a, V> {
+    Ready(&'a mut V),
+    Consumed,
+}
+
+impl<'a, V, E> SyncAdvance<'a, V, E> {
+    #[must_use]
+    pub fn new(view: &'a mut V, entries: &'a [Entry], apply: fn(&mut V, &[Entry]) -> Result<(), E>) -> Self {
+        Self { state: SyncAdvanceState::Ready(view), entries, apply, _error: PhantomData }
+    }
+}
+
+impl<V, E> Future for SyncAdvance<'_, V, E> {
+    type Output = Result<(), E>;
+
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        let state = mem::replace(&mut this.state, SyncAdvanceState::Consumed);
+        let SyncAdvanceState::Ready(view) = state else {
+            panic!("synchronous view advance polled after completion")
+        };
+        Poll::Ready((this.apply)(view, this.entries))
+    }
+}
+
+impl<V, E> Unpin for SyncAdvance<'_, V, E> {}

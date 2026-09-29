@@ -1131,6 +1131,41 @@ fn deliver_threads_component_source_to_guest() {
 }
 
 #[test]
+fn deliver_threads_correlated_reply_sender_to_guest() {
+    use crate::mail::{MailboxId as M, Source, SourceAddr};
+
+    let mut component = instantiate(&wat_stores_source());
+    let replier = M(0x8888_0000_7654_3210);
+    let parts = DispatchParts {
+        sender: Source::with_correlation(SourceAddr::None, 0x5151),
+        mail_id: Some(MailId::new(replier, 7)),
+        ..DispatchParts::new(aether_data::KindId(0), MailRef::from(Vec::new()))
+    };
+    component.deliver(&Envelope::disarmed_at(parts, M(0))).expect("deliver");
+
+    assert_eq!(
+        component.read_u32(500),
+        0x7654_3210,
+        "a correlated reply must expose its stamped replier as the inbound source",
+    );
+}
+
+#[test]
+fn deliver_keeps_uncorrelated_none_sourceless_when_mail_is_stamped() {
+    use crate::mail::{MailboxId as M, Source};
+
+    let mut component = instantiate(&wat_stores_source());
+    let parts = DispatchParts {
+        sender: Source::NONE,
+        mail_id: Some(MailId::new(M(0x9999_0000_1234_5678), 7)),
+        ..DispatchParts::new(aether_data::KindId(0), MailRef::from(Vec::new()))
+    };
+    component.deliver(&Envelope::disarmed_at(parts, M(0))).expect("deliver");
+
+    assert_eq!(component.read_u32(500), 0, "uncorrelated mail with no reply target must remain sourceless");
+}
+
+#[test]
 fn deliver_threads_zero_source_for_session_origin() {
     use crate::mail::{MailboxId as M, Source, SourceAddr};
     use aether_data::{SessionToken, Uuid};

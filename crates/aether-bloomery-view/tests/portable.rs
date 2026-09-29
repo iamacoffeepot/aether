@@ -45,7 +45,12 @@ fn contiguous_head_move_and_irrelevant_entries_lookup_typed_heads() -> Result<()
     let tree_head = Head::<Tree>::new("trim");
     let mut heads = Heads::new();
 
-    heads.advance(&[moved(1, "trim", first)?, note(2, 9)?, moved(3, "trim", second)?, moved(4, "trim", tree)?])?;
+    heads.advance_ready(&[
+        moved(1, "trim", first)?,
+        note(2, 9)?,
+        moved(3, "trim", second)?,
+        moved(4, "trim", tree)?,
+    ])?;
 
     assert_eq!(heads.cursor(), Seq(4));
     assert_eq!(heads.get(&program_head), Some(second));

@@ -31,7 +31,7 @@ fn published_heads_round_trip_cursor_and_typed_bindings() -> Result<(), Box<dyn 
     let program = digest_ref::<Program>(1);
     let tree = digest_ref::<Tree>(2);
     let mut heads = Heads::new();
-    heads.advance(&[moved(1, "main", program)?, moved(2, "main", tree)?])?;
+    heads.advance_ready(&[moved(1, "main", program)?, moved(2, "main", tree)?])?;
 
     let bytes = heads.encode()?;
     let restored = Heads::decode(&bytes)?;
@@ -52,10 +52,10 @@ fn later_folds_do_not_change_a_decoded_snapshot() -> Result<(), Box<dyn Error>> 
     let second = digest_ref::<Program>(2);
     let head = Head::<Program>::new("main");
     let mut live = Heads::new();
-    live.advance(&[moved(1, "main", first)?])?;
+    live.advance_ready(&[moved(1, "main", first)?])?;
     let owned = Heads::decode(&live.encode()?)?;
 
-    live.advance(&[moved(2, "main", second)?])?;
+    live.advance_ready(&[moved(2, "main", second)?])?;
     assert_eq!(owned.cursor(), Seq(1));
     assert_eq!(owned.get(&head), Some(first));
     assert_eq!(live.cursor(), Seq(2));
@@ -67,7 +67,7 @@ fn later_folds_do_not_change_a_decoded_snapshot() -> Result<(), Box<dyn Error>> 
 fn malformed_published_bytes_are_refused() -> Result<(), Box<dyn Error>> {
     // Bug: truncated or trailing snapshot bytes still construct a Heads value.
     let mut heads = Heads::new();
-    heads.advance(&[moved(1, "main", digest_ref::<Program>(1))?])?;
+    heads.advance_ready(&[moved(1, "main", digest_ref::<Program>(1))?])?;
     let bytes = heads.encode()?;
 
     assert!(Heads::decode(&[]).is_err());

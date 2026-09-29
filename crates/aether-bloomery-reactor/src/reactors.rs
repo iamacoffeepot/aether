@@ -1,15 +1,20 @@
 //! Type-level list of reactors sharing one [`Owner`].
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
+use core::future::Future;
+use core::pin::Pin;
 
 use aether_bloomery_kinds::{Detail, ReactorIntent, ReactorName, RuleName};
+use aether_bloomery_view::ArtifactResolver;
 
 use crate::error::PrepareError;
 use crate::evaluate::{ArmVisitor, Intent, Output, Reactor};
 use crate::owner::Owner;
 use crate::params::{Nil, Params};
 use crate::trigger::Trigger;
+use crate::views::{ViewCtor, ViewSet};
 
 mod sealed {
     pub trait Sealed {}
@@ -45,7 +50,10 @@ pub trait ReactorList: sealed::Sealed + Sized + 'static {
     /// # Errors
     ///
     /// [`PrepareError`] from a view fold.
-    fn warm_all(owner: &mut Owner) -> Result<(), PrepareError>;
+    fn warm_all<'a>(
+        owner: &'a mut Owner,
+        artifacts: &'a mut ArtifactResolver,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PrepareError>> + Send + 'a>>;
 
     /// Evaluate each reactor in list order. Stop at the first error.
     ///
@@ -64,8 +72,11 @@ impl ReactorList for Nil {
         Ok(())
     }
 
-    fn warm_all(_owner: &mut Owner) -> Result<(), PrepareError> {
-        Ok(())
+    fn warm_all<'a>(
+        _owner: &'a mut Owner,
+        _artifacts: &'a mut ArtifactResolver,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PrepareError>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
     }
 
     fn evaluate_all(_owner: &mut Owner, _names: &Self::Names) -> Result<Vec<ReactorIntent>, EvaluateFail> {
@@ -88,9 +99,14 @@ impl<R: Reactor + Default, Rest: ReactorList> ReactorList for (R, Rest) {
         Ok((reactor, Rest::names()?))
     }
 
-    fn warm_all(owner: &mut Owner) -> Result<(), PrepareError> {
-        warm_reactor::<R>(owner)?;
-        Rest::warm_all(owner)
+    fn warm_all<'a>(
+        owner: &'a mut Owner,
+        artifacts: &'a mut ArtifactResolver,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PrepareError>> + Send + 'a>> {
+        Box::pin(async move {
+            warm_reactor::<R>(owner, artifacts).await?;
+            Rest::warm_all(owner, artifacts).await
+        })
     }
 
     fn evaluate_all(owner: &mut Owner, names: &Self::Names) -> Result<Vec<ReactorIntent>, EvaluateFail> {
@@ -128,28 +144,28 @@ fn tag(reactor: &ReactorName, intents: Vec<Intent>) -> Result<Vec<ReactorIntent>
     Ok(out)
 }
 
-fn warm_reactor<R: Reactor>(owner: &mut Owner) -> Result<(), PrepareError> {
-    struct Warm<'a> {
-        owner: &'a mut Owner,
-        error: Result<(), PrepareError>,
+fn warm_reactor<'a, R: Reactor>(
+    owner: &'a mut Owner,
+    artifacts: &'a mut ArtifactResolver,
+) -> Pin<Box<dyn Future<Output = Result<(), PrepareError>> + Send + 'a>> {
+    struct Warm {
+        views: Vec<ViewCtor>,
     }
 
-    impl ArmVisitor for Warm<'_> {
+    impl ArmVisitor for Warm {
         fn visit<T, L, O>(&mut self, _name: &'static str)
         where
             T: Trigger,
             L: Params<T>,
             O: Output,
         {
-            if self.error.is_ok() {
-                self.error = self.owner.warm::<L::Views>();
-            }
+            L::Views::each_view(|ctor| self.views.push(ctor));
         }
     }
 
-    let mut warm = Warm { owner, error: Ok(()) };
+    let mut warm = Warm { views: Vec::new() };
     R::visit_arms(&mut warm);
-    warm.error
+    Box::pin(async move { owner.warm_ctors(warm.views, artifacts).await })
 }
 
 struct NameCheck {

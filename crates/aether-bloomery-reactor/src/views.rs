@@ -3,10 +3,16 @@
 use alloc::boxed::Box;
 use core::any::{Any, TypeId, type_name};
 use core::error::Error;
+use core::future::Future;
 use core::marker::PhantomData;
+use core::pin::Pin;
 
 use aether_bloomery_kinds::{Entry, Seq};
-use aether_bloomery_view::View;
+use aether_bloomery_view::{ArtifactResolver, View};
+
+/// Owned erased future used while advancing one stored view.
+#[doc(hidden)]
+pub type ErasedAdvance<'a> = Pin<Box<dyn Future<Output = Result<(), Box<dyn Error + 'static>>> + Send + 'a>>;
 
 mod sealed {
     pub trait Sealed {}
@@ -41,7 +47,11 @@ pub struct ViewCtor {
 }
 
 impl ViewCtor {
-    pub(crate) fn of<V: View + Send>() -> Self {
+    pub(crate) fn of<V>() -> Self
+    where
+        V: View + Send,
+        for<'a> V::Advance<'a>: Send,
+    {
         Self { id: TypeId::of::<V>(), name: type_name::<V>(), empty: || Box::new(Slot { view: V::empty() }) }
     }
 }
@@ -49,14 +59,18 @@ impl ViewCtor {
 pub trait ErasedView: Send {
     fn cursor(&self) -> Seq;
     fn as_any(&self) -> &dyn Any;
-    fn advance(&mut self, entries: &[Entry]) -> Result<(), Box<dyn Error + 'static>>;
+    fn advance<'a>(&'a mut self, entries: &'a [Entry], artifacts: &'a mut ArtifactResolver) -> ErasedAdvance<'a>;
 }
 
 struct Slot<V: View> {
     view: V,
 }
 
-impl<V: View + Send> ErasedView for Slot<V> {
+impl<V> ErasedView for Slot<V>
+where
+    V: View + Send,
+    for<'a> V::Advance<'a>: Send,
+{
     fn cursor(&self) -> Seq {
         self.view.cursor()
     }
@@ -65,8 +79,8 @@ impl<V: View + Send> ErasedView for Slot<V> {
         &self.view
     }
 
-    fn advance(&mut self, entries: &[Entry]) -> Result<(), Box<dyn Error + 'static>> {
-        self.view.advance(entries).map_err(|error| Box::new(error) as _)
+    fn advance<'a>(&'a mut self, entries: &'a [Entry], artifacts: &'a mut ArtifactResolver) -> ErasedAdvance<'a> {
+        Box::pin(async move { self.view.advance(entries, artifacts).await.map_err(|error| Box::new(error) as _) })
     }
 }
 
@@ -89,9 +103,18 @@ impl ViewSet for NoViews {
     }
 }
 
-impl<V: View + Send> sealed::Sealed for V {}
+impl<V> sealed::Sealed for V
+where
+    V: View + Send,
+    for<'a> V::Advance<'a>: Send,
+{
+}
 
-impl<V: View + Send> ViewSet for V {
+impl<V> ViewSet for V
+where
+    V: View + Send,
+    for<'a> V::Advance<'a>: Send,
+{
     type Refs<'a> = &'a V;
 
     fn each_view(mut visit: impl FnMut(ViewCtor)) {

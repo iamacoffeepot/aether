@@ -4,7 +4,8 @@ use alloc::boxed::Box;
 use core::error::Error;
 use core::fmt;
 
-use aether_bloomery_kinds::{DecodeError, Seq};
+use aether_bloomery_kinds::{DecodeError, Digest, Seq};
+use aether_bloomery_view::ResolveError;
 
 /// Failure to push entries or prepare a trigger against a retained prefix.
 #[derive(Debug)]
@@ -36,6 +37,13 @@ pub enum PrepareError {
     },
     /// The next sequence does not fit in [`Seq`].
     Overflow,
+    /// A synchronous owner helper encountered an artifact-backed fold.
+    AsyncRequired {
+        /// Requested digest when the fold exposed one before yielding.
+        digest: Option<Digest>,
+    },
+    /// Typed artifact resolution terminally failed the active fold.
+    Resolve(ResolveError),
     /// [`aether_bloomery_view::View::empty`] did not start at [`Seq`] `(0)`.
     NonzeroEmpty {
         /// View type that failed construction.
@@ -87,6 +95,11 @@ impl fmt::Display for PrepareError {
                 write!(f, "reactor prepare backwards: expected seq {expected}, got {actual}")
             }
             Self::Overflow => write!(f, "reactor prepare sequence overflow"),
+            Self::AsyncRequired { digest: Some(digest) } => {
+                write!(f, "view fold needs asynchronous artifact resolution for {digest}")
+            }
+            Self::AsyncRequired { digest: None } => write!(f, "view fold suspended without an artifact request"),
+            Self::Resolve(error) => write!(f, "view artifact resolution failed: {error}"),
             Self::NonzeroEmpty { view, cursor } => {
                 write!(f, "view {view} empty() started at seq {cursor}")
             }
@@ -107,12 +120,14 @@ impl Error for PrepareError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Trigger(error) => Some(error),
+            Self::Resolve(error) => Some(error),
             Self::Advance { source, .. } => Some(source.as_ref()),
             Self::Empty
             | Self::Gap { .. }
             | Self::Duplicate { .. }
             | Self::Backwards { .. }
             | Self::Overflow
+            | Self::AsyncRequired { .. }
             | Self::NonzeroEmpty { .. }
             | Self::CursorContract { .. }
             | Self::Poisoned { .. } => None,

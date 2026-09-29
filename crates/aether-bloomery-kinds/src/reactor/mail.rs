@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::error::Error as StdError;
 use core::fmt;
 
+use aether_actor::HeldReply;
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
 use aether_data::{CastEligible, Citations, Cites, LabelNode, Schema, SchemaType};
 
@@ -168,6 +169,12 @@ pub enum Warmed {
     Poisoned { last_trusted: u64, reason: Detail },
 }
 
+impl HeldReply for Warmed {
+    fn unanswered() -> Self {
+        Self::Poisoned { last_trusted: 0, reason: Detail::new("reactor root closed before answering warm") }
+    }
+}
+
 /// One live journal entry. The root checks `seq == cursor + 1`.
 #[aether_data::kind(name = "aether.bloomery.reactor.event", eq, no_serde)]
 pub struct Event {
@@ -205,6 +212,12 @@ pub enum Evaluated {
     Poisoned { seq: u64, last_trusted: u64, reason: Detail },
     /// One reactor failed; views advanced and no intents are returned.
     Failed { seq: u64, reactor: ReactorName, reason: Detail },
+}
+
+impl HeldReply for Evaluated {
+    fn unanswered() -> Self {
+        Self::Poisoned { seq: 0, last_trusted: 0, reason: Detail::new("reactor root closed before answering event") }
+    }
 }
 
 /// Ask the root for its cursor and poison flag.

@@ -95,7 +95,7 @@ fn aggregate_keys_order_filtering_and_mismatches_share_one_cursor() {
     let mut view = Moves::empty();
     assert_eq!(view.cursor(), Seq(0));
 
-    view.advance(&[
+    view.advance_ready(&[
         moved::<Program>(1, "program", 1),
         unrelated(2),
         moved::<Tree>(3, "alpha", 2),
@@ -117,13 +117,13 @@ fn replay_is_equivalent_across_batch_boundaries() {
     let entries =
         [unrelated(1), moved::<Tree>(2, "alpha", 1), moved::<Program>(3, "program", 2), moved::<Tree>(4, "beta", 3)];
     let mut whole = Moves::empty();
-    whole.advance(&entries).expect("whole");
+    whole.advance_ready(&entries).expect("whole");
 
     let mut chunked = Moves::empty();
-    chunked.advance(&entries[..1]).expect("first");
-    chunked.advance(&entries[1..3]).expect("middle");
-    chunked.advance(&entries[3..]).expect("last");
-    chunked.advance(&[]).expect("empty batch");
+    chunked.advance_ready(&entries[..1]).expect("first");
+    chunked.advance_ready(&entries[1..3]).expect("middle");
+    chunked.advance_ready(&entries[3..]).expect("last");
+    chunked.advance_ready(&[]).expect("empty batch");
 
     assert_eq!(whole, chunked);
 }
@@ -131,11 +131,11 @@ fn replay_is_equivalent_across_batch_boundaries() {
 #[test]
 fn malformed_matching_payload_does_not_advance() {
     let mut view = Moves::empty();
-    view.advance(&[moved::<Tree>(1, "alpha", 1)]).expect("first");
+    view.advance_ready(&[moved::<Tree>(1, "alpha", 1)]).expect("first");
     let malformed =
         Entry { seq: Seq(2), kind: HeadMoved::<Tree>::ID, cause: None, recorded_at_millis: 0, bytes: Vec::new() };
 
-    let error = view.advance(&[malformed]).expect_err("malformed matching event");
+    let error = view.advance_ready(&[malformed]).expect_err("malformed matching event");
     assert_eq!(view.cursor(), Seq(1));
     assert_eq!(view.counts.get("alpha"), Some(&1));
     assert_eq!(error.handler_name(), Some("count"));
@@ -146,19 +146,19 @@ fn malformed_matching_payload_does_not_advance() {
 #[test]
 fn sequence_failures_are_distinguished() {
     let mut duplicate = Moves::empty();
-    duplicate.advance(&[unrelated(1)]).expect("first");
+    duplicate.advance_ready(&[unrelated(1)]).expect("first");
     assert!(matches!(
-        duplicate.advance(&[unrelated(1)]),
+        duplicate.advance_ready(&[unrelated(1)]),
         Err(ViewFoldError::Sequence(SequenceError::Duplicate { .. }))
     ));
 
     let mut gap = Moves::empty();
-    assert!(matches!(gap.advance(&[unrelated(2)]), Err(ViewFoldError::Sequence(SequenceError::Gap { .. }))));
+    assert!(matches!(gap.advance_ready(&[unrelated(2)]), Err(ViewFoldError::Sequence(SequenceError::Gap { .. }))));
 
     let mut backwards = Moves::empty();
-    backwards.advance(&[unrelated(1), unrelated(2)]).expect("prefix");
+    backwards.advance_ready(&[unrelated(1), unrelated(2)]).expect("prefix");
     assert!(matches!(
-        backwards.advance(&[unrelated(1)]),
+        backwards.advance_ready(&[unrelated(1)]),
         Err(ViewFoldError::Sequence(SequenceError::Backwards { .. }))
     ));
 }
@@ -167,7 +167,7 @@ fn sequence_failures_are_distinguished() {
 fn handler_error_preserves_source_and_previous_entries() {
     let mut view = Fallible::empty();
     let error = view
-        .advance(&[entry_for(1, &Note { key: 10, fail: false }), entry_for(2, &Note { key: 20, fail: true })])
+        .advance_ready(&[entry_for(1, &Note { key: 10, fail: false }), entry_for(2, &Note { key: 20, fail: true })])
         .expect_err("handler fails");
 
     assert_eq!(view.cursor(), Seq(1));
