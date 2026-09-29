@@ -196,7 +196,7 @@ fn a_republish_that_drops_a_namespace_is_refused() {
         admit_over(&[(hash(1), &predecessor)], hash(2), &dropping),
         Err(AdmissionRefusal::DroppedNamespace { namespace: Arc::from("test.b") })
     );
-    assert_eq!(admit_over(&[(hash(1), &predecessor)], hash(2), &adding), Ok(Admitted::Publish));
+    assert_eq!(admit_over(&[(hash(1), &predecessor)], hash(2), &adding), Ok(Admitted::Republish));
 }
 
 // Catches: the growth rule skipped, or reading the candidate as the
@@ -225,7 +225,7 @@ fn a_republish_that_narrows_a_contract_is_refused() {
     }
     assert_eq!(
         admit_over(&[(hash(1), &predecessor)], hash(2), &narrowed(contract(&[KEPT, ADDED], true))),
-        Ok(Admitted::Publish)
+        Ok(Admitted::Republish)
     );
 }
 
@@ -251,7 +251,7 @@ fn a_republish_holds_the_predecessors_private_types_to_growth() {
     );
 
     let promoted = surface(&[exported[0].clone(), ("test.child", contract(&[KEPT], false))], &[]);
-    assert_eq!(admit_over(&published, hash(2), &promoted), Ok(Admitted::Publish));
+    assert_eq!(admit_over(&published, hash(2), &promoted), Ok(Admitted::Republish));
 }
 
 // Catches: predecessors collected from the first held namespace only, so a
@@ -266,7 +266,7 @@ fn a_candidate_covering_two_predecessors_must_cover_both() {
         surface(&exported, &[])
     };
 
-    assert_eq!(admit_over(&published, hash(3), &covering(&["test.a", "test.b", "test.c"])), Ok(Admitted::Publish));
+    assert_eq!(admit_over(&published, hash(3), &covering(&["test.a", "test.b", "test.c"])), Ok(Admitted::Republish));
     assert_eq!(
         admit_over(&published, hash(3), &covering(&["test.a", "test.c"])),
         Err(AdmissionRefusal::DroppedNamespace { namespace: Arc::from("test.b") })
@@ -274,13 +274,15 @@ fn a_candidate_covering_two_predecessors_must_cover_both() {
 }
 
 // Catches: a republish of the same bytes staged as a new publication rather
-// than the no-op §9 makes it.
+// than the no-op §9 makes it, or a republish over a predecessor answered as a
+// first publish, so a replace cannot tell it has something to succeed.
 #[test]
 fn republishing_the_same_hash_changes_nothing() {
     let module = surface(&[("test.a", contract(&[KEPT], false))], &[]);
 
     assert_eq!(admit_over(&[(hash(1), &module)], hash(1), &module), Ok(Admitted::Unchanged));
     assert_eq!(admit_over(&[], hash(1), &module), Ok(Admitted::Publish));
+    assert_eq!(admit_over(&[(hash(1), &module)], hash(2), &module), Ok(Admitted::Republish));
 }
 
 /// A registry with its owner attached, and the module cache publishes check
@@ -430,8 +432,12 @@ fn admission_preview_answers_as_publish_would_and_writes_nothing() {
         ),
         "a narrowing republish is refused",
     );
-    assert_eq!(fixture.registry.admission_preview(&growing), Ok(Admitted::Publish));
-    assert_eq!(fixture.registry.admission_preview(&growing), Ok(Admitted::Publish), "the first preview wrote nothing");
+    assert_eq!(fixture.registry.admission_preview(&growing), Ok(Admitted::Republish));
+    assert_eq!(
+        fixture.registry.admission_preview(&growing),
+        Ok(Admitted::Republish),
+        "the first preview wrote nothing"
+    );
 
     fixture.publish(&growing).expect("the previewed publish is admitted");
     assert_eq!(fixture.registry.admission_preview(&growing), Ok(Admitted::Unchanged));

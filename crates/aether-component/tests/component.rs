@@ -21,6 +21,7 @@ use aether_kinds::{
     DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, ReplaceComponent,
     ReplaceResult,
 };
+use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -365,8 +366,8 @@ fn drop_component_silences_tick_echoes() {
 
 /// `replace_component` preserves the mailbox identity across the
 /// splice (ADR-0022 + ADR-0038). Loads the probe, lets it broadcast
-/// N ticks, replaces the wasm at the same mailbox id with the same
-/// fixture binary, and asserts the post-replace count climbs —
+/// N ticks, republishes the fixture as a successor build of the
+/// same code (identical bytes would answer with no swap), and asserts the post-replace count climbs —
 /// proving the new component instance inherits the input
 /// subscriptions and continues receiving ticks at the original
 /// mailbox.
@@ -376,7 +377,7 @@ fn replace_component_preserves_mailbox_identity() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let probe = load_probe(&mut harness, &wasm_path);
+    load_probe(&mut harness, &wasm_path);
 
     harness.execute(vec![("warm", HarnessOp::advance(3))]).expect("pre-replace advance");
     assert_eq!(
@@ -386,8 +387,8 @@ fn replace_component_preserves_mailbox_identity() {
         harness.observed_kinds(),
     );
 
-    // Replace the wasm at the same mailbox id with the same fixture
-    // binary. `SendAndAwaitReply` blocks on `ReplaceResult` so the splice
+    // Republish a successor build of the same code: identical bytes would
+    // answer `Ok` with no swap (ADR-0241 §7). `SendAndAwaitReply` blocks on `ReplaceResult` so the splice
     // completes before the post-replace baseline is sampled.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
     let swapped = harness
@@ -395,7 +396,7 @@ fn replace_component_preserves_mailbox_identity() {
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { target: probe, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
             ),
         )])
         .expect("replace sequence");
@@ -422,7 +423,8 @@ fn replace_component_preserves_mailbox_identity() {
 /// hooks, now `WasmActor` defaults rather than an opt-in subtrait. Loads
 /// the `stateful_replace` fixture (`export!(public = [Counter, Sidecar])`), bumps
 /// the entry `Counter`'s in-memory count to 3, replaces the wasm at the
-/// same mailbox id with the same binary, then re-queries the count.
+/// same mailbox id with a successor build of the same code, then re-queries
+/// the count.
 /// Because the boxed `ErasedWasmActor` now forwards the hooks, the count
 /// survives the swap — before this change the multi-actor arm shipped
 /// the hooks as no-ops and the replacement booted fresh at 0.
@@ -437,7 +439,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 
     // Load the `Counter` actor (a non-entry actor in the bundle) and capture
     // its mailbox id.
-    let (counter, path) = harness
+    let (counter, _path) = harness
         .load_any(&LoadComponent {
             wasm,
             name: None,
@@ -459,7 +461,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     let pre_count = pre.reply::<CountReport>("query").expect("decode pre-replace CountReport");
     assert_eq!(pre_count, CountReport { count: 3 }, "three bumps should leave the counter at 3 before the replace");
 
-    // Replace the wasm at the same mailbox id with the same binary.
+    // Republish a successor build of the same code at the same mailbox id.
     // `on_dehydrate` saves the count on the old instance; `on_rehydrate`
     // restores it on the new one.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
@@ -468,7 +470,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
             ),
         )])
         .expect("replace sequence");
@@ -494,8 +496,8 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 /// ADR-0113: a single-actor component carries its declared `type State`
 /// across `replace_component` through the macro-generated `on_dehydrate`
 /// / `on_rehydrate` hooks — no hand-written hooks. Loads the
-/// `stateful_replace_typed` fixture, bumps the counter to 3, replaces the
-/// wasm at the same mailbox id with the same binary, then re-queries. The
+/// `stateful_replace_typed` fixture, bumps the counter to 3, republishes a
+/// successor build of the same code, then re-queries. The
 /// generated `on_dehydrate` frames the `CounterState` via
 /// `save_state_kind`; the generated `on_rehydrate` recovers it via
 /// `decode_kind`, so the count survives the swap.
@@ -508,7 +510,7 @@ fn replace_preserves_state_via_typed_state_kind() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let (counter, path) = harness
+    let (counter, _path) = harness
         .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("stateful_replace_typed load failed: {error}"));
 
@@ -527,14 +529,14 @@ fn replace_preserves_state_via_typed_state_kind() {
         "three bumps should leave the counter at 3 before the replace",
     );
 
-    // Replace with the same binary; the generated hooks carry the count.
+    // Republish a successor build; the generated hooks carry the count.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
     let swapped = harness
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
             ),
         )])
         .expect("replace sequence");
@@ -577,7 +579,7 @@ fn typed_state_decode_miss_boots_fresh() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let typed_wasm = fs::read(&typed_path).expect("read typed fixture wasm");
 
-    let (counter, path) = harness
+    let (counter, _path) = harness
         .load_any(&LoadComponent { wasm: typed_wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("stateful_replace_typed load failed: {error}"));
 
@@ -603,13 +605,7 @@ fn typed_state_decode_miss_boots_fresh() {
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent {
-                    target: path,
-                    wasm: reshaped_wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: None,
-                },
+                &ReplaceComponent { wasm: reshaped_wasm, configs: Vec::new() },
             ),
         )])
         .expect("replace sequence");
@@ -646,7 +642,7 @@ fn childless_component_hot_reloads_unchanged() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let (counter, path) = harness
+    let (counter, _path) = harness
         .load_any(&LoadComponent {
             wasm,
             name: None,
@@ -675,7 +671,7 @@ fn childless_component_hot_reloads_unchanged() {
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
             ),
         )])
         .expect("replace sequence");

@@ -20,11 +20,12 @@ use std::path::Path;
 
 use aether_actor::ErasedActorRef;
 use aether_component::ComponentHostCapability;
+use aether_component::component::Prepare;
 use aether_data::{Kind, KindId};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{CostTailResult, DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult, Tick};
-use aether_test_fixtures_kinds::{Bump, InlineProbe, UnsubscribeKeys};
+use aether_test_fixtures_kinds::{GateProbe, GateQuery, UnsubscribeKeys};
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
 // land in this test binary (mirrors `cap_registry.rs`).
@@ -92,40 +93,33 @@ fn cost_kinds(harness: &SubstrateHarness, actor: ErasedActorRef) -> Vec<KindId> 
 /// `NativeCtx::sync_guest` unions the trampoline's own measured framework arms
 /// with the guest's handlers (iamacoffeepot/aether#4269), and releasing the
 /// guest drops its rows. A sync that seeded only the guest's kinds would leave
-/// the replace arm unmeasured across a replace, and one that skipped the
-/// release would leave a dropped guest's handlers measured.
+/// the republish prepare arm unmeasured across a replace, and one that skipped
+/// the release would leave a dropped guest's handlers measured.
 #[test]
 fn replace_keeps_framework_arms_measured_and_drop_releases_guest_rows() {
-    let Some(bundle_path) = require_wasm("aether_test_fixtures_bundle") else {
+    let (Some(v1_path), Some(v2_path)) = (require_wasm("republish_group_v1"), require_wasm("republish_group_v2"))
+    else {
         return;
     };
-    let wasm = fs::read(&bundle_path).expect("read fixture wasm");
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let base = LoadComponent {
-        wasm: wasm.clone(),
-        name: None,
+    let gate = LoadComponent {
+        wasm: fs::read(&v1_path).expect("read fixture wasm"),
+        name: Some("cost".to_owned()),
         config: Vec::new(),
-        export: Some("test.contract.base".to_owned()),
+        export: Some("test.republish.gate".to_owned()),
     };
-    let (swappable, path) =
-        harness.load_any(&base).unwrap_or_else(|error| panic!("load_component(swappable): {error}"));
+    let (swappable, path) = harness.load_any(&gate).unwrap_or_else(|error| panic!("load_component(gate v1): {error}"));
     let host = harness.actor_ref::<ComponentHostCapability>();
 
-    let replace = ReplaceComponent {
-        target: path.clone(),
-        wasm,
-        drain_timeout_ms: None,
-        config: Vec::new(),
-        export: Some("test.contract.extended".to_owned()),
-    };
+    let replace = ReplaceComponent { wasm: fs::read(&v2_path).expect("read fixture wasm"), configs: Vec::new() };
     let swapped =
         harness.execute(vec![("swap", HarnessOp::send_and_await_reply(&host, &replace))]).expect("replace sequence");
     if let ReplaceResult::Err { error } = swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
         panic!("replace_component: {error}");
     }
     let replaced = cost_kinds(&harness, swappable);
-    assert!(replaced.contains(&ReplaceComponent::ID), "the replace arm stays measured across a replace");
-    assert!(replaced.contains(&InlineProbe::ID), "the replacement's new handler is measured");
+    assert!(replaced.contains(&Prepare::ID), "the republish prepare arm stays measured across a replace");
+    assert!(replaced.contains(&GateProbe::ID), "the replacement's new handler is measured");
 
     let dropped = harness
         .execute(vec![("drop", HarnessOp::send_and_await_reply(&host, &DropComponent { target: path }))])
@@ -137,6 +131,6 @@ fn replace_keeps_framework_arms_measured_and_drop_releases_guest_rows() {
     // closing trampoline's own rows leave with it later, so only the guest's
     // absence is ordered by the reply.
     let released = cost_kinds(&harness, swappable);
-    assert!(!released.contains(&Bump::ID), "a dropped guest's handler leaves the table");
-    assert!(!released.contains(&InlineProbe::ID), "a dropped guest's handler leaves the table");
+    assert!(!released.contains(&GateQuery::ID), "a dropped guest's handler leaves the table");
+    assert!(!released.contains(&GateProbe::ID), "a dropped guest's handler leaves the table");
 }

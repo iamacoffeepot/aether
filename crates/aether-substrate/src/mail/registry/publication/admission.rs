@@ -15,7 +15,8 @@
 //!    fallback, so an inline child's alias never advertises a row its code no
 //!    longer handles.
 //! 4. **Same hash.** A candidate whose hash already holds every one of its
-//!    namespaces changes nothing (§9).
+//!    namespaces changes nothing (§9). Otherwise the answer says whether a
+//!    predecessor held any of them: a first publish or a republish.
 //!
 //! A content-addressed module's exported namespaces carry its hash
 //! ([`Module::published_groups`]), so the same bytes meet rule 4 and no other
@@ -97,8 +98,13 @@ pub enum Holder<'a> {
 pub enum Admitted {
     /// The candidate's hash already holds every one of its namespaces.
     Unchanged,
-    /// Every namespace the candidate exports now points at it.
+    /// Every namespace the candidate exports now points at it, and none was
+    /// held by another module: a first publish.
     Publish,
+    /// Every namespace the candidate exports now points at it, and at least
+    /// one was held by a predecessor module, which the candidate succeeds
+    /// (§3). A replace requires this answer.
+    Republish,
 }
 
 /// Why admission refused a module publish: the first failing namespace and
@@ -230,7 +236,9 @@ pub fn admit<'a>(
     let unchanged = held.len() == candidate.exported.len() && predecessors.iter().all(|(known, _)| *known == hash);
     Ok(if unchanged {
         Admitted::Unchanged
-    } else {
+    } else if predecessors.is_empty() {
         Admitted::Publish
+    } else {
+        Admitted::Republish
     })
 }

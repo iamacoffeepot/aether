@@ -1,13 +1,14 @@
-//! Owner-staged component load, module-boot, and replacement stages. A
-//! load's held reply waits in host state keyed by its [`LoadId`] (ADR-0243
-//! §9) until the guest's birth answers it or hands it off.
+//! Owner-staged component load and module-boot stages. A load's held reply
+//! waits in host state keyed by its [`LoadId`] (ADR-0243 §9) until the
+//! guest's birth answers it or hands it off. A load of a namespace a
+//! republish holds waits in that republish until the replace answers
+//! (ADR-0241 §7).
 
-use std::mem;
 use std::sync::Arc;
 
-use aether_actor::{ErasedActorRef, Manual, OutboundReply, ReplyMode, Single};
-use aether_data::{BlobHash, ErasedActorPath, Kind, Source};
-use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult};
+use aether_actor::{ErasedActorRef, ReplyMode, Single};
+use aether_data::{BlobHash, ErasedActorPath};
+use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder};
 
 use aether_substrate::actor::native::{
     GuestBirth, GuestOutcome, Held, NativeCtx, RegistryBatch, RegistryBatchResult, TaskDone, spawn::Subname,
@@ -18,9 +19,9 @@ use aether_substrate::actor::wasm::module::{Module, ModuleManifest};
 use super::LoadResult;
 use super::dependencies::{dependency_refusal, inline_dependency_refusal};
 use super::placement::{child_refusal, root_refusal};
-use crate::component::runtime::{ComponentHostCapabilityState, GuestControl, LoadedGuest, PendingReplace};
+use crate::component::runtime::{ComponentHostCapabilityState, GuestControl, LoadedGuest};
 use crate::component::{ComponentHostCapability, LoadDelivered};
-use crate::kinds::{GuestBorn, LoadPublished};
+use crate::kinds::{GuestBorn, LoadPublished, RepublishPublished};
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
 pub(super) struct PreparedLoad {
@@ -145,18 +146,6 @@ impl PreparedBoot {
     }
 }
 
-/// A replace whose replacement module publish is staged through the registry
-/// owner. Nothing is forwarded to the trampoline until the publish commits;
-/// a refusal answers the original `source` instead.
-#[derive(Clone)]
-pub(super) struct ReplacePublication {
-    source: Source,
-    actor: ErasedActorRef,
-    module: Module,
-    /// The encoded `ReplaceComponent` the trampoline is forwarded.
-    bytes: Arc<[u8]>,
-}
-
 /// One load in flight, keyed by its [`LoadId`] from the moment its module
 /// publish is staged until the guest's birth settles it (ADR-0243 §9). The
 /// held reply leaves only through `answer` or `Held::hand_off`; at host
@@ -166,14 +155,25 @@ pub(super) struct LoadInFlight {
     load: Arc<PreparedLoad>,
 }
 
+impl LoadInFlight {
+    /// The name the load's guest is born at, which a replace of its module
+    /// waits on until the birth settles (ADR-0241 §7).
+    pub(super) fn published(&self) -> &str {
+        &self.load.published
+    }
+}
+
 /// The key of a [`LoadInFlight`], carried by its staged work's contexts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct LoadId(u64);
 
 /// A staged module boot and the loads waiting on it, the first included,
-/// each found in the host's loads by its id.
+/// each found in the host's loads by its id, with the name and module the
+/// boot guest is recorded under once it is born.
 pub(super) struct PendingBoot {
     waiters: Vec<LoadId>,
+    namespace: String,
+    module: Module,
 }
 
 impl ComponentHostCapabilityState {
@@ -227,10 +227,34 @@ impl ComponentHostCapabilityState {
                 return;
             }
         };
-        // ADR-0241 §3/§4: publish the module before anything spawns. The
-        // owner runs admission and registers the module's kinds in one batch;
-        // the held reply waits here, keyed by the load, until its completion
-        // (ADR-0243 §9).
+        // ADR-0241 §7: a load of a namespace a republish holds waits until
+        // the replace answers, then publishes against the code that won,
+        // unless it arrives on that republish's own commit chain, where the
+        // successor has already published and waiting would hold the chain
+        // the replace waits on open (see the republish module docs).
+        let committing = self.committing_republish(ctx);
+        if let Some(&republish) = self.republishing.get(&load.published)
+            && committing != Some(republish)
+        {
+            self.republishes
+                .get_mut(&republish)
+                .expect("a republishing namespace names a republish in flight")
+                .park_load(held, load);
+            return;
+        }
+        self.publish_load(ctx, held, load);
+    }
+
+    /// Publish a prepared load's module before anything spawns (ADR-0241 §3,
+    /// §4). The owner runs admission and registers the module's kinds in one
+    /// batch; the held reply waits here, keyed by the load, until its
+    /// completion (ADR-0243 §9).
+    pub(super) fn publish_load<A, M: ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        held: Held<LoadResult>,
+        load: Arc<PreparedLoad>,
+    ) {
         let id = self.next_load_id();
         let batch = RegistryBatch::publish_module(&load.module);
         self.loads.insert(id, LoadInFlight { held, load });
@@ -401,20 +425,38 @@ impl ComponentHostCapabilityState {
         }
     }
 
-    /// A load's module publish settled (ADR-0241 §3): a refusal (admission
-    /// or a kind conflict) answers the caller and spawns nothing; a commit
-    /// continues to the module boot and the requested guest.
-    pub(super) fn finish_load_publish(
+    /// A module publish settled, a load's or a republish's, as its context
+    /// names it.
+    pub(super) fn finish_publish(
         &mut self,
         ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         done: TaskDone<RegistryBatchResult>,
     ) {
-        let Some(LoadPublished { load }) = ctx.take_context() else {
-            return;
-        };
-        let id = LoadId(load);
+        if let Some(LoadPublished { load }) = ctx.take_context() {
+            self.finish_load_publish(ctx, LoadId(load), done);
+        } else if let Some(RepublishPublished { republish }) = ctx.take_context() {
+            self.finish_republish_publish(ctx, republish, done.into_output());
+        }
+    }
+
+    /// A load's module publish settled (ADR-0241 §3): a refusal (admission
+    /// or a kind conflict) answers the caller and spawns nothing; a commit
+    /// records a boot module's namespaces as not replaceable and continues
+    /// to the module boot and the requested guest.
+    fn finish_load_publish(
+        &mut self,
+        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
+        id: LoadId,
+        done: TaskDone<RegistryBatchResult>,
+    ) {
         match done.into_output() {
-            Ok(()) => self.continue_load(ctx, id),
+            Ok(()) => {
+                let module = &self.loads.get(&id).expect("a published load waits in state").load.module;
+                if module.manifest().boot().is_some() {
+                    self.boot_namespaces.extend(module.published_groups().map(|(published, _)| published.into_owned()));
+                }
+                self.continue_load(ctx, id);
+            }
             Err(error) => {
                 let error = format!("module publish refused: {error}");
                 self.take_load(id).held.answer(ctx, &LoadResult::Err { error });
@@ -457,7 +499,12 @@ impl ComponentHostCapabilityState {
             .stage_with(GuestBorn::Boot { hash: *hash.as_bytes() })
         {
             Ok(_) => {
-                let previous = self.pending_boots.insert(hash, PendingBoot { waiters: vec![first] });
+                let pending = PendingBoot {
+                    waiters: vec![first],
+                    namespace: plan.published.clone(),
+                    module: plan.module.clone(),
+                };
+                let previous = self.pending_boots.insert(hash, pending);
                 debug_assert!(previous.is_none(), "one actor-local reservation owns a module boot hash");
             }
             Err((error, _)) => {
@@ -518,13 +565,12 @@ impl ComponentHostCapabilityState {
         hash: BlobHash,
         outcome: GuestOutcome<GuestControl>,
     ) {
-        let waiters = mem::take(
-            &mut self.pending_boots.remove(&hash).expect("module boot retains its actor-local reservation").waiters,
-        );
+        let PendingBoot { waiters, namespace, module } =
+            self.pending_boots.remove(&hash).expect("module boot retains its actor-local reservation");
         match outcome.result {
             Ok(control) => {
                 self.booted_modules.insert(hash);
-                self.drop_targets.insert(control.erase(), LoadedGuest { control, from_boot_module: true });
+                self.drop_targets.insert(control.erase(), LoadedGuest { control, namespace, module });
                 for id in waiters {
                     self.stage_requested(ctx, id);
                 }
@@ -562,140 +608,12 @@ impl ComponentHostCapabilityState {
             }
         };
 
-        // A replace can neither add nor remove a boot, so whether the guest's
-        // module declares one is fixed at its birth.
-        let from_boot_module = load.module.manifest().boot().is_some();
-        self.drop_targets.insert(control.erase(), LoadedGuest { control, from_boot_module });
+        let guest = LoadedGuest { control, namespace: load.published.clone(), module: load.module.clone() };
+        self.drop_targets.insert(control.erase(), guest);
         // ADR-0230 §3: the loaded guest answers the requester itself, so the
         // reply's stamped sender is the reference the requester keeps; the
         // host hands it the held reply rather than replying.
         let delivered = LoadDelivered { path: outcome.canonical_name, capabilities: load.capabilities.clone() };
         held.hand_off(ctx, control, &delivered);
-    }
-
-    pub fn begin_replace<A>(
-        &mut self,
-        ctx: &mut NativeCtx<'_, A>,
-        held: Held<ReplaceResult>,
-        payload: ReplaceComponent,
-    ) {
-        let source = ctx.reply_target();
-        // ADR-0230: prove the target address at receipt. An address with no
-        // live route answers `Err` here instead of parking a forward nothing
-        // will answer.
-        let actor = match ctx.resolve_path(&payload.target) {
-            Ok(proven) => proven,
-            Err(error) => {
-                let error = format!("no component to replace at {}: {error}", payload.target);
-                held.answer(ctx, &ReplaceResult::Err { error });
-                return;
-            }
-        };
-        // ADR-0241 §8: only a live guest this host loaded is replaced. A
-        // dropped one left the drop targets when its drop was forwarded, so a
-        // replace that proves its path before the owner applies its `Dropped`
-        // route is refused here.
-        let Some(guest) = self.drop_targets.get(&actor) else {
-            let error = format!("no live component at {}", payload.target);
-            held.answer(ctx, &ReplaceResult::Err { error });
-            return;
-        };
-        // ADR-0147: a module that declares a boot is not replaceable, so a
-        // guest from one, its boot included, is refused before the bytes
-        // check in.
-        if guest.from_boot_module {
-            let error = format!(
-                "{} comes from a module that declares a boot, which is not replaceable: \
-                 a boot module upgrades by engine restart",
-                payload.target
-            );
-            held.answer(ctx, &ReplaceResult::Err { error });
-            return;
-        }
-        let bytes = Arc::from(payload.encode_into_bytes());
-
-        // ADR-0241 §2: the replacement module comes from the engine's one
-        // cache, checked in before forwarding, so its sections parse once and
-        // bytes that do not check in answer here, with the error the
-        // trampoline would give. `ReplacePublication` and then
-        // `PendingReplace` hold the module across the hops, so the
-        // trampoline's own check-in of the forwarded bytes is a cache hit.
-        let module = match self.modules.check_in(&ctx.blob_check_in(), &ctx.check_in(payload.wasm.into_boxed_slice())) {
-            Ok(module) => module,
-            Err(error) => {
-                held.answer(ctx, &ReplaceResult::Err { error });
-                return;
-            }
-        };
-        // ADR-0147: a replace can never add a boot either, so a replacement
-        // module that declares one is refused before anything publishes.
-        if let Some(boot) = module.manifest().boot() {
-            let error = format!(
-                "the replacement module declares the boot {boot}, which is not replaceable: \
-                 a boot module upgrades by engine restart"
-            );
-            held.answer(ctx, &ReplaceResult::Err { error });
-            return;
-        }
-        // A replacement installs a module whose inline children are rebuilt
-        // on rehydrate, so it is a module load for the ADR-0230 §3 check too.
-        // The module-wide inline check runs here; the trampoline checks the
-        // dependencies of the type the replacement will host.
-        if let Some(error) = inline_dependency_refusal(ctx, module.manifest()) {
-            held.answer(ctx, &ReplaceResult::Err { error });
-            return;
-        }
-        // ADR-0241 §4: a replace republishes its module, so admission runs
-        // and the replacement's kinds register before the trampoline sees it.
-        let batch = RegistryBatch::publish_module(&module);
-        let _ = ctx.stage_registry_batch_from(held, batch, ReplacePublication { source, actor, module, bytes });
-    }
-
-    /// A replace's module publish settled (ADR-0241 §4): a refusal answers
-    /// the caller and the replace is never forwarded; a commit forwards it to
-    /// its trampoline.
-    pub(super) fn finish_replace_publish(
-        &mut self,
-        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
-        done: TaskDone<RegistryBatchResult, ReplacePublication>,
-    ) {
-        if let Err(error) = done.output() {
-            let error = format!("module publish refused: {error}");
-            done.resolve_with(ctx, move |_, _| ReplaceResult::Err { error });
-            return;
-        }
-        let replace = done.context().clone();
-        self.forward_replace(ctx, done, replace);
-    }
-
-    /// Forward a replace to its trampoline once the replacement module's
-    /// publish commits, under the caller's chain. The forward's
-    /// `ReplaceResult` comes back to [`Self::finish_replace`].
-    fn forward_replace(
-        &mut self,
-        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
-        done: TaskDone<RegistryBatchResult, ReplacePublication>,
-        replace: ReplacePublication,
-    ) {
-        let ReplacePublication { source, actor, module, bytes } = replace;
-        match done.forward_tracked(ctx, actor, ReplaceComponent::ID, &bytes) {
-            Ok(mail_id) => {
-                self.pending_replace.insert(mail_id.correlation_id, PendingReplace { source, module });
-            }
-            Err(done) => {
-                let error = "the replace request was refused as engine-only mail".to_owned();
-                done.resolve_with(ctx, move |_, _| ReplaceResult::Err { error });
-            }
-        }
-    }
-
-    pub fn finish_replace(&mut self, ctx: &mut NativeCtx<'_, ComponentHostCapability, Manual>, result: ReplaceResult) {
-        let Some(correlation) = ctx.in_reply_to().map(|request| request.0) else {
-            return;
-        };
-        let Some(pending) = self.pending_replace.remove(&correlation) else {
-            return;
-        };
-        ctx.reply_to(pending.source, &result);
     }
 }

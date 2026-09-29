@@ -799,7 +799,9 @@ mod control_plane {
     /// canonical or short actor path. The component host proves the path
     /// once at receipt. The instance runs its `unwire` and closes, and its
     /// name tombstones: a later load of it is refused as retired, and a
-    /// replace or drop at it is refused (ADR-0241 §8). Reply: `DropResult`.
+    /// second drop at it is refused (ADR-0241 §8). A drop that arrives while
+    /// the instance's module republishes waits until the replace answers
+    /// (§7). Reply: `DropResult`.
     #[aether_data::kind(name = "aether.component.drop")]
     pub struct DropComponent {
         pub target: aether_data::ErasedActorPath,
@@ -814,49 +816,52 @@ mod control_plane {
         Err { error: String },
     }
 
-    /// `aether.component.replace` — atomically rebind the component at
-    /// `target`, its canonical or short actor path, to a freshly
-    /// instantiated component. The component host proves the path once at
-    /// receipt. Post-ADR-0038 the splice is structural: there is no drain
-    /// phase and no drain timeout. Kind vocabulary rides in the wasm's
-    /// `aether.kinds` custom section (ADR-0028). Reply: `ReplaceResult`.
+    /// `aether.component.replace` — republish a module: `wasm` succeeds the
+    /// module that publishes its namespaces, and every live instance of every
+    /// namespace it republishes moves to it as one group, or none does
+    /// (ADR-0241 §7, §9). There is no target: the module's namespaces are the
+    /// group. Identical bytes answer `Ok` with no swap. Pre-checks refuse the
+    /// whole replace before any instance prepares; a refusal while preparing
+    /// or a publish failure leaves every instance on its old code. Kind
+    /// vocabulary rides in the wasm's `aether.kinds` custom section
+    /// (ADR-0028). Reply: `ReplaceResult`.
     #[aether_data::kind(name = "aether.component.replace")]
     pub struct ReplaceComponent {
-        pub target: aether_data::ErasedActorPath,
         #[serde(with = "aether_data::bytes")]
         pub wasm: Vec<u8>,
-        /// Vestigial. ADR-0022 sized a drain phase this field capped;
-        /// ADR-0038 replaced that with a structural splice and no
-        /// substrate has read the field since. It survives only because
-        /// dropping it changes `aether.component.replace`'s schema, and
-        /// therefore its `KindId` — every sender pins it to `None` and
-        /// the MCP tool no longer exposes it (issue 5715). Remove it with
-        /// the next deliberate break of this kind.
-        pub drain_timeout_ms: Option<u32>,
-        /// ADR-0090 (issue 1257): optional init-config bytes for the
-        /// replacement instance, threaded through to its typed `init`
-        /// the same way [`LoadComponent::config`] is on first load. An
-        /// empty vec means "no config".
-        #[serde(with = "aether_data::bytes")]
-        pub config: Vec<u8>,
-        /// ADR-0096: which exported actor type to instantiate from the
-        /// replacement module, named by its `Addressable::NAMESPACE`. `None`
-        /// reuses the trampoline's **current hosted type** (not
-        /// necessarily the default), so a bare replace preserves
-        /// today's behaviour byte-for-byte. `Some(ns)` instantiates the
-        /// named export — mirroring [`LoadComponent::export`] — and an
-        /// export the replacement module doesn't declare is a clean
-        /// `ReplaceResult::Err`.
-        pub export: Option<String>,
+        /// A new init config for a live instance, by its canonical or short
+        /// actor path (ADR-0090 §5, ADR-0241 §4). An instance whose type's
+        /// config kind changed needs one; an unlisted instance whose config
+        /// kind is unchanged keeps its stored spawn config. Each supplied
+        /// config is decoded strictly against the successor's config kind.
+        pub configs: Vec<ReplaceConfig>,
     }
 
-    /// Reply to `ReplaceComponent`. Carries the new component's
-    /// advertised capabilities on `Ok` so the hub's cached state
-    /// reflects the swapped binary; `Err` carries a free-form reason.
+    /// One instance's config in a [`ReplaceComponent`]: the instance's actor
+    /// path and the config bytes its successor type is built with.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct ReplaceConfig {
+        pub path: aether_data::ErasedActorPath,
+        #[serde(with = "aether_data::bytes")]
+        pub config: Vec<u8>,
+    }
+
+    /// Reply to `ReplaceComponent`. `Ok` carries each type the successor
+    /// module publishes with its advertised capabilities, once every
+    /// instance has committed and every chain its commit released has
+    /// settled; `Err` carries a free-form reason, and no instance moved.
     #[aether_data::kind(name = "aether.component.replace_result")]
     pub enum ReplaceResult {
-        Ok { capabilities: ComponentCapabilities },
+        Ok { types: Vec<ReplacedType> },
         Err { error: String },
+    }
+
+    /// One type a republished module publishes, as [`ReplaceResult::Ok`]
+    /// reports it: its published namespace and its receive surface.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct ReplacedType {
+        pub namespace: String,
+        pub capabilities: ComponentCapabilities,
     }
 
     /// `aether.component.list` — enumerate the components an engine has

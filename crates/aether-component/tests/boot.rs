@@ -8,7 +8,7 @@
 //! singleton lifecycle end-to-end through mail: cardinality (N selector loads →
 //! 1 boot), non-selectability (an `export = boot-namespace` load → `Err`),
 //! survival (the boot outlives every widget), a drop at the boot closing it
-//! for good, and a boot module refusing every replace.
+//! for good, and a boot module refusing every republish.
 
 use std::fs;
 
@@ -20,6 +20,7 @@ use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
     LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
 };
+use aether_substrate::testing::successor_wasm;
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
@@ -34,9 +35,10 @@ const BOOT_OBSERVED: &str = "aether.test_fixture.boot_observed";
 const BOOT_TORN_DOWN: &str = "aether.test_fixture.boot_torn_down";
 /// The boot's published name: the root singleton at its namespace.
 const BOOT_NAMESPACE: &str = "aether.test.boot.boot";
-/// A bootless module, and one of its root exports.
-const BUNDLE: &str = "aether_test_fixtures_bundle";
-const BUNDLE_EXPORT: &str = "test.quiet_probe";
+/// The republish subject with an added boot, and its bootless base
+/// (issue 7109).
+const SUBJECT_BOOT: &str = "republish_subject_boot";
+const SUBJECT_BASE: &str = "republish_subject_base";
 
 /// Load one named export of the boot fixture, blocking on `LoadResult::Ok`, and
 /// return its trampoline's actor path.
@@ -208,20 +210,14 @@ fn drop_boot(harness: &mut SubstrateHarness) {
         .expect("drop boot sequence");
 }
 
-/// Replace `target` with `wasm`, returning the host's verdict.
-fn replace(harness: &mut SubstrateHarness, target: ErasedActorPath, wasm: Vec<u8>, export: &str) -> ReplaceResult {
+/// Republish `wasm`, returning the host's verdict.
+fn replace(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ReplaceResult {
     let replaced = harness
         .execute(vec![(
             "replace",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent {
-                    target,
-                    wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: Some(export.to_owned()),
-                },
+                &ReplaceComponent { wasm, configs: Vec::new() },
             ),
         )])
         .expect("replace sequence");
@@ -299,52 +295,64 @@ fn a_drop_at_the_boot_closes_it_for_good() {
     );
 }
 
-/// Catches a replace that moves a guest onto or off a module that declares a
-/// boot: a widget of the boot module, the boot itself, and a bootless guest
-/// whose replacement declares one are all refused before anything publishes,
-/// so no boot is spawned for the replacement.
+/// Catches a republish that moves live instances onto or off a module that
+/// declares a boot. A successor of the boot module declares the boot too, and
+/// a successor that drops the boot republishes namespaces a boot module
+/// published; both are refused before anything prepares or publishes, so no
+/// second boot is spawned and the running boot is not torn down.
 #[test]
 fn a_module_that_declares_a_boot_is_not_replaceable() {
     let Some(boot_path) = require_wasm("aether_test_fixtures_boot") else {
         return;
     };
-    let Some(bundle_path) = require_wasm(BUNDLE) else {
+    let Some(subject_boot_path) = require_wasm(SUBJECT_BOOT) else {
+        return;
+    };
+    let Some(subject_base_path) = require_wasm(SUBJECT_BASE) else {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let boot_wasm = fs::read(&boot_path).expect("read boot fixture wasm");
-    let bundle_wasm = fs::read(&bundle_path).expect("read bundle fixture wasm");
 
-    let widget = load_boot_export(&mut harness, &boot_wasm, "aether.test.boot.widget_a");
-    let boot = ErasedActorPath::new(BOOT_NAMESPACE).expect("the boot namespace is an actor path");
-    for target in [widget, boot] {
-        match replace(&mut harness, target.clone(), bundle_wasm.clone(), BUNDLE_EXPORT) {
-            ReplaceResult::Err { error } => assert!(
-                error.contains(target.as_str()) && error.contains("declares a boot"),
-                "the refusal names {target} and its module's boot: {error}",
-            ),
-            ReplaceResult::Ok { .. } => panic!("{target} comes from a boot module and must not be replaced"),
-        }
+    load_boot_export(&mut harness, &boot_wasm, "aether.test.boot.widget_a");
+    settle(&mut harness);
+    let booted_once = harness.count_observed(BOOT_OBSERVED);
+    match replace(&mut harness, successor_wasm(&boot_wasm, 1)) {
+        ReplaceResult::Err { error } => assert!(
+            error.contains("declares the boot") && error.contains(BOOT_NAMESPACE),
+            "the refusal names the successor's boot: {error}",
+        ),
+        ReplaceResult::Ok { .. } => panic!("a successor of a boot module must not be republished"),
     }
+    settle(&mut harness);
+    assert_eq!(harness.count_observed(BOOT_OBSERVED), booted_once, "the refused successor spawns no boot");
 
-    let (_, probe) = harness
+    let subject_boot_wasm = fs::read(&subject_boot_path).expect("read subject boot fixture wasm");
+    harness
         .load_any(&LoadComponent {
-            wasm: bundle_wasm,
+            wasm: subject_boot_wasm,
             name: None,
             config: Vec::new(),
-            export: Some(BUNDLE_EXPORT.to_owned()),
+            export: Some("test.republish.subject".to_owned()),
         })
-        .expect("load the bootless probe");
-    match replace(&mut harness, probe, boot_wasm, "aether.test.boot.widget_a") {
-        ReplaceResult::Err { error } => {
-            assert!(error.contains(BOOT_NAMESPACE), "the refusal names the replacement's boot: {error}");
-        }
-        ReplaceResult::Ok { .. } => panic!("a replacement that declares a boot must be refused"),
+        .expect("load the boot variant of the subject");
+    settle(&mut harness);
+    let booted = harness.count_observed(BOOT_OBSERVED);
+    let subject_base_wasm = fs::read(&subject_base_path).expect("read subject base fixture wasm");
+    match replace(&mut harness, subject_base_wasm) {
+        ReplaceResult::Err { error } => assert!(
+            error.contains("test.republish.subject") && error.contains("declares a boot"),
+            "the refusal names the namespace a boot module published: {error}",
+        ),
+        ReplaceResult::Ok { .. } => panic!("a successor that drops a boot must not be republished"),
     }
+
+    settle(&mut harness);
     assert_eq!(
         harness.count_observed(BOOT_OBSERVED),
-        1,
-        "the refused replacement spawns no boot of its own; observed kinds: {:?}",
+        booted,
+        "the refused successors spawn no boot of their own; observed kinds: {:?}",
         harness.observed_kinds(),
     );
+    assert_eq!(harness.count_observed(BOOT_TORN_DOWN), 0, "the running boot is untouched by a refused republish");
 }

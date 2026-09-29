@@ -24,6 +24,13 @@ publish = false
 # - `republish_carry_v{1,2}`: a correlation-carry requester, held relay and
 #   held requester beside the shared `test.republish.carry.holder`. v2 reshapes
 #   the requester's carried context and the relay's held reply kind.
+# - `republish_group_v3` (issue 7086): the pair with the gate's config kind
+#   changed, republishing v1.
+# - `republish_loader` (issue 7086): a guest that loads a component through the
+#   component host, as any guest does.
+# - `republish_courier_v{1,2}` (issue 7086): a root courier and an instanced
+#   parcel. v2's courier mails the component host from `on_rehydrate`, so its
+#   load or drop reaches the host on the republish's own commit chain.
 [lib]
 crate-type = ["rlib"]
 
@@ -34,6 +41,10 @@ aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # The dependency successors declare `depends(ClipboardCapability)`. Marker face
 # only.
 aether-clipboard = { path = "../aether-clipboard", default-features = false }
+# `republish_loader` and `republish_courier_v2` mail the component host. Identity face
+# only.
+aether-component = { path = "../aether-component", default-features = false }
+aether-kinds = { path = "../aether-kinds" }
 
 [[example]]
 name = "republish_subject_base"
@@ -73,6 +84,22 @@ crate-type = ["cdylib"]
 
 [[example]]
 name = "republish_group_v2"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_group_v3"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_loader"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_courier_v1"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_courier_v2"
 crate-type = ["cdylib"]
 
 [[example]]

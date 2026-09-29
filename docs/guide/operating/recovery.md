@@ -171,8 +171,9 @@ After an error:
 - do not drop the component until evidence is preserved;
 - prefer a known-good exact content hash for a roll-forward attempt.
 
-If the component is no longer serviceable and the engine is shared, replace it
-in place with `replace_component` while it is still live, or drop that exact
+If the component is no longer serviceable and the engine is shared, republish
+its module with `replace_component` while it is still live (every live instance
+of the module's namespaces moves with it), or drop that exact
 instance and load a differently named one after checking downstream address
 ownership. A drop retires the name, so a reload under it is refused. If the
 engine is task-owned, replacing the whole engine is often the cleaner isolation

@@ -18,6 +18,7 @@ use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::{
     InlineChild, InlineDespawnChild, InlineDespawnParent, InlineParent, InlineStatefulChild, InlineStatefulParent,
     InlineTagParent, NestedLineageChild, NestedLineageLeaf, NestedLineageParent,
@@ -66,7 +67,7 @@ where
 /// `inline_child` bundle (issue 1994, ADR-0096) via
 /// `export: Some("test.inline.stateful_parent")`, bumps the **child's**
 /// counter to 2 through the child's first-class lineage address, replaces
-/// the wasm at the same mailbox id with the same binary, then re-queries
+/// the wasm at the same mailbox id with the same code, then re-queries
 /// the child's alias. The old instance's `on_dehydrate` packs the child's
 /// state into the composite migration bundle; the new instance's
 /// `on_rehydrate` reconstructs the child by type and restores its count —
@@ -86,7 +87,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
 
     // Load `InlineStatefulParent` from the `inline_child` bundle, capturing
     // its path for the replace.
-    let (parent, path) = harness
+    let (parent, _) = harness
         .load::<InlineStatefulParent>(LoadComponent {
             wasm,
             name: None,
@@ -114,7 +115,8 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
         "two bumps should leave the inline child's counter at 2 before the replace",
     );
 
-    // Replace the wasm at the parent's mailbox id with the same binary.
+    // Republish the parent's module with the same code under a new hash,
+    // swapped at the parent's mailbox id (identical bytes would not swap).
     // The old instance's `on_dehydrate` composites the child's state; the
     // new instance's `on_rehydrate` reconstructs the child and restores it.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
@@ -123,7 +125,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
             ),
         )])
         .expect("replace sequence");
@@ -163,7 +165,7 @@ fn replace_rebuilds_a_private_inline_child() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let (parent, path) = harness
+    let (parent, _) = harness
         .load::<InlineParent>(LoadComponent {
             wasm,
             name: None,
@@ -187,7 +189,7 @@ fn replace_rebuilds_a_private_inline_child() {
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
             ),
         )])
         .expect("replace sequence");
@@ -249,7 +251,7 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let (root, path) = harness
+    let (root, _) = harness
         .load::<NestedLineageParent>(LoadComponent {
             wasm,
             name: None,
@@ -276,7 +278,7 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
             ),
         )])
         .expect("replace nested lineage fixture");
@@ -329,7 +331,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineTagParent`, capturing its path for the replace.
-    let (parent, path) = harness
+    let (parent, _) = harness
         .load::<InlineTagParent>(LoadComponent {
             wasm,
             name: None,
@@ -368,7 +370,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
         "the tag-spawned InlineStatefulChild is live and its counter climbs to 2",
     );
 
-    // (3) Replace the wasm at the parent's mailbox id with the same binary.
+    // (3) Republish the parent's module with the same code under a new hash.
     // The tag-spawned child's state must reconstruct — its type tag is in the
     // same export! set the reconstruct arm walks.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
@@ -377,7 +379,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
             ),
         )])
         .expect("replace sequence");

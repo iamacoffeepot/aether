@@ -3,19 +3,23 @@
 //! receives [`LoadComponent`](aether_kinds::LoadComponent) mail and spawns a per-component
 //! `WasmTrampoline` (issue 634 Phase 4 PR 1) named by the guest's own
 //! published namespace: `NS`, `NS:key`, or `parent/NS:key` (ADR-0241 §5).
-//! [`DropComponent`](aether_kinds::DropComponent) and
-//! [`ReplaceComponent`](aether_kinds::ReplaceComponent) mail flow through the cap as well — it
-//! forwards each to the addressed trampoline preserving the
-//! original `reply_to`, so the trampoline replies directly to the
+//! [`DropComponent`](aether_kinds::DropComponent) mail flows through the cap
+//! as well — it hands each to the addressed trampoline with the original
+//! caller as its reply target, so the trampoline replies directly to the
 //! agent. The trampoline manages its own lifecycle as an instanced
 //! [`NativeActor`]: a drop closes it and its name tombstones (ADR-0241 §8),
-//! and the host refuses a later replace or drop at that path.
+//! and the host refuses a later drop at that path.
 //!
-//! Every load and replace first publishes its module (ADR-0241 §3): one
-//! registry-owner batch runs admission (§4) and registers the module's kinds,
-//! all or nothing. A load spawns, and a replace is forwarded to its
-//! trampoline, only once that batch commits; a refusal answers the caller
-//! with `module publish refused: …`.
+//! Every load first publishes its module (ADR-0241 §3): one registry-owner
+//! batch runs admission (§4) and registers the module's kinds, all or
+//! nothing. A load spawns only once that batch commits; a refusal answers
+//! the caller with `module publish refused: …`.
+//!
+//! [`ReplaceComponent`](aether_kinds::ReplaceComponent) republishes a module
+//! as one group (ADR-0241 §7): the host pre-checks the successor against
+//! every live instance of the module's namespaces, drives each through the
+//! trampoline's prepare, then publishes the module and commits every
+//! instance, or aborts every one.
 //!
 //! Pre-Phase-4 the cap also owned the wasm dispatcher infrastructure
 //! (the retired `ComponentEntry`, `dispatcher_loop`, `kill_actor`,
@@ -61,10 +65,6 @@
 // re-export sources `ComponentHostParams` through `runtime`.
 #[cfg(feature = "runtime")]
 pub use runtime::ComponentHostParams;
-// The trampoline's replace path checks its hosted type's dependencies
-// through the host's shared refusal wording.
-#[cfg(feature = "runtime")]
-pub(crate) use runtime::replacement_refusal;
 
 // `LoadResult` is named by the emitted reply rows (the load handlers return
 // `Pending<LoadResult>`) as well as by the runtime half's own code, so it is

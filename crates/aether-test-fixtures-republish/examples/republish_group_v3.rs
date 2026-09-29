@@ -1,49 +1,41 @@
-//! Issue 7109: the first version of the republish pair, which
-//! `republish_group_v2` republishes.
+//! Issue 7086: a version of the republish pair whose gate changes its config
+//! kind, republishing `republish_group_v1`.
 //!
-//! - `Gate` (`test.republish.gate`, instanced) answers `GateQuery` with the
-//!   probes it recorded. This version has no `GateProbe` row, so it records
-//!   none: a probe means something only to the guest a republish installs.
-//! - `Peer` (`test.republish.peer`, root) counts `Bump`s, answers
-//!   `CountQuery`, carries its count across a replace as `PeerState`, and
-//!   reports `WireObserved` each time it is wired.
-//!
-//! The gate sends nothing from its lifecycle hooks, so every probe a test
-//! sends it is the test's own. It counts each run of `wire` and answers
-//! `WireCountQuery` with the count (issue 7086).
+//! - `Gate` keeps v1's rows but is built with a `GateLabelledConfig`, a kind
+//!   v1's gate does not declare, so every live gate needs a config when this
+//!   version republishes v1. It answers `GateQuery` with its config's label,
+//!   so a test reads which config each instance was built with.
+//! - `Peer` is v1's, unchanged.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, GateConfig, GateQuery, GateQueryResult, PeerConfig, PeerState,
+    Bump, CountQuery, CountReport, GateLabelledConfig, GateQuery, GateQueryResult, PeerConfig, PeerState,
     SubstrateHarnessObserver, WireCountQuery, WireObserved,
 };
 
 pub struct Gate {
-    seqs: Vec<u32>,
-    /// How many times `wire` has run on this instance.
+    label: u32,
     wired: u32,
 }
 
 #[actor(instanced, root)]
 impl WasmActor for Gate {
-    type Config = GateConfig;
+    type Config = GateLabelledConfig;
     const NAMESPACE: &'static str = "test.republish.gate";
 
-    fn init(_config: GateConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Gate { seqs: Vec::new(), wired: 0 })
+    fn init(config: GateLabelledConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Gate { label: config.label, wired: 0 })
     }
 
-    /// Count each run of the hook, without sending anything.
     fn wire(&mut self, _ctx: &mut WireCtx<'_, '_>) {
         self.wired += 1;
     }
 
     #[handler::single]
     fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: GateQuery) -> GateQueryResult {
-        GateQueryResult { seqs: self.seqs.clone() }
+        GateQueryResult { seqs: vec![self.label] }
     }
 
-    /// The number of times this instance has been wired.
     #[handler::single]
     fn on_wired(&mut self, _ctx: &mut WasmCtx<'_>, _query: WireCountQuery) -> CountReport {
         CountReport { count: self.wired }
@@ -65,7 +57,6 @@ impl WasmActor for Peer {
         Ok(Peer { count: 0 })
     }
 
-    /// Report each run of the hook, so a test can count it.
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
         ctx.send::<SubstrateHarnessObserver>(&WireObserved);
     }

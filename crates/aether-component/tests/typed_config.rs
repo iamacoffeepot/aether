@@ -16,6 +16,7 @@ use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DescribeComponent, DescribeComponentResult, LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 use std::fs;
 
@@ -112,15 +113,12 @@ fn a_replace_without_config_reuses_the_spawn_config() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let config = ProbeConfig { seed: 0x7085_0001, label: "spawn-config".to_owned() };
-    let (probe, path) = load_probe(&mut harness, &wasm_path, config.encode_into_bytes());
+    let (probe, _) = load_probe(&mut harness, &wasm_path, config.encode_into_bytes());
 
-    let replace = ReplaceComponent {
-        target: path,
-        wasm: fs::read(&wasm_path).expect("read fixture wasm"),
-        drain_timeout_ms: None,
-        config: Vec::new(),
-        export: None,
-    };
+    // A successor build of the same code: identical bytes would answer with
+    // no swap, and no candidate would be built.
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let replace = ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() };
     let host = harness.actor_ref::<ComponentHostCapability>();
     let replaced = harness
         .execute(vec![("replace", HarnessOp::send_and_await_reply(&host, &replace))])

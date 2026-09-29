@@ -707,47 +707,45 @@ pub struct LoadComponentArgs {
 /// `replace_component` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReplaceComponentArgs {
-    /// Engine UUID hosting the component (from `list_engines`). Omit to
-    /// target the sole supervised engine; with zero or several engines an
-    /// omitted id is an error naming the situation, never a guess. The
-    /// reply echoes the engine that answered.
+    /// Engine UUID hosting the module's instances (from `list_engines`).
+    /// Omit to target the sole supervised engine; with zero or several
+    /// engines an omitted id is an error naming the situation, never a
+    /// guess. The reply echoes the engine that answered.
     #[serde(default)]
     pub engine_id: Option<String>,
-    /// Address of the live component to replace: its canonical ADR-0099
-    /// lineage (the `address` `load_component` returned) or an unambiguous
-    /// ADR-0166 short path. The selected engine resolves it to the canonical
-    /// lineage through the same resolver `describe_component` /
-    /// `actor_logs` / `send_mail` use.
-    pub address: String,
-    /// Registry selector for the replacement component, resolved against
-    /// the hub's content-addressed store (ADR-0116) — hash-primary, so a
-    /// `hash` pins or rolls a component to an exact build. A `name` or
-    /// `module@actor` resolves too. The host wasm path is retired; the
-    /// only path anywhere is the `upload_component` input.
+    /// Registry selector for the successor module, resolved against the
+    /// hub's content-addressed store (ADR-0116) — hash-primary, so a `hash`
+    /// pins or rolls a module to an exact build; a `name` resolves too. A
+    /// replace names no actor: every live instance of the module's
+    /// namespaces moves, so a `module@actor` selector is refused.
     pub selector: String,
-    /// ADR-0090 (issue 1257): optional inline init-config JSON for the
-    /// replacement instance, threaded to its typed `init` the same way
-    /// [`LoadComponentArgs::config`] is on first load.
+    /// New init configs for live instances (ADR-0090 §5, ADR-0241 §4). An
+    /// instance whose type's config kind changed needs one; every other
+    /// instance keeps its stored config.
     #[serde(default)]
-    pub config: Option<serde_json::Value>,
-    /// ADR-0090 (issue 1257): optional path to a JSON file holding the
-    /// replacement instance's init-config. Mutually exclusive with `config`.
-    #[serde(default)]
-    pub config_path: Option<String>,
-    /// ADR-0096: which exported actor type to instantiate from the
-    /// replacement module, named by its `Addressable::NAMESPACE` (e.g.
-    /// `"ui.panel"`). Omit to reuse the actor type the trampoline
-    /// currently hosts — not necessarily the entry — preserving today's
-    /// replace behaviour. A `module@actor` selector populates this from
-    /// its `@actor` half. An export the replacement module doesn't
-    /// declare comes back as a `ReplaceResult::Err`.
-    #[serde(default)]
-    pub export: Option<String>,
+    pub configs: Vec<ReplaceConfigArgs>,
     /// When `true`, each capabilities doc field carries the full rustdoc
     /// string. When `false` (default), each doc is projected to its first
     /// non-empty rustdoc line (summary convention; issue 3006).
     #[serde(default)]
     pub full: bool,
+}
+
+/// One instance's config in [`ReplaceComponentArgs::configs`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReplaceConfigArgs {
+    /// The live instance: its canonical lineage (`NS`, `NS:key`, or
+    /// `parent/NS:key`, the `address` `load_component` returned) or an
+    /// unambiguous ADR-0166 short path.
+    pub address: String,
+    /// Inline init-config JSON, schema-encoded to the successor module's
+    /// Config kind for the instance's type.
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
+    /// Path to a JSON file holding the config. Mutually exclusive with
+    /// `config`.
+    #[serde(default)]
+    pub config_path: Option<String>,
 }
 
 /// `describe_component` arguments.

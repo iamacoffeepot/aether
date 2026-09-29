@@ -1,31 +1,30 @@
-//! `FleetHarness` reply-routing regression for the two **forwarded**
+//! `FleetHarness` reply-routing regression for the two **held**
 //! component-lifecycle ops (issue 1466). Over the real hub → RPC →
-//! forked-substrate wire, `ReplaceComponent` and `DropComponent` are
-//! forwarded by the component cap to the trampoline, whose deferred
-//! `ctx.reply` must stream back before the originating call settles.
-//! Before the fix the forward did not hold the call's trace root open,
-//! so the call emitted `ReplyEnd(Ok)` with zero reply events and the
-//! `ReplaceResult` / `DropResult` routed to a call that had already
-//! closed (discarded). `load_component` is unaffected — the cap answers
-//! it inline, streaming the reply home before settlement.
+//! forked-substrate wire, the component host holds the reply to
+//! `ReplaceComponent` across a republish's prepare, publish and commit
+//! turns (ADR-0241 §7), and hands `DropComponent`'s to the trampoline;
+//! either reply must stream back before the originating call settles.
+//! Before the issue-1466 fix a deferred reply did not hold the call's trace
+//! root open, so the call emitted `ReplyEnd(Ok)` with zero reply events and
+//! the `ReplaceResult` / `DropResult` routed to a call that had already
+//! closed (discarded).
 
 mod tests {
     use aether_data::Kind;
     use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
     use aether_rpc::ReplyEnvelope;
+    use aether_substrate::testing::successor_wasm;
 
     use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
-    /// Load the `probe` component, replace it in place, and drop it. Each
-    /// forwarded operation draws its `*Result::Ok` as a streamed reply event
-    /// ahead of `ReplyEnd`. The replace routes through the component host's
-    /// tracked forward and the drop through its `forward_to`; before the
-    /// issue-1466 fix the forward let the call settle before the trampoline
-    /// replied, so the reply set came back empty. The replace selects
-    /// `QuietProbe` again and checks only its dependencies, which headless
+    /// Load the `probe` component, republish its module with identical code
+    /// under a new hash, and drop it. Each held operation draws its
+    /// `*Result::Ok` as a streamed reply event ahead of `ReplyEnd`; before
+    /// the issue-1466 fix the call settled before the answer, so the reply
+    /// set came back empty. `QuietProbe` declares only dependencies headless
     /// serves.
     #[test]
-    fn forwarded_replace_and_drop_route_their_reply() {
+    fn replace_and_drop_route_their_held_reply() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
@@ -34,7 +33,7 @@ mod tests {
         let wasm = read_component_wasm("aether_test_fixtures_bundle");
 
         // Load the probe and read its actor path off the LoadResult; the
-        // forwarded ops address the trampoline by that path.
+        // drop addresses the trampoline by that path.
         let load_replies = harness.send::<LoadComponent>(
             engine,
             "aether.component",
@@ -55,17 +54,11 @@ mod tests {
         let replace_replies = harness.send::<ReplaceComponent>(
             engine,
             "aether.component",
-            &ReplaceComponent {
-                target: path.clone(),
-                wasm,
-                drain_timeout_ms: None,
-                config: Vec::new(),
-                export: Some("test.quiet_probe".to_owned()),
-            },
+            &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
         );
         assert!(
             !replace_replies.is_empty(),
-            "ReplaceComponent drew zero reply events — the forwarded reply settled before the trampoline replied (issue 1466)",
+            "ReplaceComponent drew zero reply events — the call settled before the held reply answered (issue 1466)",
         );
         match decode_reply::<ReplaceResult>(&replace_replies) {
             ReplaceResult::Ok { .. } => {}
@@ -74,11 +67,12 @@ mod tests {
 
         // The loaded guest publishes only its own rows, which do not include
         // the native DropComponent handler. The host-owned proof retained at
-        // spawn, and kept across the replace, must still make the drop succeed.
+        // spawn, and kept across the republish, must still make the drop
+        // succeed.
         let drop_replies = harness.send::<DropComponent>(engine, "aether.component", &DropComponent { target: path });
         assert!(
             !drop_replies.is_empty(),
-            "DropComponent drew zero reply events — the forwarded reply settled before the trampoline replied (issue 1466)",
+            "DropComponent drew zero reply events — the handed-off reply settled before the trampoline replied (issue 1466)",
         );
         match decode_reply::<DropResult>(&drop_replies) {
             DropResult::Ok => {}

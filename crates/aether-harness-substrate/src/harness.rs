@@ -45,8 +45,11 @@ use aether_trace::walk::TreeWalk;
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape).
 use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root};
 use aether_fs::NamespaceRoots;
+use aether_substrate::PumpedSlot;
 use aether_substrate::chassis::ctx::MailboxWakeFn;
-use aether_substrate::chassis::settlement::{PumpWake, TerminalDisposition, WaitOutcome, await_internal_signal};
+use aether_substrate::chassis::settlement::{
+    PumpWake, TerminalDisposition, WaitOutcome, await_internal_signal, await_settlement_pumped,
+};
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 #[cfg(test)]
 use aether_substrate::mail::MailboxId;
@@ -59,8 +62,8 @@ use crate::{PreparedSend, SendTarget};
 use aether_substrate_harness_cap::SubstrateHarnessCapability;
 
 use super::chassis::{
-    ComposeFn, FrameHook, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv,
-    WORKERS,
+    ComponentHostMode, ComposeFn, FrameHook, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis,
+    SubstrateHarnessEnv, WORKERS,
 };
 use aether_substrate_harness_cap::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
@@ -194,6 +197,9 @@ pub struct SubstrateHarness {
     /// instead of sleeping, and it alone empties the queue inside a pump
     /// wait — always before it drains the sources, so no wake is lost.
     wake_rx: Receiver<PumpWake>,
+    /// A sender on the same channel, for the settlement subscriptions a
+    /// pumped component host's settle wait takes.
+    wake_tx: Sender<PumpWake>,
 
     /// Frame-pump render seam, `Some` iff the builder registered a
     /// render extension (issues #3764/#3765). Captures require it; an
@@ -246,12 +252,27 @@ pub struct SubstrateHarness {
     /// Only the `#[cfg(test)]` fixtures read it, through `Self::boot`.
     _boot: SubstrateBoot,
 
+    /// The pumped component host, when the builder asked for one. Declared
+    /// before `passive` and `_boot` so it shuts down, running its close
+    /// tail, while the chassis it lives on is still up.
+    component_host: Option<PumpedHost>,
+
     /// `PassiveChassis<SubstrateHarnessChassis>` holding the booted Log +
     /// Render passives via the `chassis_builder` typed map. Held for
     /// the harness's lifetime so the passives' dispatcher threads
     /// stay alive; drops in reverse declaration order before
     /// `_boot`, so render+log shut down before the scheduler joins.
     passive: PassiveChassis<SubstrateHarnessChassis>,
+}
+
+/// The pumped component host's slot, shut down when the harness drops so the
+/// host's close tail runs while its chassis is still up.
+struct PumpedHost(PumpedSlot<ComponentHostCapability>);
+
+impl Drop for PumpedHost {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
 }
 
 /// A request enqueued through [`SubstrateHarness::send_deferred`] whose reply will
@@ -287,7 +308,7 @@ pub struct SubstrateHarnessBuilder {
     trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
     render_hook: Option<HookFactory>,
-    component_host: bool,
+    component_host: ComponentHostMode,
     compose: Vec<ComposeFn>,
     scheduler_tuning: SchedulerTuning,
 }
@@ -304,7 +325,7 @@ impl Default for SubstrateHarnessBuilder {
             trace_ring_max_capacity: None,
             settlement_cap: None,
             render_hook: None,
-            component_host: false,
+            component_host: ComponentHostMode::Absent,
             compose: Vec::new(),
             scheduler_tuning: SchedulerTuning::default(),
         }
@@ -521,7 +542,21 @@ impl SubstrateHarnessBuilder {
     /// wasm needs this.
     #[must_use]
     pub fn with_component_host(mut self) -> Self {
-        self.component_host = true;
+        self.component_host = ComponentHostMode::Pooled;
+        self
+    }
+
+    /// Compose the component host as a pumped actor (ADR-0160): it
+    /// dispatches only while this harness drains it. Every harness wait
+    /// drains it as a chassis driver would, so loads, drops and replaces
+    /// answer as they do on the pool; between waits the host holds still,
+    /// and [`SubstrateHarness::step_component_host_through`] runs it one
+    /// envelope at a time. A scenario holds a republish prepared this way
+    /// (ADR-0241 §7). It composes without a render hook, whose slot the
+    /// harness would otherwise have to drain in the same waits.
+    #[must_use]
+    pub fn with_pumped_component_host(mut self) -> Self {
+        self.component_host = ComponentHostMode::Pumped;
         self
     }
 
@@ -604,6 +639,11 @@ impl SubstrateHarness {
             trace_max: trace_ring_max_capacity.unwrap_or(trace),
         };
         let settlement_cap = settlement_cap.unwrap_or_else(|| SettlementConfig::from_env().to_cap());
+        if component_host == ComponentHostMode::Pumped && render_hook.is_some() {
+            return Err(SubstrateHarnessError::Boot(
+                "a pumped component host composes without a render hook".to_owned(),
+            ));
+        }
 
         // The one wake channel the pump loop blocks on: the event channel,
         // the loopback recorder and the render slot each fire it after they
@@ -646,14 +686,18 @@ impl SubstrateHarness {
             render_assets_dir,
             render_wake: wake_tx.clone(),
         };
-        let SubstrateHarnessBuild { passive, boot, mut hook } =
+        let SubstrateHarnessBuild { passive, boot, mut hook, component_host } =
             SubstrateHarnessChassis::build_passive(env).map_err(|e| SubstrateHarnessError::Boot(e.to_string()))?;
+        let mut component_host = component_host.map(PumpedHost);
 
         // ADR-0160 / ADR-0161: the drain-at-pump-start rule — a pumped
         // driver whose loop starts parked drains once before its first real
         // pump so any mail queued during `init` / `wire` dispatches.
         if let Some(hook) = hook.as_mut() {
             hook.pump();
+        }
+        if let Some(PumpedHost(slot)) = component_host.as_mut() {
+            slot.drain_available();
         }
 
         // Attach a recording backend to the boot's outbound. Replies
@@ -679,6 +723,8 @@ impl SubstrateHarness {
             session: SessionToken(Uuid::from_u128(TESTBENCH_SESSION_UUID)),
             stashed_replies: HashMap::new(),
             observed_kinds,
+            wake_tx,
+            component_host,
             _boot: boot,
             passive,
         })
@@ -962,9 +1008,31 @@ impl SubstrateHarness {
 
     fn await_settlement(&mut self, kind: KindId, root: MailId, rx: &Receiver<()>) -> Result<(), SubstrateHarnessError> {
         let gate = "substrate_harness.push_and_settle";
-        let outcome = match self.hook.as_mut() {
-            Some(hook) => hook.settle(self.passive.settlement_registry(), root, self.settlement_cap, &self.wake_rx),
-            None => await_internal_signal(
+        let outcome = match (self.hook.as_mut(), self.component_host.as_mut()) {
+            (Some(hook), _) => {
+                hook.settle(self.passive.settlement_registry(), root, self.settlement_cap, &self.wake_rx)
+            }
+            // A chain through the pumped host settles only while its slot is
+            // drained, so the wait drains it on each mail wake, as a pumped
+            // driver does.
+            (None, Some(PumpedHost(slot))) => {
+                let wake = self.wake_tx.clone();
+                self.passive.settlement_registry().subscribe_settlement_with(root, move || {
+                    let _ = wake.send(PumpWake::Settled);
+                });
+                // Mail that reached the host before this wait fired a wake an
+                // earlier wait may have consumed, so drain once up front.
+                slot.drain_available();
+                await_settlement_pumped(
+                    &self.wake_rx,
+                    slot,
+                    gate,
+                    SETTLEMENT_TIMEOUT,
+                    self.settlement_cap,
+                    TerminalDisposition::ReplyErr,
+                )
+            }
+            (None, None) => await_internal_signal(
                 rx,
                 gate,
                 SETTLEMENT_TIMEOUT,
@@ -1151,6 +1219,25 @@ impl SubstrateHarness {
         PendingBenchReply { cid, expected: K::NAME }
     }
 
+    /// [`Self::send_deferred`] to a reference the harness handed out, such as
+    /// a loaded guest's erased reference, which no chassis target names.
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::Decode`] when `mail` cannot be prepared for
+    /// `to`.
+    pub fn send_deferred_to<K: Kind>(
+        &self,
+        to: impl SendTarget<K>,
+        mail: &K,
+    ) -> Result<PendingBenchReply, SubstrateHarnessError> {
+        let cid = self.fresh_correlation_id();
+        to.prepare(mail)
+            .for_reply(&self.passive, self.session_reply(cid))
+            .map_err(|error| SubstrateHarnessError::Decode(format!("prepare harness send: {error}")))?;
+        Ok(PendingBenchReply { cid, expected: K::NAME })
+    }
+
     /// Pump until the reply for a request returned by [`Self::send_deferred`]
     /// arrives, stashing out-of-order replies for later awaits.
     pub fn await_deferred<R>(&mut self, pending: PendingBenchReply) -> Result<R, SubstrateHarnessError>
@@ -1158,6 +1245,99 @@ impl SubstrateHarness {
         R: Kind,
     {
         self.pump_until_reply(pending.cid, pending.expected)
+    }
+
+    /// Push `mail` to `to` as a tracked chassis root and return the root,
+    /// without pumping anything or waiting for it to settle. The push lands
+    /// in the recipient's inbox before this returns, so it is ordered ahead
+    /// of anything the harness drives afterwards.
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::Decode`] when the send cannot be prepared.
+    pub fn send_tracked<K: Kind>(&self, to: impl SendTarget<K>, mail: &K) -> Result<MailId, SubstrateHarnessError> {
+        to.prepare(mail)
+            .tracked(&self.passive, None)
+            .map(|(root, _)| root)
+            .map_err(|error| SubstrateHarnessError::Decode(format!("prepare harness send: {error}")))
+    }
+
+    /// Block, without dispatching anything, until a mail of kind `K` is
+    /// queued for the pumped component host, waiting on its mailbox wake.
+    /// Nothing the host would do in reply to its queue happens meanwhile, so
+    /// every mail queued ahead of that one arrived while the host held
+    /// still; [`Self::step_component_host_through`] then dispatches exactly
+    /// those, and that one.
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::SettlementTimeout`] when no such mail is
+    /// queued within the settlement cap.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the harness was built without
+    /// [`SubstrateHarnessBuilder::with_pumped_component_host`].
+    pub fn await_component_host_queued<K: Kind>(&mut self) -> Result<(), SubstrateHarnessError> {
+        let gate = "substrate_harness.await_component_host_queued";
+        let start = Instant::now();
+        loop {
+            let PumpedHost(slot) = self.component_host.as_mut().expect("the harness composed a pumped component host");
+            if slot.queued_kinds().contains(&K::ID) {
+                return Ok(());
+            }
+            match self.wake_rx.recv_timeout(SETTLEMENT_TIMEOUT) {
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) if start.elapsed() < self.settlement_cap => tracing::warn!(
+                    target: "aether_substrate::substrate_harness",
+                    gate,
+                    waited_millis = start.elapsed().as_millis(),
+                    "component host queue slow: still waiting for {}, extending",
+                    K::NAME,
+                ),
+                Err(_) => return Err(self.settlement_timeout(K::NAME.to_owned(), gate)),
+            }
+        }
+    }
+
+    /// Run the pumped component host one envelope at a time until it has
+    /// dispatched `count` mails of kind `K`, waiting on its mailbox wake
+    /// whenever its inbox is empty. It stops right after the last one, so
+    /// whatever that turn staged has not yet come back to it: after the
+    /// host dispatched a republish member's `Prepared`, that member is
+    /// prepared and its commit has not been sent.
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::SettlementTimeout`] when the host has not
+    /// dispatched them within the settlement cap.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the harness was built without
+    /// [`SubstrateHarnessBuilder::with_pumped_component_host`].
+    pub fn step_component_host_through<K: Kind>(&mut self, count: usize) -> Result<(), SubstrateHarnessError> {
+        let gate = "substrate_harness.step_component_host";
+        let start = Instant::now();
+        let mut seen = 0;
+        while seen < count {
+            let PumpedHost(slot) = self.component_host.as_mut().expect("the harness composed a pumped component host");
+            match slot.dispatch_one() {
+                Some(kind) => seen += usize::from(kind == K::ID),
+                None => match self.wake_rx.recv_timeout(SETTLEMENT_TIMEOUT) {
+                    Ok(_) => {}
+                    Err(RecvTimeoutError::Timeout) if start.elapsed() < self.settlement_cap => tracing::warn!(
+                        target: "aether_substrate::substrate_harness",
+                        gate,
+                        waited_millis = start.elapsed().as_millis(),
+                        "component host step slow: still waiting for {}, extending",
+                        K::NAME,
+                    ),
+                    Err(_) => return Err(self.settlement_timeout(K::NAME.to_owned(), gate)),
+                },
+            }
+        }
+        Ok(())
     }
 
     /// Run `ticks` complete frames synchronously. Each frame
@@ -1372,6 +1552,11 @@ impl SubstrateHarness {
                     hook.send_frame(/* replay_cache_when_idle */ true);
                     progressed = true;
                 }
+            }
+            // The harness is the pumped component host's driver too, so a
+            // reply that needs the host's turns gets them here.
+            if let Some(PumpedHost(slot)) = self.component_host.as_mut() {
+                slot.drain_available();
             }
 
             // Look for our reply on the loopback.

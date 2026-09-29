@@ -8,8 +8,7 @@
 //! The trampoline is split into an addressing **identity** and a
 //! state-bearing **runtime**. [`WasmTrampoline`] is a ZST identity carrying
 //! only the addressing surface — `Addressable` (`NAMESPACE` / `Resolver`),
-//! the per-handler `HandlesKind<DropComponent>` / `HandlesKind<ReplaceComponent>`
-//! markers, and the `OnePer("component")` name-inventory entry — all emitted
+//! the per-handler `HandlesKind<DropComponent>` and republish-row markers, and the `OnePer("component")` name-inventory entry — all emitted
 //! always-on by `#[actor]`. The state-bearing runtime
 //! (`WasmTrampolineState`, which owns the wasmtime `Component` plus the
 //! `Engine` / `Linker` / `HubOutbound` handles, the resident `Module` and the
@@ -34,9 +33,8 @@
 //! ## Shape
 //!
 //! Instanced. Anything the trampoline doesn't handle
-//! natively (today: `DropComponent`, `ReplaceComponent`, the host's
-//! `LoadDelivered` hand-off, and a republish's `Prepare` / `Commit` /
-//! `Abort`) falls through the
+//! natively (today: `DropComponent`, the host's `LoadDelivered` hand-off,
+//! and a republish's `Prepare` / `Commit` / `Abort`) falls through the
 //! `#[fallback]` (`forward_to_wasm`) to the wasm guest via `Component::deliver`.
 //! The framework dispatcher reads from the trampoline's `NativeBinding`;
 //! un-handled kinds reach `forward_to_wasm`; the guest's `send_mail_p32` /
@@ -69,13 +67,11 @@
 //!   commit's chain, and delivers the gated mail to it; `Abort` discards the
 //!   candidate and its mail, reinstates the old guest with its cursor and
 //!   reply table, runs its `wire` again, and delivers the gated mail to it.
-//!   A drop while prepared aborts first.
-//! - **Replace**: `ReplaceComponent` mail lands on `on_replace_component`,
-//!   which checks the new bytes in through the engine's module cache
-//!   (ADR-0241 §2), prepares a candidate, and commits it in the same turn
-//!   when it is ready. A candidate built without a config uses the stored
-//!   spawn config. ADR-0022 + ADR-0038 invariants hold because the inbox
-//!   channel is the trampoline's `NativeBinding` and outlives the swap.
+//!   A drop while prepared aborts first. The component host drives every
+//!   member of a republish through these rows as one group, and a
+//!   candidate built without a config uses the stored spawn config.
+//!   ADR-0022 + ADR-0038 invariants hold because the inbox channel is the
+//!   trampoline's `NativeBinding` and outlives the swap.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated dispatch owns the
@@ -87,7 +83,7 @@ use aether_actor::{EMBEDDED_SCOPE, actor};
 use crate::component::ComponentHostCapability;
 
 // The runtime half — the whole `aether_substrate` / `wasmtime`-typed surface
-// (imports, `WasmTrampolineState`, `WasmTrampolineConfig`, the replace
+// (imports, `WasmTrampolineState`, `WasmTrampolineConfig`, the republish
 // helpers) — lives in the `runtime` directory, gated once here.
 // The `#[runtime] impl` sits beside its state there.
 #[cfg(feature = "runtime")]

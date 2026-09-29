@@ -2,7 +2,7 @@
 //!
 //! A route publishes its actor's `(KindId, ReplyContract)` rows and its
 //! fallback flag on its route record when it goes `Live`: a wasm trampoline
-//! its guest's, republished on replace; an inline
+//! its guest's, republished on a republish; an inline
 //! child's alias its own type's, private children included; a native
 //! capability its `#[actor]` surface. Each scenario reads the published
 //! contract through the harness's `published_contract` door.
@@ -20,11 +20,13 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::{Dispatch, NativeActor};
-use aether_test_fixtures_bundle::{ContractBase, InlineChild, InlineParent, InlineStatefulChild, InlineStatefulParent};
+use aether_test_fixtures_bundle::{InlineChild, InlineParent, InlineStatefulChild, InlineStatefulParent};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, InlineEcho, InlineProbe};
 
 const BUNDLE: &str = "aether_test_fixtures_bundle";
-const EXTENDED_EXPORT: &str = "test.contract.extended";
+/// The republish subject and its row-adding successor (issue 7109).
+const SUBJECT_BASE: &str = "republish_subject_base";
+const SUBJECT_EXTENDED: &str = "republish_subject_extended";
 
 /// `rows` sorted by kind, the order a published contract holds them in.
 fn sorted(mut rows: Vec<(KindId, ReplyContract)>) -> Vec<(KindId, ReplyContract)> {
@@ -57,41 +59,37 @@ where
 }
 
 /// A loaded trampoline publishes its guest's rows and fallback flag, and
-/// neither its own framework arms nor its forwarding fallback. A replace
-/// republishes the replacement's rows. Catches a trampoline that publishes its
-/// own `#[actor]` contract or nothing, and a replace that never republishes.
-/// A dropped instance's route no longer reads `Live`, which
-/// `harness_drop_close` covers.
+/// neither its own framework arms nor its forwarding fallback. A republish
+/// publishes the successor's rows on the live instance's route. Catches a
+/// trampoline that publishes its own `#[actor]` contract or nothing, and a
+/// republish that never updates the route. A dropped instance's route no
+/// longer reads `Live`, which `harness_drop_close` covers.
 #[test]
 fn a_loaded_component_publishes_its_guest_contract_through_replace() {
-    let Some(wasm_path) = require_wasm(BUNDLE) else {
+    let Some(base_path) = require_wasm(SUBJECT_BASE) else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let Some(extended_path) = require_wasm(SUBJECT_EXTENDED) else {
+        return;
+    };
     let mut harness = harness();
 
-    let (victim, path) = harness
-        .load::<ContractBase>(load_request(wasm.clone()))
+    let (subject, _) = harness
+        .load_any(&load_request(fs::read(base_path).expect("read subject base wasm")))
         .unwrap_or_else(|error| panic!("the base must load: {error}"));
     let base = sorted(vec![(Bump::ID, ReplyContract::None), (CountQuery::ID, ReplyContract::One(CountReport::ID))]);
-    assert_eq!(harness.published_contract(victim.erase()), Some((base.clone(), false)));
+    assert_eq!(harness.published_contract(subject), Some((base.clone(), false)));
 
-    let replace = ReplaceComponent {
-        target: path,
-        wasm,
-        drain_timeout_ms: None,
-        config: Vec::new(),
-        export: Some(EXTENDED_EXPORT.to_owned()),
-    };
+    let replace = ReplaceComponent { wasm: fs::read(extended_path).expect("read successor wasm"), configs: Vec::new() };
     let operation = HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), &replace);
     let replaced = harness.execute(vec![("replace", operation)]).expect("replace operation");
     if let ReplaceResult::Err { error } = replaced.reply::<ReplaceResult>("replace").expect("decode ReplaceResult") {
         panic!("a replace that only adds a row must succeed: {error}");
     }
-    harness.execute(vec![("bump", HarnessOp::send_and_settle(&victim, &Bump))]).expect("bump the replaced actor");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(subject, &Bump))]).expect("bump the replaced actor");
     harness.await_registry_applied();
     let extended = (sorted([base, vec![(InlineProbe::ID, ReplyContract::None)]].concat()), false);
-    assert_eq!(harness.published_contract(victim.erase()), Some(extended));
+    assert_eq!(harness.published_contract(subject), Some(extended));
 }
 
 /// An inline child's alias publishes its own type's rows: an exported child

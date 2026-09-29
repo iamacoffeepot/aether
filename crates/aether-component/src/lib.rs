@@ -11,14 +11,16 @@
 //! `LoadComponent` reaches the capability, which spawns a trampoline under the
 //! guest's name and instantiates the guest wasm `Component` against that
 //! trampoline's binding.
-//! `DropComponent` and `ReplaceComponent` are forwarded to the addressed
-//! trampoline with the original `reply_to` intact, so the trampoline answers
-//! the caller directly. The trampoline manages its own lifecycle and dispatch
-//! rides the framework's `NativeActor` loop. A drop closes the trampoline, so
-//! its name tombstones and is never loaded again (ADR-0241 §8). An in-place
-//! replace swaps the `Component` inside the trampoline behind a stable
-//! mailbox handle, so a mailbox id or route cache taken before the swap stays
-//! valid (ADR-0022). [`kinds`] holds the
+//! `DropComponent` is handed to the addressed trampoline with the original
+//! caller as its reply target, so the trampoline answers the caller
+//! directly. The trampoline manages its own lifecycle and dispatch rides the
+//! framework's `NativeActor` loop. A drop closes the trampoline, so its name
+//! tombstones and is never loaded again (ADR-0241 §8). `ReplaceComponent`
+//! republishes a module as one group (ADR-0241 §7): the host drives every
+//! live instance of the module's namespaces through a prepare, commit or
+//! abort, and each trampoline swaps its `Component` behind a stable mailbox
+//! handle, so a mailbox id or route cache taken before the swap stays valid
+//! (ADR-0022). [`kinds`] holds the
 //! capability's own internal mail, such as the contexts its staged loads
 //! carry.
 //!

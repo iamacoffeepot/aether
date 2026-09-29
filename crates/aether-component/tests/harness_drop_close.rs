@@ -19,6 +19,7 @@ use aether_kinds::{DropComponent, DropResult, LoadComponent, MonitorNotice, Repl
 use aether_substrate::BootError;
 use aether_substrate::MonitorHandle;
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
+use aether_substrate::testing::successor_wasm;
 
 const BUNDLE: &str = "aether_test_fixtures_bundle";
 /// An instanced export, so a load names its key.
@@ -107,7 +108,8 @@ fn keyed_load(wasm: &[u8]) -> LoadComponent {
 
 /// Catches a drop that leaves a refillable `Live` slot: its name would stay
 /// listed and published, a reload would answer `SubnameInUse` rather than
-/// retired, and a replace or a second drop at its path would succeed.
+/// retired, a republish of its module would refill it, and a second drop at
+/// its path would succeed.
 #[test]
 fn a_dropped_instance_closes_and_its_name_is_spent() {
     let Some(wasm_path) = require_wasm(BUNDLE) else {
@@ -150,23 +152,20 @@ fn a_dropped_instance_closes_and_its_name_is_spent() {
     assert!(!listed.contains(&path.to_string()), "the dropped instance is not listed: {listed:?}");
     assert_eq!(harness.published_contract(victim), None, "the dropped instance's route no longer reads `Live`");
 
-    let replace = ReplaceComponent {
-        target: path.clone(),
-        wasm,
-        drain_timeout_ms: None,
-        config: Vec::new(),
-        export: Some(PANEL_EXPORT.to_owned()),
-    };
+    // A republish of the module moves every live instance and refills
+    // nothing: the dropped name stays spent.
+    let replace = ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() };
     let refused = harness
         .execute(vec![
             ("replace", HarnessOp::send_and_await_reply(&host, &replace)),
             ("drop-again", HarnessOp::send_and_await_reply(&host, &drop)),
         ])
-        .expect("replace and drop the dropped path");
-    let ReplaceResult::Err { error } = refused.reply::<ReplaceResult>("replace").expect("decode ReplaceResult") else {
-        panic!("a replace at a dropped path is refused");
-    };
-    assert!(error.contains(path.as_str()), "the refusal names the path: {error}");
+        .expect("republish, then drop the dropped path");
+    if let ReplaceResult::Err { error } = refused.reply::<ReplaceResult>("replace").expect("decode ReplaceResult") {
+        panic!("a republish with no live instance of the dropped path still publishes: {error}");
+    }
+    let listed = harness.list_components().expect("list components");
+    assert!(!listed.contains(&path.to_string()), "the republish refills no dropped name: {listed:?}");
     let DropResult::Err { error } = refused.reply::<DropResult>("drop-again").expect("decode DropResult") else {
         panic!("a second drop at a dropped path is refused");
     };

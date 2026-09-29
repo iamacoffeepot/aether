@@ -36,7 +36,7 @@ pub struct DevComponentArgs {
     /// Component artifact stem. Required when the package exposes more than one component.
     #[arg(long)]
     target: Option<String>,
-    /// Existing component address (its published name: `NS`, `NS:key`, or `parent/NS:key`) to replace on the first pass.
+    /// Existing component address (its published name: `NS`, `NS:key`, or `parent/NS:key`): its module is republished on the first pass.
     #[arg(long, value_parser = parse_address)]
     address: Option<String>,
     /// Actor namespace to select on the first load. Conflicts with `--address`.
@@ -48,8 +48,9 @@ pub struct DevComponentArgs {
 }
 
 /// The live component the loop replaces: the canonical lineage the load
-/// handed back, or the address `--address` supplied. `replace_component`
-/// resolves either through its address resolver.
+/// handed back, or the address `--address` supplied. A replace names no
+/// instance: it republishes the module, and every live instance of its
+/// namespaces, this one among them, moves to the new build (ADR-0241 §7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LiveBinding {
     address: String,
@@ -263,7 +264,6 @@ async fn run_pass<B: ArtifactBuilder, C: ToolCaller>(
                 "replace_component",
                 json!({
                     "engine_id": engine_id,
-                    "address": current.address,
                     "selector": uploaded.hash,
                 }),
             )
@@ -516,7 +516,6 @@ mod tests {
             ["upload_component", "load_component", "upload_component", "replace_component"]
         );
         assert_eq!(calls[1].1["export"], "example.echo");
-        assert_eq!(calls[3].1["address"], "aether.component/example:echo");
         assert_eq!(calls[3].1["selector"], "hash-2");
         assert!(calls[3].1.get("export").is_none());
     }
@@ -592,8 +591,7 @@ mod tests {
         run_pass(&mut builder, &mut caller, "engine", None, &mut binding).await.expect("replace pass");
 
         let calls = calls.lock().expect("calls mutex").clone();
-        assert_eq!(calls[1].0, "replace_component");
-        assert_eq!(calls[1].1["address"], original.address, "a supplied address is what the replace names");
+        assert_eq!(calls[1].0, "replace_component", "a supplied address marks the component live");
         assert_eq!(binding, Some(original));
     }
 

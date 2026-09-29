@@ -22,15 +22,15 @@ mod config;
 mod dependencies;
 mod load;
 mod placement;
+mod republish;
 
 use super::{ComponentHostCapability, LoadResult};
 use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare, Prepared};
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
 pub use self::config::ComponentHostParams;
-// The trampoline checks a replacement's hosted type through this re-export.
-pub use self::dependencies::replacement_refusal;
 
+use aether_kinds::trace::Settled;
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
     LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult,
@@ -43,9 +43,9 @@ pub use aether_actor::Manual;
 // module. No sibling-cap imports: drop-time cleanup rides the ADR-0079
 // close `MonitorNotice` (each cap monitors its registrants and purges its own
 // rows), so the host names no peer cap's type or kinds.
-use aether_actor::{ErasedActorRef, OutboundReply, ProtocolRef, Single};
+use aether_actor::{ErasedActorRef, ProtocolRef, Single};
 use aether_data::ErasedActorPath;
-use aether_data::{MailboxCategory, Source};
+use aether_data::{MailId, MailboxCategory};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -117,40 +117,47 @@ pub struct ComponentHostCapabilityState {
     loads: HashMap<load::LoadId, load::LoadInFlight>,
     /// The next [`load::LoadId`] a load takes.
     next_load: u64,
-    /// In-flight `aether.component.replace` forwards awaiting their
-    /// trampoline `ReplaceResult`, keyed by the forward's correlation id: the
-    /// caller's reply target and the replacement module are parked here
-    /// across the hop. Empty except while a replace is settling.
-    pub pending_replace: HashMap<u64, PendingReplace>,
+    /// Every published namespace of every module that declares a boot
+    /// (ADR-0147), recorded when its publish commits. A republish of any of
+    /// them is refused, whether or not an instance is live: a boot module is
+    /// not replaceable.
+    boot_namespaces: HashSet<String>,
+    /// Every republish in flight (ADR-0241 §7), keyed by the id its prepare,
+    /// commit and abort contexts carry: its held reply, its members and the
+    /// loads and drops that wait for it to answer.
+    republishes: HashMap<republish::RepublishId, republish::Republish>,
+    /// The next [`republish::RepublishId`] a republish takes.
+    next_republish: u64,
+    /// Which republish in flight owns each namespace, so a second republish
+    /// of it is refused and a load of it waits.
+    republishing: HashMap<String, republish::RepublishId>,
+    /// The root of each commit a republish sent on its own chain, keyed to
+    /// the republish and member, until that chain's `Settled` arrives.
+    commit_roots: HashMap<MailId, republish::CommitRoot>,
+    /// Replaces whose namespaces had a load or boot in flight when they
+    /// arrived, in arrival order. Each runs its pre-checks once no load of
+    /// its namespaces is in flight.
+    queued_replaces: Vec<republish::QueuedReplace>,
     /// Host-owned control proof of each successfully born guest, a module
     /// boot included, keyed by its erased reference: the [`GuestControl`]
     /// rows its trampoline serves. The guest's public receive surface
     /// deliberately replaces the trampoline's native surface, so an external
     /// path cannot recover this proof by casting after load. A drop removes
-    /// its entry before forwarding, since the forwarded drop closes the
-    /// trampoline (ADR-0241 §8), so a replace or a second drop that arrives
-    /// before its route reads `Dropped` finds no entry and is refused.
+    /// its entry before handing off, since the handed-off drop closes the
+    /// trampoline (ADR-0241 §8), so a second drop that arrives before its
+    /// route reads `Dropped` finds no entry and is refused. The entries a
+    /// republish's module exports are its members.
     drop_targets: HashMap<ErasedActorRef, LoadedGuest>,
 }
 
-/// A parked `aether.component.replace` forward. `source` is the original
-/// caller's reply target (the trampoline's `ReplaceResult` is routed to the
-/// cap instead, then re-replied here). Holding `module` across the hop keeps
-/// its cache entry live, so the trampoline's own check-in of the forwarded
-/// bytes is a hit.
-pub struct PendingReplace {
-    pub source: Source,
-    pub module: Module,
-}
-
-/// A guest this host loaded or booted: the control proof it is dropped
-/// through, and whether its module declares a boot. The flag is set at birth
-/// from the module manifest and never changes, because a replace can neither
-/// add nor remove a boot (ADR-0147): a guest from a boot module is not
-/// replaceable.
+/// A guest this host loaded or booted: the control proof it is dropped and
+/// republished through, the published namespace it was born at, and the
+/// module it runs. The module is written at birth and rewritten when a
+/// republish of it commits.
 pub struct LoadedGuest {
     control: ProtocolRef<GuestControl>,
-    from_boot_module: bool,
+    namespace: String,
+    module: Module,
 }
 
 /// The rows the component host controls a guest through: its trampoline's
@@ -194,7 +201,12 @@ impl NativeActor for ComponentHostCapability {
             pending_boots: HashMap::new(),
             loads: HashMap::new(),
             next_load: 0,
-            pending_replace: HashMap::new(),
+            boot_namespaces: HashSet::new(),
+            republishes: HashMap::new(),
+            next_republish: 0,
+            republishing: HashMap::new(),
+            commit_roots: HashMap::new(),
+            queued_replaces: Vec::new(),
             drop_targets: HashMap::new(),
         })
     }
@@ -246,27 +258,18 @@ impl NativeActor for ComponentHostCapability {
         pending
     }
 
-    /// A load's module publish settled (ADR-0241 §3): a commit continues to
-    /// the module boot and the requested guest, and a refusal answers the
-    /// caller.
+    /// A module publish settled (ADR-0241 §3): a load's commit continues to
+    /// the module boot and the requested guest, and a republish's commit
+    /// sends every member its commit (§7). A refusal answers the load, or
+    /// aborts every member of the republish.
     #[handler(task)]
-    fn on_load_published(
+    fn on_module_published(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_, Self, Single>,
         done: TaskDone<RegistryBatchResult>,
     ) {
-        state.finish_load_publish(ctx, done);
-    }
-
-    /// A replace's module publish settled (ADR-0241 §4): a commit forwards
-    /// the replace to its trampoline, and a refusal answers the caller.
-    #[handler(task)]
-    fn on_replace_published(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Self, Single>,
-        done: TaskDone<RegistryBatchResult, load::ReplacePublication>,
-    ) {
-        state.finish_replace_publish(ctx, done);
+        state.finish_publish(ctx, done);
+        state.release_queued_replaces(ctx);
     }
 
     /// A staged guest birth settled (ADR-0241 §6): a module boot releases
@@ -279,6 +282,7 @@ impl NativeActor for ComponentHostCapability {
         done: TaskDone<GuestOutcome<GuestControl>>,
     ) {
         state.finish_guest_birth(ctx, done);
+        state.release_queued_replaces(ctx);
     }
 
     /// Refresh the hub's registry projection after a coalesced publication.
@@ -294,87 +298,84 @@ impl NativeActor for ComponentHostCapability {
         state.refresh_registry_inventory();
     }
 
-    /// Drop a component by its actor path. Forwards
-    /// [`DropComponent`] mail to the addressed trampoline; the
-    /// trampoline's `WasmTrampoline::on_drop_component` handler
-    /// replies `DropResult::Ok` and closes (ADR-0241 §8): its name
+    /// Drop a component by its actor path. Hands the drop to the addressed
+    /// trampoline, whose `WasmTrampoline::on_drop_component` handler replies
+    /// `DropResult::Ok` to the caller and closes (ADR-0241 §8): its name
     /// tombstones, and the close tail's `MonitorNotice` purges the mailbox
     /// from every sibling cap's fan-out / routing table — each cap monitors
     /// its registrants and drops its own rows on the notice, so the host
-    /// mails no cap anything at drop time.
+    /// mails no cap anything at drop time. A drop of an instance whose
+    /// module is republishing waits until the replace answers, then runs
+    /// against the instance the replace left (§7).
     ///
     /// # Agent
     /// `DropComponent { target }`. The `target` is the component's actor
     /// path, `LoadResult.path`: `NS`, `NS:key`, or `parent/NS:key`. A drop
     /// at a module boot closes it for good: the module's later loads spawn
     /// no new one (ADR-0147, ADR-0241 §8).
-    #[handler::manual]
-    fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: DropComponent) {
-        // ADR-0230: prove the address at receipt. An address with no live
-        // route has no trampoline to drop, so it answers `Err` now rather
-        // than forwarding into nothing; no position leaves the verb.
-        let actor = match ctx.resolve_path(&payload.target) {
-            Ok(proven) => proven,
-            Err(error) => {
-                ctx.reply(&DropResult::Err { error: format!("no component to drop at {}: {error}", payload.target) });
-                return;
-            }
-        };
-        // The drop closes the trampoline, so its entry leaves now: a second
-        // drop or a replace that proves the path before the owner applies its
-        // `Dropped` route finds no entry and is refused.
-        let Some(guest) = state.drop_targets.remove(&actor) else {
-            ctx.reply(&DropResult::Err { error: format!("no live component to drop at {}", payload.target) });
-            return;
-        };
-        // The forward inherits this call's chain, so the call stays open until
-        // the trampoline's deferred reply lands at the original caller.
-        ctx.forward_to(guest.control, &payload);
+    #[handler::single]
+    fn on_drop_component(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        payload: DropComponent,
+    ) -> Pending<DropResult> {
+        let (pending, held) = ctx.hold::<DropResult>();
+        state.begin_drop(ctx, held, payload);
+        pending
     }
 
-    /// Replace the component at `target` with a fresh wasm
-    /// binary. Forwards [`ReplaceComponent`] to the trampoline;
-    /// the trampoline's `WasmTrampoline::on_replace_component`
-    /// handler swaps `Component` internally and replies
-    /// `ReplaceResult` to this host, which answers the held reply from
-    /// `on_replace_result`; an early refusal answers it here.
-    /// ADR-0022 + ADR-0038 splice invariants hold because the inbox
-    /// channel is the trampoline's `NativeBinding`, which outlives the
-    /// swap.
+    /// Republish a module (ADR-0241 §7, §9): every live instance of every
+    /// namespace it republishes moves to the successor as one group, or none
+    /// does.
     ///
     /// # Agent
-    /// `ReplaceComponent { target, wasm, drain_timeout_ms, config, export }`,
-    /// where `target` is the component's actor path, `LoadResult.path`.
-    /// `drain_timeout_ms` is accepted for wire compatibility but
-    /// ignored under the trampoline's binding-stable replace.
-    /// `export` (ADR-0096) names which exported actor type of the
-    /// replacement module to instantiate; `None` reuses the type the
-    /// trampoline currently hosts. A module that declares a boot, in its
-    /// live or its replacement version, is not replaceable: it upgrades by
-    /// engine restart (ADR-0147).
+    /// `ReplaceComponent { wasm, configs }`. `wasm` must succeed the module
+    /// that publishes its namespaces: it exports each of them, keeps each
+    /// one's handler rows and fallback, and declares no boot. Identical
+    /// bytes answer `Ok` with no swap. `configs` lists `{ path, config }`
+    /// for an instance whose type's config kind changed, which needs one;
+    /// every other instance keeps its stored config. The host checks
+    /// everything it can first and refuses the whole replace, naming each
+    /// instance a check refuses; then every instance prepares, the module
+    /// publishes, and every instance commits. A failure while preparing or
+    /// publishing leaves every instance on its old code. The reply is
+    /// `ReplaceResult::Ok { types }`, each republished type with its
+    /// capabilities, once every commit's chain has settled.
     #[handler::single]
     fn on_replace_component(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
         payload: ReplaceComponent,
     ) -> Pending<ReplaceResult> {
-        // ADR-0241 §4: the replacement module publishes first, so admission
-        // refuses a republish that drops a namespace or narrows a contract
-        // before the trampoline is touched, and the replacement's kinds
-        // register. ADR-0147: a module whose live or replacement version
-        // declares a boot is refused before anything publishes. Once the
-        // publish commits, the replace is forwarded to the trampoline, whose
-        // `ReplaceResult` comes back to this cap (`on_replace_result`).
         let (pending, held) = ctx.hold::<ReplaceResult>();
         state.begin_replace(ctx, held, payload);
         pending
     }
 
-    /// Settle a forwarded `aether.component.replace`: `finish_replace`
-    /// re-replies the trampoline's `ReplaceResult` to the original caller.
+    /// A member answered its republish prepare (ADR-0241 §7).
     #[handler::manual]
-    fn on_replace_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: ReplaceResult) {
-        state.finish_replace(ctx, payload);
+    fn on_prepared(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: Prepared) {
+        state.finish_prepare(ctx, payload);
+    }
+
+    /// A member installed its prepared candidate (ADR-0241 §7).
+    #[handler::manual]
+    fn on_committed(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _payload: Committed) {
+        state.finish_commit(ctx);
+    }
+
+    /// A member reinstated its old guest (ADR-0241 §7).
+    #[handler::manual]
+    fn on_aborted(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _payload: Aborted) {
+        state.finish_abort(ctx);
+    }
+
+    /// The chain a member's commit started has settled: the mail its
+    /// candidate held and every chain that mail caused are done (ADR-0241
+    /// §7). `Settled` notices for other roots are ignored.
+    #[handler::manual]
+    fn on_commit_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: Settled) {
+        state.settle_commit(ctx, payload.root);
     }
 
     /// Enumerate the components this engine has actually loaded and
@@ -485,6 +486,7 @@ impl ComponentHostCapabilityState {
 mod tests {
     use std::sync::Arc;
 
+    use aether_data::Source;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::mail::registry::{Registry, noop_handler};
@@ -514,7 +516,12 @@ mod tests {
             pending_boots: HashMap::new(),
             loads: HashMap::new(),
             next_load: 0,
-            pending_replace: HashMap::new(),
+            boot_namespaces: HashSet::new(),
+            republishes: HashMap::new(),
+            next_republish: 0,
+            republishing: HashMap::new(),
+            commit_roots: HashMap::new(),
+            queued_replaces: Vec::new(),
             drop_targets: HashMap::new(),
         };
 

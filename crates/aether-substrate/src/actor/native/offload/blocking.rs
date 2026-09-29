@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, Weak};
 use std::thread;
 
-use aether_actor::{ActorRef, ErasedActorRef, HandlesKind, ReplyMode, Single};
+use aether_actor::{ActorRef, HandlesKind, ReplyMode, Single};
 use aether_data::name_inventory::EngineOnlyKind;
 use aether_data::{ActorMail, Kind, KindId, MailId, RequestId, wire};
 
@@ -746,34 +746,6 @@ impl<O, C> TaskDone<O, C> {
         self.release();
     }
 
-    /// Forward already-encoded `bytes` of `kind` to `target` as a tracked
-    /// request whose reply comes back to this actor, under the root the
-    /// carried hold keeps open, then release the hold. The forward takes its
-    /// settlement count before the release, so the caller's chain stays open
-    /// until `target` answers and this actor answers the caller from that
-    /// reply's turn, which inherits the same root.
-    ///
-    /// Returns the forward's [`MailId`], whose correlation keys the reply, or
-    /// hands the completion back unresolved when the send is refused (an
-    /// engine-only `kind`, ADR-0233, or bytes whose tag-1 fields do not
-    /// resolve), so the caller can still be answered.
-    ///
-    /// Its consumer is the component host, which forwards a replace to the
-    /// trampoline once the replacement module's publish commits (ADR-0241 §4).
-    pub fn forward_tracked<A, M: ReplyMode>(
-        mut self,
-        ctx: &NativeCtx<'_, A, M>,
-        target: ErasedActorRef,
-        kind: KindId,
-        bytes: &[u8],
-    ) -> Result<MailId, Self> {
-        let Some(mail_id) = ctx.send_envelope_tracked_under(target, kind, bytes, self.hold_root()) else {
-            return Err(self);
-        };
-        self.release();
-        Ok(mail_id)
-    }
-
     /// Release the hold **without** sending any reply — the sanctioned
     /// no-reply completion (ADR-0109): a `#[handler(task)]` that borrows
     /// the `TaskDone` and returns `()` discharges the chain without
@@ -1254,7 +1226,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use aether_actor::Manual;
+    use aether_actor::{ErasedActorRef, Manual};
     use aether_data::{MailId, MailboxId, SessionToken, Source, Uuid};
     use aether_kinds::{MonitorNotice, Tick};
 
@@ -1871,61 +1843,6 @@ mod tests {
         assert_eq!(done.context(), "second");
         done.release_no_reply();
         assert_eq!(counter.held_open(root), 0, "terminal successor release closes the one continuous hold");
-    }
-
-    /// Asks [`Forwarder`] to dispatch a worker whose completion forwards.
-    #[aether_data::kind(name = "test.dispatch_blocking.forward")]
-    struct Forward;
-
-    /// A pumped root whose completion forwards the request, tracked, to the
-    /// target handed in as the boot params.
-    struct Forwarder {
-        target: ErasedActorRef,
-        /// The forward's id once the completion sent it.
-        forwarded: Option<MailId>,
-    }
-
-    #[aether_actor::actor(singleton, root)]
-    impl NativeActor for Forwarder {
-        const NAMESPACE: &'static str = "test.dispatch_blocking.forwarder";
-        type Config = ();
-        type Params = ErasedActorRef;
-
-        fn init((): (), target: ErasedActorRef, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { target, forwarded: None })
-        }
-
-        #[handler::single]
-        fn on_forward(&mut self, ctx: &mut NativeCtx<'_>, _forward: Forward) {
-            assert!(self.forwarded.is_none(), "one forward per probe");
-            let _id = ctx.dispatch_blocking_with((), move || Answer { value: 1 });
-        }
-
-        #[handler(task)]
-        fn on_forward_ready(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<Answer>) {
-            let forwarded = done
-                .forward_tracked(ctx, self.target, Answer::ID, &Answer { value: 2 }.encode_into_bytes())
-                .unwrap_or_else(|_| panic!("an actor kind forwards"));
-            self.forwarded = Some(forwarded);
-        }
-    }
-
-    /// Catches a forward pushed on the completion turn's own unchained
-    /// lineage instead of the held root: the caller's chain would settle at
-    /// the release, before the forwarded request is answered.
-    #[test]
-    fn forward_tracked_sends_under_the_held_root_and_releases_the_hold() {
-        let (registry, mailer) = fresh_substrate();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let (target, target_rx) = finishing_caller(&registry, &mailer, "test.deferred_completion.forward_target");
-        let mut driver = PumpedDriver::<Forwarder>::boot(boot_bare_test_chassis(&registry, &mailer), (), target);
-
-        let root = driver.send_and_settle(driver.chassis().actor_ref::<Forwarder>(), &Forward, None);
-
-        let delivered = target_rx.try_recv().expect("the forward is delivered before the chain settles");
-        assert_eq!(delivered.root, Some(root), "the forward joins the chain the hold kept open");
-        assert_eq!(delivered.mail_id, driver.read_state(|forwarder| forwarder.forwarded).flatten());
-        assert_eq!(counter.held_open(root), 0, "the forward discharges the hold");
     }
 
     #[test]

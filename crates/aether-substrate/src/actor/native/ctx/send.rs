@@ -180,21 +180,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.push_envelope_tracked(target, kind, bytes, self.outbound_parent(), self.outbound_root())
     }
 
-    /// [`Self::send_envelope_tracked_to`] under an explicit `root` in place of
-    /// this handler's in-flight lineage, with no parent: the send a later
-    /// turn makes on behalf of the chain a deferred reply holds open. `None`
-    /// mints a fresh root, as a chain-root send does. The body of
-    /// [`TaskDone::forward_tracked`](crate::actor::native::TaskDone::forward_tracked).
-    pub(crate) fn send_envelope_tracked_under(
-        &self,
-        target: ErasedActorRef,
-        kind: KindId,
-        bytes: &[u8],
-        root: Option<MailId>,
-    ) -> Option<MailId> {
-        self.push_envelope_tracked(target, kind, bytes, None, root)
-    }
-
     /// The push behind the tracked and detached envelope sends: refuse an
     /// engine-only `kind`, then [`Self::push_encoded`].
     fn push_envelope_tracked(
@@ -597,9 +582,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// inbound reply destination, and the forwarding handler's manual row
     /// declares no reply shape (ADR-0231 §9).
     ///
-    /// Its consumers are the component host's `DropComponent` forward to the
-    /// addressed trampoline and the `aether.window` root's forward of a
-    /// per-window command to the sole live window.
+    /// Its consumer is the `aether.window` root's forward of a per-window
+    /// command to the sole live window.
     /// A manual protocol row is a valid relay target:
     ///
     /// ```

@@ -21,9 +21,9 @@ use aether_kinds::FrameVerdict;
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::settlement::{PumpWake, SettlementRegistry, WaitOutcome};
+use aether_substrate::chassis::settlement::{PumpWake, SettlementRegistry, WaitOutcome, install_pump_wake};
 use aether_substrate::config::ConfigSources;
-use aether_substrate::{Chassis, RingCapacities, SchedulerTuning, SubstrateBoot};
+use aether_substrate::{Chassis, PumpedSlot, RingCapacities, SchedulerTuning, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 use aether_window::SyntheticWindowCapability;
 use crossbeam_channel::{Receiver, Sender};
@@ -113,7 +113,7 @@ pub type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Op
 /// Frame-pump seam for the pumped GPU render runtime (ADR-0161 slice R4).
 /// The core harness owns the advance / capture drive loop but no render
 /// types; a hook (the `GpuFrameHook` in `aether-harness-substrate-capture`)
-/// owns the [`PumpedSlot`](aether_substrate::PumpedSlot) for the pumped
+/// owns the [`aether_substrate::PumpedSlot`] for the pumped
 /// `aether.render` actor and drains it at the harness's pump points, so
 /// draw dispatch, capture readback, and present all run on the harness
 /// thread that owns the offscreen GPU. A harness without a hook skips the
@@ -246,10 +246,10 @@ pub struct SubstrateHarnessEnv {
     /// pre-issue-673 silent-skip semantics. When `None`, fs is not
     /// booted at all.
     pub namespace_roots: Option<NamespaceRoots>,
-    /// Compose the component host. Off, `aether.component.load` /
-    /// `replace` / `drop` have no recipient — benches that never touch
-    /// wasm skip the cap entirely.
-    pub component_host: bool,
+    /// How to compose the component host. Without one,
+    /// `aether.component.load` / `replace` / `drop` have no recipient —
+    /// benches that never touch wasm skip the cap entirely.
+    pub component_host: ComponentHostMode,
     /// Caller-supplied capability composition, applied to the chassis
     /// [`Builder`] after the harness basics (trace dispatch, the harness cap,
     /// lifecycle, headless window) in push order. The harness gives the
@@ -298,6 +298,24 @@ pub struct SubstrateHarnessBuild {
     /// build's start, draining the pumped render slot. `None` without a
     /// render hook.
     pub hook: Option<Box<dyn FrameHook>>,
+    /// The component host's slot when [`ComponentHostMode::Pumped`] booted
+    /// it, its mailbox wake installed on the embedder's [`PumpWake`]
+    /// channel. The embedder drains it; nothing else does.
+    pub component_host: Option<PumpedSlot<ComponentHostCapability>>,
+}
+
+/// How the harness chassis composes the component host.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ComponentHostMode {
+    /// No component host.
+    #[default]
+    Absent,
+    /// The host dispatches on the worker pool, as every chassis runs it.
+    Pooled,
+    /// The host dispatches only when the embedder drains its slot
+    /// (ADR-0160), so a scenario can hold it between two of its turns — a
+    /// republish prepared but not yet committed (ADR-0241 §7).
+    Pumped,
 }
 
 impl SubstrateHarnessChassis {
@@ -448,12 +466,17 @@ impl SubstrateHarnessChassis {
             .with_scheduler_tuning(scheduler_tuning)
             .with_teardown_budget(teardown_budget)
             .with_actor::<TraceDispatchCapability>(());
-        if component_host {
-            builder = builder.with_actor::<ComponentHostCapability>(ComponentHostParams {
-                engine: Arc::clone(&boot.engine),
-                linker: Arc::clone(&boot.linker),
-                hub_outbound: Arc::clone(&boot.outbound),
-            });
+        let host_params = || ComponentHostParams {
+            engine: Arc::clone(&boot.engine),
+            linker: Arc::clone(&boot.linker),
+            hub_outbound: Arc::clone(&boot.outbound),
+        };
+        match component_host {
+            ComponentHostMode::Absent => {}
+            ComponentHostMode::Pooled => builder = builder.with_actor::<ComponentHostCapability>(host_params()),
+            // Reserved at the Claim stage, so mail addressed to the host
+            // before the start below boots it parks instead of dropping.
+            ComponentHostMode::Pumped => builder = builder.reserve_pumped::<ComponentHostCapability>(),
         }
         // ADR-0161 R4/R5: the pumped render path composes no build-time
         // render cap — the render hook's compose closure reserves the
@@ -474,14 +497,22 @@ impl SubstrateHarnessChassis {
         // reserved pumped `aether.render` slot on this thread at the builder's
         // offscreen size, threading the render wiring the pumped path does not
         // compose at build time.
-        let (passive, hook) = builder.build_passive_with_start(|passive| {
-            render_hook
+        let (passive, (hook, component_host)) = builder.build_passive_with_start(|passive| {
+            let host = (component_host == ComponentHostMode::Pumped)
+                .then(|| {
+                    let (slot, wake_slot) = passive.boot_pumped_actor::<ComponentHostCapability>((), host_params())?;
+                    install_pump_wake(&wake_slot, render_wake.clone());
+                    Ok::<_, BootError>(slot)
+                })
+                .transpose()?;
+            let hook = render_hook
                 .map(|factory| {
                     let wiring = RenderHookWiring { assets_dir: render_assets_dir, wake: render_wake };
                     factory(passive, wiring, width, height)
                 })
                 .transpose()
-                .map_err(|e| BootError::Other(e.into()))
+                .map_err(|e| BootError::Other(e.into()))?;
+            Ok((hook, host))
         })?;
 
         // The cap config already cloned `events_tx`; dropping the
@@ -489,6 +520,6 @@ impl SubstrateHarnessChassis {
         // sender is released.
         drop(events_tx);
 
-        Ok(SubstrateHarnessBuild { passive, boot, hook })
+        Ok(SubstrateHarnessBuild { passive, boot, hook, component_host })
     }
 }

@@ -127,7 +127,7 @@ mailbox:
 |---|---|---|
 | `aether.component.load` | compile, publish its module (admission), register its kinds, instantiate, publish a mailbox | `LoadResult` |
 | `aether.component.drop` | run the guest's `unwire` and close the instance; its name tombstones | `DropResult` |
-| `aether.component.replace` | hot-swap the wasm behind a stable mailbox | `ReplaceResult` |
+| `aether.component.replace` | republish a module over every live instance of its namespaces, as one group | `ReplaceResult` |
 
 `LoadResult::Ok` carries the component's canonical **`path`** (so a caller that
 omitted `name` learns the key the load took) and the parsed
@@ -149,9 +149,10 @@ the reply event
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
 `LoadResult::Err` comes from the host, since no actor was loaded.
 
-`aether.component.drop` and `aether.component.replace` name their component by
-`target`, its actor path; the host parses and proves it once at
-receipt, and an address with no live component answers `Err` naming it.
+`aether.component.drop` names its component by `target`, its actor path; the
+host parses and proves it once at receipt, and an address with no live component
+answers `Err` naming it. `aether.component.replace` names no instance: the
+module's namespaces are the group it moves.
 
 The engine compiles each distinct module, and parses its custom sections, once
 per content hash (the BLAKE3 hash of its wasm bytes). Every load, module boot,
@@ -197,8 +198,8 @@ A drop closes the instance, and its name tombstones for the engine's lifetime
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
 §8). Its route reads `Dropped`, so mail to it drops, every watcher receives a
 `MonitorNotice`, and a later load of the same name is refused as retired. A
-replace or a second drop at the path is refused. Load under a new name to bring
-the component back.
+second drop at the path is refused. Load under a new name to bring the component
+back.
 
 In practice you drive this through the MCP harness — `load_component(engine_id,
 selector, name?, config?, config_path?, export?)`, `replace_component(...)`,
@@ -248,7 +249,7 @@ one publication.
 
 A refusal answers `LoadResult::Err` or `ReplaceResult::Err` with
 `module publish refused: <namespace> … (<rule>)`, and nothing is spawned or
-forwarded. A replace publishes too, so a replacement's new kinds register. A
+swapped. A replace publishes too, so a successor's new kinds register. A
 load that publishes and is then refused at spawn (an unmet dependency, a failed
 module boot) leaves its module published: publish and spawn are separate steps.
 A published module stays resident for the engine's life.
@@ -412,52 +413,55 @@ impl WasmActor for MyComponent {
 aether_actor::export!(public = [MyComponent]);
 ```
 
-`aether.component.replace` compiles the candidate, resolves its manifest/export,
-checks it, and instantiates it **behind the same binding** while the old instance
-is still installed. Only then does the old instance run `unwire` and
-`on_dehydrate`; the candidate calls `on_rehydrate` when the old instance saved a
-bundle, and only after that is it installed and the old instance dropped. A
+`aether.component.replace { wasm, configs }` republishes a module as one group
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§7). Its members are every live instance of every namespace the module
+publishes; each keeps its hosted type, since the namespace is the type.
+Identical bytes answer `Ok` with no swap. Otherwise the host first runs every
+pre-check and refuses the whole replace, naming each instance a check refuses,
+before any member is touched:
+
+- a module with no predecessor (none of its namespaces is published: load it),
+  a content-addressed module, or one whose republish is already in flight;
+- a module that declares a boot, or succeeds one that did (ADR-0147);
+- a module publish admission refuses (see
+  [Publishing a module](#publishing-a-module)): a dropped namespace, or a row or
+  `#[fallback]` a namespace or private child type narrows
+  ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §5);
+- an inline-spawnable type, or a member's type, that adds a dependency with no
+  `Live` route ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md));
+- a config: an instance whose type's config kind changed needs a
+  `configs` entry `{ path, config }`, decoded strictly as the new kind; an
+  unlisted instance with an unchanged kind keeps its stored spawn config; a
+  live inline child of a type whose config kind changes cannot be given one.
+
+Then each member prepares: its inbox gate closes, so mail for it waits; the
+candidate instantiates behind the same binding with its outbox held, the old
+guest runs `unwire` and `on_dehydrate` and is kept, the correlation cursor,
+reply table and request contexts move to the candidate, and it runs
+`on_rehydrate`. Once every member is ready the module publishes, and each member
+commits: its held mail leaves on a chain of its own, and the mail its gate queued
+reaches the candidate in order. `ReplaceResult::Ok { types }`, each republished
+type with its capabilities, comes once every commit's chain has settled. A
 component that leaves both state hooks at their defaults swaps cleanly and comes
 back fresh from `init`. Resident inline children are rebuilt from the module's
 exported types and its `export!` `private` list, each under its old alias; the
 `spawns(..)` check guarantees that list names every child a listed actor can
 spawn inline.
-There is no mailbox freeze/drain phase in this binding-stable implementation;
-queued mail remains on the trampoline's inbox, and
-the wire field `drain_timeout_ms` is accepted for compatibility but ignored.
 
-A failed replace leaves the old instance serving the mailbox, but a failure after
-its hooks ran does not undo them ([ADR-0016](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0016-persistent-state-across-hot-reload.md) §4):
+A refusal in any member's prepare (a failed `init`, a rejected state save, a
+carried request context the candidate does not declare
+([ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md)
+§4), or a failed rehydrate), or a refused publish, aborts every member: each
+reinstates its old guest with its reply table and counters, runs its `wire`
+again, and receives the mail its gate queued; nothing a candidate sent leaves.
+Hooks that already ran are not undone
+([ADR-0016](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0016-persistent-state-across-hot-reload.md) §4).
+While the replace is in flight, a load of one of its namespaces and a drop of a
+member wait for the answer and then run against the code that won; a replace
+that arrives while a load of its namespaces is in flight waits for those births.
 
-- candidate compile, manifest, or export-selection errors happen before the old
-  instance is touched;
-- a candidate module that publish admission refuses (see
-  [Publishing a module](#publishing-a-module)) is never forwarded to the
-  trampoline;
-- a candidate whose hosted type drops or changes a handler row of the type the
-  slot hosts, or drops its `#[fallback]`, is refused before the old instance is
-  touched; added rows and an added fallback are allowed ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §5);
-- a candidate whose hosted type (the named export, or the type the slot hosts
-  for a replace with no export) declares a dependency with no `Live` route is
-  refused before the old instance is touched ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md));
-- an instantiation error (the candidate's `init` fails, for example on config
-  bytes that do not decode as its `Config`) happens before the old instance is
-  touched;
-- a state-save error reinstalls the old instance after its `unwire` / `on_dehydrate`
-  hooks have run;
-- a candidate that does not declare the kind of a request context the old
-  instance carries is refused after those hooks, and the old instance is
-  reinstalled ([ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md) §4); and
-- a rehydrate error drops the candidate and reinstalls the old instance with its
-  reply table and correlation counters, still hosting its own module and type.
-  Its `unwire` / `on_dehydrate` effects, and any mail the candidate sent from
-  `on_rehydrate`, are not undone, and its `wire` does not run again.
-
-A replace needs a live instance: one at a dropped path is refused. Only a fully successful replace
-returns `ReplaceResult::Ok` with the new component's capabilities so the hub's
-cached view reflects the swapped binary.
-
-The load-bearing property is **binding stability** ([ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)): the swap replaces
+The load-bearing property is **binding stability** ([ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)): each swap replaces
 the wasm Module *in place* behind a stable mailbox handle, so the mailbox id, any
 route cache, and existing input subscriptions all stay valid across the swap. Peers
 mailing the component never learn it changed. Prefer `save_state_kind` (which

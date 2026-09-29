@@ -307,7 +307,7 @@ impl Spawner {
         // declaration" it has always been. `WasmTrampoline` is the exception:
         // it pre-seeds the *guest's* handler set from `init`, and while that
         // pre-seed short-circuited the declaration, the trampoline's own
-        // framework arms — `ReplaceComponent`, the ADR-0093 completion wake —
+        // framework arms — `Prepare`, the ADR-0093 completion wake —
         // owned no cell, so every loaded component ran them unmeasured.
         // Merging keeps a staged kind's exact cell (the guest's cells are
         // already stamped into the per-actor cache) and mints one only for a

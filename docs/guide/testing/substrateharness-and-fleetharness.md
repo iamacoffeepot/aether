@@ -196,10 +196,21 @@ let (panel, path) = harness.load::<WidgetPanel>(LoadComponent {
 
 `load::<R>` sets the export to `R::NAMESPACE` and returns `(ActorRef<R>,
 ErasedActorPath)`; `load_any` sends the load as given and returns the erased
-reference, for a fixture actor the test cannot name. Drop and replace take the
-path: `DropComponent { target: path }`, `ReplaceComponent { target: path, … }`.
+reference, for a fixture actor the test cannot name. A drop takes the path,
+`DropComponent { target: path }`; a replace names no instance,
+`ReplaceComponent { wasm, configs }`, and moves every live instance of the
+module's namespaces (ADR-0241 §7), so a test that swaps identical code builds a
+new hash with `aether_substrate::testing::successor_wasm(&wasm, generation)`.
 FleetHarness returns the same path as text — `Loaded { addr, capabilities }` —
-and its `replace` / `replace_export` / `replace_by_selector` take that address.
+and its `replace(engine, stem)` / `replace_by_selector(engine, selector)`
+republish by stem or selector and return the republished types.
+
+`with_pumped_component_host()` composes the component host as a pumped actor:
+every harness wait drains it, and between waits it holds still.
+`step_component_host_through::<K>(n)` runs it one envelope at a time until it
+has dispatched `n` mails of kind `K`, so a test can hold a republish after its
+members answered `Prepared` and before any commit, send mail with
+`send_tracked`, and then await the replace.
 
 Use `CaptureWithMails` when geometry must land in the same frame as readback;
 separate send/capture steps describe a different temporal contract.

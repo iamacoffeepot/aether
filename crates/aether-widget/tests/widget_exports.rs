@@ -34,6 +34,7 @@ use aether_kinds::{
     ReplaceResult, Tick,
 };
 use aether_render::HeadlessRenderCapability;
+use aether_substrate::testing::successor_wasm;
 use aether_widget::set::{DropdownWidget, MenuBarWidget, TabStripWidget};
 use aether_widget::{
     DialogConfig, DropdownConfig, Menu, MenuBarConfig, MenuItem, PanelConfig, SplitterAxis, SplitterConfig,
@@ -278,11 +279,11 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
     let config_bytes = config.encode_into_bytes();
     let mut harness = bench(240, 220);
 
-    let (panel, path) = harness
+    let (panel, _) = harness
         .load::<WidgetPanel>(LoadComponent {
             wasm: wasm.to_vec(),
             name: Some("panel".to_owned()),
-            config: config_bytes.clone(),
+            config: config_bytes,
             export: None,
         })
         .unwrap_or_else(|error| panic!("{stem}: load WidgetPanel: {error}"));
@@ -296,13 +297,10 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent {
-                    target: path,
-                    wasm: wasm.to_vec(),
-                    drain_timeout_ms: None,
-                    config: config_bytes,
-                    export: None,
-                },
+                // Identical code under a new hash, so the republish swaps the
+                // panel rather than answering unchanged (ADR-0241 §7). The
+                // panel keeps its stored spawn config.
+                &ReplaceComponent { wasm: successor_wasm(wasm, 1), configs: Vec::new() },
             ),
         )])
         .expect("replace sequence");

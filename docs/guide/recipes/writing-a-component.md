@@ -152,10 +152,11 @@ cargo xtask dev-component \
   --address example.echo
 ```
 
-The flag takes an actor path, which `replace_component` resolves on the engine;
-a malformed path is rejected before the watcher starts, and a tagged `mbx-…` id
-is not accepted. `--address` and `--export` conflict because replace-first mode
-already has a hosted actor to reuse.
+The flag takes an actor path; a malformed path is rejected before the watcher
+starts, and a tagged `mbx-…` id is not accepted. A replace names no instance: it
+republishes the module, and every live instance of its namespaces, this one
+among them, moves to the new build. `--address` and `--export` conflict because
+replace-first mode already has a hosted actor.
 
 The package root is watched recursively and generated target output is ignored.
 Edits are debounced, rebuilds are serialized, and edits arriving during a pass
@@ -226,12 +227,15 @@ upload_component(staged_path = ".../my_component.wasm", name = "my-component-dev
 
 replace_component(
   engine_id,
-  address = "<load_component address>",
   selector = "<new_hash>"
 )
 ```
 
-The trampoline/mailbox lineage remains stable while the module changes.
+Every live instance of the module's namespaces moves to the new build as one
+group, or none does (ADR-0241 §7); each keeps its address and mailbox. The new
+build must export every namespace the old one did and keep each one's handler
+rows. An instance whose `Config` kind changed needs
+`configs = [{ address, config }]`.
 Replacement can preserve, migrate, reject, or reshape state through persistence
 hooks and its compatibility contract. Test that path with the typed/reshaped
 fixture patterns; a successful code swap alone does not prove state continuity.

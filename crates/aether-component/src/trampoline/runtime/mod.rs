@@ -4,7 +4,7 @@
 //! [`WasmTrampoline`] identity never names
 //! these `aether_substrate` / `wasmtime`-typed types. The substrate-typed
 //! imports are gated once by this module rather than line-by-line; the
-//! `#[actor] impl` in the parent reaches the state, ctx, config, and replace
+//! `#[actor] impl` in the parent reaches the state, ctx, config, and republish
 //! helpers through the single `use runtime::*` glob.
 //!
 //! The cap is heavy and already decomposed, so unlike `aether.fs`'s
@@ -12,12 +12,12 @@
 //! [`state`] (the field-bearing `WasmTrampolineState` and its guest
 //! [`Slot`]), [`config`] (the `WasmTrampolineConfig` init
 //! bundle), [`republish`] (one member's prepare, commit and abort, ADR-0241
-//! §7), [`replace`] (the single-instance replace over them), and
-//! [`contract`] (the replace-time contract refusal, ADR-0231 §5).
+//! §7), [`aliases`] (inline-child alias staging), and [`contract`] (the
+//! carried-context refusal and the inline-child types, ADR-0231 §4).
 
+mod aliases;
 mod config;
 mod contract;
-mod replace;
 mod republish;
 mod state;
 
@@ -26,9 +26,9 @@ pub use state::WasmTrampolineState;
 
 // The `aether_substrate` / `wasmtime` / `std` names the parent `#[actor] impl`
 // body references, re-exported so the parent `use runtime::*` glob sees them
-// (the fs `runtime.rs` `pub use` pattern). `DropResult` / `ReplaceResult` ride
-// this glob; `DropComponent` / `ReplaceComponent` stay at the parent file root
-// (always-on, for the `HandlesKind<K>` markers).
+// (the fs `runtime.rs` `pub use` pattern). `DropResult` rides this glob;
+// `DropComponent` stays at the parent file root (always-on, for the
+// `HandlesKind<K>` markers).
 pub use std::io;
 pub use std::sync::Arc;
 
@@ -37,7 +37,7 @@ use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare
 pub use aether_actor::Local;
 use aether_actor::{Single, runtime};
 use aether_kinds::ComponentCapabilities;
-pub use aether_kinds::{DropComponent, DropResult, LoadResult, ReplaceComponent, ReplaceResult};
+pub use aether_kinds::{DropComponent, DropResult, LoadResult};
 use aether_substrate::actor::native::ctx::GuestHost;
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
@@ -48,7 +48,6 @@ pub use aether_substrate::actor::wasm::component::Component;
 pub use aether_substrate::chassis::error::BootError;
 #[allow(unused_imports, reason = "runtime facade retains its established KindId re-export")]
 pub use aether_substrate::mail::{CostCell, CostCells, KindId};
-use republish::CandidateType;
 use state::Slot;
 
 /// The trampoline hosts a wasm guest, and its receive surface is that
@@ -194,21 +193,6 @@ impl NativeActor for WasmTrampoline {
         DropResult::Ok
     }
 
-    /// Replace the wasm component with a fresh module. ADR-0022 +
-    /// ADR-0038 splice invariants hold because the trampoline's
-    /// inbox is the framework binding, which outlives the
-    /// `Component` swap. The replace prepares a candidate and, when it is
-    /// ready, commits it in the same turn (ADR-0241 §7); a refused prepare
-    /// leaves the old guest wired and serving.
-    #[handler::single]
-    fn on_replace_component(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        payload: ReplaceComponent,
-    ) -> ReplaceResult {
-        state.handle_replace(ctx, payload)
-    }
-
     /// Answer the requester of the load that produced this trampoline, in the
     /// trampoline's own name (ADR-0230 §3).
     ///
@@ -236,19 +220,15 @@ impl NativeActor for WasmTrampoline {
     #[handler::single]
     fn on_prepare(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Prepare) -> Prepared {
         let Prepare { code, config } = payload;
-        let module = match state.modules.check_in(&ctx.blob_check_in(), &code) {
-            Ok(module) => module,
+        let candidate =
+            state.modules.check_in(&ctx.blob_check_in(), &code).and_then(|module| state.candidate_type(module));
+        let candidate = match candidate {
+            Ok(candidate) => candidate,
             Err(error) => return Prepared::Refused { error },
         };
-        let (group, type_tag) = match state.resolve_replace_target(None, module.manifest().actors()) {
-            Ok(resolved) => resolved,
-            Err(error) => return Prepared::Refused { error },
-        };
-        let mut capabilities = group.map(|group| group.capabilities.clone()).unwrap_or_default();
-        capabilities.assets = module.manifest().asset_catalog().to_vec();
 
         let target = ctx.path();
-        state.prepare(ctx, &target, CandidateType { module, type_tag, capabilities }, config)
+        state.prepare(ctx, &target, candidate, config)
     }
 
     /// Install the prepared candidate (ADR-0241 §7): its held mail leaves on
