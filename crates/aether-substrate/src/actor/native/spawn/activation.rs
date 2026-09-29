@@ -1,11 +1,13 @@
 //! Private legacy adapter for ADR-0165 staged actor activation.
 
 use std::any::{Any, TypeId};
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 
+use aether_actor::ActorRef;
 use aether_actor::local::ActorSlots;
-use aether_data::ErasedActorPath;
+use aether_data::{BlobHash, ErasedActorPath};
 
 use super::reservation::ParentReservation;
 use super::{SpawnError, SpawnOutcome};
@@ -35,15 +37,48 @@ pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     binding: Arc<NativeBinding>,
     slots: Box<ActorSlots>,
     state: A::State,
-    finalizer: Option<Arc<NativeSpawnFinalizer<A>>>,
+    finalizer: Option<Arc<dyn SpawnFinalizer>>,
     /// The staging site's ADR-0168 §3 declaration, carried to the activation
     /// home so `wire` can attach a birth-completing effect to whatever chain
     /// it names.
     chain: EffectChain,
+    /// A guest birth's published namespace and the module that must hold it
+    /// (ADR-0241 §3, §6). `None` for a native birth, which holds `A`'s own
+    /// namespace instead.
+    guest: Option<(Arc<str>, BlobHash)>,
 }
 
-pub(super) struct NativeSpawnFinalizer<A> {
-    state: Mutex<Option<NativeSpawnFinalizerState<A>>>,
+/// What a birth's fate is delivered as, built once the owner has decided it.
+///
+/// A native birth answers with its [`SpawnOutcome<A>`], whose `Ok` arm is the
+/// child's `ActorRef<A>`. A guest birth answers with a
+/// [`GuestOutcome<P>`](super::GuestOutcome), which narrows the host's
+/// reference to the protocol `P` its rows cover before it leaves the
+/// finalizer.
+pub(super) trait BirthOutcome<A>: Send + 'static {
+    fn decided(canonical_name: ErasedActorPath, result: Result<ActorRef<A>, SpawnError>) -> Self;
+}
+
+impl<A: 'static> BirthOutcome<A> for SpawnOutcome<A> {
+    fn decided(canonical_name: ErasedActorPath, result: Result<ActorRef<A>, SpawnError>) -> Self {
+        Self { canonical_name, result }
+    }
+}
+
+/// The two decisions an activation delivers to its birth's finalizer, with
+/// the outcome type erased so one activation carries either.
+pub(super) trait SpawnFinalizer: Send + Sync {
+    fn reject(&self, failure: PreparedSpawnFailure);
+
+    /// Complete the birth `Ok`. Called only from the activation's catch-up
+    /// suffix, which the owner runs after it has published the child's `Live`
+    /// route — the invariant [`Registry::activated`] mints on.
+    fn promote(&self);
+}
+
+pub(super) struct NativeSpawnFinalizer<A, O = SpawnOutcome<A>> {
+    state: Mutex<Option<NativeSpawnFinalizerState<O>>>,
+    _actor: PhantomData<fn() -> A>,
 }
 
 /// Where one birth's authoritative fate is delivered.
@@ -55,13 +90,13 @@ pub(super) struct NativeSpawnFinalizer<A> {
 /// completes into a channel that thread is blocked on instead. The same
 /// two-audience split `RegistryBatchCompletionSink` draws for owner batches
 /// one layer up: actors get mail, external threads get a channel.
-pub(super) enum SpawnCompletionSink<A> {
-    Deferred(DeferredCompletion<SpawnOutcome<A>>),
-    Channel(crossbeam_channel::Sender<SpawnOutcome<A>>),
+pub(super) enum SpawnCompletionSink<O> {
+    Deferred(DeferredCompletion<O>),
+    Channel(crossbeam_channel::Sender<O>),
 }
 
-impl<A: 'static> SpawnCompletionSink<A> {
-    fn complete(self, outcome: SpawnOutcome<A>) {
+impl<O: Send + 'static> SpawnCompletionSink<O> {
+    fn complete(self, outcome: O) {
         match self {
             Self::Deferred(completion) => completion.complete(outcome),
             Self::Channel(sender) => drop(sender.send(outcome)),
@@ -71,29 +106,30 @@ impl<A: 'static> SpawnCompletionSink<A> {
 
 /// The parent-local staged key one birth holds, paired with the child binding
 /// that takes ownership of it once the birth is Live. Absent for a post-seal
-/// external birth, which has no parent actor to hold a key for it.
+/// external birth, which has no parent actor to hold a key for it, and for a
+/// root guest birth, whose uniqueness is the owner's `Starting` reservation.
 struct ParentLink {
     reservation: ParentReservation,
     child: Weak<NativeBinding>,
 }
 
-struct NativeSpawnFinalizerState<A> {
+struct NativeSpawnFinalizerState<O> {
     parent: Option<ParentLink>,
-    completion: SpawnCompletionSink<A>,
+    completion: SpawnCompletionSink<O>,
     /// The staged child's route, which mints the `Ok` arm's reference once
     /// the child is Live. It never leaves the finalizer.
     mailbox_id: MailboxId,
-    /// The staged child's name, carried onto **both** arms of the
-    /// [`SpawnOutcome`] so a rejection names the birth it belongs to.
+    /// The staged child's name, carried onto **both** arms of the outcome so
+    /// a rejection names the birth it belongs to.
     canonical_name: ErasedActorPath,
 }
 
-impl<A: 'static> NativeSpawnFinalizer<A> {
+impl<A: 'static, O: BirthOutcome<A>> NativeSpawnFinalizer<A, O> {
     /// A handler-staged child birth: the parent holds a local reservation key
     /// for it and receives the outcome as an ADR-0093 `TaskDone`.
     pub(super) fn parented(
         parent_reservation: ParentReservation,
-        completion: DeferredCompletion<SpawnOutcome<A>>,
+        completion: DeferredCompletion<O>,
         mailbox_id: MailboxId,
         canonical_name: ErasedActorPath,
         child: Weak<NativeBinding>,
@@ -106,11 +142,22 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
         )
     }
 
+    /// A handler-staged root birth: no parent-local key stands for it, since
+    /// the owner's `Starting` reservation is a root's uniqueness, and the
+    /// actor that staged it receives the outcome as an ADR-0093 `TaskDone`.
+    pub(super) fn rooted(
+        completion: DeferredCompletion<O>,
+        mailbox_id: MailboxId,
+        canonical_name: ErasedActorPath,
+    ) -> Arc<Self> {
+        Self::new(None, SpawnCompletionSink::Deferred(completion), mailbox_id, canonical_name)
+    }
+
     /// A post-seal external birth (ADR-0165): no parent actor holds a key for
     /// it, and the embedder thread that submitted it is blocked on `outcome`
     /// until this finalizer decides.
     pub(super) fn external(
-        outcome: crossbeam_channel::Sender<SpawnOutcome<A>>,
+        outcome: crossbeam_channel::Sender<O>,
         mailbox_id: MailboxId,
         canonical_name: ErasedActorPath,
     ) -> Arc<Self> {
@@ -119,15 +166,18 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
 
     fn new(
         parent: Option<ParentLink>,
-        completion: SpawnCompletionSink<A>,
+        completion: SpawnCompletionSink<O>,
         mailbox_id: MailboxId,
         canonical_name: ErasedActorPath,
     ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(Some(NativeSpawnFinalizerState { parent, completion, mailbox_id, canonical_name })),
+            _actor: PhantomData,
         })
     }
+}
 
+impl<A: 'static, O: BirthOutcome<A>> SpawnFinalizer for NativeSpawnFinalizer<A, O> {
     fn reject(&self, failure: PreparedSpawnFailure) {
         let Some(state) = self.state.lock().expect("native spawn finalizer lock poisoned").take() else {
             return;
@@ -137,17 +187,15 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
         }
         let error = match failure {
             PreparedSpawnFailure::NativeHold(refusal) => SpawnError::NativeHold(refusal),
+            PreparedSpawnFailure::GuestNotPublished { namespace } => SpawnError::GuestNotPublished { namespace },
             PreparedSpawnFailure::SubnameRetired { full_name } => SpawnError::SubnameRetired { full_name },
             PreparedSpawnFailure::SubnameInUse { full_name } => SpawnError::SubnameInUse { full_name },
             PreparedSpawnFailure::ActivationRejected => SpawnError::ActivationRejected,
             PreparedSpawnFailure::OwnerClosed => SpawnError::OwnerClosed,
         };
-        state.completion.complete(SpawnOutcome { canonical_name: state.canonical_name, result: Err(error) });
+        state.completion.complete(O::decided(state.canonical_name, Err(error)));
     }
 
-    /// Complete the birth `Ok`. Called only from the activation's catch-up
-    /// suffix, which the owner runs after it has published the child's `Live`
-    /// route — the invariant [`Registry::activated`] mints on.
     fn promote(&self) {
         let Some(state) = self.state.lock().expect("native spawn finalizer lock poisoned").take() else {
             return;
@@ -158,10 +206,7 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
                 child.retain_parent_child_reservation(live);
             }
         }
-        state.completion.complete(SpawnOutcome {
-            canonical_name: state.canonical_name,
-            result: Ok(Registry::activated(state.mailbox_id)),
-        });
+        state.completion.complete(O::decided(state.canonical_name, Ok(Registry::activated::<A>(state.mailbox_id))));
     }
 }
 
@@ -181,11 +226,18 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
         state: A::State,
         chain: EffectChain,
     ) -> Self {
-        Self { spawner, id, sender, binding, slots, state, finalizer: None, chain }
+        Self { spawner, id, sender, binding, slots, state, finalizer: None, chain, guest: None }
     }
 
-    pub(super) fn with_finalizer(mut self, finalizer: Arc<NativeSpawnFinalizer<A>>) -> Self {
+    pub(super) fn with_finalizer(mut self, finalizer: Arc<dyn SpawnFinalizer>) -> Self {
         self.finalizer = Some(finalizer);
+        self
+    }
+
+    /// Mark this birth a guest's: it takes the published `namespace`, which
+    /// `module` must hold, in place of `A`'s own.
+    pub(super) fn with_guest(mut self, namespace: Arc<str>, module: BlobHash) -> Self {
+        self.guest = Some((namespace, module));
         self
     }
 }
@@ -239,7 +291,11 @@ impl<A: NativeActor> PreparedSpawnActivation for LegacyPreparedActivation<A> {
     }
 
     fn native_type(&self) -> Option<(&'static str, NativeType)> {
-        Some((A::NAMESPACE, NativeType::of::<A>()))
+        self.guest.is_none().then(|| (A::NAMESPACE, NativeType::of::<A>()))
+    }
+
+    fn guest_publication(&self) -> Option<(&str, BlobHash)> {
+        self.guest.as_ref().map(|(namespace, module)| (&**namespace, *module))
     }
 }
 
@@ -477,7 +533,7 @@ struct LegacyLiveActivation<A: NativeActor> {
     strong_sender: Arc<mpsc::Sender<Envelope>>,
     binding: Arc<NativeBinding>,
     slot: Arc<DispatcherSlot<A>>,
-    finalizer: Option<Arc<NativeSpawnFinalizer<A>>>,
+    finalizer: Option<Arc<dyn SpawnFinalizer>>,
     failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
 }
 
@@ -487,7 +543,8 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         token: ActivationToken,
         failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
     ) -> Self {
-        let LegacyPreparedActivation { spawner, id, sender, binding, slots, state, finalizer, chain } = prepared;
+        let LegacyPreparedActivation { spawner, id, sender, binding, slots, state, finalizer, chain, guest: _ } =
+            prepared;
         let slot = DispatcherSlot::new(
             Box::new(state),
             Arc::clone(&binding),

@@ -9,15 +9,16 @@
 //! [`SpawnBuilder`] is private, so reaching synchronous commit from a
 //! handler needs an explicit substrate API change, not a call-site choice.
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use aether_actor::{HandlesKind, Instanced, validate_namespace_segment};
-use aether_data::{ActorId, ActorMail, ErasedActorPath, Kind, RequestId};
+use aether_data::{ActorId, ActorMail, BlobHash, ErasedActorPath, Kind, RequestId};
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::blocking::{DeferredCompletion, IntoDeferredReply};
-use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
+use crate::actor::native::spawn::activation::{BirthOutcome, NativeSpawnFinalizer, SpawnFinalizer};
 use crate::mail::MailId;
 use crate::runtime::effect_chain::{EffectChain, OrderingDevice, Uncaused};
 
@@ -189,33 +190,51 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             .reserve_child(key)
             .ok_or_else(|| SpawnError::SubnameInUse { full_name: identity.canonical_name.to_string() })?;
         let staged = spawner.build::<A>(identity, config, params, after_init)?;
-        Ok(PreparedBirth { spawner, parent_binding, completion_root, chain, parent_reservation, staged })
+        Ok(PreparedBirth {
+            spawner,
+            parent_binding,
+            completion_root,
+            chain,
+            parent_reservation: Some(parent_reservation),
+            staged,
+            guest: None,
+            _outcome: PhantomData,
+        })
     }
 }
 
-/// A birth past every fallible step: reserved under its parent and built,
-/// with no completion armed and nothing staged yet.
-struct PreparedBirth<A: Instanced + NativeActor> {
-    spawner: Arc<Spawner>,
-    parent_binding: Arc<NativeBinding>,
-    completion_root: Option<MailId>,
-    chain: EffectChain,
-    parent_reservation: ParentReservation,
-    staged: StagedActor<A>,
+/// A birth past every fallible step: reserved under its parent when it has
+/// one, and built, with no completion armed and nothing staged yet. Both
+/// handler builders reach it — the native [`HandlerSpawnBuilder`] and the
+/// guest [`GuestSpawnBuilder`](super::GuestSpawnBuilder) — so the staging
+/// that follows is one path. `O` is what the birth's completion delivers.
+pub(super) struct PreparedBirth<A: Instanced + NativeActor, O = SpawnOutcome<A>> {
+    pub(super) spawner: Arc<Spawner>,
+    pub(super) parent_binding: Arc<NativeBinding>,
+    pub(super) completion_root: Option<MailId>,
+    pub(super) chain: EffectChain,
+    /// The parent-local key, absent for a root birth: the owner's `Starting`
+    /// reservation is a root's uniqueness.
+    pub(super) parent_reservation: Option<ParentReservation>,
+    pub(super) staged: StagedActor<A>,
+    /// A guest birth's published namespace and module (ADR-0241 §3, §6);
+    /// `None` for a native birth.
+    pub(super) guest: Option<(Arc<str>, BlobHash)>,
+    pub(super) _outcome: PhantomData<fn() -> O>,
 }
 
-impl<A: Instanced + NativeActor> PreparedBirth<A> {
+impl<A: Instanced + NativeActor, O: BirthOutcome<A>> PreparedBirth<A, O> {
     /// Mint the birth's request id from the parent's correlation counter,
     /// the one outbound requests and staged tasks draw from (ADR-0243 §9).
-    fn mint_request(&self) -> RequestId {
+    pub(super) fn mint_request(&self) -> RequestId {
         RequestId(self.parent_binding.mint_correlation())
     }
 
     /// Arm the birth's completion as a staged task that owes no reply,
     /// holding the staging turn's chain, and stage the birth.
-    fn stage_as_task(self, request: RequestId) -> SpawnReceipt {
+    pub(super) fn stage_as_task(self, request: RequestId) -> SpawnReceipt {
         let hold = self.completion_root.map(|root| self.spawner.mailer().acquire_settlement_hold(root));
-        let completion = self.parent_binding.dispatch_stage::<SpawnOutcome<A>>(hold, request);
+        let completion = self.parent_binding.dispatch_stage::<O>(hold, request);
         let receipt = SpawnReceipt { canonical_name: self.staged.identity.canonical_name.clone(), request };
         let chain = self.chain;
         self.commit(completion, chain);
@@ -224,15 +243,20 @@ impl<A: Instanced + NativeActor> PreparedBirth<A> {
 
     /// Hand the armed completion to the birth's finalizer and append the
     /// ordered commit to the parent's outbound work (ADR-0165).
-    fn commit(self, completion: DeferredCompletion<SpawnOutcome<A>>, chain: EffectChain) {
-        let Self { spawner, parent_binding, parent_reservation, staged, .. } = self;
-        let finalizer = NativeSpawnFinalizer::parented(
-            parent_reservation,
-            completion,
-            staged.identity.id,
-            staged.identity.canonical_name.clone(),
-            Arc::downgrade(&staged.transport),
-        );
-        parent_binding.stage_child_birth(spawner.prepare_commit(staged, Some(finalizer), chain));
+    fn commit(self, completion: DeferredCompletion<O>, chain: EffectChain) {
+        let Self { spawner, parent_binding, parent_reservation, staged, guest, .. } = self;
+        let mailbox_id = staged.identity.id;
+        let canonical_name = staged.identity.canonical_name.clone();
+        let finalizer: Arc<dyn SpawnFinalizer> = match parent_reservation {
+            Some(reservation) => NativeSpawnFinalizer::<A, O>::parented(
+                reservation,
+                completion,
+                mailbox_id,
+                canonical_name,
+                Arc::downgrade(&staged.transport),
+            ),
+            None => NativeSpawnFinalizer::<A, O>::rooted(completion, mailbox_id, canonical_name),
+        };
+        parent_binding.stage_child_birth(spawner.prepare_commit_as(staged, Some(finalizer), chain, guest));
     }
 }

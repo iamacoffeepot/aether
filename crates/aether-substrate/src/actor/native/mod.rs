@@ -94,7 +94,10 @@ pub use offload::self_wake::SelfWake;
 pub use offload::staged_task::StagedTask;
 pub use probe::ActorProbe;
 pub use slot::pumped::PumpedSlot;
-pub use spawn::{HandlerSpawnBuilder, SpawnBuilder, SpawnError, SpawnOutcome, SpawnReceipt, Spawner, Subname};
+pub use spawn::{
+    GuestBirth, GuestOutcome, GuestSpawnBuilder, HandlerSpawnBuilder, SpawnBuilder, SpawnError, SpawnOutcome,
+    SpawnReceipt, Spawner, Subname,
+};
 // iamacoffeepot/aether#3707: the cap-level rate-limit/queue helper over the
 // ADR-0093 `offload::blocking` primitive it wraps — a substrate-tier native
 // helper, used by the content-gen provider caps and the rpc test-echo actor.

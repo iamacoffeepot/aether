@@ -15,7 +15,7 @@ use std::ptr;
 use std::sync::{Arc, Weak};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
-use aether_actor::{Addressable, HeldReply, ReplyMode, Singleton};
+use aether_actor::{Addressable, ErasedActorRef, HeldReply, ReplyMode, Singleton};
 use aether_data::{ActorMail, Kind, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -368,6 +368,34 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             .dispatch_claim_held(id)
             .expect("Held::answer found no held ledger entry: a ticket answers once (ADR-0243 §1)");
         self.reply_to_target(reply_to, reply, hold.as_ref().map(SettlementHold::root), None);
+        drop(hold);
+    }
+
+    /// The ledger half of [`Held::hand_off`]: claim the held entry `id` from
+    /// this actor's ledger, push `payload` to `target` with the entry's
+    /// captured reply target pinned and its held root as the lineage, and
+    /// then release the hold. The push takes its settlement count before the
+    /// release, so the chain stays open until `target` answers.
+    ///
+    /// # Panics
+    /// Panics when `ledger` is another actor's binding, and when the entry
+    /// is not held in this ledger, which is a second use of one ticket.
+    pub(crate) fn hand_off_held<K: ActorMail>(
+        &mut self,
+        id: DispatchId,
+        ledger: &Weak<NativeBinding>,
+        target: ErasedActorRef,
+        payload: &K,
+    ) {
+        assert!(
+            self.owns_ledger(ledger),
+            "Held::hand_off from another actor's ctx: a held reply leaves only the actor that armed it (ADR-0243 §5)"
+        );
+        let (hold, reply_to) = self
+            .binding
+            .dispatch_claim_held(id)
+            .expect("Held::hand_off found no held ledger entry: a ticket is used once (ADR-0243 §1)");
+        self.push_handed_off(target, payload, hold.as_ref().map(SettlementHold::root), reply_to);
         drop(hold);
     }
 

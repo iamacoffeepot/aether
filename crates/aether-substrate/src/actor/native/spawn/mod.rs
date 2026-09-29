@@ -11,6 +11,9 @@
 //! - `staged` — [`HandlerSpawnBuilder::stage`] for handler callers, which
 //!   initializes on the handler thread and appends an ordered commit to that
 //!   turn's outbound work instead of publishing global state.
+//! - `guest` — [`GuestSpawnBuilder::stage_with`], the handler staging of a
+//!   published guest under its own namespace (ADR-0241 §5, §6), which shares
+//!   `staged`'s prepared birth.
 //!
 //! Both flow through the shared `spawner` engine, which is split by phase:
 //! `prepare` resolves identity and constructs the actor with no shared
@@ -30,6 +33,7 @@
 pub(crate) mod activation;
 mod eager;
 mod error;
+mod guest;
 mod outcome;
 pub(crate) mod reservation;
 mod spawner;
@@ -48,6 +52,7 @@ pub use aether_actor::Subname;
 
 pub use eager::SpawnBuilder;
 pub use error::SpawnError;
+pub use guest::{GuestBirth, GuestOutcome, GuestSpawnBuilder};
 pub use outcome::{SpawnOutcome, SpawnReceipt};
 pub use spawner::Spawner;
 pub use staged::HandlerSpawnBuilder;

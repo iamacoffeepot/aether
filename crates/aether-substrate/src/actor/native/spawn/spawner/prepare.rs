@@ -17,14 +17,14 @@ use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace::ActorTraceRing;
 use aether_actor::{Instanced, validate_namespace_segment};
-use aether_data::{ActorId, ErasedActorPath, Tag, fold_lineage, with_tag};
+use aether_data::{ActorId, BlobHash, ErasedActorPath, Tag, fold_lineage, with_tag};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dependencies::check_declared;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::actor::native::local;
-use crate::actor::native::spawn::activation::{LegacyPreparedActivation, NativeSpawnFinalizer};
+use crate::actor::native::spawn::activation::{LegacyPreparedActivation, SpawnFinalizer};
 use crate::actor::native::{ExportedHandles, NativeActor, NativeInitCtx};
 use crate::mail::cost::{CostCell, CostCells};
 use crate::mail::registry::effect::{PreparedCostCells, PreparedMail, PreparedSpawnCommit};
@@ -98,6 +98,53 @@ impl Spawner {
         let canonical_name = ErasedActorPath::new(&rendered).map_err(SpawnError::PathInvalid)?;
         let id = MailboxId(with_tag(Tag::Mailbox, carry));
         Ok(SpawnIdentity { id, parent: parent_mailbox, carry, canonical_name, subname })
+    }
+
+    /// Resolve a guest birth's identity (ADR-0241 §5): the published
+    /// `namespace` takes the place of the host type's, so the birth lands at
+    /// `NS` with no key, `NS:key` with one, and `parent/NS:key` beneath a
+    /// parent. ADR-0241 §5 names no keyless child, so `parent/NS` is refused
+    /// before a counter is drawn. Returns the identity beside the birth's own
+    /// node, the parent-local reservation's child key.
+    ///
+    /// The id folds exactly as a native birth's does: a root's carry is its
+    /// node, and a child's folds the node onto the parent's carry.
+    pub(in crate::actor::native::spawn) fn prepare_guest_identity(
+        &self,
+        namespace: &str,
+        key: Option<Subname<'_>>,
+        parent: Option<&ActorRuntimeIdentity>,
+    ) -> Result<(SpawnIdentity, ActorId), SpawnError> {
+        if key.is_none() && parent.is_some() {
+            return Err(SpawnError::GuestPlacement);
+        }
+        validate_namespace_segment(namespace).map_err(SpawnError::SubnameInvalid)?;
+        let key = key.map(|key| match key {
+            Subname::Counter => self.counter.fetch_add(1, Ordering::Relaxed).to_string(),
+            Subname::Named(key) => key.to_owned(),
+        });
+        if let Some(key) = &key {
+            validate_namespace_segment(key).map_err(SpawnError::SubnameInvalid)?;
+        }
+
+        let (node, own) = key.as_ref().map_or_else(
+            || (ActorId::singleton(namespace), namespace.to_owned()),
+            |key| (ActorId::instanced(namespace, key), format!("{namespace}:{key}")),
+        );
+        let (parent_mailbox, carry, rendered) = parent.map_or_else(
+            || (None, node.0, own.clone()),
+            |parent| {
+                (
+                    Some(parent.mailbox()),
+                    fold_lineage(parent.carry(), node),
+                    format!("{}/{own}", parent.canonical_name()),
+                )
+            },
+        );
+        let canonical_name = ErasedActorPath::new(&rendered).map_err(SpawnError::PathInvalid)?;
+        let id = MailboxId(with_tag(Tag::Mailbox, carry));
+        let subname = key.unwrap_or_default();
+        Ok((SpawnIdentity { id, parent: parent_mailbox, carry, canonical_name, subname }, node))
     }
 
     /// Legacy eager preflight. Handler staging deliberately uses only
@@ -217,8 +264,25 @@ impl Spawner {
     pub(in crate::actor::native::spawn) fn prepare_commit<A>(
         self: &Arc<Self>,
         staged: StagedActor<A>,
-        finalizer: Option<Arc<NativeSpawnFinalizer<A>>>,
+        finalizer: Option<Arc<dyn SpawnFinalizer>>,
         chain: EffectChain,
+    ) -> PreparedSpawnCommit
+    where
+        A: Instanced + NativeActor,
+    {
+        self.prepare_commit_as(staged, finalizer, chain, None)
+    }
+
+    /// [`Self::prepare_commit`] for a birth that may be a guest's: `guest`
+    /// names the published namespace the birth takes and the module that
+    /// must hold it (ADR-0241 §3, §6), so the owner checks the publication
+    /// table in place of holding `A`'s namespace. `None` is a native birth.
+    pub(in crate::actor::native::spawn) fn prepare_commit_as<A>(
+        self: &Arc<Self>,
+        staged: StagedActor<A>,
+        finalizer: Option<Arc<dyn SpawnFinalizer>>,
+        chain: EffectChain,
+        guest: Option<(Arc<str>, BlobHash)>,
     ) -> PreparedSpawnCommit
     where
         A: Instanced + NativeActor,
@@ -269,6 +333,10 @@ impl Spawner {
             LegacyPreparedActivation::<A>::new(Arc::clone(self), id, sender, transport, slots, state, chain);
         let activation = match finalizer {
             Some(finalizer) => activation.with_finalizer(finalizer),
+            None => activation,
+        };
+        let activation = match guest {
+            Some((namespace, module)) => activation.with_guest(namespace, module),
             None => activation,
         };
         PreparedSpawnCommit::new(

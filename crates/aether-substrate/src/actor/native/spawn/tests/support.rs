@@ -187,7 +187,7 @@ pub(super) fn finalized_probe(
         RequestId(parent.mint_correlation()),
     );
     let dispatch_id = deferred.dispatch_id();
-    let finalizer = NativeSpawnFinalizer::parented(
+    let finalizer = NativeSpawnFinalizer::<ActivationProbe>::parented(
         parent_reservation,
         deferred,
         staged.identity.id,
