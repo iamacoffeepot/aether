@@ -141,6 +141,7 @@ use crate::mail::cost::CostLookup;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::DispatchParts;
 use crate::mail::{KindId, Mail, MailboxId};
+use crate::scheduler;
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost_nanos, tuning};
 
 /// Floor for a fresh burst's group-array capacity — a little headroom so a
@@ -801,11 +802,28 @@ impl BurstProducer {
     /// Fold one flush's routed mail into the active burst (or fresh bursts),
     /// scheduling a drainer and broadcast-recruiting siblings for wide
     /// fan-outs. Called on the producing actor's thread.
-    pub fn flush(&mut self, routed: Vec<Mail>) {
+    pub fn flush(&mut self, mut routed: Vec<Mail>) {
         // Prune detached bursts that have retired (fully drained — every
         // group closed, so nothing left to order against). Entries leave
         // on retire, keeping the list self-bounding.
         self.detached.retain(|(burst, _)| !burst.lifecycle.is_retired());
+
+        // A lone mail to a recipient with no group in any live burst has
+        // nothing to group or spread: deposit it straight into the
+        // recipient's inbox. Ordering holds by the same barrier a closed
+        // group's deposit relies on — the deposit's wake makes the slot
+        // `Ready`, so a later burst's in-place seize of this recipient loses
+        // and lands behind it. Only on a pool worker, where the burst's
+        // drainer would have run anyway: a deposit runs a bare inbox
+        // closure inline, and a host turn's peer delivery stays off the
+        // host thread.
+        if let [mail] = routed.as_slice()
+            && scheduler::on_pool_worker()
+            && !self.holds_group_for(mail.recipient)
+        {
+            self.mailer.push(routed.pop().expect("one mail matched above"));
+            return;
+        }
 
         let mut pending = self.route_detached(routed);
         while !pending.is_empty() {
@@ -878,6 +896,16 @@ impl BurstProducer {
     /// become fresh groups in the active burst — upholding the at-most-one-
     /// unclosed-group invariant (module doc §Single active burst + append;
     /// iamacoffeepot/aether#1533).
+    /// Whether `recipient` has a group in the live active burst or any
+    /// detached burst — the groups a lone mail must join rather than jump.
+    fn holds_group_for(&self, recipient: MailboxId) -> bool {
+        let in_active = self
+            .active
+            .as_ref()
+            .is_some_and(|(burst, index)| !burst.lifecycle.is_retired() && index.contains_key(&recipient));
+        in_active || self.detached.iter().any(|(_, index)| index.contains_key(&recipient))
+    }
+
     fn route_detached(&self, routed: Vec<Mail>) -> Vec<Mail> {
         if self.detached.is_empty() {
             return routed;
@@ -974,7 +1002,7 @@ mod tests {
     use crate::testing::bare_substrate;
     use crate::testing::boot_authority;
     use aether_data::MailId;
-    use crossbeam_deque::{Injector, Steal};
+    use crossbeam_deque::{Injector, Steal, Worker};
     use std::sync::mpsc;
 
     /// Pool size for the wake helper. Immaterial here: these tests
@@ -1151,7 +1179,7 @@ mod tests {
     }
 
     /// Two recipients across two flushes: the second flush to a fresh
-    /// recipient appends a new group; both deliver exactly once.
+    /// recipient appends a new group; both deliver exactly once, in order.
     #[test]
     fn second_flush_new_recipient_appends_group() {
         let (registry, mailer) = bare_substrate();
@@ -1160,13 +1188,35 @@ mod tests {
         let (b, _fb, b_rx, _bd) = seizable_recipient(&registry, "b");
 
         let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
-        producer.flush(vec![mail_to(a, 1)]);
+        producer.flush(vec![mail_to(a, 1), mail_to(a, 3)]);
         drain_injector(&injector);
-        producer.flush(vec![mail_to(b, 2)]);
+        producer.flush(vec![mail_to(b, 2), mail_to(b, 4)]);
         drain_injector(&injector);
 
-        assert_eq!(a_rx.try_recv().ok(), Some(1));
-        assert_eq!(b_rx.try_recv().ok(), Some(2));
+        assert_eq!(a_rx.try_iter().collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), vec![2, 4]);
+    }
+
+    /// A lone mail to a recipient with no group in any live burst is
+    /// deposited straight into its inbox: nothing is scheduled and the
+    /// in-place seize never runs. A bypass guard that misreads "no group"
+    /// either builds a burst here or, worse, deposits past an open group —
+    /// the case `detached_burst_keeps_same_recipient_fifo_across_overflow`
+    /// holds.
+    #[test]
+    fn lone_mail_to_ungrouped_recipient_deposits_without_a_burst() {
+        let (registry, mailer) = bare_substrate();
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
+        let (r, _fix, direct_rx, deposit_rx) = seizable_recipient(&registry, "r");
+
+        let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+        scheduler::install_worker_deque(Worker::new_lifo());
+        producer.flush(vec![mail_to(r, 7)]);
+
+        assert_eq!(drain_injector(&injector), 0, "no burst scheduled for a lone mail");
+        assert!(producer.active.is_none(), "no burst built");
+        assert_eq!(deposit_rx.try_recv().ok(), Some(7), "deposited into the inbox");
+        assert!(direct_rx.try_recv().is_err(), "not dispatched in place");
     }
 
     /// Overflowing the group array rolls the remainder into a fresh burst;
@@ -1229,11 +1279,13 @@ mod tests {
         let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let (r, _fix, direct_rx, _dep) = seizable_recipient(&registry, "r");
+        let (x, _xfix, x_rx, _xdep) = seizable_recipient(&registry, "x");
         let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
 
-        // Flush 1: r1 → R. burst1 (cap = GROUP_CAP_MIN) holds R's open
-        // group; nothing drains yet.
-        producer.flush(vec![mail_to(r, 1)]);
+        // Flush 1: r1 → R alongside x → X, so it forms a burst rather than
+        // taking the lone-mail deposit. burst1 (cap = GROUP_CAP_MIN) holds
+        // R's open group; nothing drains yet.
+        producer.flush(vec![mail_to(r, 1), mail_to(x, 50)]);
 
         // Flush 2: enough brand-new recipients to overflow burst1's group
         // array → burst1 detaches; burst2 takes the leftover (new
@@ -1250,7 +1302,8 @@ mod tests {
         producer.flush(routed);
         assert_eq!(producer.detached.len(), 1, "overflow moves burst1 onto the detached list");
 
-        // Flush 3: r2 → R appends to R's open group in detached burst1.
+        // Flush 3: r2 → R, a lone mail, still appends to R's open group in
+        // detached burst1 — the lone-mail deposit must not jump a group.
         producer.flush(vec![mail_to(r, 2)]);
 
         // Drain burst2 strictly BEFORE burst1 — the order that inverted
@@ -1266,6 +1319,7 @@ mod tests {
         assert_eq!(direct_rx.try_recv().ok(), Some(1), "r1 dispatches first");
         assert_eq!(direct_rx.try_recv().ok(), Some(2), "r2 dispatches second");
         assert!(direct_rx.try_recv().is_err(), "R dispatched exactly twice");
+        assert_eq!(x_rx.try_recv().ok(), Some(50), "X delivered from burst1");
 
         // Every overflow recipient still delivered exactly once.
         for (i, rx) in fresh_rxs.iter().enumerate() {
