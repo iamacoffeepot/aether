@@ -668,13 +668,9 @@ mod tests {
     use aether_data::{Kind, KindId};
     use aether_math::Rgba;
     use aether_render::DrawTexturedQuads;
-    use aether_substrate::actor::native::PumpedSlot;
-    use aether_substrate::chassis::builder::PassiveChassis;
     use aether_substrate::mail::registry::OwnedDispatch;
-    use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, fresh_substrate, registered_ref};
+    use aether_substrate::testing::{PumpedDriver, boot_bare_test_chassis, fresh_substrate, registered_ref};
     use std::sync::mpsc::{self, Receiver};
-    use std::thread;
-    use std::time::{Duration, Instant};
 
     /// A booted `aether.text` on a pumped slot, beside the two dependencies
     /// it declares: a stand-in at `aether.render` that hands every mail it
@@ -682,8 +678,7 @@ mod tests {
     /// `aether.fs`. Every mail reaches the cap through the chassis and runs
     /// through production dispatch when the slot drains.
     struct TextFixture {
-        chassis: PassiveChassis<TestChassis>,
-        cap: PumpedSlot<TextCapability>,
+        cap: PumpedDriver<TextCapability>,
         render: Receiver<(KindId, Vec<u8>)>,
     }
 
@@ -708,8 +703,8 @@ mod tests {
             );
 
             let chassis = boot_bare_test_chassis(&registry, &mailer);
-            let (cap, _wake) = chassis.boot_pumped_actor::<TextCapability>((), ()).expect("TextCapability boots");
-            Self { chassis, cap, render }
+            let cap = PumpedDriver::boot(chassis, (), ());
+            Self { cap, render }
         }
 
         /// [`Self::boot`] with the vendored font resident as `font_id` 0,
@@ -741,13 +736,7 @@ mod tests {
         where
             TextCapability: HandlesKind<K>,
         {
-            let (_, settled) = self.chassis.send_tracked(self.chassis.actor_ref::<TextCapability>(), mail, None);
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while settled.try_recv().is_err() {
-                assert!(Instant::now() < deadline, "{} did not settle within the deadline", K::NAME);
-                self.cap.drain_available();
-                thread::sleep(Duration::from_millis(1));
-            }
+            self.cap.send_and_settle(self.cap.chassis().actor_ref::<TextCapability>(), mail, None);
         }
 
         fn draw(&mut self, font_id: u32, text: &str, size_pixels: f32, origin: [f32; 2]) {
@@ -772,12 +761,6 @@ mod tests {
                 .filter(|(kind, _)| *kind == DrawTexturedQuads::ID)
                 .map(|(_, payload)| decode(&payload))
                 .collect()
-        }
-    }
-
-    impl Drop for TextFixture {
-        fn drop(&mut self) {
-            self.cap.shutdown();
         }
     }
 

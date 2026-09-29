@@ -195,11 +195,14 @@ mod headless_tests {
     use aether_actor::HandlesKind;
     use aether_data::{Kind, SessionToken, Uuid};
     use aether_substrate::chassis::builder::ReplyTarget;
-    use aether_substrate::testing::{boot_test_chassis_with, decode_session_reply, fresh_substrate_and_rx};
+    use aether_substrate::testing::{
+        await_settled, boot_test_chassis_with, decode_session_reply, fresh_substrate_and_rx,
+    };
 
     /// Boot `HeadlessRenderCapability` the way a headless chassis composes
-    /// it, send `mail` with its reply routed to a session, and decode the
-    /// reply the dispatch answers with.
+    /// it, send `mail` as a tracked root with its reply routed to a session,
+    /// wait for the root to settle, and decode the reply the dispatch
+    /// answered with: a reply precedes its root's settlement.
     fn request<K: Kind, R: Kind>(mail: &K) -> R
     where
         HeadlessRenderCapability: HandlesKind<K>,
@@ -207,7 +210,8 @@ mod headless_tests {
         let (registry, mailer, egress) = fresh_substrate_and_rx();
         let chassis = boot_test_chassis_with::<HeadlessRenderCapability>(&registry, &mailer, (), ());
         let reply = ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0x7045)), correlation: 1 };
-        chassis.send_for_reply(chassis.actor_ref::<HeadlessRenderCapability>(), mail, reply);
+        let (_, settled) = chassis.send_tracked(chassis.actor_ref::<HeadlessRenderCapability>(), mail, Some(reply));
+        await_settled(&settled, K::NAME);
         decode_session_reply(&egress)
     }
 

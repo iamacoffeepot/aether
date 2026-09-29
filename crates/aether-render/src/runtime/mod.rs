@@ -1283,14 +1283,12 @@ mod tests {
     use aether_data::{Kind, SessionToken, Uuid};
     use aether_kinds::QuadSpace;
     use aether_math::Rgba;
-    use aether_substrate::actor::native::PumpedSlot;
-    use aether_substrate::chassis::builder::{PassiveChassis, ReplyTarget};
+    use aether_substrate::chassis::builder::ReplyTarget;
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::testing::{
-        TestChassis, boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx,
+        PumpedDriver, boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx,
     };
     use std::sync::mpsc::Receiver;
-    use std::thread;
 
     fn window(name: &str) -> ErasedActorPath {
         ErasedActorPath::new(&format!("aether.window/aether.window.instance:{name}")).expect("fixture window path")
@@ -1350,8 +1348,7 @@ mod tests {
     /// through production dispatch when the slot drains; replies go to a
     /// session on the loopback egress.
     struct RenderFixture {
-        chassis: PassiveChassis<TestChassis>,
-        cap: PumpedSlot<RenderCapability>,
+        cap: PumpedDriver<RenderCapability>,
         egress: Receiver<EgressEvent>,
     }
 
@@ -1364,9 +1361,8 @@ mod tests {
                 clear_color: DEFAULT_CLEAR_COLOR.to_owned(),
                 pass_timings: false,
             };
-            let (cap, _wake) =
-                chassis.boot_pumped_actor::<RenderCapability>(tuning, params).expect("RenderCapability boots");
-            Self { chassis, cap, egress }
+            let cap = PumpedDriver::boot(chassis, tuning, params);
+            Self { cap, egress }
         }
 
         /// Seed the texture registry with `texture_id` in a host turn: a
@@ -1386,13 +1382,7 @@ mod tests {
         where
             RenderCapability: HandlesKind<K>,
         {
-            let (_, settled) = self.chassis.send_tracked(self.chassis.actor_ref::<RenderCapability>(), mail, reply);
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while settled.try_recv().is_err() {
-                assert!(Instant::now() < deadline, "{} did not settle within the deadline", K::NAME);
-                self.cap.drain_available();
-                thread::sleep(Duration::from_millis(1));
-            }
+            self.cap.send_and_settle(self.cap.chassis().actor_ref::<RenderCapability>(), mail, reply);
         }
 
         fn send<K: Kind>(&mut self, mail: &K)
@@ -1414,12 +1404,6 @@ mod tests {
 
         fn read<T>(&self, read: impl FnOnce(&RenderCapabilityState) -> T) -> T {
             self.cap.read_state(read).expect("the slot is live")
-        }
-    }
-
-    impl Drop for RenderFixture {
-        fn drop(&mut self) {
-            self.cap.shutdown();
         }
     }
 
