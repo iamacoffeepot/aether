@@ -143,7 +143,7 @@ impl HarnessEnv {
         install_frame_size(&mut sources)?;
 
         let base = ChassisBase { sources, actor_ring, scheduler_tuning, registry_queues, settlement };
-        let (events, events_rx) = events::channel();
+        let (events, events_rx) = events::channel(None);
         Ok((Self { base, namespace_roots, runtime, render, render_size, events }, events_rx))
     }
 }

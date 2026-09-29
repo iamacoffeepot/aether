@@ -36,11 +36,10 @@ aether-trace = { path = "../aether-trace" }
 aether-window = { path = "../aether-window", features = ["synthetic"] }
 anyhow = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
-clap = { workspace = true }
-confique = { workspace = true }
 # The crossbeam settlement receiver `SettlementRegistry::subscribe_settlement`
-# hands back, which a hookless `push_and_settle` waits on (a render hook waits
-# on its own `PumpWake` channel, ADR-0161 §Decision 2).
+# hands back, which a hookless `push_and_settle` waits on, and the harness's
+# one `PumpWake` channel its pump loop and a render settle block on (ADR-0161
+# §Decision 2).
 crossbeam-channel = "0.5"
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
@@ -56,13 +55,6 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # `SubstrateHarnessObserver`, the typed marker the lifecycle and window-event
 # scenarios' fixture subscribers forward what they receive to.
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
-
-# cargo-machete's source-only scan cannot see that `clap` and `confique`
-# are used exclusively through `#[derive(aether_substrate::Config)]`
-# codegen on `PollConfig` (`confique` via the emitted config layer,
-# `clap` via the emitted `Args` overlay), so both are false positives.
-[package.metadata.cargo-machete]
-ignored = ["clap", "confique"]
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 inventory = { workspace = true }

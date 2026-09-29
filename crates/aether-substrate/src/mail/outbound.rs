@@ -22,6 +22,7 @@ use std::sync::{Arc, OnceLock};
 use aether_actor::ErasedActorRef;
 use aether_data::{EngineId, KindDescriptor, KindId, MailboxDescriptor, MailboxId, SessionToken};
 
+use crate::chassis::ctx::MailboxWakeFn;
 use crate::mail::{Source, SourceAddr};
 
 // Issue 776 retired the substrate-local `LogEntry` + `LogLevel`
@@ -151,19 +152,31 @@ pub enum EgressEvent {
     },
 }
 
-/// Test backend that pushes every egress call onto an mpsc channel
-/// for assertion. Reports `is_connected = true` so substrate code
-/// that gates on connection (the bubble-up path in `Mailer::route_mail`)
-/// exercises the connected path under test.
+/// Backend that pushes every egress call onto an mpsc channel for an
+/// in-process embedder to read. Reports `is_connected = true` so substrate
+/// code that gates on connection (the bubble-up path in `Mailer::route_mail`)
+/// exercises the connected path under test. `wake`, when present, fires after
+/// each record lands on the channel, so an embedder blocked on its own wake
+/// channel reads the event the wake announces.
 pub(crate) struct RecordingBackend {
     tx: mpsc::Sender<EgressEvent>,
+    wake: Option<MailboxWakeFn>,
 }
 
 impl RecordingBackend {
     #[must_use]
-    pub(crate) fn new() -> (Self, mpsc::Receiver<EgressEvent>) {
+    pub(crate) fn new(wake: Option<MailboxWakeFn>) -> (Self, mpsc::Receiver<EgressEvent>) {
         let (tx, rx) = mpsc::channel();
-        (Self { tx }, rx)
+        (Self { tx, wake }, rx)
+    }
+
+    /// Enqueue `event`, then fire the wake: the event is on the channel
+    /// before its wake is, so a reader woken by it finds the event.
+    fn record(&self, event: EgressEvent) {
+        let _ = self.tx.send(event);
+        if let Some(wake) = &self.wake {
+            wake();
+        }
     }
 }
 
@@ -181,7 +194,7 @@ impl EgressBackend for RecordingBackend {
         correlation_id: u64,
         sender: Option<ErasedActorRef>,
     ) {
-        let _ = self.tx.send(EgressEvent::ToSession {
+        self.record(EgressEvent::ToSession {
             session,
             kind_name: kind_name.to_owned(),
             payload,
@@ -200,14 +213,7 @@ impl EgressBackend for RecordingBackend {
         count: u32,
         correlation_id: u64,
     ) {
-        let _ = self.tx.send(EgressEvent::ToEngineMailbox {
-            engine_id,
-            mailbox_id,
-            kind_id,
-            payload,
-            count,
-            correlation_id,
-        });
+        self.record(EgressEvent::ToEngineMailbox { engine_id, mailbox_id, kind_id, payload, count, correlation_id });
     }
 
     fn egress_unresolved_mail(
@@ -219,7 +225,7 @@ impl EgressBackend for RecordingBackend {
         source_mailbox_id: Option<MailboxId>,
         correlation_id: u64,
     ) {
-        let _ = self.tx.send(EgressEvent::UnresolvedMail {
+        self.record(EgressEvent::UnresolvedMail {
             recipient_mailbox_id,
             kind_id,
             payload,
@@ -230,11 +236,11 @@ impl EgressBackend for RecordingBackend {
     }
 
     fn egress_kinds_changed(&self, descriptors: Vec<KindDescriptor>) {
-        let _ = self.tx.send(EgressEvent::KindsChanged { descriptors });
+        self.record(EgressEvent::KindsChanged { descriptors });
     }
 
     fn egress_mailboxes_changed(&self, descriptors: Vec<MailboxDescriptor>) {
-        let _ = self.tx.send(EgressEvent::MailboxesChanged { descriptors });
+        self.record(EgressEvent::MailboxesChanged { descriptors });
     }
 }
 
@@ -350,9 +356,14 @@ impl HubOutbound {
     /// embedder's view of its session replies and bubble-ups. Single-backend
     /// like any attach: on an outbound that already has a backend this warns,
     /// keeps the first, and the returned receiver never yields.
+    ///
+    /// `wake`, when present, fires after each event is enqueued, so an
+    /// embedder that blocks on a wake channel instead of polling the receiver
+    /// learns of every egress; an embedder that only reads after the fact
+    /// passes `None`.
     #[must_use]
-    pub fn attach_recording(&self) -> mpsc::Receiver<EgressEvent> {
-        let (backend, rx) = RecordingBackend::new();
+    pub fn attach_recording(&self, wake: Option<MailboxWakeFn>) -> mpsc::Receiver<EgressEvent> {
+        let (backend, rx) = RecordingBackend::new(wake);
         self.attach_backend(Arc::new(backend));
         rx
     }
@@ -368,7 +379,7 @@ impl HubOutbound {
     #[must_use]
     pub fn attached_loopback() -> (Arc<Self>, mpsc::Receiver<EgressEvent>) {
         let outbound = Self::disconnected();
-        let rx = outbound.attach_recording();
+        let rx = outbound.attach_recording(None);
         (outbound, rx)
     }
 

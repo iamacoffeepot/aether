@@ -44,13 +44,12 @@ pub struct GpuFrameHook {
     /// The pumped render actor's proven reference, recorded by its boot —
     /// where the harness routes `capture_frame`.
     render: ErasedActorRef,
-    /// The unified [`PumpWake`] channel (ADR-0161 §Decision 2): the render
-    /// slot's mailbox wake sends [`PumpWake::Mail`] after each accepted
-    /// send, and each [`FrameHook::settle`] subscription sends
-    /// [`PumpWake::Settled`], so the settle wait drains the slot on mail
-    /// arrival and returns on settlement.
+    /// The harness's one [`PumpWake`] channel (ADR-0161 §Decision 2): the
+    /// render slot's mailbox wake sends [`PumpWake::Mail`] on it after each
+    /// accepted send, and each [`FrameHook::settle`] subscription sends
+    /// [`PumpWake::Settled`]. The harness owns the receiver and hands it to
+    /// [`FrameHook::settle`].
     wake_tx: Sender<PumpWake>,
-    wake_rx: Receiver<PumpWake>,
 }
 
 impl GpuFrameHook {
@@ -102,27 +101,34 @@ impl FrameHook for GpuFrameHook {
     }
 
     fn pump(&mut self) {
-        // Empty the queued wakes before draining: every mail whose wake is
-        // dropped here was queued before its wake fired, so the drain below
-        // dispatches it, and mail arriving after the drain wakes afresh. This
-        // keeps the channel bounded between settles and discards a late
-        // `Settled` left by a settle that wedged.
-        while self.wake_rx.try_recv().is_ok() {}
+        // Drain only. The wake queue is the harness pump loop's to empty: it
+        // empties it before it drains, so a wake emptied here could belong to
+        // mail that loop has yet to drain.
         self.slot.drain_available();
     }
 
-    fn settle(&mut self, settlement: &SettlementRegistry, root: MailId, cap: Duration) -> WaitOutcome {
-        // Drain first: mail queued before the wake was installed at boot
-        // carries no wake, and a chain gated on it would otherwise wait out
-        // the cap. Subscribing after the drain keeps a pre-fired `Settled`
-        // (a root that already settled) out of the emptied queue.
-        self.pump();
+    fn settle(
+        &mut self,
+        settlement: &SettlementRegistry,
+        root: MailId,
+        cap: Duration,
+        wake: &Receiver<PumpWake>,
+    ) -> WaitOutcome {
+        // Empty the queued wakes, then drain: a `Settled` left by a settle
+        // that wedged cannot end this wait early, and every render mail
+        // whose wake was emptied was queued before that wake fired, so the
+        // drain dispatches it — as it does mail queued before the wake was
+        // installed at boot, which carries none. Subscribing after the drain
+        // keeps a pre-fired `Settled` (a root that already settled) in the
+        // queue the wait reads.
+        while wake.try_recv().is_ok() {}
+        self.slot.drain_available();
         let wake_tx = self.wake_tx.clone();
         settlement.subscribe_settlement_with(root, move || {
             let _ = wake_tx.send(PumpWake::Settled);
         });
         await_settlement_pumped(
-            &self.wake_rx,
+            wake,
             &mut self.slot,
             "substrate_harness.push_and_settle",
             frame_loop::DRAIN_BUDGET,
@@ -201,7 +207,7 @@ impl RenderHarnessBuilderExt for SubstrateHarnessBuilder {
 fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color: &str) -> SubstrateHarnessBuilder {
     let clear_color = clear_color.to_owned();
     builder.render_hook::<RenderCapability>(Box::new(move |passive, wiring, width, height| {
-        let RenderHookWiring { assets_dir } = wiring;
+        let RenderHookWiring { assets_dir, wake: wake_tx } = wiring;
         // The `FrameCheck` / similarity scorer lives in
         // `aether_substrate::render::visual` (below aether-render), so the
         // pumped runtime scores capture verdicts + similarity directly in
@@ -223,9 +229,8 @@ fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color
             .map_err(|e| anyhow::anyhow!("boot pumped render slot: {e}"))?;
         let render_root = passive.root_pusher::<RenderCapability>();
         let render = passive.actor_ref::<RenderCapability>().erase();
-        let (wake_tx, wake_rx) = crossbeam_channel::unbounded::<PumpWake>();
         install_pump_wake(&wake_slot, wake_tx.clone());
-        Ok(Box::new(GpuFrameHook { slot, render_root, render, wake_tx, wake_rx }) as Box<dyn FrameHook>)
+        Ok(Box::new(GpuFrameHook { slot, render_root, render, wake_tx }) as Box<dyn FrameHook>)
     }))
 }
 

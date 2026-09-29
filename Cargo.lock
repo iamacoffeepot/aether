@@ -681,8 +681,6 @@ dependencies = [
  "aether-window",
  "anyhow",
  "bytemuck",
- "clap",
- "confique",
  "crossbeam-channel",
  "inventory",
  "serde",
