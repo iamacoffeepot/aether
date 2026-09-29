@@ -1,15 +1,14 @@
-//! The mail surface every concrete window manager carries (ADR-0169).
+//! Root-command routing: the command view a manager retains of each window
+//! child, and the forward of a root-addressed command to the sole window.
 
-use aether_actor::{Manual, OutboundReply, Protocol, ProtocolRef, RowAt, handler_set, protocol};
+use aether_actor::{Manual, Protocol, ProtocolRef, RowAt, protocol};
 use aether_data::{ActorMail, ErasedActorPath};
-use aether_substrate::actor::native::{Erased, NativeCtx};
+use aether_substrate::actor::native::NativeCtx;
 
-use super::subscribers::WindowSubscribers;
 use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, RequestWindowRedraw, RequestWindowRedrawResult,
     SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
-    UnsubscribeWindow, UnsubscribeWindowSelf,
+    SetWindowTitle, SetWindowTitleResult,
 };
 
 /// The seven command rows a concrete window endpoint exposes, each naming the
@@ -51,7 +50,7 @@ pub struct RoutableWindow {
 /// `Err` carries the refusal text for the two ambiguous cases and for a sole
 /// window that is no longer live, which the caller receives as the command's
 /// own `Err` variant rather than as silence or a forward into a dead mailbox.
-fn route_to_sole_window<K: ActorMail, A, I>(
+pub(super) fn route_to_sole_window<K: ActorMail, A, I>(
     windows: &[RoutableWindow],
     ctx: &mut NativeCtx<'_, A, Manual>,
     mail: &K,
@@ -81,148 +80,6 @@ where
     Ok(())
 }
 
-/// The shared receive surface of a concrete window manager (ADR-0169).
-///
-/// Two blocks of behavior are properties of *being* the `aether.window` root
-/// rather than of any one chassis, so a concrete manager contributes only the
-/// two accessors below and inherits both.
-///
-/// Subscription: who may subscribe, how a selector is stored, and which errors
-/// come back are properties of [`WindowSubscribers`]. Event *publication* stays
-/// with the manager — what counts as an event, and when, is exactly where
-/// desktop and synthetic differ.
-///
-/// Root-addressed commands: the per-window command kinds are handled by the
-/// window endpoint, so the root used to drop them silently
-/// (iamacoffeepot/aether#5505). It routes each to the sole window when the
-/// engine has exactly one — the overwhelmingly common case, and the one the
-/// documented surface assumes — and otherwise answers the command's `Err`
-/// variant naming the situation. Which windows are routable is the manager's
-/// call; the routing and the refusals are not.
-#[handler_set]
-pub trait WindowManagerSurface {
-    /// The manager's subscription table.
-    fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers;
-
-    /// Every window a root-addressed command may be routed to — the same set
-    /// `aether.window.list` enumerates, so the count a refusal reports is the
-    /// count the caller can see. Per-window liveness stays the endpoint's
-    /// answer, not a reason to hide a window from the root's arithmetic.
-    fn routable_windows(state: &Self::State) -> Vec<RoutableWindow>;
-
-    /// Subscribe an explicitly named actor to one kind for one selector.
-    ///
-    /// The subscriber's path reached this handler only because its decode
-    /// proved the route there, live or closed, handles the kind silently
-    /// (ADR-0231 §3); it is proven live here, at receipt, and the table keeps
-    /// the `ProtocolRef<Subscriber<K>>` that proof returns. A path whose
-    /// actor has gone answers `Err` naming it.
-    #[handler::single]
-    fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
-        match Self::subscribers(state).subscribe_path(ctx, mail.selector, &mail.subscription) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
-        }
-    }
-
-    /// Subscribe the calling actor to one kind for one selector.
-    #[handler::single]
-    fn on_subscribe_self(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: SubscribeWindowSelf,
-    ) -> SubscribeWindowResult {
-        match Self::subscribers(state).subscribe_self(ctx, mail.selector, mail.kind) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
-        }
-    }
-
-    /// Drop an explicitly named actor's subscription to one kind for one
-    /// selector. The path is proven live at receipt and its key removed; a
-    /// path whose actor has gone answers `Err` naming it.
-    #[handler::single]
-    fn on_unsubscribe(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: UnsubscribeWindow,
-    ) -> SubscribeWindowResult {
-        match Self::subscribers(state).unsubscribe_path(ctx, mail.selector, &mail.subscription) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
-        }
-    }
-
-    /// Drop the calling actor's subscription to one kind for one selector.
-    #[handler::single]
-    fn on_unsubscribe_self(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: UnsubscribeWindowSelf,
-    ) -> SubscribeWindowResult {
-        match Self::subscribers(state).unsubscribe_self(ctx, mail.selector, mail.kind) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
-        }
-    }
-
-    /// Close the sole window.
-    #[handler::manual]
-    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: CloseWindow) {
-        if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
-            ctx.reply(&CloseWindowResult::Err { error });
-        }
-    }
-
-    /// Change the sole window's presentation mode.
-    #[handler::manual]
-    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowMode) {
-        if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
-            ctx.reply(&SetWindowModeResult::Err { error });
-        }
-    }
-
-    /// Change the sole window's title.
-    #[handler::manual]
-    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowTitle) {
-        if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
-            ctx.reply(&SetWindowTitleResult::Err { error });
-        }
-    }
-
-    /// Install the sole window's native menu bar.
-    #[handler::manual]
-    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowMenu) {
-        if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
-            ctx.reply(&SetWindowMenuResult::Err { error });
-        }
-    }
-
-    /// Set the sole window's pointer shape.
-    #[handler::manual]
-    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowCursor) {
-        if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
-            ctx.reply(&SetWindowCursorResult::Err { error });
-        }
-    }
-
-    /// Bring the sole window to the foreground.
-    #[handler::manual]
-    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: FocusWindow) {
-        if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
-            ctx.reply(&FocusWindowResult::Err { error });
-        }
-    }
-
-    /// Schedule the sole window for redraw.
-    #[handler::manual]
-    fn on_request_redraw(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: RequestWindowRedraw) {
-        if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
-            ctx.reply(&RequestWindowRedrawResult::Err { error });
-        }
-    }
-}
-
 #[cfg(all(test, feature = "synthetic"))]
 mod tests {
     use aether_data::LoadName;
@@ -230,7 +87,7 @@ mod tests {
 
     use super::*;
     use crate::runtime::subscribers::fixture::Rig;
-    use crate::{CreateWindow, CreateWindowResult, RetireWindow, SyntheticWindowCapability, SyntheticWindowInstance};
+    use crate::{CreateWindow, CreateWindowResult, RetireWindow, WindowCapability, WindowInstance};
     use crate::{WindowMode, WindowSpec};
 
     /// The sole window's child departs while a root command for it is
@@ -240,18 +97,16 @@ mod tests {
     /// Fails if the root forwards without proving the sole window live.
     #[test]
     fn sole_window_departure_is_refused_before_its_monitor_notice_is_processed() {
-        let mut rig = Rig::<SyntheticWindowCapability>::boot(());
+        let mut rig = Rig::synthetic();
         let spec =
             WindowSpec { name: "main".to_owned(), title: "Main".to_owned(), mode: WindowMode::Windowed, size: None };
         rig.send(&CreateWindow { spec });
         let CreateWindowResult::Ok { window } = rig.reply::<CreateWindowResult>() else {
             panic!("the synthetic manager creates the window");
         };
-        let main_child = |rig: &Rig<SyntheticWindowCapability>| {
-            rig.chassis().child::<SyntheticWindowCapability, SyntheticWindowInstance>(
-                rig.manager(),
-                LoadName::new("main").expect("fixture name"),
-            )
+        let main_child = |rig: &Rig<WindowCapability>| {
+            rig.chassis()
+                .child::<WindowCapability, WindowInstance>(rig.manager(), LoadName::new("main").expect("fixture name"))
         };
         let child = main_child(&rig).expect("the window child is live");
 

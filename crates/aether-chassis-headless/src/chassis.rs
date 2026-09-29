@@ -1,13 +1,12 @@
 //! Headless chassis: `HeadlessChassis` (ADR-0035 / ADR-0071), the
 //! `Err`-replying capability stubs that fail fast for kinds desktop
-//! supports natively (capture/window) plus `Advance`, and the
+//! supports natively (capture) plus `Advance`, and the
 //! [`HeadlessChassis::build`] entry point that assembles the substrate
 //! + tick driver into a [`BuiltChassis`].
 //!
 //! Issue 603 retired the `chassis_handler` closure: each fail-fast
 //! kind moved onto its own cap. `HeadlessRenderCapability` (Phase 2)
-//! handles `aether.render`; `HeadlessWindowCapability` (Phase 3)
-//! handles `aether.window`; `UnsupportedSubstrateHarnessCapability` (Phase 4)
+//! handles `aether.render`; `UnsupportedSubstrateHarnessCapability` (Phase 4)
 //! handles `aether.substrate_harness`; `HeadlessAudioCapability`
 //! (iamacoffeepot/aether#5705) handles `aether.audio`, retiring the last
 //! inline sink — a hand-written closure that answered one of the six
@@ -15,6 +14,10 @@
 //! `aether.control.platform_info` (now a deleted kind name from a retired
 //! namespace) was deleted as a kind in Phase 4 — no replacement, no MCP
 //! path until issue 603 §F2 revives the per-domain shape.
+//!
+//! No window actor is composed: a chassis with no window peripheral has no
+//! `aether.window` mailbox, so a component that depends on
+//! `WindowCapability` is refused at load rather than answered by a stub.
 
 use std::mem;
 use std::sync::Arc;
@@ -31,7 +34,6 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_substrate_harness_cap::UnsupportedSubstrateHarnessCapability;
-use aether_window::HeadlessWindowCapability;
 
 use aether_chassis::{TickConfig, apply_manifest_tick_settings};
 
@@ -125,7 +127,7 @@ impl BootableChassis for HeadlessChassis {
     /// Compose the headless capability chain — the single claim/build path
     /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
     /// so the manifest roster can never drift from what boots. Composes the
-    /// common caps plus the headless render / audio / clipboard / window /
+    /// common caps plus the headless render / audio / clipboard /
     /// substrate-harness / lifecycle caps and the always-claim RPC + HTTP servers
     /// (ADR-0155 §3). The RPC server is composed held: `boot_standard` binds it
     /// only after every boot component has loaded (issue #6413). Returns the
@@ -158,7 +160,6 @@ impl BootableChassis for HeadlessChassis {
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessAudioCapability>(())
             .with_actor::<HeadlessClipboardCapability>(())
-            .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
         Ok(with_rpc_server(builder).with_actor::<HttpServerCapability>(()))

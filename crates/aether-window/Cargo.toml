@@ -7,14 +7,14 @@ publish = false
 
 # `aether.window` capability, extracted by the arc that dissolved the
 # capabilities monolith (iamacoffeepot/aether#3717) as a per-cap crate. Owns
-# the concrete `HeadlessWindowCapability` identity + its fail-fast
-# `Err`-replying default runtime (`runtime/mod.rs`), with desktop and synthetic
-# alternatives under keyed runtime children. The crate also owns the public multi-window request,
-# reply, lifecycle, and selector surface; only the shared
+# the one `WindowCapability` manager identity and its `WindowInstance`
+# endpoint, whose runtime (`runtime/mod.rs`) runs the desktop or synthetic
+# backend `WindowParams` picks at boot. The crate also owns the public
+# multi-window request, reply, lifecycle, and selector surface; only the shared
 # `WindowMode` value lives in `aether-kinds`.
 #
 # Unlike the pure-leaf `aether-clipboard`, this crate has an inbound
-# consumer: `aether-rpc`'s server test addresses `HeadlessWindowCapability` to
+# consumer: `aether-rpc`'s server test addresses `WindowCapability` to
 # exercise the `Component` local-RPC-server reply path, so `aether-rpc` holds
 # it as a dev-dependency.
 #
@@ -25,14 +25,18 @@ publish = false
 # `ctx.send::<WindowCapability>(..)` without dragging the substrate through.
 
 [features]
-default = ["runtime"]
+# Empty: a marker-only consumer (a wasm guest naming `WindowCapability`) takes
+# the crate as-is, and a runtime consumer names the backend it composes.
+default = []
+# The `#[actor]` runtime gate. A runtime runs a backend, so it is implied by
+# `desktop` and `synthetic` and refused alone (`compile_error!` in `lib.rs`).
 runtime = ["dep:aether-substrate"]
-# The desktop runtime (ADR-0160 §Decision 2): the state-bearing
-# `DesktopWindowCapability` that drives a real winit window. Pulls the
-# substrate runtime (via `runtime`) plus winit; default features stay
-# `runtime`-only, so headless / harness / wasm consumers never build winit.
+# The desktop backend (ADR-0160 §Decision 2): the state that drives real winit
+# windows, booted pumped only through `DesktopWindowSlot::boot`. Pulls the
+# substrate runtime (via `runtime`) plus winit, so only a desktop chassis build
+# pulls winit.
 desktop = ["runtime", "dep:winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:muda", "dep:tracing"]
-# Deterministic in-memory window manager and raw event injection surface for
+# The deterministic in-memory backend and raw event injection surface for
 # real-substrate harness tests. Production chassis do not enable this feature.
 synthetic = ["runtime", "dep:tracing"]
 
@@ -47,9 +51,9 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 # The winit window handle the desktop runtime mutates. Gated behind the
 # `desktop` feature so only a desktop chassis build pulls it.
 winit = { version = "0.30", optional = true }
-# The desktop runtime's log site, a menu shortcut the platform cannot parse
-# into an accelerator, and the synthetic runtime's, an injected event it does
-# not publish. Gated with those two runtimes.
+# The desktop backend's log site, a menu shortcut the platform cannot parse
+# into an accelerator, and the synthetic backend's, an injected event it does
+# not publish. Gated with those two backends.
 tracing = { workspace = true, default-features = false, features = ["std"], optional = true }
 
 # The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated

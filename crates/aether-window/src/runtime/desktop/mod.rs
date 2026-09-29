@@ -10,20 +10,19 @@
 mod application;
 mod cursor;
 mod input;
-mod instance;
 mod menu;
+mod slot;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef, ReplyMode, Single, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef, ReplyMode, Single};
 use aether_data::ErasedActorPath;
 use aether_kinds::{
-    ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
-    TextInput, WindowMode, WindowSize,
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
+    WindowMode, WindowSize,
 };
-use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending, SpawnOutcome, TaskDone};
-use aether_substrate::chassis::error::BootError;
+use aether_substrate::actor::native::{Held, NativeCtx, SpawnOutcome};
 use aether_substrate::runtime::effect_chain::OrderingDevice;
 use aether_substrate::{MonitorHandle as ActorMonitorHandle, Subname};
 #[cfg(target_os = "macos")]
@@ -44,16 +43,18 @@ use self::input::{
     text_input_gate,
 };
 use self::menu::{apply_menu, parse_menu_item_id};
-use super::manager::{RoutableWindow, WindowCommands, WindowManagerSurface};
+use super::WindowSpawnKey;
+use super::manager::{RoutableWindow, WindowCommands};
 use super::subscribers::{Published, WindowSubscribers};
 use crate::{
-    ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
-    DesktopWindowCapability, DesktopWindowInstance, FocusWindowResult, ListWindows, ListWindowsResult,
-    RequestWindowRedrawResult, RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult,
-    SetWindowTitleResult, WindowClosed, WindowCommand, WindowInfo, WindowMenuActivated, WindowOpened, WindowSpec,
+    ApplyWindowCommandResult, CloseWindowResult, CreateWindowResult, FocusWindowResult, RequestWindowRedrawResult,
+    RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowTitleResult,
+    WindowCapability, WindowClosed, WindowCommand, WindowInfo, WindowInstance, WindowMenuActivated, WindowOpened,
+    WindowSpec,
 };
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
+pub use slot::DesktopWindowSlot;
 
 #[cfg(target_os = "macos")]
 fn activate_application() {
@@ -104,19 +105,27 @@ pub fn set_application_name(app_name: &str) {
 #[cfg(not(target_os = "macos"))]
 pub fn set_application_name(_app_name: &str) {}
 
-/// Construction input for the application-scoped desktop window manager.
+/// Boot input for the desktop backend, carried by
+/// [`WindowParams::Desktop`](crate::WindowParams::Desktop).
 ///
-/// The manager needs no native handle or initial identity at boot — its
-/// registry comes from [`NativeInitCtx`], and the application host reserves
-/// the boot window before winit begins dispatching callbacks. What it does
-/// need is the application's name, which the platform application menu names
-/// its About and Quit items after and which no window-local state can supply.
-pub struct DesktopWindowParams {
-    pub app_name: String,
+/// It has no public constructor: [`DesktopWindowSlot::boot`] mints the only
+/// one, and boots the manager pumped with it. So the desktop backend never
+/// runs pooled, where no application thread would realize its host actions.
+///
+/// The backend needs no native handle or initial identity at boot — the
+/// application host reserves the boot window before winit begins dispatching
+/// callbacks. What it does need is the application's name, which the platform
+/// application menu names its About and Quit items after and which no
+/// window-local state can supply.
+pub struct DesktopWindowBoot {
+    app_name: String,
 }
 
-impl Default for DesktopWindowParams {
-    fn default() -> Self {
+impl DesktopWindowBoot {
+    /// The crate's own `Rig` tests boot the desktop backend on a test
+    /// chassis's pumped driver rather than a desktop driver.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
         Self { app_name: "Aether".to_owned() }
     }
 }
@@ -150,18 +159,11 @@ struct PendingCreate {
     shutdown_on_failure: bool,
 }
 
-/// The context a staged window child carries into its task completion
-/// (ADR-0243 §9): the window's path, which keys its [`PendingCreate`].
-#[aether_data::kind(name = "aether.window.desktop.spawn_key")]
-struct WindowSpawnKey {
-    path: ErasedActorPath,
-}
-
 /// A window child that reached `Live`: the reference its spawn outcome proved,
 /// which every later retire is sent through, and the monitor whose notice
 /// removes the entry once the child departs.
 struct WindowChild {
-    reference: ActorRef<DesktopWindowInstance>,
+    reference: ActorRef<WindowInstance>,
     _monitor: ActorMonitorHandle,
 }
 
@@ -214,13 +216,13 @@ impl DesktopWindowState {
     }
 }
 
-/// Application-scoped `aether.window` state.
+/// The desktop backend's application-scoped state.
 ///
 /// Engine identities are the canonical paths of supervised named children.
 /// The `BTreeMap` makes `ListWindows` naturally ordered by path, which is
 /// window-name order; the hash maps provide constant-time native lookup
 /// without exposing winit identities on the wire.
-pub struct DesktopWindowCapabilityState {
+pub struct DesktopWindows {
     /// The product name the platform application menu is titled with. Boot
     /// input rather than window-local state: macOS has one application menu
     /// for the whole process, whichever window installs it.
@@ -232,7 +234,7 @@ pub struct DesktopWindowCapabilityState {
     /// Each supervised child's window, keyed by the child's reference: the
     /// `MonitorNotice` sender a departing child is found by (ADR-0230).
     child_windows: HashMap<ErasedActorRef, ErasedActorPath>,
-    subscribers: WindowSubscribers,
+    pub(super) subscribers: WindowSubscribers,
     pending_creates: HashMap<ErasedActorPath, PendingCreate>,
     pending_host_actions: VecDeque<WindowHostAction>,
     pending_host_effects: Vec<WindowHostEffect>,
@@ -240,7 +242,99 @@ pub struct DesktopWindowCapabilityState {
     shutdown_when_idle: bool,
 }
 
-impl DesktopWindowCapabilityState {
+impl DesktopWindows {
+    pub(super) fn new(boot: DesktopWindowBoot) -> Self {
+        Self {
+            app_name: boot.app_name,
+            windows: BTreeMap::new(),
+            native_windows: HashMap::new(),
+            winit_windows: HashMap::new(),
+            children: HashMap::new(),
+            child_windows: HashMap::new(),
+            subscribers: WindowSubscribers::new(),
+            pending_creates: HashMap::new(),
+            pending_host_actions: VecDeque::new(),
+            pending_host_effects: Vec::new(),
+            initial_window_reserved: false,
+            shutdown_when_idle: false,
+        }
+    }
+
+    /// Every window past attachment, in path order: an attaching window is
+    /// not yet anyone's to address.
+    pub(super) fn list(&self) -> Vec<WindowInfo> {
+        self.windows
+            .iter()
+            .filter(|(_, window)| window.lifecycle != DesktopWindowLifecycle::Attaching)
+            .map(|(path, window)| window.info(path))
+            .collect()
+    }
+
+    /// Queue a create for the application's next host turn; `held` is
+    /// answered once the window's child birth is authoritative.
+    pub(super) fn create<A>(&mut self, ctx: &mut NativeCtx<'_, A>, spec: WindowSpec, held: Held<CreateWindowResult>) {
+        if let Err((error, Some(held))) = self.queue_create(spec, Some(held), false) {
+            held.answer(ctx, &CreateWindowResult::Err { error });
+        }
+    }
+
+    /// Apply one per-window command at the native window of the child that
+    /// forwarded it.
+    ///
+    /// `Close` is the exception every other arm is not: it cannot answer here,
+    /// because the window is only gone once the integration has detached its
+    /// render target and the manager has retired its child, so it hands its
+    /// held reply to the close queue and is answered from
+    /// [`Self::finish_window_close`]. Everything else resolves against the
+    /// live `Arc<Window>` on this same turn — the desktop backend is pumped,
+    /// so this *is* the winit thread — and answers immediately.
+    pub(super) fn apply_command<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        command: WindowCommand,
+        held: Held<ApplyWindowCommandResult>,
+    ) {
+        let Some(path) = ctx.sender().and_then(|sender| self.child_windows.get(&sender).cloned()) else {
+            held.answer(
+                ctx,
+                &command.refused("window command from an actor that is not a live window child".to_owned()),
+            );
+            return;
+        };
+        if matches!(command, WindowCommand::Close) {
+            if let Err((error, Some(held))) = self.queue_close(&path, Some(held)) {
+                held.answer(ctx, &ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }));
+            }
+            return;
+        }
+        held.answer(ctx, &self.apply_at_window(&path, command));
+    }
+
+    /// A monitored actor departed: when it is a window child, its window's
+    /// command proof is cleared and the window queued to close.
+    pub(super) fn child_departed(&mut self, departed: ErasedActorRef) {
+        if let Some(path) = self.child_windows.remove(&departed)
+            && self.children.remove(&path).is_some()
+        {
+            if let Some(window) = self.windows.get_mut(&path) {
+                window.commands = None;
+            }
+            let _ = self.queue_close(&path, None);
+        }
+    }
+
+    /// The same filter `list` publishes: an attaching window is not yet
+    /// anyone's to address, and a closing one still is — its missing or dead
+    /// child proof makes the root answer `window … is not live` rather than
+    /// hiding it from the count the caller was just shown.
+    pub(super) fn routable_windows(&self) -> Vec<RoutableWindow> {
+        self.windows
+            .iter()
+            .filter(|(_, window)| window.lifecycle != DesktopWindowLifecycle::Attaching)
+            .map(|(path, window)| RoutableWindow { path: path.clone(), target: window.commands })
+            .collect()
+    }
+
     /// Reserve the boot window exactly once. Creation happens when the caller
     /// realizes the returned host action.
     pub fn queue_initial_window(&mut self, spec: WindowSpec) -> Result<(), String> {
@@ -305,7 +399,7 @@ impl DesktopWindowCapabilityState {
         &mut self,
         path: &ErasedActorPath,
         attachment: Result<(), String>,
-        ctx: &mut NativeCtx<'_, DesktopWindowCapability, Single>,
+        ctx: &mut NativeCtx<'_, WindowCapability, Single>,
     ) -> Vec<WindowHostEffect> {
         let Some(mut pending) = self.pending_creates.remove(path) else {
             return Vec::new();
@@ -324,7 +418,7 @@ impl DesktopWindowCapabilityState {
                 // keeps the builder's chainless-turn default. The birth carries
                 // the window's path as its completion context, since that path
                 // is what the reservation is keyed by.
-                let birth = ctx.spawn_child::<DesktopWindowInstance>(Subname::Named(&pending.spec.name), (), ());
+                let birth = ctx.spawn_child::<WindowInstance>(Subname::Named(&pending.spec.name), (), ());
                 let birth = if pending.held.is_some() {
                     birth.ordered_by(OrderingDevice::RetainedReplyDebt)
                 } else {
@@ -357,11 +451,11 @@ impl DesktopWindowCapabilityState {
     /// publishes; every failure retires the applied child and rolls the create
     /// back. Rollback effects go to the host-effect queue because this runs on
     /// an ordinary mail turn rather than inside a native callback.
-    fn finish_window_child_spawn<A>(
+    pub(super) fn finish_window_child_spawn<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
         path: &ErasedActorPath,
-        outcome: &SpawnOutcome<DesktopWindowInstance>,
+        outcome: &SpawnOutcome<WindowInstance>,
     ) {
         let Some(mut pending) = self.pending_creates.remove(path) else {
             if let Ok(child) = &outcome.result {
@@ -409,7 +503,7 @@ impl DesktopWindowCapabilityState {
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
         path: &ErasedActorPath,
-        child: ActorRef<DesktopWindowInstance>,
+        child: ActorRef<WindowInstance>,
         monitor: ActorMonitorHandle,
         pending: &mut PendingCreate,
     ) -> Vec<WindowHostEffect> {
@@ -867,140 +961,6 @@ fn narrow_scale_factor(scale_factor: f64) -> f32 {
     <f32 as Pixel>::from_f64(scale_factor)
 }
 
-#[runtime(handler_set(WindowManagerSurface))]
-impl NativeActor for DesktopWindowCapability {
-    type State = DesktopWindowCapabilityState;
-
-    type Config = ();
-    type Params = DesktopWindowParams;
-
-    const NAMESPACE: &'static str = crate::WINDOW_NAMESPACE;
-
-    fn init(
-        (): (),
-        params: DesktopWindowParams,
-        _ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<DesktopWindowCapabilityState, BootError> {
-        Ok(DesktopWindowCapabilityState {
-            app_name: params.app_name,
-            windows: BTreeMap::new(),
-            native_windows: HashMap::new(),
-            winit_windows: HashMap::new(),
-            children: HashMap::new(),
-            child_windows: HashMap::new(),
-            subscribers: WindowSubscribers::new(),
-            pending_creates: HashMap::new(),
-            pending_host_actions: VecDeque::new(),
-            pending_host_effects: Vec::new(),
-            initial_window_reserved: false,
-            shutdown_when_idle: false,
-        })
-    }
-
-    #[handler::single]
-    fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListWindows) -> ListWindowsResult {
-        ListWindowsResult::Ok {
-            windows: state
-                .windows
-                .iter()
-                .filter(|(_, window)| window.lifecycle != DesktopWindowLifecycle::Attaching)
-                .map(|(path, window)| window.info(path))
-                .collect(),
-        }
-    }
-
-    #[handler(task)]
-    fn on_window_child_spawn_done(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<DesktopWindowInstance>>,
-    ) {
-        let Some(WindowSpawnKey { path }) = ctx.take_context() else {
-            return;
-        };
-        state.finish_window_child_spawn(ctx, &path, &done.into_output());
-    }
-
-    #[handler::single]
-    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: CreateWindow) -> Pending<CreateWindowResult> {
-        let (pending, held) = ctx.hold::<CreateWindowResult>();
-        if let Err((error, Some(held))) = state.queue_create(mail.spec, Some(held), false) {
-            held.answer(ctx, &CreateWindowResult::Err { error });
-        }
-        pending
-    }
-
-    /// Apply one per-window command at its native window.
-    ///
-    /// `Close` is the exception every other arm is not: it cannot answer here,
-    /// because the window is only gone once the integration has detached its
-    /// render target and the manager has retired its child, so it hands its
-    /// held reply to the close queue and is answered from
-    /// [`DesktopWindowCapabilityState::finish_window_close`]. Everything else
-    /// resolves against the live `Arc<Window>` on this same turn — this is a
-    /// pumped actor, so this *is* the winit thread — and replies immediately.
-    #[handler::single]
-    fn on_apply_command(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: ApplyWindowCommand,
-    ) -> Pending<ApplyWindowCommandResult> {
-        let (pending, held) = ctx.hold::<ApplyWindowCommandResult>();
-        let Some(path) = ctx.sender().and_then(|sender| state.child_windows.get(&sender).cloned()) else {
-            held.answer(
-                ctx,
-                &mail.command.refused("window command from an actor that is not a live window child".to_owned()),
-            );
-            return pending;
-        };
-        if matches!(mail.command, WindowCommand::Close) {
-            if let Err((error, Some(held))) = state.queue_close(&path, Some(held)) {
-                held.answer(ctx, &ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }));
-            }
-            return pending;
-        }
-        held.answer(ctx, &state.apply_at_window(&path, mail.command));
-        pending
-    }
-
-    #[handler::single]
-    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
-        let Some(departed) = ctx.sender() else {
-            return;
-        };
-        if let Some(path) = state.child_windows.remove(&departed)
-            && state.children.remove(&path).is_some()
-        {
-            if let Some(window) = state.windows.get_mut(&path) {
-                window.commands = None;
-            }
-            let _ = state.queue_close(&path, None);
-        }
-        state.subscribers.unsubscribe_all(departed);
-    }
-}
-
-impl WindowManagerSurface for DesktopWindowCapability {
-    type State = DesktopWindowCapabilityState;
-
-    fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers {
-        &mut state.subscribers
-    }
-
-    /// The same filter `on_list` publishes: an attaching window is not yet
-    /// anyone's to address, and a closing one still is — its missing or dead
-    /// child proof makes the root answer `window … is not live` rather than
-    /// hiding it from the count the caller was just shown.
-    fn routable_windows(state: &Self::State) -> Vec<RoutableWindow> {
-        state
-            .windows
-            .iter()
-            .filter(|(_, window)| window.lifecycle != DesktopWindowLifecycle::Attaching)
-            .map(|(path, window)| RoutableWindow { path: path.clone(), target: window.commands })
-            .collect()
-    }
-}
-
 fn find_exclusive_mode(
     monitor: &WinitMonitorHandle,
     width: u32,
@@ -1043,32 +1003,20 @@ mod tests {
     use aether_substrate::testing::{boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx};
 
     use super::*;
+    use crate::runtime::WindowBackend;
     use crate::runtime::subscribers::fixture::{Receipt, Rig, watcher};
-    use crate::{SubscribeWindowResult, WindowSubscription};
+    use crate::{CreateWindow, ListWindows, ListWindowsResult, SubscribeWindowResult, WindowSubscription};
 
-    fn test_state() -> DesktopWindowCapabilityState {
-        DesktopWindowCapabilityState {
-            app_name: "Aether".to_owned(),
-            windows: BTreeMap::new(),
-            native_windows: HashMap::new(),
-            winit_windows: HashMap::new(),
-            children: HashMap::new(),
-            child_windows: HashMap::new(),
-            subscribers: WindowSubscribers::new(),
-            pending_creates: HashMap::new(),
-            pending_host_actions: VecDeque::new(),
-            pending_host_effects: Vec::new(),
-            initial_window_reserved: false,
-            shutdown_when_idle: false,
-        }
+    fn test_state() -> DesktopWindows {
+        DesktopWindows::new(DesktopWindowBoot::for_test())
     }
 
     fn spec(name: &str, title: &str) -> WindowSpec {
         WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
     }
 
-    fn rig() -> Rig<DesktopWindowCapability> {
-        Rig::boot(DesktopWindowParams::default())
+    fn rig() -> Rig<WindowCapability> {
+        Rig::desktop()
     }
 
     fn path(name: &str) -> ErasedActorPath {
@@ -1076,7 +1024,7 @@ mod tests {
     }
 
     /// Insert a live (or closing) window named `name`, answering its path.
-    fn insert_window(state: &mut DesktopWindowCapabilityState, name: &str, closing: bool) -> ErasedActorPath {
+    fn insert_window(state: &mut DesktopWindows, name: &str, closing: bool) -> ErasedActorPath {
         let window = path(name);
         state.windows.insert(
             window.clone(),
@@ -1167,12 +1115,11 @@ mod tests {
     #[test]
     fn list_windows_is_sorted_by_window_path() {
         let mut rig = rig();
-        rig.driver
-            .host_turn(|state, _ctx| {
-                insert_window(state, "two", false);
-                insert_window(state, "nine", false);
-            })
-            .expect("the desktop manager is live");
+        rig.desktop_turn(|state, _ctx| {
+            insert_window(state, "two", false);
+            insert_window(state, "nine", false);
+        })
+        .expect("the desktop manager is live");
 
         rig.send(&ListWindows);
         let ListWindowsResult::Ok { windows } = rig.reply() else {
@@ -1193,10 +1140,9 @@ mod tests {
     fn a_reserved_window_child_is_not_enumerable_and_rolls_back_when_its_birth_fails() {
         let mut rig = rig();
         rig.push(&CreateWindow { spec: spec("tools", "Tools") });
-        rig.pump_until("the create's reservation", |state| state.pending_creates.contains_key(&path("tools")));
+        rig.pump_desktop_until("the create's reservation", |state| state.pending_creates.contains_key(&path("tools")));
         let tools = rig
-            .driver
-            .host_turn(|state, _ctx| {
+            .desktop_turn(|state, _ctx| {
                 let tools = insert_window(state, "tools", false);
                 state.windows.get_mut(&tools).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
                 tools
@@ -1209,33 +1155,32 @@ mod tests {
         };
         assert!(windows.is_empty(), "a reserved window child is absent from live enumeration");
 
-        rig.driver
-            .host_turn(|state, ctx| {
-                state.finish_window_child_spawn(
-                    ctx,
-                    &tools,
-                    &SpawnOutcome::<DesktopWindowInstance> {
-                        canonical_name: ErasedActorPath::new("aether.window/aether.window.instance:tools")
-                            .expect("fixture is an actor path"),
-                        result: Err(SpawnError::OwnerClosed),
-                    },
-                );
-            })
-            .expect("the desktop manager is live");
+        rig.desktop_turn(|state, ctx| {
+            state.finish_window_child_spawn(
+                ctx,
+                &tools,
+                &SpawnOutcome::<WindowInstance> {
+                    canonical_name: ErasedActorPath::new("aether.window/aether.window.instance:tools")
+                        .expect("fixture is an actor path"),
+                    result: Err(SpawnError::OwnerClosed),
+                },
+            );
+        })
+        .expect("the desktop manager is live");
 
         assert!(matches!(rig.reply(), CreateWindowResult::Err { .. }), "the caller is answered once, with the failure");
-        rig.driver
-            .read_state(|state| {
-                assert!(!state.windows.contains_key(&tools), "a rejected birth rolls its window back");
-                assert!(state.pending_creates.is_empty(), "a rejected birth clears its reservation");
-                assert!(
-                    state.pending_host_effects.iter().any(
-                        |effect| matches!(effect, WindowHostEffect::Closing { path: closing } if *closing == tools)
-                    ),
-                    "rollback detaches the native window through the host-effect queue",
-                );
-            })
-            .expect("the desktop manager is live");
+        rig.read_desktop(|state| {
+            assert!(!state.windows.contains_key(&tools), "a rejected birth rolls its window back");
+            assert!(state.pending_creates.is_empty(), "a rejected birth clears its reservation");
+            assert!(
+                state
+                    .pending_host_effects
+                    .iter()
+                    .any(|effect| matches!(effect, WindowHostEffect::Closing { path: closing } if *closing == tools)),
+                "rollback detaches the native window through the host-effect queue",
+            );
+        })
+        .expect("the desktop manager is live");
     }
 
     /// The divergence guard runs when the birth completes: a Live child the
@@ -1248,27 +1193,30 @@ mod tests {
         let (registry, mailer, rx) = fresh_substrate_and_rx();
         let chassis = boot_bare_test_chassis(&registry, &mailer);
         let (mut slot, _wake) = chassis
-            .boot_pumped_actor::<DesktopWindowCapability>((), DesktopWindowParams::default())
+            .boot_pumped_actor::<WindowCapability>((), crate::WindowParams::Desktop(DesktopWindowBoot::for_test()))
             .expect("the desktop manager boots pumped");
         let child = chassis
-            .spawn_actor_for_test::<DesktopWindowInstance>(Subname::Named("elsewhere"), (), ())
+            .spawn_actor_for_test::<WindowInstance>(Subname::Named("elsewhere"), (), ())
             .finish()
             .expect("the stray window child spawns");
 
         chassis.send_for_reply(
-            chassis.actor_ref::<DesktopWindowCapability>(),
+            chassis.actor_ref::<WindowCapability>(),
             &CreateWindow { spec: spec("tools", "Tools") },
             ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0)), correlation: 1 },
         );
         slot.drain_available();
         let tools = slot
             .host_turn(|state, ctx| {
+                let WindowBackend::Desktop(state) = &mut state.backend else {
+                    panic!("the manager runs the desktop backend");
+                };
                 let tools = insert_window(state, "tools", false);
                 state.windows.get_mut(&tools).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
                 state.finish_window_child_spawn(
                     ctx,
                     &tools,
-                    &SpawnOutcome::<DesktopWindowInstance> {
+                    &SpawnOutcome::<WindowInstance> {
                         canonical_name: ErasedActorPath::new("aether.window/aether.window.instance:tools")
                             .expect("fixture is an actor path"),
                         result: Ok(child),
@@ -1283,6 +1231,9 @@ mod tests {
         };
         assert!(error.contains("is not the window at"), "the reply names the divergence: {error}");
         slot.host_turn(|state, _ctx| {
+            let WindowBackend::Desktop(state) = &mut state.backend else {
+                panic!("the manager runs the desktop backend");
+            };
             assert!(state.children.is_empty(), "a divergent child is never supervised");
             assert!(!state.windows.contains_key(&tools), "a divergent child rolls its window back");
             assert!(state.pending_creates.is_empty(), "a divergent child clears its reservation");
@@ -1314,15 +1265,14 @@ mod tests {
     fn closing_one_window_does_not_request_global_shutdown() {
         let mut rig = rig();
 
-        rig.driver
-            .host_turn(|state, ctx| {
-                let first = insert_window(state, "first", true);
-                let second = insert_window(state, "second", false);
+        rig.desktop_turn(|state, ctx| {
+            let first = insert_window(state, "first", true);
+            let second = insert_window(state, "second", false);
 
-                assert!(state.finish_window_close(&first, ctx).is_empty());
-                assert!(state.windows.contains_key(&second));
-            })
-            .expect("the desktop manager is live");
+            assert!(state.finish_window_close(&first, ctx).is_empty());
+            assert!(state.windows.contains_key(&second));
+        })
+        .expect("the desktop manager is live");
     }
 
     #[test]
@@ -1330,7 +1280,7 @@ mod tests {
         let mut state = test_state();
         let path = insert_window(&mut state, "closing", true);
 
-        let windows = DesktopWindowCapability::routable_windows(&state);
+        let windows = state.routable_windows();
 
         assert!(matches!(windows.as_slice(), [window] if window.path == path && window.target.is_none()));
     }
@@ -1341,17 +1291,13 @@ mod tests {
     fn closing_the_last_window_requests_shutdown_after_removal() {
         let mut rig = rig();
 
-        rig.driver
-            .host_turn(|state, ctx| {
-                let first = insert_window(state, "first", true);
+        rig.desktop_turn(|state, ctx| {
+            let first = insert_window(state, "first", true);
 
-                assert!(matches!(
-                    state.finish_window_close(&first, ctx).as_slice(),
-                    [WindowHostEffect::LastWindowClosed]
-                ));
-                assert!(state.windows.is_empty());
-            })
-            .expect("the desktop manager is live");
+            assert!(matches!(state.finish_window_close(&first, ctx).as_slice(), [WindowHostEffect::LastWindowClosed]));
+            assert!(state.windows.is_empty());
+        })
+        .expect("the desktop manager is live");
     }
 
     /// A create still in flight when the last window closes defers the
@@ -1361,20 +1307,20 @@ mod tests {
     #[test]
     fn pending_replacement_defers_last_window_shutdown_until_create_resolves() {
         let mut rig = rig();
-        let first =
-            rig.driver.host_turn(|state, _ctx| insert_window(state, "first", true)).expect("the manager is live");
+        let first = rig.desktop_turn(|state, _ctx| insert_window(state, "first", true)).expect("the manager is live");
         rig.push(&CreateWindow { spec: spec("replacement", "Replacement") });
-        rig.pump_until("the create's reservation", |state| state.pending_creates.contains_key(&path("replacement")));
+        rig.pump_desktop_until("the create's reservation", |state| {
+            state.pending_creates.contains_key(&path("replacement"))
+        });
 
-        rig.driver
-            .host_turn(|state, ctx| {
-                assert!(state.finish_window_close(&first, ctx).is_empty());
-                assert!(state.shutdown_when_idle);
-                let effects = state.fail_window_creation(ctx, &path("replacement"), "native create failed".to_owned());
+        rig.desktop_turn(|state, ctx| {
+            assert!(state.finish_window_close(&first, ctx).is_empty());
+            assert!(state.shutdown_when_idle);
+            let effects = state.fail_window_creation(ctx, &path("replacement"), "native create failed".to_owned());
 
-                assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
-            })
-            .expect("the desktop manager is live");
+            assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
+        })
+        .expect("the desktop manager is live");
         assert!(matches!(rig.reply(), CreateWindowResult::Err { .. }), "the replacement's caller hears the failure");
     }
 
@@ -1384,15 +1330,14 @@ mod tests {
     fn failed_initial_create_rolls_back_and_requests_shutdown() {
         let mut rig = rig();
 
-        rig.driver
-            .host_turn(|state, ctx| {
-                state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
-                let effects = state.fail_window_creation(ctx, &path("main"), "native create failed".to_owned());
+        rig.desktop_turn(|state, ctx| {
+            state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
+            let effects = state.fail_window_creation(ctx, &path("main"), "native create failed".to_owned());
 
-                assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
-                assert!(state.pending_creates.is_empty());
-            })
-            .expect("the desktop manager is live");
+            assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
+            assert!(state.pending_creates.is_empty());
+        })
+        .expect("the desktop manager is live");
     }
 
     /// Fails if a boot window whose render attachment fails stays staged, or
@@ -1401,27 +1346,23 @@ mod tests {
     fn failed_attachment_removes_the_staged_initial_window_before_shutdown() {
         let mut rig = rig();
 
-        rig.driver
-            .host_turn(|state, ctx| {
-                state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
-                let main = insert_window(state, "main", false);
-                state.windows.get_mut(&main).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
-                let effects = state.finish_window_attachment(&main, Err("render attach failed".to_owned()), ctx);
+        rig.desktop_turn(|state, ctx| {
+            state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
+            let main = insert_window(state, "main", false);
+            state.windows.get_mut(&main).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
+            let effects = state.finish_window_attachment(&main, Err("render attach failed".to_owned()), ctx);
 
-                assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
-                assert!(!state.windows.contains_key(&main));
-                assert!(state.pending_creates.is_empty());
-            })
-            .expect("the desktop manager is live");
+            assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
+            assert!(!state.windows.contains_key(&main));
+            assert!(state.pending_creates.is_empty());
+        })
+        .expect("the desktop manager is live");
     }
 
     /// A live window at a chosen display density, registered under winit's
-    /// dummy id so [`DesktopWindowCapabilityState::window_event`] — winit
+    /// dummy id so [`DesktopWindows::window_event`] — winit
     /// event in, published kind out — can be driven without an event loop.
-    fn insert_scaled_window(
-        state: &mut DesktopWindowCapabilityState,
-        scale_factor: f32,
-    ) -> (ErasedActorPath, WinitWindowId) {
+    fn insert_scaled_window(state: &mut DesktopWindows, scale_factor: f32) -> (ErasedActorPath, WinitWindowId) {
         let main = insert_window(state, "main", false);
         state.windows.get_mut(&main).expect("live window").scale_factor = scale_factor;
         let winit_id = WinitWindowId::dummy();
@@ -1470,8 +1411,7 @@ mod tests {
         }
 
         let window = rig
-            .driver
-            .host_turn(|state, ctx| {
+            .desktop_turn(|state, ctx| {
                 let (window, winit_id) = insert_scaled_window(state, 2.0);
                 let device_id = DeviceId::dummy();
                 state.window_event(

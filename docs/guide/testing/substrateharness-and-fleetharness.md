@@ -99,7 +99,7 @@ turn retiring an id. Use `poll_until`, which re-sends a probe mail until its
 reply satisfies an observation or a wall-clock budget elapses:
 
 ```rust
-let window = harness.actor_ref::<SyntheticWindowCapability>();
+let window = harness.actor_ref::<WindowCapability>();
 HarnessOp::poll_until(&window, &ListWindows, move |reply: &ListWindowsResult| {
     matches!(reply, ListWindowsResult::Ok { windows }
         if windows.iter().map(|window| window.id).eq([surviving]))
@@ -268,7 +268,7 @@ capability's comes from `SubstrateHarness::actor_ref`, and the event kind infers
 from `&mail`:
 
 ```rust
-let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
+let synthetic = harness.actor_ref::<WindowCapability>();
 HarnessOp::send_and_settle(&synthetic, &SubscribeWindow {
     selector: WindowSelector::All,
     subscription: WindowSubscription::Key(ActorPath::<Relay>::root().narrow()),
@@ -296,8 +296,8 @@ held, with `SubstrateHarness::child`. Once a root `CreateWindow` operation has
 settled, send an id-less control to the child it opened:
 
 ```rust
-let window = harness.actor_ref::<SyntheticWindowCapability>();
-let main = harness.child::<SyntheticWindowCapability, SyntheticWindowInstance>(&window, LoadName::new("main")?)?;
+let window = harness.actor_ref::<WindowCapability>();
+let main = harness.child::<WindowCapability, WindowInstance>(&window, LoadName::new("main")?)?;
 
 HarnessOp::send_and_await_reply(&main, &SetWindowTitle { title: "Inspector".to_owned() });
 ```
@@ -315,11 +315,11 @@ HarnessOp::window_event(&synthetic, window.clone(), &Key { window, code: keycode
 
 `window_event` accepts any `K: Kind`, encodes it once, and hands the runtime its
 `KindId`; neither the harness nor `aether-window` maintains a table of input
-kinds. The synthetic actor unions and deduplicates `All` and `One(window)`
+kinds. The synthetic backend unions and deduplicates `All` and `One(window)`
 subscribers, then emits tracked descendant envelopes. When `execute` returns,
 inline observers and any other descendants have settled. This is test behavior:
-the production headless chassis remains fail-fast for every window request and
-does not expose synthetic injection.
+the production headless chassis composes no window actor and does not expose
+synthetic injection.
 
 ## Visual evidence
 

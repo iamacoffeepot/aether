@@ -4,8 +4,7 @@
 //! muda is the platform lowering: on macOS it drives the application menu bar
 //! (`init_for_nsapp`), on Windows the per-window bar (`init_for_hwnd`). Every
 //! other target has no bar for it to drive, so [`apply_menu`] refuses there
-//! and the caller falls back to drawing its own — the same fail-fast the
-//! headless runtime uses.
+//! and the caller falls back to drawing its own.
 //!
 //! muda's item ids are opaque strings on a process-wide event channel, while
 //! [`WindowMenuActivated`](crate::WindowMenuActivated) is per window and

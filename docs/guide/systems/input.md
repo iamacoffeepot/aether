@@ -198,13 +198,13 @@ separate `MouseMove`.
 
 ## Synthetic events in tests
 
-Production headless has no window peripheral and publishes no window events.
-`SubstrateHarness` deliberately composes the test-only
-`SyntheticWindowCapability`, which models windows and uses the same
-selector-aware fan-out as desktop:
+Production headless has no window peripheral and composes no window actor.
+`SubstrateHarness` deliberately composes `WindowCapability` with its test-only
+synthetic backend (`WindowParams::Synthetic`), which models windows and uses
+the same selector-aware fan-out as desktop:
 
 ```rust
-let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
+let synthetic = harness.actor_ref::<WindowCapability>();
 let window = aether_window::window_path(&LoadName::new("main")?);
 let event = Key { window: window.clone(), code: keycode::KEY_W };
 let op = HarnessOp::window_event(&synthetic, window, &event);
@@ -218,7 +218,8 @@ match the source passed to `window_event`.
 
 This is test injection, not a production headless fallback and not a route for
 MCP clients to invent native input. Tests that need window behavior opt into
-the deterministic runtime; unsupported production profiles fail fast.
+the deterministic backend; a production profile without a window composes no
+window actor.
 
 ## Extending input
 

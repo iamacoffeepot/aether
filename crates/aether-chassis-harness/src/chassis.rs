@@ -34,7 +34,7 @@ use aether_substrate::{Chassis, SubstrateBoot};
 use aether_substrate_harness_cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability};
 use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
-use aether_window::SyntheticWindowCapability;
+use aether_window::{WindowCapability, WindowParams};
 
 use crate::cli::HarnessCli;
 use crate::env::{HarnessEnv, RenderSizeConfig};
@@ -117,7 +117,7 @@ impl BootableChassis for HarnessChassis {
             .with_actor::<TcpCapability>(())
             .with_actor::<TextCapability>(())
             .with_actor::<ClipboardCapability>(ClipboardParams::InMemory)
-            .with_actor::<SyntheticWindowCapability>(())
+            .with_actor::<WindowCapability>(WindowParams::Synthetic)
             .with_actor::<SubstrateHarnessCapability>(SubstrateHarnessCapParams { events })
             .with_actor::<LifecycleCapability>(frame_lifecycle_params())
             // Programmatic: the fs cap uses the exact roots resolved chassis-side.

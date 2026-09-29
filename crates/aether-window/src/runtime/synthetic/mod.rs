@@ -1,33 +1,27 @@
-//! Deterministic in-memory `aether.window` runtime for substrate harnesses.
-
-mod instance;
+//! Deterministic in-memory `aether.window` backend for substrate harnesses.
 
 use std::collections::{BTreeMap, HashMap};
 
-use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef};
 use aether_data::ErasedActorPath;
-use aether_kinds::MonitorNotice;
-use aether_substrate::actor::native::{Held, Pending};
+use aether_substrate::actor::native::{Held, NativeCtx, SpawnOutcome};
 use aether_substrate::{MonitorHandle, Subname};
 
-use super::manager::{RoutableWindow, WindowCommands, WindowManagerSurface};
+use super::WindowSpawnKey;
+use super::manager::{RoutableWindow, WindowCommands};
 use super::subscribers::{Published, WindowSubscribers};
 use crate::{
-    ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
-    FocusWindowResult, InjectWindowEvent, ListWindows, ListWindowsResult, RequestWindowRedrawResult, RetireWindow,
-    SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowTitleResult, SyntheticWindowCapability,
-    SyntheticWindowInstance, WindowClosed, WindowCommand, WindowInfo, WindowMode, WindowOpened, WindowSpec,
+    ApplyWindowCommandResult, CloseWindowResult, CreateWindowResult, FocusWindowResult, RequestWindowRedrawResult,
+    RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowTitleResult,
+    WindowCapability, WindowClosed, WindowCommand, WindowInfo, WindowInstance, WindowMode, WindowOpened, WindowSpec,
 };
-
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
-pub use aether_substrate::chassis::error::BootError;
 
 const DEFAULT_WIDTH: u32 = 800;
 const DEFAULT_HEIGHT: u32 = 600;
 
 /// A window whose child actor is staged but not yet authoritatively applied.
 ///
-/// It is keyed by the window's name, which names a reservation, not a live
+/// It is keyed by the window's path, which names a reservation, not a live
 /// actor, so the window stays out of `windows` — and therefore out of
 /// `ListWindows`, every subscriber fan-out, and `WindowOpened` — until the
 /// owner completes the birth. The reservation still participates in
@@ -35,19 +29,10 @@ const DEFAULT_HEIGHT: u32 = 600;
 /// `CreateWindowResult` is ever sent.
 struct PendingWindowCreate {
     spec: WindowSpec,
-    /// The window's canonical path, written from its validated name.
-    path: ErasedActorPath,
     /// Taken by whichever path settles the reservation, so the caller sees
     /// exactly one `CreateWindowResult`. `Option` mirrors the desktop
     /// manager's `PendingCreate`, whose boot window has no caller to answer.
     held: Option<Held<CreateWindowResult>>,
-}
-
-/// The context a staged window child carries into its task completion
-/// (ADR-0243 §9): the window's name, which keys its [`PendingWindowCreate`].
-#[aether_data::kind(name = "aether.window.synthetic.spawn_key")]
-struct WindowSpawnKey {
-    name: String,
 }
 
 struct SyntheticWindow {
@@ -55,11 +40,13 @@ struct SyntheticWindow {
     commands: ProtocolRef<WindowCommands>,
 }
 
-pub struct SyntheticWindowCapabilityState {
+/// The synthetic backend's state: every window, staged create, and child it
+/// supervises, and the subscription table its events fan out through.
+pub struct SyntheticWindows {
     windows: BTreeMap<ErasedActorPath, SyntheticWindow>,
-    /// Staged creates keyed by window name, the key each birth carries back
+    /// Staged creates keyed by window path, the key each birth carries back
     /// as its completion context.
-    pending_creates: HashMap<String, PendingWindowCreate>,
+    pending_creates: HashMap<ErasedActorPath, PendingWindowCreate>,
     /// Each live child's window and retained monitor, keyed by the child's
     /// reference. The same reverse index identifies a command sender and a
     /// departing child's `MonitorNotice` (ADR-0230).
@@ -67,7 +54,16 @@ pub struct SyntheticWindowCapabilityState {
     pub(super) subscribers: WindowSubscribers,
 }
 
-impl SyntheticWindowCapabilityState {
+impl SyntheticWindows {
+    pub(super) fn new() -> Self {
+        Self {
+            windows: BTreeMap::new(),
+            pending_creates: HashMap::new(),
+            child_monitors: HashMap::new(),
+            subscribers: WindowSubscribers::new(),
+        }
+    }
+
     fn window_mut(&mut self, window: &ErasedActorPath) -> Result<&mut WindowInfo, String> {
         self.windows.get_mut(window).map(|window| &mut window.info).ok_or_else(|| format!("unknown window {window}"))
     }
@@ -76,8 +72,7 @@ impl SyntheticWindowCapabilityState {
     /// names no `ListWindows` reply can see yet, answering the window's path.
     fn check_create(&self, spec: &WindowSpec) -> Result<ErasedActorPath, String> {
         let path = crate::window_path(&crate::window_name(&spec.name)?);
-        if self.windows.values().any(|window| window.info.name == spec.name)
-            || self.pending_creates.contains_key(&spec.name)
+        if self.windows.values().any(|window| window.info.name == spec.name) || self.pending_creates.contains_key(&path)
         {
             return Err(format!("window name `{}` is already in use", spec.name));
         }
@@ -108,10 +103,11 @@ impl SyntheticWindowCapabilityState {
     fn publish_applied_window<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
-        child: ActorRef<SyntheticWindowInstance>,
+        path: ErasedActorPath,
+        child: ActorRef<WindowInstance>,
         pending: PendingWindowCreate,
     ) {
-        let PendingWindowCreate { spec, path, held } = pending;
+        let PendingWindowCreate { spec, held } = pending;
         let monitor = match ctx.monitor(child.erase()) {
             Ok(monitor) => monitor,
             Err(error) => {
@@ -124,7 +120,7 @@ impl SyntheticWindowCapabilityState {
                 return;
             }
         };
-        // The child's path needs no check against a prediction: the synthetic
+        // The child's path needs no check against a prediction: the window
         // identities read the shared window namespace consts, so the child's
         // name is the canonical path `window_path` wrote.
         let window = Self::describe(spec, path.clone());
@@ -226,130 +222,90 @@ fn answer<A>(ctx: &mut NativeCtx<'_, A>, held: Option<Held<CreateWindowResult>>,
     }
 }
 
-#[runtime(handler_set(WindowManagerSurface))]
-impl NativeActor for SyntheticWindowCapability {
-    type State = SyntheticWindowCapabilityState;
-    type Config = ();
-
-    const NAMESPACE: &'static str = crate::WINDOW_NAMESPACE;
-
-    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<SyntheticWindowCapabilityState, BootError> {
-        Ok(SyntheticWindowCapabilityState {
-            windows: BTreeMap::new(),
-            pending_creates: HashMap::new(),
-            child_monitors: HashMap::new(),
-            subscribers: WindowSubscribers::new(),
-        })
+impl SyntheticWindows {
+    /// Every applied window, in path order.
+    pub(super) fn list(&self) -> Vec<WindowInfo> {
+        self.windows.values().map(|window| window.info.clone()).collect()
     }
 
-    #[handler::single]
-    fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListWindows) -> ListWindowsResult {
-        ListWindowsResult::Ok { windows: state.windows.values().map(|window| window.info.clone()).collect() }
-    }
-
-    #[handler::single]
-    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: CreateWindow) -> Pending<CreateWindowResult> {
-        let (pending, held) = ctx.hold::<CreateWindowResult>();
-        let path = match state.check_create(&mail.spec) {
-            Ok(path) => path,
-            Err(error) => {
-                held.answer(ctx, &CreateWindowResult::Err { error });
-                return pending;
-            }
-        };
-        // The birth carries the window's name as its completion context, since
-        // that name is what the reservation is keyed by.
-        if let Err((error, _)) = ctx
-            .spawn_child::<SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ())
-            .stage_with(WindowSpawnKey { name: mail.spec.name.clone() })
-        {
-            held.answer(ctx, &CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") });
-            return pending;
-        }
-        let replaced = state
-            .pending_creates
-            .insert(mail.spec.name.clone(), PendingWindowCreate { spec: mail.spec, path, held: Some(held) });
-        debug_assert!(replaced.is_none(), "a window name is reserved exactly once");
-        pending
-    }
-
-    #[handler(task)]
-    fn on_window_child_spawn_done(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<SyntheticWindowInstance>>,
+    /// Reserve a create and stage its window child, keyed by the window's
+    /// path; `held` is answered once the birth is authoritative.
+    pub(super) fn create(
+        &mut self,
+        ctx: &mut NativeCtx<'_, WindowCapability>,
+        spec: WindowSpec,
+        held: Held<CreateWindowResult>,
     ) {
-        let Some(WindowSpawnKey { name }) = ctx.take_context() else {
-            return;
+        let path = match self.check_create(&spec) {
+            Ok(path) => path,
+            Err(error) => return held.answer(ctx, &CreateWindowResult::Err { error }),
         };
-        let result = done.into_output().result;
-        let Some(pending) = state.pending_creates.remove(&name) else {
-            if let Ok(child) = &result {
+        if let Err((error, _)) = ctx
+            .spawn_child::<WindowInstance>(Subname::Named(&spec.name), (), ())
+            .stage_with(WindowSpawnKey { path: path.clone() })
+        {
+            return held
+                .answer(ctx, &CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") });
+        }
+        let replaced = self.pending_creates.insert(path, PendingWindowCreate { spec, held: Some(held) });
+        debug_assert!(replaced.is_none(), "a window path is reserved exactly once");
+    }
+
+    /// Apply the authoritative result of the staged child for `path`. A child
+    /// whose reservation is gone is retired.
+    pub(super) fn finish_window_child_spawn<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        path: &ErasedActorPath,
+        outcome: SpawnOutcome<WindowInstance>,
+    ) {
+        let Some(pending) = self.pending_creates.remove(path) else {
+            if let Ok(child) = &outcome.result {
                 ctx.send_to(child, &RetireWindow);
             }
             return;
         };
-        match result {
+        match outcome.result {
             Err(error) => answer(
                 ctx,
                 pending.held,
                 &CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") },
             ),
-            Ok(child) => state.publish_applied_window(ctx, child, pending),
+            Ok(child) => self.publish_applied_window(ctx, path.clone(), child, pending),
         }
     }
 
-    #[handler::single]
-    fn on_apply_command(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: ApplyWindowCommand,
-    ) -> ApplyWindowCommandResult {
-        let Some(window) =
-            ctx.sender().and_then(|sender| state.child_monitors.get(&sender).map(|(path, _)| path.clone()))
-        else {
-            return mail.command.refused("window command from an actor that is not a live window child".to_owned());
+    /// Apply a command the stamped sender forwarded, at the window that
+    /// sender is, answering at once.
+    pub(super) fn apply_command<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        command: WindowCommand,
+        held: Held<ApplyWindowCommandResult>,
+    ) {
+        let window = ctx.sender().and_then(|sender| self.child_monitors.get(&sender).map(|(path, _)| path.clone()));
+        let result = match window {
+            Some(window) => self.apply_at_window(ctx, &window, command),
+            None => command.refused("window command from an actor that is not a live window child".to_owned()),
         };
-        state.apply_at_window(ctx, &window, mail.command)
+        held.answer(ctx, &result);
     }
 
-    /// Fan an injected event out as the published kind it names, through
-    /// the typed set for that kind. A kind the window does not publish, or a
-    /// payload that does not decode as the kind, warns and sends nothing.
-    #[handler::single]
-    fn on_inject(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: InjectWindowEvent) {
-        if let Err(error) = state.subscribers.publish_encoded(ctx, &mail.window, mail.kind, &mail.payload) {
-            tracing::warn!(target: "aether_window", window = %mail.window, %error, "injected window event not published");
-        }
-    }
-
-    #[handler::single]
-    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
-        let Some(departed) = ctx.sender() else {
-            return;
-        };
-        if let Some((path, _monitor)) = state.child_monitors.remove(&departed)
-            && state.windows.remove(&path).is_some()
+    /// A monitored actor departed: when it is a window child, its window
+    /// closes.
+    pub(super) fn child_departed<A>(&mut self, ctx: &mut NativeCtx<'_, A>, departed: ErasedActorRef) {
+        if let Some((path, _monitor)) = self.child_monitors.remove(&departed)
+            && self.windows.remove(&path).is_some()
         {
-            state.publish(ctx, &path, &WindowClosed { window: path.clone() });
+            self.publish(ctx, &path, &WindowClosed { window: path.clone() });
         }
-        state.subscribers.unsubscribe_all(departed);
-    }
-}
-
-impl WindowManagerSurface for SyntheticWindowCapability {
-    type State = SyntheticWindowCapabilityState;
-
-    fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers {
-        &mut state.subscribers
     }
 
-    /// Every window this runtime enumerates is applied and routable — a
+    /// Every window this backend enumerates is applied and routable — a
     /// reservation is not a window here until its child's birth is
     /// authoritative, and it is absent from `windows` until then.
-    fn routable_windows(state: &Self::State) -> Vec<RoutableWindow> {
-        state
-            .windows
+    pub(super) fn routable_windows(&self) -> Vec<RoutableWindow> {
+        self.windows
             .iter()
             .map(|(path, window)| RoutableWindow { path: path.clone(), target: Some(window.commands) })
             .collect()
@@ -364,17 +320,10 @@ mod tests {
 
     use super::*;
     use crate::runtime::subscribers::fixture::{Rig, receivers, recipients, watcher};
-    // The subscription request kinds moved to the `WindowManagerSurface` set,
-    // so the manager module no longer imports them for `use super::*` to carry.
-    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow, WindowSelector, WindowSubscription};
+    use crate::{InjectWindowEvent, SubscribeWindow, SubscribeWindowResult, WindowSelector, WindowSubscription};
 
-    fn test_state() -> SyntheticWindowCapabilityState {
-        SyntheticWindowCapabilityState {
-            windows: BTreeMap::new(),
-            pending_creates: HashMap::new(),
-            child_monitors: HashMap::new(),
-            subscribers: WindowSubscribers::new(),
-        }
+    fn test_state() -> SyntheticWindows {
+        SyntheticWindows::new()
     }
 
     fn window_path(name: &str) -> ErasedActorPath {
@@ -389,50 +338,13 @@ mod tests {
         WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
     }
 
-    /// ADR-0169: an adopted set's kinds have to reach the adopter's
-    /// *advertised* surface, not only its dispatch table. The `HandlesKind`
-    /// half of that is compile-checked by every typed send, but a set whose
-    /// rows never merge into `capabilities()` strips those kinds from
-    /// `describe_handlers` and from the per-handler cost table with no
-    /// behavioural symptom at all — the actor still answers the mail.
-    ///
-    /// Both adoption shapes are exercised: the manager merges an inherited
-    /// block onto its own handlers, and the endpoint inherits its entire
-    /// receive surface, which is the shape a naive "handlers are empty"
-    /// check would report as receiving nothing.
-    #[test]
-    fn adopted_set_kinds_reach_the_advertised_receive_surface() {
-        use aether_substrate::actor::native::Dispatch;
-
-        use crate::runtime::instance::WindowInstanceState;
-
-        let manager = <SyntheticWindowCapability as Dispatch<SyntheticWindowCapabilityState>>::capabilities();
-        let advertised = manager.handlers.iter().map(|handler| handler.id).collect::<BTreeSet<_>>();
-        assert!(advertised.contains(&SubscribeWindow::ID), "inherited kinds join the manager's advertised surface");
-        assert!(advertised.contains(&UnsubscribeWindow::ID), "every inherited kind joins, not just the first");
-        assert!(advertised.contains(&InjectWindowEvent::ID), "the manager's own handlers survive the merge");
-        // Wider than `advertised` by the ADR-0093 `TaskCompletionWake`, which
-        // is dispatched but not addressable (iamacoffeepot/aether#4266).
-        let measured = <SyntheticWindowCapability as Dispatch<SyntheticWindowCapabilityState>>::measured_kinds()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        assert!(measured.is_superset(&advertised), "the cost table measures every kind the actor advertises");
-
-        let endpoint = <SyntheticWindowInstance as Dispatch<WindowInstanceState>>::capabilities();
-        let inherited = endpoint.handlers.iter().map(|handler| handler.id).collect::<BTreeSet<_>>();
-        assert!(
-            inherited.contains(&crate::CloseWindow::ID) && inherited.contains(&RetireWindow::ID),
-            "an endpoint whose whole block lives in the set still advertises it",
-        );
-    }
-
     /// An explicit subscribe carries a subscriber path its decode proves
     /// live (ADR-0231 §3), so a path with no actor behind it never reaches
     /// the table: it is refused and adds no route. Fails if an unproven path
     /// can be held as a subscriber.
     #[test]
     fn explicit_subscriptions_validate_before_mutating_routes() {
-        let mut rig = Rig::<SyntheticWindowCapability>::boot(());
+        let mut rig = Rig::synthetic();
 
         rig.send(&SubscribeWindow {
             selector: WindowSelector::All,
@@ -443,7 +355,7 @@ mod tests {
             !rig.replies::<SubscribeWindowResult>().iter().any(|reply| matches!(reply, SubscribeWindowResult::Ok)),
             "an unproven subscriber is never accepted",
         );
-        let held = rig.driver.read_state(|state| recipients::<Key>(&state.subscribers, &main_path()));
+        let held = rig.driver.read_state(|state| recipients::<Key>(state.subscribers(), &main_path()));
         assert_eq!(held, Some(BTreeSet::new()), "a refused subscribe adds no route");
     }
 
@@ -454,7 +366,7 @@ mod tests {
     /// the event) or is sent under another identity.
     #[test]
     fn direct_publication_preserves_source_and_causal_lineage() {
-        let mut rig = Rig::<SyntheticWindowCapability>::boot(());
+        let mut rig = Rig::synthetic();
         rig.watcher("direct");
         let subscription = WindowSubscription::Key(watcher("direct").narrow());
         assert!(matches!(rig.subscribe(WindowSelector::All, subscription), SubscribeWindowResult::Ok));
@@ -494,10 +406,9 @@ mod tests {
 
         // A reserved-but-not-yet-live name is invisible to `ListWindows` and
         // still blocks a second create for the same name.
-        state.pending_creates.insert(
-            "palette".to_owned(),
-            PendingWindowCreate { spec: spec("palette", "Tools"), path: window_path("palette"), held: None },
-        );
+        state
+            .pending_creates
+            .insert(window_path("palette"), PendingWindowCreate { spec: spec("palette", "Tools"), held: None });
         assert!(state.check_create(&spec("palette", "Other tools")).is_err());
         assert!(!state.windows.values().any(|window| window.info.name == "palette"));
     }

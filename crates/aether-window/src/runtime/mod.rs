@@ -1,154 +1,334 @@
-//! Fail-fast runtime for chassis without a window peripheral.
+//! The `aether.window` manager runtime: one receive surface over the backend
+//! [`WindowParams`] picks at boot.
+//!
+//! A backend is compiled in by its feature and chosen by `Params`, never by the
+//! feature alone: cargo unifies features across a build, so a workspace build
+//! compiles both `desktop` (for the desktop chassis) and `synthetic` (for the
+//! harnesses) into one crate, and only the composer knows which it wants.
 
-use aether_actor::runtime;
+use aether_actor::{Manual, OutboundReply, runtime};
+use aether_data::ErasedActorPath;
+use aether_kinds::MonitorNotice;
+use aether_substrate::actor::native::{Erased, Pending, SpawnOutcome, TaskDone};
 
-use super::{
+use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult,
-    FocusWindow, FocusWindowResult, HeadlessWindowCapability, ListWindows, ListWindowsResult, RequestWindowRedraw,
-    RequestWindowRedrawResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult,
-    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult,
-    SubscribeWindowSelf, UnsubscribeWindow, UnsubscribeWindowSelf,
+    FocusWindow, FocusWindowResult, ListWindows, ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult,
+    SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult,
+    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
+    UnsubscribeWindow, UnsubscribeWindowSelf, WindowCapability, WindowInstance,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 
-/// Runtime state for the stateless no-window companion.
-pub struct HeadlessWindowCapabilityState;
-
-fn unsupported() -> String {
-    "unsupported on this chassis — no window peripheral".to_owned()
-}
-
-mod instance;
-
-#[runtime]
-impl NativeActor for HeadlessWindowCapability {
-    type State = HeadlessWindowCapabilityState;
-    type Config = ();
-
-    const NAMESPACE: &'static str = crate::WINDOW_NAMESPACE;
-
-    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessWindowCapabilityState, BootError> {
-        Ok(HeadlessWindowCapabilityState)
-    }
-
-    #[handler::single]
-    fn on_list(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListWindows) -> ListWindowsResult {
-        ListWindowsResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_create(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: CreateWindow) -> CreateWindowResult {
-        CreateWindowResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_apply_command(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: ApplyWindowCommand,
-    ) -> ApplyWindowCommandResult {
-        mail.command.refused(unsupported())
-    }
-
-    #[handler::single]
-    fn on_subscribe(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: SubscribeWindow,
-    ) -> SubscribeWindowResult {
-        SubscribeWindowResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_subscribe_self(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: SubscribeWindowSelf,
-    ) -> SubscribeWindowResult {
-        SubscribeWindowResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_unsubscribe(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: UnsubscribeWindow,
-    ) -> SubscribeWindowResult {
-        SubscribeWindowResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_unsubscribe_self(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: UnsubscribeWindowSelf,
-    ) -> SubscribeWindowResult {
-        SubscribeWindowResult::Err { error: unsupported() }
-    }
-
-    // The seven per-window commands, refused at the root as well as at an
-    // endpoint (iamacoffeepot/aether#5505). Both identities are addressable, so
-    // a command sent to either has to be answered rather than dropped on the
-    // floor — a silent no-op reads as success to a caller whose mail settled.
-    // The endpoint's identical seven stay written out beside these rather than
-    // shared through a handler set, because a set's `HandlesKind` markers reach
-    // an adopter through a `macro_rules!` bridge that lives with the set, and
-    // both identities also compile in the marker-only build where this whole
-    // runtime module is `cfg`-ed away.
-
-    #[handler::single]
-    fn on_close(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: CloseWindow) -> CloseWindowResult {
-        CloseWindowResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_set_mode(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowMode) -> SetWindowModeResult {
-        SetWindowModeResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_set_title(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowTitle) -> SetWindowTitleResult {
-        SetWindowTitleResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_set_menu(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowMenu) -> SetWindowMenuResult {
-        SetWindowMenuResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_set_cursor(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: SetWindowCursor,
-    ) -> SetWindowCursorResult {
-        SetWindowCursorResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_focus(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> FocusWindowResult {
-        FocusWindowResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_request_redraw(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: RequestWindowRedraw,
-    ) -> RequestWindowRedrawResult {
-        RequestWindowRedrawResult::Err { error: unsupported() }
-    }
-}
-
+#[cfg(feature = "desktop")]
+pub mod desktop;
 #[cfg(feature = "synthetic")]
 pub mod synthetic;
 
-#[cfg(feature = "desktop")]
-pub mod desktop;
-
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
+mod instance;
 mod manager;
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
 mod subscribers;
+
+use self::manager::{RoutableWindow, route_to_sole_window};
+use self::subscribers::WindowSubscribers;
+
+/// The backend a [`WindowCapability`] runs, chosen by its composer.
+pub enum WindowParams {
+    /// The winit desktop manager. Its boot value has no public constructor:
+    /// only [`DesktopWindowSlot::boot`](desktop::DesktopWindowSlot::boot)
+    /// mints one, so the desktop backend always boots pumped on the
+    /// application thread whose host turns realize its native work.
+    #[cfg(feature = "desktop")]
+    Desktop(desktop::DesktopWindowBoot),
+    /// The deterministic in-memory manager harness tests drive.
+    #[cfg(feature = "synthetic")]
+    Synthetic,
+}
+
+/// Runtime state for [`WindowCapability`]: the backend it runs.
+pub struct WindowCapabilityState {
+    backend: WindowBackend,
+}
+
+/// Each backend's state is boxed: the two differ in size by the desktop's
+/// native-window maps, and one state lives for the manager's whole life.
+enum WindowBackend {
+    #[cfg(feature = "desktop")]
+    Desktop(Box<desktop::DesktopWindows>),
+    #[cfg(feature = "synthetic")]
+    Synthetic(Box<synthetic::SyntheticWindows>),
+}
+
+/// The context a staged window child carries into its task completion
+/// (ADR-0243 §9): the window's path, which keys its pending create in either
+/// backend.
+#[aether_data::kind(name = "aether.window.spawn_key")]
+struct WindowSpawnKey {
+    path: ErasedActorPath,
+}
+
+impl WindowCapabilityState {
+    /// The manager's subscription table.
+    #[cfg(feature = "synthetic")]
+    fn subscribers(&self) -> &WindowSubscribers {
+        match &self.backend {
+            #[cfg(feature = "desktop")]
+            WindowBackend::Desktop(windows) => &windows.subscribers,
+            #[cfg(feature = "synthetic")]
+            WindowBackend::Synthetic(windows) => &windows.subscribers,
+        }
+    }
+
+    /// The manager's subscription table, mutably.
+    fn subscribers_mut(&mut self) -> &mut WindowSubscribers {
+        match &mut self.backend {
+            #[cfg(feature = "desktop")]
+            WindowBackend::Desktop(windows) => &mut windows.subscribers,
+            #[cfg(feature = "synthetic")]
+            WindowBackend::Synthetic(windows) => &mut windows.subscribers,
+        }
+    }
+
+    /// Every window a root-addressed command may be routed to — the same set
+    /// `aether.window.list` enumerates, so the count a refusal reports is the
+    /// count the caller can see. Per-window liveness stays the endpoint's
+    /// answer, not a reason to hide a window from the root's arithmetic.
+    fn routable_windows(&self) -> Vec<RoutableWindow> {
+        match &self.backend {
+            #[cfg(feature = "desktop")]
+            WindowBackend::Desktop(windows) => windows.routable_windows(),
+            #[cfg(feature = "synthetic")]
+            WindowBackend::Synthetic(windows) => windows.routable_windows(),
+        }
+    }
+}
+
+/// Root-addressed per-window commands (iamacoffeepot/aether#5505): the root
+/// routes each to the sole window when the engine has exactly one — the
+/// overwhelmingly common case, and the one the documented surface assumes —
+/// and otherwise answers the command's `Err` variant naming the situation.
+/// Which windows are routable is the backend's call; the routing and the
+/// refusals are not.
+#[runtime]
+impl NativeActor for WindowCapability {
+    type State = WindowCapabilityState;
+    type Config = ();
+    type Params = WindowParams;
+
+    const NAMESPACE: &'static str = crate::WINDOW_NAMESPACE;
+
+    fn init((): (), params: WindowParams, _ctx: &mut NativeInitCtx<'_>) -> Result<WindowCapabilityState, BootError> {
+        let backend = match params {
+            #[cfg(feature = "desktop")]
+            WindowParams::Desktop(boot) => WindowBackend::Desktop(Box::new(desktop::DesktopWindows::new(boot))),
+            #[cfg(feature = "synthetic")]
+            WindowParams::Synthetic => WindowBackend::Synthetic(Box::new(synthetic::SyntheticWindows::new())),
+        };
+        Ok(WindowCapabilityState { backend })
+    }
+
+    #[handler::single]
+    fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListWindows) -> ListWindowsResult {
+        let windows = match &state.backend {
+            #[cfg(feature = "desktop")]
+            WindowBackend::Desktop(windows) => windows.list(),
+            #[cfg(feature = "synthetic")]
+            WindowBackend::Synthetic(windows) => windows.list(),
+        };
+        ListWindowsResult::Ok { windows }
+    }
+
+    #[handler::single]
+    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: CreateWindow) -> Pending<CreateWindowResult> {
+        let (pending, held) = ctx.hold::<CreateWindowResult>();
+        match &mut state.backend {
+            #[cfg(feature = "desktop")]
+            WindowBackend::Desktop(windows) => windows.create(ctx, mail.spec, held),
+            #[cfg(feature = "synthetic")]
+            WindowBackend::Synthetic(windows) => windows.create(ctx, mail.spec, held),
+        }
+        pending
+    }
+
+    /// Complete a staged window child's birth, keyed by the path its context
+    /// carries.
+    #[handler(task)]
+    fn on_window_child_spawn_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<SpawnOutcome<WindowInstance>>,
+    ) {
+        let Some(WindowSpawnKey { path }) = ctx.take_context() else {
+            return;
+        };
+        let outcome = done.into_output();
+        match &mut state.backend {
+            #[cfg(feature = "desktop")]
+            WindowBackend::Desktop(windows) => windows.finish_window_child_spawn(ctx, &path, &outcome),
+            #[cfg(feature = "synthetic")]
+            WindowBackend::Synthetic(windows) => windows.finish_window_child_spawn(ctx, &path, outcome),
+        }
+    }
+
+    /// Apply one per-window command a live window child forwarded, at the
+    /// window that child is. The answer rides the child's held reply: at once
+    /// for every command the backend applies on this turn, later for a
+    /// desktop close, which is answered once its native window is detached.
+    #[handler::single]
+    fn on_apply_command(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: ApplyWindowCommand,
+    ) -> Pending<ApplyWindowCommandResult> {
+        let (pending, held) = ctx.hold::<ApplyWindowCommandResult>();
+        match &mut state.backend {
+            #[cfg(feature = "desktop")]
+            WindowBackend::Desktop(windows) => windows.apply_command(ctx, mail.command, held),
+            #[cfg(feature = "synthetic")]
+            WindowBackend::Synthetic(windows) => windows.apply_command(ctx, mail.command, held),
+        }
+        pending
+    }
+
+    /// Subscribe an explicitly named actor to one kind for one selector.
+    ///
+    /// The subscriber's path reached this handler only because its decode
+    /// proved the route there, live or closed, handles the kind silently
+    /// (ADR-0231 §3); it is proven live here, at receipt, and the table keeps
+    /// the `ProtocolRef<Subscriber<K>>` that proof returns. A path whose
+    /// actor has gone answers `Err` naming it.
+    #[handler::single]
+    fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
+        match state.subscribers_mut().subscribe_path(ctx, mail.selector, &mail.subscription) {
+            Ok(()) => SubscribeWindowResult::Ok,
+            Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
+        }
+    }
+
+    /// Subscribe the calling actor to one kind for one selector.
+    #[handler::single]
+    fn on_subscribe_self(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: SubscribeWindowSelf,
+    ) -> SubscribeWindowResult {
+        match state.subscribers_mut().subscribe_self(ctx, mail.selector, mail.kind) {
+            Ok(()) => SubscribeWindowResult::Ok,
+            Err(error) => SubscribeWindowResult::Err { error },
+        }
+    }
+
+    /// Drop an explicitly named actor's subscription to one kind for one
+    /// selector. The path is proven live at receipt and its key removed; a
+    /// path whose actor has gone answers `Err` naming it.
+    #[handler::single]
+    fn on_unsubscribe(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: UnsubscribeWindow,
+    ) -> SubscribeWindowResult {
+        match state.subscribers_mut().unsubscribe_path(ctx, mail.selector, &mail.subscription) {
+            Ok(()) => SubscribeWindowResult::Ok,
+            Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
+        }
+    }
+
+    /// Drop the calling actor's subscription to one kind for one selector.
+    #[handler::single]
+    fn on_unsubscribe_self(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: UnsubscribeWindowSelf,
+    ) -> SubscribeWindowResult {
+        match state.subscribers_mut().unsubscribe_self(ctx, mail.selector, mail.kind) {
+            Ok(()) => SubscribeWindowResult::Ok,
+            Err(error) => SubscribeWindowResult::Err { error },
+        }
+    }
+
+    /// Close the sole window.
+    #[handler::manual]
+    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: CloseWindow) {
+        if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
+            ctx.reply(&CloseWindowResult::Err { error });
+        }
+    }
+
+    /// Change the sole window's presentation mode.
+    #[handler::manual]
+    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowMode) {
+        if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
+            ctx.reply(&SetWindowModeResult::Err { error });
+        }
+    }
+
+    /// Change the sole window's title.
+    #[handler::manual]
+    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowTitle) {
+        if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
+            ctx.reply(&SetWindowTitleResult::Err { error });
+        }
+    }
+
+    /// Install the sole window's native menu bar.
+    #[handler::manual]
+    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowMenu) {
+        if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
+            ctx.reply(&SetWindowMenuResult::Err { error });
+        }
+    }
+
+    /// Set the sole window's pointer shape.
+    #[handler::manual]
+    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowCursor) {
+        if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
+            ctx.reply(&SetWindowCursorResult::Err { error });
+        }
+    }
+
+    /// Bring the sole window to the foreground.
+    #[handler::manual]
+    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: FocusWindow) {
+        if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
+            ctx.reply(&FocusWindowResult::Err { error });
+        }
+    }
+
+    /// Schedule the sole window for redraw.
+    #[handler::manual]
+    fn on_request_redraw(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: RequestWindowRedraw) {
+        if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
+            ctx.reply(&RequestWindowRedrawResult::Err { error });
+        }
+    }
+
+    /// Fan an injected event out as the published kind it names, through the
+    /// running backend's typed set for that kind. A kind the window does not
+    /// publish, or a payload that does not decode as the kind, warns and
+    /// sends nothing.
+    #[cfg(feature = "synthetic")]
+    #[handler::single]
+    fn on_inject(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: crate::InjectWindowEvent) {
+        if let Err(error) = state.subscribers().publish_encoded(ctx, &mail.window, mail.kind, &mail.payload) {
+            tracing::warn!(target: "aether_window", window = %mail.window, %error, "injected window event not published");
+        }
+    }
+
+    /// A monitored actor departed: a window child, whose window the backend
+    /// retires, or a subscriber, whose every row is dropped.
+    #[handler::single]
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        let Some(departed) = ctx.sender() else {
+            return;
+        };
+        match &mut state.backend {
+            #[cfg(feature = "desktop")]
+            WindowBackend::Desktop(windows) => windows.child_departed(departed),
+            #[cfg(feature = "synthetic")]
+            WindowBackend::Synthetic(windows) => windows.child_departed(ctx, departed),
+        }
+        state.subscribers_mut().unsubscribe_all(departed);
+    }
+}

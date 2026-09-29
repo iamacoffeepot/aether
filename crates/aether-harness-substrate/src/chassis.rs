@@ -4,7 +4,7 @@
 //!
 //! Issue 603 retired the `chassis_handler` closure: capture rides
 //! `RenderCapability` (Phase 2), window-kind mail through
-//! `SyntheticWindowCapability` (deterministic harness runtime), advance through
+//! `WindowCapability` (its synthetic backend), advance through
 //! `SubstrateHarnessCapability` claiming `aether.substrate_harness` (Phase 4), and
 //! `aether.control.platform_info` was deleted entirely (Phase 4).
 
@@ -25,7 +25,7 @@ use aether_substrate::chassis::settlement::{PumpWake, SettlementRegistry, WaitOu
 use aether_substrate::config::ConfigSources;
 use aether_substrate::{Chassis, PumpedSlot, RingCapacities, SchedulerTuning, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
-use aether_window::SyntheticWindowCapability;
+use aether_window::{WindowCapability, WindowParams};
 use crossbeam_channel::{Receiver, Sender};
 
 use aether_lifecycle::{LifecycleConfig, frame_lifecycle_params};
@@ -486,7 +486,7 @@ impl SubstrateHarnessChassis {
             builder = apply(builder);
         }
         builder = builder
-            .with_actor::<SyntheticWindowCapability>(())
+            .with_actor::<WindowCapability>(WindowParams::Synthetic)
             .with_actor::<SubstrateHarnessCapability>(substrate_harness_cap_config)
             // ADR-0156 §5: compose + stage the lifecycle config in one paired call.
             .with_actor_configured::<LifecycleCapability>(frame_lifecycle_params(), LifecycleConfig::default());

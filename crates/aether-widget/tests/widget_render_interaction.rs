@@ -74,7 +74,7 @@ use aether_widget::{
     SliderConfig, TextAreaConfig, TextFieldConfig, Theme, ThemeState, ToggleConfig, VirtualListConfig, VirtualListRow,
     WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem, WidgetKind, WidgetPanel, WidgetValidation,
 };
-use aether_window::SyntheticWindowCapability;
+use aether_window::WindowCapability;
 
 /// The window the injected input events name.
 fn test_window() -> aether_data::ErasedActorPath {
@@ -1308,7 +1308,7 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
     let panel = load_editor_region(&mut harness, &widget_wasm, font_id, vec![text_field_child("field", "abcd")]);
     warm_panel(&mut harness, panel);
     let probe = load_editor_probe(&mut harness, &fixtures_wasm_path);
-    let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
+    let synthetic = harness.actor_ref::<WindowCapability>();
 
     // The press begins in the panel editor region. Motion and release cross
     // x=120 into the peer region, but the shell's first-press ownership keeps

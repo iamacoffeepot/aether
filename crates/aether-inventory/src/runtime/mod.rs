@@ -202,12 +202,12 @@ impl NativeActor for InventoryCapability {
     //
     // Field-identical rows are deduped (ADR-0160 §Decision 2): two
     // `#[actor]` blocks can legitimately share one `NAMESPACE` — the
-    // desktop `DesktopWindowCapability` and the headless companion both
-    // claim `aether.window` and, linked into one desktop binary, each
-    // submit the same `(namespace, id, name, reply)` handler rows into the
-    // link-time-global inventory. The rows carry no per-instance state, so
-    // equality-dedup is lossless and keeps `describe_handlers` from
-    // double-reporting each window handler. `HashSet::insert` keeps the
+    // pumped `RenderCapability` and its headless companion both claim
+    // `aether.render` and, linked into one binary, each submit the same
+    // `(namespace, id, name, reply)` handler rows into the link-time-global
+    // inventory. The rows carry no per-instance state, so equality-dedup is
+    // lossless and keeps `describe_handlers` from double-reporting each
+    // shared handler. `HashSet::insert` keeps the
     // first occurrence, preserving inventory order for the survivors.
     #[handler::single]
     fn on_handlers(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListHandlers) -> HandlersResult {
@@ -557,10 +557,10 @@ mod tests {
     }
 
     // Two field-identical link-time `HandlerEntry` rows submitted directly
-    // into the process-global inventory — the shape a desktop binary linking
-    // both `aether.window` runtimes produces (ADR-0160 §Decision 2): the
-    // desktop `DesktopWindowCapability` and the headless companion share
-    // `NAMESPACE = "aether.window"` and each emit the same
+    // into the process-global inventory — the shape a binary linking both
+    // `aether.render` runtimes produces (ADR-0160 §Decision 2): the pumped
+    // `RenderCapability` and its headless companion share
+    // `NAMESPACE = "aether.render"` and each emit the same
     // `(namespace, id, name, reply)` rows. `HandlerEntry` holds only
     // `'static` data, so a bare `inventory::submit!` reproduces the duplicate
     // without standing up either cap.

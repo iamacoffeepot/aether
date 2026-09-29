@@ -1,4 +1,4 @@
-error[E0277]: `HeadlessWindowCapability` does not publish `aether_kinds::Tick`
+error[E0277]: `WindowCapability` does not publish `aether_kinds::Tick`
   --> tests/ui/rejects_subscribe_to_unpublished_kind.rs:24:21
    |
 24 |     ctx.subscribe::<WindowCapability, Tick>();
@@ -6,11 +6,11 @@ error[E0277]: `HeadlessWindowCapability` does not publish `aether_kinds::Tick`
    |         |
    |         required by a bound introduced by this call
    |
-   = help: the trait `Publishes<aether_kinds::Tick>` is not implemented for `HeadlessWindowCapability`
+   = help: the trait `Publishes<aether_kinds::Tick>` is not implemented for `WindowCapability`
    = note: an event with no matching subscriber is dropped at its source, so a subscription on the wrong capability fails silently at run time — it is refused here instead
    = note: frame-lifecycle stages (`Tick`, `Render`, `Present`, `InitCaps`, `InitComponents`, `Shutdown`) come from `LifecycleCapability`: `ctx.subscribe::<LifecycleCapability, Tick>()`
    = note: window device events (`Key`, `KeyRelease`, `MouseMove`, `MouseButton`, `MouseButtonRelease`, `MouseWheel`, `WindowSize`, `TextInput`, `ImePreedit`, `Modifiers`) and window lifecycle (`WindowOpened`, `WindowClosed`, `WindowMenuActivated`) come from `WindowCapability`: `ctx.subscribe::<WindowCapability, Key>()`
-   = help: `HeadlessWindowCapability` implements trait `Publishes<K>`:
+   = help: `WindowCapability` implements trait `Publishes<K>`:
              Publishes<aether_kinds::ImePreedit>
              Publishes<aether_kinds::Key>
              Publishes<aether_kinds::KeyRelease>

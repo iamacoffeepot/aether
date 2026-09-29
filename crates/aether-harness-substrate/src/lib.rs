@@ -30,13 +30,13 @@
 //! ```
 //! use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 //! use aether_window::{
-//!     CreateWindow, CreateWindowResult, ListWindows, ListWindowsResult, SyntheticWindowCapability, WindowMode,
+//!     CreateWindow, CreateWindowResult, ListWindows, ListWindowsResult, WindowCapability, WindowMode,
 //!     WindowSizeRequest, WindowSpec,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut harness = SubstrateHarness::builder().size(320, 240).build()?;
-//! let window = harness.actor_ref::<SyntheticWindowCapability>();
+//! let window = harness.actor_ref::<WindowCapability>();
 //!
 //! let spec = WindowSpec {
 //!     name: "main".to_owned(),

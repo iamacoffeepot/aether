@@ -69,31 +69,32 @@ runtime discriminator/subname is part of identity. An unsupported chassis may
 install a separate headless/fail-fast identity claiming the same public
 namespace.
 
-Runtime-placement paths let multiple implementations live beside one public
-identity without forcing directory names into actor identity. Window is the
-multi-runtime exemplar:
+Runtime-placement paths let a separate identity's runtime live in a keyed
+module without forcing directory names into actor identity: a companion
+declared `#[actor(singleton, runtime::headless)]` reads
+`runtime/headless.rs`.
+
+When one identity has several backends, keep one identity and one runtime and
+let `Params` pick the backend at boot, compiling each backend in by its
+feature. Window is the exemplar:
 
 ```rust
-#[actor(singleton)]
-pub struct HeadlessWindowCapability;
+#[actor(singleton, root)]
+pub struct WindowCapability;
 
-pub use HeadlessWindowCapability as WindowCapability;
-
-#[cfg(feature = "desktop")]
-#[actor(singleton, runtime::desktop)]
-pub struct DesktopWindowCapability;
-
-#[actor(singleton, runtime::synthetic)]
-pub struct SyntheticWindowCapability;
+pub enum WindowParams {
+    #[cfg(feature = "desktop")]
+    Desktop(DesktopWindowBoot),
+    #[cfg(feature = "synthetic")]
+    Synthetic,
+}
 ```
 
-The concrete headless, desktop, and synthetic window identities all claim one
-crate-owned namespace constant. `WindowCapability` remains the neutral alias
-that consumers name through `ctx.send::<WindowCapability>(..)`; runtime
-variants must not repeat a namespace literal in their declarations or leak
-platform identity into callers. The headless implementation lives in the
-default `runtime/mod.rs`; keyed alternatives live in `runtime/desktop/` and
-`runtime/synthetic.rs`.
+The handlers are written once in `runtime/mod.rs` and dispatch on the running
+backend (`runtime/desktop/`, `runtime/synthetic/`). A feature alone cannot pick
+the backend, because cargo unifies features across a build: a workspace build
+compiles both window backends into one crate, and only the composer knows which
+it wants.
 
 A chassis selects one of the types sharing a namespace by composing it. The
 engine's publication table records every linked type that declares the
@@ -287,7 +288,7 @@ not which crate's name appears in the knob.
 
 If a public mailbox exists conceptually but a chassis cannot provide the
 resource, prefer an explicit unsupported actor that replies with the ordinary
-error shape. Examples include headless render/window/clipboard companions and
+error shape. Examples include headless render/clipboard companions and
 the substrate-harness unsupported marker.
 
 Most companions mirror the primary cap's identity/runtime split symmetrically:
@@ -299,11 +300,9 @@ gate as the primary runtime. The module-path argument tells the struct-hosted
 `#[actor]` harvest which file to read, resolved relative to the invoking file.
 `aether-render` and `aether-clipboard` are exemplars.
 
-Window deliberately uses the concrete `HeadlessWindowCapability` as the
-fail-fast default runtime, with `WindowCapability` retained as its neutral
-consumer alias. Desktop and `runtime::synthetic` implementation types claim
-the same shared namespace. That shape is appropriate when callers must remain
-platform-neutral and multiple runtimes are mutually exclusive chassis choices.
+Window has no companion: a chassis without a window peripheral composes no
+window actor, so a component that depends on `WindowCapability` is refused at
+load rather than answered by a stub.
 
 Do not create a stub for fire-and-forget traffic unless it produces useful
 diagnostics and avoids misleading success. The goal is bounded failure, not

@@ -32,8 +32,8 @@ use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
 use aether_substrate::runtime::lifecycle as runtime_lifecycle;
 use aether_substrate::{ChassisCtx, HubOutbound, SettlingInbox, SubstrateBoot, chassis::frame_loop, mail::MailId};
 use aether_window::{
-    DesktopWindowApplication, DesktopWindowCapability, DesktopWindowIntegration, DesktopWindowParams,
-    INITIAL_WINDOW_NAME, WindowSizeRequest, WindowSpec,
+    DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowSlot, INITIAL_WINDOW_NAME, WindowCapability,
+    WindowSizeRequest, WindowSpec,
 };
 use crossbeam_channel::{Receiver, Sender};
 use winit::event_loop::EventLoop;
@@ -352,7 +352,7 @@ impl DriverCapability for DesktopDriverCapability {
         // reserves both driver-as-actor inboxes at the Claim stage;
         // `boot_pumped_actor` recovers each at Start. `aether.render` is no
         // longer claimed by a pooled `RenderCapability` on desktop.
-        ctx.claim_driver_mailbox(DesktopWindowCapability::NAMESPACE)?;
+        ctx.claim_driver_mailbox(<WindowCapability as Addressable>::NAMESPACE)?;
         ctx.claim_driver_mailbox(<RenderCapability as Addressable>::NAMESPACE)
     }
 
@@ -392,16 +392,15 @@ impl DriverCapability for DesktopDriverCapability {
         // state on this thread.
 
         // Issue 603 Phase 3 / ADR-0160 §Decision 3: the desktop driver is the
-        // pump host for the `aether.window` actor (`DesktopWindowCapability`).
-        // `boot_pumped_actor` recovers the Claim-stage `aether.window`
-        // reservation `DesktopDriverCapability::claim` made (ADR-0155 §4 —
-        // recovered here at Start rather than re-claiming, since a second
-        // claim would collide), builds the pumped slot, runs the actor's
-        // `init` / `wire`, and hands back the claim's wake slot. The manager
-        // owns native window creation, identity, controls, and event routing;
-        // `about_to_wait` drains it inline between frames.
-        let (window_slot, window_wake_slot) =
-            ctx.boot_pumped_actor::<DesktopWindowCapability>((), DesktopWindowParams { app_name })?;
+        // pump host for the `aether.window` actor (`WindowCapability`, on its
+        // desktop backend). `DesktopWindowSlot::boot` recovers the Claim-stage
+        // `aether.window` reservation `DesktopDriverCapability::claim` made
+        // (ADR-0155 §4 — recovered here at Start rather than re-claiming,
+        // since a second claim would collide), builds the pumped slot, runs
+        // the actor's `init` / `wire`, and hands back the claim's wake slot.
+        // The manager owns native window creation, identity, controls, and
+        // event routing; `about_to_wait` drains it inline between frames.
+        let (window_slot, window_wake_slot) = DesktopWindowSlot::boot(ctx, app_name)?;
 
         DesktopWindowApplication::<DesktopRenderIntegration>::install_wake(
             event_loop.create_proxy(),

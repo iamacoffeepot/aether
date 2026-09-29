@@ -24,10 +24,9 @@ aether-chassis = { path = "../aether-chassis" }
 aether-substrate = { path = "../aether-substrate" }
 # The headless cap set: the common-cap configs the env threads through
 # `with_common_caps`, plus the headless fail-fast stubs — the nop
-# renderer, the Err-replying window/clipboard caps, and the unsupported
-# substrate-harness cap.
+# renderer, the Err-replying clipboard cap, and the unsupported
+# substrate-harness cap. No window actor is composed.
 aether-render = { path = "../aether-render", features = ["runtime"] }
-aether-window = { path = "../aether-window", features = ["runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
 aether-substrate-harness-cap = { path = "../aether-substrate-harness-cap" }
 aether-lifecycle = { path = "../aether-lifecycle" }

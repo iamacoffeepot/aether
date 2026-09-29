@@ -89,10 +89,10 @@ pub trait Publisher: Addressable {
 /// Unlike [`HandlesKind`](super::HandlesKind), which the `#[actor]` macro
 /// emits from the handler list, these impls are written by hand in the
 /// publishing cap's crate. A cap's published vocabulary belongs to the
-/// *mailbox*, not to any one runtime behind it: `aether.window` is claimed by
-/// a headless, a desktop, and a synthetic implementation, and only the
-/// neutral identity that callers address is the right place to state what the
-/// mailbox emits.
+/// *mailbox*, not to any one runtime or backend behind it: `aether.window`
+/// runs a desktop or a synthetic backend, and a chassis with no window
+/// composes none, so only the identity callers address is the right place to
+/// state what the mailbox emits.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not publish `{K}`",
     label = "subscribing here would store a row that never fires",

@@ -1,16 +1,23 @@
 //! `aether.window` actor identity and wire vocabulary.
 //!
-//! [`WindowCapability`] is the neutral alias callers address; every chassis
-//! installs a runtime that claims the same `aether.window` mailbox. The
-//! default is the fail-fast headless one, `desktop` swaps in
-//! [`DesktopWindowCapability`] over a real winit window, and `synthetic` swaps
-//! in [`SyntheticWindowCapability`], the deterministic in-memory manager that
-//! harness tests drive. One named window is addressed as a [`WindowInstance`]
-//! child of the manager.
+//! [`WindowCapability`] is the one `aether.window` manager identity. Its
+//! runtime runs one of two backends, each compiled in by its feature and
+//! chosen at boot by `WindowParams`: `desktop`, a real winit window manager
+//! the desktop chassis pumps on its application thread, and `synthetic`, the
+//! deterministic in-memory manager harness tests drive. A chassis with no
+//! window peripheral composes no window actor. One named window is addressed
+//! as a [`WindowInstance`] child of the manager.
 
 // Handler methods take decoded request payloads by value as part of the
 // actor dispatch ABI.
 #![allow(clippy::needless_pass_by_value)]
+
+// `runtime` is the `#[actor]` runtime gate, and a runtime runs a backend:
+// with neither compiled in, `WindowParams` would have no variant to boot.
+#[cfg(all(feature = "runtime", not(any(feature = "desktop", feature = "synthetic"))))]
+compile_error!(
+    "aether-window's `runtime` feature needs a window backend: enable `desktop` (winit) or `synthetic` (in-memory)"
+);
 
 /// The kinds the `aether.window` mailbox publishes to its selector-keyed
 /// subscribers, each beside the field its typed subscriber set is stored in:
@@ -48,11 +55,10 @@ pub mod kinds;
 pub use aether_kinds::WindowMode;
 // The forwarding command, its reply, and the command vocabulary they carry
 // arrive through the glob: the manager identity's always-on `#[actor]` markers
-// declare all three, so they cannot ride a runtime gate. The one below can —
-// nothing outside a window-bearing runtime names it. `RetireWindow` is a
-// `pub` type in a private module, because a handled kind must be `pub`
-// (ADR-0231 §10), and its `pub(crate)` re-export keeps it out of the glob.
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
+// declare all three, so they cannot ride a runtime gate. `RetireWindow` is
+// named by the endpoint's always-on markers too, but it is a `pub` type in a
+// private module, because a handled kind must be `pub` (ADR-0231 §10), and
+// its `pub(crate)` re-export keeps it out of the glob.
 pub(crate) use kinds::RetireWindow;
 pub use kinds::*;
 
@@ -62,13 +68,9 @@ use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
     WindowSize,
 };
-/// The one declaration of the `aether.window` mailbox name.
-///
-/// Every implementation identity — headless, `desktop`, `synthetic` — reads
-/// its `NAMESPACE` from this const rather than repeating the literal, so the
-/// shared mailbox has a single naming authority (iamacoffeepot/aether#5720).
-/// Each of those three reads is `#[cfg]`-gated on a runtime feature, which is
-/// why a grep of this file alone makes the const look unreferenced.
+/// The one declaration of the `aether.window` mailbox name, which
+/// [`WindowCapability`]'s runtime reads as its `NAMESPACE`
+/// (iamacoffeepot/aether#5720).
 const WINDOW_NAMESPACE: &str = "aether.window";
 
 /// Shared logical namespace for named window child identities.
@@ -77,56 +79,29 @@ pub const WINDOW_INSTANCE_NAMESPACE: &str = "aether.window.instance";
 /// Stable name assigned to the desktop composer's initial window.
 pub const INITIAL_WINDOW_NAME: &str = "main";
 
-/// Fail-fast headless identity for the `aether.window` actor.
+/// The `aether.window` window manager.
 ///
-/// This default runtime replies that no window peripheral is available.
+/// One identity whatever backs it: the runtime picks its backend from
+/// `WindowParams` at boot — the winit desktop manager under `desktop`, the
+/// deterministic in-memory manager harness tests drive under `synthetic`. The
+/// identity and its markers compile always-on, so a marker-only wasm guest
+/// declares `depends(WindowCapability)` and mails it without the runtime.
 #[actor(singleton, root)]
-pub struct HeadlessWindowCapability;
+pub struct WindowCapability;
 
-/// Platform-neutral compatibility alias for the headless window identity.
-///
-/// Consumers declare `depends(WindowCapability)` and send with
-/// `ctx.send::<WindowCapability>(..)` regardless of the chassis-specific
-/// runtime that owns the shared mailbox namespace.
-pub use HeadlessWindowCapability as WindowCapability;
-
-/// Fail-fast headless identity for one named window endpoint.
-#[actor(instanced, child_of(WindowCapability), runtime::instance)]
-pub struct HeadlessWindowInstance;
-
-/// Platform-neutral identity for one named window endpoint.
-pub use HeadlessWindowInstance as WindowInstance;
-
-/// Desktop implementation identity for the `aether.window` mailbox.
-#[cfg(feature = "desktop")]
-#[actor(singleton, root, runtime::desktop)]
-pub struct DesktopWindowCapability;
-
-/// Desktop runtime identity for one named window endpoint.
-#[cfg(feature = "desktop")]
-#[actor(instanced, child_of(DesktopWindowCapability), depends(WindowCapability), runtime::desktop::instance)]
-pub struct DesktopWindowInstance;
-
-/// Deterministic in-memory implementation identity for the `aether.window`
-/// mailbox.
-#[cfg(feature = "synthetic")]
-#[actor(singleton, root, runtime::synthetic)]
-pub struct SyntheticWindowCapability;
-
-/// Deterministic in-memory runtime identity for one named window endpoint.
-#[cfg(feature = "synthetic")]
-#[actor(instanced, child_of(SyntheticWindowCapability), depends(WindowCapability), runtime::synthetic::instance)]
-pub struct SyntheticWindowInstance;
+/// One named window endpoint, a child of [`WindowCapability`]. Every command
+/// it receives is forwarded to the manager, which applies it at the native
+/// (or synthetic) window and answers the endpoint's held reply.
+#[actor(instanced, child_of(WindowCapability), depends(WindowCapability), runtime::instance)]
+pub struct WindowInstance;
 
 /// Writes one `Publishes` impl per published kind — the compile-time gate on
 /// the flat `ctx.subscribe::<WindowCapability, K>()` verb.
 ///
-/// They sit on the neutral `WindowCapability` identity rather than on a
-/// runtime, because the published vocabulary belongs to the mailbox:
-/// desktop, synthetic, and headless all claim `aether.window`, and a
-/// subscriber addresses the identity without knowing which is installed. A
-/// runtime with no window peripheral emits none of them — that is a
-/// deployment fact the marker cannot and should not encode.
+/// They sit on the `WindowCapability` identity rather than on a backend,
+/// because the published vocabulary belongs to the mailbox: a subscriber
+/// addresses the identity without knowing whether the desktop or the synthetic
+/// backend runs behind it.
 macro_rules! publishes {
     ($($kind:ident $field:ident),+ $(,)?) => {
         $(impl Publishes<$kind> for WindowCapability {})+
@@ -174,7 +149,7 @@ pub fn window_path(name: &LoadName) -> ErasedActorPath {
 }
 
 /// The validated load name of a window spec's `name`.
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
+#[cfg(feature = "runtime")]
 fn window_name(name: &str) -> Result<LoadName, String> {
     LoadName::new(name).map_err(|error| format!("invalid window name `{name}`: {error}"))
 }
@@ -184,9 +159,12 @@ mod runtime;
 
 #[cfg(feature = "desktop")]
 pub use runtime::desktop::{
-    DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowParams, DesktopWindowUserEvent, WindowHostAction,
-    WindowHostEffect, resolve_fullscreen, set_application_name,
+    DesktopWindowApplication, DesktopWindowBoot, DesktopWindowIntegration, DesktopWindowSlot, DesktopWindowUserEvent,
+    WindowHostAction, WindowHostEffect, resolve_fullscreen, set_application_name,
 };
+
+#[cfg(feature = "runtime")]
+pub use runtime::{WindowCapabilityState, WindowParams};
 
 #[cfg(feature = "synthetic")]
 pub use kinds::InjectWindowEvent;
