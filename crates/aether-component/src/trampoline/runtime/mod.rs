@@ -10,7 +10,7 @@
 //! The cap is heavy and already decomposed, so unlike `aether.fs`'s
 //! single-file `runtime.rs` the runtime half is a directory module:
 //! [`state`] (the field-bearing `WasmTrampolineState` and its guest
-//! [`Slot`](state::Slot)), [`config`] (the `WasmTrampolineConfig` init
+//! [`Slot`]), [`config`] (the `WasmTrampolineConfig` init
 //! bundle), [`republish`] (one member's prepare, commit and abort, ADR-0241
 //! §7), [`replace`] (the single-instance replace over them), and
 //! [`contract`] (the replace-time contract refusal, ADR-0231 §5).
