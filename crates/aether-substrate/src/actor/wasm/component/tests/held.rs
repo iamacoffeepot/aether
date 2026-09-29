@@ -44,8 +44,9 @@ struct Received {
     parent: Option<MailId>,
     /// Whether the requester's root was still live on arrival.
     live: bool,
-    /// The address the reply was sent in the name of.
-    from: SourceAddr,
+    /// The address the reply was sent in the name of: the sender its
+    /// lineage id was minted under.
+    from: Option<MailboxId>,
 }
 
 /// How the kind-A arm registers its held reply's unanswered value, as the
@@ -183,7 +184,8 @@ impl Fixture {
                 Arc::new(move |dispatch: OwnedDispatch| {
                     dispatch.discharge();
                     let live = dispatch.root.is_some_and(|root| sink_trace.settlement_counter().is_live(root));
-                    let (root, parent, from) = (dispatch.root, dispatch.parent_mail, dispatch.sender.addr);
+                    let from = dispatch.mail_id.map(|id| id.sender);
+                    let (root, parent) = (dispatch.root, dispatch.parent_mail);
                     sink_received.lock().unwrap().push(Received { root, parent, live, from });
                     sink_trace.record_finished(dispatch.mail_id, dispatch.root);
                 }),
@@ -339,7 +341,7 @@ fn unload_sends_the_registered_reply_before_release() {
     let Received { root, parent, live, from } = received[0];
     assert_eq!((root, parent), (Some(request_root), Some(request_id())));
     assert!(live, "the hold releases only after the reply is sent");
-    assert_eq!(from, SourceAddr::Component(OWN), "sent in the name of the component that held");
+    assert_eq!(from, Some(OWN), "sent in the name of the component that held");
     assert!(settled.try_recv().is_ok());
     assert_eq!(fixture.held_open(request_root), 0);
 }
@@ -392,11 +394,10 @@ fn a_registration_for_another_handle_fails_the_delivery() {
 /// fails the delivery.
 #[test]
 fn a_refused_registration_leaves_the_hold_unregistered() {
-    let pages_end = 65_536;
     let refusals = [
         (Registration::Raw { kind: MonitorNotice::ID.0, ptr: 0, len: 0 }, REPLY_ENGINE_ONLY_KIND),
         (Registration::Raw { kind: UNKNOWN_KIND, ptr: 0, len: 0 }, REPLY_KIND_NOT_FOUND),
-        (Registration::Raw { kind: KIND_ANSWER.0, ptr: pages_end, len: 1 }, REPLY_OOB),
+        (Registration::Raw { kind: KIND_ANSWER.0, ptr: u32::MAX, len: 2 }, REPLY_OOB),
     ];
 
     for (registration, status) in refusals {
@@ -428,7 +429,7 @@ fn an_inline_childs_unanswered_reply_comes_from_the_child() {
 
     let received = fixture.received.lock().unwrap();
     assert_eq!(received.len(), 1);
-    assert_eq!(received[0].from, SourceAddr::Component(child));
+    assert_eq!(received[0].from, Some(child));
 }
 
 /// Catches a host that ignores `on_dehydrate`'s return, letting a replace
