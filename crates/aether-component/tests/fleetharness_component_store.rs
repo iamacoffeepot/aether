@@ -13,8 +13,6 @@ mod tests {
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use aether_actor::Addressable;
-    use aether_component::WasmTrampoline;
     use aether_data::{Kind, Schema, SchemaType, wire};
     use aether_kinds::{
         ComponentSelector, ListComponentBinaries, LogTailResult, ResolveComponentResult, Tick, UploadComponentResult,
@@ -30,9 +28,10 @@ mod tests {
     /// load because headless registers no harness observer.
     const PROBE_NAMESPACE: &str = "test.quiet_probe";
 
-    /// The probe's registered ADR-0099 lineage address.
+    /// The probe's registered address: a singleton guest's published name
+    /// (ADR-0241 §5).
     fn probe_lineage_addr() -> String {
-        format!("aether.component/{}:{PROBE_NAMESPACE}", WasmTrampoline::NAMESPACE)
+        PROBE_NAMESPACE.to_owned()
     }
 
     /// Resolve `selector` hub-local and return the matched content hash,

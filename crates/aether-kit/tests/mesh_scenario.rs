@@ -70,7 +70,7 @@ fn load_kit_export<R: Addressable>(harness: &mut SubstrateHarness, wasm: &[u8]) 
     let (actor, path) = harness
         .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load {name}: {error}"));
-    assert!(path.to_string().ends_with(&format!(":{name}")), "export {name} should register under :{name}; got {path}");
+    assert_eq!(path.to_string(), name, "singleton export {name} should register at its own namespace");
     (actor, path)
 }
 

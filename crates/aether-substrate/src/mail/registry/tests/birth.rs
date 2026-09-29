@@ -250,7 +250,7 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     );
     let initial_route_generation = registry.route_generation();
     let initial_mailbox_generation = registry.mailbox_generation();
-    let name = "aether.component/starting-only";
+    let name = "test.birth.starting_only";
     let id = lineage_mailbox_id(name);
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::reserve_with_id(id, name.to_owned())]))

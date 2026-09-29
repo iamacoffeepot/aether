@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::Path;
 
-use aether_component::{ComponentHostCapability, WasmTrampoline};
+use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -33,14 +33,11 @@ use aether_test_fixtures_kinds as _;
 /// The probe's namespace, which keys the singleton's unnamed load.
 const PROBE_NAME: &str = "test.probe";
 
-/// Full trampoline address the substrate registers the loaded probe
-/// under: the component host `aether.component` `/`-joined to the
-/// trampoline node (ADR-0099 §4) — exactly what `LoadResult.path`
-/// reports. Mail destined for the probe goes here, not to the bare
-/// namespace (which isn't a registered mailbox).
+/// The address the substrate registers the loaded probe under: a singleton
+/// guest is born at its own published namespace (ADR-0241 §5) — exactly what
+/// `LoadResult.path` reports.
 fn probe_address() -> String {
-    use aether_actor::Addressable;
-    format!("aether.component/{}:{PROBE_NAME}", WasmTrampoline::NAMESPACE)
+    PROBE_NAME.to_owned()
 }
 
 /// The kind the probe broadcasts to the harness observer once per tick.
@@ -71,7 +68,9 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorPa
 /// The engine-local loaded-components query (issue 2020) lists a
 /// loaded component by its ADR-0099 lineage address. After loading the
 /// probe, a fieldless `ListComponents` to the `aether.component` mailbox
-/// replies with the probe's full trampoline address — the deterministic
+/// replies with the probe's published name, categorised a guest from the
+/// publication table rather than its name's spelling (ADR-0241 §3) — the
+/// deterministic
 /// registration snapshot a readiness poll consumes instead of inferring
 /// liveness from a log-ring side channel.
 #[test]
@@ -86,8 +85,7 @@ fn list_components_reports_loaded_probe_lineage() {
         .unwrap_or_else(|error| panic!("load_component: {error}"))
         .1
         .to_string();
-    assert_eq!(name, probe_address(), "LoadResult must return the registered nested trampoline route");
-    assert_ne!(name, format!("aether.embedded:{PROBE_NAME}"));
+    assert_eq!(name, probe_address(), "LoadResult must return the guest's own published name");
 
     let listed = harness
         .execute(vec![(
@@ -158,7 +156,7 @@ fn multi_actor_module_loads_entry_export() {
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { path: name, capabilities, .. } => {
             assert!(
-                name.to_string().ends_with(":test.probe"),
+                name.to_string() == "test.probe",
                 "entry export should resolve to the first type's NAMESPACE \
                  (test.probe); got {name}",
             );
@@ -205,7 +203,7 @@ fn multi_actor_module_loads_selected_export() {
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { path: name, capabilities, .. } => {
             assert!(
-                name.to_string().ends_with(":test.ui.panel"),
+                name.to_string() == "test.ui.panel:test.ui.panel",
                 "selected export should resolve to Panel's NAMESPACE (test.ui.panel); got {name}",
             );
             assert!(
@@ -305,7 +303,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
     match named.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { path: name, .. } => {
             assert!(
-                name.to_string().ends_with(":test.defaultless.alpha"),
+                name.to_string() == "test.defaultless.alpha",
                 "a named load of a defaultless module resolves to the selected \
                  export's NAMESPACE (test.defaultless.alpha); got {name}",
             );

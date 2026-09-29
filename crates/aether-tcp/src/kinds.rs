@@ -39,7 +39,7 @@ pub trait TcpConsumer {
 /// [`TcpConsumer`] (ADR-0231 §3): in code an `ActorPath<R>` narrowed with
 /// `.narrow::<TcpConsumer>()`, which compiles only when `R` handles both
 /// kinds silently; over MCP the `path` a component load returns. A short
-/// `aether.component/:name` path, or one whose live route does not publish
+/// `root/:key` path, or one whose live route does not publish
 /// both silent rows, is refused at decode: the mail is logged at warn and
 /// gets no reply. A route that left between decode and receipt gets `Err`
 /// without binding. `None` leaves the listener observer-less and drops

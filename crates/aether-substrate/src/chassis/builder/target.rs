@@ -38,7 +38,7 @@ mod sealed {
 /// A typed reference is not a target for a kind its actor does not handle:
 ///
 /// ```compile_fail,E0277
-/// use aether_actor::{ActorRef, Addressable, Direct, Embedded};
+/// use aether_actor::{ActorRef, Addressable, Direct, One};
 /// use aether_kinds::Ping;
 /// use aether_substrate::ChassisTarget;
 ///
@@ -46,7 +46,7 @@ mod sealed {
 ///
 /// impl Addressable for Peer {
 ///     const NAMESPACE: &'static str = "example.peer";
-///     type Resolver = Embedded;
+///     type Resolver = One;
 /// }
 ///
 /// fn require_target<T: ChassisTarget<Ping, Direct>>(_: T) {}

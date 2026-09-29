@@ -1113,8 +1113,10 @@ macro_rules! __export_internal {
 
         /// # Safety
         /// Called exactly once by the substrate before any `receive`.
-        /// Receives the actor's own mailbox id and logical parent mailbox so
-        /// runtime ctxs can select Root, Current, or Parent lineage.
+        /// Receives the actor's own mailbox id and its logical parent's
+        /// mailbox. The parent is ignored: a guest's typed addressing selects
+        /// only Root or Current lineage (ADR-0241 §5), and the ABI keeps the
+        /// argument so the substrate's call is unchanged.
         ///
         /// ADR-0090 (issue 1256): the substrate writes `config_len`
         /// bytes at `config_ptr` (`CONFIG_OFFSET` in the substrate's
@@ -1131,7 +1133,7 @@ macro_rules! __export_internal {
         #[unsafe(export_name = "init_with_parent_p32")]
         pub unsafe extern "C" fn init_with_parent(
             mailbox_id: u64,
-            parent_mailbox_id: u64,
+            _parent_mailbox_id: u64,
             config_ptr: u32,
             config_len: u32,
         ) -> u32 {
@@ -1176,7 +1178,6 @@ macro_rules! __export_internal {
             // and `WasmCtx` self read this rather than recomputing
             // `hash(NAMESPACE)`, the ADR-0099 depth-1 fixed point.
             __AETHER_INLINE.set_self_id(mailbox_id);
-            __AETHER_INLINE.set_parent_id(parent_mailbox_id);
             // Issue 2692: install this module's by-tag inline-spawn resolver
             // (the tag-match over its exported set) so guest handler / `wire`
             // code can `ctx.spawn_inline_child_by_tag(...)`. Set once here at
@@ -1749,8 +1750,8 @@ macro_rules! __export_internal {
 /// One module-level `Slot<Box<dyn ErasedWasmActor>>` holds whichever
 /// exported type the instance became. Two construction entry points:
 ///
-/// - `init_with_parent_p32` constructs the **default** type and records the
-///   logical parent mailbox. `init_with_config_p32` remains as an additive
+/// - `init_with_parent_p32` constructs the **default** type; the logical
+///   parent mailbox it receives is ignored. `init_with_config_p32` remains as an additive
 ///   compatibility wrapper that supplies parent `0`. A defaultless module
 ///   stages the same "module has no default" failure through both exports.
 /// - `init_typed_with_parent_p32` carries both logical parent and actor-type
@@ -1842,11 +1843,12 @@ macro_rules! __export_multi_internal {
 
         /// # Safety
         /// Parent-aware init ABI; constructs the default (opted-in) export.
+        /// The parent mailbox is ignored (ADR-0241 §5).
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "init_with_parent_p32")]
         pub unsafe extern "C" fn init_with_parent(
             mailbox_id: u64,
-            parent_mailbox_id: u64,
+            _parent_mailbox_id: u64,
             config_ptr: u32,
             config_len: u32,
         ) -> u32 {
@@ -1862,7 +1864,6 @@ macro_rules! __export_multi_internal {
             // ADR-0114 addressing amendment: capture the real folded id as the
             // cluster self-identity (correct at any lineage depth).
             __AETHER_INLINE.set_self_id(mailbox_id);
-            __AETHER_INLINE.set_parent_id(parent_mailbox_id);
             // Issue 2692: install the by-tag inline-spawn resolver over the
             // module's full exported set (default + rest), so any exported actor
             // can `ctx.spawn_inline_child_by_tag(...)`.
@@ -2004,12 +2005,13 @@ macro_rules! __export_multi_internal {
 
         /// # Safety
         /// ADR-0096 typed init: `type_tag` selects which exported type
-        /// to construct (its `ActorTypeTag::of::<A>()`).
+        /// to construct (its `ActorTypeTag::of::<A>()`). The parent mailbox
+        /// is ignored (ADR-0241 §5).
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "init_typed_with_parent_p32")]
         pub unsafe extern "C" fn init_typed_with_parent(
             mailbox_id: u64,
-            parent_mailbox_id: u64,
+            _parent_mailbox_id: u64,
             type_tag: u64,
             config_ptr: u32,
             config_len: u32,
@@ -2026,7 +2028,6 @@ macro_rules! __export_multi_internal {
             // ADR-0114 addressing amendment: capture the real folded id as the
             // cluster self-identity (correct at any lineage depth).
             __AETHER_INLINE.set_self_id(mailbox_id);
-            __AETHER_INLINE.set_parent_id(parent_mailbox_id);
             // Issue 2692: install the by-tag inline-spawn resolver over the
             // module's full exported set — the same set this shim selects the
             // constructed type from — so the constructed actor can

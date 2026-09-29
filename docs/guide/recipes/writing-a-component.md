@@ -149,7 +149,7 @@ pass, supply its address as `load_component` returned it:
 cargo xtask dev-component \
   --package my-component \
   --engine-id <engine UUID> \
-  --address aether.component/aether.embedded:example.echo
+  --address example.echo
 ```
 
 The flag takes an actor path, which `replace_component` resolves on the engine;
@@ -188,9 +188,9 @@ load_component(engine_id, selector = "<returned hash or name>")
 `load_component` resolves a registry selector. For a defaultless module, select
 an export (for example `module@actor`) as described by the live tool schema.
 
-Record the returned `address`, normally a full lineage such as
-`aether.component/aether.embedded:example.echo`. Do not send to the bare Rust
-namespace and do not substitute the registry artifact name for the live mailbox.
+Record the returned `address`, the component's published name: `example.echo`
+for a singleton, `example.echo:key` for an instanced type. Do not substitute the
+registry artifact name for the live mailbox.
 
 If the actor has typed config, pass either inline `config` JSON or
 `config_path` pointing to a JSON file. MCP schema-encodes that JSON against the

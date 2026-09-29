@@ -56,7 +56,7 @@ pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
 pub use paint_probe::PaintProbe;
 pub use peer_routing::{ParentPeerCaller, ParentPeerStandIn, ParentPeerTarget};
-pub use probe::{Probe, ProbeWithConfig};
+pub use probe::{KeyProbe, Probe, ProbeWithConfig};
 pub use quiet_probe::QuietProbe;
 pub use source_forwarder::SourceForwarder;
 pub use source_observer::SourceObserver;
@@ -72,6 +72,7 @@ aether_actor::export!(
     default = Probe,
     public = [
         ProbeWithConfig,
+        KeyProbe,
         PaintProbe,
         QuietProbe,
         RootManager,

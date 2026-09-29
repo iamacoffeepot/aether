@@ -115,11 +115,8 @@ mod tests {
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
 
-        let replies = harness.send(
-            engine,
-            "aether.component",
-            &DescribeComponent { name: "aether.component/aether.embedded:nonexistent".to_owned() },
-        );
+        let replies =
+            harness.send(engine, "aether.component", &DescribeComponent { name: "test.nonexistent".to_owned() });
         let reply = match replies.as_slice() {
             [one] => one,
             other => panic!("describe expected exactly one reply event, got {}", other.len()),

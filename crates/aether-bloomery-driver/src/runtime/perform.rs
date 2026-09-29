@@ -1,7 +1,7 @@
 //! Performing the core's commands: one iterative loop over typed sends.
 
 use aether_actor::{DependsOn, ReplyMode};
-use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery, UnitBundle};
+use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery};
 use aether_component::ComponentHostCapability;
 use aether_data::{ActorMail, Kind};
 use aether_http::HttpCapability;
@@ -47,7 +47,7 @@ impl BundleDriverState {
                     let _ = ctx.send_with_context::<ComponentHostCapability>(
                         &LoadComponent {
                             wasm,
-                            name: Some(UnitBundle::name(&self.unit, &bundle).as_str().to_owned()),
+                            name: Some(self.unit.as_str().to_owned()),
                             config: Vec::new(),
                             export: Some(BUNDLE_NAMESPACE.to_owned()),
                         },

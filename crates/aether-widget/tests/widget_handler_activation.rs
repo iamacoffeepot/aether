@@ -14,7 +14,7 @@ mod support;
 
 use std::fs;
 
-use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
+use aether_actor::{ActorRef, ChildOf, Instanced};
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
@@ -49,8 +49,10 @@ fn bench(width: u32, height: u32) -> SubstrateHarness {
     .expect("boot")
 }
 
-fn trampoline_address(name: &str) -> String {
-    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
+/// The address a root loaded from `export` under the key `name` registers
+/// at: its own namespace and the key (ADR-0241 §5).
+fn guest_address(export: &str, name: &str) -> String {
+    format!("{export}:{name}")
 }
 
 /// The `C` child the panel spawned under `subname`.
@@ -220,10 +222,10 @@ fn named_load_exported_widget_defaults_adopters_succeeds() {
             let name = load_named(&mut harness, &wasm, &case);
             assert_eq!(
                 name,
-                trampoline_address(case.name),
+                guest_address(case.export, case.name),
                 "{stem} named load of {} must register under {}; got {name}",
                 case.export,
-                trampoline_address(case.name),
+                guest_address(case.export, case.name),
             );
         }
     }

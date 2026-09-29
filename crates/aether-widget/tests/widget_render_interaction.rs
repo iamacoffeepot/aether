@@ -144,10 +144,10 @@ fn panel_child<C: ChildOf<WidgetPanel> + Instanced>(
         .unwrap_or_else(|error| panic!("the panel's {subname} child is live: {error}"))
 }
 
-/// The full trampoline path the loaded panel registers at (ADR-0099 §4) — the
-/// recipient a capture bundle's `NamedMail` carries.
+/// The address the loaded `WidgetPanel` root registers at: its own
+/// namespace and the key `panel` (ADR-0241 §5).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
+    "aether.widget.panel:panel".to_owned()
 }
 
 /// The widget crate's `assets/` dir — where `RobotoMono.ttf` ships, resolved under

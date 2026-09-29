@@ -363,12 +363,12 @@ Each step lands on its own:
    cache's move to the registry owner land with step 5, when a remote caller
    first publishes by mail.
 3. **Forwarding host and native naming for guests**: guests spawn as
-   `NS` / `NS:key` / `parent/NS:key`; `Embedded` retires.
+   `NS` / `NS:key` / `parent/NS:key`; `Embedded` retires; CLAUDE.md and the
+   guide state the new addresses.
 4. **Republish replaces replace**; `DropComponent` closes the instance and
    its name tombstones; `despawn_inline_child` closes the child the same way;
    the boot refcount and teardown retire.
-5. **Surface**: MCP, RPC kinds, SubstrateHarness `load::<R>`, FleetHarness,
-   CLAUDE.md, the guide.
+5. **Surface**: MCP, RPC kinds, SubstrateHarness `load::<R>`, FleetHarness.
 6. **Deletion**: `ComponentHostCapability` as an address parent,
    `WasmTrampoline`'s namespace, `aether.embedded`, `categorise_mailbox_name`'s
    component category, and the component short path.

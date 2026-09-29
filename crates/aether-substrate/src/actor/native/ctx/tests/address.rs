@@ -1,11 +1,11 @@
-//! Typed receiver resolution off a ctx: an embedded peer folds from the
-//! binding's logical parent (ADR-0099 §3), and the proof verbs hand back
-//! proven references.
+//! Typed receiver resolution off a ctx: a declared root dependency folds
+//! from the root whatever the binding's lineage (ADR-0099 §3), and the proof
+//! verbs hand back proven references.
 
 use std::sync::Arc;
 
 use aether_actor::Addressable;
-use aether_data::{Kind, MailboxId};
+use aether_data::MailboxId;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
@@ -14,11 +14,9 @@ use crate::chassis::error::BootError;
 use crate::mail::registry::{InboxHandler, OwnedDispatch};
 use crate::mail::{Source, SourceAddr};
 
-use super::support::{CastOnly, EmbeddedPeer};
-
 struct Dependent;
 
-#[aether_actor::actor(depends(OneDep, EmbeddedPeer))]
+#[aether_actor::actor(depends(OneDep))]
 impl NativeActor for Dependent {
     const NAMESPACE: &'static str = "test.native.actor_ref_dependent";
     type Config = ();
@@ -40,51 +38,12 @@ impl Addressable for OneDep {
     type Resolver = aether_actor::One;
 }
 
-/// A typed embedded recipient resolves from the binding's logical parent,
-/// and a flat send to that declared dependency reaches the mailbox registered
-/// beneath that parent. The parent is already a tagged routable `MailboxId`;
-/// no raw carry is retained beside it.
+/// `actor_ref` on a `NativeCtx<'_, Dependent>` proves the root position a
+/// `One` dependency folds to, whatever the binding's own lineage, with no
+/// registry read. Owned logic: the scope selection `actor_ref` feeds the
+/// resolver.
 #[test]
-fn embedded_actor_resolves_and_delivers_beneath_binding_parent() {
-    use crate::mail::registry::lineage_mailbox_id;
-    use crate::testing::{bare_substrate, boot_authority};
-    use std::sync::mpsc;
-
-    let (registry, mailer) = bare_substrate();
-    let parent = lineage_mailbox_id("test.native.parent");
-    let current = lineage_mailbox_id("test.native.parent/test.native.caller");
-    let recipient = EmbeddedPeer::resolve(parent.0, ());
-    let (tx, rx) = mpsc::channel::<Envelope>();
-    registry
-        .try_register_inbox_with_id(
-            &boot_authority(),
-            recipient,
-            "test.native.parent/test.embedded_peer",
-            Arc::new(move |dispatch: OwnedDispatch| {
-                dispatch.discharge();
-                let _ = tx.send(dispatch);
-            }),
-        )
-        .expect("register embedded peer beneath the runtime parent");
-    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, Some(parent)));
-    assert_eq!(binding.parent_mailbox(), Some(parent));
-
-    {
-        let mut ctx: NativeCtx<'_, Dependent> =
-            NativeCtx::new_for_actor(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
-        ctx.send::<EmbeddedPeer>(&CastOnly { code: 17 });
-    }
-
-    let delivered = rx.try_recv().expect("embedded peer send routes at ctx flush");
-    assert_eq!(delivered.kind, CastOnly::ID);
-}
-
-/// `actor_ref` on a `NativeCtx<'_, Dependent>` proves the position each
-/// dependency's resolver folds beneath the binding's scope, for a `One` and
-/// for an `Embedded` dependency, with no registry read. Owned logic: the
-/// scope selection `actor_ref` feeds the resolver.
-#[test]
-fn actor_ref_mints_the_resolver_fold_for_one_and_embedded_dependencies() {
+fn actor_ref_mints_the_root_fold_for_a_one_dependency() {
     use aether_actor::Single;
 
     use crate::testing::bare_substrate;
@@ -96,8 +55,7 @@ fn actor_ref_mints_the_resolver_fold_for_one_and_embedded_dependencies() {
     let ctx: NativeCtx<'_, Dependent, Single> =
         NativeCtx::new_for_actor(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
 
-    assert_eq!(ctx.actor_ref::<OneDep>().id(), OneDep::resolve(current.0, ()));
-    assert_eq!(ctx.actor_ref::<EmbeddedPeer>().id(), EmbeddedPeer::resolve(parent.0, ()));
+    assert_eq!(ctx.actor_ref::<OneDep>().id(), OneDep::resolve(0, ()));
 }
 
 /// `sender` mints the stamped dispatch source only when it holds a route in

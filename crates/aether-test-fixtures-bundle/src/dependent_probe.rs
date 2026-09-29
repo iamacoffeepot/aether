@@ -1,7 +1,7 @@
 //! Declared-dependency load fixture (issue #6277).
 //!
 //! `DependentProbe` declares `depends(ParentPeerTarget)`: it may only load
-//! once the target holds a `Live` route beneath the same parent. It counts
+//! once the target holds a `Live` route at its published name. It counts
 //! the `Bump` mails it receives and reports the count, so the probe stays
 //! observable like every other peer-routing fixture.
 

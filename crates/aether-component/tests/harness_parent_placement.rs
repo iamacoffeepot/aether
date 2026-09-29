@@ -1,55 +1,34 @@
 //! Public `SubstrateHarness` placement coverage for issue #4535.
 //!
-//! The scenario uses only `HarnessOp` plus ordinary `LoadComponent` values to
-//! build two component peer scopes. The fixture caller's real bare-type
-//! `ctx.send::<R>(..)` proves the runtime parent selected during explicit
-//! placement is what embedded resolution consumes. The refusal scenarios
-//! pin the parent boundary: an address that does not resolve, and one that
-//! resolves to a parent still `Starting`, both answer `Err` before any load.
-//! Host placement is pinned the same way (ADR-0241 §5): a host load of a type
-//! whose only declared placement is `child_of(P)` answers `Err` naming it,
-//! before the module publishes or its route is staged.
+//! The refusal scenarios pin the parent boundary: an address that does not
+//! resolve, and one that resolves to a parent still `Starting`, both answer
+//! `Err` before any load. Root placement is pinned the same way (ADR-0241
+//! §5): a root load of a type whose only declared placement is `child_of(P)`
+//! answers `Err` naming it, before the module publishes or its route is
+//! staged. `harness_guest_addresses` covers a placement beneath a live
+//! parent.
 
 use std::fs;
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
-use aether_actor::{ActorRef, Addressable, EMBEDDED_SCOPE, actor};
-use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{ErasedActorPath, Kind, LoadName};
+use aether_actor::{Addressable, actor};
+use aether_component::ComponentHostCapability;
+use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult};
+use aether_kinds::{LoadComponent, LoadResult};
 use aether_substrate::BootError;
 use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
-use aether_test_fixtures_kinds::{Bump, TickObserved};
 
-const PROBE_EXPORT: &str = "test.probe";
 const CHILD_ONLY_EXPORT: &str = "test.matrix.child";
-const CALLER_EXPORT: &str = "test.parent_peer.caller";
-const TARGET_EXPORT: &str = "test.parent_peer.target";
 const PANEL_EXPORT: &str = "test.ui.panel";
-
-fn load(
-    harness: &mut SubstrateHarness,
-    wasm: &[u8],
-    label: &str,
-    parent: Option<&str>,
-    name: Option<&str>,
-    export: &str,
-) -> String {
-    match load_result(harness, wasm, label, parent, name, export) {
-        LoadResult::Ok { path, .. } => path.to_string(),
-        LoadResult::Err { error } => panic!("load {export} beneath {parent:?} failed: {error}"),
-    }
-}
 
 fn load_result(
     harness: &mut SubstrateHarness,
     wasm: &[u8],
     label: &str,
-    parent: Option<&str>,
     name: Option<&str>,
     export: &str,
 ) -> LoadResult {
@@ -60,109 +39,34 @@ fn load_result(
         export: Some(export.to_owned()),
     };
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let operation = match parent {
-        Some(parent) => HarnessOp::load_component_under(&host, parent, component),
-        None => HarnessOp::send_and_await_reply(&host, &component),
-    };
-    let result = harness.execute(vec![(label, operation)]).expect("component load operation");
+    let result =
+        harness.execute(vec![(label, HarnessOp::send_and_await_reply(&host, &component))]).expect("component load");
 
     result.reply::<LoadResult>(label).expect("decode LoadResult")
 }
 
-/// The loaded trampoline keyed `name` beneath the trampoline `parent` — the
-/// placement a load beneath a component parent produces.
-fn nested_trampoline(
-    harness: &SubstrateHarness,
-    parent: ActorRef<WasmTrampoline>,
-    name: &str,
-) -> ActorRef<WasmTrampoline> {
-    harness
-        .child::<WasmTrampoline, WasmTrampoline>(&parent, LoadName::new(name).expect("a valid load name"))
-        .unwrap_or_else(|error| panic!("the trampoline loaded as {name} is live: {error}"))
-}
-
-fn assert_child_identity(loaded: &str, parent: &str, subname: &str) {
-    let expected = format!("{parent}/{EMBEDDED_SCOPE}:{subname}");
-    assert_eq!(loaded, expected, "LoadResult must return the registry-canonical child path");
-}
-
+/// Catches a root load that ignores the selected type's lineage (the
+/// child-only type would load at the root) and a refusal that comes after
+/// staging (a route left behind would be listed).
 #[test]
-fn explicit_and_nested_parents_scope_live_peer_delivery() {
+fn a_root_load_of_a_child_only_type_is_refused_before_staging() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
 
-    let outer = load(&mut harness, &wasm, "outer", None, None, PROBE_EXPORT);
-    let outer_target = load(&mut harness, &wasm, "outer-target", Some(&outer), None, TARGET_EXPORT);
-    let outer_caller = load(&mut harness, &wasm, "outer-caller", Some(&outer), None, CALLER_EXPORT);
-    assert_child_identity(&outer_target, &outer, TARGET_EXPORT);
-    assert_child_identity(&outer_caller, &outer, CALLER_EXPORT);
-
-    let nested = load(&mut harness, &wasm, "nested", Some(&outer), None, PROBE_EXPORT);
-    assert_child_identity(&nested, &outer, PROBE_EXPORT);
-    let nested_target = load(&mut harness, &wasm, "nested-target", Some(&nested), None, TARGET_EXPORT);
-    let nested_caller = load(&mut harness, &wasm, "nested-caller", Some(&nested), None, CALLER_EXPORT);
-    assert_child_identity(&nested_target, &nested, TARGET_EXPORT);
-    assert_child_identity(&nested_caller, &nested, CALLER_EXPORT);
-
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let outer = harness
-        .child::<ComponentHostCapability, WasmTrampoline>(
-            &host,
-            LoadName::new(PROBE_EXPORT).expect("a valid load name"),
-        )
-        .expect("the outer trampoline is live");
-    let outer_caller = nested_trampoline(&harness, outer, CALLER_EXPORT);
-    let nested_caller = nested_trampoline(&harness, nested_trampoline(&harness, outer, PROBE_EXPORT), CALLER_EXPORT);
-
-    let baseline = harness.count_observed(TickObserved::NAME);
-    harness
-        .execute(vec![
-            ("outer-peer", HarnessOp::send_and_settle(outer_caller.erase(), &Bump)),
-            ("nested-peer", HarnessOp::send_and_settle(nested_caller.erase(), &Bump)),
-        ])
-        .expect("both parent-relative peer sends settle");
-    assert_eq!(
-        harness.count_observed(TickObserved::NAME) - baseline,
-        2,
-        "each caller must reach the target beneath its own runtime parent; observed kinds: {:?}",
-        harness.observed_kinds(),
-    );
-
-    let nested_target = ErasedActorPath::new(&nested_target).expect("the loaded target returned a canonical path");
-    let dropped = harness
-        .execute(vec![(
-            "drop-parent-placed",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &DropComponent { target: nested_target },
-            ),
-        )])
-        .expect("parent-placed drop settles");
-    assert!(matches!(dropped.reply::<DropResult>("drop-parent-placed"), Ok(DropResult::Ok)));
-}
-
-/// Catches a host load that ignores the selected type's lineage (the child-only
-/// type would load at the host) and a refusal that comes after staging (a route
-/// left behind under `stray` would make the second load `SubnameInUse`).
-#[test]
-fn a_host_load_of_a_child_only_type_is_refused_before_staging() {
-    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
-        return;
-    };
-    let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-
-    let LoadResult::Err { error } =
-        load_result(&mut harness, &wasm, "child-only", None, Some("stray"), CHILD_ONLY_EXPORT)
+    let LoadResult::Err { error } = load_result(&mut harness, &wasm, "child-only", Some("stray"), CHILD_ONLY_EXPORT)
     else {
-        panic!("a type declaring only child_of(..) must not load at the component host");
+        panic!("a type declaring only child_of(..) must not load at the root");
     };
     assert!(error.contains(CHILD_ONLY_EXPORT), "the refusal names the type: {error}");
+    let listed = harness.list_components().expect("list components");
+    assert!(!listed.contains(&format!("{CHILD_ONLY_EXPORT}:stray")), "the refused load left no route: {listed:?}");
 
-    load(&mut harness, &wasm, "root", None, Some("stray"), PANEL_EXPORT);
+    let LoadResult::Ok { .. } = load_result(&mut harness, &wasm, "root", Some("stray"), PANEL_EXPORT) else {
+        panic!("a root type loads at the root");
+    };
 }
 
 #[test]
@@ -174,7 +78,7 @@ fn unresolved_explicit_parent_is_a_clean_load_error() {
             "missing-parent",
             HarnessOp::load_component_under(
                 &host,
-                "aether.component/aether.embedded:missing",
+                "test.missing",
                 LoadComponent { wasm: Vec::new(), name: None, config: Vec::new(), export: None },
             ),
         )])

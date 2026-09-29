@@ -10,9 +10,11 @@
 //! BootError>`. What you `run()` is the [`BuiltChassis<Self>`] that `build`
 //! returns, not a value of `Self` (ADR-0035, ADR-0071).
 //!
-//! Each loaded wasm component runs as an
-//! `aether_component::trampoline::WasmTrampoline`, a native actor instanced
-//! under `aether.embedded:NAME` that delegates incoming mail to the guest. A
+//! Each loaded wasm component runs in an
+//! `aether_component::trampoline::WasmTrampoline`, a native actor that
+//! delegates incoming mail to the guest. The actor is named by the guest's
+//! own published namespace, `NS`, `NS:key` or `parent/NS:key` (ADR-0241 §5),
+//! never by the trampoline's. A
 //! trampoline trap fails fast at the trap site through
 //! `NativeBinding::fatal_abort`; there is no per-frame drain barrier.
 

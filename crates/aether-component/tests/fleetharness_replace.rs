@@ -6,8 +6,6 @@
 //! stays put.
 
 mod tests {
-    use aether_actor::Addressable;
-    use aether_component::WasmTrampoline;
     use aether_data::Kind;
     use aether_kinds::{ComponentCapabilities, LogTailResult, Ping, Tick};
     use aether_kit::camera::CameraCreate;
@@ -48,8 +46,7 @@ mod tests {
             "cube should not declare a CameraCreate handler: {:?}",
             loaded.capabilities.handlers,
         );
-        let expected = format!("aether.component/{}:test.cube", WasmTrampoline::NAMESPACE);
-        assert_eq!(loaded.addr, expected, "cube should load at its ADR-0099 lineage address");
+        assert_eq!(loaded.addr, "test.cube", "cube should load at its published name");
 
         let caps = harness.replace_export(engine, &loaded.addr, "aether_kit", "aether.kit.camera");
 

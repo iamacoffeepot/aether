@@ -78,9 +78,10 @@ fn no_new_parent_loses_its_hole() {
     );
 }
 
-/// The component host is the short path the harness surface leans on:
-/// `aether.component/:camera` is how an operator names a loaded component
-/// without spelling the full `aether.component/aether.embedded:camera` lineage.
+/// The component host keeps its one native hole, the trampoline it declares
+/// as its instanced child, until #6869 retires it. No guest is born there any
+/// more (ADR-0241 §5: a loaded component is named by its own namespace), so
+/// the hole names no loaded component; it still resolves unambiguously.
 ///
 /// Tripwire: asserted separately from the list above because the list's failure
 /// says "something changed" while this one says which working address broke.

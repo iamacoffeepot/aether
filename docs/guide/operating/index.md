@@ -117,7 +117,7 @@ same lineage address. Only terminating the substrate tombstones that slot.
 - Hand tagged ids such as `knd-…` and `hdl-…` back verbatim. Address an actor
   by its path; a mailbox id in output is for reading.
 - Address a loaded component by the full lineage `name` returned by the load,
-  normally `aether.component/aether.embedded:NAME`.
+  its published name: `NS`, or `NS:key` for an instanced type.
 - Prefer a content hash when a rollout or rollback must select exact bytes.
   A human-readable registry name is a movable pointer.
 

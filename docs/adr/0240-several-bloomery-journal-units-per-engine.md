@@ -74,21 +74,20 @@ files. Issue #6821 tracks the fix. This ADR does not use the verb.
 | Term | Meaning |
 |---|---|
 | **unit** | One log plus every actor whose state derives from that log. |
-| **unit key** | The `UnitKey` that names a unit, unique per engine: a `LoadName` of at most 191 bytes (D3, D4). |
+| **unit key** | The `UnitKey` that names a unit, unique per engine: a `LoadName` of one path segment (D3, D4). |
 | **unit root** | The unit's log owner, the root of the unit's lineage: `JournalActor` at `aether.bloomery.journal:<key>` (D1). |
 | **member** | An actor beneath a unit root: the driver. |
-| **bundle root** | A trampoline beneath the engine's one `aether.component` that hosts one bundle's generated root for one unit, loaded under the name `<key>-<digest>` (D4). |
-| **belongs to a unit** | A member belongs by lineage, beneath the unit root. A bundle root belongs by name, through the unit key its name is built from. |
+| **bundle root** | One bundle's generated root for one unit, a root guest born at `aether.bloomery.bundle.<module hash>:<key>` (D4). |
+| **belongs to a unit** | A member belongs by lineage, beneath the unit root. A bundle root belongs by name, through the unit key it is keyed by. |
 | **engine-shared** | Held once per engine and keyed by content hash, or holding no log state. |
 
 ```text
 aether.bloomery.journal:<key>                          unit root: the journal
 └── aether.bloomery.driver:driver                      member; relays its programs' runs to the workspace
 
-aether.component                                       engine-shared host
-├── aether.embedded:<key>-<digest>                     bundle root of unit <key> (one per digest the unit loads)
-│   └── aether.embedded:<seq>                          inline child per live invocation
-└── aether.embedded:<other-key>-<digest>               the same digest's bundle root for another unit
+aether.bloomery.bundle.<hash>:<key>                    bundle root of unit <key> (one per bundle the unit loads)
+└── aether.bloomery.bundle.invocation:<seq>            inline child per live invocation
+aether.bloomery.bundle.<hash>:<other-key>              the same bundle's root for another unit
 
 aether.bloomery.workspace                              engine-shared; no store: reads and writes each request's source
 
@@ -125,31 +124,31 @@ lives in one journal, and a journal is never split across units.**
   log, never by adding logs.
 
 **I-2. Every actor whose state derives from a log belongs to that log's
-unit: a member by lineage beneath the log's owner, a bundle root by a name
-built from the unit's key.**
+unit: a member by lineage beneath the log's owner, a bundle root by the
+unit's key.**
 
 - *Upheld by:* lineage for members and naming for bundle roots. The driver
   is `#[actor(instanced, child_of(JournalActor))]` and is born beneath its
   journal (D2). The workspace holds no unit's data and derives no state
   from any log (I-7): it reads and writes a request's artifacts only
-  through the request's source (D7). Every bundle root is loaded under the
-  name `UnitBundle::name(key, digest)`, the only constructor of that name,
-  from the unit key its driver was born with (D4). Unit keys are unique per
-  engine (D3), so two units' roots of one digest are two actors under two
-  names, and each name states the unit it folds for.
+  through the request's source (D7). Every bundle root is keyed by the unit
+  key its driver was born with, at `aether.bloomery.bundle.<module hash>:<key>`
+  (D4). Unit keys are unique per engine (D3), so two units' roots of one
+  bundle are two actors under two names, and each name states the unit it
+  folds for.
 - *Would be violated by:* one bundle root of a digest serving two units,
   the shape on `main`, where a root's name is its digest alone. Closed: the
   name carries the key, and a driver holds proofs only for the roots its
-  own loads returned. A name written by hand at a call site, or hashed
-  from the key and digest, would hide which unit a root belongs to. Closed
-  by review: the driver builds names only through `UnitBundle::name`. A
-  root loaded under a unit's name by some other loader (MCP
+  own loads returned. A name hashed from the key and digest would hide which
+  unit a root belongs to. Closed by review: the driver keys each root by its
+  unit key alone. A root loaded under a unit's key by some other loader (MCP
   `load_component`) makes that unit's own load fail on `SubnameInUse`; the
   driver never binds to it, because it keeps only its own load reply's
   sender, as it does on `main`.
 - *Implication:* one bundle root per (digest, unit); the compiled module is
   shared instead (D5). A unit's bundle roots are not a subtree, so
-  removing a unit means dropping its `<key>-*` roots (D9).
+  removing a unit means dropping its `aether.bloomery.bundle.*:<key>` roots
+  (D9).
 
 **I-3. A unit's log is totally ordered and local: every entry's position is
 its own journal's `seq`, and no entry is ordered against another unit's.**
@@ -227,8 +226,8 @@ state.**
   workspace keeps no store and no fold: its only state is the budget, the
   queue, and run-key estimates, which are executor-local and keyed by the
   digest of what a run does (ADR-0237 decision 9). The bundle
-  roots beneath `aether.component` do hold folds, and each belongs to one
-  unit by name (I-2); the host keeps only their load bookkeeping.
+  roots do hold folds, and each belongs to one unit by name (I-2); the
+  component host keeps only their load bookkeeping.
 - *Would be violated by:* an engine-wide actor that caches a view of one
   unit's log. Closed only by review: the chassis composes no such actor,
   and a new composed actor that reads a journal is a change to this ADR.
@@ -238,8 +237,8 @@ state.**
   and one compilation per engine.
 
 **I-8. A unit is named by its key, a member by its type beneath the unit,
-and a bundle root by its unit's key and its digest; no position crosses a
-boundary.**
+and a bundle root by its bundle's published name and its unit's key; no
+position crosses a boundary.**
 
 - *Upheld by:* D8 and D4. Config carries unit keys (`UnitKey`, validated on
   decode). The bootstrap writes each unit's paths from the actor types and
@@ -248,22 +247,20 @@ boundary.**
   `ActorPath::<C>::child(&journal, &C::key())`. It proves each through the guest verb
   `WasmCtx::resolve`, which mints `ActorRef<R>`; native code holds its
   proofs from spawn results. A
-  bundle root's name is `UnitBundle::name(key, digest)`, so anyone holding
-  the key and the digest derives it, and its canonical path
-  `aether.component/aether.embedded:<key>-<digest>` splits back into both
-  because the digest is last and fixed-width. `ActorRef` has no codec, and
-  no config, kind, or record carries a `MailboxId` (ADR-0230 §1).
+  bundle root's canonical path is `aether.bloomery.bundle.<module hash>:<key>`,
+  so anyone holding the bundle and the key derives it, and it splits back
+  into both at its one `:`. `ActorRef` has no codec, and no config, kind, or
+  record carries a `MailboxId` (ADR-0230 §1).
 - *Would be violated by:* a config slot holding the driver's path (the
   bootstrap today), a role or alias per unit, `send_to_named`, or a
   `MailboxId` in config. Closed: the bootstrap's config loses its path
   fields, `send_to_named` is deleted, and every path is written from a type
   and a key and carries no position. A bundle root name that cannot be split
-  back into key and digest. Closed: `UnitBundle::name` is the only
-  constructor, and `UnitKey` is short enough that the name always fits one
-  segment.
+  back into bundle and key. Closed: the published name and the key are
+  separate segments of the path, and a `UnitKey` is one load-name segment.
 - *Implication:* the journal and driver crates split identity from runtime
   (ADR-0122) so a guest can name their types and its sends are
-  kind-checked. A bundle root's path reads as its unit and digest in logs,
+  kind-checked. A bundle root's path reads as its bundle and unit in logs,
   traces, and MCP tools.
 
 ### D1. Unit topology (serves I-1, I-2, I-3, I-7, I-8)
@@ -272,7 +269,7 @@ boundary.**
 |---|---|---|
 | Journal (log, artifact files, read cache) | per unit | I-3 |
 | Driver (program queue, reactor following, fetch cache) | per unit | I-2, I-4 |
-| Bundle roots (program role and reactor role) | per (digest, unit), beneath `aether.component`, named `<key>-<digest>` | I-2 |
+| Bundle roots (program role and reactor role) | per (bundle, unit), root guests at `aether.bloomery.bundle.<module hash>:<key>` | I-2 |
 | Workspace (the host budget, one admission queue, run-key estimates; no store) | per engine | I-5, I-6, I-7 |
 | Component host, compiled modules by hash | per engine | I-7 |
 | Engine blob store (in-memory bytes by hash) | per engine | I-7 |
@@ -336,54 +333,38 @@ readiness wait before bind; it is rejected below.
 | Workspace knobs (`WorkspaceConfig`) | unchanged, the engine's | the one workspace (D7); no per-unit workspace knob exists |
 
 Lowering refuses boot, naming the key, for: an empty list, a key that is
-not a `LoadName`, a key longer than 191 bytes, a repeated key, or two
-entries whose roots are the same directory after canonicalization. The
-191-byte limit is what `UnitKey::new` checks: a bundle root's name is the
-key, a dash, and 64 hex characters, and one path segment holds at most 256
-bytes (`crates/aether-data/src/reference/segment.rs`), so a longer key would
-leave the unit unable to load any bundle. The root lock stays the guard
+not a `LoadName`, a repeated key, or two entries whose roots are the same
+directory after canonicalization. `UnitKey::new` checks the load-name
+grammar, one path segment of at most 256 bytes
+(`crates/aether-data/src/reference/segment.rs`): a bundle root is keyed by
+the unit key alone, so any key a unit can take can key its roots. The root lock stays the guard
 across processes. Each root is opened before wasmtime, as today, so a held
 root costs no boot.
 
-### D4. Bundle roots are named by unit key and digest (serves I-2, I-4, I-8)
+### D4. Bundle roots are named by bundle and unit key (serves I-2, I-4, I-8)
 
-Every bundle root stays a trampoline beneath the one engine-level
-`aether.component`, as on `main`. Its load name is a readable fold of the
-unit key and the bundle digest:
+Every bundle is content-addressed (ADR-0241 §3), so its root publishes as
+`aether.bloomery.bundle.<module hash>`, and every built bundle is its own
+publication. The driver keys each root it loads by its unit, so the root is
+born at `aether.bloomery.bundle.<module hash>:<key>` (ADR-0241 §5): the
+published name says which bundle it runs, and the key which unit it folds for.
 
 ```rust
-/// A `LoadName` of at most 191 bytes: the key of one unit (ADR-0240).
+/// A `LoadName` of one path segment: the key of one unit (ADR-0240).
 /// Fallible on construction and on decode.
 pub struct UnitKey(LoadName);
-
-/// The load name of a unit's bundle root.
-pub struct UnitBundle;
-
-impl UnitBundle {
-    /// `<key>-<digest>`, the digest as 64 lowercase hex characters.
-    ///
-    /// Every bundle root is a child of the one engine-level
-    /// `aether.component`, so this name is what keeps two units' roots of
-    /// one digest apart and what says, in a log, a trace, or an MCP path,
-    /// which unit a root folds for and which bundle it runs (ADR-0240 I-2,
-    /// I-8). The digest comes last at a fixed width, so the name splits back
-    /// into key and digest even when the key contains dashes; the key's
-    /// 191-byte limit keeps the whole name inside one 256-byte segment.
-    pub fn name(key: &UnitKey, digest: &Digest) -> LoadName;
-}
 ```
 
-Both live beside `Digest` in `aether-bloomery-kinds`, so the driver, the
-chassis, and external tooling build the same name from the same parts.
+It lives beside `Digest` in `aether-bloomery-kinds`, so the driver, the
+chassis, and external tooling key roots from the same value.
 
-- `UnitBundle::name` is the only way a bundle root's name is built. It is
-  never written by hand at a call site, and never hashed (a
-  `sha256(key || digest)` name would hide both parts and the reason the
-  name exists).
+- A bundle root's key is its unit key, never a name built or hashed from the
+  key and the digest (a `sha256(key || digest)` name would hide both parts
+  and the reason the name exists); the bundle part is the published name.
 - The driver is born with its unit's key (`DriverParams.unit`, D2) and
-  loads each bundle with `LoadComponent { name:
-  Some(UnitBundle::name(&unit, &digest)), export: Some(BUNDLE_NAMESPACE) }`
-  sent to `aether.component`. `LoadComponent` is unchanged.
+  loads each bundle with `LoadComponent { name: Some(unit), export:
+  Some(BUNDLE_NAMESPACE) }` sent to `aether.component`. `LoadComponent` is
+  unchanged.
 - The driver keeps each load reply's stamped sender in
   `roots: HashMap<Digest, ErasedActorRef>`, as it does on `main`. The erased
   form stays only as the key-side proof: the driver types each root before it
@@ -397,18 +378,12 @@ This amends ADR-0226:
   unit; `Invoke.seq` is unique within one journal, which is now one
   driver's.
 - **Decision 2.** "Roots are named by digest" becomes "roots are named by
-  (unit key, digest)": a root's name is `UnitBundle::name(key, digest)`,
-  whose digest part is the same lowercase-hex `artifact_digest` ADR-0226
-  uses. Roots are still never dropped by the driver, and the name is unique
-  beneath `aether.component` because unit keys are unique per engine.
+  (bundle, unit key)": a root's name is its bundle's published name keyed by
+  the unit key. Roots are still never dropped by the driver, and the name is
+  unique because unit keys are unique per engine.
 
-The root's code publishes as `aether.bloomery.bundle.<module hash>`
-(ADR-0241 §3): every bundle is content-addressed, so every built bundle is its
-own publication, and two units on one bundle share that publication. A unit
-moving to a new bundle spawns the new root and closes its old one. The load
-name stays `UnitBundle::name(key, digest)` until ADR-0241 step 3 spawns the
-root as `aether.bloomery.bundle.<module hash>:<key>`, when `UnitBundle::name`
-retires and a unit key may take a whole 256-byte segment.
+Two units on one bundle share its publication and its compiled module. A unit
+moving to a new bundle spawns the new root and closes its old one.
 
 ### D5. Shared code, per-unit instances (serves I-2, I-4, I-7)
 
@@ -584,17 +559,17 @@ The daemon's image store stays shared by every unit; it is a rebuildable
 derivative labelled by environment digest (ADR-0237 decision 8), so two
 units importing one environment converge on one image.
 
-### D8. Addressing: units by key, members by type, bundle roots by key and digest (serves I-8)
+### D8. Addressing: units by key, members by type, bundle roots by bundle and key (serves I-8)
 
 | Piece | Change |
 |---|---|
 | Unit paths | written from the actor types and the unit key with ADR-0230 §2's `ActorPath<R>`: the journal is `ActorPath::<JournalActor>::instance(&key)` (`aether.bloomery.journal:<key>`), and a member is written beneath it, `ActorPath::<C>::child(&journal, &C::key())`; each constructor compiles only for the placement its bounds name (`Root + Instanced`, `ChildOf<JournalActor> + Instanced`). No registry lookup and no position: the text is each type's `NAMESPACE` and its key. `.narrow::<P>()` makes a `ProtocolPath<P>` where a holder needs only a protocol (D7). |
 | `WasmCtx::resolve` | ADR-0230 §3's verb over an `ActorPath<R>`, the guest arm: the path compiles to its position by the lineage fold, and one route-table lookup checks the canonical name and `Live`; it proves liveness only, compares no rows, and mints `ActorRef<R>`. The path's leaf namespace is `R::NAMESPACE` by construction: the bootstrap writes it with a type constructor, and an `ActorPath<R>`'s decode refuses any other leaf (ADR-0230 §2, #6857). The guest crosses one host import. It takes the name ADR-0230 reserved. |
 | `UnitMember` | a trait in the journal identity half: `ChildOf<JournalActor> + Instanced` with a fixed key, `C::key()` (`driver`). A member's path is its unit's path plus `ActorPath::<C>::child(&journal, &C::key())`. The fixed key stands in for a one-per-parent child placement that the actor model does not have yet (ADR-0166 defers a keyless native-child resolver); #6822 designs that placement, and `UnitMember` is deleted when it lands. |
-| `UnitKey`, `UnitBundle::name` | in `aether-bloomery-kinds` beside `Digest` (D4). The driver's only way to name a bundle root. |
+| `UnitKey` | in `aether-bloomery-kinds` beside `Digest` (D4). The key the driver gives every bundle root it loads. |
 | `aether-bloomery-journal`, `aether-bloomery-driver` | split per ADR-0122: an always-on, `no_std` identity (the marker, its handled kinds and contract rows, `UnitMember`) and a `runtime` feature carrying the actor, `aether-substrate`, and `rusqlite`. |
 | Bootstrap config | `journal` and `driver` paths are replaced by `units: Vec<UnitKey>`. At `wire` it writes each unit's `ActorPath<JournalActor>` and `ActorPath<BundleDriver>` from the types and the key and resolves each with `WasmCtx::resolve` to an `ActorRef`; every send is `send_to(ActorRef<R>, &K)`, kind-checked. That includes `aether.bloomery.driver.call`, which the driver answers from a manual handler (`on_call`, `crates/aether-bloomery-driver/src/actor/mod.rs`); a protocol-typed path could not carry it, which is why the bootstrap names the driver by actor type (ADR-0231 §3). Its journal sends, `ReadHead`, `Publish`, and `ReadArtifact`, land on single handlers (`crates/aether-bloomery-journal/src/actor.rs`). Its `Import`s name the unit's journal as `source`, `ActorPath::<JournalActor>::instance(&key).narrow::<ArtifactStorage>()` (D7). |
-| External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. An operator's `Import` names the unit's journal as its `source` (D7). A unit's bundle root is `aether.component/aether.embedded:<key>-<digest>`, or its short path `aether.component/:<key>-<digest>`; from ADR-0241 step 3 it is `aether.bloomery.bundle.<module hash>:<key>`. |
+| External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. An operator's `Import` names the unit's journal as its `source` (D7). A unit's bundle root is `aether.bloomery.bundle.<module hash>:<key>`. |
 
 `resolve` is one verb, and each arm lands with a named production consumer:
 the guest arm over an `ActorPath<R>` serves the bootstrap, and the native
@@ -629,12 +604,12 @@ the per-unit component host.
 
 | Rule | How this ADR complies |
 |---|---|
-| Addressing by type markers only; no roles, aliases, config slots; no `send_to_named`; ADR-0166 is the only grammar | Units by key, members by type (`UnitMember`), bundle roots by a name built from key and digest; no path fields in config; external text is canonical ADR-0166 paths; no new grammar. `key=root` entries follow `--http-secrets`. The workspace is reached by type and keys nothing by unit: its storage is the request's typed `source`, re-proven on receipt (D7). |
-| No public `MailboxId` surface increase; stored state holds proofs; no serialized `MailboxId` | Every path is written from a type and a key and carries no position, and no config, kind, or record gains a `MailboxId` (ADR-0230 §1); `UnitBundle::name` returns a `LoadName`; the driver stores `ActorRef` / `ErasedActorRef`, and the workspace holds each request's source as a `ProtocolRef<ArtifactStorage>` resolved on receipt. `LoadComponent` is unchanged. The program role's existing `Live.child: MailboxId` is untouched. |
-| Representations valid by construction | `UnitKey` is fallible on construction and decode and enforces the 191-byte limit that keeps `UnitBundle::name` infallible. |
+| Addressing by type markers only; no roles, aliases, config slots; no `send_to_named`; ADR-0166 is the only grammar | Units by key, members by type (`UnitMember`), bundle roots by their bundle's published name and the unit key; no path fields in config; external text is canonical ADR-0166 paths; no new grammar. `key=root` entries follow `--http-secrets`. The workspace is reached by type and keys nothing by unit: its storage is the request's typed `source`, re-proven on receipt (D7). |
+| No public `MailboxId` surface increase; stored state holds proofs; no serialized `MailboxId` | Every path is written from a type and a key and carries no position, and no config, kind, or record gains a `MailboxId` (ADR-0230 §1); a bundle root's key is the unit's `UnitKey`; the driver stores `ActorRef` / `ErasedActorRef`, and the workspace holds each request's source as a `ProtocolRef<ArtifactStorage>` resolved on receipt. `LoadComponent` is unchanged. The program role's existing `Live.child: MailboxId` is untouched. |
+| Representations valid by construction | `UnitKey` is fallible on construction and decode and holds one load-name segment, so every unit key can key a bundle root. |
 | Unexportable invariants stay unexported | Config carries `UnitKey`s; `ActorRef` crosses nothing. A request carries its source as a `ProtocolPath`, an `ErasedActorPath` on the wire, and the workspace proves it again on receipt. |
 | Static contract checks | A storage source is written from the journal's type and key and narrowed to `ArtifactStorage`, which compiles only if the journal covers it; the source the workspace receives is proven by its contextual decode against the engine's published rows, and its `resolve` on receipt proves liveness only (D7, ADR-0231 §3). The bootstrap writes its paths with type constructors whose bounds check placement. `child_of(JournalActor)` places the driver; identity halves make bootstrap sends kind-checked. No runtime token or injection. |
-| One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `UnitBundle::name`: the driver. `UnitKey::new`: D3's lowering. `resolve`: the bootstrap for the guest arm over `ActorPath<R>`, the workspace for the native arm over `ProtocolPath<P>` (D7, D8); the other arms wait for a caller. `ActorPath::instance` and `narrow`: the driver and the bootstrap; `ActorPath::child` and `UnitMember`: the bootstrap. `Stage`: the workspace's source-backed sink, answered by the journal owner. `ArtifactStorage`: `Run.source` and `Import.source`. |
+| One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `UnitKey` as a bundle root's key: the driver. `UnitKey::new`: D3's lowering. `resolve`: the bootstrap for the guest arm over `ActorPath<R>`, the workspace for the native arm over `ProtocolPath<P>` (D7, D8); the other arms wait for a caller. `ActorPath::instance` and `narrow`: the driver and the bootstrap; `ActorPath::child` and `UnitMember`: the bootstrap. `Stage`: the workspace's source-backed sink, answered by the journal owner. `ArtifactStorage`: `Run.source` and `Import.source`. |
 | Pending replies never dropped | D6's hops park and answer once; nothing evicts. Each storage request is answered once, and a request whose source does not resolve is answered at receipt, never queued. |
 | Fewer events, simpler architecture | No new actor, event, or record kind; one new mail kind pair (`Stage`). The workspace sheds its store, and isolation between units is the source each driver sets, with no table. The dedicated unit root is rejected for having no behaviour, and bundle roots keep the host they have. |
 | No recursion on unbounded data | Mount iterates the unit list; relays are single hops. |

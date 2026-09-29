@@ -353,7 +353,7 @@ pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 // ADR-0119: `#[derive(Singleton)]` / `#[derive(Instanced)]` /
 // `#[derive(Embeddable)]` are retired. Cardinality is now the
-// `Addressable::Resolver` (`One` / `Many` / `Embedded` / `EmbeddedMany`); the
+// `Addressable::Resolver` (`One` / `Many`); the
 // `Singleton` / `Instanced` markers derive from it by blanket impl, so a
 // hand-emitted marker would conflict. `#[actor]` emits the resolver from its
 // `singleton` / `instanced` arg; a hand-written actor sets `type Resolver`

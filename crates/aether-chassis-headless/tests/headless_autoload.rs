@@ -109,8 +109,7 @@ mod tests {
         // `build` returns only once every boot component has answered its
         // load, so the probe resolves at once, with no wait.
         let built = HeadlessChassis::build(headless_env(sandbox, autoload)).expect("build headless chassis");
-        let address = ErasedActorPath::new("aether.component/aether.embedded:test.quiet_probe")
-            .expect("a well-formed actor path");
+        let address = ErasedActorPath::new("test.quiet_probe").expect("a well-formed actor path");
         let resolved = built.resolve_address(&address);
         assert!(resolved.is_ok(), "boot component {address} is not live when build returns: {resolved:?}");
     }

@@ -116,7 +116,8 @@ On a single load, record both outputs:
   kind for the selected actor type.
 
 Never reconstruct the lineage from a short load name. Use the returned value,
-normally `aether.component/aether.embedded:NAME`.
+the component's published name: `NS` for a singleton, `NS:key` for an
+instanced type.
 
 ### Configuration
 
@@ -188,8 +189,8 @@ engine reachability matters.
 
 Use `replace_component` with the current engine id, the component's `address`,
 and a previously uploaded selector. The address is the same spelling every other
-tool takes: a canonical ADR-0099 lineage or an unambiguous ADR-0166 short path
-(`aether.component/:NAME`). Prefer a content hash for the selector so the
+tool takes: a canonical ADR-0099 lineage (the component's published name) or an
+unambiguous ADR-0166 short path. Prefer a content hash for the selector so the
 replacement is unambiguous.
 
 On success the trampoline mailbox stays stable and the returned capabilities

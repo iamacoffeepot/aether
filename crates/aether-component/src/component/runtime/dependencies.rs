@@ -10,14 +10,15 @@
 //! inline-spawnable types and every private inline child (issue 6590), read
 //! from the module's `aether.kinds.inputs.private` section.
 //!
-//! Every site asks one read, the ctx's `missing_dependency` under an explicit
-//! placement (or `missing_child_dependency` for a child of the host itself),
-//! whose fold-and-liveness core is the registry's own for both transports.
+//! Every site asks one read, the ctx's `missing_dependency`, whose
+//! fold-and-liveness core is the registry's own for both transports. Every
+//! declarable dependency is a root singleton (ADR-0241 §5), so the read takes
+//! no placement.
 
 use std::collections::HashSet;
 
 use aether_actor::ReplyMode;
-use aether_data::{ActorLineageRecord, ErasedActorPath};
+use aether_data::ActorLineageRecord;
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::wasm::kind_manifest::{ActorInputs, Dependency};
 use aether_substrate::actor::wasm::module::ModuleManifest;
@@ -33,25 +34,13 @@ pub(super) fn dependency_refusal(actor: &str, namespace: &str) -> String {
 /// dependency with no `Live` route, or `None` when the replacement may
 /// proceed. The caller is the trampoline, which passes its own canonical
 /// name and the dependencies of the type the replacement will host: the
-/// named export, or its current hosted type for a bare replace. The parent
-/// is the replaced actor's own, derived from `canonical`.
+/// named export, or its current hosted type for a bare replace.
 pub fn replacement_refusal<A, M: ReplyMode>(
     ctx: &NativeCtx<'_, A, M>,
     canonical: &str,
     dependencies: &[Dependency],
 ) -> Option<String> {
-    // The parent path is the canonical path minus its leaf (`/` is
-    // structural — a subname cannot contain it), proven like any other
-    // address. A parent whose route is not `Live` — a dead parent fails
-    // here even though the child outlives it, and a `Starting` one is not
-    // yet provable — or a root-placed actor with no parent path, cannot
-    // prove an embedded peer live, so it passes no parent and refuses
-    // closed.
-    let parent = canonical
-        .rsplit_once('/')
-        .and_then(|(path, _)| ErasedActorPath::new(path).ok())
-        .and_then(|path| ctx.resolve_path(&path).ok());
-    ctx.missing_dependency(parent, dependencies).map(|namespace| dependency_refusal(canonical, namespace))
+    ctx.missing_dependency(dependencies).map(|namespace| dependency_refusal(canonical, namespace))
 }
 
 /// The module's inline-spawnable exported groups, in declaration order, each
@@ -98,11 +87,8 @@ fn inline_spawnable<'a>(
 /// with the same wording as the other sites. A private group needs no
 /// lineage filter: every private type is an inline child.
 ///
-/// The check passes no parent, so a `One` entry folds from the root exactly
-/// as for a component load, and an `Embedded` entry refuses closed: an
-/// inline child's embedded peer folds beneath the child's own spawner,
-/// which does not exist while its module loads, so nothing here can prove
-/// it live.
+/// Every entry is a root singleton, so it folds from the root exactly as
+/// for a component load.
 pub(super) fn inline_dependency_refusal<A, M: ReplyMode>(
     ctx: &NativeCtx<'_, A, M>,
     manifest: &ModuleManifest,
@@ -112,7 +98,7 @@ pub(super) fn inline_dependency_refusal<A, M: ReplyMode>(
     inline_spawnable(manifest.actors(), private, manifest.lineage(), manifest.namespace())
         .chain(private_groups)
         .find_map(|(namespace, group)| {
-            ctx.missing_dependency(None, &group.dependencies).map(|missing| dependency_refusal(namespace, missing))
+            ctx.missing_dependency(&group.dependencies).map(|missing| dependency_refusal(namespace, missing))
         })
 }
 

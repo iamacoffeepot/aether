@@ -11,12 +11,12 @@
 
 use std::fs;
 
-use aether_actor::ActorRef;
-use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{ErasedActorPath, LoadName};
+use aether_actor::ErasedActorRef;
+use aether_component::ComponentHostCapability;
+use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_kinds::Bump;
 
 const BASE_EXPORT: &str = "test.contract.base";
@@ -32,6 +32,8 @@ struct Fixture {
     harness: SubstrateHarness,
     wasm: Vec<u8>,
     victim: ErasedActorPath,
+    /// The victim's reference, the load reply's stamped sender.
+    victim_ref: ErasedActorRef,
 }
 
 impl Fixture {
@@ -42,14 +44,10 @@ impl Fixture {
 
         let load =
             LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: Some(BASE_EXPORT.to_owned()) };
-        let operation = HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), &load);
-        let result = harness.execute(vec![("load", operation)]).expect("component load operation");
-        let victim = match result.reply::<LoadResult>("load").expect("decode LoadResult") {
-            LoadResult::Ok { path, .. } => path,
-            LoadResult::Err { error } => panic!("the base must load: {error}"),
-        };
+        let (victim_ref, victim) =
+            harness.load_any(&load).unwrap_or_else(|error| panic!("the base must load: {error}"));
 
-        Some(Self { harness, wasm, victim })
+        Some(Self { harness, wasm, victim, victim_ref })
     }
 
     fn replace(&mut self, label: &str, export: &str) -> ReplaceResult {
@@ -69,14 +67,8 @@ impl Fixture {
         format!("{} replacement changes its contract for {kind}", self.victim)
     }
 
-    fn trampoline(&self) -> ActorRef<WasmTrampoline> {
-        let host = self.harness.actor_ref::<ComponentHostCapability>();
-        self.harness
-            .child::<ComponentHostCapability, WasmTrampoline>(
-                &host,
-                LoadName::new(BASE_EXPORT).expect("a valid load name"),
-            )
-            .expect("the victim is live")
+    fn trampoline(&self) -> ErasedActorRef {
+        self.victim_ref
     }
 }
 
@@ -93,10 +85,7 @@ fn a_replace_that_drops_a_row_is_refused_and_the_old_module_keeps_serving() {
 
     let victim = fixture.trampoline();
     let baseline = fixture.harness.count_observed(TICK_OBSERVED);
-    fixture
-        .harness
-        .execute(vec![("bump", HarnessOp::send_and_settle(victim.erase(), &Bump))])
-        .expect("bump the victim");
+    fixture.harness.execute(vec![("bump", HarnessOp::send_and_settle(victim, &Bump))]).expect("bump the victim");
     assert_eq!(fixture.harness.count_observed(TICK_OBSERVED), baseline + 1, "the old module must still serve");
 }
 
@@ -172,9 +161,6 @@ fn an_added_fallback_is_accepted_and_a_replace_that_drops_it_is_refused() {
 
     let victim = fixture.trampoline();
     let baseline = fixture.harness.count_observed(TICK_OBSERVED);
-    fixture
-        .harness
-        .execute(vec![("bump", HarnessOp::send_and_settle(victim.erase(), &Bump))])
-        .expect("bump the victim");
+    fixture.harness.execute(vec![("bump", HarnessOp::send_and_settle(victim, &Bump))]).expect("bump the victim");
     assert_eq!(fixture.harness.count_observed(TICK_OBSERVED), baseline + 1, "the fallback guest must still serve");
 }

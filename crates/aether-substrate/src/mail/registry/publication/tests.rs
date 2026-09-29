@@ -11,10 +11,11 @@ use std::iter;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_actor::{Addressable, One};
 use aether_data::name_inventory::{NameEntry, NativeTypeEntry, ParamKind, TemplateEntry, inventory};
 use aether_data::{
     Blob, BlobHash, CONTENT_ADDRESSED_SECTION, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, MAILBOX_DOMAIN,
-    ReplyContract, THREAD_DOMAIN, wire,
+    MailboxCategory, ReplyContract, THREAD_DOMAIN, wire,
 };
 use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 use wasmtime::Engine;
@@ -27,7 +28,9 @@ use crate::mail::KindId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, RegistryApplied, RegistryBatch, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::owner::RegistryOwnerLease;
-use crate::mail::registry::{ContractBreak, Registry, RouteContract, canonical_mailbox_id};
+use crate::mail::registry::{
+    AdoptRefused, ContractBreak, Registry, RouteContract, canonical_mailbox_id, lineage_mailbox_id, noop_handler,
+};
 use crate::scheduler::WakeSink;
 use crate::store::BlobStore;
 use crate::testing::boot_authority as auth;
@@ -384,4 +387,65 @@ fn every_content_addressed_build_is_its_own_publication() {
     fixture.publish(&first).expect("a second unit on the same build shares its publication");
     fixture.publish(&second).expect("a build that drops a row is not the first build's successor");
     fixture.publish(&fixture.module(&[(BUNDLE, &[KEPT])])).expect("no build publishes the bare declared namespace");
+}
+
+/// The guest a load adopts: its namespace is published by a module.
+struct Guest;
+
+impl Addressable for Guest {
+    const NAMESPACE: &'static str = "test.publication.guest";
+    type Resolver = One;
+}
+
+impl Fixture {
+    /// Register a live route at `name`'s lineage position.
+    fn register(&self, name: &str) {
+        self.registry
+            .try_register_inbox_with_id(&auth(), lineage_mailbox_id(name), name, noop_handler())
+            .expect("register the route");
+    }
+
+    fn category(&self, name: &str) -> Option<MailboxCategory> {
+        let descriptors = self.registry.list_mailbox_descriptors();
+        descriptors.iter().find(|descriptor| descriptor.name == name).expect("the route is listed").category
+    }
+}
+
+// Catches: a guest categorised by its name's spelling rather than the
+// publication table, so a guest named by its own namespace is lost from
+// `ListComponents`, or a route no module implements is listed as one
+// (ADR-0241 §3).
+#[test]
+fn a_route_is_a_guest_where_a_published_module_holds_its_leaf_namespace() {
+    let fixture = Fixture::new();
+    fixture.publish(&fixture.module(&[(Guest::NAMESPACE, &[KEPT])])).expect("publish the guest's module");
+
+    let guests = [Guest::NAMESPACE, "test.publication.guest:k", "test.publication.host/test.publication.guest:k"];
+    for name in guests.into_iter().chain(["test.publication.unpublished"]) {
+        fixture.register(name);
+    }
+
+    for name in guests {
+        assert_eq!(fixture.category(name), Some(MailboxCategory::Trampoline), "{name}");
+    }
+    assert_eq!(fixture.category("test.publication.unpublished"), None);
+}
+
+// Catches: a typed adoption over an arbitrary live actor, which would hand an
+// embedder an `ActorRef<R>` for something that never loaded as `R`; the
+// refusal keeps `adopt_load` a load door rather than a generic mint.
+#[test]
+fn loaded_adopts_only_a_published_guest() {
+    let fixture = Fixture::new();
+    fixture.publish(&fixture.module(&[(Guest::NAMESPACE, &[KEPT])])).expect("publish the guest's module");
+    fixture.register(Guest::NAMESPACE);
+    fixture.register("test.publication.not_a_guest");
+
+    let resolve = |name: &str| fixture.registry.resolve_live(lineage_mailbox_id(name)).expect("the route is live");
+
+    assert!(fixture.registry.loaded::<Guest>(resolve(Guest::NAMESPACE)).is_ok());
+    assert_eq!(
+        fixture.registry.loaded::<Guest>(resolve("test.publication.not_a_guest")),
+        Err(AdoptRefused::NotComponent)
+    );
 }

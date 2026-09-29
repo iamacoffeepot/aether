@@ -84,13 +84,16 @@ const TEXTURE_RED: [u8; 3] = [255, 0, 0];
 const TEXTURE_GREEN: [u8; 3] = [0, 255, 0];
 const TEXTURE_BLUE: [u8; 3] = [0, 0, 255];
 const TEXTURE_YELLOW: [u8; 3] = [255, 255, 0];
+/// The flat `Widget` root's export.
+const WIDGET_EXPORT: &str = "aether.widget";
+/// The `WidgetPanel` root's export.
+const PANEL_EXPORT: &str = "aether.widget.panel";
 
-/// The full trampoline address a loaded component registers at (ADR-0099
-/// §4) — `aether.component` `/`-joined to the trampoline node named
-/// `panel`, matching what `LoadResult.path` reports.
-fn panel_address() -> String {
-    use aether_actor::Addressable;
-    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
+/// The address a root loaded from `export` under the key `panel` registers
+/// at: the export's own namespace and the key (ADR-0241 §5), matching what
+/// `LoadResult.path` reports.
+fn panel_address(export: &str) -> String {
+    format!("{export}:panel")
 }
 
 /// A flat-colored rectangle draw item in the widget's own local
@@ -190,14 +193,14 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &WidgetConfig
                     wasm: wasm.to_vec(),
                     name: Some("panel".to_owned()),
                     config: config.encode_into_bytes(),
-                    export: Some("aether.widget".to_owned()),
+                    export: Some(WIDGET_EXPORT.to_owned()),
                 },
             ),
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { path: name, .. } => {
-            assert!(name.to_string().ends_with(":panel"), "the Widget root should register under :panel; got {name}");
+            assert_eq!(name.to_string(), panel_address(WIDGET_EXPORT), "the Widget root registers at its own name");
         }
         LoadResult::Err { error } => panic!("load Widget root: {error}"),
     }
@@ -224,13 +227,13 @@ fn load_scroll_panel(harness: &mut SubstrateHarness, wasm: &[u8], child: WidgetC
                     wasm: wasm.to_vec(),
                     name: Some("panel".to_owned()),
                     config: config.encode_into_bytes(),
-                    export: Some("aether.widget.panel".to_owned()),
+                    export: Some(PANEL_EXPORT.to_owned()),
                 },
             ),
         )])
         .expect("load scroll panel sequence");
     match loaded.reply::<LoadResult>("load").expect("decode scroll-panel LoadResult") {
-        LoadResult::Ok { path: name, .. } => assert!(name.to_string().ends_with(":panel")),
+        LoadResult::Ok { path: name, .. } => assert_eq!(name.to_string(), panel_address(PANEL_EXPORT)),
         LoadResult::Err { error } => panic!("load scroll WidgetPanel: {error}"),
     }
 }
@@ -239,8 +242,8 @@ fn load_scroll_panel(harness: &mut SubstrateHarness, wasm: &[u8], child: WidgetC
 /// its `on_tick` runs exactly once during the captured frame — the same
 /// way the probe scenarios synthesize `aether.lifecycle.tick` to drive a
 /// draw right before readback.
-fn tick_to_root() -> NamedMail {
-    envelope(&panel_address(), &Tick::default())
+fn tick_to_root(export: &str) -> NamedMail {
+    envelope(&panel_address(export), &Tick::default())
 }
 
 /// The RGB of the captured pixel at `(x, y)`. The frame is 8-bit RGBA,
@@ -294,7 +297,7 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
     load_panel(&mut harness, &wasm, &config);
 
     let captured = harness
-        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], vec![]))])
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root(WIDGET_EXPORT)], vec![]))])
         .expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
@@ -388,7 +391,7 @@ fn nested_tree_draws_in_depth_first_order() {
     load_panel(&mut harness, &wasm, &config);
 
     let captured = harness
-        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], vec![]))])
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root(WIDGET_EXPORT)], vec![]))])
         .expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
@@ -467,7 +470,7 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
     let mut harness = bench(64, 48);
     load_panel(&mut harness, &wasm, &config);
     let captured = harness
-        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], vec![]))])
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root(WIDGET_EXPORT)], vec![]))])
         .expect("capture clipped tree");
     let img = decode_png(captured.captured("snap").expect("snap bytes")).expect("decode clipped capture");
 
@@ -584,7 +587,7 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
     load_panel(&mut harness, &wasm, &config);
 
     let captured = harness
-        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], vec![]))])
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root(WIDGET_EXPORT)], vec![]))])
         .expect("capture textured widget tree");
     let img = decode_png(captured.captured("snap").expect("snap bytes")).expect("decode textured capture");
 
@@ -727,7 +730,7 @@ fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge
     let mut harness = bench(80, 48);
     load_scroll_panel(&mut harness, &wasm, scroll);
     let captured = harness
-        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], Vec::new()))])
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root(PANEL_EXPORT)], Vec::new()))])
         .expect("capture scrolled composite");
     let image = decode_png(captured.captured("snap").expect("scroll capture bytes")).expect("decode scroll capture");
 

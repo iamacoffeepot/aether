@@ -93,10 +93,8 @@ const _: () = assert!(EVENTS_PAGE == MAX_READ_EVENTS);
 /// through both references, never by resolving a name.
 pub struct DriverParams {
     /// The key of the unit this driver folds for. Every bundle root it loads
-    /// is named [`UnitBundle::name`] of this key and the bundle's digest
-    /// (ADR-0240 D4).
-    ///
-    /// [`UnitBundle::name`]: aether_bloomery_kinds::UnitBundle::name
+    /// is keyed by it, at `aether.bloomery.bundle.<hash>:<unit key>`: the
+    /// bundle's content-addressed published name and this key (ADR-0240 D4).
     pub unit: UnitKey,
     /// The journal owner's proven reference, handed over at spawn.
     pub journal: ActorRef<JournalActor>,
