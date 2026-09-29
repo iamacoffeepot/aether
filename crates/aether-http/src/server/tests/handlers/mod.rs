@@ -5,8 +5,9 @@
 //! request-timeout `504` path), two
 //! response-streaming handlers (ADR-0128) — a well-behaved one that
 //! paces chunks against credit, and a flooder that ignores credit —
-//! plus the routed handlers. Most route handlers author their routes
-//! through the typed `#[http::router]` / `#[http::route]` surface
+//! plus the routed handlers and one that answers `Stream` or `WebSocket`
+//! without covering the data phase that follows. Most route handlers author
+//! their routes through the typed `#[http::router]` / `#[http::route]` surface
 //! (ADR-0131) — the macro emits the router's one request handler and
 //! injects its `register_route_self` registration — so the tests exercise what a
 //! component author writes. The conflict-`Err` and idempotent
@@ -29,6 +30,7 @@ mod basic;
 mod routed;
 mod shared;
 mod streaming;
+mod uncovered;
 
 // `EchoHttpHandler` is also the `HttpRouter`-covering fixture the runtime's
 // own unit tests narrow a handler path from, so the basic fixtures reach the
@@ -44,6 +46,7 @@ pub(super) use streaming::{
     FloodHttpHandler, STREAM_CHUNK_COUNT, StreamHttpHandler, StreamIdEchoHandler, StreamingUploadHandler,
     stream_chunk_body,
 };
+pub(super) use uncovered::UncoveredStreamRouter;
 
 /// Two proven route holders, each an `HttpRouter` covered by a live
 /// handler, beside the chassis that keeps them live: the route table's unit

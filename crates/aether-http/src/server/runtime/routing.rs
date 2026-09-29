@@ -40,7 +40,35 @@ pub struct Route {
     pub shared: bool,
     /// The target set, in registration order. Never empty — the last
     /// member's unregistration drops the whole route.
-    pub members: Vec<ProtocolRef<HttpRouter>>,
+    pub members: Vec<RouteMember>,
+}
+
+/// One route holder with the casts the server sends its data phase through
+/// (ADR-0231 §4). `router` is the proof every holder carries; the other three
+/// are the holder cast to each data-phase protocol when it registered, `None`
+/// where its rows do not cover that protocol. A route's published contract
+/// only grows (ADR-0231 §5), so a cast that held at registration holds for the
+/// route's life, and no request reads the registry to decide how to stream.
+/// The member's identity is `router`'s erased reference.
+#[derive(Clone, Copy)]
+pub struct RouteMember {
+    pub router: ProtocolRef<HttpRouter>,
+    /// Present when the holder takes response-stream and websocket credit.
+    pub credit: Option<ProtocolRef<StreamCreditRouter>>,
+    /// Present when the holder takes a streamed upload; the reader streams a
+    /// request body to it rather than buffering.
+    pub request_stream: Option<ProtocolRef<RequestStreamRouter>>,
+    /// Present when the holder takes an upgraded websocket's messages.
+    pub websocket: Option<ProtocolRef<WebSocketRouter>>,
+}
+
+impl RouteMember {
+    /// Cast `router` to each data-phase protocol, three registry reads paid
+    /// once per registration.
+    pub fn cast<A, M: ReplyMode>(ctx: &NativeCtx<'_, A, M>, router: ProtocolRef<HttpRouter>) -> Self {
+        let identity = router.erase();
+        Self { router, credit: ctx.cast(identity), request_stream: ctx.cast(identity), websocket: ctx.cast(identity) }
+    }
 }
 
 /// The winning route for `(path, method)` (ADR-0130): the longest
@@ -87,7 +115,9 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
 /// after `replace_component` re-registers cleanly (its reference is
 /// stable). Shared (`shared: true`): joins the key's member set when the
 /// set is shared; re-registering an existing membership is an idempotent
-/// `Ok`. Mixing exclusive and shared on one key is a conflict `Err` either
+/// `Ok`. An idempotent re-claim or re-join replaces the stored member with
+/// `holder`, so a replacement that gained a data-phase row holds its fresh
+/// casts. Mixing exclusive and shared on one key is a conflict `Err` either
 /// way. Every `Ok` records the key under `holder`'s identity in the reverse
 /// index.
 ///
@@ -103,7 +133,7 @@ pub fn register_route(
     routes: &SharedRoutes,
     prefix: &str,
     method: Option<HttpMethod>,
-    holder: ProtocolRef<HttpRouter>,
+    holder: RouteMember,
     shared: bool,
 ) -> RegisterRouteResult {
     match normalize_prefix(prefix) {
@@ -152,13 +182,15 @@ pub fn unregister_routes_all(routes: &SharedRoutes, holder: ErasedActorRef) {
 
 impl RouteTable {
     /// [`register_route`]'s body over the locked table.
-    fn claim(&mut self, key: RouteKey, holder: ProtocolRef<HttpRouter>, shared: bool) -> RegisterRouteResult {
-        let identity = holder.erase();
+    fn claim(&mut self, key: RouteKey, holder: RouteMember, shared: bool) -> RegisterRouteResult {
+        let identity = holder.router.erase();
         if let Some(existing) = self.routes.get_mut(&key) {
             let RouteKey { prefix, method } = &key;
             // Exclusive re-claim by the sole holder stays the idempotent Ok
-            // it always was.
-            if !shared && !existing.shared && existing.members.iter().map(|member| member.erase()).eq([identity]) {
+            // it always was, holding the fresh casts.
+            if !shared && !existing.shared && existing.members.iter().map(|member| member.router.erase()).eq([identity])
+            {
+                existing.members[0] = holder;
                 return RegisterRouteResult::Ok;
             }
             if shared != existing.shared {
@@ -181,11 +213,15 @@ impl RouteTable {
             }
             if !shared {
                 return RegisterRouteResult::Err {
-                    error: format!("route ({prefix:?}, {method:?}) already claimed by {:?}", existing.members[0]),
+                    error: format!(
+                        "route ({prefix:?}, {method:?}) already claimed by {:?}",
+                        existing.members[0].router
+                    ),
                 };
             }
-            if !existing.members.iter().any(|member| member.erase() == identity) {
-                existing.members.push(holder);
+            match existing.members.iter_mut().find(|member| member.router.erase() == identity) {
+                Some(member) => *member = holder,
+                None => existing.members.push(holder),
             }
         } else {
             self.routes.insert(key.clone(), Route { shared, members: vec![holder] });
@@ -217,7 +253,7 @@ impl RouteTable {
     /// its replica count bounds.
     fn release_member(&mut self, key: &RouteKey, holder: ErasedActorRef) {
         if let Some(route) = self.routes.get_mut(key) {
-            route.members.retain(|member| member.erase() != holder);
+            route.members.retain(|member| member.router.erase() != holder);
             if route.members.is_empty() {
                 self.routes.remove(key);
             }

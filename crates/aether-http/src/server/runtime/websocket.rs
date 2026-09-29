@@ -429,13 +429,15 @@ impl HttpShardState {
     /// interleave on the shared fd), spawn the ADR-0128 writer thread for
     /// outbound frames, grant the handler its initial outbound credit window,
     /// and flip the reader into the RFC 6455 frame loop. `correlation` is the
-    /// handshake request's in-flight key.
+    /// handshake request's in-flight key. A holder whose route `member` lacks
+    /// the [`StreamCreditRouter`] or [`WebSocketRouter`] cast is answered `502`
+    /// in place of the `101`, and nothing is seated.
     pub fn accept_websocket<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
         correlation: u64,
         conn_id: ConnId,
-        handler: ErasedActorRef,
+        member: RouteMember,
         accept: &WebSocketAccept,
     ) {
         self.in_flight.remove(&correlation);
@@ -444,6 +446,24 @@ impl HttpShardState {
             // to a non-upgrade request. Cap-level error; the parked reader
             // writes the canned status and exits (ADR-0135 §3).
             self.respond_and_finish(conn_id, render_status_response(500, "websocket accept without upgrade"), false);
+            return;
+        };
+        let RouteMember { credit: Some(credit), websocket: Some(handler), .. } = member else {
+            // A holder that cannot take credit or its messages would hold an
+            // upgraded socket nothing is delivered to, so the upgrade is
+            // refused before the `101` is written.
+            tracing::warn!(
+                target: "aether_http::server",
+                conn = conn_id,
+                holder = ?member.router,
+                "http websocket: route holder replied WebSocket without covering StreamCreditRouter and \
+                 WebSocketRouter; answering 502",
+            );
+            self.respond_and_finish(
+                conn_id,
+                render_status_response(502, "route holder does not cover StreamCreditRouter and WebSocketRouter"),
+                false,
+            );
             return;
         };
         let head = render_ws_accept(&key, accept);
@@ -495,7 +515,7 @@ impl HttpShardState {
             stream_id,
             StreamState {
                 conn_id,
-                handler: Some(handler),
+                handler: Some(credit),
                 tx,
                 writer_thread: Some(writer_thread),
                 credit_outstanding: window,
@@ -528,7 +548,7 @@ impl HttpShardState {
     /// The websocket-upgraded connection's dispatch handler + `stream_id`
     /// (ADR-0132), or `None` if `conn_id` names no such connection — the
     /// shared lookup behind every ws dispatch/close/send site.
-    fn ws_target(&self, conn_id: ConnId) -> Option<(ErasedActorRef, u64)> {
+    fn ws_target(&self, conn_id: ConnId) -> Option<(ProtocolRef<WebSocketRouter>, u64)> {
         self.connections.get(&conn_id).and_then(|conn| conn.websocket.as_ref()).map(|ws| (ws.handler, ws.stream_id))
     }
 
@@ -541,8 +561,7 @@ impl HttpShardState {
         let Some((handler, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
-        let payload = WebSocketMessage { stream_id, binary, data }.encode_into_bytes();
-        let _ = ctx.send_envelope_detached_to(handler, <WebSocketMessage as Kind>::ID, &payload);
+        ctx.send_detached_to(handler, &WebSocketMessage { stream_id, binary, data });
     }
 
     /// Report a peer-initiated websocket close to the handler (ADR-0129 §5) as
@@ -552,8 +571,7 @@ impl HttpShardState {
         let Some((handler, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
-        let payload = WebSocketClose { stream_id, code, reason: reason.to_string() }.encode_into_bytes();
-        let _ = ctx.send_envelope_detached_to(handler, <WebSocketClose as Kind>::ID, &payload);
+        ctx.send_detached_to(handler, &WebSocketClose { stream_id, code, reason: reason.to_string() });
     }
 
     /// Frame an outbound application message and hand it to the connection's

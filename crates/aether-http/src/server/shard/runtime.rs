@@ -99,8 +99,8 @@ impl NativeActor for HttpDispatchShard {
                 InboundEvent::PeerAccepted { stream, peer } => {
                     state.spawn_reader_for_peer(stream, peer);
                 }
-                InboundEvent::RequestHeadParsed { conn_id, head, handler } => {
-                    state.open_requested_stream(ctx, conn_id, head, handler);
+                InboundEvent::RequestHeadParsed { conn_id, head, member, handler } => {
+                    state.open_requested_stream(ctx, conn_id, head, member, handler);
                 }
                 InboundEvent::RequestParsed(request) => state.dispatch_prepared(ctx, request),
                 InboundEvent::RequestBodyChunk { conn_id, body } => {

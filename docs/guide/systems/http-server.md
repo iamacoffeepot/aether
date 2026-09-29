@@ -115,6 +115,12 @@ through `stream_credit`; the handler sends at most that many
 `response_chunk` messages before waiting for more credit, then sends
 `response_stream_end`.
 
+The credit grants go through the route holder's `StreamCreditRouter` protocol:
+a handler covers it with a silent handler taking `stream_credit`. The server
+casts every route holder to it once, when the route is registered. A holder
+that replies `Stream` without covering it gets a `502` instead of a chunked
+head, because nothing it could take would ever be granted.
+
 `ResponseStream` captures both the dispatching counterparty and `stream_id` from
 the credit message. Later handler methods use that durable handle. They do not
 assume the singleton server mailbox is the correct return address—sharded
@@ -126,11 +132,16 @@ not remain held for the full lifetime of a download.
 ## Request streaming
 
 Request streaming is a structural handler opt-in, not the default for every
-upload. After route selection, the capability checks whether that handler's
-accept set includes `aether.http.server.request_stream_open`; a handler that
-only accepts the ordinary request kind receives a buffered body. A streaming
-handler is still a route holder, so it covers `HttpRouter` too; a websocket
-upgrade reaches it as an ordinary request. For an opted-in
+upload. The capability streams an upload to a route holder that covers the
+`RequestStreamRouter` protocol: silent handlers for
+`aether.http.server.request_stream_open` and `request_chunk`, and a
+`request_stream_end` handler that answers with the buffered
+`HttpServerResponse`. The server casts every route holder to it once, when the
+route is registered, and the reader reads that cast for each request, so no
+request reads the registry to decide. A holder that does not cover every row
+receives a buffered body. A streaming handler is still a route holder, so it
+covers `HttpRouter` too; a websocket upgrade reaches it as an ordinary
+request. For an opted-in
 handler, the capability sends `request_stream_open`, then chunks only as the
 handler grants `request_credit`. The handler learns the stream id at open;
 `request_stream_end` marks the last body bytes and retains the reply correlation
@@ -145,6 +156,12 @@ An ordinary HTTP upgrade request reaches the selected route. The handler may
 reply `HttpRouterResult::WebSocket`, carrying a `websocket.accept`, or decline
 with `HttpRouterResult::Response`; after an accept, complete de-fragmented messages and
 close events use an explicit `stream_id` in both directions.
+
+The server delivers those messages and the peer's close through the holder's
+`WebSocketRouter` protocol, and paces its outbound messages with
+`stream_credit` through `StreamCreditRouter`, both cast when the route is
+registered. A holder that accepts without covering both gets a `502` in place
+of the `101`.
 
 `WebSocketStream` is reply-derived like response streams: it remembers the
 actual dispatch counterparty. An unknown or already-torn-down id is not rerouted

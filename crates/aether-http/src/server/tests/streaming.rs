@@ -5,7 +5,7 @@
 
 use super::handlers::{
     EchoHttpHandler, FloodHttpHandler, STREAM_CHUNK_COUNT, StreamHttpHandler, StreamIdEchoHandler,
-    StreamingUploadHandler, stream_chunk_body,
+    StreamingUploadHandler, UncoveredStreamRouter, stream_chunk_body,
 };
 use super::support::{body_of, boot_request_stream, boot_response_stream, dechunk, port_of, round_trip};
 
@@ -137,7 +137,7 @@ fn chunked_on_ws_upgrade_is_411() {
     assert!(response.starts_with("HTTP/1.1 411 "), "expected 411, got: {response:?}");
 }
 
-/// A buffered handler (no `HttpRequestStreamOpen` in its accept-set) keeps the
+/// A buffered handler (one that does not cover `RequestStreamRouter`) keeps the
 /// unchanged `HttpServerRequest` round trip — the streaming decision is a
 /// per-handler property, so an ordinary `Content-Length` POST to
 /// [`EchoHttpHandler`] still buffers and echoes verbatim (ADR-0128). The
@@ -178,4 +178,36 @@ fn consecutive_response_streams_get_distinct_stream_ids() {
     assert!(!first_id.is_empty(), "first stream reported no id: {first:?}");
     assert!(!second_id.is_empty(), "second stream reported no id: {second:?}");
     assert_ne!(first_id, second_id, "consecutive response streams reused stream_id {first_id}");
+}
+
+/// A route holder that replies `Stream` without covering
+/// `StreamCreditRouter` is refused `502` before the chunked head is written.
+/// Seated, its stream would never be granted a chunk it could take, and the
+/// client would wait out the request timeout.
+#[test]
+fn stream_reply_from_a_holder_without_credit_is_502() {
+    let chassis = boot_response_stream::<UncoveredStreamRouter>(8);
+
+    let response = round_trip(port_of(&chassis), b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(response.starts_with("HTTP/1.1 502 "), "expected 502, got: {response:?}");
+    assert!(!response.contains("Transfer-Encoding: chunked"), "no stream head was written: {response:?}");
+}
+
+/// A route holder that replies `WebSocket` without covering
+/// `StreamCreditRouter` and `WebSocketRouter` is refused `502` in place of the
+/// `101`. Upgraded, the socket's messages and close would reach no handler.
+#[test]
+fn websocket_reply_from_a_holder_without_websocket_router_is_502() {
+    let chassis = boot_response_stream::<UncoveredStreamRouter>(8);
+
+    let response = round_trip(
+        port_of(&chassis),
+        b"GET /ws HTTP/1.1\r\n\
+          Host: localhost\r\n\
+          Upgrade: websocket\r\n\
+          Connection: Upgrade\r\n\
+          Sec-WebSocket-Version: 13\r\n\
+          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 502 "), "expected 502, not 101: {response:?}");
 }

@@ -9,26 +9,28 @@ impl HttpShardState {
     /// Open an inbound request stream (ADR-0128): mint a `stream_id`, record
     /// the stream, send the handler an `HttpRequestStreamOpen`, and seed the
     /// reader's send window. The handler learns its `stream_id` here and paces
-    /// the cap by mailing `HttpRequestCredit`.
+    /// the cap by mailing `HttpRequestCredit`. `handler` is `member`'s
+    /// [`RequestStreamRouter`] cast.
     pub fn start_request_stream<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
         conn_id: ConnId,
-        handler: ErasedActorRef,
+        member: RouteMember,
+        handler: ProtocolRef<RequestStreamRouter>,
         method: HttpMethod,
         head: ParsedHead,
     ) {
         let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let window = self.request_stream_window.max(1);
         self.request_streams
-            .insert(stream_id, RequestStreamState { conn_id, handler, method, keep_alive: head.keep_alive });
+            .insert(stream_id, RequestStreamState { conn_id, handler, member, method, keep_alive: head.keep_alive });
         if let Some(conn) = self.connections.get_mut(&conn_id) {
             conn.active_stream = Some(stream_id);
         }
-        let payload =
-            HttpRequestStreamOpen { stream_id, method, path: head.path, query: head.query, headers: head.headers }
-                .encode_into_bytes();
-        let _ = ctx.send_envelope_detached_to(handler, <HttpRequestStreamOpen as Kind>::ID, &payload);
+        ctx.send_detached_to(
+            handler,
+            &HttpRequestStreamOpen { stream_id, method, path: head.path, query: head.query, headers: head.headers },
+        );
         self.signal_reader(conn_id, ReaderControl::Stream { credit: window });
         tracing::debug!(
             target: "aether_http::server",
@@ -49,8 +51,7 @@ impl HttpShardState {
         let Some(handler) = self.request_streams.get(&stream_id).map(|s| s.handler) else {
             return;
         };
-        let payload = HttpRequestChunk { stream_id, body }.encode_into_bytes();
-        let _ = ctx.send_envelope_detached_to(handler, <HttpRequestChunk as Kind>::ID, &payload);
+        ctx.send_detached_to(handler, &HttpRequestChunk { stream_id, body });
     }
 
     /// Finish an inbound request stream (ADR-0128): send the handler an
@@ -66,15 +67,11 @@ impl HttpShardState {
         let Some(stream) = self.request_streams.remove(&stream_id) else {
             return;
         };
-        let payload = HttpRequestStreamEnd { stream_id }.encode_into_bytes();
-        let Some(mail_id) = ctx.send_envelope_detached_to(stream.handler, <HttpRequestStreamEnd as Kind>::ID, &payload)
-        else {
-            return;
-        };
+        let mail_id = ctx.send_detached_to(stream.handler, &HttpRequestStreamEnd { stream_id });
         let _ = ctx.subscribe_settlement::<Settled>(mail_id);
         self.in_flight.insert(
             mail_id.correlation_id,
-            PendingRequest { conn_id, method: stream.method, keep_alive: stream.keep_alive, handler: stream.handler },
+            PendingRequest { conn_id, method: stream.method, keep_alive: stream.keep_alive, handler: stream.member },
         );
     }
 
@@ -91,7 +88,9 @@ impl HttpShardState {
     /// `HttpRouterResult::Stream` reply (ADR-0128): drop its
     /// in-flight entry so the settlement safety net no longer trips `502` on
     /// this chain, write the chunked response head, spawn the per-connection
-    /// writer thread, and grant the handler its initial credit window.
+    /// writer thread, and grant the handler its initial credit window. A
+    /// holder whose route member has no [`StreamCreditRouter`] cast is answered
+    /// `502` instead, and nothing is seated.
     ///
     /// `correlation` is the request's dispatch correlation id — the key of the
     /// in-flight entry this reply belongs to, and nothing more. The stream it
@@ -114,10 +113,28 @@ impl HttpShardState {
         // more specific registered route (ADR-0131) — so credit grants reach the
         // real replier regardless of dispatch path. A missing in-flight entry
         // leaves no handler, and the stream grants no credit.
-        let (keep_alive, handler) = self
-            .in_flight
-            .remove(&correlation)
-            .map_or((false, None), |pending| (pending.keep_alive, Some(pending.handler)));
+        let (keep_alive, handler) = match self.in_flight.remove(&correlation) {
+            None => (false, None),
+            Some(PendingRequest { keep_alive, handler: RouteMember { credit: Some(credit), .. }, .. }) => {
+                (keep_alive, Some(credit))
+            }
+            // A holder that cannot take credit would never be granted a
+            // chunk, so the stream is refused before its head is written.
+            Some(PendingRequest { handler: RouteMember { router, .. }, .. }) => {
+                tracing::warn!(
+                    target: "aether_http::server",
+                    conn = conn_id,
+                    holder = ?router,
+                    "http stream: route holder replied Stream without covering StreamCreditRouter; answering 502",
+                );
+                self.respond_and_finish(
+                    conn_id,
+                    render_status_response(502, "route holder does not cover StreamCreditRouter"),
+                    false,
+                );
+                return;
+            }
+        };
         let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let head = render_stream_head(open, keep_alive);
         self.write_raw_to(conn_id, &head);
@@ -294,8 +311,7 @@ impl HttpShardState {
         let Some(handler) = self.streams.get(&stream_id).and_then(|stream| stream.handler) else {
             return;
         };
-        let payload = HttpStreamCredit { stream_id, credit }.encode_into_bytes();
-        let _ = ctx.send_envelope_detached_to(handler, <HttpStreamCredit as Kind>::ID, &payload);
+        ctx.send_detached_to(handler, &HttpStreamCredit { stream_id, credit });
     }
 
     /// Remove a stream and detach its writer thread without joining inline —

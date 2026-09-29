@@ -241,6 +241,54 @@ pub trait HttpRouter {
     fn request(mail: HttpServerRequest) -> HttpRouterResult;
 }
 
+/// What the server sends a route holder whose request it answers with a
+/// streamed response or an upgraded websocket: the [`HttpStreamCredit`]
+/// grants that pace its outbound chunks or messages (ADR-0128, ADR-0129 §3).
+/// The server casts every route holder to it once, at registration (ADR-0231
+/// §4), and answers `502` to a [`HttpRouterResult::Stream`] or
+/// [`HttpRouterResult::WebSocket`] reply from a holder that does not cover it.
+///
+/// A silent `#[handler::single]` taking `HttpStreamCredit` covers the row.
+#[aether_actor::protocol]
+pub trait StreamCreditRouter {
+    fn credit(mail: HttpStreamCredit);
+}
+
+/// What the server sends a route holder that takes a streamed upload
+/// (ADR-0128): the stream's head, its body pieces, and its terminator, which
+/// the holder answers with the one buffered response. The server casts every
+/// route holder to it once, at registration (ADR-0231 §4), and streams a
+/// request body only to a holder that covers every row; any other holder gets
+/// the buffered [`HttpServerRequest`].
+///
+/// Silent `#[handler::single]` handlers taking `HttpRequestStreamOpen` and
+/// `HttpRequestChunk` cover the first two rows. A handler taking
+/// `HttpRequestStreamEnd` that returns `HttpServerResponse`, or
+/// `Pending<HttpServerResponse>` and answers later through its held reply
+/// (ADR-0243), covers the third.
+#[aether_actor::protocol]
+pub trait RequestStreamRouter {
+    fn open(mail: HttpRequestStreamOpen);
+    fn chunk(mail: HttpRequestChunk);
+    fn end(mail: HttpRequestStreamEnd) -> HttpServerResponse;
+}
+
+/// What the server sends a route holder that holds an upgraded websocket
+/// (ADR-0129): each inbound message and the peer's close. A websocket is paced
+/// by [`HttpStreamCredit`] too, so a holder that accepts one covers
+/// [`StreamCreditRouter`] as well. The server casts every route holder to it
+/// once, at registration (ADR-0231 §4), and answers `502` in place of the
+/// `101` to a [`HttpRouterResult::WebSocket`] reply from a holder that does
+/// not cover both.
+///
+/// Silent `#[handler::single]` handlers taking `WebSocketMessage` and
+/// `WebSocketClose` cover the rows.
+#[aether_actor::protocol]
+pub trait WebSocketRouter {
+    fn message(mail: WebSocketMessage);
+    fn close(mail: WebSocketClose);
+}
+
 // ADR-0128 HTTP server response streaming. A handler opts into streaming by
 // replying `HttpRouterResult::Stream` instead of `HttpRouterResult::Response`, emits its
 // body across many `HttpResponseChunk` mails paced by the cap's
@@ -305,8 +353,8 @@ pub struct HttpResponseStreamEnd {
 // here the peer is the producer, so the cap streams the inbound body to a
 // streaming handler across many `HttpRequestChunk` mails and the *handler*
 // grants credit back to the cap with `HttpRequestCredit`. A handler opts in
-// structurally — by declaring it accepts `HttpRequestStreamOpen` — so the cap
-// reads the decision off the handler's accept-set at dispatch time rather than
+// structurally — by covering `RequestStreamRouter` — so the cap reads the
+// decision off the cast it made when the route was registered rather than
 // from a per-request reply (a request handler cannot reply before it receives
 // the request).
 //
