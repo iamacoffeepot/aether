@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aether_bloomery_kinds::{
-    Digest, Entry, Evaluated, Event, Head, HeadMoved, JournalEntry, Ref, RuleRecord, Seq, SetHead, Tree, Warm,
+    Digest, Entry, Evaluated, Event, Head, HeadMoved, JournalEntry, Ref, RuleRecord, Seq, SetHeads, Tree, Warm,
     WarmEntries, Warmed, reactor_record_len, write_reactor_record,
 };
 use aether_bloomery_reactor::{Nil, Owner, PrepareError, Reactor, Root, reactor};
@@ -92,8 +92,8 @@ impl Reactor for Publisher {
     const NAMESPACE: &'static str = "test.bloomery.root.publisher";
 
     #[rule]
-    fn publish(&self, change: HeadMoved<Tree>, _view: CountView) -> SetHead {
-        SetHead::new(&PUBLISHED, None, change.to())
+    fn publish(&self, change: HeadMoved<Tree>, _view: CountView) -> SetHeads {
+        SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&PUBLISHED, None, change.to())])
     }
 }
 
@@ -104,14 +104,14 @@ impl Reactor for Witness {
     const NAMESPACE: &'static str = "test.bloomery.root.witness";
 
     #[rule]
-    fn note(&self, change: HeadMoved<Tree>, _view: CountView) -> SetHead {
-        SetHead::new(&PUBLISHED, None, change.to())
+    fn note(&self, change: HeadMoved<Tree>, _view: CountView) -> SetHeads {
+        SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&PUBLISHED, None, change.to())])
     }
 }
 
 struct BoomReactor;
 
-const BOOM_RULES: &[RuleRecord<'static>] = &[RuleRecord::new("note", HeadMoved::<Tree>::ID, SetHead::ID)];
+const BOOM_RULES: &[RuleRecord<'static>] = &[RuleRecord::new("note", HeadMoved::<Tree>::ID, SetHeads::ID)];
 const BOOM_LEN: usize = reactor_record_len("test.bloomery.root.boom", BOOM_RULES);
 
 impl Default for BoomReactor {
@@ -125,7 +125,7 @@ impl Reactor for BoomReactor {
     const DECLARATION: &'static [u8] = &write_reactor_record::<BOOM_LEN>("test.bloomery.root.boom", BOOM_RULES);
 
     fn visit_arms(visitor: &mut impl aether_bloomery_reactor::ArmVisitor) {
-        visitor.visit::<HeadMoved<Tree>, aether_bloomery_reactor::ViewArg<CountView>, SetHead>("note");
+        visitor.visit::<HeadMoved<Tree>, aether_bloomery_reactor::ViewArg<CountView>, SetHeads>("note");
     }
 
     fn evaluate(&self, owner: &mut Owner) -> Result<Vec<aether_bloomery_reactor::Intent>, PrepareError> {
@@ -231,8 +231,9 @@ fn warm_folds_without_evaluating() {
     match live {
         Evaluated::Completed { seq: 3, intents } => {
             for intent in &intents {
-                let published = SetHead::decode_from_bytes(intent.bytes()).expect("set-head");
-                assert_eq!(published.to(), Digest::from_bytes([3; 32]));
+                let published = SetHeads::decode_from_bytes(intent.bytes()).expect("set-head");
+                assert_eq!(published.changes().len(), 1);
+                assert_eq!(published.changes()[0].to(), Digest::from_bytes([3; 32]));
             }
             assert_eq!(counts(), (1, 3));
         }
@@ -264,8 +265,8 @@ fn intents_carry_reactor_rule_and_mail_kind() {
         Evaluated::Completed { intents, .. } => {
             assert_eq!(intents[0].reactor().as_str(), "test.bloomery.root.publisher");
             assert_eq!(intents[0].rule().as_str(), "publish");
-            assert_eq!(intents[0].kind(), SetHead::ID);
-            assert!(SetHead::decode_from_bytes(intents[0].bytes()).is_some());
+            assert_eq!(intents[0].kind(), SetHeads::ID);
+            assert!(SetHeads::decode_from_bytes(intents[0].bytes()).is_some());
             assert_eq!(intents[1].reactor().as_str(), "test.bloomery.root.witness");
             assert_eq!(intents[1].rule().as_str(), "note");
         }

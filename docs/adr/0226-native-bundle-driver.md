@@ -8,10 +8,11 @@
 - **Amended:** 2026-09-23 — decision 10: the driver sends `WatchHead` on a fresh chain (issue #6401).
 - **Amended:** 2026-09-23 — the bloomery's RPC listener binds only after the journal owner and the driver are mounted, so a reachable engine can take driver calls (issue #6399).
 - **Amended:** 2026-09-24 — a bundle's fetch-on-miss travels invocation → bundle root → driver, and the driver forwards it to the journal owner with the reply pinned to the root; a bundle addresses no journal position (issue #6478).
-- **Amended:** 2026-09-24 — the driver answers a bundle's fetch-on-miss itself, from a byte-bounded cache of found artifacts or one journal read shared by every fetch of that digest, and never caches a missing artifact; `SetHead` destination checks consult the same cache (issue #6258).
+- **Amended:** 2026-09-24 — the driver answers a bundle's fetch-on-miss itself, from a byte-bounded cache of found artifacts or one journal read shared by every fetch of that digest, and never caches a missing artifact; head-change destination checks consult the same cache (issue #6258).
 - **Amended:** 2026-09-25 — the chassis opens one journal root (the SQLite database plus its `blobs` directory, ADR-0220) rather than one journal file.
 - **Amended:** 2026-09-25 — decision 10: `ReadClosure` answers with shared `Blob` values rather than inline bytes, and `ClosureLimit::MAX_BYTES` rises from 16 MiB to 4 GiB (ADR-0238 decision 10).
 - **Amended:** 2026-09-28 — decisions 6, 8, and 10: reactor calls may carry a fresh encoded input that the driver persists atomically with `Requested`; digest-only v1 intents remain decodable under their pinned kind id (issue #7011).
+- **Amended:** 2026-09-28 — decisions 6 and 8: `SetHeads` atomically validates and appends an ordered list of typed head changes; original `SetHead` intents remain decodable under their pinned kind id (issue #7016).
 
 ## Context
 
@@ -157,16 +158,20 @@ Nothing on main can carry any of this yet:
      the encoded artifact's digest, retains the exact captured bytes through
      any append conflict, and persists it in the same `AppendRecords` as the
      request.
-   - `SetHead { head, from: Option<Ref>, to: Ref }`, kind
-     `aether.bloomery.driver.set_head`. It is named apart from the
-     journal's `MoveHead` command. The driver records a head move. `from`
-     is a compare-and-swap. If the head's binding
-     when the driver appends isn't `from`, the move is refused and
-     recorded as `ReactionFailed`. A `to` that the journal doesn't hold
-     under the head's kind is refused the same way.
+   - `SetHeads { changes: Vec<HeadChange> }`, kind
+     `aether.bloomery.driver.set_heads`. Each `HeadChange` contains one
+     recorded head, its expected `from: Option<Ref>`, and its `to: Ref`;
+     the typed constructor requires all three to share a kind. An empty list
+     or duplicate target head is refused. The driver checks every destination
+     under its target head's kind, then compares every `from` against one
+     pre-group state. The complete group either records one head move per
+     change in list order or records one `ReactionFailed` and no moves.
+     Earlier successful sibling groups are visible to later groups. A failed
+     group does not affect later `SetHeads` or `CallProgram` intents.
 
    Any other intent kind is refused and recorded as `ReactionFailed`. A
-   refusal applies to that one intent. The bundle's other intents for `N`
+   refusal applies to that one intent; for `SetHeads`, the whole list is that
+   intent. The bundle's other intents for `N`
    still stand, because the refusal happens when the driver applies the
    intent, not while the reactor evaluates. A
    reactor may move any head. Restricting that is deferred. Moves are how
@@ -183,6 +188,16 @@ Nothing on main can carry any of this yet:
    kind id selects one decoder; malformed bytes never fall back between
    schemas. Both generations normalize to the same digest-based request and
    execution pipeline.
+
+   The original single-change schema remains registered and decoded under
+   `aether.bloomery.driver.set_head` and its pinned kind id. Its exact decoder
+   normalizes it to a singleton `SetHeads`; malformed bytes never fall back
+   between schemas. The public authoring API exposes only `SetHeads`.
+
+   Group atomicity is the acceptance and durable append boundary. The journal
+   still stores and replays one ordinary `HeadMoved` entry per change, so a
+   fold or reactor observing an intermediate journal prefix may see an earlier
+   entry before a later one. There is no durable aggregate group event.
 
 7. **Intent heads resolve through the trigger, inclusive.** The driver
    resolves a `CallProgram` head from `Heads` folded through `N`, the
@@ -223,7 +238,7 @@ Nothing on main can carry any of this yet:
 
    | Reply | Recorded |
    | --- | --- |
-   | `Evaluated::Completed` | one `Requested` per `CallProgram`, one head move per `SetHead` |
+   | `Evaluated::Completed` | one `Requested` per `CallProgram`; one head move per change in each accepted `SetHeads`, or one `ReactionFailed` for a refused group |
    | `Evaluated::Failed { reactor }` | `ReactionFailed { reactor: Some }`; no intents from that bundle for that seq |
    | `Evaluated::Poisoned` | `ReactionFailed { reactor: None }`, plus `ActivationRejected` for every head the digest serves |
    | `Warmed::Poisoned` / `Warmed::OutOfSequence` during activation | `ActivationRejected` |
@@ -267,7 +282,9 @@ Nothing on main can carry any of this yet:
       A value-carrying `CallProgram` puts its input artifact and `Requested`
       in this one transaction; either both commit or neither does. A conflict
       re-derives only journal-dependent routing choices and retains the
-      captured input bytes. Any non-conflict refusal of a routing batch keeps
+      captured input bytes. A retained `SetHeads` group is rechecked in full
+      against freshly folded heads, with no provisionally accepted member
+      carried across the conflict. Any non-conflict refusal of a routing batch keeps
       the existing fail-fast behavior: the driver aborts, records no partial
       request, and invokes no program from that batch.
     - `WatchHead { after }`, answered by `HeadAdvanced { head }` once the
@@ -340,7 +357,9 @@ Nothing on main can carry any of this yet:
   (issue #6478). The driver answers the fetch itself, from a 64 MiB cache
   of found artifacts evicted least recently used first, or from one
   journal read shared by every fetch of that digest; a missing artifact
-  is never cached, because it can be stored later (issue #6258).
+  is never cached, because it can be stored later (issue #6258). Each
+  `SetHeads` change consults the same cache and still checks the cached
+  artifact's kind against its own target head.
 - **Amendments.** Following ADR-0224's precedent, the older ADRs stay
   unedited. This ADR amends:
   - ADR-0223: the feeder becomes this driver; `DropComponent` is never

@@ -1,5 +1,5 @@
 use aether_actor::export;
-use aether_bloomery_kinds::{Head, HeadMoved, SetHead, Tree};
+use aether_bloomery_kinds::{Head, HeadMoved, SetHeads, Tree};
 use aether_bloomery_reactor::{Reactor, reactor};
 
 const PUBLISHED: Head<Tree> = Head::new("published");
@@ -11,8 +11,8 @@ impl Reactor for First {
     const NAMESPACE: &'static str = "test.bloomery.export.dup";
 
     #[rule]
-    fn publish(&self, change: HeadMoved<Tree>) -> SetHead {
-        SetHead::new(&PUBLISHED, None, change.to())
+    fn publish(&self, change: HeadMoved<Tree>) -> SetHeads {
+        SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&PUBLISHED, None, change.to())])
     }
 }
 
@@ -23,8 +23,8 @@ impl Reactor for Second {
     const NAMESPACE: &'static str = "test.bloomery.export.dup";
 
     #[rule]
-    fn publish(&self, change: HeadMoved<Tree>) -> SetHead {
-        SetHead::new(&PUBLISHED, None, change.to())
+    fn publish(&self, change: HeadMoved<Tree>) -> SetHeads {
+        SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&PUBLISHED, None, change.to())])
     }
 }
 

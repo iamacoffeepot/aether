@@ -1,5 +1,5 @@
 use aether_actor::{actor, export, ActorInitError, WasmActor, WasmCtx, WasmInitCtx};
-use aether_bloomery_kinds::{Head, HeadMoved, SetHead, Tree};
+use aether_bloomery_kinds::{Head, HeadMoved, SetHeads, Tree};
 use aether_bloomery_reactor::reactor;
 
 const PUBLISHED: Head<Tree> = Head::new("published");
@@ -17,14 +17,14 @@ struct Publisher;
 impl Reactor for Publisher {
     const NAMESPACE: &'static str = "test.bloomery.export.publisher";
     #[rule]
-    fn publish(&self, change: HeadMoved<Tree>) -> SetHead { SetHead::new(&PUBLISHED, None, change.to()) }
+    fn publish(&self, change: HeadMoved<Tree>) -> SetHeads { SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&PUBLISHED, None, change.to())]) }
 }
 struct Witness;
 #[reactor]
 impl Reactor for Witness {
     const NAMESPACE: &'static str = "test.bloomery.export.witness";
     #[rule]
-    fn publish(&self, change: HeadMoved<Tree>) -> SetHead { SetHead::new(&PUBLISHED, None, change.to()) }
+    fn publish(&self, change: HeadMoved<Tree>) -> SetHeads { SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&PUBLISHED, None, change.to())]) }
 }
 macro_rules! InjectSentinel {
     (@aether_export_generate

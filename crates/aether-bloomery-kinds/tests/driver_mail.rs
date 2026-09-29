@@ -1,8 +1,9 @@
-//! Driver mail: pinned kind ids and the `SetHead` constructor.
+//! Driver mail: pinned kind ids and the atomic `SetHeads` constructor.
 
 use aether_bloomery_kinds::{
-    AwaitProcessed, Call, CallInput, CallOutcome, CallProgram, Digest, Head, LEGACY_CALL_PROGRAM_ID, OpaqueBytes,
-    Processed, ProgramName, RecordedHeadMove, Ref, SetHead, Tree, Utf8Text, decode_call_program,
+    AwaitProcessed, Call, CallInput, CallOutcome, CallProgram, Digest, Head, HeadChange, LEGACY_CALL_PROGRAM_ID,
+    LEGACY_SET_HEAD_ID, OpaqueBytes, Processed, ProgramName, RecordedHead, RecordedHeadMove, Ref, SetHeads, Tree,
+    Utf8Text, decode_call_program, decode_set_heads,
 };
 use aether_data::{Citations, Cites, Kind, KindId, Storage, StorageData, StorageError};
 
@@ -11,6 +12,13 @@ struct LegacyCallProgram {
     program: Head<OpaqueBytes>,
     name: ProgramName,
     input: Digest,
+}
+
+#[aether_data::kind(name = "aether.bloomery.driver.set_head", eq, no_serde)]
+struct LegacySetHead {
+    head: RecordedHead,
+    from: Option<Digest>,
+    to: Digest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
@@ -45,14 +53,16 @@ impl Cites for FailingInput {
 #[test]
 fn the_driver_mail_kind_ids_are_pinned() {
     // Tripwire: mail KindIds hash the canonical schema. ReactorIntent.kind
-    // is compared against CallProgram::ID / SetHead::ID, and the mail
+    // is compared against CallProgram::ID / SetHeads::ID, and the mail
     // registry refuses a second schema under an existing name, so drift
     // makes bundles built against the old schema unloadable beside new
     // ones and strands in-flight intents.
     assert_eq!(LEGACY_CALL_PROGRAM_ID, TRIPWIRE_LEGACY_CALL_PROGRAM);
     assert_eq!(LegacyCallProgram::ID, TRIPWIRE_LEGACY_CALL_PROGRAM);
     assert_eq!(CallProgram::ID, TRIPWIRE_CALL_PROGRAM_V2);
-    assert_eq!(SetHead::ID, TRIPWIRE_SET_HEAD);
+    assert_eq!(LEGACY_SET_HEAD_ID, TRIPWIRE_LEGACY_SET_HEAD);
+    assert_eq!(LegacySetHead::ID, TRIPWIRE_LEGACY_SET_HEAD);
+    assert_eq!(SetHeads::ID, TRIPWIRE_SET_HEADS);
     assert_eq!(Call::ID, TRIPWIRE_CALL);
     assert_eq!(CallOutcome::ID, TRIPWIRE_CALL_OUTCOME);
     assert_eq!(AwaitProcessed::ID, TRIPWIRE_AWAIT_PROCESSED);
@@ -61,7 +71,8 @@ fn the_driver_mail_kind_ids_are_pinned() {
 
 const TRIPWIRE_LEGACY_CALL_PROGRAM: KindId = KindId(0x298e_86d0_91bf_d585);
 const TRIPWIRE_CALL_PROGRAM_V2: KindId = KindId(0x2917_43a7_6596_2e0b);
-const TRIPWIRE_SET_HEAD: KindId = KindId(0x2842_0dd2_d83a_65e8);
+const TRIPWIRE_LEGACY_SET_HEAD: KindId = KindId(0x2842_0dd2_d83a_65e8);
+const TRIPWIRE_SET_HEADS: KindId = KindId(0x2f03_537c_84d9_dd5d);
 const TRIPWIRE_CALL: KindId = KindId(0x2dcc_bc68_65cc_027a);
 const TRIPWIRE_CALL_OUTCOME: KindId = KindId(0x2ed5_fa91_cb11_9000);
 const TRIPWIRE_AWAIT_PROCESSED: KindId = KindId(0x28c8_2171_74e2_f5b0);
@@ -84,6 +95,32 @@ fn call_program_decodes_both_wire_generations_without_fallback() {
     assert!(decode_call_program(CallProgram::ID, &legacy.encode_into_bytes()).is_none());
     assert!(decode_call_program(LegacyCallProgram::ID, &[1, 2, 3]).is_none());
     assert!(decode_call_program(KindId(9), &[]).is_none());
+}
+
+#[test]
+fn set_heads_decodes_both_wire_generations_without_fallback() {
+    let tree_head = Head::<Tree>::new("tree");
+    let text_head = Head::<Utf8Text>::new("text");
+    let tree_from = Ref::<Tree>::from_digest(Digest::from_bytes([1; 32]));
+    let tree_to = Ref::<Tree>::from_digest(Digest::from_bytes([2; 32]));
+    let text_to = Ref::<Utf8Text>::from_digest(Digest::from_bytes([3; 32]));
+    let group = SetHeads::new(vec![
+        HeadChange::new(&tree_head, Some(tree_from), tree_to),
+        HeadChange::new(&text_head, None, text_to),
+    ]);
+    assert_eq!(decode_set_heads(SetHeads::ID, &group.encode_into_bytes()), Some(group));
+
+    let legacy =
+        LegacySetHead { head: RecordedHead::from(&tree_head), from: Some(tree_from.digest()), to: tree_to.digest() };
+    let decoded = decode_set_heads(LegacySetHead::ID, &legacy.encode_into_bytes()).expect("legacy singleton");
+    assert_eq!(decoded.changes().len(), 1);
+    assert_eq!(decoded.changes()[0].head(), &RecordedHead::from(&tree_head));
+    assert_eq!(decoded.changes()[0].from(), Some(tree_from.digest()));
+    assert_eq!(decoded.changes()[0].to(), tree_to.digest());
+
+    assert!(decode_set_heads(SetHeads::ID, &legacy.encode_into_bytes()).is_none());
+    assert!(decode_set_heads(LegacySetHead::ID, &[1, 2, 3]).is_none());
+    assert!(decode_set_heads(KindId(9), &[]).is_none());
 }
 
 #[test]
@@ -122,7 +159,7 @@ fn with_input_returns_the_storage_error() {
 }
 
 #[test]
-fn set_head_moves_to_the_destination_not_the_expected_binding() {
+fn head_change_moves_to_the_destination_not_the_expected_binding() {
     // Catches a constructor or `to_move` that swapped the two same-typed
     // digests, which would make every CAS move land on the old binding
     // instead of the new one.
@@ -130,9 +167,9 @@ fn set_head_moves_to_the_destination_not_the_expected_binding() {
     let a = Ref::<Tree>::from_digest(Digest::from_bytes([1; 32]));
     let b = Ref::<Tree>::from_digest(Digest::from_bytes([2; 32]));
 
-    let set_head = SetHead::new(&HEAD, Some(a), b);
+    let change = HeadChange::new(&HEAD, Some(a), b);
 
-    assert_eq!(set_head.from(), Some(a.digest()));
-    assert_eq!(set_head.to(), b.digest());
-    assert_eq!(set_head.to_move(), RecordedHeadMove::from(&HEAD.move_to(b)));
+    assert_eq!(change.from(), Some(a.digest()));
+    assert_eq!(change.to(), b.digest());
+    assert_eq!(change.to_move(), RecordedHeadMove::from(&HEAD.move_to(b)));
 }

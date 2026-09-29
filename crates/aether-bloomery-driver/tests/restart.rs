@@ -5,8 +5,8 @@ mod support;
 
 use aether_bloomery_driver::{Command, ProgramCore};
 use aether_bloomery_kinds::{
-    ActivationRejected, Detail, Digest, Evaluated, OpaqueBytes, ReactorIntent, ReactorName, RecordedHead,
-    RecordedHeadMove, Ref, RuleName, SetHead,
+    ActivationRejected, Detail, Digest, Evaluated, HeadChange, OpaqueBytes, ReactorIntent, ReactorName, RecordedHead,
+    RecordedHeadMove, Ref, RuleName, SetHeads,
 };
 use aether_data::Kind;
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
@@ -47,53 +47,82 @@ fn fail_load(world: &mut World, bundle: Digest, message: &str) {
 }
 
 #[test]
-fn restart_warms_through_the_watermark_and_redelivers_nothing_below_it() {
-    // Catches the `DuplicateRequest` crash loop: a restart that replays at or
-    // below the watermark re-records, and the fold aborts on the duplicate.
+fn restart_preserves_committed_and_refused_atomic_groups() {
+    // Catches restart recovering only part of a committed group, reapplying
+    // its moves, or losing a refused group's reaction watermark.
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
     let bundle_a = world.store_reactor(b"reactor-a");
     world.seed_set_root(set_digest);
     world.seed_move("a", bundle_a);
-    let dest = world.store(OpaqueBytes::ID, b"dest-bytes");
+    let first_destination = world.store(OpaqueBytes::ID, b"first-destination");
+    let second_destination = world.store(OpaqueBytes::ID, b"second-destination");
     world.seed_move("target", digest(7));
 
-    let head = program_head("target");
-    let set_head = SetHead::new(&head, Some(Ref::from_digest(digest(7))), Ref::from_digest(dest));
+    let set_head = SetHeads::new(vec![
+        HeadChange::new(
+            &program_head("target"),
+            Some(Ref::from_digest(digest(7))),
+            Ref::from_digest(first_destination),
+        ),
+        HeadChange::new(&program_head("other"), None, Ref::from_digest(second_destination)),
+    ]);
     let intent = ReactorIntent::new(
         ReactorName::new("r").expect("valid reactor name"),
         RuleName::new("rule").expect("valid rule name"),
-        SetHead::ID,
+        SetHeads::ID,
         set_head.encode_into_bytes(),
     );
     world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents: vec![intent] });
-    for seq in [4, 5, 6] {
+    let refused = SetHeads::new(vec![
+        HeadChange::new(
+            &program_head("target"),
+            Some(Ref::from_digest(first_destination)),
+            Ref::from_digest(second_destination),
+        ),
+        HeadChange::new(&program_head("other"), Some(Ref::from_digest(digest(9))), Ref::from_digest(first_destination)),
+    ]);
+    world.evaluates.insert(
+        4,
+        Evaluated::Completed {
+            seq: 4,
+            intents: vec![ReactorIntent::new(
+                ReactorName::new("r").expect("valid reactor name"),
+                RuleName::new("rule").expect("valid rule name"),
+                SetHeads::ID,
+                refused.encode_into_bytes(),
+            )],
+        },
+    );
+    for seq in [5, 6, 7, 8] {
         world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
     }
     let manual = world.drive(commands);
     assert!(manual.is_empty());
     assert_eq!(activated_records(&world).len(), 1);
-    assert_eq!(head_moves(&world).len(), 1);
+    assert_eq!(head_moves(&world).len(), 2, "both committed group moves are present");
+    assert_eq!(failed_records(&world).len(), 1, "the late mismatch refuses its group once");
 
     let commands = restart_world(&mut world);
     let manual = world.drive(commands);
     assert!(manual.is_empty());
     assert!(world.abort.is_none());
 
-    assert_eq!(world.warm_ranges_for(bundle_a), vec![(1, 3)]);
-    assert_eq!(world.events_for(bundle_a), vec![4, 5]);
+    assert_eq!(world.warm_ranges_for(bundle_a), vec![(1, 4)]);
+    assert_eq!(world.events_for(bundle_a), vec![5, 6, 7]);
     assert!(world.appends.is_empty(), "a restart records nothing twice");
     assert!(requested_records(&world).is_empty());
     assert!(failed_records(&world).is_empty());
     assert_eq!(world.loads_seen, vec![bundle_a]);
     assert_eq!(world.parked.len(), 1);
 
+    let external_seq = world.head() + 1;
     let moved = RecordedHeadMove::new(RecordedHead::from(&program_head("target")), digest(9));
     let wake = world.append_external(None, &moved);
     let manual = world.drive(wake);
     assert!(manual.is_empty());
-    assert_eq!(world.events_for(bundle_a), vec![4, 5, 6]);
+    assert_eq!(world.events_for(bundle_a), vec![5, 6, 7, external_seq]);
     assert_eq!(world.parked.len(), 1);
 }
 

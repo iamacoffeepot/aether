@@ -17,7 +17,7 @@ use crate::trigger::Trigger;
 
 /// Marker for a rule output, sealed to the two ADR-0226 decision 6 intents.
 ///
-/// Only `CallProgram` and `SetHead` implement this marker, and no other crate
+/// Only `CallProgram` and `SetHeads` implement this marker, and no other crate
 /// can add an impl. The driver still refuses any other kind per intent, as the
 /// backstop for wasm not built through this crate.
 pub trait Output: Kind + sealed::Sealed + 'static {}
@@ -28,14 +28,14 @@ mod sealed {
 
     impl Sealed for aether_bloomery_kinds::CallProgram {}
 
-    impl Sealed for aether_bloomery_kinds::SetHead {}
+    impl Sealed for aether_bloomery_kinds::SetHeads {}
 }
 
 /// A rule output carrying the ADR-0226 decision 6 call-program intent.
 impl Output for aether_bloomery_kinds::CallProgram {}
 
-/// A rule output carrying the ADR-0226 decision 6 set-head intent.
-impl Output for aether_bloomery_kinds::SetHead {}
+/// A rule output carrying the ADR-0226 decision 6 atomic set-heads intent.
+impl Output for aether_bloomery_kinds::SetHeads {}
 
 /// One typed output produced by an invoked arm.
 ///

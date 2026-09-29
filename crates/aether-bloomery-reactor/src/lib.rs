@@ -57,7 +57,7 @@
 //!         change: HeadMoved<Tree>,
 //!         current: CurrentCompilation,
 //!         heads: Heads,
-//!     ) -> SetHead { /* ... */ }
+//!     ) -> SetHeads { /* ... */ }
 //! }
 //! ```
 //!

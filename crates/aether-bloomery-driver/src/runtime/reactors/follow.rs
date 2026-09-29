@@ -113,7 +113,7 @@ impl ProgramCore {
         let reading = self
             .artifact_reads
             .values()
-            .any(|read| matches!(read, ArtifactRead::ReactorSet(_) | ArtifactRead::SetHeadDestination));
+            .any(|read| matches!(read, ArtifactRead::ReactorSet(_) | ArtifactRead::SetHeadsDestination));
         routing.read.is_none()
             && routing.deliveries.is_empty()
             && routing.warms.is_empty()

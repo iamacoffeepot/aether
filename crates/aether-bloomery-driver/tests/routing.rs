@@ -12,9 +12,9 @@ use std::{collections::BTreeMap, slice};
 use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
     AppendRecords, AwaitProcessed, Call, CallInput, CallProgram, ClosureArtifact, Detail, Digest, DriverRecord,
-    EncodedArtifact, Evaluated, FaultReason, Head, Invoked, NativeOrigin, OpaqueBytes, Processed, ProgramName,
-    ProgramRef, ReactorIntent, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, RuleName,
-    SetHead, Status, Utf8Text, WatchHeadResult, artifact_digest,
+    EncodedArtifact, Evaluated, FaultReason, Head, HeadChange, Invoked, NativeOrigin, OpaqueBytes, Processed,
+    ProgramName, ProgramRef, ReactorIntent, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref,
+    RequestSource, RuleName, SetHeads, Status, Utf8Text, WatchHeadResult, artifact_digest,
 };
 use aether_data::Kind;
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
@@ -115,6 +115,11 @@ fn legacy_call_intent(reactor: &str, rule: &str, program: &'static str, name: &s
         input,
     };
     ReactorIntent::new(reactor_name(reactor), rule_name(rule), LegacyCallProgram::ID, call.encode_into_bytes())
+}
+
+fn set_heads_intent(reactor: &str, rule: &str, changes: Vec<HeadChange>) -> ReactorIntent {
+    let set_heads = SetHeads::new(changes);
+    ReactorIntent::new(reactor_name(reactor), rule_name(rule), SetHeads::ID, set_heads.encode_into_bytes())
 }
 
 /// Park one barrier waiter and drive its follow-ups, returning its caller.
@@ -280,10 +285,10 @@ fn unbound_program_head_becomes_a_single_reaction_failed() {
 }
 
 #[test]
-fn set_head_refusals_fail_only_that_intent() {
-    // Catches a swap mismatch, a missing destination, or a wrong-kind
-    // destination failing the batch instead of its own intent, and a swap
-    // checked without the earlier move in the same batch.
+fn set_heads_groups_are_atomic_and_siblings_remain_independent() {
+    // Catches a late validation or CAS failure leaking earlier changes, empty
+    // or duplicate groups failing more than once, or one failed group blocking
+    // later groups and calls.
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
@@ -295,35 +300,90 @@ fn set_head_refusals_fail_only_that_intent() {
     let chain_end = world.store(OpaqueBytes::ID, b"chain-end");
     world.seed_move("target", digest(7));
 
-    let head = program_head("target");
-    let set_intent = |from: Option<Digest>, to: Digest| {
-        let set_head = SetHead::new(&head, from.map(Ref::from_digest), Ref::from_digest(to));
-        ReactorIntent::new(reactor_name("r"), rule_name("rule"), SetHead::ID, set_head.encode_into_bytes())
-    };
+    let target = program_head("target");
+    let other = program_head("other");
+    let third = program_head("third");
     let intents = vec![
-        set_intent(Some(digest(7)), wrong),
-        set_intent(Some(digest(7)), digest(77)),
-        set_intent(Some(digest(9)), chain_mid),
-        set_intent(Some(digest(7)), chain_mid),
-        set_intent(Some(chain_mid), chain_end),
+        set_heads_intent(
+            "r",
+            "rule",
+            vec![
+                HeadChange::new(&target, Some(Ref::from_digest(digest(7))), Ref::from_digest(chain_mid)),
+                HeadChange::new(&program_head("wrong-kind-target"), None, Ref::from_digest(wrong)),
+            ],
+        ),
+        set_heads_intent(
+            "r",
+            "rule",
+            vec![
+                HeadChange::new(&target, Some(Ref::from_digest(digest(7))), Ref::from_digest(chain_mid)),
+                HeadChange::new(&other, None, Ref::from_digest(digest(77))),
+            ],
+        ),
+        set_heads_intent(
+            "r",
+            "rule",
+            vec![
+                HeadChange::new(&target, Some(Ref::from_digest(digest(7))), Ref::from_digest(chain_mid)),
+                HeadChange::new(&other, Some(Ref::from_digest(digest(9))), Ref::from_digest(chain_end)),
+            ],
+        ),
+        set_heads_intent("r", "rule", Vec::new()),
+        set_heads_intent(
+            "r",
+            "rule",
+            vec![
+                HeadChange::new(&other, None, Ref::from_digest(chain_mid)),
+                HeadChange::new(&other, None, Ref::from_digest(chain_end)),
+            ],
+        ),
+        set_heads_intent(
+            "r",
+            "rule",
+            vec![
+                HeadChange::new(&other, None, Ref::from_digest(chain_mid)),
+                HeadChange::new(&third, None, Ref::from_digest(chain_end)),
+            ],
+        ),
+        set_heads_intent(
+            "r",
+            "rule",
+            vec![HeadChange::new(&other, Some(Ref::from_digest(chain_mid)), Ref::from_digest(chain_end))],
+        ),
+        set_heads_intent(
+            "r",
+            "rule",
+            vec![
+                HeadChange::new(&target, Some(Ref::from_digest(digest(7))), Ref::from_digest(chain_mid)),
+                HeadChange::new(&third, Some(Ref::from_digest(digest(9))), Ref::from_digest(chain_mid)),
+            ],
+        ),
+        set_heads_intent(
+            "r",
+            "rule",
+            vec![HeadChange::new(&target, Some(Ref::from_digest(digest(7))), Ref::from_digest(chain_end))],
+        ),
         call_intent("r", "other", "target", "run", digest(9)),
     ];
     world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents });
-    for seq in [4, 5, 6, 7, 8, 9, 10, 11] {
-        world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
-    }
+    script_quiet(&mut world, 32);
     let manual = world.drive(commands);
-    assert!(manual.is_empty());
+    assert!(manual.is_empty(), "unexpected manual commands: {manual:?}");
     assert!(world.abort.is_none());
 
-    assert_eq!(failed_records(&world).len(), 3);
-    assert_eq!(head_moves(&world).len(), 2, "the chained swap sees the earlier move");
+    assert_eq!(failed_records(&world).len(), 6);
+    let moves = head_moves(&world);
+    assert_eq!(moves.len(), 4, "only complete successful groups move heads");
+    assert_eq!(moves[0].1.head(), &RecordedHead::from(&other));
+    assert_eq!(moves[1].1.head(), &RecordedHead::from(&third));
+    assert_eq!(moves[2].1.head(), &RecordedHead::from(&other));
+    assert_eq!(moves[3].1.head(), &RecordedHead::from(&target));
     assert_eq!(requested_records(&world).len(), 1, "the sibling intent still stands");
 }
 
 #[test]
-fn repeated_set_head_destinations_read_once() {
-    // Catches a destination re-read for every intent that names it, and a
+fn repeated_set_heads_destinations_read_once() {
+    // Catches a destination re-read for every entry that names it, and a
     // cached destination whose kind is never compared with the head's.
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
@@ -334,13 +394,20 @@ fn repeated_set_head_destinations_read_once() {
     let dest = world.store(OpaqueBytes::ID, b"dest-bytes");
     world.seed_move("target", digest(7));
 
-    let set_intent = |set_head: &SetHead| {
-        ReactorIntent::new(reactor_name("r"), rule_name("rule"), SetHead::ID, set_head.encode_into_bytes())
-    };
     let intents = vec![
-        set_intent(&SetHead::new(&program_head("target"), Some(Ref::from_digest(digest(7))), Ref::from_digest(dest))),
-        set_intent(&SetHead::new(&program_head("other"), None, Ref::from_digest(dest))),
-        set_intent(&SetHead::new(&Head::<Utf8Text>::new("text"), None, Ref::from_digest(dest))),
+        set_heads_intent(
+            "r",
+            "rule",
+            vec![
+                HeadChange::new(&program_head("target"), Some(Ref::from_digest(digest(7))), Ref::from_digest(dest)),
+                HeadChange::new(&program_head("other"), None, Ref::from_digest(dest)),
+            ],
+        ),
+        set_heads_intent(
+            "r",
+            "rule",
+            vec![HeadChange::new(&Head::<Utf8Text>::new("text"), None, Ref::from_digest(dest))],
+        ),
     ];
     world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents });
     script_quiet(&mut world, 10);
@@ -349,7 +416,7 @@ fn repeated_set_head_destinations_read_once() {
     assert!(world.abort.is_none());
 
     assert_eq!(world.reads_seen.iter().filter(|seen| **seen == dest).count(), 1, "the destination is read once");
-    assert_eq!(head_moves(&world).len(), 2);
+    assert_eq!(head_moves(&world).len(), 2, "the valid two-entry group succeeds");
     let failed = failed_records(&world);
     assert_eq!(failed.len(), 1);
     assert!(failed[0].1.reason.as_str().contains("wrong kind"), "a cached destination still checks its kind");
@@ -658,8 +725,9 @@ fn invalid_supplied_calls_never_stage_their_inputs() {
 
 #[test]
 fn supplied_input_bytes_survive_a_routing_conflict() {
-    // Catches re-encoding or dropping a supplied value while SetHead-era
-    // comparisons are re-derived after another writer advances the journal.
+    // Catches re-encoding or dropping a supplied value, changing its source
+    // ordinal/seq, or losing an atomic group while another writer advances the
+    // journal before the variable-length routing batch commits.
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
@@ -671,7 +739,9 @@ fn supplied_input_bytes_survive_a_routing_conflict() {
     world.seed_set_root(set_digest);
     world.seed_move("a", bundle_a);
     world.seed_move("prog", program_bundle);
-    for seq in [4, 5, 6, 7, 8] {
+    let first_destination = world.store(OpaqueBytes::ID, b"first-destination");
+    let second_destination = world.store(OpaqueBytes::ID, b"second-destination");
+    for seq in 4..=16 {
         world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
     }
     let manual = world.drive(commands);
@@ -680,22 +750,59 @@ fn supplied_input_bytes_survive_a_routing_conflict() {
     };
     let ticket = *ticket;
 
+    let raced_seq = world.head() + 1;
     let raced = RecordedHeadMove::new(RecordedHead::from(&program_head("other")), digest(8));
     assert!(world.append_external(None, &raced).is_empty());
     let input = RoutedInput { count: 99, text: Ref::from_digest(digest(6)) };
     let expected = EncodedArtifact::new(&input).expect("encode expected input");
+    let group = set_heads_intent(
+        "r",
+        "rule",
+        vec![
+            HeadChange::new(&program_head("first"), None, Ref::from_digest(first_destination)),
+            HeadChange::new(&program_head("second"), None, Ref::from_digest(second_destination)),
+        ],
+    );
     let evaluated =
-        Evaluated::Completed { seq: 3, intents: vec![supplied_call_intent("r", "rule", "prog", "run", &input)] };
+        Evaluated::Completed { seq: 3, intents: vec![group, supplied_call_intent("r", "rule", "prog", "run", &input)] };
     let follow = feed_evaluated(&mut world, ticket, evaluated);
     assert!(follow.iter().all(|command| !matches!(command, Command::Invoke { .. })));
     let manual = world.drive(follow);
-    assert!(manual.is_empty());
+    assert!(manual.is_empty(), "unexpected manual commands: {manual:?}");
     assert!(world.abort.is_none());
 
     let attempts: Vec<_> =
         world.appends.iter().filter(|append| append.artifacts() == slice::from_ref(&expected)).collect();
     assert_eq!(attempts.len(), 2, "the conflicted append and retry carry the input");
     assert_eq!(attempts[0].artifacts(), attempts[1].artifacts());
+    let committed = world
+        .committed
+        .iter()
+        .find(|append| append.artifacts() == slice::from_ref(&expected))
+        .expect("committed retry");
+    assert_eq!(
+        committed.records().iter().filter(|record| matches!(record, DriverRecord::HeadMoved { .. })).count(),
+        2,
+        "the committed retry contains every group member once",
+    );
+    let request_index = committed
+        .records()
+        .iter()
+        .position(|record| matches!(record, DriverRecord::Requested { .. }))
+        .expect("requested record");
+    assert_eq!(request_index, 2, "the request follows both ordered group moves");
+    let DriverRecord::Requested { record: requested, .. } = &committed.records()[request_index] else {
+        unreachable!("request index was selected from a Requested record");
+    };
+    let RequestSource::Reaction { ordinal, .. } = requested.source else {
+        panic!("expected reaction source");
+    };
+    assert_eq!(ordinal, 1, "the two-record group still occupies one intent ordinal");
+    assert_eq!(
+        committed.expected_seq() + request_index as u64 + 1,
+        raced_seq + 3,
+        "read-back uses the expanded record seq",
+    );
 }
 
 #[test]
@@ -770,48 +877,57 @@ fn unsupported_intent_records_reaction_failed_and_keeps_siblings() {
 }
 
 #[test]
-fn set_head_conflict_rechecks_the_swap() {
-    // Catches appending a swap decided against a stale view: the target moves
-    // after the first derivation, so the re-derived batch must refuse it.
-    let (mut world, commands) = World::open();
-    let set = reactor_set(&["a"]);
-    let set_digest = world.store_set(&set);
-    let bundle_a = world.store_reactor(b"reactor-a");
-    world.seed_set_root(set_digest);
-    world.seed_move("a", bundle_a);
-    let dest = world.store(OpaqueBytes::ID, b"dest-bytes");
-    world.seed_move("target", digest(7));
-    for seq in [4, 5, 6] {
-        world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
+fn set_heads_conflict_rechecks_every_member() {
+    // Catches retaining a partial acceptance across a conflict. A race on
+    // either member refuses the retried group once and commits no group move.
+    for raced_name in ["target", "other"] {
+        let (mut world, commands) = World::open();
+        let set = reactor_set(&["a"]);
+        let set_digest = world.store_set(&set);
+        let bundle_a = world.store_reactor(b"reactor-a");
+        world.seed_set_root(set_digest);
+        world.seed_move("a", bundle_a);
+        let first_destination = world.store(OpaqueBytes::ID, b"first-destination");
+        let second_destination = world.store(OpaqueBytes::ID, b"second-destination");
+        world.seed_move("target", digest(7));
+        for seq in [4, 5, 6] {
+            world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
+        }
+        let manual = world.drive(commands);
+        let [Command::Evaluate { ticket, .. }] = manual.as_slice() else {
+            panic!("expected one held evaluate, got {manual:?}");
+        };
+        let ticket = *ticket;
+
+        let raced = RecordedHeadMove::new(RecordedHead::from(&program_head(raced_name)), digest(8));
+        let wake = world.append_external(None, &raced);
+        assert!(wake.is_empty(), "no watch is parked while routing is busy");
+
+        let intent = set_heads_intent(
+            "r",
+            "rule",
+            vec![
+                HeadChange::new(
+                    &program_head("target"),
+                    Some(Ref::from_digest(digest(7))),
+                    Ref::from_digest(first_destination),
+                ),
+                HeadChange::new(&program_head("other"), None, Ref::from_digest(second_destination)),
+            ],
+        );
+        let follow = feed_evaluated(&mut world, ticket, Evaluated::Completed { seq: 3, intents: vec![intent] });
+        let manual = world.drive(follow);
+        assert!(manual.is_empty());
+        assert!(world.abort.is_none());
+
+        let committed: Vec<_> = world.committed.iter().flat_map(AppendRecords::records).collect();
+        assert!(
+            !committed.iter().any(|record| matches!(record, DriverRecord::HeadMoved { .. })),
+            "a race on {raced_name} must prevent every group move"
+        );
+        let failed = committed.iter().filter(|record| matches!(record, DriverRecord::ReactionFailed { .. })).count();
+        assert_eq!(failed, 1, "the re-derived group is refused once after racing {raced_name}");
     }
-    let manual = world.drive(commands);
-    let [Command::Evaluate { ticket, .. }] = manual.as_slice() else {
-        panic!("expected one held evaluate, got {manual:?}");
-    };
-    let ticket = *ticket;
-
-    let raced = RecordedHeadMove::new(RecordedHead::from(&program_head("target")), digest(8));
-    let wake = world.append_external(None, &raced);
-    assert!(wake.is_empty(), "no watch is parked while routing is busy");
-
-    let head = program_head("target");
-    let from = Ref::from_digest(digest(7));
-    let to = Ref::from_digest(dest);
-    let set_head = SetHead::new(&head, Some(from), to);
-    let intent = ReactorIntent::new(reactor_name("r"), rule_name("rule"), SetHead::ID, set_head.encode_into_bytes());
-    let reply = Evaluated::Completed { seq: 3, intents: vec![intent] };
-    let follow = feed_evaluated(&mut world, ticket, reply);
-    let manual = world.drive(follow);
-    assert!(manual.is_empty());
-    assert!(world.abort.is_none());
-
-    let committed: Vec<_> = world.committed.iter().flat_map(AppendRecords::records).collect();
-    assert!(
-        !committed.iter().any(|record| matches!(record, DriverRecord::HeadMoved { .. })),
-        "the stale swap must not commit"
-    );
-    let failed = committed.iter().filter(|record| matches!(record, DriverRecord::ReactionFailed { .. })).count();
-    assert_eq!(failed, 1, "the re-derived batch refuses the raced swap");
 }
 
 #[test]

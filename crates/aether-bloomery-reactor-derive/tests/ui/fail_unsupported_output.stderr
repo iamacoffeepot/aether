@@ -17,8 +17,8 @@ help: the following other types implement trait `aether_bloomery_reactor::Output
    | impl Output for aether_bloomery_kinds::CallProgram {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `CallProgram`
 ...
-   | impl Output for aether_bloomery_kinds::SetHead {}
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SetHead`
+   | impl Output for aether_bloomery_kinds::SetHeads {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SetHeads`
 note: required by a bound in `visit`
   --> $WORKSPACE/crates/aether-bloomery-reactor/src/evaluate.rs
    |
@@ -45,8 +45,8 @@ help: the following other types implement trait `aether_bloomery_reactor::Output
    | impl Output for aether_bloomery_kinds::CallProgram {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `CallProgram`
 ...
-   | impl Output for aether_bloomery_kinds::SetHead {}
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SetHead`
+   | impl Output for aether_bloomery_kinds::SetHeads {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SetHeads`
 note: required by a bound in `Intent::from_output`
   --> $WORKSPACE/crates/aether-bloomery-reactor/src/evaluate.rs
    |

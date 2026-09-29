@@ -1,4 +1,4 @@
-// Catches a rule output outside `CallProgram` / `SetHead` compiling into a bundle whose every intent the driver refuses at runtime.
+// Catches a rule output outside `CallProgram` / `SetHeads` compiling into a bundle whose every intent the driver refuses at runtime.
 
 use aether_bloomery_kinds::{HeadMoved, Tree};
 use aether_bloomery_reactor::reactor;

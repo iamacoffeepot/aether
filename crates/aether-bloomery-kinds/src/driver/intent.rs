@@ -1,5 +1,7 @@
 //! Reactor intents: the two kinds a rule's `ReactorIntent.kind` may name.
 
+use alloc::vec::Vec;
+
 use aether_data::{Cites, Kind, Storage, StorageError};
 
 use crate::{Digest, EncodedArtifact, Head, OpaqueBytes, ProgramName, RecordedHead, RecordedHeadMove, Ref};
@@ -40,38 +42,38 @@ impl CallProgram {
     }
 }
 
-/// Move one head, compare-and-swap on `from`.
+/// One typed head change in an atomic [`SetHeads`] group.
 ///
-/// A reactor intent: the driver appends [`Self::to_move`] only if the
-/// head's binding at append is `from`; otherwise it records `ReactionFailed`.
-#[aether_data::kind(name = "aether.bloomery.driver.set_head", eq, no_serde)]
-pub struct SetHead {
+/// The head and both references share one kind at construction. On the wire,
+/// the recorded head retains that kind alongside the untyped digests.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Schema)]
+pub struct HeadChange {
     head: RecordedHead,
     from: Option<Digest>,
     to: Digest,
 }
 
-impl SetHead {
+impl HeadChange {
     /// Move `head` to `to`, compare-and-swap on `from`.
     ///
     /// The head and both digests must share one kind:
     ///
     /// ```compile_fail
-    /// use aether_bloomery_kinds::{Digest, Head, Program, Ref, SetHead, Tree};
+    /// use aether_bloomery_kinds::{Digest, Head, HeadChange, Program, Ref, Tree};
     ///
     /// let head = Head::<Program>::new("main");
     /// let to = Ref::<Tree>::from_digest(Digest::from_bytes([0; 32]));
-    /// let _ = SetHead::new(&head, None, to);
+    /// let _ = HeadChange::new(&head, None, to);
     /// ```
     ///
     /// The same-kind call compiles:
     ///
     /// ```
-    /// use aether_bloomery_kinds::{Digest, Head, Ref, SetHead, Tree};
+    /// use aether_bloomery_kinds::{Digest, Head, HeadChange, Ref, Tree};
     ///
     /// let head = Head::<Tree>::new("main");
     /// let to = Ref::<Tree>::from_digest(Digest::from_bytes([0; 32]));
-    /// let _ = SetHead::new(&head, None, to);
+    /// let _ = HeadChange::new(&head, None, to);
     /// ```
     #[must_use]
     pub fn new<K: Kind>(head: &Head<K>, from: Option<Ref<K>>, to: Ref<K>) -> Self {
@@ -106,5 +108,39 @@ impl SetHead {
     #[must_use]
     pub fn into_parts(self) -> (RecordedHead, Option<Digest>, Digest) {
         (self.head, self.from, self.to)
+    }
+
+    pub(super) fn from_recorded(head: RecordedHead, from: Option<Digest>, to: Digest) -> Self {
+        Self { head, from, to }
+    }
+}
+
+/// Atomically compare and move a group of heads.
+///
+/// A reactor intent: the driver validates every destination and comparison,
+/// then appends every [`HeadChange`] in list order or records one
+/// `ReactionFailed` without moving any head.
+#[aether_data::kind(name = "aether.bloomery.driver.set_heads", eq, no_serde)]
+pub struct SetHeads {
+    changes: Vec<HeadChange>,
+}
+
+impl SetHeads {
+    /// Build one atomic group in comparison and append order.
+    #[must_use]
+    pub const fn new(changes: Vec<HeadChange>) -> Self {
+        Self { changes }
+    }
+
+    /// Changes in comparison and append order.
+    #[must_use]
+    pub fn changes(&self) -> &[HeadChange] {
+        &self.changes
+    }
+
+    /// Take the ordered changes.
+    #[must_use]
+    pub fn into_changes(self) -> Vec<HeadChange> {
+        self.changes
     }
 }
