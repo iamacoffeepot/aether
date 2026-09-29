@@ -46,7 +46,7 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
     let token = starting_token(&birth_completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
     let starting_inventory_generation = registry.inventory().mailbox_generation;
 
-    let alias_name = format!("{parent_name}/aether.embedded:widget");
+    let alias_name = format!("{parent_name}/test.inline.child:widget");
     let alias_id = lineage_mailbox_id(&alias_name);
     let alias_completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
@@ -99,7 +99,7 @@ fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
         WakeSink::detached(),
         RegistryQueueCapacities::default(),
     );
-    let alias_name = "alias-parent-first/aether.embedded:widget";
+    let alias_name = "alias-parent-first/test.inline.child:widget";
     let alias_id = lineage_mailbox_id(alias_name);
     let submit = |target_parent| {
         registry

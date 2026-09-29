@@ -148,7 +148,7 @@ pub trait Declared {
 /// walk.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a declared dependency list",
-    note = "a dependency list is `()` or `(R, Tail)`, where `R` is a keyless actor with a `One` or `Embedded` resolver"
+    note = "a dependency list is `()` or `(R, Tail)`, where `R` is a root singleton with a `One` resolver"
 )]
 pub trait DependencyList: sealed::DependencySealed {
     /// The list's first entry, or `None` for the empty list.

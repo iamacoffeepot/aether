@@ -4,7 +4,8 @@
 //! [`CONTENT_ADDRESSED_SECTION`] marker, so the engine publishes it as
 //! `aether.bloomery.bundle.<module hash>` and every built bundle is its own
 //! publication. The root is `instanced`: the driver loads one per unit and
-//! digest, each keyed by its `UnitBundle::name` (ADR-0241 §5).
+//! digest, each keyed by its unit, so it is born at
+//! `aether.bloomery.bundle.<module hash>:<unit key>` (ADR-0241 §5).
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;

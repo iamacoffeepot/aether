@@ -215,7 +215,7 @@ so the name hash of [ADR-0029](https://github.com/iamacoffeepot/aether/blob/main
 actor — a loaded component, a spawned child — folds its ActorId onto its
 parent's, so the same code under two different parents is two different
 mailboxes. The `/`-rendered addresses you see
-(`aether.component/aether.embedded:camera`) are a display rendering of the
+(`aether.widget:panel/aether.widget.button:ok`) are a display rendering of the
 lineage, one segment per ActorId; a written path resolves by parsing it into
 segments and re-folding, which happens in the host registry, never by hashing
 the joined string.

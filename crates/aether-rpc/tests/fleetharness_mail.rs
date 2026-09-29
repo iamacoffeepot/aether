@@ -161,25 +161,26 @@ mod tests {
     }
 
     /// Issue 6570: a wire `Call` names its recipient by `ErasedActorPath`, and the
-    /// engine that hosts it expands an ADR-0166 short path on arrival. Load
-    /// the probe, then address it only as `aether.component/:NAME` and expect
-    /// its one `ConfigEcho`. Fails if any hop — the harness, the hub, or the
-    /// proxy — hashes or folds the recipient text instead of carrying the
-    /// path to the engine, because a folded short path names no mailbox.
+    /// engine that hosts it expands an ADR-0166 short path on arrival. The
+    /// component host keeps its one native hole until #6869, but no guest is
+    /// born there (ADR-0241 §5), so the short path expands to a position with
+    /// no live actor, and the engine's refusal names the expanded path. Fails
+    /// if any hop — the harness, the hub, or the proxy — hashes or folds the
+    /// recipient text instead of carrying the path to the engine, because only
+    /// the engine that hosts the hole can expand it.
     #[test]
-    fn fleetharness_short_path_reaches_the_component() {
-        if !dist_component_available("aether_test_fixtures_bundle") {
-            return;
-        }
+    fn fleetharness_short_path_expands_in_the_engine() {
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let config = ProbeConfig { seed: 7, label: "short-path".to_owned() };
-        harness.load_with_config_export(engine, "aether_test_fixtures_bundle", &config, "test.probe_with_config");
 
-        let replies = harness
-            .try_send(engine, "aether.component/:test.probe_with_config", &ConfigQuery)
-            .expect("the short path reaches the loaded probe");
-        assert!(matches!(replies.as_slice(), [one] if one.kind == ConfigEcho::ID), "one ConfigEcho: {replies:?}");
+        let error = harness
+            .try_send(engine, "aether.component/:never_loaded", &ConfigQuery)
+            .expect_err("the expanded short path names no live actor");
+        let expanded = format!("{}:never_loaded", aether_actor::EMBEDDED_SCOPE);
+        assert!(
+            matches!(&error, RpcError::NotPresent { detail, .. } if detail.contains(&expanded)),
+            "the engine expanded the short path it was carried: {error:?}",
+        );
     }
 
     /// Issue 6570: a path that resolves to no actor in the engine closes the
@@ -191,7 +192,7 @@ mod tests {
     fn fleetharness_absent_path_is_not_present_through_the_hub() {
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let absent = "aether.component/aether.embedded:never-loaded";
+        let absent = "test.never_loaded";
 
         let error = harness.try_send(engine, absent, &ConfigQuery).expect_err("an absent path is refused");
         assert!(

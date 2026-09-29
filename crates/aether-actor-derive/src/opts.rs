@@ -7,9 +7,8 @@ use syn::token::Paren;
 #[derive(Default, Clone)]
 pub struct ActorOpts {
     /// ADR-0119 cardinality from `#[actor(singleton|instanced)]`, mapped to
-    /// the resolver per transport — native: `One` / `Many`; FFI: `Embedded`
-    /// (default) / `EmbeddedMany`. `None` where the transport supplies a
-    /// default (FFI ⇒ `Embedded`).
+    /// the resolver `One` / `Many` on both transports (ADR-0241 §5). `None`
+    /// where the transport supplies a default (FFI ⇒ `One`).
     pub cardinality: Option<ActorCardinality>,
     /// iamacoffeepot/aether#2330: override the `runtime` feature the split path
     /// gates its `Lifecycle`/`Dispatch`/`NativeActor` impls behind, from
@@ -29,9 +28,9 @@ pub struct ActorOpts {
     /// ADR-0166: this actor may be placed at the actor-tree root. On a wasm
     /// actor (ADR-0241 §5) it is a host-placement permission recorded as a
     /// `Root` record in the lineage section, which the component host checks
-    /// before it loads, boots, or replaces-with-boot the type; it emits no
-    /// `Root` marker impl, because a loaded guest's address is still its
-    /// host's.
+    /// before it loads, boots, or replaces-with-boot the type, and it emits
+    /// the `Root` marker impl a native root carries, because a loaded guest is
+    /// named at the root as a native actor is.
     pub root: bool,
     /// ADR-0166: actor types that may directly parent this actor. Repetition
     /// is intentional so one child identity can be permitted beneath several
@@ -43,7 +42,7 @@ pub struct ActorOpts {
     /// it (ADR-0231 §10). The pre-`init` check reads that list on both
     /// transports (on wasm through the `Dependency` records `export!` writes
     /// from it) and refuses the birth while any entry has no `Live` route.
-    /// Only keyless (`One` / `Embedded`) actors are declarable — a keyed `R` is a
+    /// Only keyless (`One`) actors are declarable — a keyed `R` is a
     /// trait-bound compile error on the emitted impl, not a macro error here.
     pub depends: Vec<syn::TypePath>,
     /// ADR-0114: the inline children this Wasm actor spawns through the typed

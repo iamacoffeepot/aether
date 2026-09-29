@@ -5,28 +5,28 @@
 use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
 use crate::mail::{Mail, NO_REPLY_HANDLE};
 use crate::model::ctx::{Erased, Manual, Single};
-use crate::model::{Addressable, Embedded, HandlesKind, Resolve};
+use crate::model::{Addressable, HandlesKind, One, Resolve};
 use crate::reference::ErasedActorRef;
 use crate::wasm::inline::{ChildRecord, RouteDecision};
 use crate::wasm::{ActorInitError, WasmInitCtx};
-use aether_data::{ActorId, Kind, MailboxId, Source};
+use aether_data::{Kind, MailboxId, Source};
 use alloc::string::String;
 use core::mem::{self, align_of, size_of};
 
-struct EmbeddedPeer;
+struct RootPeer;
 
-impl Addressable for EmbeddedPeer {
-    const NAMESPACE: &'static str = "test.wasm.embedded_peer";
-    type Resolver = Embedded;
+impl Addressable for RootPeer {
+    const NAMESPACE: &'static str = "test.wasm.root_peer";
+    type Resolver = One;
 }
 
-impl HandlesKind<()> for EmbeddedPeer {}
+impl HandlesKind<()> for RootPeer {}
 
-/// Types the ctx that sends to [`EmbeddedPeer`]: the flat typed verbs exist
+/// Types the ctx that sends to [`RootPeer`]: the flat typed verbs exist
 /// only on a ctx whose actor declares its recipient.
 struct PeerDependent;
 
-#[crate::actor(depends(EmbeddedPeer))]
+#[crate::actor(depends(RootPeer))]
 impl crate::WasmActor for PeerDependent {
     const NAMESPACE: &'static str = "test.wasm.peer_dependent";
 
@@ -112,53 +112,8 @@ fn local_dispatch_ctx_never_reads_host_reply_correlation() {
 fn ffi_ctx_layout_identical_across_modes() {
     assert_eq!(size_of::<WasmCtx<'static, Erased, Single>>(), size_of::<WasmCtx<'static, Erased, Manual>>(),);
     assert_eq!(align_of::<WasmCtx<'static, Erased, Single>>(), align_of::<WasmCtx<'static, Erased, Manual>>(),);
-    assert_eq!(size_of::<WasmCtx<'static, EmbeddedPeer, Manual>>(), size_of::<WasmCtx<'static, Erased, Manual>>(),);
-    assert_eq!(align_of::<WasmCtx<'static, EmbeddedPeer, Manual>>(), align_of::<WasmCtx<'static, Erased, Manual>>(),);
-}
-
-#[test]
-fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents() {
-    let registry = Registry::new();
-    let entry_parent = ActorId::singleton("test.wasm.host").0;
-    let entry = Embedded::resolve(entry_parent, "test.wasm.entry", ());
-    let child = Embedded::resolve(entry.0, "test.wasm.child", ());
-    let default_entry_peer = Embedded::resolve(entry_parent, EmbeddedPeer::NAMESPACE, ());
-    let nested_peer = Embedded::resolve(entry.0, EmbeddedPeer::NAMESPACE, ());
-    registry.set_self_id(entry.0);
-    registry.set_parent_id(entry_parent);
-    install_inline_child::<SucceedingChild>(
-        &registry,
-        child,
-        ChildRecord { full_subname: String::from("child"), parent: entry.0, ..ChildRecord::default() },
-        (),
-    )
-    .expect("install inline child");
-    install_inline_child::<SucceedingChild>(
-        &registry,
-        default_entry_peer,
-        ChildRecord { full_subname: String::from("default-peer"), parent: entry.0, ..ChildRecord::default() },
-        (),
-    )
-    .expect("install default embedded peer");
-    install_inline_child::<SucceedingChild>(
-        &registry,
-        nested_peer,
-        ChildRecord { full_subname: String::from("nested-peer"), parent: entry.0, ..ChildRecord::default() },
-        (),
-    )
-    .expect("install nested embedded peer");
-
-    let mut entry_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(entry.0, &registry, NO_INBOUND_SOURCE);
-    let mut child_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(child.0, &registry, NO_INBOUND_SOURCE);
-    let entry_ctx = entry_ctx.__for_actor::<PeerDependent>();
-    let child_ctx = child_ctx.__for_actor::<PeerDependent>();
-
-    assert_eq!(entry_ctx.actor_ref::<EmbeddedPeer>().id(), default_entry_peer);
-    assert_eq!(child_ctx.actor_ref::<EmbeddedPeer>().id(), nested_peer);
-
-    entry_ctx.send::<EmbeddedPeer>(&());
-    child_ctx.send::<EmbeddedPeer>(&());
-    assert_eq!(registry.queued_len(), 2, "default and nested parent-scoped sends route locally");
+    assert_eq!(size_of::<WasmCtx<'static, RootPeer, Manual>>(), size_of::<WasmCtx<'static, Erased, Manual>>(),);
+    assert_eq!(align_of::<WasmCtx<'static, RootPeer, Manual>>(), align_of::<WasmCtx<'static, Erased, Manual>>(),);
 }
 
 /// ADR-0114 addressing amendment: a ctx self-identified as the cluster
@@ -231,11 +186,9 @@ fn ctx_relative_verbs_resolve_and_route_in_place() {
 #[test]
 fn send_tracked_local_route_enqueues_and_returns_no_correlation() {
     let registry = Registry::new();
-    let parent = 0x7000_u64;
     let root = 0x7100_u64;
     registry.set_self_id(root);
-    registry.set_parent_id(parent);
-    let peer = Embedded::resolve(parent, EmbeddedPeer::NAMESPACE, ());
+    let peer = One::resolve(0, RootPeer::NAMESPACE, ());
     install_inline_child::<SucceedingChild>(
         &registry,
         peer,
@@ -245,7 +198,7 @@ fn send_tracked_local_route_enqueues_and_returns_no_correlation() {
     .expect("install inline child");
 
     let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
-    let request = ctx.__for_actor::<PeerDependent>().send_tracked::<EmbeddedPeer>(&());
+    let request = ctx.__for_actor::<PeerDependent>().send_tracked::<RootPeer>(&());
     assert_eq!(request.0, Source::NO_CORRELATION, "local inline sends have no host-minted request id");
     assert_eq!(registry.queued_len(), 1, "local tracked sends enqueue their payload before returning the sentinel");
 }

@@ -239,13 +239,10 @@ impl NativeBinding {
 
     /// Select the caller carry requested by a caller-scoped resolver.
     pub(crate) fn scope_mailbox(&self, scope: CallerScope) -> u64 {
-        match (scope, self.parent_mailbox()) {
-            // A root-pinned resolver ignores its carry, and no birth folds
-            // beneath the empty lineage, so a parentless `Parent` scope
-            // resolves to an address that is never live.
-            (CallerScope::Root, _) | (CallerScope::Parent, None) => 0,
-            (CallerScope::Current, _) => self.self_mailbox().0,
-            (CallerScope::Parent, Some(parent)) => parent.0,
+        match scope {
+            // A root-pinned resolver ignores its carry.
+            CallerScope::Root => 0,
+            CallerScope::Current => self.self_mailbox().0,
         }
     }
 
@@ -318,27 +315,14 @@ impl NativeBinding {
         self.mailer.actor_probe()
     }
 
-    /// The first declared dependency with no `Live` route for a child placed
-    /// under this binding's actor. The path behind
-    /// [`NativeCtx::missing_child_dependency`](crate::actor::native::ctx::NativeCtx::missing_child_dependency).
-    #[cfg(feature = "wasm")]
-    pub(crate) fn missing_child_dependency<'a>(
-        &self,
-        dependencies: impl IntoIterator<Item = (u8, &'a str)>,
-    ) -> Option<&'a str> {
-        self.mailer.missing_dependency(Some(self.self_mailbox()), dependencies)
-    }
-
-    /// The first declared dependency with no `Live` route for an actor placed
-    /// under an explicit `parent`, or at the root for `None`. The path behind
+    /// The first declared dependency with no `Live` route. The path behind
     /// [`NativeCtx::missing_dependency`](crate::actor::native::ctx::NativeCtx::missing_dependency).
     #[cfg(feature = "wasm")]
     pub(crate) fn missing_dependency<'a>(
         &self,
-        parent: Option<ErasedActorRef>,
         dependencies: impl IntoIterator<Item = (u8, &'a str)>,
     ) -> Option<&'a str> {
-        self.mailer.missing_dependency(parent.map(ErasedActorRef::id), dependencies)
+        self.mailer.missing_dependency(dependencies)
     }
 
     /// Build a guest ctx over this binding. The path behind
@@ -526,17 +510,6 @@ mod tests {
         let (_tx2, rx2) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx1);
         transport.install_inbox(rx2);
-    }
-
-    #[test]
-    fn binding_scope_selection_distinguishes_current_and_parent() {
-        let (_registry, mailer) = bare_substrate();
-        let current = MailboxId(0x4a01);
-        let parent = MailboxId(0x4a00);
-        let binding = NativeBinding::new_for_test_with_parent(mailer, current, Some(parent));
-
-        assert_eq!(binding.scope_mailbox(CallerScope::Current), current.0);
-        assert_eq!(binding.scope_mailbox(CallerScope::Parent), parent.0);
     }
 
     /// #1716 / step 2: an armed envelope left queued in the dispatcher's

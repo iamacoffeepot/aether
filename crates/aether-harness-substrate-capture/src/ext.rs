@@ -11,6 +11,7 @@
 //! params.
 
 use std::any::Any;
+use std::time::Duration;
 
 use aether_actor::ErasedActorRef;
 use aether_harness_substrate::{
@@ -20,8 +21,14 @@ use aether_render::{
     DrawShapes, DrawTexturedQuads, Frame, ProgramTimings, ProgramTimingsResult, RenderCapability, RenderParams,
     RenderTuningConfig,
 };
+use aether_substrate::chassis::frame_loop;
+use aether_substrate::chassis::settlement::{
+    PumpWake, SettlementRegistry, TerminalDisposition, WaitOutcome, await_settlement_pumped, install_pump_wake,
+};
+use aether_substrate::mail::MailId;
 use aether_substrate::render::VERTEX_BUFFER_BYTES;
 use aether_substrate::{PumpedSlot, RootPusher};
+use crossbeam_channel::{Receiver, Sender};
 
 /// [`FrameHook`] owning the [`PumpedSlot`] for the pumped `aether.render`
 /// actor (ADR-0161). The harness drains the slot at its step / capture pump
@@ -37,6 +44,13 @@ pub struct GpuFrameHook {
     /// The pumped render actor's proven reference, recorded by its boot —
     /// where the harness routes `capture_frame`.
     render: ErasedActorRef,
+    /// The unified [`PumpWake`] channel (ADR-0161 §Decision 2): the render
+    /// slot's mailbox wake sends [`PumpWake::Mail`] after each accepted
+    /// send, and each [`FrameHook::settle`] subscription sends
+    /// [`PumpWake::Settled`], so the settle wait drains the slot on mail
+    /// arrival and returns on settlement.
+    wake_tx: Sender<PumpWake>,
+    wake_rx: Receiver<PumpWake>,
 }
 
 impl GpuFrameHook {
@@ -88,7 +102,33 @@ impl FrameHook for GpuFrameHook {
     }
 
     fn pump(&mut self) {
+        // Empty the queued wakes before draining: every mail whose wake is
+        // dropped here was queued before its wake fired, so the drain below
+        // dispatches it, and mail arriving after the drain wakes afresh. This
+        // keeps the channel bounded between settles and discards a late
+        // `Settled` left by a settle that wedged.
+        while self.wake_rx.try_recv().is_ok() {}
         self.slot.drain_available();
+    }
+
+    fn settle(&mut self, settlement: &SettlementRegistry, root: MailId, cap: Duration) -> WaitOutcome {
+        // Drain first: mail queued before the wake was installed at boot
+        // carries no wake, and a chain gated on it would otherwise wait out
+        // the cap. Subscribing after the drain keeps a pre-fired `Settled`
+        // (a root that already settled) out of the emptied queue.
+        self.pump();
+        let wake_tx = self.wake_tx.clone();
+        settlement.subscribe_settlement_with(root, move || {
+            let _ = wake_tx.send(PumpWake::Settled);
+        });
+        await_settlement_pumped(
+            &self.wake_rx,
+            &mut self.slot,
+            "substrate_harness.push_and_settle",
+            frame_loop::DRAIN_BUDGET,
+            cap,
+            TerminalDisposition::ReplyErr,
+        )
     }
 
     // See `committed_overlay_snapshot`: the pumped state type is unnameable
@@ -171,7 +211,7 @@ fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color
         // desktop-only `window: None`, so this literal is robust to feature
         // unification.
         let params = RenderParams { assets_dir, offscreen_size: Some((width, height)), ..Default::default() };
-        let (slot, _wake_slot) = passive
+        let (slot, wake_slot) = passive
             .boot_pumped_actor::<RenderCapability>(
                 RenderTuningConfig {
                     vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
@@ -183,7 +223,9 @@ fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color
             .map_err(|e| anyhow::anyhow!("boot pumped render slot: {e}"))?;
         let render_root = passive.root_pusher::<RenderCapability>();
         let render = passive.actor_ref::<RenderCapability>().erase();
-        Ok(Box::new(GpuFrameHook { slot, render_root, render }) as Box<dyn FrameHook>)
+        let (wake_tx, wake_rx) = crossbeam_channel::unbounded::<PumpWake>();
+        install_pump_wake(&wake_slot, wake_tx.clone());
+        Ok(Box::new(GpuFrameHook { slot, render_root, render, wake_tx, wake_rx }) as Box<dyn FrameHook>)
     }))
 }
 

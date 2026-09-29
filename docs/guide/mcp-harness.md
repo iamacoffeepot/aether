@@ -106,8 +106,8 @@ not for hub artifact-store or MCP-local queries.
 `{engine_id, address, kind_name, params}` — the **mailbox** to deliver to,
 the **kind** to deliver, and the structured params, which the tool schema-encodes to
 wire bytes against that kind's descriptor. A textual `address` may be a
-canonical lineage (`aether.component/aether.embedded:camera`) or an ADR-0166
-short path (`aether.component/:camera`). The selected engine resolves either
+canonical lineage (a loaded component's published name, `aether.kit.camera`) or
+an ADR-0166 short path (`aether.window/:main`). The selected engine resolves either
 spelling to the same canonical path before dispatch, and the `Call` names its
 recipient by that `ErasedActorPath`; aether-mcp does not hash operator strings or keep
 an alias cache. By default each item *blocks* until its
@@ -206,7 +206,8 @@ stays bounded. `describe_component` reports a loaded component's handler kinds,
 their docs, whether it has a fallback, and its boot-config kind, addressed by
 the component's loaded lineage name or an unambiguous ADR-0166 short path.
 `load_component` returns the canonical
-`aether.component/aether.embedded:NAME` address. For a boot load, retain the
+address, the component's published name (`NS`, or `NS:key` for an instanced
+type). For a boot load, retain the
 configured name from the component spec or derive the expected lineage from
 that spec; `spawn_substrate` itself returns only engine information. Registry
 `list_components` entries describe stored artifacts and are not loaded lineage

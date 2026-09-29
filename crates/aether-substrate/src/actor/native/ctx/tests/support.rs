@@ -85,15 +85,6 @@ impl aether_data::CrossesActors for CastOnly {}
 
 impl HandlesKind<CastOnly> for StubActor {}
 
-pub(super) struct EmbeddedPeer;
-
-impl Addressable for EmbeddedPeer {
-    const NAMESPACE: &'static str = "test.native.embedded_peer";
-    type Resolver = aether_actor::Embedded;
-}
-
-impl HandlesKind<CastOnly> for EmbeddedPeer {}
-
 #[aether_data::kind(name = "test.native_request_context", partial_eq)]
 pub(super) struct NativeRequestContext {
     pub(super) value: u32,

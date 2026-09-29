@@ -20,7 +20,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_actor::{ActorRef, Addressable};
+use aether_actor::ActorRef;
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -43,8 +43,10 @@ const PANEL_WIDTH: f32 = 200.0;
 const RESTYLE_RED: Rgba = Rgba::new(0.90, 0.05, 0.05, 1.0);
 const RESTYLE_BLUE: Rgba = Rgba::new(0.05, 0.05, 0.90, 1.0);
 
+/// The address the loaded `WidgetPanel` root registers at: its own
+/// namespace and the key `panel` (ADR-0241 §5).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
+    "aether.widget.panel:panel".to_owned()
 }
 
 fn tick_to_panel() -> NamedMail {

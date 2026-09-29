@@ -46,7 +46,7 @@ impl Inner {
             if self
                 .inventory_publisher
                 .publish(RegistryInventory {
-                    mailboxes: live_inventory(&self.mailboxes),
+                    mailboxes: live_inventory(&self.mailboxes, &self.publications),
                     kinds: kind_inventory(&self.kinds),
                     mailbox_generation: self.mailbox_generation,
                     kind_generation: self.kind_generation,

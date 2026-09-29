@@ -605,8 +605,8 @@ impl FleetHarness {
 
     /// Load the `<stem>` component wasm (located through
     /// `dist/manifest.json`) into `engine` and return its registered
-    /// ADR-0099 lineage address
-    /// (`aether.component/aether.embedded:<NAMESPACE>`). Loads with no
+    /// address, the guest's published name (`<NAMESPACE>` for a singleton,
+    /// ADR-0241 §5). Loads with no
     /// init-config — the `LoadComponent.config` carrier is empty, which a
     /// `Config = ()` component decodes uniformly. A thin delegate over
     /// [`load_full`](Self::load_full) for callers that need only the
@@ -761,9 +761,8 @@ impl FleetHarness {
     /// Route a mail to a recipient on a forked substrate and return the
     /// reply envelopes (one per `ReplyEvent`). `recipient` is an
     /// `ErasedActorPath` in text — a chassis cap (`aether.fs`), a loaded
-    /// component's lineage address
-    /// (`aether.component/aether.embedded:<name>`), or an ADR-0166 short
-    /// path (`aether.component/:<name>`) the engine expands on arrival.
+    /// component's address (`NS`, `NS:key`, or `parent/NS:key`), or an
+    /// ADR-0166 short path (`root/:<key>`) the engine expands on arrival.
     pub fn send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Vec<ReplyEnvelope>
     where
         K: WireMail,

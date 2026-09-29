@@ -299,21 +299,24 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     }
 
     // ADR-0093 §3: two `#[handler(task)]` methods with the same
-    // `TaskDone<O>` output type are ambiguous — completions route by `O`,
-    // so a duplicate `O` would let the first-tried handler shadow the
-    // second. Reject it at compile time, spanned at the later handler.
+    // `TaskDone<O, C>` pair are ambiguous — completions route by the pair the
+    // ledger's `try_take::<O, C>` probe matches, so a duplicate pair would let
+    // the first-tried handler shadow the second. Two handlers sharing `O` with
+    // distinct `C` are told apart by that probe. Reject a duplicate pair at
+    // compile time, spanned at the later handler.
     for (i, later) in task_handlers.iter().enumerate() {
-        if let Some(earlier) =
-            task_handlers[..i].iter().find(|earlier| types_token_eq(&earlier.output_ty, &later.output_ty))
-        {
+        if let Some(earlier) = task_handlers[..i].iter().find(|earlier| {
+            types_token_eq(&earlier.output_ty, &later.output_ty)
+                && types_token_eq(&earlier.context_ty, &later.context_ty)
+        }) {
             let earlier_name = &earlier.method.sig.ident;
             return Err(syn::Error::new_spanned(
                 &later.method.sig.ident,
                 format!(
-                    "two #[handler(task)] methods share the `TaskDone<O>` output type \
-                     (also on `{earlier_name}`) — completions route by output type, so a \
-                     duplicate `O` is ambiguous (ADR-0093 §3). Give each task handler a \
-                     distinct output type."
+                    "two #[handler(task)] methods share the `TaskDone<O, C>` output and context types \
+                     (also on `{earlier_name}`) — completions route by the `(O, C)` pair, so a \
+                     duplicate pair is ambiguous (ADR-0093 §3). Give each task handler a \
+                     distinct output or context type."
                 ),
             ));
         }

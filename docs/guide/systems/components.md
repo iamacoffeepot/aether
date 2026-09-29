@@ -92,9 +92,8 @@ reactor with one root exported as `aether.bloomery.bundle`
 content-addressed (see [Publishing a module](#publishing-a-module)), so the
 root publishes as `aether.bloomery.bundle.<module hash>` while
 `export: Some("aether.bloomery.bundle")` still selects it. The root is
-`instanced`, and the bundle driver loads it as `aether.component/aether.embedded:<key>-<digest>` (short path
-`aether.component/:<key>-<digest>`), the name `UnitBundle::name` builds from
-the unit's key and the bundle digest (ADR-0240 D4). A module provides
+`instanced`, and the bundle driver loads it keyed by its unit, so it is born at
+`aether.bloomery.bundle.<module hash>:<unit key>` (ADR-0240 D4). A module provides
 programs, reactors, or both; neither is a compile error. With programs, the
 root answers `Invoke` with `Invoked` through a per-seq inline child and
 writes `aether.bloomery.programs`. The program root relays each invocation's
@@ -133,23 +132,25 @@ mailbox:
 `LoadResult::Ok` carries the component's canonical **`path`** (so a caller that
 omitted `name` learns the key the load took) and the parsed
 `ComponentCapabilities` (handlers, fallback, doc, config) read from the manifest.
-It carries no mailbox id. A loaded component registers at
-**`aether.component/aether.embedded:KEY`** — that full string is the address you
-send subsequent mail to, and `aether.component/:KEY` is its short path. Bare
-names (`"player"`) are *not* registered and warn-drop; always use the path from
-`LoadResult`.
+It carries no mailbox id. A loaded component is named as a native actor is
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§5): a singleton registers at its published namespace **`NS`**, an instanced
+type at **`NS:KEY`**, and one loaded beneath a parent at **`parent/NS:KEY`** —
+that full string is the address you send subsequent mail to. A name nothing is
+registered at warn-drops; always use the path from `LoadResult`.
 
 The successful reply is sent by the loaded component itself: the component host
-hands its owed reply to the trampoline it just spawned (as
-`aether.component.load_delivered`), and the trampoline answers the requester in
-its own name. An actor that loaded a component therefore keeps `ctx.sender()`
+waits with the load's held reply until the guest's birth completes, then hands
+it off to the guest (as `aether.component.load_delivered`,
+[ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)
+§9), and the guest answers the requester in its own name. An actor that loaded a component therefore keeps `ctx.sender()`
 from the reply as its proven reference; an embedder reads the stamped sender off
 the reply event
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
 `LoadResult::Err` comes from the host, since no actor was loaded.
 
 `aether.component.drop` and `aether.component.replace` name their component by
-`target`, a canonical or short actor path; the host parses and proves it once at
+`target`, its actor path; the host parses and proves it once at
 receipt, and an address with no live component answers `Err` naming it.
 
 The engine compiles each distinct module, and parses its custom sections, once
@@ -171,7 +172,7 @@ The selected type's cardinality decides the load's key
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
 §5). A singleton is named by its namespace, so **a load names no key** for it:
 loading the singleton `RootManager` export with `export: "ui.root"` and no `name`
-registers it at `aether.component/aether.embedded:ui.root`, and a load that names
+registers it at `ui.root`, and a load that names
 any key for a singleton, its own namespace included, answers `Err` ("`ui.root` is a
 singleton; a load names no key") before the module publishes or anything is
 staged. An `#[actor(instanced)]` type is named by the load's `name`, or, when the
@@ -331,10 +332,12 @@ entry, and the `export!` must list every child it declares.
 `Subname::Counter` has the host assign a bare monotonic counter — `0`, `1`, … —
 for when you'll track it by the returned handle; `Subname::Named("inventory")`
 gives it a stable discriminator you can render and address. A spawned actor nests
-under the spawner's registered lineage ([ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)): if a loaded root is
-`aether.component/aether.embedded:root`, its named child is
-`aether.component/aether.embedded:root/aether.embedded:inventory`, and another
-generation adds another `/aether.embedded:<subname>` node. Its `MailboxId` is the
+under the spawner's registered lineage under its own type's namespace
+([ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md),
+[ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§6): if a loaded root is `example.root` and it spawns an `example.inventory`
+child named `main`, the child is `example.root/example.inventory:main`, and
+another generation adds another `/<child NS>:<subname>` node. Its `MailboxId` is the
 lineage fold, not `hash(flat_name)`, and replies still route back to the spawner.
 The text after each `:` is that node's discriminator; `/` carries the ancestry.
 Spawn stays within the module the instance runs from; a different binary comes in
@@ -364,18 +367,19 @@ let nested_load = HarnessOp::load_component_under(
 ```
 
 The component host resolves `parent_name` through the live registry before it
-stages the ordinary component-loader path. The existing `LoadResult` is the
-reply: `Ok.path` carries the canonical nested address
-`PARENT/aether.embedded:worker`, while a missing or non-live parent returns
-`LoadResult::Err`. Loading another component beneath that returned path builds
-another lineage generation. Because typed addressing seeds resolution from the
-caller's runtime parent, identical component types can then route to the peers
-in their own explicit or nested scope.
+stages the ordinary component-loader path, and admits the load only when the
+selected type declares `child_of` the parent's type
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§5); any other placement answers `Err` before the module publishes. The
+existing `LoadResult` is the reply: `Ok.path` carries the canonical nested
+address `PARENT/example.worker:worker`, while a missing or non-live parent
+returns `LoadResult::Err`. A singleton is named at the root alone, so a
+`load_under` of one is refused. A declared dependency is always a root
+singleton, so a nested guest reaches its peers exactly as a root one does.
 
 This constructor is test-harness composition infrastructure. Ordinary
-`aether.component.load` retains its established placement beneath
-`aether.component`; the hub and MCP load surfaces do not expose an explicit
-parent mode.
+`aether.component.load` places its guest at the root; the hub and MCP load
+surfaces do not expose an explicit parent mode.
 
 ## Hot reload
 
@@ -469,8 +473,11 @@ impl WasmActor for MeshViewer {
 }
 ```
 
-Each entry names a keyless actor — a root singleton (`One`, like a chassis
-capability) or a co-hosted peer under the same parent (`Embedded`). A keyed
+Each entry names a root singleton (`One`), a chassis capability or a loaded
+guest alike: a guest singleton is named at the root by its published
+namespace
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§5), so a dependency reads the same position from every caller. A keyed
 (`Instanced`) entry is a compile error: which instance is meant is run-time
 data, and that instance is reached through the reference its spawn returned. The
 macro emits the actor's one `Declared` impl, whose `Depends` lists the entries,
@@ -500,9 +507,7 @@ keeps the envelope sender of its announcement; see
 Loading or replacing a module also checks the dependencies of every actor in it
 that can be spawned inline — a `composable` actor, or a `child_of` a type in the
 same module — and refuses with the same message before anything in the module
-runs. Such an actor's `Embedded` dependency would sit beneath its spawner, which
-does not exist while the module loads, so it cannot be proven live then and the
-load refuses. A private child, listed under `export!`'s `private = [..]`, is
+runs. A private child, listed under `export!`'s `private = [..]`, is
 checked the same way, so a module whose private child depends on an absent
 actor does not load.
 

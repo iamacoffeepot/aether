@@ -1,13 +1,14 @@
 //! `aether.component` cap (issue 603, renamed in issue 638 phase 3
 //! from `aether.control`). The wasm-component lifecycle endpoint:
 //! receives [`LoadComponent`](aether_kinds::LoadComponent) mail and spawns a per-component
-//! `WasmTrampoline` (issue 634 Phase 4 PR 1) addressed at
-//! `aether.embedded:NAME`. [`DropComponent`](aether_kinds::DropComponent) and
+//! `WasmTrampoline` (issue 634 Phase 4 PR 1) named by the guest's own
+//! published namespace: `NS`, `NS:key`, or `parent/NS:key` (ADR-0241 §5).
+//! [`DropComponent`](aether_kinds::DropComponent) and
 //! [`ReplaceComponent`](aether_kinds::ReplaceComponent) mail flow through the cap as well — it
 //! forwards each to the addressed trampoline preserving the
 //! original `reply_to`, so the trampoline replies directly to the
-//! agent. The cap holds no per-component bookkeeping; the
-//! trampoline manages its own lifecycle as an instanced [`NativeActor`].
+//! agent. The trampoline manages its own lifecycle as an instanced
+//! [`NativeActor`].
 //!
 //! Every load and replace first publishes its module (ADR-0241 §3): one
 //! registry-owner batch runs admission (§4) and registers the module's kinds,
@@ -91,10 +92,10 @@ use aether_actor::actor;
 pub struct ComponentHostCapability;
 
 /// `aether.component.load_delivered` — the component host hands a successful
-/// load to the trampoline it just spawned, which answers the requester with
+/// load to the guest it just staged, which answers the requester with
 /// [`LoadResult::Ok`] in its own name.
 ///
-/// The host's owed reply rides this mail (`TaskDone::hand_off`): its reply
+/// The host's held reply rides this mail (`Held::hand_off`): its reply
 /// target is the requester and its lineage is the load's chain, so the
 /// trampoline's reply settles the requester's call and arrives stamped with
 /// the trampoline as sender — the reference the requester keeps (ADR-0230
@@ -115,59 +116,3 @@ pub struct LoadDelivered {
 // identity markers; the runtime body is self-contained there.
 #[cfg(feature = "runtime")]
 mod runtime;
-
-#[cfg(test)]
-mod tests {
-    use aether_actor::{Addressable, Embedded};
-    use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::registered_ref;
-
-    use super::ComponentHostCapability;
-    use crate::trampoline::WasmTrampoline;
-
-    struct Guest;
-
-    impl Addressable for Guest {
-        const NAMESPACE: &'static str = "aether.kit.camera";
-        type Resolver = Embedded;
-    }
-
-    /// Tripwire: a loaded component's id is the ADR-0099 §3 lineage fold over
-    /// `[aether.component, aether.embedded:<name>]`, and the cap registers its
-    /// trampoline at that id. The bare-type fold a co-hosted caller computes
-    /// from its runtime parent and the declared host-to-trampoline edge must
-    /// therefore both land on it — a change to the fold that misses either one
-    /// splits the address the host registers from the address senders compute.
-    #[test]
-    fn typed_route_composes_the_canonical_trampoline_address() {
-        let parent = ComponentHostCapability::resolve(0, ());
-
-        assert_eq!(<Guest as Addressable>::resolve(parent.0, ()), WasmTrampoline::resolve(parent.0, Guest::NAMESPACE));
-    }
-
-    /// The external registry boundary expands short component paths
-    /// before its canonical live lookup. Typed resolution, the full
-    /// canonical path, and the short path therefore identify one
-    /// mailbox, while reverse lookup retains only the canonical spelling.
-    #[test]
-    fn registry_resolves_typed_canonical_and_short_component_addresses_equally() {
-        let name = "camera";
-        let typed = WasmTrampoline::resolve(ComponentHostCapability::resolve(0, ()).0, name);
-        let canonical = format!("{}/{}:{name}", ComponentHostCapability::NAMESPACE, WasmTrampoline::NAMESPACE);
-        let registry = Registry::new();
-        let live = registered_ref(&registry, &canonical, noop_handler());
-        assert_eq!(live.id(), typed, "the fixture stands the route at the typed resolver's position");
-
-        for address in [canonical.as_str(), "aether.component/:camera"] {
-            let address = aether_data::ErasedActorPath::new(address).expect("fixture is a well-formed actor path");
-            let resolved = registry.resolve_address(&address).expect("address resolves to the live trampoline");
-            assert_eq!(resolved.mailbox_id, typed);
-            assert_eq!(resolved.canonical_path, canonical);
-        }
-        assert_eq!(registry.mailbox_name(typed).as_deref(), Some(canonical.as_str()));
-        assert!(
-            registry.list_mailbox_descriptors().iter().all(|descriptor| !descriptor.name.contains("/:")),
-            "short spellings never enter registry inventory"
-        );
-    }
-}

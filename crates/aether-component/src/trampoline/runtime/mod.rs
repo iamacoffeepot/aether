@@ -65,17 +65,11 @@ impl NativeActor for WasmTrampoline {
 
     type Config = WasmTrampolineConfig;
 
-    /// The embedding-host scope namespace (ADR-0099 §5/§6, ADR-0119),
-    /// **forward-fed** from [`EMBEDDED_SCOPE`]
-    /// — `aether-actor`'s sole owner of the `"aether.embedded"` literal.
-    /// The trampoline references the const rather than re-declaring the
-    /// name, so an embeddable actor's id depends on what the code is, not
-    /// how it is hosted, and the namespace is written only on its owner.
-    /// Reachable on every target because `#[actor]` emits the always-on
-    /// `Addressable` impl. The substrate's `TRAMPOLINE_NAMESPACE`
-    /// forward-feeds the same const, collapsing the former two-literal mirror
-    /// into one source; the `trampoline_namespace_matches_substrate` test
-    /// guards the match.
+    /// The trampoline's own namespace, **forward-fed** from
+    /// [`EMBEDDED_SCOPE`] — `aether-actor`'s sole owner of the
+    /// `"aether.embedded"` literal — until #6869 retires it. No guest is
+    /// named by it: a guest is born under its own published name (ADR-0241
+    /// §5), so its id depends on what the code is, not how it is hosted.
     const NAMESPACE: &'static str = EMBEDDED_SCOPE;
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
@@ -181,7 +175,7 @@ impl NativeActor for WasmTrampoline {
 
     /// Drop the **wasm component**. Runs the guest's `unwire`
     /// pre-shutdown hook, then drops the `Component`. The trampoline itself
-    /// stays alive — the mailbox `aether.embedded:NAME`
+    /// stays alive — the guest's mailbox
     /// remains addressable and reusable: agents can refill it via
     /// `ReplaceComponent` without minting a new name. To kill
     /// the trampoline (tombstone the subname), terminate the
@@ -223,8 +217,8 @@ impl NativeActor for WasmTrampoline {
     /// Answer the requester of the load that produced this trampoline, in the
     /// trampoline's own name (ADR-0230 §3).
     ///
-    /// The component host hands its owed load reply here once this
-    /// trampoline's birth completes (`TaskDone::hand_off`), so the mail's
+    /// The component host hands its held load reply here once this
+    /// guest's birth completes (`Held::hand_off`), so the mail's
     /// reply target is the original requester and the reply's stamped sender
     /// is this trampoline — the reference the requester keeps.
     ///

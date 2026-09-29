@@ -181,7 +181,7 @@ where
         // `tracing::*` event the cap fires lands in its per-actor
         // `ActorLogRing`. The pre-ADR `with_actor_dispatch` +
         // `drain_buffer` flush hop retired alongside `LogBatch`.
-        let init_result = check_declared::<A>(ctx.registry(), None).and_then(|()| {
+        let init_result = check_declared::<A>(ctx.registry()).and_then(|()| {
             let mut init_ctx = NativeInitCtx::new(&resources.transport, handles);
             local::with_stamped(&resources.slots, || A::init(config, params, &mut init_ctx))
         });

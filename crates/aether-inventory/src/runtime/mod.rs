@@ -147,7 +147,7 @@ impl NativeActor for InventoryCapability {
     /// requested id, in request order and echoing `id` for
     /// correlation. `name` is `Some` for a runtime-minted thread,
     /// mailbox, or kind the engine has registered — including a
-    /// component loaded at `aether.component/aether.embedded:NAME`,
+    /// component loaded at its published name (`NS` or `NS:key`),
     /// which no link-time manifest can carry; `None` on a miss (or an
     /// unparseable id), at which point the caller renders the
     /// ADR-0064 tagged-id string itself. Call this only for ids a

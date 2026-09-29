@@ -82,7 +82,8 @@ unsafe extern "C" {
     pub fn log_event(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
     /// ADR-0114: register an inline child's alias route and return its
     /// `MailboxId`. The host folds the alias id `with_tag(Mailbox,
-    /// fold_lineage(parent, instanced(aether.embedded, subname)))`
+    /// fold_lineage(parent, instanced(<child NS>, subname)))` under the child
+    /// type's own namespace (ADR-0241 §6)
     /// and synchronously registers an alias `MailboxEntry` routing to the
     /// component root's own dispatcher slot — the child is co-located
     /// in the parent's wasm instance, so there is no new trampoline and no

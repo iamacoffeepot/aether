@@ -391,7 +391,7 @@ pub enum ReplyProjection {
 pub struct EngineMailSpec {
     /// Address of the recipient mailbox on the target engine: a canonical
     /// ADR-0099 lineage (e.g. `"aether.render"`, or a loaded component's
-    /// `"aether.component/aether.embedded:aether.kit.camera"`) or an
+    /// published name, `"aether.kit.camera"`) or an
     /// unambiguous ADR-0166 short path — the same spelling every other
     /// tool's `address` takes. A mailbox id in a reply is for reading, never
     /// an address.
@@ -813,9 +813,9 @@ pub struct ActorLogsArgs {
     /// the engine that answered.
     #[serde(default)]
     pub engine_id: Option<String>,
-    /// Address of the actor to query (e.g. `"aether.audio"`,
-    /// `"aether.component/aether.embedded:aether.camera"`, or an unambiguous
-    /// ADR-0166 short path). The substrate's dispatch loop services
+    /// Address of the actor to query (e.g. `"aether.audio"`, a loaded
+    /// component's `"aether.kit.camera"`, or an unambiguous ADR-0166 short
+    /// path). The substrate's dispatch loop services
     /// `aether.log.tail` for every actor automatically; agents don't need to
     /// know which actor implements the handler.
     pub address: String,
@@ -890,9 +890,9 @@ pub struct ActorCostArgs {
     /// the engine that answered.
     #[serde(default)]
     pub engine_id: Option<String>,
-    /// Address of the actor to query (e.g. `"aether.audio"`,
-    /// `"aether.component/aether.embedded:aether.camera"`, or an unambiguous
-    /// ADR-0166 short path). Every actor serves `aether.cost.tail` via the
+    /// Address of the actor to query (e.g. `"aether.audio"`, a loaded
+    /// component's `"aether.kit.camera"`, or an unambiguous ADR-0166 short
+    /// path). Every actor serves `aether.cost.tail` via the
     /// substrate's framework dispatch arm.
     pub address: String,
     /// Optional kind-id filter (tagged `knd-XXXX-XXXX-XXXX` or raw

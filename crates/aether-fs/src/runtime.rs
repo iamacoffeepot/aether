@@ -77,17 +77,6 @@ pub fn panic_message(payload: &(dyn Any + Send)) -> String {
         .unwrap_or_else(|| "<non-string panic payload>".to_owned())
 }
 
-#[cfg(test)]
-impl FsCapabilityState {
-    /// Test-only direct constructor. Production boots through
-    /// `Builder::with_actor::<FsCapability>(roots)` which calls the
-    /// generated `Lifecycle::init`; handler-unit tests that want to drive
-    /// a handler without a full chassis hand a pre-built registry directly.
-    fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
-        Self { registry, transforms: TransformRegistry::from_inventory() }
-    }
-}
-
 #[runtime]
 impl NativeActor for FsCapability {
     /// The runtime state this identity boots into (ADR-0122 split): the
@@ -262,45 +251,23 @@ impl FsCapabilityState {
 mod tests {
     use super::super::FsCapability;
     use super::super::{
-        Access, AdapterRegistry, Copy, CopyResult, Delete, DeleteResult, FileAdapter, FsError, LocalFileAdapter,
-        NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
+        Access, Copy, CopyResult, FileAdapter, FsError, FsFetch, FsFetchError, FsFetchResult, FsFoldError,
+        LocalFileAdapter, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
     };
-    use super::FsCapabilityState;
-    use aether_actor::Addressable;
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::actor::native::ctx::NativeCtx;
-    use aether_substrate::chassis::builder::Builder;
-    use aether_substrate::mail::Source;
+    use aether_actor::{Addressable, HandlesKind};
+    use aether_data::{Kind, SessionToken, Uuid, transform};
+    use aether_substrate::PumpedSlot;
+    use aether_substrate::chassis::builder::{Builder, PassiveChassis, ReplyTarget};
+    use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::testing::{
+        TestChassis, boot_bare_test_chassis, cleanup, decode_session_reply, fresh_substrate, fresh_substrate_and_rx,
+        scratch_dir,
+    };
+    use aether_substrate::transform::TransformRegistry;
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-
-    use aether_substrate::mail::SourceAddr;
-    use aether_substrate::testing::{TestChassis, cleanup, fresh_substrate, scratch_dir};
-    use std::fs;
-
-    /// Test fixture that bundles the cap, a fully-wired test mailer,
-    /// and a `NativeBinding` long enough for handlers to borrow.
-    struct TestFixture {
-        state: FsCapabilityState,
-        transport: Arc<NativeBinding>,
-    }
-
-    impl TestFixture {
-        fn new(reg: Arc<AdapterRegistry>) -> Self {
-            let (mailer, _rx) = test_mailer_and_rx();
-            let transport = unrouted_binding(&mailer);
-            Self { state: FsCapabilityState::from_registry(reg), transport }
-        }
-    }
-
-    // A free fn (not a `&self` method) so the borrow is of `fix.transport`
-    // only, leaving `&mut fix.state` a disjoint field borrow at the call
-    // site — ADR-0122 split: handlers are associated fns on the identity
-    // taking `state: &mut FsCapabilityState`, called as
-    // `FsCapability::on_x(&mut fix.state, &mut ctx, mail)`.
-    fn make_ctx<A>(transport: &Arc<NativeBinding>, sender: Source) -> NativeCtx<'_, A> {
-        NativeCtx::new_for_actor(transport, sender, None, None)
-    }
+    use std::sync::mpsc::Receiver;
 
     fn scratch_root(tag: &str) -> PathBuf {
         scratch_dir("aether-io-cap", tag)
@@ -457,24 +424,6 @@ mod tests {
         cleanup(&root);
     }
 
-    use aether_data::{SessionToken, Uuid};
-
-    fn build_save_only_registry(root: &Path, access: Access) -> Arc<AdapterRegistry> {
-        let adapter: Arc<dyn FileAdapter> = Arc::new(
-            LocalFileAdapter::new(root.to_path_buf(), access)
-                .expect("test setup: LocalFileAdapter constructs on supplied root"),
-        );
-        let mut r = AdapterRegistry::new();
-        r.register("save", adapter);
-        Arc::new(r)
-    }
-
-    fn session_sender() -> Source {
-        Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
-    }
-
-    use aether_substrate::testing::{test_mailer_and_rx, unrouted_binding};
-
     /// Boot the cap against a fresh tempdir; assert the mailbox
     /// is registered.
     #[test]
@@ -511,37 +460,73 @@ mod tests {
         cleanup(&root);
     }
 
-    #[test]
-    fn cap_read_ok_replies_with_bytes() {
-        let root = scratch_root("cap-read");
-        let reg = build_save_only_registry(&root, Access::ReadWrite);
-        reg.get("save")
-            .expect("test setup: save adapter is registered")
-            .write("slot.bin", &[9, 9, 9])
-            .expect("test setup: adapter accepts write");
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result =
-            FsCapability::on_read(&mut fix.state, &mut ctx, Read { addr: NamespaceAddr::new("save", "slot.bin") });
-        match result {
-            ReadResult::Ok { addr, bytes } => {
-                assert_eq!(addr.namespace, "save");
-                assert_eq!(addr.path, "slot.bin");
-                assert_eq!(bytes, vec![9, 9, 9]);
-            }
-            ReadResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
-        }
-        cleanup(&root);
+    /// A real `FsCapability` booted as a pumped actor over scratch namespace
+    /// roots: its own `init` builds the adapters (`save` read-write, `assets`
+    /// read-only), a request is pushed to its proven reference with a session
+    /// reply target, [`PumpedSlot::drain_available`] runs the production
+    /// dispatch body, and the reply is decoded off the loopback egress.
+    struct PumpedFs {
+        root: PathBuf,
+        roots: NamespaceRoots,
+        rx: Receiver<EgressEvent>,
+        chassis: PassiveChassis<TestChassis>,
+        cap: PumpedSlot<FsCapability>,
     }
 
+    impl PumpedFs {
+        fn boot(tag: &str) -> Self {
+            let root = scratch_root(tag);
+            let roots = roots_under(&root);
+            let (registry, mailer, rx) = fresh_substrate_and_rx();
+            let chassis = boot_bare_test_chassis(&registry, &mailer);
+            let (cap, _wake) =
+                chassis.boot_pumped_actor::<FsCapability>(roots.clone(), ()).expect("FsCapability boots pumped");
+
+            Self { root, roots, rx, chassis, cap }
+        }
+
+        fn request<K, R>(&mut self, mail: &K) -> R
+        where
+            K: Kind,
+            R: Kind,
+            FsCapability: HandlesKind<K>,
+        {
+            let session = SessionToken(Uuid::nil());
+            self.chassis.send_for_reply(
+                self.chassis.actor_ref::<FsCapability>(),
+                mail,
+                ReplyTarget::Session { session, correlation: 1 },
+            );
+            self.cap.drain_available();
+
+            decode_session_reply(&self.rx)
+        }
+
+        fn copy_from_host(&mut self, from: &Path, to: NamespaceAddr) -> CopyResult {
+            self.request(&Copy { from: from.to_string_lossy().into_owned(), to })
+        }
+
+        fn fetch(&mut self, path: &str, transforms: Vec<aether_data::TransformId>) -> FsFetchResult {
+            self.request(&FsFetch { addr: NamespaceAddr::new("assets", path), transforms })
+        }
+    }
+
+    impl Drop for PumpedFs {
+        fn drop(&mut self) {
+            self.cap.shutdown();
+            cleanup(&self.root);
+        }
+    }
+
+    /// Bug caught: a verb that does not map an unregistered namespace to
+    /// `UnknownNamespace`, or that drops the request address from the error
+    /// arm of its reply.
     #[test]
-    fn cap_read_unknown_namespace_replies_err() {
-        let root = scratch_root("cap-ns");
-        let reg = build_save_only_registry(&root, Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result =
-            FsCapability::on_read(&mut fix.state, &mut ctx, Read { addr: NamespaceAddr::new("nope", "x.bin") });
+    fn read_of_unknown_namespace_replies_unknown_namespace_echoing_the_address() {
+        let mut fsys = PumpedFs::boot("cap-ns");
+
+        let result: ReadResult = fsys.request(&Read { addr: NamespaceAddr::new("nope", "x.bin") });
+
         match result {
             ReadResult::Err { addr, error: FsError::UnknownNamespace } => {
                 assert_eq!(addr.namespace, "nope");
@@ -549,145 +534,35 @@ mod tests {
             }
             other => panic!("expected Err UnknownNamespace echoing request, got {other:?}"),
         }
-        cleanup(&root);
     }
 
+    /// Bug caught: `init` registering `assets` writable, or `on_write`
+    /// bypassing the adapter's access check.
     #[test]
-    fn cap_read_not_found_replies_err() {
-        let root = scratch_root("cap-nf");
-        let reg = build_save_only_registry(&root, Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result =
-            FsCapability::on_read(&mut fix.state, &mut ctx, Read { addr: NamespaceAddr::new("save", "ghost.bin") });
-        assert!(matches!(result, ReadResult::Err { error: FsError::NotFound, .. }));
-        cleanup(&root);
-    }
+    fn write_to_read_only_namespace_replies_forbidden() {
+        let mut fsys = PumpedFs::boot("cap-ro");
 
-    #[test]
-    fn cap_write_ok_persists_bytes() {
-        let root = scratch_root("cap-write");
-        let reg = build_save_only_registry(&root, Access::ReadWrite);
-        let reg_clone = Arc::clone(&reg);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_write(
-            &mut fix.state,
-            &mut ctx,
-            Write { addr: NamespaceAddr::new("save", "slot.bin"), bytes: vec![1, 2, 3] },
-        );
+        let result: WriteResult =
+            fsys.request(&Write { addr: NamespaceAddr::new("assets", "slot.bin"), bytes: vec![1] });
+
         match result {
-            WriteResult::Ok { addr } => {
-                assert_eq!(addr.namespace, "save");
-                assert_eq!(addr.path, "slot.bin");
-            }
-            WriteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            WriteResult::Err { addr, error: FsError::Forbidden } => assert_eq!(addr.namespace, "assets"),
+            other => panic!("expected Err Forbidden, got {other:?}"),
         }
-        assert_eq!(
-            reg_clone
-                .get("save")
-                .expect("test setup: save adapter is registered")
-                .read("slot.bin")
-                .expect("test setup: adapter reads written bytes"),
-            vec![1, 2, 3]
-        );
-        cleanup(&root);
+        assert!(!fsys.roots.assets.join("slot.bin").exists(), "a forbidden write must not land on disk");
     }
 
+    /// Bug caught: `on_copy` reading `from` through a namespace adapter
+    /// instead of the host filesystem, writing somewhere other than the `to`
+    /// namespace root, or dropping either echoed address.
     #[test]
-    fn cap_write_read_only_namespace_replies_forbidden() {
-        let root = scratch_root("cap-ro");
-        let reg = build_save_only_registry(&root, Access::ReadOnly);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_write(
-            &mut fix.state,
-            &mut ctx,
-            Write { addr: NamespaceAddr::new("save", "slot.bin"), bytes: vec![] },
-        );
-        assert!(matches!(result, WriteResult::Err { error: FsError::Forbidden, .. }));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn cap_delete_then_read_surfaces_not_found() {
-        let root = scratch_root("cap-del");
-        let reg = build_save_only_registry(&root, Access::ReadWrite);
-        let reg_clone = Arc::clone(&reg);
-        reg.get("save")
-            .expect("test setup: save adapter is registered")
-            .write("x.bin", b"x")
-            .expect("test setup: adapter accepts write");
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result =
-            FsCapability::on_delete(&mut fix.state, &mut ctx, Delete { addr: NamespaceAddr::new("save", "x.bin") });
-        match result {
-            DeleteResult::Ok { addr } => {
-                assert_eq!(addr.namespace, "save");
-                assert_eq!(addr.path, "x.bin");
-            }
-            DeleteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
-        }
-        assert!(matches!(
-            reg_clone.get("save").expect("test setup: save adapter is registered").read("x.bin"),
-            Err(FsError::NotFound)
-        ));
-        cleanup(&root);
-    }
-
-    // The end-to-end "component pushes Read, dispatcher delivers
-    // ReadResult to the component's receive_p32" test that lived here
-    // pre-stage-2e (issue 552) reached deep into `aether_substrate`
-    // privates (`Component::read_u32`, `ComponentEntry`, `host_fns`)
-    // plus wasmtime + wat. With the cap extracted to its own crate
-    // those internals are no longer reachable as crate-locals. The
-    // path it exercised is now covered by:
-    //   - `aether-scenario` declarative scenarios (they go through
-    //     the same Mailer + dispatch reply machinery), and
-    //   - the substrate's own `mailer` / `scheduler` unit tests for
-    //     `Mailer::send_reply` → component delivery.
-    // Reach for the in-bundle integration suite if a future change
-    // wants the full WAT roundtrip back as targeted coverage.
-
-    fn build_two_namespace_registry(root: &Path, save_access: Access) -> Arc<AdapterRegistry> {
-        let save_adapter: Arc<dyn FileAdapter> = Arc::new(
-            LocalFileAdapter::new(root.join("save"), save_access)
-                .expect("test setup: save LocalFileAdapter constructs"),
-        );
-        let assets_adapter: Arc<dyn FileAdapter> = Arc::new(
-            LocalFileAdapter::new(root.join("assets"), Access::ReadOnly)
-                .expect("test setup: assets LocalFileAdapter constructs"),
-        );
-        let mut r = AdapterRegistry::new();
-        r.register("save", save_adapter);
-        r.register("assets", assets_adapter);
-        Arc::new(r)
-    }
-
-    fn ensure_namespace_dirs(root: &Path) {
-        fs::create_dir_all(root.join("save")).expect("test setup: save dir creates");
-        fs::create_dir_all(root.join("assets")).expect("test setup: assets dir creates");
-    }
-
-    #[test]
-    fn cap_copy_host_to_save_roundtrip() {
-        let root = scratch_root("cap-copy-ok");
-        ensure_namespace_dirs(&root);
-        let src = root.join("source.bin");
+    fn copy_from_host_path_lands_in_the_save_namespace() {
+        let mut fsys = PumpedFs::boot("cap-copy-ok");
+        let src = fsys.root.join("source.bin");
         fs::write(&src, b"\x0a\x14\x1e").expect("test setup: write source file");
-        let reg = build_save_only_registry(&root.join("save"), Access::ReadWrite);
-        let reg_clone = Arc::clone(&reg);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_copy(
-            &mut fix.state,
-            &mut ctx,
-            Copy {
-                from: src.to_string_lossy().into_owned(),
-                to: NamespaceAddr { namespace: "save".to_string(), path: "copied.bin".to_string() },
-            },
-        );
+
+        let result = fsys.copy_from_host(&src, NamespaceAddr::new("save", "copied.bin"));
+
         match result {
             CopyResult::Ok { from, to } => {
                 assert_eq!(from, src.to_string_lossy().as_ref());
@@ -697,92 +572,63 @@ mod tests {
             CopyResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
         }
         assert_eq!(
-            reg_clone
-                .get("save")
-                .expect("test setup: save adapter is registered")
-                .read("copied.bin")
-                .expect("test setup: adapter reads copied bytes"),
+            fs::read(fsys.roots.save.join("copied.bin")).expect("the copy lands under the save root"),
             vec![0x0a_u8, 0x14, 0x1e]
         );
-        cleanup(&root);
     }
 
+    /// Bug caught: `on_copy` resolving the destination namespace after (or
+    /// without) the lookup that reports `UnknownNamespace`.
     #[test]
-    fn cap_copy_unknown_destination_namespace_replies_unknown_namespace() {
-        let root = scratch_root("cap-copy-unknown-ns");
-        ensure_namespace_dirs(&root);
-        let src = root.join("source.bin");
+    fn copy_to_unknown_namespace_replies_unknown_namespace() {
+        let mut fsys = PumpedFs::boot("cap-copy-unknown-ns");
+        let src = fsys.root.join("source.bin");
         fs::write(&src, b"y").expect("test setup: write source file");
-        let reg = build_save_only_registry(&root.join("save"), Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_copy(
-            &mut fix.state,
-            &mut ctx,
-            Copy {
-                from: src.to_string_lossy().into_owned(),
-                to: NamespaceAddr { namespace: "nope".to_string(), path: "data.bin".to_string() },
-            },
-        );
+
+        let result = fsys.copy_from_host(&src, NamespaceAddr::new("nope", "data.bin"));
+
         assert!(
             matches!(result, CopyResult::Err { error: FsError::UnknownNamespace, .. }),
             "expected UnknownNamespace, got {result:?}",
         );
-        cleanup(&root);
     }
 
+    /// Bug caught: a missing host source mapped to anything but `NotFound`
+    /// (the `fs_error_from_std` mapping on the `from` read).
     #[test]
-    fn cap_copy_missing_host_from_replies_not_found() {
-        let root = scratch_root("cap-copy-missing-src");
-        ensure_namespace_dirs(&root);
-        let reg = build_save_only_registry(&root.join("save"), Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_copy(
-            &mut fix.state,
-            &mut ctx,
-            Copy {
-                from: root.join("does_not_exist.bin").to_string_lossy().into_owned(),
-                to: NamespaceAddr { namespace: "save".to_string(), path: "dst.bin".to_string() },
-            },
-        );
+    fn copy_from_missing_host_path_replies_not_found() {
+        let mut fsys = PumpedFs::boot("cap-copy-missing-src");
+        let src = fsys.root.join("does_not_exist.bin");
+
+        let result = fsys.copy_from_host(&src, NamespaceAddr::new("save", "dst.bin"));
+
         assert!(
             matches!(result, CopyResult::Err { error: FsError::NotFound, .. }),
             "expected NotFound, got {result:?}",
         );
-        cleanup(&root);
     }
 
+    /// Bug caught: the `to` side of a copy escaping the namespace root, the
+    /// write sandbox `on_copy` relies on the adapter for.
     #[test]
-    fn cap_copy_to_path_traversal_replies_forbidden() {
-        let root = scratch_root("cap-copy-traversal");
-        ensure_namespace_dirs(&root);
-        let src = root.join("source.bin");
+    fn copy_to_traversal_path_replies_forbidden() {
+        let mut fsys = PumpedFs::boot("cap-copy-traversal");
+        let src = fsys.root.join("source.bin");
         fs::write(&src, b"z").expect("test setup: write source file");
-        let reg = build_save_only_registry(&root.join("save"), Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_copy(
-            &mut fix.state,
-            &mut ctx,
-            Copy {
-                from: src.to_string_lossy().into_owned(),
-                to: NamespaceAddr { namespace: "save".to_string(), path: "../escape".to_string() },
-            },
-        );
+
+        let result = fsys.copy_from_host(&src, NamespaceAddr::new("save", "../escape"));
+
         assert!(
             matches!(result, CopyResult::Err { error: FsError::Forbidden, .. }),
             "expected Forbidden for traversal path, got {result:?}",
         );
-        cleanup(&root);
+        assert!(!fsys.root.join("escape").exists(), "a forbidden copy must not land outside the save root");
     }
 
-    // `aether.fs.fetch` handler tests (issue 2132). Migrated from the
-    // retired `aether.nfs` capability. The transform fixtures (`double`,
-    // `boom`, `seed`) are local to this test module; `TestNumber` is
-    // the shared input/output kind wired through the `double` transform.
-
-    use aether_data::transform;
+    // `aether.fs.fetch` handler tests (issue 2132). The transform fixtures
+    // (`double`, `boom`, `seed`) link only into this unit-test binary, which
+    // is why these stay in-crate rather than in a harness scenario;
+    // `TestNumber` is the shared input/output kind wired through `double`.
 
     /// Structured number kind — the fetch-fold fixtures' transform
     /// input + output. The extra `tag: u32` makes the `{ u64, u32 }`
@@ -834,26 +680,14 @@ mod tests {
         transform_id_by_name("seed_fs")
     }
 
-    use super::super::{FsFetch, FsFetchError, FsFetchResult, FsFoldError};
-    use aether_data::Kind;
-    use aether_substrate::transform::TransformRegistry;
-
-    /// Unit test: `on_fetch` with empty transforms returns raw file bytes.
+    /// Bug caught: an empty chain run through the fold (or tagged with an
+    /// output kind) instead of short-circuiting to the raw file bytes.
     #[test]
-    fn on_fetch_empty_transforms_returns_raw_bytes() {
-        let root = scratch_root("fetch-raw");
-        let assets = root.join("assets");
-        fs::create_dir_all(&assets).expect("test setup: assets dir creates");
-        fs::write(assets.join("data.bin"), b"raw payload").expect("test setup: seed data.bin");
-        let reg = build_two_namespace_registry(&root, Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_fetch(
-            &mut fix.state,
-            &mut ctx,
-            FsFetch { addr: NamespaceAddr::new("assets", "data.bin"), transforms: vec![] },
-        );
-        match result {
+    fn fetch_with_no_transforms_replies_raw_bytes() {
+        let mut fsys = PumpedFs::boot("fetch-raw");
+        fs::write(fsys.roots.assets.join("data.bin"), b"raw payload").expect("test setup: seed data.bin");
+
+        match fsys.fetch("data.bin", vec![]) {
             FsFetchResult::Ok { addr, output_kind, data } => {
                 assert_eq!(addr.namespace, "assets");
                 assert_eq!(addr.path, "data.bin");
@@ -862,155 +696,90 @@ mod tests {
             }
             FsFetchResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
         }
-        cleanup(&root);
     }
 
-    /// Unit test: `on_fetch` with an unknown namespace returns
-    /// `FsFetchError::Fs(FsError::UnknownNamespace)`.
+    /// Bug caught: a namespace failure on fetch not wrapped as
+    /// `FsFetchError::Fs`.
     #[test]
-    fn on_fetch_unknown_namespace_returns_unknown_namespace() {
-        let root = scratch_root("fetch-ns-unknown");
-        let reg = build_save_only_registry(&root, Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_fetch(
-            &mut fix.state,
-            &mut ctx,
-            FsFetch { addr: NamespaceAddr::new("nope", "x.bin"), transforms: vec![] },
-        );
+    fn fetch_from_unknown_namespace_replies_fs_unknown_namespace() {
+        let mut fsys = PumpedFs::boot("fetch-ns-unknown");
+
+        let result: FsFetchResult =
+            fsys.request(&FsFetch { addr: NamespaceAddr::new("nope", "x.bin"), transforms: vec![] });
+
         assert!(
             matches!(result, FsFetchResult::Err { error: FsFetchError::Fs(FsError::UnknownNamespace), .. }),
             "expected Err(Fs(UnknownNamespace)), got {result:?}",
         );
-        cleanup(&root);
     }
 
-    /// Unit test: `on_fetch` with a single transform returns the folded
-    /// output tagged with the transform's output `KindId`.
-    ///
-    /// Uses the `double_fs` test transform (`TestNumber` → `TestNumber`).
+    /// Bug caught: the fold not running the transform over the file bytes,
+    /// or tagging the output with anything but the chain's output kind.
     #[test]
-    fn on_fetch_single_transform_returns_folded_output() {
-        let root = scratch_root("fetch-transform");
-        let assets = root.join("assets");
-        fs::create_dir_all(&assets).expect("test setup: assets dir creates");
-        let input = TestNumber { value: 7, tag: 0 };
-        let encoded = input.encode_into_bytes();
-        fs::write(assets.join("number.bin"), &encoded).expect("test setup: seed number.bin");
-
-        let reg = build_two_namespace_registry(&root, Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
+    fn fetch_with_one_transform_replies_folded_output() {
+        let mut fsys = PumpedFs::boot("fetch-transform");
+        fs::write(fsys.roots.assets.join("number.bin"), TestNumber { value: 7, tag: 0 }.encode_into_bytes())
+            .expect("test setup: seed number.bin");
         let double_id = double_fs_transform_id();
+        let expected_output_kind =
+            TransformRegistry::from_inventory().lookup(double_id).expect("double_fs registered").output_kind_id;
 
-        let transform_reg = TransformRegistry::from_inventory();
-        let double_t = transform_reg.lookup(double_id).expect("double_fs registered");
-        let expected_output_kind = double_t.output_kind_id;
-
-        let result = FsCapability::on_fetch(
-            &mut fix.state,
-            &mut ctx,
-            FsFetch { addr: NamespaceAddr::new("assets", "number.bin"), transforms: vec![double_id] },
-        );
-        match result {
+        match fsys.fetch("number.bin", vec![double_id]) {
             FsFetchResult::Ok { output_kind, data, .. } => {
                 assert_eq!(output_kind, Some(expected_output_kind), "output_kind should be double_fs's output kind");
-                let out: TestNumber = TestNumber::decode_from_bytes(&data).expect("output decodes as TestNumber");
+                let out = TestNumber::decode_from_bytes(&data).expect("output decodes as TestNumber");
                 assert_eq!(out.value, 14, "double_fs(7) == 14");
             }
             FsFetchResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
         }
-        cleanup(&root);
     }
 
-    /// Unit test: a non-composing chain returns `FsFetchError::Fold`
-    /// before any transform runs.
+    /// Bug caught: a non-composing chain run instead of refused, or its
+    /// `FoldError` mapped to the wrong `FsFoldError` variant or index.
     #[test]
-    fn on_fetch_non_composing_chain_returns_fold_error() {
-        let root = scratch_root("fetch-fold-err");
-        let assets = root.join("assets");
-        fs::create_dir_all(&assets).expect("test setup: assets dir creates");
-        fs::write(assets.join("data.bin"), b"ignored").expect("test setup: seed data.bin");
-        let reg = build_two_namespace_registry(&root, Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
+    fn fetch_with_non_composing_chain_replies_fold_error() {
+        let mut fsys = PumpedFs::boot("fetch-fold-err");
+        fs::write(fsys.roots.assets.join("data.bin"), b"ignored").expect("test setup: seed data.bin");
 
-        // `double_fs`: TestNumber → TestNumber; `seed_fs`: () → TestNumber.
-        // `seed_fs` takes ZERO inputs (arity 0), so placing it at index 1
-        // (where one input is expected for a linear fold) fires
-        // NonLinearArity at index 1.
-        let double_id = double_fs_transform_id();
-        let seed_id = seed_fs_transform_id();
-
-        let result = FsCapability::on_fetch(
-            &mut fix.state,
-            &mut ctx,
-            FsFetch { addr: NamespaceAddr::new("assets", "data.bin"), transforms: vec![double_id, seed_id] },
-        );
-        match result {
-            FsFetchResult::Err { error, .. } => {
-                assert!(
-                    matches!(error, FsFetchError::Fold(FsFoldError::NonLinearArity { at_index: 1, .. })),
-                    "expected Fold(NonLinearArity at 1), got {error:?}",
-                );
-            }
+        // `seed_fs` takes zero inputs, so at index 1 of a linear fold it
+        // trips NonLinearArity there.
+        match fsys.fetch("data.bin", vec![double_fs_transform_id(), seed_fs_transform_id()]) {
+            FsFetchResult::Err { error, .. } => assert!(
+                matches!(error, FsFetchError::Fold(FsFoldError::NonLinearArity { at_index: 1, .. })),
+                "expected Fold(NonLinearArity at 1), got {error:?}",
+            ),
             FsFetchResult::Ok { .. } => panic!("expected Err(Fold), got Ok"),
         }
-        cleanup(&root);
     }
 
-    /// Unit test: a chain whose first transform can't decode the file's
-    /// bytes returns `FsFetchError::Transform`.
+    /// Bug caught: a transform's own decode failure surfaced as anything
+    /// but `FsFetchError::Transform`.
     #[test]
-    fn on_fetch_transform_decode_failure_returns_transform_error() {
-        let root = scratch_root("fetch-transform-err");
-        let assets = root.join("assets");
-        fs::create_dir_all(&assets).expect("test setup: assets dir creates");
-        fs::write(assets.join("garbage.bin"), [0xFF_u8]).expect("test setup: seed garbage.bin");
-        let reg = build_two_namespace_registry(&root, Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let double_id = double_fs_transform_id();
+    fn fetch_whose_transform_cannot_decode_replies_transform_error() {
+        let mut fsys = PumpedFs::boot("fetch-transform-err");
+        fs::write(fsys.roots.assets.join("garbage.bin"), [0xFF_u8]).expect("test setup: seed garbage.bin");
 
-        let result = FsCapability::on_fetch(
-            &mut fix.state,
-            &mut ctx,
-            FsFetch { addr: NamespaceAddr::new("assets", "garbage.bin"), transforms: vec![double_id] },
-        );
-        match result {
+        match fsys.fetch("garbage.bin", vec![double_fs_transform_id()]) {
             FsFetchResult::Err { error, .. } => {
                 assert!(matches!(error, FsFetchError::Transform(_)), "expected Transform error, got {error:?}");
             }
             FsFetchResult::Ok { .. } => panic!("expected Err(Transform), got Ok"),
         }
-        cleanup(&root);
     }
 
-    /// Unit test: a panicking transform produces `FsFetchError::Panicked`.
+    /// Bug caught: a panicking transform unwinding through actor dispatch
+    /// instead of replying `FsFetchError::Panicked`.
     #[test]
-    fn on_fetch_panicking_transform_returns_panicked_error() {
-        let root = scratch_root("fetch-panic");
-        let assets = root.join("assets");
-        fs::create_dir_all(&assets).expect("test setup: assets dir creates");
-        let input = TestNumber { value: 1, tag: 0 };
-        let encoded = input.encode_into_bytes();
-        fs::write(assets.join("number.bin"), &encoded).expect("test setup: seed number.bin");
-        let reg = build_two_namespace_registry(&root, Access::ReadWrite);
-        let mut fix = TestFixture::new(reg);
-        let mut ctx = make_ctx(&fix.transport, session_sender());
-        let boom_id = boom_fs_transform_id();
+    fn fetch_whose_transform_panics_replies_panicked() {
+        let mut fsys = PumpedFs::boot("fetch-panic");
+        fs::write(fsys.roots.assets.join("number.bin"), TestNumber { value: 1, tag: 0 }.encode_into_bytes())
+            .expect("test setup: seed number.bin");
 
-        let result = FsCapability::on_fetch(
-            &mut fix.state,
-            &mut ctx,
-            FsFetch { addr: NamespaceAddr::new("assets", "number.bin"), transforms: vec![boom_id] },
-        );
-        match result {
+        match fsys.fetch("number.bin", vec![boom_fs_transform_id()]) {
             FsFetchResult::Err { error, .. } => {
                 assert!(matches!(error, FsFetchError::Panicked(_)), "expected Panicked error, got {error:?}");
             }
             FsFetchResult::Ok { .. } => panic!("expected Err(Panicked), got Ok"),
         }
-        cleanup(&root);
     }
 }

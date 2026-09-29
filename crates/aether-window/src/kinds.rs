@@ -375,7 +375,7 @@ macro_rules! subscription {
         /// only against a live route that publishes that silent row.
         ///
         /// Over MCP each variant takes the subscriber's canonical path, as in
-        /// `{"Key": "aether.component/aether.embedded:ui"}`.
+        /// `{"Key": "test.ui.root"}`.
         #[derive(aether_data::Schema, Debug, Clone, PartialEq, Eq)]
         pub enum WindowSubscription {
             $(

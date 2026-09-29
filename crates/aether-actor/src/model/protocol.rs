@@ -116,8 +116,9 @@ mod row_at_sealed {
 pub struct At<const N: usize>;
 
 /// `Rows: RowAt<K, I>` holds when the row tuple `Rows` has a row for the kind
-/// `K`, at the position `I`. Sealed, and implemented once per tuple arity and
-/// position as `RowAt<K_j, At<j>>`.
+/// `K`, at the position `I`, and [`Reply`](RowAt::Reply) is that row's reply.
+/// Sealed, and implemented once per tuple arity and position as
+/// `RowAt<K_j, At<j>, Reply = O_j>`.
 ///
 /// A send through a [`ProtocolRef<P>`](crate::ProtocolRef) is bounded
 /// `P::Rows: RowAt<K, I>`, so it compiles only for a kind `P` lists, and the
@@ -129,7 +130,11 @@ pub struct At<const N: usize>;
     label = "not a kind the protocol lists",
     note = "a protocol reference sends only the kinds its protocol lists (ADR-0231 §3)"
 )]
-pub trait RowAt<K, I>: row_at_sealed::Sealed<K, I> {}
+pub trait RowAt<K, I>: row_at_sealed::Sealed<K, I> {
+    /// The reply the row at this position names: a reply kind, [`Silent`], or
+    /// [`Undeclared`].
+    type Reply: RowReply;
+}
 
 /// Emits the `RowSet`, `CoversRows`, and `RowAt` impls for every tuple arity
 /// from the full parameter list down to one row, peeling one row per step.
@@ -144,19 +149,21 @@ macro_rules! row_tuples {
     (@row_at [$($all_kind:ident $all_reply:ident),+] [$($index:literal)*]) => {};
     (
         @row_at [$($all_kind:ident $all_reply:ident),+] [$index:literal $($indices:literal)*]
-        $kind:ident $(, $rest_kind:ident)*
+        $kind:ident $reply:ident $(, $rest_kind:ident $rest_reply:ident)*
     ) => {
         impl<$($all_kind: Kind, $all_reply: RowReply),+> row_at_sealed::Sealed<$kind, At<$index>>
             for ($(Row<$all_kind, $all_reply>,)+)
         {
         }
 
-        impl<$($all_kind: Kind, $all_reply: RowReply),+> RowAt<$kind, At<$index>> for ($(Row<$all_kind, $all_reply>,)+) {}
+        impl<$($all_kind: Kind, $all_reply: RowReply),+> RowAt<$kind, At<$index>> for ($(Row<$all_kind, $all_reply>,)+) {
+            type Reply = $reply;
+        }
 
-        row_tuples!(@row_at [$($all_kind $all_reply),+] [$($indices)*] $($rest_kind),*);
+        row_tuples!(@row_at [$($all_kind $all_reply),+] [$($indices)*] $($rest_kind $rest_reply),*);
     };
     (@impl $($kind:ident $reply:ident),+) => {
-        row_tuples!(@row_at [$($kind $reply),+] [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15] $($kind),+);
+        row_tuples!(@row_at [$($kind $reply),+] [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15] $($kind $reply),+);
 
         impl<$($kind: Kind, $reply: RowReply),+> rows_sealed::Sealed for ($(Row<$kind, $reply>,)+) {}
 

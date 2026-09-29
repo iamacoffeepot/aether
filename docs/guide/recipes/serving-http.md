@@ -137,8 +137,10 @@ its actor, and the macro types the ctx by it — `WasmCtx<'_>` reads as
 `WasmCtx<'_, Self>`, reaching only the actors the component declares with
 `depends(R)`. Spell `WasmCtx<'_, Erased>` for the untyped view.
 
-The component registers at `aether.component/aether.embedded:web` (its
-`NAMESPACE` const rendered through the ADR-0099 lineage). Its `wire` hook
+The component registers at `web`, its `NAMESPACE` const: a singleton guest is
+named by its own namespace
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§5). Its `wire` hook
 claims the `/` catch-all, so every request the server can't match to a more
 specific route dispatches here. `req.peer_addr` carries the connecting
 client's address (`ip:port`, IPv6 bracketed) for logging, rate-limiting, or
@@ -177,7 +179,7 @@ Then load it by selector over the MCP harness once the substrate is up:
 ```
 
 `load_component` replies with the component's registered address
-(`aether.component/aether.embedded:web`). After that, any inbound HTTP request
+(`web`). After that, any inbound HTTP request
 on the bound port routes to your handler.
 
 ## 5. Send a request
@@ -249,8 +251,7 @@ ADR-0136 member-set flag — `false` claims the prefix exclusively, `true` joins
 the round-robin set on it).
 
 The `handler` path must be canonical — the `path` a `load_component` reply
-returns, `aether.component/aether.embedded:api` for a component loaded as
-`api`. The named actor has to take `aether.http.server.request` and reply
+returns, `api` for a singleton component whose `NAMESPACE` is `api`. The named actor has to take `aether.http.server.request` and reply
 `HttpRouterResult`: the path is `ProtocolPath<HttpRouter>`, so a path whose
 live route does not publish that row is refused when the mail is
 decoded — logged at warn, with no `register_route_result` reply at all, rather
@@ -264,7 +265,7 @@ a streaming, websocket, or deferred handler and a `#[http::router]` actor.
 {
   "prefix": "/api",
   "method": "Get",
-  "handler": "aether.component/aether.embedded:api",
+  "handler": "api",
   "shared": false
 }
 ```
@@ -278,15 +279,16 @@ answers it `Err`.
 Releasing the route mirrors the registration, keeping `method` so a
 method-specific route and a method-agnostic route at the same prefix release
 independently. Its `handler` is a plain actor path rather than a protocol one
-— a release needs only the identity the route table is keyed by — so a short
-path like `aether.component/:api` works too:
+— a release needs only the identity the route table is keyed by — so any
+spelling the engine resolves to the handler works, an ADR-0166 short path
+included:
 
 ```jsonc
 // send_mail → aether.http.server  (kind: aether.http.server.unregister_route)
 {
   "prefix": "/api",
   "method": "Get",
-  "handler": "aether.component/aether.embedded:api"
+  "handler": "api"
 }
 ```
 

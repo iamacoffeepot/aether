@@ -23,7 +23,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput};
+use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, TextInput};
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved, UnsubscribeKeys};
 use aether_window::{SyntheticWindowCapability, window_path};
 
@@ -41,8 +41,8 @@ fn boot_bench() -> SubstrateHarness {
     SubstrateHarness::builder().with_component_host().build().expect("boot")
 }
 
-/// Load the bundle's default export, the singleton `test.probe`, at the
-/// component host.
+/// Load the bundle's default export, the singleton `test.probe`, at its
+/// published name.
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> (ErasedActorRef, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
@@ -50,18 +50,18 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> (ErasedActorR
         .unwrap_or_else(|error| panic!("load_component(test.probe): {error}"))
 }
 
-/// Load a second `test.probe` beneath the loaded `parent`: a singleton is one
-/// per parent, so this is how one harness hosts two independent probes.
-fn load_probe_under(harness: &mut SubstrateHarness, wasm_path: &Path, parent: &ErasedActorPath) {
+/// Load the instanced root key subscriber `test.key_probe` under `key`: a
+/// singleton is one per engine, so this is how one harness hosts several
+/// independent subscribers.
+fn load_key_probe(harness: &mut SubstrateHarness, wasm_path: &Path, key: &str) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let load = LoadComponent { wasm, name: None, config: Vec::new(), export: None };
-    let operation =
-        HarnessOp::load_component_under(&harness.actor_ref::<ComponentHostCapability>(), parent.to_string(), load);
-    let result = harness.execute(vec![("load-under", operation)]).expect("component load operation");
-    match result.reply::<LoadResult>("load-under").expect("decode LoadResult") {
-        LoadResult::Ok { .. } => {}
-        LoadResult::Err { error } => panic!("load_component(test.probe) beneath {parent}: {error}"),
-    }
+    let load = LoadComponent {
+        wasm,
+        name: Some(key.to_owned()),
+        config: Vec::new(),
+        export: Some("test.key_probe".to_owned()),
+    };
+    harness.load_any(&load).unwrap_or_else(|error| panic!("load_component(test.key_probe:{key}): {error}"));
 }
 
 /// Inject `count` synthetic `Key` presses from one window. The synthetic
@@ -174,8 +174,8 @@ fn two_subscribers_each_receive_every_key() {
         return;
     };
     let mut harness = boot_bench();
-    let (_, probe_a) = load_probe(&mut harness, &wasm_path);
-    load_probe_under(&mut harness, &wasm_path, &probe_a);
+    load_key_probe(&mut harness, &wasm_path, "a");
+    load_key_probe(&mut harness, &wasm_path, "b");
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 2);

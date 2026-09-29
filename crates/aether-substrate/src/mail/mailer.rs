@@ -439,18 +439,15 @@ impl Mailer {
         self.registry.resolve_live(mailbox_id).map_err(|_| ResolvePathError::NotLive { canonical_path })
     }
 
-    /// The first declared dependency with no `Live` route for an actor placed
-    /// under `parent` (`None` for a root placement), as
+    /// The first declared dependency with no `Live` route, as
     /// [`Registry::missing_dependency`] answers it. The crate-private path
-    /// behind [`NativeCtx::missing_dependency`](crate::actor::native::ctx::NativeCtx::missing_dependency)
-    /// and [`NativeCtx::missing_child_dependency`](crate::actor::native::ctx::NativeCtx::missing_child_dependency).
+    /// behind [`NativeCtx::missing_dependency`](crate::actor::native::ctx::NativeCtx::missing_dependency).
     #[cfg(feature = "wasm")]
     pub(crate) fn missing_dependency<'a>(
         &self,
-        parent: Option<aether_data::MailboxId>,
         dependencies: impl IntoIterator<Item = (u8, &'a str)>,
     ) -> Option<&'a str> {
-        self.registry.missing_dependency(parent, dependencies)
+        self.registry.missing_dependency(dependencies)
     }
 
     /// The receive surface the capability registry retains for the actor

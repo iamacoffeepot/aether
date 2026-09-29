@@ -1,0 +1,54 @@
+error[E0277]: `ActorRef<Asked>` cannot take a held `Other` for `Ask`
+  --> tests/ui/rejects_hands_off_to_a_different_reply.rs:70:32
+   |
+70 |     Held::<Other>(PhantomData).hand_off(asked, &Ask { seq: 1 });
+   |                                ^^^^^^^^ no row of this target answers `Ask` with `Other`
+   |
+   = note: a held reply hands off to an `ActorRef<T>` whose handler for `Ask` replies `Other`, or a `ProtocolRef<P>` whose row for `Ask` is `Row<Ask, Other>`; an `ErasedActorRef` proves no row (#6895)
+help: the trait `HandsOff<Ask, Other, Direct>` is not implemented for `ActorRef<Asked>`
+      but trait `HandsOff<Ask, Answered, Direct>` is implemented for it
+  --> $WORKSPACE/crates/aether-actor/src/reference/hands_off.rs
+   |
+   | impl<T: HandlesKind<K> + Contract<K, Reply = R>, K: ActorMail, R: ActorMail> HandsOff<K, R> for ActorRef<T> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `Answered`, found `Other`
+note: required by a bound in `Held::<R>::hand_off`
+  --> tests/ui/rejects_hands_off_to_a_different_reply.rs:66:54
+   |
+66 |     fn hand_off<K: ActorMail, I>(self, _target: impl HandsOff<K, R, I>, _payload: &K) {}
+   |                                                      ^^^^^^^^^^^^^^^^^ required by this bound in `Held::<R>::hand_off`
+
+error[E0277]: `ProtocolRef<Control>` cannot take a held `Other` for `Ask`
+  --> tests/ui/rejects_hands_off_to_a_different_reply.rs:71:32
+   |
+71 |     Held::<Other>(PhantomData).hand_off(control, &Ask { seq: 2 });
+   |                                ^^^^^^^^ no row of this target answers `Ask` with `Other`
+   |
+   = note: a held reply hands off to an `ActorRef<T>` whose handler for `Ask` replies `Other`, or a `ProtocolRef<P>` whose row for `Ask` is `Row<Ask, Other>`; an `ErasedActorRef` proves no row (#6895)
+help: the trait `HandsOff<Ask, Other, At<0>>` is not implemented for `ProtocolRef<Control>`
+      but trait `HandsOff<Ask, Answered, At<0>>` is implemented for it
+  --> $WORKSPACE/crates/aether-actor/src/reference/hands_off.rs
+   |
+   | / impl<P: Protocol, K: ActorMail, R: ActorMail, I> HandsOff<K, R, I> for ProtocolRef<P> where
+   | |     P::Rows: RowAt<K, I, Reply = R>
+   | |___________________________________^
+   = help: for that trait implementation, expected `Answered`, found `Other`
+note: required by a bound in `Held::<R>::hand_off`
+  --> tests/ui/rejects_hands_off_to_a_different_reply.rs:66:54
+   |
+66 |     fn hand_off<K: ActorMail, I>(self, _target: impl HandsOff<K, R, I>, _payload: &K) {}
+   |                                                      ^^^^^^^^^^^^^^^^^ required by this bound in `Held::<R>::hand_off`
+
+error[E0277]: `ActorRef<Asked>` cannot take a held `Answered` for `Note`
+  --> tests/ui/rejects_hands_off_to_a_different_reply.rs:72:35
+   |
+72 |     Held::<Answered>(PhantomData).hand_off(asked, &Note { seq: 3 });
+   |                                   ^^^^^^^^ no row of this target answers `Note` with `Answered`
+   |
+   = help: the trait `HandsOff<Note, Answered>` is not implemented for `ActorRef<Asked>`
+   = note: a held reply hands off to an `ActorRef<T>` whose handler for `Note` replies `Answered`, or a `ProtocolRef<P>` whose row for `Note` is `Row<Note, Answered>`; an `ErasedActorRef` proves no row (#6895)
+note: required by a bound in `Held::<R>::hand_off`
+  --> tests/ui/rejects_hands_off_to_a_different_reply.rs:66:54
+   |
+66 |     fn hand_off<K: ActorMail, I>(self, _target: impl HandsOff<K, R, I>, _payload: &K) {}
+   |                                                      ^^^^^^^^^^^^^^^^^ required by this bound in `Held::<R>::hand_off`

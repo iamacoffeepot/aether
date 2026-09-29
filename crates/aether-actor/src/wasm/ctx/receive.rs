@@ -217,7 +217,7 @@ impl<'a, A, M: ReplyMode> WasmCtx<'a, A, M> {
 
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     pub(super) fn scope_mailbox(&self, scope: CallerScope) -> u64 {
-        self.inline.scope_mailbox(MailboxId(self.mailbox), scope)
+        scope.select(MailboxId(self.mailbox))
     }
 
     /// Not part of the public API; called only by the `#[actor]`

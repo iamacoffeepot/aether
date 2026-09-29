@@ -180,7 +180,7 @@ subscriptions when the component drops.
 
 To subscribe another actor — an operator over MCP, or a test — send
 `aether.lifecycle.subscribe` with a `subscription` naming the stage and the
-subscriber's canonical path, as in `{"Tick": "aether.component/aether.embedded:camera"}`.
+subscriber's canonical path, as in `{"Tick": "aether.kit.camera"}`.
 The path decodes only when the live actor there handles the stage silently, and
 the cap proves it live at receipt.
 

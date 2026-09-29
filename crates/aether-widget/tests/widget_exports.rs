@@ -259,7 +259,7 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
         match loaded.reply::<LoadResult>("named").expect("decode named LoadResult") {
             LoadResult::Ok { path: name, .. } => {
                 assert!(
-                    name.to_string().ends_with(&format!(":{export}")),
+                    name.to_string() == format!("{export}:{export}"),
                     "{stem}: named load of {export} must instantiate that NAMESPACE; got {name}"
                 );
             }

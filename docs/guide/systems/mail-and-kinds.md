@@ -219,8 +219,9 @@ recipe).
 
 - Chassis mailboxes live under `aether.<name>` (`aether.render`, `aether.fs`,
   `aether.audio`, `aether.lifecycle`, `aether.window`, `aether.component`).
-- A loaded component registers at `aether.component/aether.embedded:NAME` — use the
-  full address `LoadResult.path` hands back.
+- A loaded component registers at its published name — `NS`, `NS:key`, or
+  `parent/NS:key` (ADR-0241 §5) — use the full address `LoadResult.path` hands
+  back.
 - **Bare names** (`"camera"`, `"player"`) are not registered and warn-drop
   silently. If mail seems to vanish, check the address first.
 - **Never hash a name into a `MailboxId` yourself.** The name hashes are
