@@ -237,9 +237,8 @@ fn a_bad_reply_kind_leaves_the_slot_held() {
     assert!(fixture.component.store.data().reply_table.resolve(handle).is_some(), "the handle stays answerable");
 }
 
-/// Catches an unload that carries held slots to a refill: no ticket
-/// survives unload, so the requester's chain would stay open until actor
-/// close.
+/// Catches a guest release that keeps its held slots: no ticket survives
+/// the release, so the requester's chain would stay open until actor close.
 #[test]
 fn settle_held_releases_on_unload() {
     let mut fixture = Fixture::new(false, false);

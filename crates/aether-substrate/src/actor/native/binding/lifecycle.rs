@@ -379,9 +379,8 @@ impl NativeBinding {
     /// [`NativeCtx::sync_guest`](crate::actor::native::ctx::NativeCtx::sync_guest)
     /// for an empty slot.
     ///
-    /// The route keeps publishing the last guest's contract: an unload does
-    /// not shrink a published contract (ADR-0231 §5), and a refill is held
-    /// to the dropped guest's rows.
+    /// The route keeps publishing the last guest's contract: a release does
+    /// not shrink a published contract (ADR-0231 §5).
     #[cfg(feature = "wasm")]
     pub(crate) fn release_guest(&self, measured: &[KindId]) {
         self.mailer.capability_registry().remove(self.self_mailbox());

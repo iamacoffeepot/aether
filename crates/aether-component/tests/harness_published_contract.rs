@@ -2,7 +2,7 @@
 //!
 //! A route publishes its actor's `(KindId, ReplyContract)` rows and its
 //! fallback flag on its route record when it goes `Live`: a wasm trampoline
-//! its guest's, republished on replace and kept through an unload; an inline
+//! its guest's, republished on replace; an inline
 //! child's alias its own type's, private children included; a native
 //! capability its `#[actor]` surface. Each scenario reads the published
 //! contract through the harness's `published_contract` door.
@@ -20,7 +20,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId, LoadName, ReplyContract};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::{Dispatch, NativeActor};
 use aether_test_fixtures_bundle::{ContractBase, InlineChild, InlineParent, InlineStatefulChild, InlineStatefulParent};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, InlineEcho, InlineProbe};
@@ -80,11 +80,12 @@ where
 
 /// A loaded trampoline publishes its guest's rows and fallback flag, and
 /// neither its own framework arms nor its forwarding fallback. A replace
-/// republishes the replacement's rows, and an unload keeps them. Catches a
-/// trampoline that publishes its own `#[actor]` contract or nothing, a
-/// replace that never republishes, and an unload that sheds the rows.
+/// republishes the replacement's rows. Catches a trampoline that publishes its
+/// own `#[actor]` contract or nothing, and a replace that never republishes.
+/// A dropped instance's route no longer reads `Live`, which
+/// `harness_drop_close` covers.
 #[test]
-fn a_loaded_component_publishes_its_guest_contract_through_replace_and_drop() {
+fn a_loaded_component_publishes_its_guest_contract_through_replace() {
     let Some(wasm_path) = require_wasm(BUNDLE) else {
         return;
     };
@@ -98,7 +99,7 @@ fn a_loaded_component_publishes_its_guest_contract_through_replace_and_drop() {
     assert_eq!(harness.published_contract(victim.erase()), Some((base.clone(), false)));
 
     let replace = ReplaceComponent {
-        target: path.clone(),
+        target: path,
         wasm,
         drain_timeout_ms: None,
         config: Vec::new(),
@@ -111,18 +112,6 @@ fn a_loaded_component_publishes_its_guest_contract_through_replace_and_drop() {
     }
     let extended = (sorted([base, vec![(InlineProbe::ID, ReplyContract::None)]].concat()), false);
     await_published(&harness, victim.erase(), &extended);
-
-    let drop = DropComponent { target: path };
-    let operation = HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), &drop);
-    let dropped = harness.execute(vec![("drop", operation)]).expect("drop operation");
-    if let DropResult::Err { error } = dropped.reply::<DropResult>("drop").expect("decode DropResult") {
-        panic!("the victim must drop: {error}");
-    }
-    assert_eq!(
-        harness.published_contract(victim.erase()),
-        Some(extended),
-        "the emptied slot keeps publishing the dropped guest's contract"
-    );
 }
 
 /// An inline child's alias publishes its own type's rows: an exported child

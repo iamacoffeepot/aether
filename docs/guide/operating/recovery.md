@@ -170,9 +170,10 @@ After an error:
 - do not drop the component until evidence is preserved;
 - prefer a known-good exact content hash for a roll-forward attempt.
 
-If the component is no longer serviceable and the engine is shared, drop that
-exact mailbox and either refill the slot with `replace_component` or load a
-differently named instance after checking downstream address ownership. If the
+If the component is no longer serviceable and the engine is shared, replace it
+in place with `replace_component` while it is still live, or drop that exact
+instance and load a differently named one after checking downstream address
+ownership. A drop retires the name, so a reload under it is refused. If the
 engine is task-owned, replacing the whole engine is often the cleaner isolation
 boundary.
 
@@ -218,7 +219,7 @@ invalidating the successful engine capture, so inspect both results. See
 - [ ] Preserve all returned spill-file and capture-file paths needed by the
       incident record.
 - [ ] Drop task-owned components in a shared engine, require `drop_result`, and
-      record the remaining empty slot.
+      record the retired names.
 - [ ] Terminate task-owned engines and verify the live fleet no longer lists
       them.
 - [ ] Leave adopted/shared engines alone unless the owner authorizes action.

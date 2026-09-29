@@ -46,8 +46,8 @@
 // the host fn touches it via `Caller::data_mut()`. The ctx dies with
 // its instance, so the component trampoline moves the table out as an
 // opaque `PendingReplies` when a guest leaves the slot and installs it
-// on the next occupant — across replace, drop-then-refill and a
-// replacement that fails to start — so a held handle still answers its
+// on the next occupant — across replace and a replacement that fails
+// to start — so a held handle still answers its
 // own requester and the free queue carries on (#6409).
 
 use std::collections::VecDeque;

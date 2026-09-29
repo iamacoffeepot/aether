@@ -538,10 +538,9 @@ impl HttpSupervisorState {
     /// binding) means "not monitorable", and the claim still stands: the
     /// route lives until substrate teardown. That is harmless for a mailbox
     /// that never goes away, and *not* harmless for a wasm trampoline, which
-    /// vacates on `DropComponent` while staying addressable — an unmonitored
-    /// route then keeps dispatching at an empty trampoline, which warn-drops
-    /// every request, so the cap answers `502` to that prefix for the rest of
-    /// the process. Nothing recovers it, because the notice that would have
+    /// closes on `DropComponent` — an unmonitored route then keeps
+    /// dispatching at a mailbox that drops every request, so the cap answers
+    /// `502` to that prefix for the rest of the process. Nothing recovers it, because the notice that would have
     /// purged the route is the one that never arrives.
     ///
     /// So the failure is logged rather than discarded (issue 4195): the

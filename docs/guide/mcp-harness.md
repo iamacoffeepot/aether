@@ -239,7 +239,9 @@ shows its schema. `config_path` does not contain pre-encoded wire bytes.
 replica; docs on that block also follow the summary-vs-`full` projection.
 `replace_component` names its target by lineage address (canonical or short),
 sends it to the engine as the `aether.component.replace` target, and prints the
-address back.
+address back. There is no drop tool: send `aether.component.drop` through
+`send_mail`. A drop closes the instance and retires its name, so a later load
+needs a new name and a replace at the dropped address is refused.
 
 `list_binaries` and registry `list_components` return
 `{entries, total_matched, shown, truncated, notice}` in stable newest-first
