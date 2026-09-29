@@ -47,6 +47,6 @@ pub use sweep::{Drive, SweepConfig, run_sweep, run_sweep_samples};
 pub use tick::TickSource;
 pub use topology::{
     REAL_CODEC_WORK_ITERS, REAL_FANOUT_N, REAL_LOGIC_WORK_ITERS, REAL_UI_FOLLOWUP_STEPS, Tier, Topology,
-    default_topologies, depth_chain, fanout, fanout_heavy, max_out_degree, parse_topologies, socket_server,
+    default_topologies, depth_chain, fanin, fanout, fanout_heavy, max_out_degree, parse_topologies, socket_server,
     tick_broadcast, two_level_tree, two_level_tree_heavy, two_level_tree_router_heavy, ui_roundtrip,
 };
