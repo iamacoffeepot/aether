@@ -7,8 +7,10 @@
 //! These scenarios load the already-exported adopters by typed config and
 //! drive the override bodies that existing panel tests do not cover.
 //!
-//! Skips when the stem wasm has not been pre-built (`require_wasm`). CI sets
-//! `AETHER_REQUIRE_RUNTIME=1` to turn that skip into a hard failure.
+//! Skips when no wgpu adapter is available or the stem wasm has not been
+//! pre-built (the shared `require_runtime` gate): the widget module declares
+//! render, and only a real render serves it. CI sets `AETHER_REQUIRE_RUNTIME=1`
+//! to turn either skip into a hard failure.
 
 mod support;
 
@@ -17,10 +19,10 @@ use std::fs;
 use aether_actor::{ActorRef, ChildOf, Instanced};
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
-use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
+use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseMove, TextInput, Tick};
-use aether_render::HeadlessRenderCapability;
 use aether_widget::set::{NumericWidget, VirtualListWidget};
 use aether_widget::{
     ButtonConfig, FocusLost, HoverLost, NumericConfig, PanelConfig, SegmentedConfig, TextAreaConfig, TextFieldConfig,
@@ -34,15 +36,15 @@ fn test_window() -> aether_data::ErasedActorPath {
 }
 const WASM_STEMS: [&str; 1] = ["aether_widget"];
 
-/// A GPU-free bench with the component host and everything the widget module
-/// declares: the headless render stub, text (its fs from the sandbox roots) and
-/// the in-memory clipboard.
+/// A GPU bench with the component host and everything the widget module
+/// declares: the real render, text (its fs from the sandbox roots) and the
+/// in-memory clipboard.
 fn bench(width: u32, height: u32) -> SubstrateHarness {
     widget_caps(
         SubstrateHarness::builder()
             .size(width, height)
             .namespace_roots(test_namespace_roots(init_save_sandbox("widget-activation")))
-            .with_actor::<HeadlessRenderCapability>(())
+            .with_render()
             .with_component_host(),
     )
     .build()
@@ -213,7 +215,7 @@ fn numeric_value(message: &str) -> Option<f32> {
 #[test]
 fn named_load_exported_widget_defaults_adopters_succeeds() {
     for stem in WASM_STEMS {
-        let Some(wasm_path) = require_wasm(stem) else {
+        let Some(wasm_path) = require_runtime(stem) else {
             continue;
         };
         let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -236,7 +238,7 @@ fn named_load_exported_widget_defaults_adopters_succeeds() {
 #[test]
 fn numeric_focus_lost_commits_the_typed_buffer() {
     for stem in WASM_STEMS {
-        let Some(wasm_path) = require_wasm(stem) else {
+        let Some(wasm_path) = require_runtime(stem) else {
             continue;
         };
         let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -303,7 +305,7 @@ fn numeric_focus_lost_commits_the_typed_buffer() {
 #[test]
 fn virtual_list_hover_lost_clears_the_hovered_row() {
     for stem in WASM_STEMS {
-        let Some(wasm_path) = require_wasm(stem) else {
+        let Some(wasm_path) = require_runtime(stem) else {
             continue;
         };
         let wasm = fs::read(&wasm_path).expect("read widget wasm");

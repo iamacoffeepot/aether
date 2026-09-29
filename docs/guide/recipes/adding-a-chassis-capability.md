@@ -283,8 +283,10 @@ Where that line goes depends on which chassis should carry the cap:
 
 - **Desktop and headless together** — add it to `with_common_caps` in
   [`crates/aether-chassis/src/boot.rs`][common], the
-  shared composition those two chassis call. `TextCapability` lives here.
-  Adding it to the `.with_actor::<_>()` chain is all it takes: the
+  shared composition those two chassis call. `FsCapability` lives here. Put
+  a cap here only when both chassis serve it and everything it depends on;
+  `TextCapability` depends on render, which headless does not serve, so it
+  is not here. Adding it to the `.with_actor::<_>()` chain is all it takes: the
   `--describe` manifest is claim-derived ([ADR-0155][adr155]), so a cap
   appears in the roster the moment it claims a mailbox — there is no
   parallel namespace list to keep in lockstep.
@@ -292,15 +294,18 @@ Where that line goes depends on which chassis should carry the cap:
   `with_common_caps`; it has a separate, reduced builder chain in
   [`crates/aether-harness-substrate/src/chassis.rs`][substrateharness];
   add the capability there too when scenarios should drive it, and thread any
-  required config through `SubstrateHarnessEnv`. `TextCapability` is registered in both
-  compositions for this reason.
+  required config through `SubstrateHarnessEnv`.
 - **One chassis only** — add it to that chassis's own builder chain:
   `desktop/chassis.rs`, `headless/chassis.rs`, or `hub/chassis.rs` in
-  the chassis crates. `HeadlessRenderCapability` is composed with
-  `with_actor` on the headless chassis alone; the desktop `RenderCapability`
-  claims the same `aether.render` name there, booted as a pumped actor by the
-  desktop driver (`ctx.boot_pumped_actor::<RenderCapability>(…)`) because it
-  must run on the winit thread.
+  the chassis crates. `TextCapability` is composed in the desktop and
+  harness chains, beside the render each serves; the desktop
+  `RenderCapability` is booted as a pumped actor by the desktop driver
+  (`ctx.boot_pumped_actor::<RenderCapability>(…)`) because it must run on the
+  winit thread.
+
+A chassis that cannot serve a capability composes nothing for it, not a stub
+claiming its mailbox ([ADR-0232 §6][adr232]), so a component that depends on it
+is refused at load there.
 
 A pumped actor is **reserved at the Claim stage**, before any passive's
 `init`: on a driver chassis the driver's `claim` hook calls
@@ -317,9 +322,8 @@ The builder claims `A::NAMESPACE` as it boots each cap and enforces
 **one claimant per name**: a second cap claiming an already-owned mailbox
 fails the build with `BootError::MailboxAlreadyClaimed { name }` (or a
 namespace-ownership error for a `NAMESPACE` collision across types). This
-is the guarantee that lets two chassis define different caps behind the
-same well-known name (the desktop vs headless renderer) without either
-silently shadowing the other — each composition picks exactly one.
+is the guarantee that a well-known name has at most one claimant in any
+composition, so no cap silently shadows another.
 
 Boot is multi-pass across every cap: `claim → init → wire → spawn`,
 synchronized so that at `init` time every peer mailbox is claimed and at
@@ -328,6 +332,7 @@ synchronized so that at `init` time every peer mailbox is claimed and at
 [adr70]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0070-native-capabilities-and-chassis-as-builder.md
 [adr71]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0071-driver-capabilities-and-chassis-composition.md
 [adr155]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0155-staged-chassis-boot-and-claim-derived-describe.md
+[adr232]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0232-flat-ctx-send-verbs.md
 [common]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis/src/boot.rs
 [substrateharness]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs
 

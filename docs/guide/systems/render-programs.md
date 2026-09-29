@@ -601,10 +601,9 @@ lifecycle over mail has its own scenario in
 - **Desktop** executes programs. A `register` sent before the render GPU
   boots (before the first window attaches) replies `Err` rather than
   parking.
-- **Headless** replies `Err` to `register` and to `create_geometry`
-  (fail-fast, the same as `create_texture`) and absorbs `dispatch` /
-  `destroy` / `update_geometry` / `destroy_geometry` as no-ops, so a
-  desktop-built component mailing them does not warn-storm.
+- **Headless** composes no render actor, so a component that depends on
+  render is refused at load there rather than mailing programs into a
+  stand-in.
 - **SubstrateHarness** executes programs for real — it has a wgpu adapter —
   which is what makes a parity scenario an ordinary `cargo test`. Driverless
   machines skip such tests cleanly.

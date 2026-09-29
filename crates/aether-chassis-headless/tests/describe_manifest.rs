@@ -26,13 +26,30 @@ fn headless_describe_emits_manifest() {
     assert!(!manifest.caps.is_empty(), "the headless chassis links a non-empty cap set");
     // ADR-0155: the roster is claim-derived, so these assert the real claim
     // path — not a hand list. `aether.fs` is a `with_full_stack_caps` cap,
-    // `aether.audio` is the headless inline fail-fast sink, and
-    // `aether.rpc.server` / `aether.http.server` are the always-claim servers
-    // (ADR-0155 §3) the old hand list silently omitted.
-    for expected in ["aether.fs", "aether.audio", "aether.rpc.server", "aether.http.server"] {
+    // and `aether.rpc.server` / `aether.http.server` are the always-claim
+    // servers (ADR-0155 §3) the old hand list silently omitted.
+    for expected in ["aether.fs", "aether.rpc.server", "aether.http.server"] {
         assert!(
             manifest.caps.iter().any(|c| c == expected),
             "claim-derived roster must include {expected}, got {:?}",
+            manifest.caps
+        );
+    }
+    // ADR-0232 §6: a chassis composes only the capabilities it serves, so
+    // headless claims none of these mailboxes and a dependent is refused at
+    // load. A shared compose helper that grew one of them back, or a stub
+    // reintroduced to claim the mailbox, fails here.
+    for absent in [
+        "aether.render",
+        "aether.window",
+        "aether.clipboard",
+        "aether.audio",
+        "aether.text",
+        "aether.substrate_harness",
+    ] {
+        assert!(
+            !manifest.caps.iter().any(|c| c == absent),
+            "headless serves no {absent}, so the claim-derived roster must exclude it, got {:?}",
             manifest.caps
         );
     }

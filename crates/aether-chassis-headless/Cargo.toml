@@ -23,21 +23,11 @@ runtime = []
 aether-chassis = { path = "../aether-chassis" }
 aether-substrate = { path = "../aether-substrate" }
 # The headless cap set: the common-cap configs the env threads through
-# `with_common_caps`, plus the headless fail-fast stubs — the nop
-# renderer, the Err-replying clipboard cap, and the unsupported
-# substrate-harness cap. No window actor is composed.
-aether-render = { path = "../aether-render", features = ["runtime"] }
-aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
-aether-substrate-harness-cap = { path = "../aether-substrate-harness-cap" }
+# `with_common_caps`. A chassis composes only what it serves, so no render,
+# window, text, audio, clipboard, or substrate-harness actor is composed.
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-component = { path = "../aether-component" }
 aether-http = { path = "../aether-http" }
-# The headless chassis composes `HeadlessAudioCapability`, the crate's
-# fail-fast `aether.audio` companion. The companion's runtime half rides the
-# same `runtime` feature as the pumped cap (one `mod runtime;` gate, ADR-0122),
-# so the cpal/synth stack is linked but never constructed here — no audio
-# device is opened on a headless boot.
-aether-audio = { path = "../aether-audio", features = ["runtime"] }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 clap = { workspace = true }

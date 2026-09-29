@@ -1,39 +1,25 @@
-//! Headless chassis: `HeadlessChassis` (ADR-0035 / ADR-0071), the
-//! `Err`-replying capability stubs that fail fast for kinds desktop
-//! supports natively (capture) plus `Advance`, and the
+//! Headless chassis: `HeadlessChassis` (ADR-0035 / ADR-0071) and the
 //! [`HeadlessChassis::build`] entry point that assembles the substrate
 //! + tick driver into a [`BuiltChassis`].
 //!
-//! Issue 603 retired the `chassis_handler` closure: each fail-fast
-//! kind moved onto its own cap. `HeadlessRenderCapability` (Phase 2)
-//! handles `aether.render`; `UnsupportedSubstrateHarnessCapability` (Phase 4)
-//! handles `aether.substrate_harness`; `HeadlessAudioCapability`
-//! (iamacoffeepot/aether#5705) handles `aether.audio`, retiring the last
-//! inline sink — a hand-written closure that answered one of the six
-//! reply-promising audio kinds and silently absorbed the other five.
-//! `aether.control.platform_info` (now a deleted kind name from a retired
-//! namespace) was deleted as a kind in Phase 4 — no replacement, no MCP
-//! path until issue 603 §F2 revives the per-domain shape.
-//!
-//! No window actor is composed: a chassis with no window peripheral has no
-//! `aether.window` mailbox, so a component that depends on
-//! `WindowCapability` is refused at load rather than answered by a stub.
+//! A chassis composes only the capabilities it serves (ADR-0232 §6). Headless
+//! has no GPU, window, audio device, or clipboard and drives its own timer, so
+//! it composes no `aether.render`, `aether.window`, `aether.text`,
+//! `aether.audio`, `aether.clipboard`, or `aether.substrate_harness` actor. A
+//! component that depends on one of them is refused at load, naming the
+//! dependency that is not live, rather than answered by a stub.
 
 use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_audio::HeadlessAudioCapability;
-use aether_clipboard::HeadlessClipboardCapability;
 use aether_component::ComponentHostParams;
 use aether_http::HttpServerCapability;
 use aether_lifecycle::LifecycleCapability;
-use aether_render::HeadlessRenderCapability;
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
-use aether_substrate_harness_cap::UnsupportedSubstrateHarnessCapability;
 
 use aether_chassis::{TickConfig, apply_manifest_tick_settings};
 
@@ -156,12 +142,8 @@ impl BootableChassis for HeadlessChassis {
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
         // the timer pushes `LifecycleAdvance` and the lifecycle cap
         // broadcasts `Tick` to its stage subscribers.
-        let builder = with_full_stack_caps(builder, common)
-            .with_actor::<HeadlessRenderCapability>(())
-            .with_actor::<HeadlessAudioCapability>(())
-            .with_actor::<HeadlessClipboardCapability>(())
-            .with_actor::<UnsupportedSubstrateHarnessCapability>(())
-            .with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
+        let builder =
+            with_full_stack_caps(builder, common).with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
         Ok(with_rpc_server(builder).with_actor::<HttpServerCapability>(()))
     }
 }

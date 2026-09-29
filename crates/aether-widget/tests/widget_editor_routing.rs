@@ -12,14 +12,16 @@ use std::path::Path;
 
 use aether_actor::{ActorRef, ErasedActorRef};
 use aether_data::Kind;
-use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
+use aether_harness_substrate_capture::test_helpers::{
+    init_save_sandbox, require_runtime, require_wasm, test_namespace_roots,
+};
 use aether_kinds::keycode::{KEY_BACKQUOTE, KEY_TAB};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, LoadComponent, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
     TextInput,
 };
-use aether_render::HeadlessRenderCapability;
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
@@ -32,15 +34,15 @@ fn test_window() -> aether_data::ErasedActorPath {
     aether_window::window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
 }
 
-/// A GPU-free bench with the component host and everything the widget module
-/// declares: the headless render stub, text (its fs from the sandbox roots) and
-/// the in-memory clipboard.
+/// A GPU bench with the component host and everything the widget module
+/// declares: the real render, text (its fs from the sandbox roots) and the
+/// in-memory clipboard.
 fn bench(width: u32, height: u32) -> SubstrateHarness {
     widget_caps(
         SubstrateHarness::builder()
             .size(width, height)
             .namespace_roots(test_namespace_roots(init_save_sandbox("widget-editor-routing")))
-            .with_actor::<HeadlessRenderCapability>(())
+            .with_render()
             .with_component_host(),
     )
     .build()
@@ -107,7 +109,7 @@ fn input<K: Kind>(synthetic: ActorRef<WindowCapability>, mail: &K) -> HarnessOp 
 #[test]
 fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     let (Some(widget_wasm), Some(fixtures_wasm)) =
-        (require_wasm("aether_widget"), require_wasm("aether_test_fixtures_bundle"))
+        (require_runtime("aether_widget"), require_wasm("aether_test_fixtures_bundle"))
     else {
         return;
     };
@@ -186,7 +188,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
 #[test]
 fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
     let (Some(widget_wasm), Some(fixtures_wasm)) =
-        (require_wasm("aether_widget"), require_wasm("aether_test_fixtures_bundle"))
+        (require_runtime("aether_widget"), require_wasm("aether_test_fixtures_bundle"))
     else {
         return;
     };

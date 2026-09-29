@@ -6,24 +6,21 @@ license.workspace = true
 publish = false
 
 # The `aether.substrate_harness` capability (ADR-0067 / ADR-0121 / ADR-0122):
-# `aether.substrate_harness.advance { ticks }` and the two chassis profiles
-# that claim the mailbox — the substrate-harness chassis's real drive
-# (`SubstrateHarnessCapability`, which hands the request to the embedder loop
-# over `events`) and the fail-fast stub every other chassis composes
-# (`UnsupportedSubstrateHarnessCapability`).
+# `aether.substrate_harness.advance { ticks }`, served only by the
+# substrate-harness chassis's drive (`SubstrateHarnessCapability`, which hands
+# the request to the embedder loop over `events`). Every other chassis composes
+# no actor at this mailbox.
 #
-# Its own crate per `docs/guide/capability-anatomy.md`. Before issue #5706 the
-# cap lived inside `aether-harness-substrate`, so desktop, headless and hub all
-# carried a 13k-line test crate — 7.4k of it the perf sweep framework — as a
-# normal dependency to compose 100 lines of fail-fast stub.
+# Its own crate per `docs/guide/capability-anatomy.md`, so a chassis composes
+# the cap without carrying the `aether-harness-substrate` test crate.
 #
 # The `-cap` suffix disambiguates: the bare `aether-substrate-harness` name the
 # `aether-<cap>` convention would pick is already the harness chassis binary
 # (`aether-chassis-harness`'s `[[bin]]`).
 
-# ADR-0122 identity/runtime split: the wasm-safe identities and their
+# ADR-0122 identity/runtime split: the wasm-safe identity and its
 # `HandlesKind` markers compile always-on; the `aether_substrate`-typed runtime
-# halves (the `NativeActor` impls, the embedder event channel whose `Advance`
+# half (the `NativeActor` impl, the embedder event channel whose `Advance`
 # carries an `InboundMail` reply guard) are gated, so a marker-only guest can
 # declare `#[actor(depends(SubstrateHarnessCapability))]` and mail it with
 # `ctx.send::<SubstrateHarnessCapability>(..)` without dragging the substrate

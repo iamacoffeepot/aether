@@ -74,8 +74,7 @@ of quads sampling that texture, each carrying a pixel-unit rect, a uv sub-rect,
 and an RGBA tint. `R8` samples contribute their scalar value in the red channel
 (`vec4(r, 0, 0, 1)`), which is mainly a substrate for material passes; ordinary
 sprite/text atlas callers use `Rgba8`. `destroy_texture` releases a registered
-texture when the producer knows it is no longer used; headless absorbs it as a
-no-op.
+texture when the producer knows it is no longer used.
 
 `blend` picks how the sampled texel lays over what is already there, and the
 choice is about what the source's colour channels already carry. `Straight` —
@@ -131,7 +130,6 @@ crashes the substrate. `program.dispatch` executes the passes once at the next
 frame record, before the material and overlay passes, so drawing a program's
 writable output texture in the same frame shows the freshly computed pixels;
 runtime binding mismatches warn-drop naming the program, pass, and binding.
-Headless replies `Err` to `register` and absorbs `dispatch` / `destroy`.
 The full contract — slots, extents, uniform windows, repeat semantics,
 validation classes, pooling, determinism conventions — is the subject of
 [Authored render programs](render-programs.md).
@@ -254,16 +252,14 @@ an ambiguous submission, poll, map, or readback instead returns that capture's
 All of this is host policy — there is no recovery kind, generation callback, or
 guest-visible wire change.
 
-**The production headless chassis absorbs draw and camera mail.** It composes
-`HeadlessRenderCapability` on the same `aether.render` mailbox:
-`DrawTriangle`, `aether.view_projection`, `update_texture`, `destroy_texture`,
-`draw_textured_quads`, `draw_screen_triangles`, `draw_shapes`, and
-`aether.render.material.*` no-op (a desktop-built
-component mailing them every frame doesn't warn-storm), and
-`aether.render.capture_frame` and `create_texture` reply `Err` so a request
-fails fast instead of hanging. The minimal hub chassis does not install an
-`aether.render` mailbox at all, so render mail cannot resolve there. `SubstrateHarness`
-instead composes the real offscreen `RenderCapability` for render/capture tests.
+**The production headless chassis composes no render actor.** A chassis
+composes only the capabilities it serves
+([ADR-0232 §6](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0232-flat-ctx-send-verbs.md)),
+so a component that declares `depends(RenderCapability)` is refused at load on
+headless, naming `aether.render` as the dependency that is not live, and a
+`capture_frame` there is answered `NotPresent`. The minimal hub chassis does not
+install an `aether.render` mailbox either. `SubstrateHarness` composes the real
+offscreen `RenderCapability` for render/capture tests.
 
 ## How to use it
 
@@ -297,10 +293,10 @@ with `depends(R)`. The actor is the first parameter, the reply mode the second
 (`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 Address the cap by type — `ctx.send::<RenderCapability>(..)` — and send
-`DrawTriangle`s (and, if you're a camera, an `aether.view_projection`). On a chassis whose
-lifecycle graph omits `Render` (headless), subscribing to it rejects fail-fast at
-wire time, and the actor simply never submits — a no-op where there's no GPU
-anyway.
+`DrawTriangle`s (and, if you're a camera, an `aether.view_projection`). A
+component that depends on render does not stand up on headless at all; one
+that subscribes `Render` without depending on render gets the lifecycle's
+refusal at wire time on a graph that omits the stage.
 
 **From an agent over MCP — stage, then capture.** Use `capture_frame`: its
 required `window` names the render target (the window's actor path as

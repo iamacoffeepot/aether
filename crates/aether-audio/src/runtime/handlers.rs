@@ -155,7 +155,7 @@ impl AudioCapabilityState {
     ) -> Pending<PlayTrackResult> {
         let (pending, held) = ctx.hold::<PlayTrackResult>();
 
-        // Nop chassis (headless / hub / disabled / no device): fail
+        // Nop output (disabled / no device): fail
         // fast with a loud Err (ADR-0103 §7).
         if self.sender.is_none() || self.sample_rate.is_none() {
             held.answer(
@@ -300,7 +300,7 @@ impl AudioCapabilityState {
     ) -> Pending<LoadInstrumentResult> {
         let (pending, held) = ctx.hold::<LoadInstrumentResult>();
 
-        // Nop chassis (headless / hub / disabled / no device): fail
+        // Nop output (disabled / no device): fail
         // fast with a loud Err (ADR-0103 §7).
         if self.sender.is_none() || self.sample_rate.is_none() {
             held.answer(

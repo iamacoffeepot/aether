@@ -14,8 +14,10 @@
 //! tests prove post-replace behavior at the original aliases, not that a
 //! live selection survived the swap.
 //!
-//! Skipped when the matching wasm has not been pre-built (`require_wasm`).
-//! CI sets `AETHER_REQUIRE_RUNTIME=1` to turn that skip into a hard failure.
+//! Skipped when no wgpu adapter is available or the matching wasm has not been
+//! pre-built (the shared `require_runtime` gate): the widget module declares
+//! render, and only a real render serves it. CI sets
+//! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure.
 //! The parent builds `aether_widget`.
 
 mod support;
@@ -25,15 +27,15 @@ use std::fs;
 use aether_actor::ActorRef;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
-use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
+use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_RIGHT};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, ReplaceComponent,
     ReplaceResult, Tick,
 };
-use aether_render::HeadlessRenderCapability;
 use aether_substrate::testing::successor_wasm;
 use aether_widget::set::{DropdownWidget, MenuBarWidget, TabStripWidget};
 use aether_widget::{
@@ -50,15 +52,15 @@ fn test_window() -> aether_data::ErasedActorPath {
     aether_window::window_path(&LoadName::new("main").expect("a valid window name"))
 }
 
-/// A GPU-free bench with the component host and everything the widget module
-/// declares: the headless render stub, text (its fs from the sandbox roots) and
-/// the in-memory clipboard.
+/// A GPU bench with the component host and everything the widget module
+/// declares: the real render, text (its fs from the sandbox roots) and the
+/// in-memory clipboard.
 fn bench(width: u32, height: u32) -> SubstrateHarness {
     widget_caps(
         SubstrateHarness::builder()
             .size(width, height)
             .namespace_roots(test_namespace_roots(init_save_sandbox("widget-exports")))
-            .with_actor::<HeadlessRenderCapability>(())
+            .with_render()
             .with_component_host(),
     )
     .build()
@@ -77,7 +79,7 @@ const SEVEN: [&str; 7] = [
 ];
 
 fn wasm_or_skip(stem: &str) -> Option<Vec<u8>> {
-    let path = require_wasm(stem)?;
+    let path = require_runtime(stem)?;
     Some(fs::read(&path).unwrap_or_else(|error| panic!("read {stem} wasm: {error}")))
 }
 

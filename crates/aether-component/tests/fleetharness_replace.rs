@@ -56,28 +56,29 @@ mod tests {
     }
 
     /// A republish moves every live instance of every namespace its module
-    /// publishes (ADR-0241 §7): two instances of two different bundle
-    /// exports both still serve at their addresses after the bundle is
+    /// publishes (ADR-0241 §7): two instances of two different module
+    /// exports both still serve at their addresses after the module is
     /// republished with identical code under a new hash, and the reply
-    /// names both types.
+    /// names both types. The courier pair's first version depends on no
+    /// capability, so both exports load on the headless engine.
     ///
     /// Catches: a republish that swaps only one instance, or reports only
     /// the types that had one.
     #[test]
     fn fleetharness_republish_moves_every_instance_of_the_module() {
-        if !dist_component_available("aether_test_fixtures_bundle") {
+        if !dist_component_available("republish_courier_v1") {
             return;
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let cube = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.cube");
-        let root = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.ui.root");
+        let courier = harness.load_full_export(engine, "republish_courier_v1", "test.republish.courier");
+        let parcel = harness.load_full_export(engine, "republish_courier_v1", "test.republish.parcel");
 
-        let types = harness.replace_with_successor(engine, "aether_test_fixtures_bundle", 1);
+        let types = harness.replace_with_successor(engine, "republish_courier_v1", 1);
 
-        published(&types, "test.cube");
-        published(&types, "test.ui.root");
-        for address in [&cube.addr, &root.addr] {
+        published(&types, "test.republish.courier");
+        published(&types, "test.republish.parcel");
+        for address in [&courier.addr, &parcel.addr] {
             assert!(
                 matches!(harness.log_tail(engine, address, None, None), LogTailResult::Ok { .. }),
                 "{address} should still route to its live mailbox after the republish",
