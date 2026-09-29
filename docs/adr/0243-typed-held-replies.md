@@ -80,7 +80,7 @@ held.answer(ctx, &WatchHeadResult { .. });
    - `aether-http`'s client `PerSenderEgress::submit`;
    - `aether-bloomery-workspace`'s `RunQueue::submit`.
 
-   When one of these dispatches at once, it returns the receipt that the dispatch call mints. When it queues, it enqueues a `Held<R>` in place of the raw `SettlementHold` and `Source` pair. `hold` and the offload dispatch calls are the only mint sites left, and every receipt names an armed ledger entry.
+   Each one holds the reply with `hold` and returns that receipt, whether its work starts at once or waits for a free slot, and keeps the `Held<R>` in place of the raw `SettlementHold` and `Source` pair (§9). `hold` is the only mint site left, and every receipt names an armed ledger entry.
 
 4. **A `Held<R>` is a field of the request context.** The debt is part of the state a request carries to its reply handler, so it travels in the ADR-0139 context, with no verbs of its own:
 
@@ -157,7 +157,8 @@ held.answer(ctx, &WatchHeadResult { .. });
 
    - **A task context is a kind.** It describes the work (an index, a path, an id), as a request context does. Live values — channels, `Arc`s, prepared plans, `Held`s — wait in actor state keyed by what the context names; the actors that stage work already keep such a table (`aether-http`'s shard slots, `aether-component`'s `pending_boots`, `aether-fleet`'s `pending_engines`, `aether-audio`'s `track_loads`). An actor handles one mail at a time, so the entry a staging handler inserts is always present when the completion runs.
    - **Waiters on the same work are a join in state.** Requests of different reply kinds that need the same work wait under one key, each list typed by its own reply: `aether-text` keeps `{ load: Vec<Held<LoadFontResult>>, metrics: Vec<Held<FontMetricsResult>> }` per font, so one read and one parse serve every request for that font.
-   - **Staged work owes no reply.** Its ledger entry has no reply target. It keeps the staging turn's chain hold, if that turn had a chain, until the completion is handled, so a completion that stages the next step stays in the causal tree. `TaskDone<O>` carries only the output.
+   - **Staged work owes no reply.** Its ledger entry has no reply target. `TaskDone<O>` carries only the output.
+   - **A task takes its chain when it is staged.** Staging holds the chain of the turn that stages it, if that turn had one, until the completion is handled, so a completion that stages the next step stays in the causal tree. Staging is separate from starting: a bounded queue stages a request's work in that request's turn and starts it when a slot frees, from whichever turn frees it, so each task holds the chain of the request it serves and never the chain of the turn that happens to start it.
    - **`hand_off` is the one way a debt leaves its actor.** `held.hand_off(ctx, &child, &payload)` sends `payload` to a child with the requester as its reply target and ends the entry, so the child answers in its own name and the requester keeps the child's stamped sender as its reference (ADR-0230 §3). The component host's load hand-off to its trampoline is the one consumer.
    - **Removed:** `HandlerSpawnBuilder::continue_from`, `NativeCtx::stage_registry_batch_from`, `IntoDeferredReply`, `dispatch_blocking_held_with`, the `dispatch_blocking` variants that arm a reply, and `TaskDone`'s `resolve`, `resolve_with`, `resolve_value`, `resolve_err`, `release_no_reply`, `hand_off`, and `forward_tracked`. `stage_with` and `stage_registry_batch` take the context alone, and a failed stage hands the context back. `DeferredReply` and `defer_reply_to` remain for manual handlers only.
 
