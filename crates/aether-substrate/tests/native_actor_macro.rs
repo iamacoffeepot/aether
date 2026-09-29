@@ -852,7 +852,6 @@ impl NativeActor for ReplyMacroCap {
     /// captures from the return type. Stateless: the link-time
     /// `HandlerEntry` (not handler behaviour) is what this cap exists to
     /// exercise.
-    #[allow(clippy::unused_self)]
     #[aether_actor::handler::single]
     fn on_greet_reply(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) -> Pong {
         Pong { echoed: mail.tag }
@@ -872,7 +871,6 @@ impl NativeActor for InstancedChildCap {
         Ok(Self)
     }
 
-    #[allow(clippy::unused_self)]
     #[aether_actor::handler::single]
     fn on_greet(&self, _ctx: &mut NativeCtx<'_>, _mail: Greet) {}
 }
@@ -1110,7 +1108,6 @@ impl NativeActor for InstancedRootCap {
 
     /// Present only so the identity carries a handler like any other cap; the
     /// link-time placement facts are what this fixture exists to exercise.
-    #[allow(clippy::unused_self)]
     #[aether_actor::handler::single]
     fn on_greet(&self, _ctx: &mut NativeCtx<'_>, _mail: Greet) {}
 }
@@ -1245,7 +1242,6 @@ impl NativeActor for DeferredReplyCap {
     /// Reply path: `-> Pending<EchoReply>` declares the deferred reply
     /// kind on the request signature and arms an `EchoReply` worker; the
     /// macro sends nothing now.
-    #[allow(clippy::unused_self)]
     #[aether_actor::handler::single]
     fn on_kick_p(&self, ctx: &mut NativeCtx<'_>, mail: KickP) -> Pending<EchoReply> {
         let seed = mail.seed;
@@ -1254,7 +1250,6 @@ impl NativeActor for DeferredReplyCap {
 
     /// Worker-panic path: the worker panics with a probe naming the seed,
     /// so no `EchoReply` output ever lands.
-    #[allow(clippy::unused_self)] // aether-suppression-request: required native handler receiver
     #[aether_actor::handler::single]
     fn on_kick_panic(&self, ctx: &mut NativeCtx<'_>, mail: KickPanic) -> Pending<EchoReply> {
         let seed = mail.seed;
@@ -1271,7 +1266,6 @@ impl NativeActor for DeferredReplyCap {
 
     /// No-reply path: returns `()`, so it dispatches via
     /// `dispatch_blocking_with` (no `Pending<R>` contract to declare).
-    #[allow(clippy::unused_self)]
     #[aether_actor::handler::single]
     fn on_kick_s(&self, ctx: &mut NativeCtx<'_>, mail: KickS) {
         let seed = mail.seed;
@@ -1316,7 +1310,6 @@ impl NativeActor for ManualReplyCap {
     }
 
     #[aether_actor::handler::manual]
-    #[allow(clippy::unused_self)]
     fn on_ping(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, ping: ManualPing) {
         ctx.reply(&ManualAck { seq: ping.seq });
     }

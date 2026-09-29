@@ -59,7 +59,6 @@ impl NativeActor for TestEchoActor {
     }
 
     /// Stateless echo handler.
-    #[allow(clippy::unused_self)] // actor handler ABI always receives state
     #[handler::single]
     fn on_echo(&mut self, _ctx: &mut NativeCtx<'_>, mail: TestEchoRequest) -> TestEchoReply {
         TestEchoReply { value: mail.value }

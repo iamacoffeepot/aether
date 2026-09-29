@@ -12,10 +12,6 @@
 //! `Tick` is a frame-lifecycle stage on `aether.lifecycle`, not an input
 //! stream, so it is not part of this demo.
 
-// Stateless logger: each handler keeps `&mut self` for the dispatch ABI but
-// touches no fields.
-#![allow(clippy::unused_self)]
-
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Key, MouseButton, MouseMove};
 use aether_window::WindowCapability;

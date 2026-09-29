@@ -19,10 +19,6 @@
 //!   the report's arrival, and the test reads that log with `log_tail` on the
 //!   forwarder's address.
 
-// `#[handler]` methods take `&mut self` to match the dispatch ABI even when
-// the actor carries no state.
-#![allow(clippy::unused_self)]
-
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{SourceQuery, SourceReport};
 

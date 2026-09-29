@@ -27,10 +27,6 @@
 //! replace rolls back to the running `Counter`, wired again, and that the
 //! candidate's mail never leaves (ADR-0016 §4, ADR-0241 §7).
 
-// `#[handler]` / `#[fallback]` methods take `&mut self` to match the
-// dispatch ABI even when stateless.
-#![allow(clippy::unused_self)]
-
 use std::process;
 
 use aether_actor::{ActorInitError, Mail, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx, actor};

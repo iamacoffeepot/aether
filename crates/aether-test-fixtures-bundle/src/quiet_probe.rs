@@ -11,8 +11,6 @@
 //!   that flows through the actor-aware subscriber (issue #581) into the
 //!   per-actor log ring the log-ring tests read.
 
-#![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and `on_log_marker` only logs, so it reads no state — the same allow `probe` carries
-
 use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{AssetProbe, AssetProbeResult, LogMarker};
 

@@ -17,8 +17,11 @@
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the decoded
-// bytes so callers can't see references. A stateless handler that
-// ignores `self` is correct but triggers `unused_self`.
+// bytes so callers can't see references. `needless_pass_by_value` covers
+// that. `unused_self` stays too: the `#[http::route]` methods (e.g.
+// `on_routed`) are ordinary helpers the router macro's generated glue
+// calls directly — they never pass through `#[actor]`'s handler
+// collection, so its per-method allow never reaches them.
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
 use std::collections::BTreeMap;

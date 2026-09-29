@@ -550,7 +550,6 @@ mod tests {
         /// A synchronous `-> ProbeReply` handler — the reply contract
         /// the link-time inventory captures. Stateless: the link-time
         /// `HandlerEntry` is what the test reads, not handler state.
-        #[allow(clippy::unused_self)]
         #[handler::single]
         fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ProbeReq) -> ProbeReply {
             ProbeReply {}

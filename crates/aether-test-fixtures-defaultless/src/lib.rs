@@ -14,9 +14,6 @@
 //! no-default load path.
 
 #![forbid(unsafe_code)]
-// The `#[handler]` methods take `&mut self` to match the dispatch ABI even
-// though these actors are stateless.
-#![allow(clippy::unused_self)]
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Ping;

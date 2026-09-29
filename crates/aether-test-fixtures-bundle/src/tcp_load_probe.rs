@@ -61,7 +61,6 @@ impl WasmActor for TcpLoadProbe {
     /// Bind the named listener with this probe as the consumer; the bind
     /// reply lands in [`Self::on_bind_result`] inside the same chain, so the
     /// configure call settles with the port known.
-    #[allow(clippy::unused_self)] // aether-suppression-request: required wasm handler receiver; the bind reply carries the state
     #[handler::single]
     fn on_configure(&mut self, ctx: &mut WasmCtx<'_, Self>, configure: ConfigureTcpLoadProbe) {
         ctx.send::<TcpCapability>(&BindListenerSelf {

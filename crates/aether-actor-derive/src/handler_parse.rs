@@ -575,9 +575,20 @@ pub fn erase_unless_ctx_names_actor(sig: &Signature) -> TokenStream2 {
     }
 }
 
+/// ADR-0033: push `#[allow(clippy::unused_self)]` onto a method whose `self`
+/// receiver is fixed by the actor ABI rather than chosen by the author — a
+/// handler, fallback, or renamed lifecycle hook. iamacoffeepot/aether#2311: the
+/// receiver is required shape, not an authoring choice, so a stateless body
+/// trips `clippy::unused_self` on the generated copy for no reason the author
+/// can fix; suppress it at the one site every such method passes through.
+pub fn allow_abi_receiver(m: &mut syn::ImplItemFn) {
+    m.attrs.push(syn::parse_quote!(#[allow(clippy::unused_self)]));
+}
+
 /// Rename `wire` → `__aether_wire`, `unwire` → `__aether_unwire` and
 /// `on_rehydrate` → `__aether_on_rehydrate` in the given method slice, pushing
-/// `#[allow(clippy::unused_self)]` onto each renamed method. Returns
+/// `#[allow(clippy::unused_self)]` (via [`allow_abi_receiver`]) onto each
+/// renamed method. Returns
 /// `(has_wire, has_unwire, has_rehydrate)`; native never collects an
 /// `on_rehydrate`, so its third flag is always `false`.
 ///
@@ -608,12 +619,12 @@ pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool, b
         } else {
             continue;
         }
-        // iamacoffeepot/aether#2311: the renamed hook keeps its `&mut self`
-        // receiver (the forwarding `Lifecycle<S>` fn passes `&mut S` in as
-        // `self`), so a stateless `wire`/`unwire` body trips
-        // `clippy::unused_self` on the now-inherent method — the receiver is
-        // the required ABI, so suppress it on the generated copy.
-        m.attrs.push(syn::parse_quote!(#[allow(clippy::unused_self)]));
+        // The renamed hook keeps its `&mut self` receiver (the forwarding
+        // `Lifecycle<S>` fn passes `&mut S` in as `self`), so a stateless
+        // `wire`/`unwire` body trips `clippy::unused_self` on the now-inherent
+        // method — the receiver is the required ABI, so suppress it on the
+        // generated copy (see [`allow_abi_receiver`]).
+        allow_abi_receiver(m);
     }
     (has_wire, has_unwire, has_rehydrate)
 }
