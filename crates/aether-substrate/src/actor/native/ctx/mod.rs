@@ -179,9 +179,9 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
     /// pumped host turn
     /// ([`PumpedSlot::host_turn`](super::slot::pumped::PumpedSlot::host_turn))
     /// and both slots' close hooks, which hand the `unwire` hook a ctx typed
-    /// by its actor and derive both from the same slot. It is visible only to
-    /// the native runtime, so no test can hand-build a ctx and call a handler
-    /// around `dispatch_envelope`.
+    /// by its actor and derive both from the same slot. It is visible only
+    /// inside `actor::native`, so no test outside the native runtime can
+    /// hand-build a ctx and call a handler around `dispatch_envelope`.
     pub(in crate::actor::native) fn new_for_actor(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
