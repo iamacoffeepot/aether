@@ -133,10 +133,8 @@ aether-clipboard = { path = "../aether-clipboard" }
 # iamacoffeepot/aether#4156).
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 wasmtime = { workspace = true }
-# The host's own `mod tests` (in `component/runtime/mod.rs`) waits on the
-# registry-inventory egress wake through the same channel type
-# `aether_substrate::testing::await_signal` takes, so it needs the crate
-# directly rather than only transitively through `aether-substrate`.
+# The host's unit test waits on its egress wake through the channel
+# `aether_substrate::testing::await_signal` takes.
 crossbeam-channel = "0.5"
 
 # cargo-machete's source-only scan cannot see the wasm-coupling dev-deps

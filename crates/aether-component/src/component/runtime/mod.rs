@@ -603,7 +603,9 @@ mod tests {
         assert!(try_registered_ref(&registry, "test.component.inventory.mailbox", noop_handler()).is_err());
         registry.register_kind(&boot_authority(), "test.component.inventory.fence");
         let (kinds, mailboxes) = next_pair_carrying(&signal_rx, &egress_rx, "test.component.inventory.fence", true);
+        assert!(kinds.iter().any(|d| d.name == "test.component.inventory.kind"));
         assert!(kinds.iter().any(|d| d.name == "test.component.inventory.fence"));
+        assert!(mailboxes.iter().any(|d| d.name == "aether.component"));
         assert_eq!(
             mailboxes.iter().filter(|d| d.name == "test.component.inventory.mailbox").count(),
             1,
