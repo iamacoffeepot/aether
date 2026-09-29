@@ -23,6 +23,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
+use aether_data::BlobHash;
 use aether_data::name_inventory::native_type_entries;
 use rustc_hash::FxHashMap;
 
@@ -68,6 +69,18 @@ pub(super) enum Published {
     /// A published module, shared by every namespace it exports.
     #[cfg(feature = "wasm")]
     Module(Arc<ModulePublication>),
+}
+
+impl Published {
+    /// The hash of the module that implements the namespace, or `None` for
+    /// native code.
+    fn module_hash(&self) -> Option<BlobHash> {
+        match self {
+            Self::Native(_) => None,
+            #[cfg(feature = "wasm")]
+            Self::Module(publication) => Some(publication.module.hash()),
+        }
+    }
 }
 
 /// A native namespace: the linked types that declare it, and the one this
@@ -173,6 +186,13 @@ impl PublicationTable {
                 Ok(())
             }
         }
+    }
+
+    /// Whether `namespace` is published by the module `module`, the one check
+    /// a guest birth passes before the owner reserves it (ADR-0241 §3, §6):
+    /// a native, unpublished, or other module's namespace binds no guest.
+    pub(super) fn binds(&self, namespace: &str, module: BlobHash) -> bool {
+        self.namespaces.get(namespace).and_then(Published::module_hash) == Some(module)
     }
 
     /// Who holds `namespace`, or `None` when it is unpublished.

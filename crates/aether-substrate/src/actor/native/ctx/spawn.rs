@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
-use aether_actor::{ErasedActorRef, Instanced, ReplyMode};
+use aether_actor::{CoveredBy, ErasedActorRef, Instanced, Protocol, ReplyMode};
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::identity::ActorRuntimeIdentity;
-use crate::actor::native::spawn::{HandlerSpawnBuilder, SpawnBuilder, Subname};
+use crate::actor::native::spawn::{GuestBirth, GuestSpawnBuilder, HandlerSpawnBuilder, SpawnBuilder, Subname};
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::kind_manifest::Dependency;
 use crate::mail::{Source, SourceAddr};
@@ -104,9 +104,60 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
         let spawner = self.binding.spawner().expect("NativeCtx::spawn_child_scoped requires a chassis-built binding");
         let sender =
             Source { addr: SourceAddr::Component(self.binding.self_mailbox()), correlation_id: Source::NO_CORRELATION };
-        let parent = ActorRuntimeIdentity::new(parent.id(), None, parent.id().0, self.actor_path(parent));
+        let parent = self.scoped_parent(parent);
         let builder = SpawnBuilder::new_child(Arc::clone(spawner), subname, config, params, sender, parent);
         HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root)
+    }
+
+    /// Stage the birth of a published guest, hosted by the native `H`, under
+    /// the guest's own published name (ADR-0241 §5, §6): `NS`, `NS:key`, or
+    /// `parent/NS:key`, as [`GuestBirth`] says. The birth holds no native
+    /// namespace; the registry owner admits it only where the publication
+    /// table binds `birth.namespace` to `birth.module` (§3), and otherwise
+    /// completes it with [`SpawnError::GuestNotPublished`](crate::actor::native::SpawnError::GuestNotPublished)
+    /// and leaves no route.
+    ///
+    /// The returned [`GuestSpawnBuilder`] stages a task that owes no reply
+    /// (ADR-0243 §9). Its completion is `TaskDone<GuestOutcome<P>>`, whose
+    /// `Ok` arm is a [`ProtocolRef<P>`](aether_actor::ProtocolRef) over the
+    /// rows of `H` the caller controls the guest through: the name is the
+    /// guest's, so no `ActorRef<H>` is minted for it.
+    ///
+    /// A parented birth's parent is the proof `birth.parent` carries, and its
+    /// lineage is read off that proof, as [`Self::spawn_child_scoped`] reads
+    /// it. The staging actor holds the parent-local key.
+    ///
+    /// # Panics
+    /// Panics if the transport carries no spawner, as [`Self::spawn_child`]
+    /// does.
+    pub fn spawn_guest<'b, H, P>(
+        &'b self,
+        birth: GuestBirth<'b>,
+        config: H::Config,
+        params: H::Params,
+    ) -> GuestSpawnBuilder<'b, H, P>
+    where
+        H: Instanced + NativeActor,
+        P: Protocol + CoveredBy<H> + 'static,
+    {
+        let spawner = self.binding.spawner().expect("NativeCtx::spawn_guest requires a chassis-built binding");
+        let parent = birth.parent.map(|parent| self.scoped_parent(parent));
+        GuestSpawnBuilder::new(
+            Arc::clone(spawner),
+            birth,
+            parent,
+            config,
+            params,
+            Arc::clone(self.binding),
+            self.in_flight_root,
+        )
+    }
+
+    /// The runtime identity a live `parent` proves, for a birth placed
+    /// beneath it rather than beneath this ctx's actor. Its mailbox id is its
+    /// lineage carry: a tag rewrites only bits no later fold reads.
+    fn scoped_parent(&self, parent: ErasedActorRef) -> ActorRuntimeIdentity {
+        ActorRuntimeIdentity::new(parent.id(), None, parent.id().0, self.actor_path(parent))
     }
 
     /// The namespace of the first declared dependency with no `Live` route

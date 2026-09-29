@@ -28,7 +28,8 @@ use crate::mail::registry::NativeHoldRefusal;
 pub enum SpawnError {
     /// Subname is empty, contains `:`, has control / whitespace
     /// chars, or exceeds the byte cap. See
-    /// [`NamespaceError`].
+    /// [`NamespaceError`]. A guest birth's namespace is held to the same
+    /// segment grammar and refused the same way.
     SubnameInvalid(NamespaceError),
     /// The child's composed canonical name — the parent's proven path, then
     /// `{A::NAMESPACE}:{subname}` — is not an ADR-0166 actor path: in practice a
@@ -39,6 +40,14 @@ pub enum SpawnError {
     /// another type sharing `A::NAMESPACE` was born first in this engine, or
     /// `A` is not among the types linked there.
     NativeHold(NativeHoldRefusal),
+    /// A guest birth names a namespace the publication table does not bind
+    /// to the birth's module (ADR-0241 §3): it is unpublished, native, or
+    /// held by another module. Decided by the registry owner, so it arrives
+    /// on the birth's completion.
+    GuestNotPublished { namespace: String },
+    /// A guest birth asked for a placement ADR-0241 §5 does not name: a
+    /// keyless child, `parent/NS`. Reported at staging, before `H::init`.
+    GuestPlacement,
     /// The full name was previously live and has been retired. Names
     /// don't recycle within a substrate's lifetime (ADR-0079 §Drop /
     /// lifecycle); pick a different subname.

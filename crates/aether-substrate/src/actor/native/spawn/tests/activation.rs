@@ -85,7 +85,7 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
         RequestId(parent.mint_correlation()),
     );
     let dispatch_id = deferred.dispatch_id();
-    let finalizer = NativeSpawnFinalizer::parented(
+    let finalizer = NativeSpawnFinalizer::<ActivationProbe>::parented(
         parent_reservation,
         deferred,
         staged.identity.id,

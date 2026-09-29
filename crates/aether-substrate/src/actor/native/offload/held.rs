@@ -26,7 +26,7 @@ use std::mem::{self, ManuallyDrop};
 use std::sync::Weak;
 use std::thread;
 
-use aether_actor::{HeldReply, ReplyMode};
+use aether_actor::{HeldReply, ReplyMode, Target};
 use aether_data::wire::{self, Decoder, Encoder, WireDecode, WireEncode};
 use aether_data::{ActorMail, CastEligible, LabelNode, MailId, Schema, SchemaType, Source};
 
@@ -52,7 +52,8 @@ pub(crate) fn answer_unanswered<R: HeldReply>(binding: &NativeBinding, reply_to:
 ///
 /// A move-only ticket to one held entry in the actor's in-flight ledger,
 /// which keeps the caller's settlement hold and reply target.
-/// [`Self::answer`] sends the one terminal `R` and releases the hold.
+/// [`Self::answer`] sends the one terminal `R` and releases the hold, and
+/// [`Self::hand_off`] moves the answer to another actor.
 /// Dropping it unanswered releases the hold and then panics outside an
 /// unwind, as [`DeferredReply`] does. When the actor closes first while the
 /// engine keeps running, the close tail answers the entry with
@@ -123,6 +124,32 @@ impl<R: ActorMail> Held<R> {
     pub fn answer<M: ReplyMode, A>(self, ctx: &mut NativeCtx<'_, A, M>, reply: &R) {
         let (id, ledger) = self.disarm();
         ctx.answer_held(id, &ledger, reply);
+    }
+
+    /// Hand the owed reply to `target`, which then answers in its own name
+    /// (ADR-0243 §9): send `payload` to it with the captured caller as its
+    /// reply target and the held root as its lineage, then release the hold.
+    /// The send takes its settlement count before the release, so the
+    /// caller's chain stays open until `target` answers.
+    ///
+    /// This is the one way a debt leaves its actor. The caller hears from
+    /// `target`, stamped as the reply's sender, and keeps that sender as its
+    /// reference (ADR-0230 §3); no verb lets one actor reply *as* another.
+    /// `target` is a typed reference checked against `K`: an
+    /// [`ActorRef<T>`](aether_actor::ActorRef) of an actor that handles `K`,
+    /// or a [`ProtocolRef<P>`](aether_actor::ProtocolRef) whose protocol
+    /// lists `K`, such as the control reference a guest birth completes with.
+    ///
+    /// # Panics
+    /// Panics when `ctx` belongs to another actor (ADR-0243 §5).
+    pub fn hand_off<K: ActorMail, I, A, M: ReplyMode>(
+        self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        target: impl Target<K, I>,
+        payload: &K,
+    ) {
+        let (id, ledger) = self.disarm();
+        ctx.hand_off_held(id, &ledger, target.erased(), payload);
     }
 
     /// The ledger this ticket's entry lives in, for a consuming path that

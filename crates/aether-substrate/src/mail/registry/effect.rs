@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use aether_actor::RegistryChanged;
-use aether_data::{ErasedActorPath, Kind};
+use aether_data::{BlobHash, ErasedActorPath, Kind};
 use aether_data::{KindDescriptor, MailboxDescriptor, SchemaType};
 
 use crate::actor::native::offload::blocking::DeferredCompletion;
@@ -178,6 +178,15 @@ pub trait PreparedSpawnActivation: Send {
     fn native_type(&self) -> Option<(&'static str, NativeType)> {
         None
     }
+
+    /// The published namespace a guest birth takes and the module that must
+    /// hold it (ADR-0241 §3, §6), read by the owner's apply loop before
+    /// [`Self::reserve`]. A guest birth holds no native namespace, so
+    /// [`Self::native_type`] is `None` whenever this is `Some`. `None` for
+    /// every birth that is not a guest's.
+    fn guest_publication(&self) -> Option<(&str, BlobHash)> {
+        None
+    }
 }
 
 /// Storage-neutral reason supplied to the native finalizer. The registry
@@ -186,6 +195,7 @@ pub trait PreparedSpawnActivation: Send {
 #[derive(Debug)]
 pub enum PreparedSpawnFailure {
     NativeHold(NativeHoldRefusal),
+    GuestNotPublished { namespace: String },
     SubnameRetired { full_name: String },
     SubnameInUse { full_name: String },
     ActivationRejected,
@@ -265,6 +275,10 @@ impl PreparedActivationGuard {
     fn native_type(&self) -> Option<(&'static str, NativeType)> {
         self.0.as_ref().expect("prepared activation remains available until reserved").native_type()
     }
+
+    fn guest_publication(&self) -> Option<(&str, BlobHash)> {
+        self.0.as_ref().expect("prepared activation remains available until reserved").guest_publication()
+    }
 }
 
 impl Drop for PreparedActivationGuard {
@@ -304,6 +318,12 @@ impl PreparedSpawnCommit {
     /// The native type this birth instantiates and the namespace it holds.
     pub(super) fn native_type(&self) -> Option<(&'static str, NativeType)> {
         self.activation.native_type()
+    }
+
+    /// The published namespace a guest birth takes and the module that must
+    /// hold it.
+    pub(super) fn guest_publication(&self) -> Option<(&str, BlobHash)> {
+        self.activation.guest_publication()
     }
 
     /// Why the owner is refusing a birth whose id already carries a route.

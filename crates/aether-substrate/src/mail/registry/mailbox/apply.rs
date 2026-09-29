@@ -114,6 +114,21 @@ impl Registry {
                         drop(commit.reject_at_home(failure));
                         return Err(RegistryEffectError::Name(NameConflict { name }));
                     }
+                    // ADR-0241 §3, §6: a guest birth takes a published
+                    // namespace, so it is admitted only where the table, as
+                    // this batch has staged it, binds that namespace to the
+                    // birth's module. It holds no native namespace.
+                    if let Some((namespace, module)) = commit.guest_publication() {
+                        #[cfg(feature = "wasm")]
+                        let publications = staged_publications.as_ref().unwrap_or(&inner.publications);
+                        #[cfg(not(feature = "wasm"))]
+                        let publications = &inner.publications;
+                        if !publications.binds(namespace, module) {
+                            let namespace = namespace.to_owned();
+                            drop(commit.reject_at_home(PreparedSpawnFailure::GuestNotPublished { namespace }));
+                            return Err(RegistryEffectError::ActivationRejected);
+                        }
+                    }
                     // ADR-0241 §3: the birth holds its namespace in the
                     // publication table as this batch has staged it, so a
                     // second type sharing the namespace is refused.
