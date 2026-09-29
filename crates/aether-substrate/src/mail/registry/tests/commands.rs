@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use aether_data::{ErasedActorPath, Kind, KindDescriptor, SchemaType};
+use aether_data::{ErasedActorPath, Kind, KindDescriptor, RequestId, SchemaType};
 
 use crate::actor::native::{DispatchId, NativeBinding, TaskCompletionWake};
 use crate::chassis::settlement::SettlementRegistry;
@@ -25,7 +25,7 @@ use crate::mail::registry::relay::RouteRelayLease;
 use crate::mail::registry::{
     InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch, Registry, canonical_mailbox_id, noop_handler,
 };
-use crate::mail::{KindId, Mail, MailId, Source};
+use crate::mail::{KindId, Mail, MailId};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, Pool, PoolConfig, WakeSink};
 use crate::testing::boot_authority as auth;
@@ -635,7 +635,7 @@ fn owner_completion_reentry_requeues_and_preserves_depth_metric() {
         WakeSink::detached(),
         RegistryQueueCapacities::default(),
     );
-    let completion = binding.dispatch_arm::<RegistryBatchResult, _>(None, Source::NONE, ());
+    let completion = binding.dispatch_stage::<RegistryBatchResult>(None, RequestId(binding.mint_correlation()));
     let dispatch_id = completion.dispatch_id();
     assert!(registry.submit_deferred(RegistryBatch::register_kinds(Vec::new()).into_effects(), completion));
 
@@ -651,8 +651,7 @@ fn owner_completion_reentry_requeues_and_preserves_depth_metric() {
     let done = binding
         .dispatch_take::<RegistryBatchResult, ()>(dispatch_id)
         .expect("the deferred result remains available after its wake");
-    assert!(done.output().is_ok());
-    done.release_no_reply();
+    assert!(done.into_output().is_ok());
 }
 
 #[test]
@@ -703,7 +702,7 @@ fn deferred_batch_owner_close_wakes_exactly_once_with_public_error() {
         WakeSink::detached(),
         RegistryQueueCapacities::default(),
     );
-    let completion = binding.dispatch_arm::<RegistryBatchResult, _>(None, Source::NONE, ());
+    let completion = binding.dispatch_stage::<RegistryBatchResult>(None, RequestId(binding.mint_correlation()));
     let dispatch_id = completion.dispatch_id();
     assert!(registry.submit_deferred(RegistryBatch::register_kinds(Vec::new()).into_effects(), completion));
 
@@ -716,8 +715,7 @@ fn deferred_batch_owner_close_wakes_exactly_once_with_public_error() {
     let done = binding
         .dispatch_take::<RegistryBatchResult, ()>(dispatch_id)
         .expect("public deferred result is retained in the actor ledger");
-    assert!(matches!(done.output(), Err(RegistryBatchError::OwnerClosed)));
-    done.release_no_reply();
+    assert!(matches!(done.into_output(), Err(RegistryBatchError::OwnerClosed)));
     assert!(wake_rx.try_recv().is_err(), "owner close emits exactly one completion wake");
 }
 

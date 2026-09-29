@@ -47,10 +47,11 @@ pub struct TcpListenerState {
     pub next_subname: u64,
 }
 
-/// Completion context for a staged accepted-connection birth. The child's
-/// identity rides its `SpawnOutcome`; what this carries is the peer address the
-/// accept loop observed, which the spawn itself never learns.
-#[derive(Clone)]
+/// Completion context for a staged accepted-connection birth, taken from the
+/// ctx in its task completion (ADR-0243 §9). The child's identity rides its
+/// `SpawnOutcome`; what this carries is the peer address the accept loop
+/// observed, which the spawn itself never learns.
+#[aether_data::kind(name = "aether.tcp.listener.accepted_session")]
 pub struct AcceptedSessionContext {
     pub session_name: String,
     pub peer: String,
@@ -229,7 +230,7 @@ impl NativeActor for TcpListenerActor {
                 .stage_with(AcceptedSessionContext { session_name: subname.clone(), peer: peer_str.clone() })
             {
                 Ok(_) => {}
-                Err(e) => {
+                Err((e, _)) => {
                     tracing::warn!(
                         target: "aether_tcp",
                         session = %subname,
@@ -245,29 +246,31 @@ impl NativeActor for TcpListenerActor {
     #[handler(task)]
     fn on_session_spawn_done(
         _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<TcpSessionActor>, AcceptedSessionContext>,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<SpawnOutcome<TcpSessionActor>>,
     ) {
-        match &done.output().result {
+        let Some(AcceptedSessionContext { session_name, peer }) = ctx.take_context() else {
+            return;
+        };
+        match done.into_output().result {
             Ok(_) => {
                 tracing::debug!(
                     target: "aether_tcp",
-                    session = %done.context().session_name,
-                    peer = %done.context().peer,
+                    session = %session_name,
+                    peer = %peer,
                     "tcp session spawned",
                 );
             }
             Err(error) => {
                 tracing::warn!(
                     target: "aether_tcp",
-                    session = %done.context().session_name,
-                    peer = %done.context().peer,
+                    session = %session_name,
+                    peer = %peer,
                     error = ?error,
                     "tcp session spawn failed; stream closed during rollback",
                 );
             }
         }
-        done.release_no_reply();
     }
 }
 

@@ -15,7 +15,7 @@
 //! (no dispatcher ctx), so it hands the connection to actor-owned state, fires
 //! a typed wake, and the *handler* stages the session child —
 //! `ctx.spawn_child(..).stage()` returns a receipt immediately and the
-//! authoritative result arrives later as `TaskDone<SpawnOutcome<C>, _>`. A handler
+//! authoritative result arrives later as `TaskDone<SpawnOutcome<C>>`. A handler
 //! can therefore stage N births back-to-back, and all N sit in the owner queue
 //! at once. That is exactly the load this fixture exists to create, and it
 //! reaches the owner through the path production drives it through, so the
@@ -23,12 +23,13 @@
 //!
 //! # The completion is not optional
 //!
-//! A stager owes every staged birth its ADR-0093 completion. `stage()` takes a
-//! settlement hold; dropping the `TaskDone` without discharging it leaves that
-//! hold outstanding, and because the harness's own send path is settle-gated,
-//! the benchmark would block forever waiting for a chain that can never settle.
-//! [`CommitParent`] discharges each one with `release_no_reply`, the same call
-//! `TcpListenerActor::on_session_spawn_done` makes.
+//! A staged birth is a task that owes no reply (ADR-0243 §9). `stage()` takes
+//! a settlement hold on the staging turn's chain, and the hold moves onto the
+//! completion's ctx when its `TaskDone` is taken, releasing when that turn
+//! ends. A stager that never takes its completions leaves those holds parked,
+//! and because the harness's own send path is settle-gated, the benchmark
+//! would block forever waiting for a chain that can never settle.
+//! [`CommitParent`] takes each one and reads its output with `into_output`.
 //!
 //! Dispatch is hand-written rather than `#[actor]`-generated, matching the
 //! sibling actors in `perf::harness`. Completions arrive as the single
@@ -263,18 +264,17 @@ impl Dispatch<Self> for CommitParent {
         }
         if kind == TaskCompletionWake::ID {
             let wake = TaskCompletionWake::decode_from_bytes(payload)?;
+            // Taking the completion is what #4176 called a blocking contract:
+            // it moves the staged birth's settlement hold onto this turn, which
+            // releases it, so the benchmark's settle-gated send can settle.
             let done = ctx.take_task_done::<SpawnOutcome<CommitChild>, ()>(DispatchId(wake.dispatch_id))?;
-            match &done.output().result {
+            match done.into_output().result {
                 Ok(child) => {
-                    state.live.push(*child);
+                    state.live.push(child);
                     state.succeeded += 1;
                 }
                 Err(_) => state.failed += 1,
             }
-            // The discharge #4176 called a blocking contract. Without it the
-            // staged birth's settlement hold is never released and the
-            // benchmark's settle-gated send waits forever.
-            done.release_no_reply();
             return Some(());
         }
         None

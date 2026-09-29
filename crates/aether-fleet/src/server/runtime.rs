@@ -28,7 +28,9 @@ pub use aether_kinds::{
 };
 pub use aether_substrate::Subname;
 use aether_substrate::actor::native::SpawnError;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, SpawnOutcome, TaskDone};
+pub use aether_substrate::actor::native::{
+    Held, NativeActor, NativeCtx, NativeInitCtx, Pending, SpawnOutcome, TaskDone,
+};
 pub use aether_substrate::chassis::error::BootError;
 pub use std::collections::HashMap;
 pub use std::collections::VecDeque;
@@ -265,49 +267,48 @@ pub struct EngineEntry<P = ActorRef<FleetProxy>> {
 /// staged but whose route is not authoritatively Live yet. Pending engines
 /// are deliberately absent from [`FleetServerState::engines`], so list,
 /// route, and terminate cannot observe a reservation as a supervised engine.
+///
+/// The staged birth's completion finds this entry by the [`FleetSpawnKey`]
+/// it takes from its ctx (ADR-0243 §9): everything the completion needs
+/// beyond the proxy's own outcome waits here, the caller's held reply
+/// included.
 pub struct PendingEngine {
     /// The localhost RPC port the forked substrate reported binding.
     pub rpc_port: u16,
-    /// Content hash of the binary this birth was forked from. The recipe
-    /// itself rides the staged birth's [`FleetSpawnContext`], which is not
-    /// state this cap can read, so the hash is kept here — it is what
+    /// Content hash of the binary this birth was forked from — what
     /// [`FleetServerState::refresh_binary_holds`] needs to keep the store
     /// from reclaiming a binary an engine is already running while its
     /// supervision is still committing.
     pub hash: String,
+    /// The recipe + restart ledger to install on the engine this birth
+    /// commits. For a restart this is the dead engine's ledger carried
+    /// forward, which is what makes the burst limit bind across a
+    /// lineage whose engine id changes on every restart.
+    pub supervision: Supervision,
+    /// Who ordered this birth, and so what its completion owes.
+    pub origin: SpawnOrigin,
     /// A Live proxy can report its death from the activation catch-up wake
     /// before the parent's later task completion runs. Latch only the first
     /// report so completion cannot install a corpse or duplicate its death.
     pub early_death: Option<DeathReason>,
 }
 
-/// Context carried by the staged proxy birth into its authoritative task
-/// completion. Process ownership stays solely in `FleetProxyState`; the proxy's
-/// own identity rides its `SpawnOutcome`. What this carries is the fleet
-/// metadata no spawn result knows: the engine id the cap minted. The RPC
-/// port the substrate reported rides its [`PendingEngine`].
-#[derive(Clone)]
-pub struct FleetSpawnContext {
+/// The context a staged proxy birth carries into its task completion: the
+/// engine id the cap minted, which keys its [`PendingEngine`]. Process
+/// ownership stays solely in `FleetProxyState`, and the proxy's own identity
+/// rides its `SpawnOutcome`.
+#[aether_data::kind(name = "aether.fleet.spawn_key", copy)]
+pub struct FleetSpawnKey {
     pub engine_id: EngineId,
-    /// The recipe + restart ledger to install on the engine this birth
-    /// commits. For a restart this is the dead engine's ledger carried
-    /// forward, which is what makes the burst limit bind across a
-    /// lineage whose engine id changes on every restart.
-    pub supervision: Supervision,
-    /// Who ordered this birth. Decides only what its completion owes:
-    /// a requested spawn owes the caller a `SpawnEngineResult`, a
-    /// restart owes nobody and must discharge without replying.
-    pub origin: SpawnOrigin,
 }
 
 /// What ordered a proxy birth.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SpawnOrigin {
-    /// A `SpawnEngine` from a caller who is waiting on the reply.
-    Requested,
-    /// Automatic restart supervision re-forking a dead engine. There is
-    /// no deferred reply behind it, so its completion releases the
-    /// settlement hold without sending one.
+    /// A `SpawnEngine` from a caller who is waiting on the reply; the
+    /// completion answers the held reply.
+    Requested(Held<SpawnEngineResult>),
+    /// Automatic restart supervision re-forking a dead engine. Nobody
+    /// waits on it, so its completion sends no reply.
     Restarted,
 }
 
@@ -466,8 +467,8 @@ impl<P> FleetServerState<P> {
     /// [`FleetServerState::pending_engines`], shared by the requested-spawn
     /// and restart paths so neither can register a birth the store does
     /// not know is running.
-    pub fn begin_pending_spawn(&mut self, engine_id: EngineId, rpc_port: u16, hash: String) {
-        let replaced = self.pending_engines.insert(engine_id, PendingEngine { rpc_port, hash, early_death: None });
+    pub fn begin_pending_spawn(&mut self, engine_id: EngineId, pending: PendingEngine) {
+        let replaced = self.pending_engines.insert(engine_id, pending);
         debug_assert!(replaced.is_none(), "fresh engine ids cannot replace a pending spawn");
         self.refresh_binary_holds();
     }
@@ -725,12 +726,15 @@ impl<P> FleetServerState<P> {
                 },
                 (),
             )
-            .stage_with(FleetSpawnContext { engine_id, supervision, origin: SpawnOrigin::Restarted });
+            .stage_with(FleetSpawnKey { engine_id });
         let rpc_port = reported_port(&port_file);
 
         match staged {
             Ok(_) => {
-                self.begin_pending_spawn(engine_id, rpc_port, hash);
+                self.begin_pending_spawn(
+                    engine_id,
+                    PendingEngine { rpc_port, hash, supervision, origin: SpawnOrigin::Restarted, early_death: None },
+                );
                 tracing::warn!(
                     target: "aether_substrate::fleet_server",
                     engine_id = %engine_id.0,
@@ -738,7 +742,7 @@ impl<P> FleetServerState<P> {
                     "engine restart: re-forked a dead engine under a fresh id",
                 );
             }
-            Err(e) => {
+            Err((e, _)) => {
                 // The staging itself was rejected, so no completion is
                 // coming and `FleetProxyState` never took ownership of
                 // the child — except on the init-failure path, which
@@ -756,22 +760,22 @@ impl<P> FleetServerState<P> {
         }
     }
 
-    /// Apply the actor-local half of a staged proxy settlement. Returning
-    /// `None` suppresses a stale completion; the binding-owned task ledger
-    /// still gets discharged by the caller without emitting a second reply.
+    /// Apply the actor-local half of a staged proxy settlement, handing back
+    /// the reply the birth settled to and who ordered it, so the caller
+    /// answers a requested spawn's held reply. `None` for a stale
+    /// completion, which has no pending entry to settle.
     pub fn settle_pending_spawn(
         &mut self,
-        spawn: FleetSpawnContext,
+        engine_id: EngineId,
         outcome: ProxySpawnOutcome<P>,
-    ) -> Option<SpawnEngineResult> {
-        let FleetSpawnContext { engine_id, supervision, .. } = spawn;
-        let pending = self.pending_engines.remove(&engine_id)?;
-        let rpc_port = pending.rpc_port;
+    ) -> Option<(SpawnEngineResult, SpawnOrigin)> {
+        let PendingEngine { rpc_port, supervision, origin, early_death, .. } =
+            self.pending_engines.remove(&engine_id)?;
 
         let reply = match outcome {
             ProxySpawnOutcome::Rejected(error) => self.fail_spawn(engine_id, rpc_port, error),
             ProxySpawnOutcome::Applied(proxy) => {
-                if let Some(reason) = pending.early_death {
+                if let Some(reason) = early_death {
                     let error = format!("proxy died before supervision committed: {reason:?}");
                     self.record_death(engine_id.0.to_string(), rpc_port, reason);
                     self.reap_engine_dir(engine_id);
@@ -797,7 +801,7 @@ impl<P> FleetServerState<P> {
         // engine holding its own binary now, or it is over and the hold
         // its reservation carried is released.
         self.refresh_binary_holds();
-        Some(reply)
+        Some((reply, origin))
     }
 
     /// Reconcile a proxy death against pending and committed supervision.
@@ -977,12 +981,12 @@ impl NativeActor for FleetServer {
         let PreparedFork { engine_id, port_file, child, stderr } = prepared;
         let subname = engine_id.0.simple().to_string();
 
-        // `continue_from` still runs `FleetProxy::init` on this thread: it
+        // `stage_with` still runs `FleetProxy::init` on this thread: it
         // waits for the substrate to report its port, dials it, and, on
         // failure, terminates the child it was handed. So once it returns
-        // the report is on disk if there is one. A successful init
-        // transfers the held reply into the staged birth; only its later
-        // task completion may commit the engine and answer the caller.
+        // the report is on disk if there is one. A staged birth keeps the
+        // held reply in its pending entry; only its later task completion
+        // may commit the engine and answer the caller.
         let result = ctx
             .spawn_child::<FleetProxy>(
                 Subname::Named(&subname),
@@ -994,17 +998,23 @@ impl NativeActor for FleetServer {
                 },
                 (),
             )
-            .continue_from(
-                held,
-                FleetSpawnContext { engine_id, supervision: Supervision::new(recipe), origin: SpawnOrigin::Requested },
-            );
+            .stage_with(FleetSpawnKey { engine_id });
         let rpc_port = reported_port(&port_file);
 
         match result {
-            Ok(_) => state.begin_pending_spawn(engine_id, rpc_port, artifact.hash),
+            Ok(_) => state.begin_pending_spawn(
+                engine_id,
+                PendingEngine {
+                    rpc_port,
+                    hash: artifact.hash,
+                    supervision: Supervision::new(recipe),
+                    origin: SpawnOrigin::Requested(held),
+                    early_death: None,
+                },
+            ),
             // A startup exit of any kind is terminal: the reply names its
             // exit code or signal and carries the child's stderr.
-            Err((e, held)) => {
+            Err((e, _)) => {
                 let error = spawn_failure_detail("spawned", &e, stderr);
                 held.answer(ctx, &state.fail_spawn(engine_id, rpc_port, error));
             }
@@ -1018,51 +1028,41 @@ impl NativeActor for FleetServer {
     /// arrives after prepared-state rollback has dropped `FleetProxyState`,
     /// which kills and reaps its sole `Child` owner.
     #[handler(task)]
-    fn on_spawn_done(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<FleetProxy>, FleetSpawnContext>,
-    ) {
-        let spawn = done.context().clone();
-        let engine_id = spawn.engine_id;
-        let origin = spawn.origin;
-        let outcome = match &done.output().result {
-            Ok(proxy) => ProxySpawnOutcome::Applied(*proxy),
+    fn on_spawn_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<FleetProxy>>) {
+        let Some(FleetSpawnKey { engine_id }) = ctx.take_context() else {
+            return;
+        };
+        let outcome = match done.into_output().result {
+            Ok(proxy) => ProxySpawnOutcome::Applied(proxy),
             Err(error) => ProxySpawnOutcome::Rejected(format!("proxy activation failed: {error:?}")),
         };
-        let Some(reply) = state.settle_pending_spawn(spawn, outcome) else {
+        let Some((reply, origin)) = state.settle_pending_spawn(engine_id, outcome) else {
             tracing::warn!(
                 target: "aether_substrate::fleet_server",
                 engine_id = %engine_id.0,
                 "stale proxy spawn completion ignored",
             );
-            done.release_no_reply();
             return;
         };
 
         match origin {
-            SpawnOrigin::Requested => done.resolve_value(ctx, &reply),
-            // A restart has no caller waiting on a `SpawnEngineResult`,
-            // so the settlement hold is released without one. The
-            // settle above still ran, so the recovered engine is
-            // supervised (or its failure recorded) either way; all that
-            // is skipped is the reply nobody asked for.
-            SpawnOrigin::Restarted => {
-                match &reply {
-                    SpawnEngineResult::Ok { .. } => tracing::info!(
-                        target: "aether_substrate::fleet_server",
-                        engine_id = %engine_id.0,
-                        "engine restart: the replacement engine is supervised",
-                    ),
-                    SpawnEngineResult::Err { error, .. } => tracing::error!(
-                        target: "aether_substrate::fleet_server",
-                        engine_id = %engine_id.0,
-                        error = %error,
-                        "engine restart: the replacement engine did not commit; the engine stays dead",
-                    ),
-                }
-                done.release_no_reply();
-            }
+            SpawnOrigin::Requested(held) => held.answer(ctx, &reply),
+            // A restart has no caller waiting on a `SpawnEngineResult`.
+            // The settle above still ran, so the recovered engine is
+            // supervised (or its failure recorded) either way.
+            SpawnOrigin::Restarted => match &reply {
+                SpawnEngineResult::Ok { .. } => tracing::info!(
+                    target: "aether_substrate::fleet_server",
+                    engine_id = %engine_id.0,
+                    "engine restart: the replacement engine is supervised",
+                ),
+                SpawnEngineResult::Err { error, .. } => tracing::error!(
+                    target: "aether_substrate::fleet_server",
+                    engine_id = %engine_id.0,
+                    error = %error,
+                    "engine restart: the replacement engine did not commit; the engine stays dead",
+                ),
+            },
         }
     }
 

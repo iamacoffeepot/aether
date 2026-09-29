@@ -263,7 +263,8 @@ pub struct SampleSlot {
 pub struct BankAssembly {
     /// The original `load_instrument` request's held reply (ADR-0243):
     /// the one `LoadInstrumentResult` answers it, from `fail_assembly` or
-    /// the assembly worker's completion.
+    /// the staged assembly's completion, which finds this entry by its
+    /// `BankAssemblyKey`.
     pub held: Held<LoadInstrumentResult>,
     /// The fs namespace the `.sfz` and its samples live in (shared).
     pub namespace: String,
@@ -272,22 +273,15 @@ pub struct BankAssembly {
     /// Bank name, derived from the `.sfz` filename stem.
     pub name: String,
     /// The parsed regions; each names a `sample_rel` resolved at
-    /// assembly time to its decoded PCM.
+    /// assembly time to its decoded PCM. Moved onto the assembly worker
+    /// when it is staged.
     pub regions: Vec<SfzRegion>,
-    /// The unique samples, fetched in parallel.
+    /// The unique samples, fetched in parallel. Moved onto the assembly
+    /// worker when it is staged.
     pub samples: Vec<SampleSlot>,
     /// How many samples are still missing their bytes; the bank
     /// assembles when this reaches zero.
     pub remaining: usize,
-}
-
-/// Completion context the bank-assembly dispatch carries so the
-/// `#[handler(task)]` arm can build the `Err` reply (`Ok` carries the
-/// assembled bank's own name / id / bytes). Mirrors
-/// [`super::TrackDecodeContext`] for the load path.
-pub struct BankAssemblyContext {
-    pub namespace: String,
-    pub path: String,
 }
 
 /// Output of the bank-assembly dispatch worker — the assembled,

@@ -14,12 +14,12 @@ use std::time::Duration;
 
 use aether_actor::ErasedActorRef;
 use aether_data::{Kind, RequestId, Source, SourceAddr};
-use aether_substrate::actor::native::{Held, Pending, StagedTask, TaskDone, TaskQueue};
+use aether_substrate::actor::native::{Held, Pending, SpawnOutcome, StagedTask, TaskDone, TaskQueue};
 use aether_substrate::mail::MailRef;
 use aether_substrate::mail::registry::{DispatchParts, MailboxEntry, OwnedDispatch};
 use aether_substrate::runtime::lifecycle::{FatalAbortRecord, FatalAborter, PanicAborter, RecordingAborter};
 use aether_substrate::testing::{TestChassis, bare_substrate, boot_test_chassis_aborting_into, boot_test_chassis_with};
-use aether_substrate::{BootError, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis, Registry};
+use aether_substrate::{BootError, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis, Registry, Subname};
 
 /// How long a wait that must succeed may take before the test fails.
 const PATIENCE: Duration = Duration::from_secs(5);
@@ -422,5 +422,157 @@ fn an_unstarted_task_is_released_at_actor_close() {
     assert_eq!(seen.recv_timeout(PATIENCE), Ok(Seen::Closing), "the close reached the actor");
     settled.recv_timeout(PATIENCE).expect("closing the actor releases the chain its unstarted task held");
     assert_eq!(record.reason(), None, "an unstarted task owes nothing, so its close fails nothing");
+    drop(chassis);
+}
+
+/// A child birth's context: which birth it is.
+#[aether_data::kind(name = "test.staged_task.birth_note", copy, partial_eq)]
+struct BirthNote {
+    value: u32,
+}
+
+/// Stage one child birth under `child-{value}`, with a [`BirthNote`].
+#[aether_data::kind(name = "test.staged_task.hatch", copy)]
+struct Hatch {
+    value: u32,
+}
+
+/// Stage one child birth under a subname the grammar refuses, with a
+/// [`BirthNote`].
+#[aether_data::kind(name = "test.staged_task.hatch_refused", copy)]
+struct HatchRefused {
+    value: u32,
+}
+
+/// What a [`BirthProbe`] saw.
+#[derive(Debug, PartialEq)]
+enum Born {
+    /// A birth was staged under this request.
+    Staged(RequestId),
+    /// Staging refused the birth and handed back this context.
+    Refused(BirthNote),
+    /// A birth's completion ran; it drops its `TaskDone` without reading it.
+    Completed { in_reply_to: Option<RequestId>, note: Option<BirthNote> },
+}
+
+/// A root that stages [`BirthChild`] births with a context and reports what
+/// staging and each completion see.
+struct BirthProbe {
+    seen: Sender<Born>,
+}
+
+#[aether_actor::actor(root)]
+impl NativeActor for BirthProbe {
+    type Config = ();
+    type Params = Sender<Born>;
+    const NAMESPACE: &'static str = "test.staged_task.birth_probe";
+
+    fn init((): (), seen: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { seen })
+    }
+
+    #[aether_actor::handler::single]
+    fn on_hatch(&mut self, ctx: &mut NativeCtx<'_>, hatch: Hatch) {
+        let subname = format!("child-{}", hatch.value);
+        let staged = ctx
+            .spawn_child::<BirthChild>(Subname::Named(&subname), (), ())
+            .stage_with(BirthNote { value: hatch.value });
+        let _ = self
+            .seen
+            .send(staged.map_or_else(|(_, note)| Born::Refused(note), |receipt| Born::Staged(receipt.request)));
+    }
+
+    #[aether_actor::handler::single]
+    fn on_hatch_refused(&mut self, ctx: &mut NativeCtx<'_>, hatch: HatchRefused) {
+        let staged = ctx
+            .spawn_child::<BirthChild>(Subname::Named("not a segment"), (), ())
+            .stage_with(BirthNote { value: hatch.value });
+        let _ = self
+            .seen
+            .send(staged.map_or_else(|(_, note)| Born::Refused(note), |receipt| Born::Staged(receipt.request)));
+    }
+
+    #[aether_actor::handler(task)]
+    fn on_born(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<BirthChild>>) {
+        let note = ctx.take_context::<BirthNote>();
+        let _ = self.seen.send(Born::Completed { in_reply_to: ctx.in_reply_to(), note });
+        drop(done);
+    }
+}
+
+/// The child a [`BirthProbe`] stages. Nothing mails it: its one handler is
+/// there because an actor declares at least one.
+struct BirthChild {
+    gate: u32,
+}
+
+#[aether_actor::actor(instanced, child_of(BirthProbe))]
+impl NativeActor for BirthChild {
+    type Config = ();
+    const NAMESPACE: &'static str = "test.staged_task.birth_child";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { gate: 0 })
+    }
+
+    #[aether_actor::handler::single]
+    fn on_work(&self, _ctx: &mut NativeCtx<'_>, work: Work) -> Worked {
+        Worked { gate: work.gate.max(self.gate) }
+    }
+}
+
+fn boot_birth_probe(aborter: Arc<dyn FatalAborter>) -> (PassiveChassis<TestChassis>, Receiver<Born>) {
+    let (registry, mailer) = bare_substrate();
+    let (seen_tx, seen) = mpsc::channel();
+    let chassis = boot_test_chassis_aborting_into::<BirthProbe>(&registry, &mailer, (), seen_tx, aborter);
+    (chassis, seen)
+}
+
+/// Catches a birth whose completion is not correlated to the request its
+/// context was stored under, or whose context is stored under a different
+/// id: the completion's take would then find nothing.
+#[test]
+fn a_birth_staged_with_a_context_completes_with_it() {
+    let (chassis, seen) = boot_birth_probe(Arc::new(PanicAborter));
+
+    let _ = chassis.send_tracked(chassis.actor_ref::<BirthProbe>(), &Hatch { value: 7 }, None);
+    let Ok(Born::Staged(request)) = seen.recv_timeout(PATIENCE) else {
+        panic!("the birth stages");
+    };
+    assert_eq!(
+        seen.recv_timeout(PATIENCE),
+        Ok(Born::Completed { in_reply_to: Some(request), note: Some(BirthNote { value: 7 }) }),
+        "the completion is correlated to the birth's request and takes the context staged with it",
+    );
+    drop(chassis);
+}
+
+/// Catches a stage that stores its context, or arms its completion, before
+/// a synchronous refusal: the caller would lose the context it needs to
+/// answer the refusal, and the request's chain would stay held.
+#[test]
+fn a_refused_birth_hands_its_context_back() {
+    let (chassis, seen) = boot_birth_probe(Arc::new(PanicAborter));
+
+    let (_, settled) = chassis.send_tracked(chassis.actor_ref::<BirthProbe>(), &HatchRefused { value: 3 }, None);
+    assert_eq!(seen.recv_timeout(PATIENCE), Ok(Born::Refused(BirthNote { value: 3 })));
+    settled.recv_timeout(PATIENCE).expect("a refused birth holds nothing, so its request settles");
+    drop(chassis);
+}
+
+/// Catches a birth armed as a reply its completion owes: dropping the
+/// completion's `TaskDone` unread would then fail fast as a lost reply, or
+/// leave the staging chain held.
+#[test]
+fn dropping_a_birth_completion_fails_nothing() {
+    let record = Arc::new(FatalAbortRecord::new());
+    let aborter = Arc::new(RecordingAborter::new(Arc::new(PanicAborter), Arc::clone(&record)));
+    let (chassis, seen) = boot_birth_probe(aborter);
+
+    let (_, settled) = chassis.send_tracked(chassis.actor_ref::<BirthProbe>(), &Hatch { value: 1 }, None);
+    assert!(matches!(seen.recv_timeout(PATIENCE), Ok(Born::Staged(_))), "the birth stages");
+    assert!(matches!(seen.recv_timeout(PATIENCE), Ok(Born::Completed { .. })), "the completion runs");
+    settled.recv_timeout(PATIENCE).expect("the staging chain settles once the completion ends");
+    assert_eq!(record.reason(), None, "a birth owes nothing, so dropping its completion fails nothing");
     drop(chassis);
 }

@@ -74,10 +74,10 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use self::event::AudioEvent;
 pub use self::instrument::builtin_id_ceiling;
-pub use self::load::{AudioLoadContext, TrackLoad};
-pub use self::sample::{BankAssemblyContext, BankAssemblyOutput};
+pub use self::load::{AudioLoadContext, BankAssemblyKey, TrackDecodeKey, TrackLoad};
+pub use self::sample::BankAssemblyOutput;
 pub use self::schedule::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
-pub use self::track::{DecodeOutput, TrackDecodeContext};
+pub use self::track::DecodeOutput;
 use self::worker::spawn_audio_worker;
 pub use aether_fs::{FsCapability, Read, ReadResult};
 
@@ -269,11 +269,7 @@ impl NativeActor for AudioCapability {
 
     /// Decode completion (ADR-0093 §3).
     #[handler(task)]
-    fn on_track_decoded(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<DecodeOutput, TrackDecodeContext>,
-    ) {
+    fn on_track_decoded(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<DecodeOutput>) {
         state.handle_track_decoded(ctx, done);
     }
 
@@ -295,11 +291,7 @@ impl NativeActor for AudioCapability {
 
     /// Bank-assembly completion (ADR-0093 §3 / ADR-0103 §4).
     #[handler(task)]
-    fn on_instrument_assembled(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<BankAssemblyOutput, BankAssemblyContext>,
-    ) {
+    fn on_instrument_assembled(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<BankAssemblyOutput>) {
         state.handle_instrument_assembled(ctx, done);
     }
 }

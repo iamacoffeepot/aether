@@ -42,6 +42,13 @@ struct PendingWindowCreate {
     reply: Option<Box<InboundMail>>,
 }
 
+/// The context a staged window child carries into its task completion
+/// (ADR-0243 §9): the window's name, which keys its [`PendingWindowCreate`].
+#[aether_data::kind(name = "aether.window.synthetic.spawn_key")]
+struct WindowSpawnKey {
+    name: String,
+}
+
 struct SyntheticWindow {
     info: WindowInfo,
     commands: ProtocolRef<WindowCommands>,
@@ -260,9 +267,9 @@ impl NativeActor for SyntheticWindowCapability {
         };
         // The birth carries the window's name as its completion context, since
         // that name is what the reservation is keyed by.
-        if let Err(error) = ctx
+        if let Err((error, _)) = ctx
             .spawn_child::<SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ())
-            .stage_with(mail.spec.name.clone())
+            .stage_with(WindowSpawnKey { name: mail.spec.name.clone() })
         {
             reply.reply(&CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") });
             return;
@@ -278,23 +285,25 @@ impl NativeActor for SyntheticWindowCapability {
     fn on_window_child_spawn_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<SyntheticWindowInstance>, String>,
+        done: TaskDone<SpawnOutcome<SyntheticWindowInstance>>,
     ) {
-        let Some(mut pending) = state.pending_creates.remove(done.context()) else {
-            if let Ok(child) = &done.output().result {
-                ctx.send_to(child, &RetireWindow);
-            }
-            done.release_no_reply();
+        let Some(WindowSpawnKey { name }) = ctx.take_context() else {
             return;
         };
-        match &done.output().result {
+        let result = done.into_output().result;
+        let Some(mut pending) = state.pending_creates.remove(&name) else {
+            if let Ok(child) = &result {
+                ctx.send_to(child, &RetireWindow);
+            }
+            return;
+        };
+        match result {
             Err(error) => answer(
                 &mut pending.reply,
                 &CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") },
             ),
-            Ok(child) => state.publish_applied_window(ctx, *child, pending),
+            Ok(child) => state.publish_applied_window(ctx, child, pending),
         }
-        done.release_no_reply();
     }
 
     #[handler::single]

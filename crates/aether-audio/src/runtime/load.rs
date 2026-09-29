@@ -1,14 +1,14 @@
+use std::mem;
 use std::str::from_utf8;
 
 use aether_actor::{DependsOn, ErasedActorRef};
 
 use super::decode::decode_wav_to_mono;
 use super::sample::{
-    BankAssembly, BankAssemblyContext, BankAssemblyOutput, SampleSlot, assemble_bank, bank_name_from_path, join_fs,
-    sfz_dir,
+    BankAssembly, BankAssemblyOutput, SampleSlot, assemble_bank, bank_name_from_path, join_fs, sfz_dir,
 };
 use super::sfz::parse_sfz;
-use super::track::{DecodeOutput, TrackDecodeContext};
+use super::track::DecodeOutput;
 use super::{AudioCapabilityState, FsCapability, Held, NativeCtx, Read};
 use crate::kinds::{LoadInstrumentResult, PlayTrackResult};
 use aether_fs::NamespaceAddr;
@@ -31,32 +31,45 @@ pub enum AudioLoadContext {
     Sample { assembly_id: u64, slot: u64 },
 }
 
-/// A `play_track` whose read is in flight, keyed by `load_id` in the cap's
-/// `track_loads`: held in state because the proven sender cannot ride a kind,
-/// and the request's held reply sits with the rest of its state.
+/// The context a track's staged decode carries into its task completion
+/// (ADR-0243 §9): the load it decodes for, which waits in `track_loads`.
+#[aether_data::kind(name = "aether.audio.track_decode_key", copy)]
+pub struct TrackDecodeKey {
+    pub load_id: u64,
+}
+
+/// The context a bank's staged assembly carries into its task completion
+/// (ADR-0243 §9): the assembly it builds, which waits in `assemblies`.
+#[aether_data::kind(name = "aether.audio.bank_assembly_key", copy)]
+pub struct BankAssemblyKey {
+    pub assembly_id: u64,
+}
+
+/// A `play_track` whose read or decode is in flight, keyed by `load_id` in
+/// the cap's `track_loads`: held in state because the proven sender cannot
+/// ride a kind, and the request's held reply sits with the rest of its
+/// state until the decode's completion answers it.
 pub struct TrackLoad {
     pub held: Held<PlayTrackResult>,
     pub sender: Option<ErasedActorRef>,
     pub lane: Option<String>,
+    pub namespace: String,
+    pub path: String,
     pub gain: f32,
     pub looping: bool,
 }
 
 impl AudioCapabilityState {
-    /// Dispatch a track's decode off the realtime path (ADR-0093),
-    /// handing the load's held `PlayTrackResult` to the worker so the
-    /// completion answers the original `play_track` caller. Split out of
-    /// `on_read_result` so the one handler can route three fetch paths.
-    pub fn start_track_decode<A>(
-        &mut self,
-        ctx: &mut NativeCtx<'_, A>,
-        load: TrackLoad,
-        namespace: String,
-        path: String,
-        bytes: Vec<u8>,
-    ) {
-        let TrackLoad { held, sender, lane, gain, looping } = load;
+    /// Stage a track's decode off the realtime path (ADR-0243 §9). The
+    /// load stays in `track_loads` with its held `PlayTrackResult`, and the
+    /// decode's completion answers the original `play_track` caller. Split
+    /// out of `on_read_result` so the one handler can route three fetch
+    /// paths.
+    pub fn start_track_decode<A>(&mut self, ctx: &mut NativeCtx<'_, A>, load_id: u64, bytes: Vec<u8>) {
         let Some(device_rate) = self.sample_rate else {
+            let Some(TrackLoad { held, lane, namespace, path, .. }) = self.track_loads.remove(&load_id) else {
+                return;
+            };
             held.answer(
                 ctx,
                 &PlayTrackResult::Err {
@@ -73,12 +86,8 @@ impl AudioCapabilityState {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target_rate = device_rate as u32;
 
-        let context = TrackDecodeContext { sender, lane, namespace, path, gain, looping };
-        // The worker attaches to the held entry, which kept the
-        // `play_track` caller's target and chain open across the read.
-        ctx.dispatch_blocking_held_with::<DecodeOutput, _, _, _>(held, context, move || {
-            decode_wav_to_mono(&bytes, target_rate)
-        });
+        ctx.stage_blocking_with::<DecodeOutput, TrackDecodeKey>(TrackDecodeKey { load_id })
+            .start(ctx, move || decode_wav_to_mono(&bytes, target_rate));
     }
 
     /// The `.sfz` bytes landed: parse the SFZ subset and fan out one
@@ -164,9 +173,11 @@ impl AudioCapabilityState {
     }
 
     /// A sample's bytes landed: store them against its slot and, once
-    /// the last sample is in, dispatch the decode + assembly off the
-    /// realtime path (ADR-0093 / ADR-0103 §6). A late / orphan reply
-    /// (its assembly already failed) is dropped.
+    /// the last sample is in, stage the decode + assembly off the
+    /// realtime path (ADR-0243 §9 / ADR-0103 §6). The assembly stays in
+    /// `assemblies` with its held reply until the assembly's completion
+    /// answers it. A late / orphan reply (its assembly already failed, or
+    /// already assembling) is dropped.
     pub fn on_sample_loaded<A>(&mut self, ctx: &mut NativeCtx<'_, A>, assembly_id: u64, slot: u64, bytes: Vec<u8>) {
         let Ok(slot) = usize::try_from(slot) else {
             return;
@@ -189,28 +200,23 @@ impl AudioCapabilityState {
             return;
         }
 
-        let assembly = self.assemblies.remove(&assembly_id).expect("assembly present — checked above");
         let Some(device_rate) = self.sample_rate else {
-            assembly.held.answer(
-                ctx,
-                &LoadInstrumentResult::Err {
-                    namespace: assembly.namespace,
-                    path: assembly.sfz_path,
-                    error: "audio pipeline not initialised on this desktop substrate".to_owned(),
-                },
-            );
+            self.fail_assembly(ctx, assembly_id, "audio pipeline not initialised on this desktop substrate".to_owned());
             return;
         };
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target_rate = device_rate as u32;
 
-        let BankAssembly { held, namespace, sfz_path, name, regions, samples, .. } = assembly;
+        // The worker takes the assembly's inputs; its held reply and the
+        // names an `Err` echoes stay behind for the completion. The emptied
+        // sample slots leave nothing for a late reply to fill.
+        let assembly = self.assemblies.get_mut(&assembly_id).expect("assembly present — checked above");
+        let name = assembly.name.clone();
+        let regions = mem::take(&mut assembly.regions);
         let sample_bytes: Vec<(String, Vec<u8>)> =
-            samples.into_iter().map(|s| (s.sample_rel, s.bytes.unwrap_or_default())).collect();
-        let context = BankAssemblyContext { namespace, path: sfz_path };
-        ctx.dispatch_blocking_held_with::<BankAssemblyOutput, _, _, _>(held, context, move || {
-            assemble_bank(name, &regions, &sample_bytes, target_rate)
-        });
+            mem::take(&mut assembly.samples).into_iter().map(|s| (s.sample_rel, s.bytes.unwrap_or_default())).collect();
+        ctx.stage_blocking_with::<BankAssemblyOutput, BankAssemblyKey>(BankAssemblyKey { assembly_id })
+            .start(ctx, move || assemble_bank(name, &regions, &sample_bytes, target_rate));
     }
 
     /// Abandon a bank load whose sample read failed: reply `Err` to the

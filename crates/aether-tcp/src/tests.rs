@@ -201,11 +201,10 @@ impl NativeActor for ConsumerHost {
     }
 
     #[handler(task)]
-    fn on_consumer_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<SessionConsumer>, ()>) {
-        if self.staged.as_ref() == Some(&done.output().canonical_name) {
+    fn on_consumer_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<SessionConsumer>>) {
+        if self.staged.as_ref() == Some(&done.into_output().canonical_name) {
             self.staged = None;
         }
-        done.release_no_reply();
     }
 }
 

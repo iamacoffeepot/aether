@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::{Addressable, ErasedActorRef};
-use aether_data::ActorId;
+use aether_data::{ActorId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
@@ -20,7 +20,7 @@ use crate::config::RingCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::PreparedSpawnCommit;
 use crate::mail::registry::{MailDispatch, Registry};
-use crate::mail::{KindId, MailId, Source};
+use crate::mail::{KindId, MailId};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
@@ -182,10 +182,9 @@ pub(super) fn finalized_probe(
     let identity = spawner.prepare_identity::<ActivationProbe>(Subname::Named(name), None).unwrap();
     let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
     let causing_chain = MailId::new(parent.self_mailbox(), correlation);
-    let deferred = parent.dispatch_arm::<SpawnOutcome<ActivationProbe>, _>(
+    let deferred = parent.dispatch_stage::<SpawnOutcome<ActivationProbe>>(
         Some(spawner.mailer().acquire_settlement_hold(causing_chain)),
-        Source::NONE,
-        (),
+        RequestId(parent.mint_correlation()),
     );
     let dispatch_id = deferred.dispatch_id();
     let finalizer = NativeSpawnFinalizer::parented(

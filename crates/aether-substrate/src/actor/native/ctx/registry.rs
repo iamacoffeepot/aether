@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_codec::InlineError;
 use aether_codec::frame::max_frame_size;
-use aether_data::{ErasedActorPath, KindDescriptor, KindId};
+use aether_data::{ErasedActorPath, Kind, KindDescriptor, KindId, RequestId};
 use aether_kinds::ComponentCapabilities;
 
 use crate::actor::native::envelope::Envelope;
@@ -143,16 +143,18 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         .map(Cow::into_owned)
     }
 
-    /// Stage a typed registry-owner batch from the current handler. The batch
-    /// uses reserved owner admission and completes on a later actor turn.
-    pub fn stage_registry_batch<C>(&mut self, batch: RegistryBatch, context: C) -> DispatchId
-    where
-        C: Send + 'static,
-    {
-        let completion = self.arm_deferred_completion::<RegistryBatchResult, _>(context);
-        let id = completion.dispatch_id();
+    /// Stage a typed registry-owner batch from the current handler, as a
+    /// task that owes no reply (ADR-0243 §9). The batch uses reserved owner
+    /// admission and completes on a later actor turn: the `#[handler(task)]`
+    /// completion receives `TaskDone<RegistryBatchResult>` correlated to the
+    /// returned request id, on this turn's chain, and takes `context` with
+    /// `ctx.take_context::<C>()`.
+    pub fn stage_registry_batch<C: Kind>(&mut self, batch: RegistryBatch, context: C) -> RequestId {
+        let request = RequestId(self.binding.mint_correlation());
+        self.binding.store_request_context(request, context);
+        let completion = self.binding.dispatch_stage::<RegistryBatchResult>(self.acquire_settlement_hold(), request);
         self.binding.stage_owner_batch(batch, completion);
-        id
+        request
     }
 
     /// Stage a typed registry-owner batch whose completion inherits an

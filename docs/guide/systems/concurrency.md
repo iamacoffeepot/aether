@@ -131,6 +131,19 @@ comes back with `ctx.take_context::<C>()`, its sends inherit the chain, and
 leaves a context holding a live `Held` untaken fails fast, as a reply handler
 does. Dropping an unstarted task releases its chain and removes its context.
 
+A child birth and a registry batch are staged tasks too. `ctx.spawn_child::<C>(..)`
+ends with `.stage()`, or `.stage_with(context)` with a context kind, and
+`ctx.stage_registry_batch(batch, context)` stages an owner batch the same way:
+each mints a request id, holds the staging turn's chain, and stores its context,
+and its `#[handler(task)]` completion (`TaskDone<SpawnOutcome<C>>`,
+`TaskDone<RegistryBatchResult>`) takes the context from the ctx and owes
+nothing. A birth refused before it is staged hands its context back beside the
+`SpawnError`. The context is a kind that names the work, such as an index or a
+path; live values the completion needs, a request's `Held` among them, wait in
+actor state under the key it names. Requests that need the same work join as
+waiters under one key, one list per reply kind, and the one completion answers
+them all.
+
 **A bounded queue holds each reply and stages each request's work.** A native
 capability that bounds its concurrent blocking calls uses `TaskQueue<R>`
 (`aether-http`'s per-sender egress and the workspace run queue are the same
@@ -179,9 +192,11 @@ held.answer(ctx, &WatchHeadResult { head });               // reply, then drop t
 in-flight ledger, the same table `dispatch_blocking` fills, and returns the
 `Pending<R>` receipt with a move-only `Held<R>` ticket. `answer` replies to the
 captured caller with its correlation, whichever turn runs it, and only an `R`
-compiles. A `Held` also stages onto a successor that takes the owed reply
-(`continue_from`, `stage_registry_batch_from`), whose completion then answers
-the same caller. A second `hold` in one dispatch panics. Dropping a `Held` unanswered
+compiles. Work the actor stages for a held request (an offload, a child birth, a
+registry batch) owes no reply: the `Held` waits in state under the key the
+task's context names, and the completion answers it. The component host's
+`continue_from` and `stage_registry_batch_from`, which carry a `Held` onto a
+successor that answers the same caller, remain until #7008. A second `hold` in one dispatch panics. Dropping a `Held` unanswered
 releases the hold and panics; an actor that closes with tickets still parked
 settles them silently.
 
