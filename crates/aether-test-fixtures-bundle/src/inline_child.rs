@@ -84,7 +84,7 @@
 // `rehydrate` takes its `State` by value; `InlineCounterState` is
 // all-`Copy`, so clippy reads the by-value parameter as needlessly owned —
 // the contract is the point.
-#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::needless_pass_by_value)] // aether-suppression-request: narrowed from the existing pair (#7148); `rehydrate` takes its state by value
 
 use aether_actor::{
     ActorInitError, ActorTypeTag, Erased, ErasedActorRef, Mail, Manual, SpawnError, Subname, WasmActor, WasmCtx,

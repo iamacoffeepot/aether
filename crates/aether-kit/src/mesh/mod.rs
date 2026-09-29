@@ -180,7 +180,7 @@ impl WasmActor for MeshViewer {
     /// succeeded (`ok`) and why it didn't (`error`).
     // `msg: LoadMesh` matches the dispatch ABI (ADR-0033 / ADR-0038);
     // the load body delegates straight to `FsCapability` via `ctx`.
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value)] // aether-suppression-request: narrowed from the existing pair (#7148); the handler ABI takes `msg` by value
     #[handler::single]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) -> Pending<MeshLoadResult> {
         let (pending, held) = ctx.hold::<MeshLoadResult>();
