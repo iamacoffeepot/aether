@@ -198,7 +198,7 @@ fn percent_encoded_path_is_decoded() {
 
 /// A `Transfer-Encoding: chunked` request to a *buffered* handler is rejected
 /// `411`: an unknown-length body has nothing to buffer under (ADR-0128 relaxes
-/// this only for a streaming handler, whose accept-set opts it into the
+/// this only for a streaming handler, whose `RequestStreamRouter` cover opts it into the
 /// incremental path — see `chunked_upload_streams_to_streaming_handler`).
 #[test]
 fn transfer_encoding_is_411() {
