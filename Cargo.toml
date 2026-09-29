@@ -67,8 +67,9 @@ members = [
     # member: one shared `kinds` rlib plus the component cdylibs (the main
     # bundle, the typed↔reshaped replace-pair satellites, the reshaped
     # carried-context replace target, the ADR-0138 defaultless multi-actor
-    # fixture, and the ADR-0147 boot-slot fixture) and the split-cap native
-    # lib.
+    # fixture, and the ADR-0147 boot-slot fixture), the split-cap native
+    # lib, and the republish fixtures, whose same-namespace successor
+    # modules are example cdylibs of one crate.
     "crates/aether-test-fixtures-kinds",
     "crates/aether-test-fixtures-bundle",
     "crates/aether-test-fixtures-stateful-typed",
@@ -86,6 +87,7 @@ members = [
     "crates/aether-test-fixtures-inline-dependency",
     "crates/aether-test-fixtures-fs-demux",
     "crates/aether-test-fixtures-short-path",
+    "crates/aether-test-fixtures-republish",
     "xtask",
 ]
 # What a bare `cargo build` / `cargo test` / `cargo clippy` at the root selects:

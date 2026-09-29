@@ -1163,6 +1163,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-test-fixtures-republish"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-clipboard",
+ "aether-data",
+ "aether-test-fixtures-kinds",
+]
+
+[[package]]
 name = "aether-test-fixtures-short-path"
 version = "0.3.0-alpha"
 dependencies = [
