@@ -691,7 +691,7 @@ pub struct PeerState {
 /// republish gate is built with, a kind the first two versions' gate does
 /// not declare, so republishing to the third changes the gate's config kind.
 /// The third version's gate answers `GateQuery` with `[label]`.
-#[aether_data::kind(name = "aether.test_fixtures.gate.labelled_config", copy, default, eq)]
+#[aether_data::kind(name = "aether.test_fixtures.labelled_gate.config", copy, default, eq)]
 pub struct GateLabelledConfig {
     pub label: u32,
 }

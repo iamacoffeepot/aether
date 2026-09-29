@@ -113,7 +113,7 @@ pub type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Op
 /// Frame-pump seam for the pumped GPU render runtime (ADR-0161 slice R4).
 /// The core harness owns the advance / capture drive loop but no render
 /// types; a hook (the `GpuFrameHook` in `aether-harness-substrate-capture`)
-/// owns the [`PumpedSlot`](aether_substrate::PumpedSlot) for the pumped
+/// owns the [`aether_substrate::PumpedSlot`] for the pumped
 /// `aether.render` actor and drains it at the harness's pump points, so
 /// draw dispatch, capture readback, and present all run on the harness
 /// thread that owns the offscreen GPU. A harness without a hook skips the
