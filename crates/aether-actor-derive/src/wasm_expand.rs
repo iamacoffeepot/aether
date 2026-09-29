@@ -341,6 +341,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         component_doc.as_ref(),
         config_kind_ty,
         opts.handler_set.as_ref().map(|set| (set, &**self_ty)),
+        opts.cardinality,
     );
 
     // ADR-0169: an adopted set's `HandlesKind` markers and `Contract<K>` rows

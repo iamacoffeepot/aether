@@ -28,6 +28,20 @@ fn check_in(cache: &ModuleCache, blobs: &BlobCheckIn, wat: &str) -> Module {
     cache.check_in(blobs, &blobs.check_in(wasm(wat))).expect("check the module in")
 }
 
+/// `records` as an `aether.kinds.inputs` section payload, escaped for a WAT
+/// `@custom` string.
+fn escaped_inputs_section(records: &[InputsRecord]) -> String {
+    let section = records.iter().fold(Vec::new(), |mut section, record| {
+        section.push(INPUTS_SECTION_VERSION);
+        section.extend(wire::to_vec(record).expect("encode an inputs record"));
+        section
+    });
+    section.iter().fold(String::new(), |mut escaped, byte| {
+        write!(escaped, "\\{byte:02x}").expect("write to a String");
+        escaped
+    })
+}
+
 fn same_entry(left: &Module, right: &Module) -> bool {
     Arc::ptr_eq(&left.entry, &right.entry)
 }
@@ -122,15 +136,7 @@ fn an_owned_code_value_answers_the_module_its_checked_in_twin_does() {
 fn a_content_addressed_module_refuses_a_namespace_too_long_to_carry_its_hash() {
     let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
     let content_addressed_exporting = |namespace: &str| {
-        let mut section = vec![INPUTS_SECTION_VERSION];
-        section.extend(
-            wire::to_vec(&InputsRecord::ActorBoundary { namespace: namespace.to_owned().into() })
-                .expect("encode an inputs record"),
-        );
-        let escaped = section.iter().fold(String::new(), |mut escaped, byte| {
-            write!(escaped, "\\{byte:02x}").expect("write to a String");
-            escaped
-        });
+        let escaped = escaped_inputs_section(&[InputsRecord::ActorBoundary { namespace: namespace.to_owned().into() }]);
         let wat = format!(
             r#"(module (@custom "{INPUTS_SECTION}" "{escaped}") (@custom "{CONTENT_ADDRESSED_SECTION}" "\01") (func (export "noop")))"#
         );
@@ -143,4 +149,39 @@ fn a_content_addressed_module_refuses_a_namespace_too_long_to_carry_its_hash() {
     let too_long = "a".repeat(192);
     let error = content_addressed_exporting(&too_long).map(drop).expect_err("a 192-byte namespace cannot carry it");
     assert!(error.contains(&format!("`{too_long}`")), "the refusal names the namespace: {error}");
+}
+
+/// `ModuleManifest::instanced` answers from the exported group its namespace
+/// names, and a single-actor module's implicit group answers to the module's
+/// namespace. It catches a lookup that reads the wrong group (the entry, or
+/// the one after), one that misses the implicit group, and one that answers
+/// for a name the module does not export.
+#[test]
+fn the_manifest_answers_each_exported_namespaces_cardinality() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+    let module_with = |records: &[InputsRecord], namespace_section: &str| {
+        let wat = format!(
+            r#"(module (@custom "{INPUTS_SECTION}" "{}") {namespace_section} (func (export "noop")))"#,
+            escaped_inputs_section(records)
+        );
+        check_in(&cache, &blobs, &wat)
+    };
+
+    let grouped = module_with(
+        &[
+            InputsRecord::ActorBoundary { namespace: "m.root".into() },
+            InputsRecord::ActorBoundary { namespace: "m.panel".into() },
+            InputsRecord::Instanced,
+            InputsRecord::ActorBoundary { namespace: "m.status".into() },
+        ],
+        "",
+    );
+    let manifest = grouped.manifest();
+    assert_eq!(manifest.instanced("m.root"), Some(false));
+    assert_eq!(manifest.instanced("m.panel"), Some(true));
+    assert_eq!(manifest.instanced("m.status"), Some(false));
+    assert_eq!(manifest.instanced("m.absent"), None);
+
+    let single = module_with(&[InputsRecord::Instanced], r#"(@custom "aether.namespace" "m.single")"#);
+    assert_eq!(single.manifest().instanced("m.single"), Some(true));
 }

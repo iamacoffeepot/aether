@@ -836,6 +836,11 @@ pub enum InputsRecord {
     /// that declares nothing encodes byte-identically and an actor with
     /// no `Dependency` records has no dependencies.
     Dependency { resolver: u8, namespace: Cow<'static, str> },
+    /// ADR-0241 §5: the type declares `#[actor(instanced)]`, so a load names
+    /// each instance by key rather than addressing the one namespace. At most
+    /// one per group, appended like `Dependency`; a group without it is a
+    /// singleton.
+    Instanced,
 }
 
 /// Custom-section name for the inputs manifest (ADR-0033). Paired
@@ -863,15 +868,16 @@ pub const PRIVATE_INPUTS_SECTION: &str = "aether.kinds.inputs.private";
 /// *class* (single / manual) is reported, not just a single
 /// reply kind; v0x05 (ADR-0118 / issue 1984) moved every record
 /// onto the owned aether-wire format (fixed little-endian
-/// selectors / ids / counts). A component built before any of these and
-/// a substrate after would otherwise disagree on the record shape, so
-/// the reader rejects an older version byte loudly — a hard rebuild
-/// boundary.
+/// selectors / ids / counts); v0x06 (ADR-0241 §5 / issue 7017) added the
+/// `InputsRecord::Instanced` cardinality record, whose absence now means
+/// "singleton" — a v0x05 module cannot say otherwise. A component built
+/// before any of these and a substrate after would otherwise disagree on
+/// the record shape, so the reader rejects an older version byte loudly —
+/// a hard rebuild boundary.
 ///
-/// Distinct from the `aether.kinds` section's own version (also `0x05`,
-/// `kind_manifest::KINDS_VERSION`): the two sections version
-/// independently and happen to share a number at this revision.
-pub const INPUTS_SECTION_VERSION: u8 = 0x05;
+/// Distinct from the `aether.kinds` section's own version
+/// ([`KINDS_SECTION_VERSION`]): the two sections version independently.
+pub const INPUTS_SECTION_VERSION: u8 = 0x06;
 
 /// One anonymous actor-placement fact in the `aether.actor.lineage` wasm
 /// custom section (ADR-0166).
@@ -1013,8 +1019,7 @@ pub const fn write_actor_lineage_module_child<const N: usize>(child: u64, child_
 /// substrate reader share. A format bump is a one-line edit here that
 /// const-folds into every writer site. Distinct from the
 /// `aether.kinds.inputs` section's own version
-/// ([`INPUTS_SECTION_VERSION`], also `0x05`): the two sections version
-/// independently and happen to share a number at this revision.
+/// ([`INPUTS_SECTION_VERSION`]): the two sections version independently.
 pub const KINDS_SECTION_VERSION: u8 = 0x05;
 
 /// Version byte the `aether.kinds.labels` wasm custom section opens

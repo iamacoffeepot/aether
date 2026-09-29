@@ -127,6 +127,7 @@ mod tests {
             namespace: namespace.map(str::to_owned),
             capabilities: ComponentCapabilities::default(),
             dependencies: Vec::new(),
+            instanced: false,
         }
     }
 

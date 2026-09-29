@@ -137,6 +137,16 @@ impl ModuleManifest {
         })
     }
 
+    /// Whether the exported type named `namespace` declares
+    /// `#[actor(instanced)]` (ADR-0241 §5), resolved as
+    /// [`Self::exported_groups`] resolves names, so a single-actor module's
+    /// implicit group answers to the module's namespace. `None` when no
+    /// exported group has that name.
+    #[must_use]
+    pub fn instanced(&self, namespace: &str) -> Option<bool> {
+        self.exported_groups().find(|(name, _)| *name == namespace).map(|(_, group)| group.instanced)
+    }
+
     /// Every private inline child's group with its namespace, in declaration
     /// order. Every private group is led by a boundary record, so one without
     /// a namespace is malformed and skipped.
