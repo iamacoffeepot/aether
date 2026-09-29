@@ -241,6 +241,22 @@ pub(super) fn dechunk(body: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Read from `stream` through the status line's terminating `\r\n` only, and
+/// return it without the CRLF — enough to observe that the server has begun
+/// writing a response without draining the rest of the head or body.
+pub(super) fn read_status_line(stream: &mut TcpStream) -> String {
+    let mut carry = Vec::new();
+    let mut chunk = [0u8; 256];
+    loop {
+        if let Some(pos) = carry.windows(2).position(|window| window == b"\r\n") {
+            return String::from_utf8_lossy(&carry[..pos]).into_owned();
+        }
+        let n = stream.read(&mut chunk).expect("read status line");
+        assert!(n > 0, "eof before status line; buffered: {:?}", String::from_utf8_lossy(&carry));
+        carry.extend_from_slice(&chunk[..n]);
+    }
+}
+
 /// Read from `stream` into `carry` until the blank line terminating the
 /// HTTP response head is buffered; return the byte index just past it.
 /// Shared by the buffered and chunked response readers.
