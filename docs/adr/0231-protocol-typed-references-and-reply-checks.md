@@ -469,7 +469,13 @@ refuses without one.
   kind carrying one is declared `no_serde`.
 - Native dispatch decodes each typed arm with the inbound's attachments and
   the registry, and logs a refusal at warn, naming the kind and the error,
-  before treating the mail as a miss. A guest's context carries its blob
+  before treating the mail as a miss. The reply target hears the refusal only
+  when it opts in: it asked under a correlation, and its published contract
+  carries a row for the engine-only `DecodeRefused`, which the refuser then
+  answers it as a reply joining the request's chain. Only the RPC server
+  declares that row, so a wire call closes naming the refusal, and an
+  in-engine sender, whose refusal is a codec bug, hears nothing. A guest's
+  context carries its blob
   holds only, so a guest decode of a `ProtocolPath<P>` refuses until
   [ADR-0241](0241-code-is-published-not-loaded.md) gives it a published-routes
   answer.

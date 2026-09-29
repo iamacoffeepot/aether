@@ -165,10 +165,11 @@ pub struct ReplyEnvelope {
     pub payload: Vec<u8>,
 }
 
-/// Reasons a `Call` can fail before the trace chain settles. v1 keeps
-/// the variant set small — most failures (handler panics, decode
-/// errors, etc.) surface as a `ReplyEvent` carrying a result kind
-/// from the responder, not an `RpcError`.
+/// Reasons a `Call` can fail, closing it with `ReplyEnd` `Err`. The set
+/// stays small: a failure the responder reports itself (a handler's own
+/// error) surfaces as a `ReplyEvent` carrying its result kind, not an
+/// `RpcError`. A payload the recipient refuses at decode produces no reply to
+/// carry one, so it closes the call as [`RpcError::DecodeRefused`].
 ///
 /// It derives [`aether_data::Schema`] because the hub carries an engine's
 /// refusal back in `aether.rpc.call_settled` unchanged, so a caller that
@@ -203,6 +204,12 @@ pub enum RpcError {
     /// or has not finished registering. Appended after every existing
     /// variant so their tags keep their positions.
     UnknownEngine { engine: EngineId },
+    /// The native actor at `path` refused the call's `kind` payload at
+    /// decode, so its handler for that kind never ran; `error` is the decode
+    /// error. Raised in the engine that hosts the actor, and relayed
+    /// unchanged through a hub. Appended after every existing variant so
+    /// their tags keep their positions.
+    DecodeRefused { path: ErasedActorPath, kind: KindId, error: String },
 }
 
 #[cfg(not(target_family = "wasm"))]

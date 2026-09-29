@@ -33,7 +33,7 @@ pub mod transforms;
 
 pub use text_metrics::{CachedFontMetrics, scale_units};
 
-pub use diagnostics::MonitorNotice;
+pub use diagnostics::{DecodeRefused, MonitorNotice};
 pub use input::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
     WindowSize,

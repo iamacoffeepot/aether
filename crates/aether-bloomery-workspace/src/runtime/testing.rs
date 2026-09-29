@@ -6,6 +6,9 @@
 //! [`StubDaemon`] answers each connection with the next scripted reply, in
 //! order, whatever the request, and hands back every request it read, a
 //! chunked request body decoded. It serves on a scoped thread the test owns.
+//! [`StubDaemon::requests_read`] counts each request as it is read, before
+//! any reply is written, so a snapshot taken after settlement returns is an
+//! exact count without waiting on the serving thread's own exit.
 //! A reply can also hang up unanswered, hold a response open until the client
 //! gives up, or take a hijacked connection over and record what the client
 //! streams into it. A connection the script expects
@@ -31,6 +34,7 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -76,6 +80,9 @@ pub struct StubDaemon {
     /// is done.
     _dir: TempDir,
     listener: StubListener,
+    /// Requests read so far, counted before the reply that answers each one
+    /// is written: see [`StubDaemon::requests_read`].
+    requests_read: AtomicUsize,
 }
 
 enum StubListener {
@@ -200,7 +207,7 @@ impl StubDaemon {
         let dir = tempfile::Builder::new().prefix("ws").tempdir()?;
         let socket = dir.path().join("d.sock");
         let listener = UnixListener::bind(&socket)?;
-        Ok(Self { _dir: dir, listener: StubListener::Unix { socket, listener } })
+        Ok(Self { _dir: dir, listener: StubListener::Unix { socket, listener }, requests_read: AtomicUsize::new(0) })
     }
 
     /// Bind `127.0.0.1:0` behind mutual TLS: a fresh CA issues the server's
@@ -261,7 +268,11 @@ impl StubDaemon {
 
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
-        Ok(Self { _dir: dir, listener: StubListener::Tls { address, listener, server: Arc::new(server), files } })
+        Ok(Self {
+            _dir: dir,
+            listener: StubListener::Tls { address, listener, server: Arc::new(server), files },
+            requests_read: AtomicUsize::new(0),
+        })
     }
 
     /// The endpoint a client dials: `unix://<socket>`, or
@@ -296,6 +307,15 @@ impl StubDaemon {
         }
     }
 
+    /// Requests read so far. Each one is counted before its reply is
+    /// written, so a snapshot taken once a chain the last reply settles has
+    /// returned is exact: the client cannot have read that reply, and so
+    /// cannot have let the chain settle, before this count included it.
+    #[must_use]
+    pub fn requests_read(&self) -> usize {
+        self.requests_read.load(Ordering::SeqCst)
+    }
+
     /// Answer one connection per reply, in order, and return the requests
     /// read, then drop the listener. It stops early, returning what it read,
     /// when a scripted connection does not arrive within [`ACCEPT_WAIT`]. A write the client stops reading early is
@@ -323,6 +343,7 @@ impl StubDaemon {
                 };
                 let mut reader = BufReader::new(stream);
                 requests.push(read_request(&mut reader)?);
+                self.requests_read.fetch_add(1, Ordering::SeqCst);
                 let mut stream = reader.into_inner();
                 match reply.body {
                     StubBody::HangUp => {}
