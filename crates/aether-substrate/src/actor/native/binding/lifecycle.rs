@@ -29,6 +29,8 @@ use crate::runtime::lifecycle::FatalAborter;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime::lifecycle::PanicAborter;
 use aether_actor::{CallerScope, ErasedActorRef, RequestContextTable};
+#[cfg(feature = "wasm")]
+use aether_data::ReplyContract;
 use aether_data::{ErasedActorPath, KindDescriptor};
 use aether_kinds::ComponentCapabilities;
 
@@ -300,6 +302,14 @@ impl NativeBinding {
     /// [`NativeCtx::resolve_path`](crate::actor::native::ctx::NativeCtx::resolve_path).
     pub(crate) fn resolve_path(&self, address: &ErasedActorPath) -> Result<ErasedActorRef, ResolvePathError> {
         self.mailer.resolve_path(address)
+    }
+
+    /// The rows the route at `position` published while it is `Live`, as
+    /// `Registry::published_rows_at` answers them: the read behind the wasm
+    /// guest's `WasmCtx::cast`, through the `published_rows_p32` host fn.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn published_rows_at(&self, position: MailboxId) -> Option<Vec<(KindId, ReplyContract)>> {
+        self.mailer.registry().published_rows_at(position)
     }
 
     /// The receive surface retained for the actor a reference proves. The

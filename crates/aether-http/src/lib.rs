@@ -43,7 +43,7 @@ pub use typed::{Ctx, FromPathSegment, FromRequest, Path, Route, route_matches, r
 // ADR-0133 reply-based data-phase stream handles. Wasm-safe like `typed`,
 // so a `default-features = false` guest that streams gets them without the
 // native runtime.
-pub use stream::{RequestStream, ResponseStream, WebSocketStream};
+pub use stream::{RequestCreditSink, RequestStream, ResponseSink, ResponseStream, WebSocketSink, WebSocketStream};
 
 // Egress client surface (`client.rs`). `HttpConfig` is the always-on
 // domain struct; the `Config`-derive `HttpConfigLayer` / `HttpOverlay`

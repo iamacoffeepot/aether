@@ -475,12 +475,17 @@ flows back to that counterparty, so a test mock or a middleware forwarding in
 front of the server receives it exactly as the real server does. Each send is a
 detached chain root, so a chunk settles on its own causal chain instead of the
 credit grant that triggered it. The handler reads the proven sender of the credit
-mail with `ctx.sender()` and hands it to `from_credit`, so the credit handler is
-an ordinary `#[handler::single]`:
+mail with `ctx.sender()`, casts it once to the `ResponseSink` protocol with
+`ctx.cast::<ResponseSink>` (ADR-0231 §4), and hands the typed reference to
+`from_credit`. The cast answers `None` for a sender whose published rows do not
+take the chunk and terminator kinds, so a misrouted stream is refused when the
+handle is armed instead of warn-dropped chunk by chunk, and every emit compiles
+only for the sink's kinds. The credit handler is an ordinary
+`#[handler::single]`:
 
 ```rust
 use aether_actor::{WasmCtx, WasmInitCtx};
-use aether_http::ResponseStream;
+use aether_http::{ResponseSink, ResponseStream};
 use aether_http::kinds::{
     HttpResponseStreamOpen, HttpRouterResult, HttpServerRequest, HttpStreamCredit,
 };
@@ -510,16 +515,17 @@ impl WasmActor for Feed {
 
     // Spend the granted credit, then terminate once the body is exhausted.
     // The first credit mail arms the stream handle — its counterparty is
-    // whoever paced the stream, and every chunk flows back through it.
+    // whoever paced the stream, cast to the sink it covers, and every chunk
+    // flows back through it.
     #[handler::single]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
         let stream = match self.stream {
             Some(stream) => stream,
             None => {
-                let Some(sender) = ctx.sender() else {
+                let Some(sink) = ctx.sender().and_then(|sender| ctx.cast::<ResponseSink>(sender)) else {
                     return;
                 };
-                *self.stream.insert(ResponseStream::from_credit(sender, &credit))
+                *self.stream.insert(ResponseStream::from_credit(sink, &credit))
             }
         };
         let mut budget = credit.credit;

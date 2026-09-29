@@ -151,6 +151,13 @@ unsafe extern "C" {
     /// ADR-0166 path grammar; the SDK passes only a validated `ErasedActorPath`.
     #[link_name = "resolve_path_p32"]
     pub fn resolve_path(path_ptr: u32, path_len: u32) -> u64;
+    /// ADR-0231 §4: the rows the route at `position` published while it is
+    /// `Live`. The return is the packed `(ptr << 32) | len` of a live guest
+    /// buffer holding the wire-encoded answer, a `__PublishedRows`, which the
+    /// SDK decodes and frees as [`asset_catalog`] does. Any position is
+    /// answered; one naming no `Live` route answers no rows.
+    #[link_name = "published_rows_p32"]
+    pub fn published_rows(position: u64) -> u64;
     /// ADR-0238 decisions 2 and 9: take one hold on the blob whose 32-byte
     /// hash sits at `hash_ptr`, resolved only against this instance's blob
     /// table, and return its length. Negative, with no hold taken, when the
@@ -336,4 +343,19 @@ pub unsafe fn asset_catalog() -> u64 {
 #[must_use]
 pub unsafe fn resolve_path(_path_ptr: u32, _path_len: u32) -> u64 {
     panic!("aether-actor: resolve_path called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::published_rows` import (ADR-0231 §4).
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn published_rows(_position: u64) -> u64 {
+    panic!("aether-actor: published_rows called outside the FFI guest");
 }

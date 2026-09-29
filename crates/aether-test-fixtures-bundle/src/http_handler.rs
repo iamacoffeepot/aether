@@ -33,7 +33,7 @@ use aether_http::kinds::{
     HttpResponseStreamOpen, HttpRouterResult, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
     RegisterRouteSelf, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
-use aether_http::{ResponseStream, WebSocketStream};
+use aether_http::{ResponseSink, ResponseStream, WebSocketSink, WebSocketStream};
 use aether_kinds::DropComponent;
 
 /// Bind the calling actor as the `/` catch-all (ADR-0130/0131) so every
@@ -121,8 +121,9 @@ struct StreamProgress {
 impl StreamProgress {
     /// Spend one `HttpStreamCredit` grant against its own stream: arm that
     /// stream's entry on its first grant (ADR-0133 — the counterparty that
-    /// dispatched it, so chunks flow back to whoever paced the stream rather
-    /// than a hard-coded cap singleton), emit up to `credit.credit` more
+    /// dispatched it, cast to the `ResponseSink` it covers, so chunks flow
+    /// back to whoever paced the stream rather than a hard-coded cap
+    /// singleton), emit up to `credit.credit` more
     /// chunks, and terminate once all [`STREAM_CHUNK_COUNT`] have gone out.
     ///
     /// A grant arriving after its own stream's terminator is ignored:
@@ -133,10 +134,10 @@ impl StreamProgress {
         let state = match self.streams.entry(credit.stream_id) {
             Entry::Occupied(occupied) => occupied.into_mut(),
             Entry::Vacant(vacant) => {
-                let Some(sender) = ctx.sender() else {
+                let Some(sink) = ctx.sender().and_then(|sender| ctx.cast::<ResponseSink>(sender)) else {
                     return;
                 };
-                let stream = ResponseStream::from_credit(sender, credit);
+                let stream = ResponseStream::from_credit(sink, credit);
 
                 vacant.insert(StreamState { stream, next_index: 0, ended: false })
             }
@@ -295,17 +296,18 @@ impl WasmActor for WebSocketHandler {
     #[handler::single]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
         // ADR-0133: capture the connection handle from the accept-time
-        // credit grant — its counterparty is whoever owns the socket. A
+        // credit grant — its counterparty is whoever owns the socket, cast
+        // to the `WebSocketSink` it covers. A
         // repeat grant for a known stream_id is a no-op: this connection
         // has already been greeted.
         if self.connections.contains_key(&credit.stream_id) {
             return;
         }
 
-        let Some(sender) = ctx.sender() else {
+        let Some(sink) = ctx.sender().and_then(|sender| ctx.cast::<WebSocketSink>(sender)) else {
             return;
         };
-        let stream = WebSocketStream::from_credit(sender, &credit);
+        let stream = WebSocketStream::from_credit(sink, &credit);
 
         self.connections.insert(credit.stream_id, stream);
         stream.message(ctx, false, b"server greeting".to_vec());

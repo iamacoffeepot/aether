@@ -645,19 +645,18 @@ fn refuse_engine_only(kind: KindId) -> bool {
 }
 
 // The per-stage capability trait impls (`MailSender` / `OutboundReply`).
-// The shared detached-send signature stays erased for guest compatibility;
-// native delegates it to the inherent typed verb and discards the returned
-// id. `shutdown` / `monitor`
-// are inherent methods on `NativeCtx` that reach into the
-// substrate-internal spawner + actor registry.
+// The shared detached send takes the same `Target` the inherent verb does;
+// native delegates it to the inherent verb and discards the returned id.
+// `shutdown` / `monitor` are inherent methods on `NativeCtx` that reach into
+// the substrate-internal spawner + actor registry.
 
 impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
     }
 
-    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
-        let _ = NativeCtx::send_detached_to(self, target, payload);
+    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+        let _ = NativeCtx::send_detached_to(self, target.erased(), payload);
     }
 }
 

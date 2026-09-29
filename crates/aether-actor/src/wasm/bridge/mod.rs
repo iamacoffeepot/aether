@@ -22,7 +22,9 @@
 //!   `blob_drop`), the transport under the guest's `GuestHold` backing.
 //!   wasm32-only: every caller is.
 //! - `address` — ADR-0230 §3 path proof (`resolve_path`), the transport under
-//!   `WasmCtx::resolve_path`, and the `__ResolvedPath` answer it decodes.
+//!   `WasmCtx::resolve_path`, and the `__ResolvedPath` answer it decodes; and
+//!   ADR-0231 §4 published rows (`published_rows`), the transport under
+//!   `WasmCtx::cast`, and the `__PublishedRows` answer it decodes.
 //!
 //! Per-stage capability ctx impls in [`crate::wasm::ctx`] call these
 //! functions directly; the cross-target abstraction layer is the

@@ -237,8 +237,8 @@ pub(super) mod cast_sealed {
     pub trait Sealed {}
 }
 
-/// A protocol the native `ctx.cast` may type an erased reference as
-/// (ADR-0231 §4's guard cast). Sealed.
+/// A protocol `ctx.cast` may type an erased reference as (ADR-0231 §4's
+/// guard cast), on a native ctx and on a guest ctx alike. Sealed.
 ///
 /// The cast reads the contract the reference's `Live` route published and
 /// mints a [`ProtocolRef<Self>`](crate::ProtocolRef) only when
