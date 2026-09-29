@@ -267,9 +267,12 @@ impl NativeActor for FleetProxy {
     ///
     /// The hub's RPC server forwards every `engine = Some(engine_id)` wire
     /// `Call` to the proxy that registered for `engine_id`. A send from
-    /// `wire` starts a fresh root, so the registration alone would not keep
-    /// the spawn open; the settlement hold on the causing chain (ADR-0168)
-    /// does, until [`Self::on_route_registered`] drops it. The proxy declares
+    /// `wire` never inherits the causing chain, so the registration alone
+    /// would not keep the spawn open; the settlement hold on the causing
+    /// chain (ADR-0168) does, until [`Self::on_route_registered`] drops it.
+    /// Born through an embedder spawn instead, the proxy has no causing
+    /// chain, and the hold gates the spawn's wire root (ADR-0244), so that
+    /// root settles only once the route is registered. The proxy declares
     /// the RPC server as a dependency, so the registration always has a live
     /// recipient.
     ///

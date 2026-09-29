@@ -5,13 +5,83 @@
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::envelope::Envelope;
+use crate::actor::native::spawn::Subname;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
-use crate::testing::{TestChassis, await_signal, bare_substrate};
+use crate::testing::{TestChassis, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, HandlesKind};
-use crossbeam_channel::Sender;
+use aether_data::Kind;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+pod_kind!(WireBarrierPing { tag: u32 }, "test.barrier.wire_ping", 0xB0B1_B2B3_B4B5_B6B7);
+
+/// Counts every `WireBarrierPing` it handles — the composed peer each
+/// wire-sending probe below mails.
+struct Ponger {
+    received: Arc<AtomicU32>,
+}
+impl Addressable for Ponger {
+    const NAMESPACE: &'static str = "test.barrier.ponger";
+    type Resolver = aether_actor::One;
+}
+impl aether_actor::Root for Ponger {}
+impl HandlesKind<WireBarrierPing> for Ponger {}
+impl aether_actor::Lifecycle<Self> for Ponger {
+    type Config = ();
+    type Params = Arc<AtomicU32>;
+    type InitError = BootError;
+    type InitCtx<'a> = NativeInitCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a, Self>;
+    fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { received: params })
+    }
+}
+impl aether_actor::Declared for Ponger {
+    type Depends = ();
+    type Spawns = ();
+}
+impl NativeActor for Ponger {
+    type State = Self;
+}
+impl Dispatch<Self> for Ponger {
+    fn dispatch(
+        state: &mut Self,
+        _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+        kind: KindId,
+        payload: &[u8],
+    ) -> Option<()> {
+        if kind.0 == WireBarrierPing::ID.0 {
+            let _ = WireBarrierPing::decode_from_bytes(payload)?;
+            state.received.fetch_add(1, AtomicOrdering::SeqCst);
+            return Some(());
+        }
+        None
+    }
+}
+
+/// An embedder-spawned actor whose `wire` mails the composed [`Ponger`].
+struct SpawnedPinger;
+
+#[aether_actor::actor(instanced, root, depends(Ponger))]
+impl NativeActor for SpawnedPinger {
+    const NAMESPACE: &'static str = "test.spawn_wire.pinger";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) {
+        ctx.send::<Ponger>(&WireBarrierPing { tag: 2 });
+    }
+
+    #[fallback]
+    fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+        let _ = self;
+    }
+}
 
 /// Issue 697 multi-pass model: wire-time mail crosses actors
 /// regardless of declaration order. Pinger's `wire` mails Ponger;
@@ -40,12 +110,11 @@ fn wire_pass_mail_crosses_actors_ponger_first() {
 /// pre-load mail or the dispatcher pull. Runtime spawn doesn't
 /// need the chassis-boot multi-pass barrier (the substrate is
 /// already steady-state).
+///
+/// Its `wire` sends nothing, so `finish_wire_settled` returns only because the
+/// spawn's wire root settles on its hold's release alone.
 #[test]
 fn spawn_actor_runs_wire_once_after_init() {
-    use crate::actor::native::spawn::Subname;
-
-    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
     struct WireSpawnProbe {
         wire_count: Arc<AtomicU32>,
     }
@@ -93,7 +162,7 @@ fn spawn_actor_runs_wire_once_after_init() {
 
     let id = chassis
         .spawn_actor::<WireSpawnProbe>(Subname::Counter, (), Arc::clone(&wire_count))
-        .finish()
+        .finish_wire_settled()
         .expect("spawn instanced actor");
 
     assert_eq!(wire_count.load(AtomicOrdering::SeqCst), 1, "wire must fire exactly once on Spawner::spawn_actor");
@@ -102,13 +171,34 @@ fn spawn_actor_runs_wire_once_after_init() {
     let _ = id;
 }
 
+/// ADR-0244: an embedder spawn's `wire` sends settle under the spawn's own
+/// wire root, so once `finish_wire_settled` returns the composed peer has
+/// handled the mail — no poll. A send that minted its own root, or a hold
+/// released before the held mail was flushed, would let it return first.
+#[test]
+fn spawn_wire_mail_settles_under_the_spawn_root() {
+    let (registry, mailer) = bare_substrate();
+    let received = Arc::new(AtomicU32::new(0));
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<Ponger>(Arc::clone(&received))
+        .build_passive()
+        .expect("ponger boots");
+
+    chassis
+        .spawn_actor::<SpawnedPinger>(Subname::Counter, (), ())
+        .finish_wire_settled()
+        .expect("spawn the wire-sending pinger");
+
+    assert_eq!(received.load(AtomicOrdering::SeqCst), 1, "ponger must have handled the spawned pinger's wire ping");
+
+    drop(chassis);
+}
+
 /// Issue 584 Phase 2a / 697 wire pass: `wire` runs exactly once
 /// for a singleton actor at chassis boot, after `init` succeeds
 /// and before the dispatcher pulls the first envelope.
 #[test]
 fn with_actor_runs_wire_once_at_chassis_boot() {
-    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
     struct WireProbe {
         wire_count: Arc<AtomicU32>,
     }
@@ -165,11 +255,6 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
 }
 
 fn wire_pass_mail_crosses_actors(pinger_first: bool) {
-    use aether_data::Kind;
-    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-    pod_kind!(WireBarrierPing { tag: u32 }, "test.barrier.wire_ping", 0xB0B1_B2B3_B4B5_B6B7);
-
     struct Pinger {
         wire_ran: Arc<AtomicU32>,
     }
@@ -195,71 +280,23 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
         }
     }
 
-    // Counts its pings and signals the test on each. The wire-pass send
-    // flushes through Pinger's burst producer onto the pool, outside any
-    // root the test holds, so no tracked barrier is ordered behind it.
-    struct Ponger {
-        received: Arc<AtomicU32>,
-        pinged: Sender<()>,
-    }
-    impl Addressable for Ponger {
-        const NAMESPACE: &'static str = "test.barrier.ponger";
-        type Resolver = aether_actor::One;
-    }
-    impl aether_actor::Root for Ponger {}
-    impl HandlesKind<WireBarrierPing> for Ponger {}
-    impl aether_actor::Lifecycle<Self> for Ponger {
-        type Config = ();
-        type Params = (Arc<AtomicU32>, Sender<()>);
-        type InitError = BootError;
-        type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a, Self>;
-        fn init((): (), (received, pinged): Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { received, pinged })
-        }
-    }
-    impl aether_actor::Declared for Ponger {
-        type Depends = ();
-        type Spawns = ();
-    }
-    impl NativeActor for Ponger {
-        type State = Self;
-    }
-    impl Dispatch<Self> for Ponger {
-        fn dispatch(
-            state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
-            kind: KindId,
-            payload: &[u8],
-        ) -> Option<()> {
-            if kind.0 == WireBarrierPing::ID.0 {
-                let _ = WireBarrierPing::decode_from_bytes(payload)?;
-                state.received.fetch_add(1, AtomicOrdering::SeqCst);
-                let _ = state.pinged.send(());
-                return Some(());
-            }
-            None
-        }
-    }
-
     let (registry, mailer) = bare_substrate();
     let received = Arc::new(AtomicU32::new(0));
-    let (pinged, pinged_rx) = crossbeam_channel::unbounded();
     let wire_ran = Arc::new(AtomicU32::new(0));
 
     let builder = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer));
-    let ponger_params = (Arc::clone(&received), pinged);
     let builder = if pinger_first {
-        builder.with_actor::<Pinger>(Arc::clone(&wire_ran)).with_actor::<Ponger>(ponger_params)
+        builder.with_actor::<Pinger>(Arc::clone(&wire_ran)).with_actor::<Ponger>(Arc::clone(&received))
     } else {
-        builder.with_actor::<Ponger>(ponger_params).with_actor::<Pinger>(Arc::clone(&wire_ran))
+        builder.with_actor::<Ponger>(Arc::clone(&received)).with_actor::<Pinger>(Arc::clone(&wire_ran))
     };
     let chassis = builder.build_passive().expect("multi-pass boot succeeds");
 
     assert_eq!(wire_ran.load(AtomicOrdering::SeqCst), 1, "pinger's wire must have run during the wire pass");
 
-    // Wait for Ponger's dispatcher to drain the wire-emitted ping.
-    await_signal(&pinged_rx, "test.barrier.wire_ping");
+    // ADR-0244: the wire pass ran under the boot's wire root, which the seal
+    // released, so its settlement means Ponger has handled the ping.
+    chassis.await_boot_settled();
     assert_eq!(
         received.load(AtomicOrdering::SeqCst),
         1,

@@ -16,9 +16,9 @@ use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCt
 use crate::chassis::ctx::{ChassisCtx, MailboxSender, MailboxWakeSlot};
 use crate::chassis::error::BootError;
 use crate::config::{ConfigError, ConfigMember, ConfigSources};
-use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
 use crate::mail::registry::{Registry, RouteContract};
+use crate::mail::{MailId, MailboxId};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::scheduler::{Drainable, SeizeHandle, WakeHandle};
 
@@ -244,7 +244,7 @@ where
         Ok(())
     }
 
-    fn wire(&mut self) -> Result<(), BootError> {
+    fn wire(&mut self, wire_root: Option<MailId>) -> Result<(), BootError> {
         let BootState::Initialized { resources, mut actor } = mem::replace(&mut self.state, BootState::Transitioning)
         else {
             panic!("PassiveBoot::wire called in non-Initialized state");
@@ -257,9 +257,11 @@ where
         // is running yet — spawn pass is next). Wrapped in the same
         // `with_stamped` envelope as `init` and per-envelope dispatch
         // so `Local<T>` and `tracing::*` route into this actor's
-        // `ActorLogRing` identically.
+        // `ActorLogRing` identically. Its sends inherit the boot's wire root
+        // (ADR-0244), so they settle together once boot seals.
         local::with_stamped(&resources.slots, || {
-            let mut wire_ctx = NativeCtx::for_wire(&resources.transport, EffectChain::Uncaused(Uncaused::ChassisBoot));
+            let mut wire_ctx =
+                NativeCtx::for_wire(&resources.transport, EffectChain::Uncaused(Uncaused::ChassisBoot), wire_root);
             A::wire(actor.as_mut(), &mut wire_ctx);
         });
 

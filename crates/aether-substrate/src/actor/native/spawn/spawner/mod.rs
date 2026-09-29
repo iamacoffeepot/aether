@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use aether_actor::{ActorRef, ErasedActorRef, Instanced};
 use aether_data::{ErasedActorPath, LoadName};
@@ -26,6 +26,7 @@ use crate::mail::registry::{
 };
 use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::FatalAborter;
+use crate::runtime::wire_root::WireRoot;
 use crate::scheduler::{Drainable, WakeHandle, WakeSink};
 
 #[cfg(any(test, feature = "test-support"))]
@@ -110,6 +111,13 @@ pub struct Spawner {
     /// sealed state the *absence* of a token rather than a flag sitting
     /// beside a live one.
     authority: Mutex<Option<BootAuthority>>,
+    /// ADR-0244: the boot's held wire root, opened by `boot_passives` right
+    /// after this `Spawner` is built and kept beside [`Self::authority`] for
+    /// exactly as long. Every pre-seal birth's `wire` — the Pass 3 wire, a
+    /// pre-seal direct commit, a driver `Start` pumped actor — runs under it,
+    /// and [`Self::seal`] drops it with the authority, releasing the hold that
+    /// kept it open while boot could still add sends to it.
+    boot_wire: Mutex<Option<WireRoot>>,
 }
 
 /// One entry in [`Spawner::instanced_slots`]. Holds both the strong
@@ -139,7 +147,40 @@ impl Spawner {
             instanced_slots: Mutex::new(HashMap::new()),
             ring_capacities,
             authority: Mutex::new(Some(BootAuthority::new())),
+            boot_wire: Mutex::new(None),
         }
+    }
+
+    /// Open the boot's wire root (ADR-0244), held until [`Self::seal`].
+    ///
+    /// # Panics
+    /// Panics if the boot wire is already open.
+    pub(crate) fn open_boot_wire(&self) {
+        let previous = self.lock_boot_wire().replace(WireRoot::open(&self.mailer));
+        assert!(previous.is_none(), "a chassis opens one boot wire root");
+    }
+
+    /// Subscribe to the boot wire root's settlement: the receiver fires once
+    /// [`Self::seal`] has released its hold and every mail a pre-seal `wire`
+    /// sent, and everything those mails caused, has been handled.
+    ///
+    /// # Panics
+    /// Panics if the boot wire is not open, which it is from
+    /// [`Self::open_boot_wire`] until the seal.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn subscribe_boot_wire(&self) -> Receiver<()> {
+        self.lock_boot_wire().as_ref().expect("the boot wire root is open until the seal").subscribe(&self.mailer)
+    }
+
+    /// The boot's wire root while boot is still open, `None` once
+    /// [`Self::seal`] has dropped it: a birth after the seal is an embedder's
+    /// and opens its own.
+    pub(crate) fn boot_wire_root(&self) -> Option<MailId> {
+        self.lock_boot_wire().as_ref().map(WireRoot::root)
+    }
+
+    fn lock_boot_wire(&self) -> MutexGuard<'_, Option<WireRoot>> {
+        self.boot_wire.lock().expect("spawner boot wire lock poisoned; fail-fast per ADR-0063")
     }
 
     /// Install the ADR-0165 runtime seal: take the boot authority out of
@@ -151,12 +192,19 @@ impl Spawner {
     /// `None`, which is what makes a re-entered teardown or a double-sealed
     /// test harmless.
     ///
+    /// The boot's wire root (ADR-0244) leaves with the token: no birth after
+    /// the seal runs under it, so its hold is released here and the root
+    /// settles once the boot's `wire` mail has been handled.
+    ///
     /// The chassis builder calls this after a successful driver `Start` and
     /// immediately before returning a `PassiveChassis`. A failed `Start` never
     /// reaches it, so a chassis that never came up leaves boot's own writer
     /// intact for the unwind.
     pub(crate) fn seal(&self) -> Option<BootAuthority> {
-        self.authority.lock().expect("spawner boot authority lock poisoned; fail-fast per ADR-0063").take()
+        let authority =
+            self.authority.lock().expect("spawner boot authority lock poisoned; fail-fast per ADR-0063").take();
+        drop(self.lock_boot_wire().take());
+        authority
     }
 
     /// Borrow the chassis worker pool's wake sink (ready-queue sender +

@@ -24,6 +24,7 @@ use crate::mail::registry::effect::{
 use crate::mail::registry::{DispatchParts, MailboxEntry, NativeType, OwnedDispatch, Registry, SeizeCell};
 use crate::mail::{MailId, MailboxId};
 use crate::runtime::effect_chain::EffectChain;
+use crate::runtime::wire_root::WireRoot;
 use crate::scheduler::pending_depth;
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeHandle};
 use aether_kinds::trace::Nanos;
@@ -46,6 +47,10 @@ pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     /// (ADR-0241 §3, §6). `None` for a native birth, which holds `A`'s own
     /// namespace instead.
     guest: Option<(Arc<str>, BlobHash)>,
+    /// An embedder spawn's held wire root (ADR-0244): `wire` runs under it,
+    /// and its hold is released once the mail `wire` sent is flushed, or
+    /// with the activation if it is cancelled. `None` for every other birth.
+    wire_root: Option<WireRoot>,
 }
 
 /// What a birth's fate is delivered as, built once the owner has decided it.
@@ -226,7 +231,7 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
         state: A::State,
         chain: EffectChain,
     ) -> Self {
-        Self { spawner, id, sender, binding, slots, state, finalizer: None, chain, guest: None }
+        Self { spawner, id, sender, binding, slots, state, finalizer: None, chain, guest: None, wire_root: None }
     }
 
     pub(super) fn with_finalizer(mut self, finalizer: Arc<dyn SpawnFinalizer>) -> Self {
@@ -238,6 +243,13 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
     /// `module` must hold, in place of `A`'s own.
     pub(super) fn with_guest(mut self, namespace: Arc<str>, module: BlobHash) -> Self {
         self.guest = Some((namespace, module));
+        self
+    }
+
+    /// Run this birth's `wire` under `wire_root`, a chainless birth's fresh
+    /// held root (ADR-0244), and release its hold once `wire`'s mail is out.
+    pub(super) fn with_wire_root(mut self, wire_root: WireRoot) -> Self {
+        self.wire_root = Some(wire_root);
         self
     }
 }
@@ -535,6 +547,10 @@ struct LegacyLiveActivation<A: NativeActor> {
     slot: Arc<DispatcherSlot<A>>,
     finalizer: Option<Arc<dyn SpawnFinalizer>>,
     failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
+    /// Carried from the prepared activation once `wire` has run under it;
+    /// released in the catch-up suffix after the held mail is flushed, or
+    /// dropped with this activation on cancel.
+    wire_root: Option<WireRoot>,
 }
 
 impl<A: NativeActor> LegacyLiveActivation<A> {
@@ -543,8 +559,18 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         token: ActivationToken,
         failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
     ) -> Self {
-        let LegacyPreparedActivation { spawner, id, sender, binding, slots, state, finalizer, chain, guest: _ } =
-            prepared;
+        let LegacyPreparedActivation {
+            spawner,
+            id,
+            sender,
+            binding,
+            slots,
+            state,
+            finalizer,
+            chain,
+            guest: _,
+            wire_root,
+        } = prepared;
         let slot = DispatcherSlot::new(
             Box::new(state),
             Arc::clone(&binding),
@@ -554,7 +580,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
             id,
         );
         binding.hold_outbound_for_activation();
-        slot.wire_activation(chain);
+        slot.wire_activation(chain, wire_root.as_ref().map(WireRoot::root));
 
         Self {
             spawner,
@@ -566,6 +592,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
             slot,
             finalizer,
             failure,
+            wire_root,
         }
     }
 
@@ -587,7 +614,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
 
 impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
     fn install(self: Box<Self>, bootstrap: Vec<PreparedMail>, parked: Vec<PreparedMail>) -> InstalledActivation {
-        let Self { spawner, id, token, sender, strong_sender, binding, slot, finalizer, failure: _ } = *self;
+        let Self { spawner, id, token, sender, strong_sender, binding, slot, finalizer, failure: _, wire_root } = *self;
         for prepared in bootstrap.into_iter().chain(parked) {
             let PreparedMail { mail, bootstrap } = prepared;
             let t_enqueue = if bootstrap {
@@ -656,6 +683,10 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
             // behind the parked prefix without creating a second ring
             // producer.
             binding.release_outbound_after_activation();
+            // ADR-0244: every mail `wire` sent was counted against the wire
+            // root when it was buffered and is routed now, so the hold may
+            // go; the root settles once those mails have been handled.
+            drop(wire_root);
             wake_slot.set(Arc::new({
                 let wake = wake.clone();
                 move || {

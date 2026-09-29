@@ -11,6 +11,7 @@ pub mod log_install;
 pub mod panic_hook;
 pub mod thread_name;
 pub mod trace;
+pub(crate) mod wire_root;
 
 pub use panic_hook::init_panic_hook;
 

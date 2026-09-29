@@ -8,6 +8,7 @@ use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
 use aether_substrate::actor::wasm::module::{Module, ModuleCache};
+use aether_substrate::mail::MailId;
 use aether_substrate::mail::outbound::HubOutbound;
 use wasmtime::{Engine, Linker};
 
@@ -97,8 +98,8 @@ impl WasmTrampolineState {
     /// Run a guest's `wire` hook and publish the inline-child aliases it
     /// staged. A birth runs it once, and a reinstated guest runs it again
     /// (ADR-0241 §7), since its `unwire` ran at prepare.
-    pub(crate) fn wire_guest(ctx: &mut NativeCtx<'_, WasmTrampoline>, component: &mut Component) {
-        if let Err(e) = component.wire() {
+    pub(crate) fn wire_guest(ctx: &mut NativeCtx<'_, WasmTrampoline>, component: &mut Component, root: Option<MailId>) {
+        if let Err(e) = component.wire(root) {
             tracing::error!(
                 target: "aether_component",
                 error = %e,
@@ -160,7 +161,7 @@ impl WasmTrampolineState {
         old.resume_correlations(candidate.correlation_cursor());
         drop(candidate);
 
-        Self::wire_guest(ctx, &mut old);
+        Self::wire_guest(ctx, &mut old, None);
         self.slot = Slot::Live(Box::new(old));
         self.release_gated(ctx, gated);
     }

@@ -5,7 +5,7 @@
 //! (ADR-0099 §3) and `build` runs `A::init` on the calling thread, so a
 //! failure drops the partial state before anything is staged; `preflight`
 //! adds the legacy eager namespace/tombstone checks that handler staging
-//! deliberately leaves to owner-time reservation. `prepare_commit` is the
+//! deliberately leaves to owner-time reservation. `prepare_commit_as` is the
 //! seam to the registry owner — everything past it is [`super::commit`]'s.
 
 use std::collections::HashSet;
@@ -30,6 +30,7 @@ use crate::mail::cost::{CostCell, CostCells};
 use crate::mail::registry::effect::{PreparedCostCells, PreparedMail, PreparedSpawnCommit};
 use crate::mail::{KindId, Mail, MailboxId};
 use crate::runtime::effect_chain::EffectChain;
+use crate::runtime::wire_root::WireRoot;
 
 use super::super::{SpawnError, Subname};
 use super::Spawner;
@@ -250,6 +251,21 @@ impl Spawner {
         })
     }
 
+    /// [`Self::prepare_commit_as`] for a native birth with no wire root, the
+    /// form the owner-path fixtures stage.
+    #[cfg(test)]
+    pub(in crate::actor::native::spawn) fn prepare_commit<A>(
+        self: &Arc<Self>,
+        staged: StagedActor<A>,
+        finalizer: Option<Arc<dyn SpawnFinalizer>>,
+        chain: EffectChain,
+    ) -> PreparedSpawnCommit
+    where
+        A: Instanced + NativeActor,
+    {
+        self.prepare_commit_as(staged, finalizer, chain, None, None)
+    }
+
     /// Convert an initialized actor into a storage-erased owner commit.
     ///
     /// `finalizer` is what decides the birth once the owner has ruled on it —
@@ -261,28 +277,24 @@ impl Spawner {
     /// `chain` is the staging site's ADR-0168 §3 declaration of what orders
     /// this birth's effects. It rides to the activation home so the newborn's
     /// `wire` hook can hold whatever chain it names (ADR-0168 §1).
-    pub(in crate::actor::native::spawn) fn prepare_commit<A>(
-        self: &Arc<Self>,
-        staged: StagedActor<A>,
-        finalizer: Option<Arc<dyn SpawnFinalizer>>,
-        chain: EffectChain,
-    ) -> PreparedSpawnCommit
-    where
-        A: Instanced + NativeActor,
-    {
-        self.prepare_commit_as(staged, finalizer, chain, None)
-    }
-
-    /// [`Self::prepare_commit`] for a birth that may be a guest's: `guest`
-    /// names the published namespace the birth takes and the module that
-    /// must hold it (ADR-0241 §3, §6), so the owner checks the publication
-    /// table in place of holding `A`'s namespace. `None` is a native birth.
+    ///
+    /// `guest` names the published namespace a guest's birth takes and the
+    /// module that must hold it (ADR-0241 §3, §6), so the owner checks the
+    /// publication table in place of holding `A`'s namespace. `None` is a
+    /// native birth.
+    ///
+    /// `wire_root` is a chainless birth's held wire root (ADR-0244), which
+    /// the activation runs `wire` under and releases once the mail `wire`
+    /// sent is flushed. Only an embedder's post-seal spawn opens one; a
+    /// handler-staged birth passes `None`, since its `wire` holds the causing
+    /// chain `chain` names instead.
     pub(in crate::actor::native::spawn) fn prepare_commit_as<A>(
         self: &Arc<Self>,
         staged: StagedActor<A>,
         finalizer: Option<Arc<dyn SpawnFinalizer>>,
         chain: EffectChain,
         guest: Option<(Arc<str>, BlobHash)>,
+        wire_root: Option<WireRoot>,
     ) -> PreparedSpawnCommit
     where
         A: Instanced + NativeActor,
@@ -337,6 +349,10 @@ impl Spawner {
         };
         let activation = match guest {
             Some((namespace, module)) => activation.with_guest(namespace, module),
+            None => activation,
+        };
+        let activation = match wire_root {
+            Some(wire_root) => activation.with_wire_root(wire_root),
             None => activation,
         };
         PreparedSpawnCommit::new(

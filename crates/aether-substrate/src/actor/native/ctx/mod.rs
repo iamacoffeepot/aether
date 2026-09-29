@@ -93,8 +93,9 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     in_flight_mail_id: Option<MailId>,
     /// ADR-0080 §5: root of the causal chain this handler runs in.
     /// Outbound `send` paths read this to stamp `root` on child mail
-    /// so descendants share the chain. `None` for ctxs without
-    /// an inbound — those sends mint a fresh root from their own
+    /// so descendants share the chain. A chainless birth's `wire` ctx
+    /// carries its wire root here (ADR-0244). `None` for the other ctxs
+    /// without an inbound — those sends mint a fresh root from their own
     /// `mail_id` in `NativeBinding::push_envelope_buffered`.
     in_flight_root: Option<MailId>,
     /// ADR-0168 §1: the chain of the work that *caused* this context to
@@ -240,7 +241,7 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
     /// The `wire`-hook context, built by every birth path that runs
     /// `A::wire` (ADR-0079 amended) and typed by that actor, which the hook's
     /// parameter type pins. It dispatches no inbound, so it carries no
-    /// in-flight lineage of its own.
+    /// in-flight mail of its own.
     ///
     /// `chain` is the birth path's ADR-0168 §3 declaration of what orders the
     /// effects this hook stages. [`EffectChain::Held`] carries the chain of
@@ -250,15 +251,25 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
     /// what puts the question in front of the author of the next birth path
     /// rather than leaving it to be re-derived.
     ///
-    /// The actor's own `wire`-time sends still mint their own roots — see the
-    /// [`NativeCtx::causing_chain`] field docs for why the two must not share
-    /// one root.
-    pub(crate) fn for_wire(binding: &'a Arc<NativeBinding>, chain: EffectChain) -> Self {
+    /// The actor's own `wire`-time sends never inherit the causing chain —
+    /// see the [`NativeCtx::causing_chain`] field docs for why the two must
+    /// not share one root. `wire_root` is the fresh, held root a chainless
+    /// birth opens for them instead (ADR-0244): a chassis boot and an
+    /// embedder spawn pass theirs, so every send `wire` makes, and everything
+    /// those sends cause, settles under one root the birth's caller can await.
+    /// A handler-staged birth passes `None`, and its `wire` sends mint their
+    /// own roots as before. It is also the chain a hold taken from this ctx
+    /// gates, so a task or deferred reply `wire` starts is inside that root.
+    pub(crate) fn for_wire(binding: &'a Arc<NativeBinding>, chain: EffectChain, wire_root: Option<MailId>) -> Self {
+        debug_assert!(
+            chain.held_root().is_none() || wire_root.is_none(),
+            "a birth with a causing chain opens no wire root (ADR-0244)"
+        );
         Self {
             binding,
             source: Source::NONE,
             in_flight_mail_id: None,
-            in_flight_root: None,
+            in_flight_root: wire_root,
             causing_chain: chain.held_root(),
             inbound: None,
             held_this_dispatch: false,
