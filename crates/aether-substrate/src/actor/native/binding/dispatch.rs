@@ -16,11 +16,13 @@ use aether_data::{Kind, RequestId, wire};
 
 /// ADR-0093 hold-until-resolve dispatch: the `&self`-interior-mutability
 /// bridge between [`super::ctx::NativeCtx`](crate::actor::native::ctx::NativeCtx)'s dispatch primitive and the
-/// per-actor `InflightTable` (crate-internal). Each method
-/// takes the table lock for one operation — mint+insert at dispatch,
-/// fill-output from the worker, take at completion — matching the
-/// `outbound` / `burst_producer` locking pattern (uncontended, single
-/// logical writer).
+/// per-actor `InflightLedger` (crate-internal). Each method
+/// takes the ledger lock for one operation — mint+insert at dispatch,
+/// fill-output from the worker, take at completion — except the reply
+/// tail's parked-context check, which skips it while nothing is parked. The
+/// ledger is a `Mutex` because it has writers off the actor's dispatch
+/// thread: offload workers, child activations and the registry owner
+/// completing deferred work, a dropped `Held`, and close and teardown.
 impl NativeBinding {
     /// Insert a freshly-minted in-flight dispatch entry and return its
     /// [`DispatchId`]. Called on the actor thread at dispatch time, after
@@ -36,10 +38,7 @@ impl NativeBinding {
         reply_to: Source,
         context: Box<dyn Any + Send>,
     ) -> DispatchId {
-        self.inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_insert(hold, reply_to, context)
+        self.inflight.lock().dispatch_insert(hold, reply_to, context)
     }
 
     /// Arm a typed deferred completion in the ordinary ADR-0093 ledger.
@@ -70,11 +69,7 @@ impl NativeBinding {
         hold: Option<SettlementHold>,
         request: RequestId,
     ) -> DeferredCompletion<O> {
-        let dispatch_id = self
-            .inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_insert_task(hold, request);
+        let dispatch_id = self.inflight.lock().dispatch_insert_task(hold, request);
         DeferredCompletion::new(Arc::downgrade(self), dispatch_id)
     }
 
@@ -100,11 +95,7 @@ impl NativeBinding {
     where
         O: Send + 'static,
     {
-        let filled = self
-            .inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_fill_output(id, Box::new(output));
+        let filled = self.inflight.lock().dispatch_fill_output(id, Box::new(output));
         let FillOutcome::Filled(wake) = filled else {
             return;
         };
@@ -136,7 +127,7 @@ impl NativeBinding {
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn dispatch_take<O: 'static, C: 'static>(&self, id: DispatchId) -> Option<TaskDone<O, C>> {
-        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_take(id)
+        self.inflight.lock().dispatch_take(id)
     }
 
     /// Remove the named dispatch entry and hand back its hold without any
@@ -149,7 +140,7 @@ impl NativeBinding {
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn dispatch_abandon(&self, id: DispatchId) -> Option<SettlementHold> {
-        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_abandon(id)
+        self.inflight.lock().dispatch_abandon(id)
     }
 
     /// Non-consuming peek-then-take of the named dispatch entry: probe its
@@ -163,7 +154,7 @@ impl NativeBinding {
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(&self, id: DispatchId) -> Option<TaskDone<O, C>> {
-        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_try_take(id)
+        self.inflight.lock().dispatch_try_take(id)
     }
 
     /// Arm a ledger entry no worker answers (ADR-0243 §1), with the `answer`
@@ -180,11 +171,7 @@ impl NativeBinding {
         reply_to: Source,
         answer: AnswerUnanswered,
     ) -> (DispatchId, Weak<Self>) {
-        let id = self
-            .inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_insert_held(hold, reply_to, answer);
+        let id = self.inflight.lock().dispatch_insert_held(hold, reply_to, answer);
         (id, Arc::downgrade(self))
     }
 
@@ -196,7 +183,7 @@ impl NativeBinding {
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn dispatch_claim_held(&self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
-        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_claim_held(id)
+        self.inflight.lock().dispatch_claim_held(id)
     }
 
     /// Hand the held entry `id` to a worker (ADR-0243 §3): the entry keeps
@@ -213,10 +200,7 @@ impl NativeBinding {
         id: DispatchId,
         context: Box<dyn Any + Send>,
     ) -> DeferredCompletion<O> {
-        self.inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_attach_worker(id, context);
+        self.inflight.lock().dispatch_attach_worker(id, context);
         DeferredCompletion::new(Arc::downgrade(self), id)
     }
 
@@ -236,8 +220,7 @@ impl NativeBinding {
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn answer_held_for_actor_close(&self) {
-        let (owed, released) =
-            self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_close_for_actor();
+        let (owed, released) = self.inflight.close_for_actor();
         for OwedAtClose { hold, reply_to, answer } in owed {
             answer(self, reply_to, hold.as_ref().map(SettlementHold::root));
             drop(hold);
@@ -258,8 +241,7 @@ impl NativeBinding {
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn settle_held_for_engine_teardown(&self) {
-        let (owed, released) =
-            self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_close_for_actor();
+        let (owed, released) = self.inflight.close_for_actor();
         drop(owed);
         drop(released);
     }
@@ -282,12 +264,7 @@ impl NativeBinding {
         reply: KindId,
         context_name: &'static str,
     ) -> Result<(), wire::Error> {
-        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_park(
-            id,
-            request,
-            reply,
-            context_name,
-        )
+        self.inflight.park(id, request, reply, context_name)
     }
 
     /// Claim the parked entry `id` back to held for a decode of the context
@@ -301,29 +278,24 @@ impl NativeBinding {
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn dispatch_unpark(&self, id: DispatchId, request: RequestId, reply: KindId) -> Result<(), wire::Error> {
-        self.inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_unpark(id, request, reply)
+        self.inflight.unpark(id, request, reply)
     }
 
     /// The kind name of the context stored under `request` while it still
     /// carries a parked `Held` (ADR-0243 §7). Takes the ledger lock for this
-    /// one read.
+    /// one read only while some entry is parked, so an actor that never
+    /// parks takes no lock on its reply path.
     ///
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn parked_context(&self, request: RequestId) -> Option<&'static str> {
-        self.inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_parked_context(request)
+        self.inflight.parked_context(request)
     }
 
     /// The named ledger entry's state, for tests.
     #[cfg(test)]
     pub(crate) fn dispatch_state_of(&self, id: DispatchId) -> Option<&'static str> {
-        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_state_of(id)
+        self.inflight.lock().dispatch_state_of(id)
     }
 }
