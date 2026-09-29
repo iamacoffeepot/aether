@@ -21,6 +21,7 @@ use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::config::SettlementConfig;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::{OwnedDispatch, Registry};
@@ -801,7 +802,9 @@ fn bind_listener_self_refuses_a_sender_that_does_not_cover_the_consumer_protocol
         boot_tcp_substrate_with(|builder| builder.with_actor::<DataOnlyConsumer>(replies_tx));
     let tcp = chassis.actor_ref::<TcpCapability>();
 
-    let reply = replies.recv().expect("the bind reply reaches its sender");
+    let reply = replies
+        .recv_timeout(SettlementConfig::from_env().to_cap())
+        .expect("the self-bind reply never reached its sender within the settlement cap");
     match reply {
         BindListenerResult::Err { error, .. } => {
             assert!(error.contains("TcpConsumer"), "expected a consumer-protocol refusal, got: {error}");
@@ -891,7 +894,9 @@ fn nested_lineage_consumer_receives_session_mail() {
         boot_tcp_substrate_with(|builder| builder.with_actor::<ConsumerHost>((captures, born)));
     let tcp = chassis.actor_ref::<TcpCapability>();
     let key = LoadName::new(NESTED_CONSUMER_KEY).expect("a valid key");
-    born_rx.recv().expect("the host hears its nested consumer's birth decided");
+    born_rx
+        .recv_timeout(SettlementConfig::from_env().to_cap())
+        .expect("the nested consumer's birth was never decided within the settlement cap");
     chassis
         .child::<ConsumerHost, SessionConsumer>(chassis.actor_ref::<ConsumerHost>(), key.clone())
         .expect("the nested consumer is live");
