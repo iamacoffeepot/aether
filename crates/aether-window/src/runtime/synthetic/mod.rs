@@ -360,16 +360,13 @@ impl WindowManagerSurface for SyntheticWindowCapability {
 mod tests {
     use aether_data::Kind;
     use aether_kinds::Key;
-    use aether_substrate::mail::Source;
-    use aether_substrate::mail::registry::noop_handler;
-    use aether_substrate::testing::{bare_substrate, drop_ref, unrouted_binding};
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::runtime::subscribers::fixture::{recipients, stand, watcher};
+    use crate::runtime::subscribers::fixture::{Rig, receivers, recipients, watcher};
     // The subscription request kinds moved to the `WindowManagerSurface` set,
     // so the manager module no longer imports them for `use super::*` to carry.
-    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow, WindowSubscription};
+    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow, WindowSelector, WindowSubscription};
 
     fn test_state() -> SyntheticWindowCapabilityState {
         SyntheticWindowCapabilityState {
@@ -429,48 +426,49 @@ mod tests {
         );
     }
 
-    /// An explicit subscribe proves its subscriber path live at receipt: a
-    /// path with no live actor answers `Err` naming it and adds no route,
-    /// and a live one is held. An unsubscribe whose subscriber has since gone
-    /// answers `Err` naming it and leaves the table as it was; a departed
-    /// subscriber's rows leave with its `MonitorNotice` instead.
+    /// An explicit subscribe carries a subscriber path its decode proves
+    /// live (ADR-0231 §3), so a path with no actor behind it never reaches
+    /// the table: it is refused and adds no route. Fails if an unproven path
+    /// can be held as a subscriber.
     #[test]
     fn explicit_subscriptions_validate_before_mutating_routes() {
-        let (registry, mailer) = bare_substrate();
-        let binding = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-        let mut state = test_state();
-        let key = |name| WindowSubscription::Key(watcher(name).narrow());
-        let names = |name, error: &str| error.contains(watcher(name).as_erased().as_str());
+        let mut rig = Rig::<SyntheticWindowCapability>::boot(());
 
-        let unknown = SyntheticWindowCapability::on_subscribe(
-            &mut state,
-            &mut ctx,
-            SubscribeWindow { selector: crate::WindowSelector::All, subscription: key("unknown") },
+        rig.send(&SubscribeWindow {
+            selector: WindowSelector::All,
+            subscription: WindowSubscription::Key(watcher("unknown").narrow()),
+        });
+
+        assert!(
+            !rig.replies::<SubscribeWindowResult>().iter().any(|reply| matches!(reply, SubscribeWindowResult::Ok)),
+            "an unproven subscriber is never accepted",
         );
-        assert!(matches!(unknown, SubscribeWindowResult::Err { error } if names("unknown", &error)));
-        assert!(recipients::<Key>(&state.subscribers, &main_path()).is_empty());
+        let held = rig.slot.read_state(|state| recipients::<Key>(&state.subscribers, &main_path()));
+        assert_eq!(held, Some(BTreeSet::new()), "a refused subscribe adds no route");
+    }
 
-        let subscriber = stand(&registry, "dropped", noop_handler());
-        assert!(matches!(
-            SyntheticWindowCapability::on_subscribe(
-                &mut state,
-                &mut ctx,
-                SubscribeWindow { selector: crate::WindowSelector::All, subscription: key("dropped") },
-            ),
-            SubscribeWindowResult::Ok
-        ));
-        drop_ref(&registry, subscriber);
+    /// A published event continues the causal chain that caused it and is
+    /// stamped with the manager as its sender: the injected event's tracked
+    /// root is the subscriber's envelope root, and its sender is the manager.
+    /// Fails if the fan-out starts a fresh chain (settlement and tracing lose
+    /// the event) or is sent under another identity.
+    #[test]
+    fn direct_publication_preserves_source_and_causal_lineage() {
+        let mut rig = Rig::<SyntheticWindowCapability>::boot(());
+        rig.watcher("direct");
+        let subscription = WindowSubscription::Key(watcher("direct").narrow());
+        assert!(matches!(rig.subscribe(WindowSelector::All, subscription), SubscribeWindowResult::Ok));
 
-        assert!(matches!(
-            SyntheticWindowCapability::on_unsubscribe(
-                &mut state,
-                &mut ctx,
-                UnsubscribeWindow { selector: crate::WindowSelector::All, subscription: key("dropped") },
-            ),
-            SubscribeWindowResult::Err { error } if names("dropped", &error)
-        ));
-        assert_eq!(recipients::<Key>(&state.subscribers, &main_path()), BTreeSet::from([subscriber]));
+        let main = main_path();
+        let event = Key { window: main.clone(), code: 41 };
+        let inject = InjectWindowEvent { window: main, kind: Key::ID, payload: event.encode_into_bytes() };
+        let (root, receipts) = rig.send_to(rig.manager(), &inject);
+
+        assert_eq!(receivers(&receipts), ["direct"]);
+        let receipt = &receipts[0];
+        assert_eq!(receipt.root, Some(root), "the subscriber's envelope is in the injecting chain");
+        assert_eq!(receipt.sender, Some(rig.manager().erase()), "the manager is the stamped sender");
+        assert_eq!(receipt.event::<Key>(), Some(event));
     }
 
     /// Reducer-only: drives `check_create` directly rather than the handler,

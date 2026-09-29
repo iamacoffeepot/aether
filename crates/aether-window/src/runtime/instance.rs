@@ -262,14 +262,10 @@ impl NativeActor for HeadlessWindowInstance {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use aether_data::Kind;
-    use aether_substrate::Registry;
-    use aether_substrate::actor::native::{Dispatch, NativeCtx};
-    use aether_substrate::mail::Source;
-    use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::testing::unrouted_binding;
+    use aether_data::{Kind, SessionToken, Uuid};
+    use aether_substrate::actor::native::Dispatch;
+    use aether_substrate::testing::{boot_test_chassis_with, decode_session_reply, fresh_substrate_and_rx};
+    use aether_substrate::{ReplyTarget, Subname};
 
     use super::super::HeadlessWindowCapabilityState;
     use super::{HeadlessWindowInstanceState, SetWindowCursor, SetWindowCursorResult, SetWindowMenu};
@@ -284,14 +280,18 @@ mod tests {
     /// The advertised-surface half is the part a new op actually gets wrong:
     /// the `Err` arms below are easy to remember and the *registration* is not,
     /// and an identity that advertises a kind is an identity that dispatches
-    /// it. So the pair — advertised, and answered — is what pins "replies
-    /// rather than hangs" without booting a real headless engine.
+    /// it. So the pair — advertised, and answered over real mail — is what
+    /// pins "replies rather than hangs".
     #[test]
     fn headless_refuses_the_native_chrome_ops_at_both_identities_rather_than_dropping_them() {
-        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        let binding = unrouted_binding(&mailer);
-        let mut capability_ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-        let mut instance_ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
+        let (registry, mailer, egress) = fresh_substrate_and_rx();
+        let chassis = boot_test_chassis_with::<HeadlessWindowCapability>(&registry, &mailer, (), ());
+        let instance = chassis
+            .spawn_actor_for_test::<HeadlessWindowInstance>(Subname::Named("main"), (), ())
+            .finish()
+            .expect("the headless window endpoint spawns");
+        let capability = chassis.actor_ref::<HeadlessWindowCapability>();
+        let session = ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0)), correlation: 1 };
 
         for advertised in [
             <HeadlessWindowCapability as Dispatch<HeadlessWindowCapabilityState>>::capabilities(),
@@ -302,37 +302,19 @@ mod tests {
             assert!(kinds.contains(&SetWindowCursor::ID), "the headless identity advertises aether.window.set_cursor");
         }
 
-        assert!(matches!(
-            HeadlessWindowCapability::on_set_menu(
-                &mut HeadlessWindowCapabilityState,
-                &mut capability_ctx,
-                SetWindowMenu { menus: Vec::new() },
-            ),
-            SetWindowMenuResult::Err { .. }
-        ));
-        assert!(matches!(
-            HeadlessWindowInstance::on_set_menu(
-                &mut HeadlessWindowInstanceState,
-                &mut instance_ctx,
-                SetWindowMenu { menus: Vec::new() },
-            ),
-            SetWindowMenuResult::Err { .. }
-        ));
-        assert!(matches!(
-            HeadlessWindowCapability::on_set_cursor(
-                &mut HeadlessWindowCapabilityState,
-                &mut capability_ctx,
-                SetWindowCursor { icon: CursorIcon::Move },
-            ),
-            SetWindowCursorResult::Err { .. }
-        ));
-        assert!(matches!(
-            HeadlessWindowInstance::on_set_cursor(
-                &mut HeadlessWindowInstanceState,
-                &mut instance_ctx,
-                SetWindowCursor { icon: CursorIcon::Move },
-            ),
-            SetWindowCursorResult::Err { .. }
-        ));
+        chassis.send_for_reply(capability, &SetWindowMenu { menus: Vec::new() }, session);
+        assert!(matches!(decode_session_reply(&egress), SetWindowMenuResult::Err { .. }), "the root refuses a menu");
+        chassis.send_for_reply(instance, &SetWindowMenu { menus: Vec::new() }, session);
+        assert!(matches!(decode_session_reply(&egress), SetWindowMenuResult::Err { .. }), "a window refuses a menu");
+        chassis.send_for_reply(capability, &SetWindowCursor { icon: CursorIcon::Move }, session);
+        assert!(
+            matches!(decode_session_reply(&egress), SetWindowCursorResult::Err { .. }),
+            "the root refuses a cursor",
+        );
+        chassis.send_for_reply(instance, &SetWindowCursor { icon: CursorIcon::Move }, session);
+        assert!(
+            matches!(decode_session_reply(&egress), SetWindowCursorResult::Err { .. }),
+            "a window refuses a cursor",
+        );
     }
 }

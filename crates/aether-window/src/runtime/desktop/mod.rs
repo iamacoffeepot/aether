@@ -1035,26 +1035,16 @@ pub fn resolve_fullscreen(
 mod tests {
     use std::collections::BTreeSet;
     use std::fmt::Debug;
-    use std::sync::mpsc;
 
     use aether_data::{ErasedActorPath, Kind, SessionToken, Uuid};
     use aether_kinds::mouse_button;
+    use aether_substrate::ReplyTarget;
     use aether_substrate::actor::native::SpawnError;
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::Source;
-    use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, noop_handler};
-    use aether_substrate::testing::{
-        bare_substrate, boot_bare_test_chassis, decode_session_reply, drop_ref, fresh_substrate_and_rx,
-        registered_binding, token_root, unrouted_binding,
-    };
-    use aether_substrate::{Registry, ReplyTarget};
+    use aether_substrate::testing::{boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx};
 
     use super::*;
-    use crate::runtime::subscribers::fixture::{recipients, stand, subscriber, watcher};
-    // The subscription request kinds moved to the `WindowSubscriptions` set,
-    // so the manager module no longer imports them for `use super::*` to carry.
-    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow, WindowSubscription};
+    use crate::runtime::subscribers::fixture::{Receipt, Rig, watcher};
+    use crate::{SubscribeWindowResult, WindowSubscription};
 
     fn test_state() -> DesktopWindowCapabilityState {
         DesktopWindowCapabilityState {
@@ -1073,13 +1063,12 @@ mod tests {
         }
     }
 
-    fn test_ctx() -> (Arc<NativeBinding>, Arc<Mailer>) {
-        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        (unrouted_binding(&mailer), mailer)
-    }
-
     fn spec(name: &str, title: &str) -> WindowSpec {
         WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
+    }
+
+    fn rig() -> Rig<DesktopWindowCapability> {
+        Rig::boot(DesktopWindowParams::default())
     }
 
     fn path(name: &str) -> ErasedActorPath {
@@ -1113,50 +1102,6 @@ mod tests {
             },
         );
         window
-    }
-
-    /// An explicit subscribe proves its subscriber path live at receipt: a
-    /// path with no live actor answers `Err` naming it and adds no route,
-    /// and a live one is held. An unsubscribe whose subscriber has since gone
-    /// answers `Err` naming it and leaves the table as it was; a departed
-    /// subscriber's rows leave with its `MonitorNotice` instead.
-    #[test]
-    fn explicit_subscriptions_validate_before_mutating_routes() {
-        let mut state = test_state();
-        let (registry, mailer) = bare_substrate();
-        let binding = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-        let key = |name| WindowSubscription::Key(watcher(name).narrow());
-        let names = |name, error: &str| error.contains(watcher(name).as_erased().as_str());
-
-        let unknown = DesktopWindowCapability::on_subscribe(
-            &mut state,
-            &mut ctx,
-            SubscribeWindow { selector: crate::WindowSelector::All, subscription: key("unknown") },
-        );
-        assert!(matches!(unknown, SubscribeWindowResult::Err { error } if names("unknown", &error)));
-        assert!(recipients::<Key>(&state.subscribers, &path("main")).is_empty());
-
-        let subscriber = stand(&registry, "dropped", noop_handler());
-        assert!(matches!(
-            DesktopWindowCapability::on_subscribe(
-                &mut state,
-                &mut ctx,
-                SubscribeWindow { selector: crate::WindowSelector::All, subscription: key("dropped") },
-            ),
-            SubscribeWindowResult::Ok
-        ));
-        drop_ref(&registry, subscriber);
-
-        assert!(matches!(
-            DesktopWindowCapability::on_unsubscribe(
-                &mut state,
-                &mut ctx,
-                UnsubscribeWindow { selector: crate::WindowSelector::All, subscription: key("dropped") },
-            ),
-            SubscribeWindowResult::Err { error } if names("dropped", &error)
-        ));
-        assert_eq!(recipients::<Key>(&state.subscribers, &path("main")), BTreeSet::from([subscriber]));
     }
 
     #[test]
@@ -1218,61 +1163,79 @@ mod tests {
         assert_eq!(info.title, "Renamed");
     }
 
+    /// Fails if `aether.window.list` stops answering in window-path order.
     #[test]
     fn list_windows_is_sorted_by_window_path() {
-        let mut state = test_state();
-        insert_window(&mut state, "two", false);
-        insert_window(&mut state, "nine", false);
-        let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
+        let mut rig = rig();
+        rig.slot
+            .host_turn(|state, _ctx| {
+                insert_window(state, "two", false);
+                insert_window(state, "nine", false);
+            })
+            .expect("the desktop manager is live");
 
-        let ListWindowsResult::Ok { windows } = DesktopWindowCapability::on_list(&mut state, &mut ctx, ListWindows)
-        else {
+        rig.send(&ListWindows);
+        let ListWindowsResult::Ok { windows } = rig.reply() else {
             panic!("desktop manager list succeeds");
         };
 
         assert_eq!(windows.into_iter().map(|window| window.path).collect::<Vec<_>>(), [path("nine"), path("two")]);
     }
 
-    /// Reducer-only: staging a real child needs a chassis-built binding this
-    /// fixture cannot supply, so the reservation is assembled directly. It
-    /// pins the two properties the staged path owes — a reserved child is not
-    /// enumerable, and an authoritative rejection rolls the window back and
-    /// answers the caller exactly once.
+    /// A create is reserved by `aether.window.create`; the native window a
+    /// winit callback would stage is placed directly, since the test has no
+    /// event loop. It pins the two properties the staged path owes — a
+    /// reserved child is not enumerable, and an authoritative rejection rolls
+    /// the window back and answers the caller exactly once. Fails if an
+    /// attaching window is listed, or if a failed birth leaks its window, its
+    /// reservation, or its caller's reply.
     #[test]
     fn a_reserved_window_child_is_not_enumerable_and_rolls_back_when_its_birth_fails() {
-        let mut state = test_state();
-        let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-        assert!(state.queue_create(spec("tools", "Tools"), None, true).is_ok(), "reserve the create");
-        let tools = insert_window(&mut state, "tools", false);
-        state.windows.get_mut(&tools).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
+        let mut rig = rig();
+        rig.push(&CreateWindow { spec: spec("tools", "Tools") });
+        rig.slot.drain_available();
+        let tools = rig
+            .slot
+            .host_turn(|state, _ctx| {
+                let tools = insert_window(state, "tools", false);
+                state.windows.get_mut(&tools).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
+                tools
+            })
+            .expect("the desktop manager is live");
 
-        let ListWindowsResult::Ok { windows } = DesktopWindowCapability::on_list(&mut state, &mut ctx, ListWindows)
-        else {
+        rig.send(&ListWindows);
+        let ListWindowsResult::Ok { windows } = rig.reply() else {
             panic!("desktop manager list succeeds");
         };
         assert!(windows.is_empty(), "a reserved window child is absent from live enumeration");
 
-        state.finish_window_child_spawn(
-            &mut ctx,
-            &tools,
-            &SpawnOutcome::<DesktopWindowInstance> {
-                canonical_name: ErasedActorPath::new("aether.window/aether.window.instance:tools")
-                    .expect("fixture is an actor path"),
-                result: Err(SpawnError::OwnerClosed),
-            },
-        );
+        rig.slot
+            .host_turn(|state, ctx| {
+                state.finish_window_child_spawn(
+                    ctx,
+                    &tools,
+                    &SpawnOutcome::<DesktopWindowInstance> {
+                        canonical_name: ErasedActorPath::new("aether.window/aether.window.instance:tools")
+                            .expect("fixture is an actor path"),
+                        result: Err(SpawnError::OwnerClosed),
+                    },
+                );
+            })
+            .expect("the desktop manager is live");
 
-        assert!(!state.windows.contains_key(&tools), "a rejected birth rolls its window back");
-        assert!(state.pending_creates.is_empty(), "a rejected birth clears its reservation");
-        assert!(
-            state
-                .pending_host_effects
-                .iter()
-                .any(|effect| matches!(effect, WindowHostEffect::Closing { path: closing } if *closing == tools)),
-            "rollback detaches the native window through the host-effect queue",
-        );
+        assert!(matches!(rig.reply(), CreateWindowResult::Err { .. }), "the caller is answered once, with the failure");
+        rig.slot
+            .read_state(|state| {
+                assert!(!state.windows.contains_key(&tools), "a rejected birth rolls its window back");
+                assert!(state.pending_creates.is_empty(), "a rejected birth clears its reservation");
+                assert!(
+                    state.pending_host_effects.iter().any(
+                        |effect| matches!(effect, WindowHostEffect::Closing { path: closing } if *closing == tools)
+                    ),
+                    "rollback detaches the native window through the host-effect queue",
+                );
+            })
+            .expect("the desktop manager is live");
     }
 
     /// The divergence guard runs when the birth completes: a Live child the
@@ -1345,18 +1308,21 @@ mod tests {
         assert!(matches!(&actions[0], WindowHostAction::Create { spec, .. } if spec.title == "boot"));
     }
 
+    /// Fails if detaching one of several windows asks the application to
+    /// shut down.
     #[test]
     fn closing_one_window_does_not_request_global_shutdown() {
-        let mut state = test_state();
-        let first = insert_window(&mut state, "first", true);
-        let second = insert_window(&mut state, "second", false);
-        let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
+        let mut rig = rig();
 
-        let effects = state.finish_window_close(&first, &mut ctx);
+        rig.slot
+            .host_turn(|state, ctx| {
+                let first = insert_window(state, "first", true);
+                let second = insert_window(state, "second", false);
 
-        assert!(effects.is_empty());
-        assert!(state.windows.contains_key(&second));
+                assert!(state.finish_window_close(&first, ctx).is_empty());
+                assert!(state.windows.contains_key(&second));
+            })
+            .expect("the desktop manager is live");
     }
 
     #[test]
@@ -1369,95 +1335,83 @@ mod tests {
         assert!(matches!(windows.as_slice(), [window] if window.path == path && window.target.is_none()));
     }
 
+    /// Fails if the last window's detach does not ask for shutdown, or asks
+    /// before the window has left the map.
     #[test]
     fn closing_the_last_window_requests_shutdown_after_removal() {
-        let mut state = test_state();
-        let first = insert_window(&mut state, "first", true);
-        let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
+        let mut rig = rig();
 
-        let effects = state.finish_window_close(&first, &mut ctx);
+        rig.slot
+            .host_turn(|state, ctx| {
+                let first = insert_window(state, "first", true);
 
-        assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
-        assert!(state.windows.is_empty());
+                assert!(matches!(
+                    state.finish_window_close(&first, ctx).as_slice(),
+                    [WindowHostEffect::LastWindowClosed]
+                ));
+                assert!(state.windows.is_empty());
+            })
+            .expect("the desktop manager is live");
     }
 
+    /// A create still in flight when the last window closes defers the
+    /// shutdown to the create's outcome. Fails if the close shuts down under
+    /// a pending replacement, or if the replacement's failure forgets the
+    /// deferred shutdown or its caller's reply.
     #[test]
     fn pending_replacement_defers_last_window_shutdown_until_create_resolves() {
-        let mut state = test_state();
-        let first = insert_window(&mut state, "first", true);
-        assert!(state.queue_create(spec("replacement", "Replacement"), None, false).is_ok());
-        let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
+        let mut rig = rig();
+        let first = rig.slot.host_turn(|state, _ctx| insert_window(state, "first", true)).expect("the manager is live");
+        rig.push(&CreateWindow { spec: spec("replacement", "Replacement") });
+        rig.slot.drain_available();
 
-        assert!(state.finish_window_close(&first, &mut ctx).is_empty());
-        assert!(state.shutdown_when_idle);
-        let effects = state.fail_window_creation(&mut ctx, &path("replacement"), "native create failed".to_owned());
+        rig.slot
+            .host_turn(|state, ctx| {
+                assert!(state.finish_window_close(&first, ctx).is_empty());
+                assert!(state.shutdown_when_idle);
+                let effects = state.fail_window_creation(ctx, &path("replacement"), "native create failed".to_owned());
 
-        assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
+                assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
+            })
+            .expect("the desktop manager is live");
+        assert!(matches!(rig.reply(), CreateWindowResult::Err { .. }), "the replacement's caller hears the failure");
     }
 
+    /// Fails if a boot window whose native create fails leaves its
+    /// reservation behind or leaves the application running with no window.
     #[test]
     fn failed_initial_create_rolls_back_and_requests_shutdown() {
-        let mut state = test_state();
-        state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
-        let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let effects = state.fail_window_creation(&mut ctx, &path("main"), "native create failed".to_owned());
+        let mut rig = rig();
 
-        assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
-        assert!(state.pending_creates.is_empty());
+        rig.slot
+            .host_turn(|state, ctx| {
+                state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
+                let effects = state.fail_window_creation(ctx, &path("main"), "native create failed".to_owned());
+
+                assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
+                assert!(state.pending_creates.is_empty());
+            })
+            .expect("the desktop manager is live");
     }
 
+    /// Fails if a boot window whose render attachment fails stays staged, or
+    /// the application keeps running with no window.
     #[test]
     fn failed_attachment_removes_the_staged_initial_window_before_shutdown() {
-        let mut state = test_state();
-        state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
-        let main = insert_window(&mut state, "main", false);
-        state.windows.get_mut(&main).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
-        let (binding, _mailer) = test_ctx();
-        // Attachment stages the window's child birth, so the ctx names the cap
-        // it would parent under — the same one the pumped host turn supplies.
-        let mut ctx =
-            NativeCtx::<'_, DesktopWindowCapability, Single>::new_for_actor(&binding, Source::NONE, None, None);
+        let mut rig = rig();
 
-        let effects = state.finish_window_attachment(&main, Err("render attach failed".to_owned()), &mut ctx);
+        rig.slot
+            .host_turn(|state, ctx| {
+                state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
+                let main = insert_window(state, "main", false);
+                state.windows.get_mut(&main).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
+                let effects = state.finish_window_attachment(&main, Err("render attach failed".to_owned()), ctx);
 
-        assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
-        assert!(!state.windows.contains_key(&main));
-        assert!(state.pending_creates.is_empty());
-    }
-
-    #[test]
-    fn direct_publication_preserves_source_and_causal_lineage() {
-        let registry = Arc::new(Registry::new());
-        let (tx, rx) = mpsc::channel();
-        stand(
-            &registry,
-            "direct",
-            Arc::new(move |dispatch: OwnedDispatch| {
-                dispatch.discharge();
-                tx.send(dispatch).expect("record routed window event");
-            }) as Arc<dyn InboxHandler>,
-        );
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-        let (binding, manager) = registered_binding(&registry, &mailer, "test.window.manager", noop_handler());
-        let mut state = test_state();
-        let root = token_root(7);
-        let parent = token_root(9);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, Some(parent), Some(root));
-        let direct = subscriber::<Key>(&ctx, "direct");
-        state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, direct);
-
-        let main = path("main");
-        state.publish(&mut ctx, &main, &Key { window: main.clone(), code: 41 });
-        drop(ctx);
-
-        let dispatch = rx.recv().expect("direct subscriber receives the event");
-        assert_eq!(dispatch.root, Some(root));
-        assert_eq!(dispatch.parent_mail, Some(parent));
-        assert_eq!(NativeCtx::new(&binding, dispatch.sender, None, None).sender(), Some(manager));
-        assert_eq!(Key::decode_from_bytes(dispatch.payload.bytes()), Some(Key { window: main, code: 41 }));
+                assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
+                assert!(!state.windows.contains_key(&main));
+                assert!(state.pending_creates.is_empty());
+            })
+            .expect("the desktop manager is live");
     }
 
     /// A live window at a chosen display density, registered under winit's
@@ -1474,12 +1428,12 @@ mod tests {
         (main, winit_id)
     }
 
-    /// The sole recorded publication of kind `K`, decoded.
-    fn sole_published<K: Kind + PartialEq + Debug>(recorded: &[OwnedDispatch]) -> K {
-        let mut matched = recorded.iter().filter(|dispatch| dispatch.kind == K::ID);
-        let dispatch = matched.next().unwrap_or_else(|| panic!("{} was published", K::NAME));
+    /// The sole received publication of kind `K`, decoded.
+    fn sole_published<K: Kind + PartialEq + Debug>(receipts: &[Receipt]) -> K {
+        let mut matched = receipts.iter().filter_map(Receipt::event::<K>);
+        let event = matched.next().unwrap_or_else(|| panic!("{} was published", K::NAME));
         assert!(matched.next().is_none(), "{} was published exactly once", K::NAME);
-        K::decode_from_bytes(dispatch.payload.bytes()).unwrap_or_else(|| panic!("{} decodes", K::NAME))
+        event
     }
 
     // Tripwire: every pixel coordinate this translation publishes is a
@@ -1502,55 +1456,48 @@ mod tests {
         use winit::dpi::PhysicalPosition;
         use winit::event::{DeviceId, MouseButton as WinitMouseButton, MouseScrollDelta, TouchPhase};
 
-        let registry = Arc::new(Registry::new());
-        let (tx, rx) = mpsc::channel();
-        stand(
-            &registry,
-            "pixel-space",
-            Arc::new(move |dispatch: OwnedDispatch| {
-                dispatch.discharge();
-                tx.send(dispatch).expect("record published input");
-            }) as Arc<dyn InboxHandler>,
-        );
-        let binding = unrouted_binding(&Arc::new(Mailer::new(Arc::clone(&registry))));
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
+        let mut rig = rig();
+        rig.watcher("pixel-space");
+        let pixel_space = watcher("pixel-space");
+        for subscription in [
+            WindowSubscription::MouseMove(pixel_space.narrow()),
+            WindowSubscription::MouseButton(pixel_space.narrow()),
+            WindowSubscription::MouseWheel(pixel_space.narrow()),
+            WindowSubscription::WindowSize(pixel_space.narrow()),
+        ] {
+            assert!(matches!(rig.subscribe(crate::WindowSelector::All, subscription), SubscribeWindowResult::Ok));
+        }
 
-        let mut state = test_state();
-        let (window, winit_id) = insert_scaled_window(&mut state, 2.0);
-        let all = || crate::WindowSelector::All;
-        let (moves, buttons) =
-            (subscriber::<MouseMove>(&ctx, "pixel-space"), subscriber::<MouseButton>(&ctx, "pixel-space"));
-        let (wheels, sizes) =
-            (subscriber::<MouseWheel>(&ctx, "pixel-space"), subscriber::<WindowSize>(&ctx, "pixel-space"));
-        state.subscribers.subscribe(&mut ctx, all(), moves);
-        state.subscribers.subscribe(&mut ctx, all(), buttons);
-        state.subscribers.subscribe(&mut ctx, all(), wheels);
-        state.subscribers.subscribe(&mut ctx, all(), sizes);
+        let window = rig
+            .slot
+            .host_turn(|state, ctx| {
+                let (window, winit_id) = insert_scaled_window(state, 2.0);
+                let device_id = DeviceId::dummy();
+                state.window_event(
+                    winit_id,
+                    WindowEvent::CursorMoved { device_id, position: PhysicalPosition::new(400.0, 300.0) },
+                    ctx,
+                );
+                state.window_event(
+                    winit_id,
+                    WindowEvent::MouseInput { device_id, state: ElementState::Pressed, button: WinitMouseButton::Left },
+                    ctx,
+                );
+                state.window_event(
+                    winit_id,
+                    WindowEvent::MouseWheel {
+                        device_id,
+                        delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -120.0)),
+                        phase: TouchPhase::Moved,
+                    },
+                    ctx,
+                );
+                state.window_event(winit_id, WindowEvent::Resized(PhysicalSize::new(1280, 960)), ctx);
+                window
+            })
+            .expect("the desktop manager is live");
 
-        let device_id = DeviceId::dummy();
-        state.window_event(
-            winit_id,
-            WindowEvent::CursorMoved { device_id, position: PhysicalPosition::new(400.0, 300.0) },
-            &mut ctx,
-        );
-        state.window_event(
-            winit_id,
-            WindowEvent::MouseInput { device_id, state: ElementState::Pressed, button: WinitMouseButton::Left },
-            &mut ctx,
-        );
-        state.window_event(
-            winit_id,
-            WindowEvent::MouseWheel {
-                device_id,
-                delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -120.0)),
-                phase: TouchPhase::Moved,
-            },
-            &mut ctx,
-        );
-        state.window_event(winit_id, WindowEvent::Resized(PhysicalSize::new(1280, 960)), &mut ctx);
-        drop(ctx);
-
-        let recorded = rx.try_iter().collect::<Vec<_>>();
+        let recorded = rig.receipts(4);
 
         assert_eq!(
             sole_published::<MouseMove>(&recorded),
