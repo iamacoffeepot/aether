@@ -20,6 +20,11 @@ publish = false
 [features]
 default = ["runtime"]
 runtime = []
+# Exposes `SubstrateHarness::await_registry_applied`, which needs
+# `PassiveChassis::await_registry_applied` — gated on `aether-substrate`'s
+# own `test-support` feature. A downstream test crate (never a chassis
+# binary, which takes this crate as a normal dependency) opts in.
+test-support = ["aether-substrate/test-support"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }

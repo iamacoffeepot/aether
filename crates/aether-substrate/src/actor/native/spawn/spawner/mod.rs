@@ -32,6 +32,8 @@ use crate::scheduler::{Drainable, WakeHandle, WakeSink};
 mod close_wait;
 pub(super) mod commit;
 pub(super) mod prepare;
+#[cfg(any(test, feature = "test-support"))]
+mod registry_barrier;
 mod teardown;
 
 /// The dispatch `Source` an embedder's [`ReplyTarget`] names: the push's

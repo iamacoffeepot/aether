@@ -587,6 +587,26 @@ impl<C: Chassis> PassiveChassis<C> {
         self.booted.spawner.await_closed(actor.id(), "testing.await_closed");
     }
 
+    /// Block until the registry owner has applied and published every
+    /// batch submitted before this call — the **test-scoped** barrier for
+    /// an effect this harness cannot observe directly (an alias a guest's
+    /// `wire` staged, a republish a replace staged), gated on the
+    /// `test-support` feature like [`Self::await_closed`].
+    ///
+    /// The owner runs one FIFO queue and applies and publishes a whole
+    /// drain before it completes any batch in it, so this proves only
+    /// batches submitted *before* the call: the caller must already hold a
+    /// real ordering signal (a load reply, a settled follow-up mail) that
+    /// the effect it cares about was submitted first.
+    ///
+    /// # Panics
+    /// Panics when the registry owner refuses the barrier batch or does not
+    /// complete it within the settlement cap (`AETHER_SETTLEMENT_CAP_SECS`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn await_registry_applied(&self) {
+        self.booted.spawner.await_registry_applied("testing.await_registry_applied");
+    }
+
     chassis_accessors!();
 }
 
