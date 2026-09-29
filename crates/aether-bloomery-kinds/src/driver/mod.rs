@@ -8,9 +8,11 @@
 //! [`AwaitProcessed`], answered by [`Processed`].
 
 mod call;
+mod call_input;
 mod intent;
 mod processed;
 
 pub use call::{Call, CallOutcome, CallRefusal};
-pub use intent::{CallProgram, SetHead};
+pub use call_input::{LEGACY_CALL_PROGRAM_ID, decode_call_program};
+pub use intent::{CallInput, CallProgram, SetHead};
 pub use processed::{AwaitProcessed, Processed};

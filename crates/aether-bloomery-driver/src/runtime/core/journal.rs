@@ -21,12 +21,19 @@ use super::ticket::{AppendTicket, CallerId, EventsTicket};
 /// Entries per journal page. Matches the journal owner's `MAX_READ_EVENTS`.
 pub const EVENTS_PAGE: u32 = 128;
 
-/// One planned routing record: ready to append, or a `SetHead` awaiting its
-/// compare-and-swap at derivation.
+/// One planned routing record: ready to append, a supplied-input call, or a
+/// `SetHead` awaiting its compare-and-swap at derivation.
 #[derive(Debug, Clone)]
 pub enum PlannedRecord {
     /// A record decided during routing, appended unchanged.
     Ready(DriverRecord),
+    /// A `Requested` record whose fresh input must be staged in the same append.
+    SuppliedCall {
+        /// Exact input bytes captured from the reactor reply.
+        input: EncodedArtifact,
+        /// The request naming `input.digest()`.
+        record: DriverRecord,
+    },
     /// A `SetHead` intent whose destination is stored under the head's kind.
     /// Derivation checks the compare-and-swap against the journal view's
     /// `Heads` plus earlier moves in the same batch; a pass becomes

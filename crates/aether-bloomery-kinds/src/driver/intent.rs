@@ -1,19 +1,43 @@
 //! Reactor intents: the two kinds a rule's `ReactorIntent.kind` may name.
 
-use aether_data::Kind;
+use aether_data::{Cites, Kind, Storage, StorageError};
 
-use crate::{Digest, Head, OpaqueBytes, ProgramName, RecordedHead, RecordedHeadMove, Ref};
+use crate::{Digest, EncodedArtifact, Head, OpaqueBytes, ProgramName, RecordedHead, RecordedHeadMove, Ref};
+
+/// Input submitted by a reactor call intent.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Schema)]
+pub enum CallInput {
+    /// Invoke over an artifact that is already stored.
+    Stored(Digest),
+    /// Persist this freshly encoded input with the resulting `Requested` record.
+    Value(EncodedArtifact),
+}
 
 /// Ask the driver to run program `name` from the bundle `program` resolves to, over `input`.
 ///
 /// A reactor intent: the driver records `Requested` with a `Reaction`
 /// source, caused by the trigger seq, and resolves `program` from heads
 /// folded through that seq (ADR-0226 decision 7).
-#[aether_data::kind(name = "aether.bloomery.driver.call_program", eq, no_serde)]
+#[aether_data::kind(name = "aether.bloomery.driver.call_program.v2", eq, no_serde)]
 pub struct CallProgram {
     pub program: Head<OpaqueBytes>,
     pub name: ProgramName,
-    pub input: Digest,
+    pub input: CallInput,
+}
+
+impl CallProgram {
+    /// Build a call carrying a freshly encoded input value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if `input` cannot be encoded.
+    pub fn with_input<K: Storage + Clone + Cites>(
+        program: Head<OpaqueBytes>,
+        name: ProgramName,
+        input: &K,
+    ) -> Result<Self, StorageError> {
+        Ok(Self { program, name, input: CallInput::Value(EncodedArtifact::new(input)?) })
+    }
 }
 
 /// Move one head, compare-and-swap on `from`.

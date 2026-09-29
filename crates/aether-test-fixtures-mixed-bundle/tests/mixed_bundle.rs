@@ -5,9 +5,9 @@ use std::fs;
 
 use aether_actor::ErasedActorRef;
 use aether_bloomery_kinds::{
-    BUNDLE_NAMESPACE, CallProgram, ClosureArtifact, Digest, EncodedArtifact, Evaluated, Event, Head, HeadMoved, Invoke,
-    Invoked, JournalEntry, OpaqueBytes, PROGRAMS_SECTION, ProgramName, REACTORS_SECTION, Ref, Status, StatusQuery,
-    Tree, Utf8Text, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
+    BUNDLE_NAMESPACE, CallInput, CallProgram, ClosureArtifact, Digest, EncodedArtifact, Evaluated, Event, Head,
+    HeadMoved, Invoke, Invoked, JournalEntry, OpaqueBytes, PROGRAMS_SECTION, ProgramName, REACTORS_SECTION, Ref,
+    Status, StatusQuery, Tree, Utf8Text, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
 };
 use aether_bloomery_program::declarations;
 use aether_data::{Cites, ErasedActorPath, Kind, Storage, StorageData};
@@ -119,7 +119,7 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
                 CallProgram {
                     program: MIXED_BUNDLE,
                     name: ProgramName::new(SUMMARIZE_PROGRAM)?,
-                    input: Digest::from_bytes([7; 32]),
+                    input: CallInput::Stored(Digest::from_bytes([7; 32])),
                 }
             );
         }

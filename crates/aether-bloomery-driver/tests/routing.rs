@@ -7,18 +7,32 @@
 mod reactor_world;
 mod support;
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, slice};
 
 use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
-    AppendRecords, AwaitProcessed, Call, CallProgram, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact,
-    Evaluated, FaultReason, Head, Invoked, NativeOrigin, OpaqueBytes, Processed, ProgramName, ProgramRef,
-    ReactorIntent, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, RuleName, SetHead,
-    Status, Utf8Text, artifact_digest,
+    AppendRecords, AwaitProcessed, Call, CallInput, CallProgram, ClosureArtifact, Detail, Digest, DriverRecord,
+    EncodedArtifact, Evaluated, FaultReason, Head, Invoked, NativeOrigin, OpaqueBytes, Processed, ProgramName,
+    ProgramRef, ReactorIntent, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, RuleName,
+    SetHead, Status, Utf8Text, artifact_digest,
 };
 use aether_data::Kind;
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
 use support::{World, bundle_wasm, digest, program_head, program_records, wasm_module};
+
+#[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.driver.routed-input")]
+struct RoutedInput {
+    count: u64,
+    text: Ref<Utf8Text>,
+}
+
+#[aether_data::kind(name = "aether.bloomery.driver.call_program", eq, no_serde)]
+struct LegacyCallProgram {
+    program: Head<OpaqueBytes>,
+    name: ProgramName,
+    input: Digest,
+}
 
 /// Store one program wasm bundle, answering its load.
 fn store_program(world: &mut World, wasm: &[u8]) -> Digest {
@@ -76,9 +90,31 @@ fn call_intent(reactor: &str, rule: &str, program: &'static str, name: &str, inp
     let call = CallProgram {
         program: program_head(program),
         name: ProgramName::new(name).expect("valid program name"),
-        input,
+        input: CallInput::Stored(input),
     };
     ReactorIntent::new(reactor_name(reactor), rule_name(rule), CallProgram::ID, call.encode_into_bytes())
+}
+
+fn supplied_call_intent(
+    reactor: &str,
+    rule: &str,
+    program: &'static str,
+    name: &str,
+    input: &RoutedInput,
+) -> ReactorIntent {
+    let call =
+        CallProgram::with_input(program_head(program), ProgramName::new(name).expect("valid program name"), input)
+            .expect("encode routed input");
+    ReactorIntent::new(reactor_name(reactor), rule_name(rule), CallProgram::ID, call.encode_into_bytes())
+}
+
+fn legacy_call_intent(reactor: &str, rule: &str, program: &'static str, name: &str, input: Digest) -> ReactorIntent {
+    let call = LegacyCallProgram {
+        program: program_head(program),
+        name: ProgramName::new(name).expect("valid program name"),
+        input,
+    };
+    ReactorIntent::new(reactor_name(reactor), rule_name(rule), LegacyCallProgram::ID, call.encode_into_bytes())
 }
 
 /// Park one barrier waiter and drive its follow-ups, returning its caller.
@@ -455,6 +491,12 @@ fn call_program_resolves_its_head_through_the_trigger_and_enters_the_pipeline() 
     assert_eq!(requested[0].0, Some(4));
     let run = ProgramName::new("run").expect("valid program name");
     assert_eq!(requested[0].1.program, ProgramRef::new(second, run));
+    let request_append = world
+        .committed
+        .iter()
+        .find(|append| append.records().iter().any(|record| matches!(record, DriverRecord::Requested { .. })))
+        .expect("routing request append");
+    assert!(request_append.artifacts().is_empty(), "stored inputs stage no artifacts");
     let faults = world
         .appends
         .iter()
@@ -462,6 +504,217 @@ fn call_program_resolves_its_head_through_the_trigger_and_enters_the_pipeline() 
         .filter(|record| matches!(record, DriverRecord::Fault { cause: 6, .. }))
         .count();
     assert_eq!(faults, 1, "the reaction request enters the program pipeline");
+}
+
+#[test]
+fn supplied_calls_stage_exact_inputs_and_keep_distinct_requests() {
+    // Catches dropping scalar fields or citations, staging the input separately
+    // from Requested, and deduplicating requests merely because their values match.
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let bundle_a = world.store_reactor(b"reactor-a");
+    let program_bundle = store_program(
+        &mut world,
+        &bundle_wasm(&[("run", RoutedInput::ID, OpaqueBytes::ID, "run it")], &[], b"program"),
+    );
+    world.seed_set_root(set_digest);
+    world.seed_move("a", bundle_a);
+    world.seed_move("prog", program_bundle);
+
+    let text = Ref::from_digest(world.store(Utf8Text::ID, b"hello"));
+    let input = RoutedInput { count: 42, text };
+    let expected = EncodedArtifact::new(&input).expect("encode expected input");
+    let first = supplied_call_intent("r", "rule", "prog", "run", &input);
+    let second = supplied_call_intent("r", "rule", "prog", "run", &input);
+    world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents: vec![first, second] });
+    script_quiet(&mut world, 10);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let append = world
+        .committed
+        .iter()
+        .find(|append| append.artifacts().len() == 2)
+        .expect("routing append with supplied inputs");
+    assert_eq!(append.artifacts(), &[expected.clone(), expected.clone()]);
+    assert_eq!(append.artifacts()[0].citations().len(), 1);
+    assert_eq!(append.artifacts()[0].citations()[0].kind(), Utf8Text::ID);
+    assert_eq!(append.artifacts()[0].citations()[0].bytes(), text.digest().as_bytes());
+
+    let requested: Vec<_> = append
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            DriverRecord::Requested { record, .. } => Some(record),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requested.len(), 2);
+    assert!(requested.iter().all(|request| request.input == expected.digest()));
+    assert_eq!(
+        requested
+            .iter()
+            .map(|request| match &request.source {
+                RequestSource::Reaction { ordinal, .. } => *ordinal,
+                RequestSource::Native { .. } => panic!("reaction request expected"),
+            })
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+#[test]
+fn legacy_call_program_normalizes_to_a_stored_input() {
+    // Catches replacing the old schema under its pinned id or accidentally
+    // treating historical digest-only bytes as a supplied artifact.
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let bundle_a = world.store_reactor(b"reactor-a");
+    let program_bundle =
+        store_program(&mut world, &bundle_wasm(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program"));
+    world.seed_set_root(set_digest);
+    world.seed_move("a", bundle_a);
+    world.seed_move("prog", program_bundle);
+
+    let input = digest(9);
+    world.evaluates.insert(
+        3,
+        Evaluated::Completed { seq: 3, intents: vec![legacy_call_intent("r", "rule", "prog", "run", input)] },
+    );
+    for seq in [4, 5, 6, 7, 8] {
+        world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
+    }
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let append = world
+        .committed
+        .iter()
+        .find(|append| append.records().iter().any(|record| matches!(record, DriverRecord::Requested { .. })))
+        .expect("legacy request append");
+    assert!(append.artifacts().is_empty());
+    let DriverRecord::Requested { record, .. } = &append.records()[0] else {
+        panic!("legacy call must normalize to Requested");
+    };
+    assert_eq!(record.input, input);
+}
+
+#[test]
+fn invalid_supplied_calls_never_stage_their_inputs() {
+    // Catches retaining a value before its exact wire schema and program head
+    // have both been accepted.
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let bundle_a = world.store_reactor(b"reactor-a");
+    world.seed_set_root(set_digest);
+    world.seed_move("a", bundle_a);
+
+    let input = RoutedInput { count: 7, text: Ref::from_digest(digest(5)) };
+    let unbound = supplied_call_intent("r", "rule", "missing", "run", &input);
+    let malformed =
+        ReactorIntent::new(reactor_name("r"), rule_name("rule"), CallProgram::ID, b"malformed-call".to_vec());
+    world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents: vec![unbound, malformed] });
+    script_quiet(&mut world, 6);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let append = world
+        .committed
+        .iter()
+        .find(|append| {
+            append.records().iter().filter(|record| matches!(record, DriverRecord::ReactionFailed { .. })).count() == 2
+        })
+        .expect("failure routing append");
+    assert!(append.artifacts().is_empty());
+    assert!(requested_records(&world).is_empty());
+}
+
+#[test]
+fn supplied_input_bytes_survive_a_routing_conflict() {
+    // Catches re-encoding or dropping a supplied value while SetHead-era
+    // comparisons are re-derived after another writer advances the journal.
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let bundle_a = world.store_reactor(b"reactor-a");
+    let program_bundle = store_program(
+        &mut world,
+        &bundle_wasm(&[("run", RoutedInput::ID, OpaqueBytes::ID, "run it")], &[], b"program"),
+    );
+    world.seed_set_root(set_digest);
+    world.seed_move("a", bundle_a);
+    world.seed_move("prog", program_bundle);
+    for seq in [4, 5, 6, 7, 8] {
+        world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
+    }
+    let manual = world.drive(commands);
+    let [Command::Evaluate { ticket, .. }] = manual.as_slice() else {
+        panic!("expected one held evaluate, got {manual:?}");
+    };
+    let ticket = *ticket;
+
+    let raced = RecordedHeadMove::new(RecordedHead::from(&program_head("other")), digest(8));
+    assert!(world.append_external(None, &raced).is_empty());
+    let input = RoutedInput { count: 99, text: Ref::from_digest(digest(6)) };
+    let expected = EncodedArtifact::new(&input).expect("encode expected input");
+    let evaluated =
+        Evaluated::Completed { seq: 3, intents: vec![supplied_call_intent("r", "rule", "prog", "run", &input)] };
+    let follow = feed_evaluated(&mut world, ticket, evaluated);
+    assert!(follow.iter().all(|command| !matches!(command, Command::Invoke { .. })));
+    let manual = world.drive(follow);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let attempts: Vec<_> =
+        world.appends.iter().filter(|append| append.artifacts() == slice::from_ref(&expected)).collect();
+    assert_eq!(attempts.len(), 2, "the conflicted append and retry carry the input");
+    assert_eq!(attempts[0].artifacts(), attempts[1].artifacts());
+}
+
+#[test]
+fn refused_supplied_input_batch_aborts_before_invocation() {
+    // Catches a supplied input escaping a refused routing transaction or a
+    // request entering the program pipeline before committed read-back.
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let bundle_a = world.store_reactor(b"reactor-a");
+    let program_bundle = store_program(
+        &mut world,
+        &bundle_wasm(&[("run", RoutedInput::ID, OpaqueBytes::ID, "run it")], &[], b"program"),
+    );
+    world.seed_set_root(set_digest);
+    world.seed_move("a", bundle_a);
+    world.seed_move("prog", program_bundle);
+    for seq in [4, 5, 6] {
+        world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
+    }
+    let manual = world.drive(commands);
+    let [Command::Evaluate { ticket, .. }] = manual.as_slice() else {
+        panic!("expected one held evaluate, got {manual:?}");
+    };
+    let ticket = *ticket;
+
+    let input = RoutedInput { count: 11, text: Ref::from_digest(digest(4)) };
+    let expected = EncodedArtifact::new(&input).expect("encode expected input");
+    world.fail_next = Some("journal exploded".to_string());
+    let follow = feed_evaluated(
+        &mut world,
+        ticket,
+        Evaluated::Completed { seq: 3, intents: vec![supplied_call_intent("r", "rule", "prog", "run", &input)] },
+    );
+    assert!(follow.iter().all(|command| !matches!(command, Command::Invoke { .. })));
+    let _manual = world.drive(follow);
+
+    assert!(world.abort.as_deref().is_some_and(|reason| reason.contains("routing batch")));
+    assert!(world.invokes_seen.is_empty());
+    assert!(world.committed.iter().all(|append| !append.artifacts().contains(&expected)));
 }
 
 #[test]

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_kinds::{AppendRecords, Detail, Digest, DriverRecord, RecordedHead, Seq};
+use aether_bloomery_kinds::{AppendRecords, Detail, Digest, DriverRecord, EncodedArtifact, RecordedHead, Seq};
 use aether_bloomery_view::Heads;
 
 use crate::runtime::core::{AppendTicket, Command, PendingWrite, PlannedRecord, ProgramCore};
@@ -13,12 +13,17 @@ use crate::runtime::reactors::intents::reaction_failed;
 ///
 /// Each `SetHead` compares against the view plus the earlier moves in the
 /// same batch: a pass becomes `HeadMoved`, a mismatch fails that intent alone.
-fn resolve_plan(heads: &Heads, plan: &[PlannedRecord]) -> Vec<DriverRecord> {
+fn resolve_plan(heads: &Heads, plan: &[PlannedRecord]) -> (Vec<EncodedArtifact>, Vec<DriverRecord>) {
     let mut moved: BTreeMap<RecordedHead, Digest> = BTreeMap::new();
+    let mut artifacts = Vec::new();
     let mut records = Vec::with_capacity(plan.len());
     for planned in plan {
         let record = match planned {
             PlannedRecord::Ready(record) => record.clone(),
+            PlannedRecord::SuppliedCall { input, record } => {
+                artifacts.push(input.clone());
+                record.clone()
+            }
             PlannedRecord::SetHead { cause, bundle, reactor, set_head } => {
                 let current = moved.get(set_head.head()).copied().or_else(|| heads.binding(set_head.head()));
                 if current == set_head.from() {
@@ -32,7 +37,7 @@ fn resolve_plan(heads: &Heads, plan: &[PlannedRecord]) -> Vec<DriverRecord> {
         };
         records.push(record);
     }
-    records
+    (artifacts, records)
 }
 
 impl ProgramCore {
@@ -56,10 +61,10 @@ impl ProgramCore {
 
     /// Derive one queued routing batch against the synced view and append it.
     pub(crate) fn derive_routing(&mut self, trigger: u64, plan: Vec<PlannedRecord>, out: &mut Vec<Command>) {
-        let records = resolve_plan(self.journal.heads(), &plan);
+        let (artifacts, records) = resolve_plan(self.journal.heads(), &plan);
         self.routing.appending = Some(records.clone());
         let ticket = self.mint(AppendTicket::mint);
-        let append = AppendRecords::new(Vec::new(), records, self.journal.cursor());
+        let append = AppendRecords::new(artifacts, records, self.journal.cursor());
         self.journal.set_append(ticket, PendingWrite::Routing { trigger, plan });
         out.push(Command::Append { ticket, request: append });
     }

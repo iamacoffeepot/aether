@@ -240,6 +240,9 @@ impl SeqWork {
                 PlannedIntent::Ready(record) => {
                     self.order.insert(key(index), PlannedRecord::Ready(record));
                 }
+                PlannedIntent::SuppliedCall { input, record } => {
+                    self.order.insert(key(index), PlannedRecord::SuppliedCall { input, record });
+                }
                 PlannedIntent::Destination(pending) => {
                     self.destinations.insert(key(index), pending);
                 }

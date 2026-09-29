@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 
 use aether_bloomery_kinds::{
-    CallProgram, Detail, Digest, DriverRecord, ProgramRef, ReactionFailed, ReactorIntent, ReactorName, ReadArtifact,
-    ReadArtifactResult, RequestSource, Requested, RuleName, SetHead,
+    CallInput, CallProgram, Detail, Digest, DriverRecord, EncodedArtifact, LEGACY_CALL_PROGRAM_ID, ProgramRef,
+    ReactionFailed, ReactorIntent, ReactorName, ReadArtifact, ReadArtifactResult, RequestSource, Requested, RuleName,
+    SetHead, decode_call_program,
 };
 use aether_bloomery_view::Heads;
 use aether_data::{Kind, KindId};
@@ -12,10 +13,13 @@ use aether_data::{Kind, KindId};
 use crate::runtime::core::{ArtifactRead, ArtifactTicket, Command, PlannedRecord, ProgramCore};
 use crate::runtime::reactors::PendingDestination;
 
-/// One intent's plan: a ready record, or a `SetHead` awaiting its destination check.
+/// One intent's plan: a ready record, a supplied-input call, or a `SetHead`
+/// awaiting its destination check.
 pub enum PlannedIntent {
     /// A record appended as decided.
     Ready(DriverRecord),
+    /// A call whose captured input is staged with its `Requested` record.
+    SuppliedCall { input: EncodedArtifact, record: DriverRecord },
     /// A move whose destination must be read before derivation.
     Destination(PendingDestination),
 }
@@ -57,23 +61,33 @@ pub fn plan_intents(bundle: Digest, cause: u64, intents: Vec<ReactorIntent>, hea
                     },
                 );
             }
-            if kind != CallProgram::ID {
+            if kind != CallProgram::ID && kind != LEGACY_CALL_PROGRAM_ID {
                 return failed(Detail::new(format!("unsupported intent kind {}", kind.0)));
             }
-            let Some(call) = CallProgram::decode_from_bytes(&bytes) else {
+            let Some(call) = decode_call_program(kind, &bytes) else {
                 return failed(Detail::new("undecodable call_program intent"));
             };
             let Some(bound) = heads.get(&call.program) else {
                 return failed(Detail::new("program head unbound"));
             };
-            PlannedIntent::Ready(DriverRecord::Requested {
-                cause: Some(cause),
-                record: Requested {
-                    program: ProgramRef::new(bound.digest(), call.name),
-                    input: call.input,
-                    source: RequestSource::Reaction { bundle, reactor, rule, ordinal },
-                },
-            })
+            let program = ProgramRef::new(bound.digest(), call.name);
+            let source = RequestSource::Reaction { bundle, reactor, rule, ordinal };
+            match call.input {
+                CallInput::Stored(input) => PlannedIntent::Ready(DriverRecord::Requested {
+                    cause: Some(cause),
+                    record: Requested { program, input, source },
+                }),
+                CallInput::Value(input) => {
+                    let digest = input.digest();
+                    PlannedIntent::SuppliedCall {
+                        input,
+                        record: DriverRecord::Requested {
+                            cause: Some(cause),
+                            record: Requested { program, input: digest, source },
+                        },
+                    }
+                }
+            }
         })
         .collect()
 }

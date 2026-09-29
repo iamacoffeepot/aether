@@ -2,7 +2,7 @@
 //! rule calls that program.
 
 use aether_actor::export;
-use aether_bloomery_kinds::{CallProgram, HeadMoved, Mode, ProgramName, Ref, Refusal, Utf8Text};
+use aether_bloomery_kinds::{CallInput, CallProgram, HeadMoved, Mode, ProgramName, Ref, Refusal, Utf8Text};
 use aether_bloomery_program::{Env, Program, Sync, program};
 use aether_bloomery_reactor::{Guard, NoViews, reactor};
 use aether_test_fixtures_kinds::{MIXED_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
@@ -47,7 +47,7 @@ impl Reactor for MixedCaller {
 
     #[rule]
     fn call_summarize(&self, change: HeadMoved<SummarizeInput>, name: SummarizeName) -> CallProgram {
-        CallProgram { program: MIXED_BUNDLE, name: name.0, input: change.to().digest() }
+        CallProgram { program: MIXED_BUNDLE, name: name.0, input: CallInput::Stored(change.to().digest()) }
     }
 }
 
