@@ -2,7 +2,7 @@
 //! layer the chassis builds from argv/env and hands to `AudioCapability::init`.
 
 /// Resolved configuration for the audio synth. Chassis mains read
-/// env vars (`AETHER_AUDIO_DISABLE`, `AETHER_AUDIO_SAMPLE_RATE`)
+/// env vars (`AETHER_AUDIO_OUTPUT`, `AETHER_AUDIO_SAMPLE_RATE`)
 /// into an `AudioConfig` and pass it to `with_actor::<AudioCapability>(cfg)`
 /// (issue 464). Tests build an `AudioConfig` directly.
 ///
@@ -19,20 +19,36 @@
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_AUDIO", cli_prefix = "audio")]
 pub struct AudioConfig {
-    /// Disable audio output entirely.
+    /// Where the synth's samples go: `device`, `null` (the synth runs and its samples are discarded), or `disabled`.
     ///
-    /// Skips cpal init. The cap still claims its mailbox and replies `Err`
-    /// to `SetMasterGain` so agents fail fast instead of hanging. `env` +
-    /// `cli_long` overrides pin the historical wire shape (no `D` suffix
-    /// on `DISABLE`; `--audio-disable` not `--audio-disabled`).
-    #[config(env = "AETHER_AUDIO_DISABLE", cli_long = "audio-disable", default = false)]
-    pub disabled: bool,
+    /// `disabled` skips the synth entirely: the cap still claims its
+    /// mailbox and replies `Err` to its requests so agents fail fast
+    /// instead of hanging. `null` runs the real synth thread and event
+    /// queue without opening a device, so every request behaves as on a
+    /// desktop with audio.
+    #[config(default = "device")]
+    pub output: AudioOutput,
     /// Requested output sample rate in hertz; unset uses the device default.
     ///
     /// If the device doesn't support the requested rate, boot falls back
-    /// to nop (ADR-0039 — non-fatal). `layer_field = "sample_rate"` drops
+    /// to nop (ADR-0039 — non-fatal). A `null` output runs at this rate,
+    /// or at 48 kHz when unset. `layer_field = "sample_rate"` drops
     /// the `requested_` prefix on the Layer / env / CLI side so the
     /// historical names are unchanged.
     #[config(layer_field = "sample_rate", env = "AETHER_AUDIO_SAMPLE_RATE")]
     pub requested_sample_rate: Option<u32>,
+}
+
+/// Where the synth's samples go ([`AudioConfig::output`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioOutput {
+    /// The default output device, through cpal.
+    #[default]
+    Device,
+    /// No device: the synth runs on its own thread and its samples are
+    /// discarded.
+    Null,
+    /// No synth: every request that needs one replies `Err`.
+    Disabled,
 }

@@ -139,7 +139,7 @@ Over MCP there are three ways to set configuration, from coarsest to finest:
 - **The environment** configures the process you launch directly — the hub
   itself, or a chassis you run at a shell. Use `--print-config`, the owning
   config struct, and the active surface contract for exact knobs
-  (`AETHER_TICK_HZ`, `AETHER_SAVE_DIR`, `AETHER_AUDIO_DISABLE`,
+  (`AETHER_TICK_HZ`, `AETHER_SAVE_DIR`, `AETHER_AUDIO_OUTPUT`,
   `AETHER_ACTOR_TRACE_RING_SIZE`, and the rest). It's fixed at launch and
   addressed to that one process: `AETHER_*` is scrubbed from a spawned engine's
   environment at fork (ADR-0162), so a knob exported on the hub does not reach

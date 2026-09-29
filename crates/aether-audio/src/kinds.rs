@@ -72,7 +72,7 @@ pub struct SetMasterGain {
 /// substrate actually applied — values above `1.0` are clamped, so
 /// callers that sent `1.5` learn they got `1.0`. `Err` fires on
 /// chassis without an audio device (headless, hub) or when audio
-/// was disabled at boot via `AETHER_AUDIO_DISABLE`.
+/// was disabled at boot via `AETHER_AUDIO_OUTPUT=disabled`.
 #[aether_data::kind(name = "aether.audio.set_master_gain_result")]
 pub enum SetMasterGainResult {
     Ok { applied_gain: f32 },
@@ -98,7 +98,7 @@ pub struct SetReverbSend {
 /// substrate actually applied — values above `1.0` are clamped, so
 /// callers that sent `1.5` learn they got `1.0`. `Err` fires on
 /// chassis without an audio device (headless, hub) or when audio
-/// was disabled at boot via `AETHER_AUDIO_DISABLE`.
+/// was disabled at boot via `AETHER_AUDIO_OUTPUT=disabled`.
 #[aether_data::kind(name = "aether.audio.set_reverb_send_result")]
 pub enum SetReverbSendResult {
     Ok { applied_send: f32 },
@@ -124,7 +124,7 @@ pub struct SetSenderGain {
 /// actually applied — values outside `0.0..=4.0` are clamped, so a caller
 /// that sent `5.0` learns it got `4.0`. `Err` fires on chassis without an
 /// audio device (headless, hub) or when audio was disabled at boot via
-/// `AETHER_AUDIO_DISABLE`.
+/// `AETHER_AUDIO_OUTPUT=disabled`.
 #[aether_data::kind(name = "aether.audio.set_sender_gain_result")]
 pub enum SetSenderGainResult {
     Ok { applied_gain: f32 },

@@ -171,7 +171,7 @@ mod config_manifest_tests {
             "hub does not compose the desktop window cap, so the fleet window knob must not be a known key"
         );
         assert!(
-            !known.contains("AETHER_AUDIO_DISABLE"),
+            !known.contains("AETHER_AUDIO_OUTPUT"),
             "hub does not compose the audio cap, so the fleet audio knob must not be a known key"
         );
         assert!(known.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"), "hub claims its own composed engines-cap knob");

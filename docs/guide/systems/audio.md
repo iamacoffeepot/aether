@@ -178,8 +178,12 @@ and
 ## Chassis and boot behavior
 
 The desktop chassis composes the full `AudioCapability`. It accepts
-`AETHER_AUDIO_DISABLE=1` / `--audio-disable` and an optional requested sample
-rate. Disabled audio, no output device, or an unsupported requested rate is
+`AETHER_AUDIO_OUTPUT` / `--audio-output` — `device` (the default), `null`, or
+`disabled` — and an optional requested sample rate. `null` runs the real synth
+thread and event queue with no device and discards the samples, at the
+requested rate or 48 kHz; a test that composes `AudioCapability` on a
+SubstrateHarness uses it to exercise every handler without audio hardware.
+Disabled audio, no output device, or an unsupported requested rate is
 non-fatal to substrate boot: the capability stays registered in nop state.
 Immediate notes then disappear, while reply-bearing handlers implemented by
 that capability return an audio-not-initialised error.

@@ -48,8 +48,8 @@
 //!
 //! cpal init failure is **not** fatal. Audio is a peripheral, not
 //! infrastructure — a CI machine without an audio device should
-//! still boot. If cpal fails (no device, rate unsupported,
-//! `AETHER_AUDIO_DISABLE=1`), the cap falls back to nop:
+//! still boot. If cpal fails (no device, rate unsupported) or the output
+//! is `AETHER_AUDIO_OUTPUT=disabled`, the cap falls back to nop:
 //! `NoteOn` / `NoteOff` are dropped silently and `SetMasterGain`
 //! replies `Err` so agents fail fast instead of hanging.
 
@@ -72,7 +72,10 @@ pub use kinds::*;
 // marker-only (`default-features = false`) build don't need the config
 // struct (sends are typed; config is the chassis's concern).
 #[cfg(feature = "runtime")]
-pub use runtime::{AudioConfig, AudioConfigLayer, AudioOverlay};
+pub use runtime::{AudioConfig, AudioConfigLayer, AudioOutput, AudioOverlay};
+// The two `aether.audio.schedule` batch limits a caller builds against.
+#[cfg(feature = "runtime")]
+pub use runtime::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
 
 /// `aether.audio` cap **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`) plus

@@ -55,17 +55,39 @@ pub fn try_build_pipeline(requested_sample_rate: Option<u32>) -> Result<AudioPip
 
     let sample_rate = config.sample_rate;
     let channels = config.channels;
+    let (sender, render) = synth_renderer(sample_rate, usize::from(channels));
+    start_stream(&device, &config, sender, render)
+}
 
+/// A fresh synth at `sample_rate` behind its event channel: the producer side
+/// the cap pushes to, and the render callback that fills an interleaved
+/// `channels`-wide buffer from it. The cpal stream and the `null` output both
+/// drive their synth through this.
+pub(super) fn synth_renderer(
+    sample_rate: u32,
+    channels: usize,
+) -> (AudioEventSender, impl FnMut(&mut [f32]) + Send + 'static) {
     let (sender, queue) = new_event_channel();
     // Audio sample rates are bounded well below 2^24 — exact in f32.
     #[allow(clippy::cast_precision_loss)]
     let mut synth = Synth::new(queue, sample_rate as f32);
+    (sender, move |data: &mut [f32]| synth.fill(data, channels))
+}
+
+/// Open and play the cpal output stream over `render`.
+fn start_stream(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    sender: AudioEventSender,
+    mut render: impl FnMut(&mut [f32]) + Send + 'static,
+) -> Result<AudioPipeline, AudioBuildError> {
+    let (sample_rate, channels) = (config.sample_rate, config.channels);
 
     let stream = device
         .build_output_stream(
-            &config,
+            config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                synth.fill(data, channels as usize);
+                render(data);
             },
             |err| {
                 tracing::warn!(
