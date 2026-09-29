@@ -17,6 +17,13 @@ cluster; loaded on its own with `load_component`, it becomes an independent
 instance with its own lineage. Both are the same authoring surface — the actor
 you write, [compiled to wasm](recipes/writing-a-component.md).
 
+An inline child lives until it is despawned or its parent closes. Either one
+closes the child and spends its name
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §8),
+so spawning a despawned child's key again fails with
+`SpawnError::AliasAllocationFailed`; spawn a fresh child under a new key instead
+([the actor model](foundations/actor-model.md) has the details).
+
 ## Deferred replies
 
 A `#[handler::single]` that answers later returns `Pending<R>`, so its row still

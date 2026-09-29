@@ -471,7 +471,8 @@ pub fn __validate_inline_child_placement(
 /// Validate the raw alias a host allocated for an inline child. A zero alias
 /// is the host's failure sentinel, not an address that can enter the inline
 /// registry, so validation occurs before configuration decode or child init.
-#[cfg(any(target_family = "wasm", test))]
+/// Both the typed spawn verbs and the by-tag resolver take their alias
+/// through it.
 pub(crate) fn __validate_inline_child_alias(alias: u64) -> Result<aether_data::MailboxId, SpawnError> {
     use core::num::NonZeroU64;
 

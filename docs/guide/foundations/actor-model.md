@@ -922,6 +922,15 @@ module it was built from; a foreign module comes in through `load_component`, wh
 carries its own code and kinds — the boundary is covered in
 [Components & lifecycle](../systems/components.md).
 
+An inline child ends by closing, as any actor does
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §8):
+`ctx.despawn_inline_child(child)` closes it, and so does its parent's close.
+Each watcher gets a `MonitorNotice` sent from the child, and the child's name
+tombstones. The name is spent: a later `monitor` of it is refused with
+`TargetTombstoned`, and spawning the same key beneath the same parent fails with
+`SpawnError::AliasAllocationFailed`. A parent that wants a fresh child after a
+despawn spawns it under a new key, such as `Subname::Counter`.
+
 A component can also run as several instances of one type: an `instanced` type
 loaded under different keys is an independent actor at each `NS:key`. The loader
 hosts every component in a native trampoline actor, spawned once per load, but

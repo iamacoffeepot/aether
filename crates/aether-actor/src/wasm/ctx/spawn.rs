@@ -11,7 +11,7 @@ use crate::model::{Addressable, ChildOf, Instanced, NamespaceError, Subname, val
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChildRecord, Registry};
-use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, Spawns, WasmActor};
+use crate::wasm::{__validate_inline_child_alias, ActorInitError, ErasedWasmActor, ModuleChild, Spawns, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
 
@@ -49,6 +49,10 @@ impl ActorTypeTag {
 pub enum SpawnError {
     /// The host returned the zero id while allocating an inline child alias. The alias is a required first-class address, so spawning stops
     /// before configuration decode, initialization, or registry insertion.
+    ///
+    /// Among the host's refusals is a spent name: an inline child ends by
+    /// closing and its name tombstones (ADR-0241 §8), so a key whose child
+    /// was despawned, or whose parent closed, is never spawned again.
     AliasAllocationFailed,
     /// The ctx's mailbox did not identify either the constructed entry actor
     /// or a registered inline actor, so its logical parent type could not be
@@ -196,7 +200,11 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         // tag `init_typed_p32` selects on — and the key the host reads the
         // alias's contract rows by (ADR-0231 §4).
         let type_tag = ActorTypeTag::of::<C>().0;
-        let alias = MailboxId(mail::spawn_inline_child(self.mailbox, type_tag, is_counter, &full_subname));
+        // A zero alias is the host's refusal, a spent name among them
+        // (ADR-0241 §8): stop before a child is built at an address that
+        // never routes.
+        let alias =
+            __validate_inline_child_alias(mail::spawn_inline_child(self.mailbox, type_tag, is_counter, &full_subname))?;
         // Re-decode an owned `C::Config` for the in-guest `init` from the
         // same bytes the detached path would have shipped — symmetric with
         // `spawn_child`'s encode-in-guest / decode-in-host round-trip, and
@@ -294,6 +302,11 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// a cap holding rows keyed on the child's stamped identity (ADR-0114 §4)
     /// reclaims them — the despawn counterpart of what a vacate and a close
     /// already do for a departing cluster.
+    ///
+    /// **The child's name is spent** (ADR-0241 §8): a despawned child closes
+    /// and its name tombstones, so a later monitor of it is refused and
+    /// spawning the same key beneath the same parent fails with
+    /// [`SpawnError::AliasAllocationFailed`].
     ///
     /// Later mail to a retired alias resolves as *dropped* rather than
     /// resolving to this component's slot: the substrate warns and discards
