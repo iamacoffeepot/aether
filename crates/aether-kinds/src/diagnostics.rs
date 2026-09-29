@@ -1,5 +1,9 @@
 //! Diagnostic and actor-monitoring kind vocabulary.
 
+use alloc::string::String;
+
+use aether_data::KindId;
+
 /// Issue 607 Phase 4b (ADR-0079): framework-emitted close
 /// notification. Sent to every monitor a closing actor accumulated via
 /// `NativeCtx::monitor` — the substrate drains `monitors_of[target]`
@@ -19,3 +23,26 @@
 #[repr(C)]
 #[aether_data::kind(name = "aether.actor.monitor_notice", pod, default, eq, engine_only)]
 pub struct MonitorNotice;
+
+/// Host-generated notice that a request's recipient refused its payload at
+/// decode. The refusing actor answers it to the request's reply target in
+/// place of the reply it could not produce, so it joins the request's chain
+/// and is handled before that chain's `Settled`.
+///
+/// Only a reply target that opts in hears it: one whose published contract
+/// carries a row for this kind. Any other sender hears nothing, because an
+/// in-engine sender is typed code and a refusal it causes is a codec bug the
+/// refuser's log records. The RPC server declares the row, since a wire
+/// payload is untrusted and its caller cannot read actor logs.
+///
+/// The refuser is the notice's sender, read as a proven reference from
+/// `ctx.sender()`, so the notice carries no address. `kind` is the refused
+/// payload's kind and `error` the decode error's text.
+///
+/// Engine-only mail (ADR-0233): the native decode path answers it from host
+/// code, and no actor may send it.
+#[aether_data::kind(name = "aether.mail.decode_refused", eq, engine_only)]
+pub struct DecodeRefused {
+    pub kind: KindId,
+    pub error: String,
+}

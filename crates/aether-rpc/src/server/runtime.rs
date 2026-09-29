@@ -28,8 +28,8 @@
 // struct `RpcServerCapability` is the impl's `Self` type.
 use super::connection::{ConnId, ConnState, InboundEvent, run_reader_loop};
 use super::{
-    MonitorNotice, PeerKind, RegisterEngineRoute, RpcBind, RpcInboundReady, RpcServerCapability, RpcServerConfig,
-    RpcServerParams, Settled,
+    DecodeRefused, MonitorNotice, PeerKind, RegisterEngineRoute, RpcBind, RpcInboundReady, RpcServerCapability,
+    RpcServerConfig, RpcServerParams, Settled,
 };
 use aether_actor::{HandlesKind, ProtocolRef, runtime};
 use aether_codec::InlineError;
@@ -139,7 +139,6 @@ fn write_port_file(path: &Path, port: u16) -> io::Result<()> {
 /// mint a detached chassis root). Fields are
 /// `pub` so the parent's `on_settled` / `on_any` handlers can
 /// read them after `remove` / `get`.
-#[derive(Copy, Clone)]
 pub struct InFlight {
     pub conn_id: ConnId,
     pub wire_cid: u64,
@@ -148,6 +147,10 @@ pub struct InFlight {
     /// [`RouteOwner::calls`] with one keyed lookup. `None` for a call
     /// dispatched into this server's local actor system.
     pub route: Option<ErasedActorRef>,
+    /// The first decode refusal the local call's chain answered, which
+    /// `on_settled` writes in place of `Ok(())`. Always `None` for a
+    /// forwarded call, which a refusal closes at once.
+    pub refusal: Option<RpcError>,
 }
 
 /// One registered engine route, keyed by its registrant in
@@ -515,7 +518,7 @@ impl RpcServerState {
             if let Some(wire_cid) = cid {
                 let correlation = mail_id.correlation_id;
                 let route = route.erase();
-                self.in_flight.insert(correlation, InFlight { conn_id, wire_cid, route: Some(route) });
+                self.in_flight.insert(correlation, InFlight { conn_id, wire_cid, route: Some(route), refusal: None });
                 if let Some(owner) = self.route_owners.get_mut(&route) {
                     owner.calls.insert(correlation);
                 }
@@ -575,7 +578,7 @@ impl RpcServerState {
             );
             return;
         }
-        self.in_flight.insert(mail_id.correlation_id, InFlight { conn_id, wire_cid, route: None });
+        self.in_flight.insert(mail_id.correlation_id, InFlight { conn_id, wire_cid, route: None, refusal: None });
     }
 
     pub fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
@@ -826,8 +829,9 @@ impl NativeActor for RpcServerCapability {
 
     /// Settlement notice from the chassis. The root corresponds
     /// to a `Call` dispatch we subscribed to; close the call by
-    /// writing `ReplyEnd { cid, result: Ok(()) }` and dropping
-    /// the in-flight entry.
+    /// writing `ReplyEnd { cid, result }` and dropping the in-flight
+    /// entry. `result` is `Ok(())`, or the decode refusal the chain
+    /// answered first.
     ///
     /// # Agent
     /// Internal — fires from `SettlementRegistry::fire_settled`,
@@ -842,7 +846,37 @@ impl NativeActor for RpcServerCapability {
             // cleared eagerly. Either way: drop silently.
             return;
         };
-        state.write_frame_to(entry.conn_id, &WireFrame::ReplyEnd { cid: entry.wire_cid, result: Ok(()) });
+        let result = entry.refusal.map_or(Ok(()), Err);
+        state.write_frame_to(entry.conn_id, &WireFrame::ReplyEnd { cid: entry.wire_cid, result });
+    }
+
+    /// A recipient refused the payload of a call this server relayed at
+    /// decode, and answered this notice in place of a reply.
+    ///
+    /// # Agent
+    /// Internal — the native decode path answers it, only because this cap
+    /// declares this handler. The refuser is the notice's sender, named by
+    /// its path. A local call keeps the first refusal until its chain
+    /// settles, so sibling replies under a traced call still stream; a
+    /// forwarded call has no local chain to wait on, so it closes at once.
+    /// A notice for no in-flight call, or with no sender, changes nothing.
+    #[handler::single]
+    fn on_decode_refused(state: &mut Self::State, ctx: &mut NativeCtx<'_>, notice: DecodeRefused) {
+        let (Some(request), Some(refuser)) = (ctx.in_reply_to(), ctx.sender()) else {
+            return;
+        };
+        let Some(entry) = state.in_flight.get_mut(&request.0) else {
+            return;
+        };
+
+        let refusal = RpcError::DecodeRefused { path: ctx.actor_path(refuser), kind: notice.kind, error: notice.error };
+        if entry.route.is_none() {
+            entry.refusal.get_or_insert(refusal);
+            return;
+        }
+        let (conn_id, wire_cid) = (entry.conn_id, entry.wire_cid);
+        state.take_in_flight(request.0);
+        state.write_frame_to(conn_id, &WireFrame::ReplyEnd { cid: wire_cid, result: Err(refusal) });
     }
 
     /// Register the sending proxy as the route for one engine.
@@ -916,7 +950,7 @@ impl NativeActor for RpcServerCapability {
     #[fallback]
     fn on_any(state: &mut Self::State, ctx: &mut NativeCtx<'_>, env: &Envelope) {
         let correlation = env.sender.correlation_id;
-        let Some(entry) = state.in_flight.get(&correlation).copied() else {
+        let Some(&InFlight { conn_id, wire_cid, .. }) = state.in_flight.get(&correlation) else {
             tracing::debug!(
                 target: "aether_substrate::rpc",
                 kind = %ctx.kind_label(env.kind),
@@ -938,7 +972,7 @@ impl NativeActor for RpcServerCapability {
                 None => Err(RpcError::Other { reason: "malformed CallSettled payload".into() }),
             };
             state.take_in_flight(correlation);
-            state.write_frame_to(entry.conn_id, &WireFrame::ReplyEnd { cid: entry.wire_cid, result });
+            state.write_frame_to(conn_id, &WireFrame::ReplyEnd { cid: wire_cid, result });
             return;
         }
 
@@ -949,7 +983,7 @@ impl NativeActor for RpcServerCapability {
         let result = match ctx.wire_payload(env) {
             Ok(payload) => {
                 let envelope = ReplyEnvelope { kind: env.kind, payload };
-                state.write_frame_to(entry.conn_id, &WireFrame::ReplyEvent { cid: entry.wire_cid, envelope });
+                state.write_frame_to(conn_id, &WireFrame::ReplyEvent { cid: wire_cid, envelope });
                 return;
             }
             Err(InlineError::TooLarge { size, limit }) => {
@@ -958,6 +992,6 @@ impl NativeActor for RpcServerCapability {
             Err(error) => RpcError::Other { reason: format!("reply {} not sent: {error}", ctx.kind_label(env.kind)) },
         };
         state.take_in_flight(correlation);
-        state.write_frame_to(entry.conn_id, &WireFrame::ReplyEnd { cid: entry.wire_cid, result: Err(result) });
+        state.write_frame_to(conn_id, &WireFrame::ReplyEnd { cid: wire_cid, result: Err(result) });
     }
 }

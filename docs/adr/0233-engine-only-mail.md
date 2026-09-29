@@ -118,7 +118,9 @@ the wire frames are unchanged.
 None of the engine's own senders crosses a guarded door: `notify_departure`,
 `push_settlement_notice`, the chassis drivers' `push_chassis_root_mail`, the
 harness pump and capture extension, and `NativeBinding::wake_self` all encode
-through `Kind::encode_into_bytes` and push through the mailer.
+through `Kind::encode_into_bytes` and push through the mailer. The native decode
+refusal encodes its `DecodeRefused` the same way and answers it through the
+binding's reply path, below the ctx's refusing reply verb.
 
 ### Guest-declared kinds
 
@@ -144,6 +146,7 @@ need that send moved onto a host path.
 | `aether.render.frame` (`Frame`) | desktop driver, harness pump, harness capture extension | engine-only |
 | `aether.render.occluded` (`Occluded`) | desktop driver | engine-only |
 | `TaskCompletionWake` | `NativeBinding::wake_self` | engine-only |
+| `aether.mail.decode_refused` (`DecodeRefused`) | the native decode refusal in `NativeCtx::__decode_inbound`, answered to a reply target that declares a handler for it | engine-only |
 | `aether.lifecycle.quit` (`Quit`) | an application asking to quit is a legitimate actor request | ordinary |
 | `aether.rpc.call_settled` (`CallSettled`) | the fleet proxy, a capability, through its held mailer | ordinary |
 | `aether.mail.unresolved` (`UnresolvedMail`) | no producer yet | ordinary |
