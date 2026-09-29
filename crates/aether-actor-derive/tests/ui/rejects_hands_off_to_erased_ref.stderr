@@ -1,0 +1,15 @@
+error[E0277]: `ErasedActorRef` cannot take a held `Answered` for `_`
+  --> tests/ui/rejects_hands_off_to_erased_ref.rs:32:44
+   |
+32 |     Held::<Answered>(PhantomData).hand_off(target, &Ask { seq: 1 });
+   |                                   -------- ^^^^^^ no row of this target answers `_` with `Answered`
+   |                                   |
+   |                                   required by a bound introduced by this call
+   |
+   = help: the trait `HandsOff<_, Answered, _>` is not implemented for `ErasedActorRef`
+   = note: a held reply hands off to an `ActorRef<T>` whose handler for `_` replies `Answered`, or a `ProtocolRef<P>` whose row for `_` is `Row<_, Answered>`; an `ErasedActorRef` proves no row (#6895)
+note: required by a bound in `Held::<R>::hand_off`
+  --> tests/ui/rejects_hands_off_to_erased_ref.rs:28:54
+   |
+28 |     fn hand_off<K: ActorMail, I>(self, _target: impl HandsOff<K, R, I>, _payload: &K) {}
+   |                                                      ^^^^^^^^^^^^^^^^^ required by this bound in `Held::<R>::hand_off`
