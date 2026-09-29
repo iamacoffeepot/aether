@@ -6,8 +6,8 @@
 //! response-streaming handlers (ADR-0128) — a well-behaved one that
 //! paces chunks against credit, and a flooder that ignores credit —
 //! plus the routed handlers and one that answers `Stream` or `WebSocket`
-//! without covering the data phase that follows. Most route handlers author their routes
-//! through the typed `#[http::router]` / `#[http::route]` surface
+//! without covering the data phase that follows. Most route handlers author
+//! their routes through the typed `#[http::router]` / `#[http::route]` surface
 //! (ADR-0131) — the macro emits the router's one request handler and
 //! injects its `register_route_self` registration — so the tests exercise what a
 //! component author writes. The conflict-`Err` and idempotent

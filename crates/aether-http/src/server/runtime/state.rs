@@ -752,8 +752,7 @@ impl HttpShardState {
     /// Open the inbound request stream for a reader-posted head bound
     /// for a streaming handler (ADR-0128 / ADR-0135 §2). The reader
     /// resolved `member`, unwrapped its `handler` cast, and made every
-    /// reject decision; the shard
-    /// seats the session — minting the stream id and seeding credit —
+    /// reject decision; the shard seats the session — minting the stream id and seeding credit —
     /// because the stream tables live here. The method re-parses from
     /// the head's raw string; the reader already rejected
     /// non-enumerated verbs, so the defensive arm only fires on a

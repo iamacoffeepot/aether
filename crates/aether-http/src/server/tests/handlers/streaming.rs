@@ -49,8 +49,8 @@ impl NativeActor for StreamHttpHandler {
         Ok(StreamHttpHandlerState { next_index: 0, ended: false })
     }
 
-    /// The cap reads this handler's accept-set off the catch-all
-    /// binding to take the streaming path.
+    /// Binds the catch-all; its `HttpStreamCredit` handler covers
+    /// `StreamCreditRouter`, so the server seats its response stream.
     fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         bind_catch_all(ctx);
     }
@@ -196,8 +196,8 @@ impl NativeActor for FloodHttpHandler {
 
 /// A streaming *upload* handler (ADR-0128), the request-side mirror of
 /// [`StreamHttpHandler`]: it declares the request-stream vocabulary
-/// (`HttpRequestStreamOpen` in its accept-set is the structural opt-in the
-/// cap reads), grants one credit per [`HttpRequestChunk`] it drains,
+/// (covering `RequestStreamRouter` is the structural opt-in the server
+/// casts at registration), grants one credit per [`HttpRequestChunk`] it drains,
 /// accumulates the received byte count, and replies `200` echoing that
 /// count when the stream ends — the reply riding the
 /// [`HttpRequestStreamEnd`] correlation.
@@ -223,8 +223,8 @@ impl NativeActor for StreamingUploadHandler {
         Ok(StreamingUploadHandlerState { received: 0, stream: None })
     }
 
-    /// The cap reads this handler's accept-set off the catch-all
-    /// binding to take the request-streaming path.
+    /// Binds the catch-all; the server casts the binding to
+    /// `RequestStreamRouter` to take the request-streaming path.
     fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         bind_catch_all(ctx);
     }
