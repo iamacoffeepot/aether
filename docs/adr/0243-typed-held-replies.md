@@ -115,11 +115,43 @@ held.answer(ctx, &WatchHeadResult { .. });
 
    The host cannot call into the guest at unload, because the instance may already be gone, so the guest registers its `R::unanswered()` when it holds. Before its dispatch returns `DISPATCH_HANDLED_HOLD`, the shim passes the reply kind and the encoded `R::unanswered()` to the host, which stores them in the held slot beside its settlement hold. When the slot is settled without an answer (unload, or actor close), the host sends those bytes to the requester before releasing the hold.
 
-   **Across a replace, the ticket and its obligation both survive:**
-   - **The obligation.** The host reply table, with each held slot's settlement hold and registered `unanswered` reply, moves to the next occupant in `PendingReplies` (#6409), so a ticket still resolves to its requester. The successor does not re-register: the stored reply is the kind the requester asked for, and a ticket claims only with a matching reply kind id, which hashes the kind's schema, so a successor that changed `R` could not answer the slot and could not produce the old encoding either.
-   - **The ticket.** It crosses inside a carried request context, or inside saved state that `on_dehydrate` writes and `on_rehydrate` decodes. The old instance's memory is freed without running `Drop`, so no trap fires there.
-   - **The guard.** The guest's per-actor registry, the one that already holds its request-context table and is reached through the ctx, tracks each live ticket. After `on_dehydrate`, a ticket that is still live and was not encoded makes the hook return a refusal status. The host maps that status onto the existing save-error rollback, which reinstates the old guest (ADR-0101), so the requester is not stranded. The hook refuses, not traps, because the host contains `on_dehydrate` traps and lets the replace proceed (ADR-0015). That long-standing behavior is out of scope here. A dropped guest `Held` checks only a flag on the value that a granted encoder sets, so no drop path reads global state.
-   - **Limits.** A successor whose `on_rehydrate` does not decode a saved `Held` leaves the host slot held until actor close, when the requester receives the slot's registered `unanswered` reply; neither side can see the stranded slot earlier without a format change to the state envelope. The untaken-reply guard (§7) does not cover a context carried across a replace.
+   **Across a replace, the ticket and its obligation both survive, and both
+   travel with the rest of the member's state through prepare, commit, and
+   abort (ADR-0241 §7):**
+   - **The obligation.** During prepare, the host reply table, with each held
+     slot's settlement hold and registered `unanswered` reply, moves to the
+     candidate in `PendingReplies` (#6409), so a ticket still resolves to
+     its requester once the member commits. On abort, the table moves back
+     to the reinstated old guest, so no ticket is orphaned by another
+     member's failure. The candidate does not re-register: the stored reply
+     is the kind the requester asked for, and a ticket claims only with a
+     matching reply kind id, which hashes the kind's schema, so a candidate
+     that changed `R` could not answer the slot and could not produce the
+     old encoding either.
+   - **The ticket.** It crosses inside a carried request context, or inside
+     saved state that `on_dehydrate` writes and `on_rehydrate` decodes. On
+     abort, that context, ticket included, returns to the reinstated old
+     guest with the rest of its request-context table (ADR-0139 §4). The old
+     instance's memory is freed without running `Drop`, so no trap fires
+     there.
+   - **The guard.** The guest's per-actor registry, the one that already
+     holds its request-context table and is reached through the ctx, tracks
+     each live ticket. After `on_dehydrate`, a ticket that is still live and
+     was not encoded makes the hook return a refusal status. The host maps
+     that status onto a refusal that aborts the whole group (ADR-0241 §7):
+     every member reinstates its old guest, so the requester is not
+     stranded and a healthy member is not swapped out for another member's
+     dropped ticket. The hook refuses, not traps, because the host contains
+     `on_dehydrate` traps and lets the replace proceed (ADR-0015). That
+     long-standing behavior is out of scope here. A dropped guest `Held`
+     checks only a flag on the value that a granted encoder sets, so no drop
+     path reads global state.
+   - **Limits.** A candidate whose `on_rehydrate` does not decode a saved
+     `Held` leaves the host slot held until actor close, when the requester
+     receives the slot's registered `unanswered` reply; neither side can see
+     the stranded slot earlier without a format change to the state
+     envelope. The untaken-reply guard (§7) does not cover a context carried
+     across a replace.
 
    Native capabilities are not replaced at run time (ADR-0231 §5), so a native ticket lives only within one process. The host keeps its `ReplyTable` entry alive after the handler returns, and holds settlement open, until the handle answers. Today a single handler's return frees the handle (`component/dispatch.rs`), and a `ReplyEntry` carries no settlement hold. #6960 implements this.
 

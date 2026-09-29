@@ -736,11 +736,11 @@ decoded (§3).
 
 ### 5. Replace preserves contracts
 
-A `replace_component` whose replacement drops or changes any contract row its
-predecessor declared is refused before the swap, and the old module keeps
-running. The refusal names the actor and the kind:
-`"<actor> replacement changes its contract for <kind>"`
-(`contract_refusal`, `crates/aether-component/src/trampoline/runtime/contract.rs`).
+A republish whose successor drops or changes any contract row its
+predecessor declared is refused by the admission preview (ADR-0241 §4)
+before any instance prepares, and every live instance keeps running its old
+module. The refusal names the actor and the kind:
+`"<actor> replacement changes its contract for <kind>"` (`contract_refusal`).
 Added rows are allowed. Config, documentation, cost, and assets do not count.
 A `#[fallback]` counts like a row, because a peer may hold a
 `ProtocolRef<AnyKind>` (§4): a replacement that drops its predecessor's
@@ -1301,7 +1301,8 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 - **ADR-0232.** `send_to` takes an `ActorRef<R>` or a `ProtocolRef<P>`; an
   `ErasedActorRef` is not a `Target`.
 - **ADR-0022 / ADR-0038 / ADR-0101.** `replace_component` refuses a replacement
-  that drops or changes a contract row, before `on_dehydrate` runs.
+  that drops or changes a contract row, at admission, before any instance
+  prepares.
 - **ADR-0101 decision 1.** `WasmActor::on_rehydrate` takes `WasmCtx<'_, Self>`.
   An override that writes `WasmCtx<'_>` is typed by the macro, and one that
   writes `WasmCtx<'_, Erased>` receives the erased view.

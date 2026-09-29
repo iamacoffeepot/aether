@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (config-file source deferred)
 - **Date:** 2026-05-27
+- **Amended:** 2026-09-29 — Section 5: a republished instance keeps its stored spawn config; when its type's config kind changed, it needs a config of the new kind, supplied in `ReplaceComponent.configs` (issue 7067).
 
 ## Context
 
@@ -249,6 +250,8 @@ wants live reconfig adds a `#[handler]` for its config kind; the same kind serve
 both paths). Init-time config is a chassis *push* into `init`, not a guest
 host-fn *pull*, so it stays consistent with ADR-0030's "guests don't host-fn-pull"
 stance.
+
+**Amended 2026-09-29 (issue 7067):** a republish ([ADR-0241](0241-code-is-published-not-loaded.md) §7) delivers config the same way as a first `init`, once per instance, during prepare. An instance whose type's config kind is unchanged receives its own stored spawn config again, unaltered, so replace never overwrites one instance's config with another's. An instance whose type's config kind changed has no stored bytes of the new kind, so the replace's `configs` map must supply one for it, keyed by the instance's path; the admission preview refuses the whole group when it does not (ADR-0241 §4).
 
 #### Config delivery routes by size, reusing the shared guest-heap reserve (#1390)
 

@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-04-21
 - **Superseded in part (2026-06-04):** the **§2 Threading model** below — one OS thread per actor (thread-per-component) — was retired. Actors are now multiplexed onto a shared work-stealing scheduler (the worker pool reintroduced by issue #635, refined into burst dispatch by ADR-0087); the single-threaded-per-actor property is preserved by the run-token, not a dedicated thread. A dedicated OS thread is now the exception, spawned only for blocking I/O. See ADR-0087 for the current dispatch model. The original decision is preserved below.
+- **Amended:** 2026-09-29 — Section 5: replace is an atomic group republish; the splice holds new mail behind an inbox gate during prepare and releases it in order to the candidate that commits (issue 7067).
 
 ## Context
 
@@ -103,6 +104,8 @@ No `Arc::into_inner`. No `pending` counter. No `strand_scheduled`. The dispatch 
 ADR-0022's drain semantics are preserved by construction: mail already in the old channel gets delivered before `recv()` returns `None`. Mail sent after the `Sender` swap goes to the new inbox. No `frozen` flag, no parked deque, no drain loop.
 
 State migration (ADR-0016) shifts timing: `save_state` now runs on the old dispatch thread after it drains, then the snapshot crosses back to the control thread, then into the new dispatch thread for `on_rehydrate`. Serialization cost is unchanged; the only visible change is that `on_replace` fires *after* the old instance has seen every pre-replace mail — which is the invariant ADR-0022 was reaching for anyway.
+
+**Amended 2026-09-29 (issue 7067):** replace is now an atomic group republish (ADR-0241 §7), and step 2's swap is no longer immediate. Prepare closes an inbox gate: mail arriving once prepare begins is held, not delivered to either the old or the candidate `Sender`. Only on commit does the gate release the held mail, in order, to whichever `Sender` won — the candidate's, once every member of the group has committed, or the old one, reinstated, if any member's prepare or the publish itself failed. The old dispatch thread's drain before step 3 is unchanged; the gate adds a second hold in front of it for mail that arrives mid-prepare.
 
 ### 6. Backpressure
 
