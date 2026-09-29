@@ -141,6 +141,7 @@ use crate::mail::cost::CostLookup;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::DispatchParts;
 use crate::mail::{KindId, Mail, MailboxId};
+use crate::scheduler;
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost_nanos, tuning};
 
 /// Floor for a fresh burst's group-array capacity — a little headroom so a
@@ -812,8 +813,12 @@ impl BurstProducer {
         // recipient's inbox. Ordering holds by the same barrier a closed
         // group's deposit relies on — the deposit's wake makes the slot
         // `Ready`, so a later burst's in-place seize of this recipient loses
-        // and lands behind it.
+        // and lands behind it. Only on a pool worker, where the burst's
+        // drainer would have run anyway: a deposit runs a bare inbox
+        // closure inline, and a host turn's peer delivery stays off the
+        // host thread.
         if let [mail] = routed.as_slice()
+            && scheduler::on_pool_worker()
             && !self.holds_group_for(mail.recipient)
         {
             self.mailer.push(routed.pop().expect("one mail matched above"));
@@ -997,7 +1002,7 @@ mod tests {
     use crate::testing::bare_substrate;
     use crate::testing::boot_authority;
     use aether_data::MailId;
-    use crossbeam_deque::{Injector, Steal};
+    use crossbeam_deque::{Injector, Steal, Worker};
     use std::sync::mpsc;
 
     /// Pool size for the wake helper. Immaterial here: these tests
@@ -1205,6 +1210,7 @@ mod tests {
         let (r, _fix, direct_rx, deposit_rx) = seizable_recipient(&registry, "r");
 
         let mut producer = BurstProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+        scheduler::install_worker_deque(Worker::new_lifo());
         producer.flush(vec![mail_to(r, 7)]);
 
         assert_eq!(drain_injector(&injector), 0, "no burst scheduled for a lone mail");

@@ -119,6 +119,16 @@ pub fn install_injector(injector: Arc<Injector<Slot>>) {
     INJECTOR.with(|i| *i.borrow_mut() = Some(injector));
 }
 
+/// Whether this thread is a pool worker (its own deque is installed).
+/// Off a pool worker — a pumped host turn, a chassis thread — work this
+/// thread schedules spills to the injector for a worker to run, so a
+/// caller that would otherwise do that work inline checks here first
+/// (iamacoffeepot/aether#7130).
+#[must_use]
+pub fn on_pool_worker() -> bool {
+    LOCAL.with(|w| w.borrow().is_some())
+}
+
 /// Scheduler ready-queue depth observed from this thread: this worker's
 /// own-deque len plus the shared injector len (iamacoffeepot/aether#1134).
 /// `0` off any pool worker (no own deque installed) — chassis-root
