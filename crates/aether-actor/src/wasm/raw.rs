@@ -48,6 +48,15 @@ unsafe extern "C" {
     /// lineage, validated and fallback-resolved exactly like `send_mail`.
     #[link_name = "reply_mail_p32"]
     pub fn reply_mail(sender: u32, kind: u64, ptr: u32, len: u32, count: u32, from: u64) -> u32;
+    /// ADR-0243 §6: register the reply the dispatch in progress held on
+    /// reply handle `sender`: `kind` and the `(ptr, len)` bytes of its
+    /// `unanswered` value, copied out before the call returns. The host sends
+    /// it to the requester if this instance closes before answering. `0` on
+    /// success; the non-zero statuses are `reply_mail`'s: `3` out of bounds,
+    /// `4` an unregistered kind, `5` engine-only mail, `6` a payload naming a
+    /// blob this instance neither pins nor holds.
+    #[link_name = "held_unanswered_p32"]
+    pub fn held_unanswered(sender: u32, kind: u64, ptr: u32, len: u32) -> u32;
     #[link_name = "save_state_p32"]
     pub fn save_state(version: u32, ptr: u32, len: u32) -> u32;
     /// ADR-0042: return the correlation id the substrate minted for
@@ -198,6 +207,21 @@ pub unsafe fn send_mail(
 #[must_use]
 pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count: u32, _from: u64) -> u32 {
     panic!("aether-actor: reply_mail called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::held_unanswered` import (ADR-0243
+/// §6). Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn held_unanswered(_sender: u32, _kind: u64, _ptr: u32, _len: u32) -> u32 {
+    panic!("aether-actor: held_unanswered called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::save_state` import. Always

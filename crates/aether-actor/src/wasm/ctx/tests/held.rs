@@ -18,7 +18,8 @@ use core::panic::AssertUnwindSafe;
 use aether_data::{Kind, RequestId, wire};
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx};
-use crate::mail::{Mail, PriorState, ReplyHandle};
+use crate::HeldReply;
+use crate::mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
 use crate::model::ctx::{Erased, Manual};
 use crate::request_context::split_state_envelope;
 use crate::wasm::ctx::{CapturedState, Held, WasmDropCtx};
@@ -27,6 +28,12 @@ use crate::wasm::{ActorInitError, WasmInitCtx};
 #[aether_data::kind(name = "test.held.answer")]
 struct Answer {
     value: u32,
+}
+
+impl HeldReply for Answer {
+    fn unanswered() -> Self {
+        Self { value: u32::MAX }
+    }
 }
 
 #[aether_data::kind(name = "test.held.context")]
@@ -84,10 +91,11 @@ impl crate::WasmActor for Holder {
     }
 }
 
-/// Hold a reply on `handle` and return its ticket, dispatching a real
-/// [`Holder`] mail so the `#[actor]`-generated `Manual` arm accepts the
-/// returned receipt.
-fn hold_on(registry: &Registry, handle: u32) -> Held<Answer> {
+/// Dispatch a real [`Holder`] mail on `handle`, so the `#[actor]`-generated
+/// `Manual` arm accepts the returned receipt, and return its ticket. The
+/// registration the hold staged stays staged, as it is when the dispatch
+/// returns to the `receive` shim.
+fn dispatch_hold(registry: &Registry, handle: u32) -> Held<Answer> {
     let mut holder = Holder { parked: None };
     let payload = Ask { value: 0 }.encode_into_bytes();
     // SAFETY: `payload` outlives the `Mail` built over it.
@@ -96,6 +104,14 @@ fn hold_on(registry: &Registry, handle: u32) -> Held<Answer> {
     let rc = <Holder as crate::WasmDispatch<Holder>>::dispatch(&mut holder, &mut ctx, mail);
     assert_eq!(rc, crate::DISPATCH_HANDLED_HOLD, "a single `-> Pending<R>` arm reports the hold");
     holder.parked.take().expect("the handler parked its ticket")
+}
+
+/// Hold a reply on `handle` and return its ticket, taking the staged
+/// registration as the `receive` shim's flush does.
+fn hold_on(registry: &Registry, handle: u32) -> Held<Answer> {
+    let held = dispatch_hold(registry, handle);
+    registry.take_unanswered().expect("a live hold stages its unanswered reply");
+    held
 }
 
 /// Stand in for `Held::answer` on the host: release the ticket and forget the
@@ -158,6 +174,25 @@ fn accepted_pending_is_silent() {
     let registry = Registry::new();
     let held = hold_on(&registry, 5);
     discharge(&registry, held);
+}
+
+/// Catches a hold that registers no unanswered reply, or registers another
+/// kind's or another handle's, so the host has nothing to send, or the wrong
+/// thing, when the holder closes first; and a detached hold that registers
+/// one for a request with no reply target.
+#[test]
+fn hold_stages_its_unanswered_reply() {
+    let registry = Registry::new();
+    let held = dispatch_hold(&registry, 5);
+
+    let staged = registry.take_unanswered().expect("a live hold stages its unanswered reply");
+    assert_eq!((staged.ticket, staged.reply), (5, Answer::ID));
+    assert_eq!(staged.mail.bytes, Answer::unanswered().encode_into_bytes());
+    discharge(&registry, held);
+
+    let detached = dispatch_hold(&registry, NO_REPLY_HANDLE);
+    assert!(registry.take_unanswered().is_none(), "a detached hold owes no reply to register");
+    drop(detached);
 }
 
 /// A ticket dropped live loses the requester's reply; it must fail fast.

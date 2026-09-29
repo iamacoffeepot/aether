@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::blob_table::BlobTable;
-use crate::actor::wasm::reply_table::{HeldChain, ReplyEntry, ReplyOrigin, ReplyTable};
+use crate::actor::wasm::reply_table::{HeldChain, ReplyEntry, ReplyMail, ReplyOrigin, ReplyTable};
 use crate::mail::attachments::{Attachments, EncodedMail, ResolveError, plain_payload, resolve_on_send};
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
@@ -46,17 +46,6 @@ pub struct CorrelationCursor {
 /// live component. Neither `Clone` nor `Copy`: two tables holding the same
 /// handle would answer one request twice.
 pub struct PendingReplies(ReplyTable);
-
-impl PendingReplies {
-    /// Free every held slot and release each requester's settlement hold
-    /// unanswered (ADR-0243 §6). The consumer is the trampoline's guest release:
-    /// it saves no guest state, so no ticket survives to answer a held
-    /// slot, and keeping the hold would leave the requester's chain open
-    /// until actor close. A replace carries the table without calling this.
-    pub fn settle_held(&mut self) {
-        self.0.settle_held();
-    }
-}
 
 /// Per-component context stored as wasmtime `Store` data. Holds the
 /// sender's own `MailboxId`, its binding (which reaches the shared mail
@@ -203,6 +192,11 @@ pub struct ComponentCtx {
     /// [`Self::hold_outbox`] until the candidate is flushed or discarded,
     /// while every send and reply it makes is held rather than sent.
     held: Option<HeldOutbox>,
+    /// ADR-0243 §6: the reply handle the dispatch in progress held and the
+    /// `unanswered` value the guest registered for it through the
+    /// `held_unanswered_p32` host fn. [`super::Component::deliver`] takes it
+    /// once `receive` returns and moves it into the slot's [`HeldChain`].
+    pending_unanswered: Option<(u32, ReplyMail)>,
 }
 
 /// The declared type of one inline-child actor the resident module can
@@ -287,6 +281,7 @@ impl ComponentCtx {
             inline_children: FxHashMap::default(),
             load_window: None,
             held: None,
+            pending_unanswered: None,
         }
     }
 
@@ -373,6 +368,19 @@ impl ComponentCtx {
                 self.reply_table.restore(handle, entry, chain);
             }
         }
+    }
+
+    /// Record the `unanswered` value the guest registered for reply handle
+    /// `handle`, which the dispatch in progress holds (ADR-0243 §6). A
+    /// second registration in one dispatch replaces the first; `deliver`
+    /// keeps only one naming the handle it dispatched.
+    pub(crate) fn register_unanswered(&mut self, handle: u32, unanswered: ReplyMail) {
+        self.pending_unanswered = Some((handle, unanswered));
+    }
+
+    /// Take the registration the dispatch that just returned made, if any.
+    pub(super) fn take_unanswered(&mut self) -> Option<(u32, ReplyMail)> {
+        self.pending_unanswered.take()
     }
 
     pub(crate) fn stage_alias(&mut self, alias: PreparedAliasRoute) {

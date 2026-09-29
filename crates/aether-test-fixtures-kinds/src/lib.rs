@@ -617,10 +617,25 @@ pub struct HeldRequestResult {
     pub tag: u32,
 }
 
+/// Issue 7015: the [`HeldRequestResult::tag`] a held actor that closed before
+/// answering sends in its place (ADR-0243 §6).
+pub const HELD_UNANSWERED_TAG: u32 = u32::MAX;
+
+impl aether_actor::HeldReply for HeldRequestResult {
+    fn unanswered() -> Self {
+        Self { tag: HELD_UNANSWERED_TAG }
+    }
+}
+
 /// Issue 6983: report the held requester emits when a [`HeldRequestResult`] echoes
 /// the tag of the request it sent.
 #[aether_data::kind(name = "aether.test_fixtures.held_reply_matched", default)]
 pub struct HeldReplyMatched;
+
+/// Issue 7015: report the held requester emits when a [`HeldRequestResult`]
+/// carries [`HELD_UNANSWERED_TAG`]: its holder closed before answering.
+#[aether_data::kind(name = "aether.test_fixtures.held_reply_unanswered", default)]
+pub struct HeldReplyUnanswered;
 
 /// Issue 6983: tells a held keeper or forgetter to answer the reply it holds.
 #[aether_data::kind(name = "aether.test_fixtures.release_held", default)]

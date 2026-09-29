@@ -174,8 +174,9 @@ impl NativeActor for Host {
     }
 }
 
-/// The old guest: it keeps its [`Hold`] reply handle at offset 500, answers
-/// it with [`Answered`] on [`Answer`], and saves it when it dehydrates.
+/// The old guest: it keeps its [`Hold`] reply handle at offset 500,
+/// registering [`Answered`] as its unanswered reply, answers it with
+/// [`Answered`] on [`Answer`], and saves it when it dehydrates.
 fn old_guest_wat() -> String {
     let (hold, answered) = (Hold::ID.0, Answered::ID.0);
     format!(
@@ -183,6 +184,8 @@ fn old_guest_wat() -> String {
         (module
             (import "aether" "reply_mail_p32"
                 (func $reply_mail (param i32 i64 i32 i32 i32 i64) (result i32)))
+            (import "aether" "held_unanswered_p32"
+                (func $held_unanswered (param i32 i64 i32 i32) (result i32)))
             (import "aether" "save_state_p32" (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             {WAT_REALLOC}
@@ -190,6 +193,8 @@ fn old_guest_wat() -> String {
                 (if (i64.eq (local.get 0) (i64.const {hold}))
                     (then
                         (i32.store (i32.const 500) (local.get 4))
+                        (drop (call $held_unanswered
+                            (local.get 4) (i64.const {answered}) (i32.const 0) (i32.const 0)))
                         (return (i32.const {DISPATCH_HANDLED_HOLD}))))
                 (drop (call $reply_mail
                     (i32.load (i32.const 500)) (i64.const {answered}) (i32.const 0) (i32.const 0) (i32.const 1)

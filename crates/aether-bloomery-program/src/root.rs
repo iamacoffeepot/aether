@@ -133,10 +133,11 @@ impl<H> Root<H> {
     }
 
     /// Remove and return `(child, handle)` for `invoked`'s seq, only when that seq
-    /// is live and `source` is its child or absent. Otherwise changes nothing.
+    /// is live and `source` is its child or absent. Otherwise, and for an
+    /// `Invoked::Closed`, which names no seq, changes nothing.
     #[must_use]
     pub fn finish(&mut self, invoked: &Invoked, source: Option<MailboxId>) -> Option<(MailboxId, H)> {
-        let seq = invoked.seq();
+        let seq = invoked.seq()?;
         let live = self.live.remove(&seq)?;
         if let Some(source) = source
             && live.child != source

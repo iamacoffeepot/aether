@@ -170,6 +170,17 @@ impl NativeActor for WasmTrampoline {
         }
     }
 
+    /// The close hook: answer each reply the guest still holds with the
+    /// `unanswered` value it registered (ADR-0243 §6), before the
+    /// trampoline's state, and the guest with it, drops. A prepared
+    /// candidate is discarded without re-wiring the kept guest. Engine
+    /// teardown answers nothing, and a guest a `DropComponent` released
+    /// already answered. No guest code runs, the guest's own `unwire`
+    /// export included.
+    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        state.answer_held_at_close();
+    }
+
     /// Close this instance (ADR-0241 §8). Releases the guest, which runs its
     /// `unwire` pre-shutdown hook and drops the `Component`, then shuts the
     /// trampoline down. The close tail tombstones the name, retires its route

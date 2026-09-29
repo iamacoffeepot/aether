@@ -138,6 +138,16 @@ pub(crate) struct InlineChildMeta {
     pub(crate) config_bytes: Vec<u8>,
 }
 
+/// A held reply's registration, staged by `hold` until the `receive` shim
+/// flushes it to the host (ADR-0243 §6): the reply handle it answers, the
+/// reply kind, and the encoded `unanswered` value. The encoding keeps the
+/// held values its bytes name until the flush has sent them.
+pub(crate) struct StagedUnanswered {
+    pub(crate) ticket: u32,
+    pub(crate) reply: KindId,
+    pub(crate) mail: EncodedGuestMail,
+}
+
 /// One intra-cluster send buffered on the per-component queue
 /// ([`Registry`]). A send whose recipient is a member of this cluster
 /// — the instance itself or one of its inline children — is pushed here
@@ -266,6 +276,12 @@ pub struct Registry {
     /// argument as `request_contexts`; every borrow is released before the
     /// method that took it returns.
     held: RefCell<HeldTickets>,
+    /// ADR-0243 §6: the reply the dispatch in progress held, registered with
+    /// its `unanswered` value. `hold` stages it here and the `export!`
+    /// `receive` shim flushes it to the host once the dispatch returns, so
+    /// the host can answer the held slot if this instance closes first. A
+    /// `RefCell` under the same single-thread argument as `held`.
+    unanswered: RefCell<Option<StagedUnanswered>>,
     /// The `export!`-installed by-tag spawn resolver (issue 2692), or `None`
     /// on a raw registry never wired by `export!` (a host-unit registry).
     /// Set once from each init shim — the resolver enumerates the module's
@@ -302,6 +318,7 @@ impl Registry {
             queue: UnsafeCell::new(VecDeque::new()),
             request_contexts: RefCell::new(RequestContextTable::new()),
             held: RefCell::new(HeldTickets::new()),
+            unanswered: RefCell::new(None),
             spawn_resolver: Cell::new(None),
         }
     }
@@ -347,6 +364,45 @@ impl Registry {
     /// Forget a held reply that was just answered.
     pub(crate) fn release_held(&self, ticket: u32) {
         self.held.borrow_mut().release(ticket);
+    }
+
+    /// Stage the reply `ticket`'s requester receives if this instance
+    /// closes before answering it (ADR-0243 §6): `reply` is its kind and
+    /// `mail` its encoded `unanswered` value. The `export!` `receive` shim
+    /// flushes it through [`Self::__flush_unanswered`] once the dispatch
+    /// returns.
+    ///
+    /// # Panics
+    ///
+    /// When a registration is already staged: `hold` arms one reply per
+    /// dispatch, and the shim flushes after each one.
+    pub(crate) fn stage_unanswered(&self, ticket: u32, reply: KindId, mail: EncodedGuestMail) {
+        let previous = self.unanswered.borrow_mut().replace(StagedUnanswered { ticket, reply, mail });
+        assert!(previous.is_none(), "aether-actor: a held reply's unanswered value was staged twice in one dispatch");
+    }
+
+    /// Take the staged registration, if the dispatch held a reply.
+    pub(crate) fn take_unanswered(&self) -> Option<StagedUnanswered> {
+        self.unanswered.borrow_mut().take()
+    }
+
+    /// Register the reply the dispatch just held with the host
+    /// (ADR-0243 §6), called by the `export!` `receive` shim after the
+    /// top-level dispatch. A dispatch that held nothing registers nothing.
+    ///
+    /// # Panics
+    ///
+    /// When the host refuses the registration (ADR-0063): an engine-only
+    /// or unregistered kind, or a payload naming a blob this instance does
+    /// not hold. The host fails the delivery of a held reply it has no
+    /// registration for, so the requester is never left without one. On a
+    /// host build, whenever a registration is staged: there is no FFI host.
+    #[doc(hidden)]
+    pub fn __flush_unanswered(&self) {
+        if let Some(StagedUnanswered { ticket, reply, mail: encoded }) = self.take_unanswered() {
+            let status = mail::held_unanswered(ticket, reply.0, &encoded.bytes);
+            assert!(status == 0, "aether-actor: the host refused a held reply's unanswered value (status {status})");
+        }
     }
 
     /// Frame `value` for `save_state` as `K::ID` then its wire bytes,

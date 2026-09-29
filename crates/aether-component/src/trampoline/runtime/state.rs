@@ -166,6 +166,31 @@ impl WasmTrampolineState {
         self.release_gated(ctx, gated);
     }
 
+    /// Answer the replies the guest still holds as its trampoline closes
+    /// (ADR-0243 §6), each with the `unanswered` value the guest registered.
+    /// No guest code runs: the guest's own `unwire` export does not, and a
+    /// prepared candidate is discarded without an abort, which would wire
+    /// the kept guest again and deliver its gated mail inside the close.
+    /// Instead the candidate's held outbox is discarded, which restores any
+    /// slot a held answer reserved, and the reply table it took over moves
+    /// back to the kept guest; the gated mail drops, and each chain settles
+    /// as it does. Engine teardown answers nothing. A guest already released
+    /// answered at its release.
+    pub(crate) fn answer_held_at_close(&mut self) {
+        self.slot = match mem::replace(&mut self.slot, Slot::Released) {
+            Slot::Prepared(prepared) => {
+                let PreparedSlot { mut old, mut candidate, .. } = *prepared;
+                candidate.discard_held_outbox();
+                old.resume_replies(candidate.take_pending_replies());
+                Slot::Live(Box::new(old))
+            }
+            other => other,
+        };
+        if let Slot::Live(component) = &mut self.slot {
+            component.answer_held_at_close();
+        }
+    }
+
     /// Deliver the mail a prepared slot's gate queued, in arrival order, to
     /// the guest now live. Each mail's chain closes once it is delivered.
     pub(crate) fn release_gated(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>, gated: VecDeque<InboundMail>) {
@@ -177,12 +202,13 @@ impl WasmTrampolineState {
         }
     }
 
-    /// Release the **wasm guest**: run its `unwire` pre-shutdown hook, drop
-    /// the `Component`, and sync the now-empty slot, so the accept set clears
-    /// and only the framework cost cells stay. A prepared candidate is
-    /// discarded first and the kept guest reinstated, so the guest released is
-    /// the one that ran. The caller, a `DropComponent`, then closes the
-    /// trampoline.
+    /// Release the **wasm guest**: run its `unwire` pre-shutdown hook, answer
+    /// each reply it still holds with its registered `unanswered` value
+    /// (ADR-0243 §6), drop the `Component`, and sync the now-empty slot, so
+    /// the accept set clears and only the framework cost cells stay. A
+    /// prepared candidate is discarded first and the kept guest reinstated,
+    /// so the guest released is the one that ran. The caller, a
+    /// `DropComponent`, then closes the trampoline.
     pub fn release_guest(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>) {
         if matches!(self.slot, Slot::Prepared(_)) {
             self.abort(ctx);
@@ -194,10 +220,10 @@ impl WasmTrampolineState {
             // drops at end of scope, tearing down linear memory.
             component.unwire();
             // #6409: after `unwire`, which may still answer handles.
-            // ADR-0243 §6: held slots settle here. Releasing saves no guest
-            // state, so no ticket survives to answer one, and its settlement
-            // hold would keep the requester's chain open until actor close.
-            component.take_pending_replies().settle_held();
+            // ADR-0243 §6: releasing saves no guest state, so no ticket
+            // survives to answer a held slot; each requester receives the
+            // `unanswered` value its guest registered when it held.
+            component.answer_held_at_close();
         }
         // The slot is empty now, so the declaration reads `None` and the sync
         // releases the guest. iamacoffeepot/aether#1037: the mailbox accepts
