@@ -131,13 +131,17 @@ held.answer(ctx, &WatchHeadResult { .. });
    - **The ticket.** It crosses inside a carried request context, or inside
      saved state that `on_dehydrate` writes and `on_rehydrate` decodes. On
      abort, that context, ticket included, returns to the reinstated old
-     guest with the rest of its request-context table (ADR-0139 §4). The old
-     instance's memory is freed without running `Drop`, so no trap fires
-     there.
+     guest with the rest of its request-context table (ADR-0139 §4), and a
+     ticket in saved state returns to it too: the host hands the old guest
+     the bundle it saved through its own `on_rehydrate`, whose decode claims
+     the ticket back to live. The old instance's memory is freed without
+     running `Drop`, so no trap fires there.
    - **The guard.** The guest's per-actor registry, the one that already
      holds its request-context table and is reached through the ctx, tracks
      each live ticket. After `on_dehydrate`, a ticket that is still live and
-     was not encoded makes the hook return a refusal status. The host maps
+     was not encoded makes the hook return a refusal status. The refusing
+     hook still saves what it encoded, so the tickets it moved into saved
+     state return with that state to the reinstated guest. The host maps
      that status onto a refusal that aborts the whole group (ADR-0241 §7):
      every member reinstates its old guest, so the requester is not
      stranded and a healthy member is not swapped out for another member's

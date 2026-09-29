@@ -5,6 +5,7 @@
 - **Accepted:** 2026-04-17
 - **Revised by:** ADR-0101 (2026-06-09) — the opt-in is retired. `on_dehydrate` (the former `on_replace`) and `on_rehydrate` are now default-no-op `WasmActor` lifecycle hooks, not a `Replaceable` subtrait reached through an `export!` flag. The state-bundle protocol described below is unchanged.
 - **Amended:** 2026-09-29 — Section 4: an `init` or rehydrate failure in any member of a group republish aborts the whole group; every member keeps and re-wires its old guest, and the candidate's mail is discarded (issue 7067).
+- **Amended:** 2026-09-29 — Section 4: an aborted replace hands the bundle back to the old instance's `on_rehydrate` instead of discarding it, so a value its `on_dehydrate` moved out returns to it (issue 7125).
 
 ## Context
 
@@ -104,6 +105,8 @@ The replace sequence under this ADR:
 Failure at steps 4 or 5 (instantiate error, WASM trap in `init`/`on_rehydrate`) aborts the replace: old instance stays live, new instance is dropped, mailbox binding unchanged, bundle discarded. Step 3's `on_drop` ran already — this is a wart. `on_drop` running on an instance that ends up not being replaced is observable but not incorrect (the instance *is* being replaced from its own perspective; the rollback is a substrate concern). Revisit if this becomes surprising in practice.
 
 **Amended 2026-09-29 (issue 7067):** replace is now an atomic group republish (ADR-0241 §7), and the failure case above widens from one instance to the group. An `init` or `on_rehydrate` failure in any member aborts every member, not just the one that failed: each keeps its own old instance, re-wires it, and discards its own candidate's mail, so a sibling's failure never leaves one member mid-swap.
+
+**Amended 2026-09-29 (issue 7125):** the bundle is no longer discarded on abort. Each member whose old instance ran `on_dehydrate` hands the bundle it saved back to that old instance's `on_rehydrate` before re-wiring it, so a value the dehydrate moved out of the instance, a held reply among it, returns to it. This covers a sibling's failure, the member's own refused prepare after its hooks ran, and a dehydrate refused because a held reply was left unsaved (ADR-0243 §6), which still saves what it encoded. A `save_state` the host rejected deposited no bundle, so nothing returns there. A trap in the old instance's own `on_rehydrate` aborts the substrate (ADR-0063). `on_rehydrate` can therefore also run on the instance that dehydrated, with its own bundle.
 
 ### 5. Interaction with `drop_component`
 

@@ -219,6 +219,12 @@ pub trait WasmActor:
     /// override to rehydrate from `prior` (typically
     /// [`PriorState::decode_kind`][crate::PriorState::decode_kind]).
     ///
+    /// It also runs on the instance that dehydrated, with the bundle that
+    /// instance saved, when its replace aborts (ADR-0016 §4, ADR-0241 §7):
+    /// what `on_dehydrate` moved out returns to it this way. An override
+    /// should therefore assign from `prior` rather than accumulate onto the
+    /// fields it already has.
+    ///
     /// Concrete `&mut WasmCtx<'_, Self>` — the post-init send surface, typed
     /// by the actor like a handler's ctx (ADR-0231 §7), so an override can
     /// both restore fields and emit mail to its declared dependencies. Inside
@@ -1439,7 +1445,8 @@ macro_rules! __export_internal {
             // childless component dehydrates exactly as before; a parent
             // that saves nothing and has no children skips the host save.
             // ADR-0243 §6: a ticket an earlier dehydrate saved, in a replace
-            // that was then rolled back, is live again in this instance.
+            // that was then rolled back, is live again in this instance,
+            // whether or not its `on_rehydrate` claimed it back.
             __AETHER_INLINE.__revert_dehydrate();
             let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
                 mailbox_id,
@@ -1447,24 +1454,24 @@ macro_rules! __export_internal {
                 |ctx| <$component as $crate::WasmActor>::on_dehydrate(instance, ctx),
             );
             // ADR-0243 §6: a held reply that is still live was neither saved
-            // nor answered; refuse the replace so the host reinstates this
-            // instance, whose tickets the dehydrate saved are live again.
-            if __AETHER_INLINE.__held_unsaved() {
-                __AETHER_INLINE.__revert_dehydrate();
-                return $crate::DEHYDRATE_HELD_UNSAVED;
-            }
+            // nor answered, so the replace is refused. The state the
+            // dehydrate composed is still saved: the host reinstates this
+            // instance and hands it back through `on_rehydrate`, which
+            // claims the tickets it saved back to live (issue 7125).
+            let __aether_refused = __AETHER_INLINE.__held_unsaved();
             let __aether_state = __AETHER_INLINE.compose_request_context_state(__aether_user_state);
             if let Some((version, bytes)) = __aether_state {
                 let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id, &__AETHER_INLINE);
                 ctx.save_state(version, &bytes);
             }
-            0
+            if __aether_refused { $crate::DEHYDRATE_HELD_UNSAVED } else { 0 }
         }
 
         /// # Safety
         /// Called by the substrate after `init` on a freshly
-        /// instantiated replacement, with `(version, ptr, len)`
-        /// describing the prior-state bundle the old instance produced.
+        /// instantiated replacement, or on the instance that dehydrated
+        /// when its replace aborts, with `(version, ptr, len)` describing
+        /// the prior-state bundle the old instance produced.
         /// Exported under the `_p32` suffix per ADR-0024 Phase 1.
         /// Forwards to [`$crate::WasmActor::on_rehydrate`], a no-op unless
         /// the actor overrides it.
@@ -2245,7 +2252,8 @@ macro_rules! __export_multi_internal {
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
             // byte-identical to the boxed parent's own blob.
             // ADR-0243 §6: a ticket an earlier dehydrate saved, in a replace
-            // that was then rolled back, is live again in this instance.
+            // that was then rolled back, is live again in this instance,
+            // whether or not its `on_rehydrate` claimed it back.
             __AETHER_INLINE.__revert_dehydrate();
             let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
                 mailbox_id,
@@ -2253,24 +2261,24 @@ macro_rules! __export_multi_internal {
                 |ctx| instance.erased_on_dehydrate(ctx),
             );
             // ADR-0243 §6: a held reply that is still live was neither saved
-            // nor answered; refuse the replace so the host reinstates this
-            // instance, whose tickets the dehydrate saved are live again.
-            if __AETHER_INLINE.__held_unsaved() {
-                __AETHER_INLINE.__revert_dehydrate();
-                return $crate::DEHYDRATE_HELD_UNSAVED;
-            }
+            // nor answered, so the replace is refused. The state the
+            // dehydrate composed is still saved: the host reinstates this
+            // instance and hands it back through `on_rehydrate`, which
+            // claims the tickets it saved back to live (issue 7125).
+            let __aether_refused = __AETHER_INLINE.__held_unsaved();
             let __aether_state = __AETHER_INLINE.compose_request_context_state(__aether_user_state);
             if let Some((version, bytes)) = __aether_state {
                 let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id, &__AETHER_INLINE);
                 ctx.save_state(version, &bytes);
             }
-            0
+            if __aether_refused { $crate::DEHYDRATE_HELD_UNSAVED } else { 0 }
         }
 
         /// # Safety
         /// Called by the substrate after `init` on a freshly
-        /// instantiated replacement, with `(version, ptr, len)`
-        /// describing the prior-state bundle the old instance produced.
+        /// instantiated replacement, or on the instance that dehydrated
+        /// when its replace aborts, with `(version, ptr, len)` describing
+        /// the prior-state bundle the old instance produced.
         /// Routes through the boxed `ErasedWasmActor` to the live type's
         /// [`$crate::WasmActor::on_rehydrate`] (ADR-0101). Self-mailbox id
         /// is the captured folded id, with the live instance's namespace

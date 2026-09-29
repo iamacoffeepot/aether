@@ -6,7 +6,7 @@ use aether_kinds::ComponentCapabilities;
 use aether_substrate::InboundMail;
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::native::envelope::Envelope;
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx, StateBundle};
 use aether_substrate::actor::wasm::module::{Module, ModuleCache};
 use aether_substrate::mail::MailId;
 use aether_substrate::mail::outbound::HubOutbound;
@@ -62,8 +62,9 @@ pub enum Slot {
     /// One guest runs and receives its mail.
     Live(Box<Component>),
     /// A republish prepared a candidate beside the running guest, which is
-    /// kept, unwired and dehydrated, until a commit installs the candidate or
-    /// an abort reinstates it.
+    /// kept, unwired and dehydrated, with the state it saved, until a commit
+    /// installs the candidate or an abort reinstates it and hands that state
+    /// back.
     Prepared(Box<PreparedSlot>),
     /// The guest is released; mail to the trampoline warn-drops.
     Released,
@@ -76,8 +77,12 @@ pub enum Slot {
 pub struct PreparedSlot {
     /// The guest that ran until prepare. It has run `unwire` and
     /// `on_dehydrate`, and its reply table and correlation cursor moved to
-    /// the candidate.
+    /// the candidate. An abort reinstates it with [`Self::saved`].
     pub(crate) old: Component,
+    /// The state the kept guest saved in `on_dehydrate`, which the candidate
+    /// rehydrated from. An abort hands it back to the kept guest through its
+    /// `on_rehydrate`, so what the dehydrate moved out returns to it.
+    pub(crate) saved: Option<StateBundle>,
     /// The candidate, whose outbox is held: nothing it sent has left.
     pub(crate) candidate: Component,
     /// The candidate's module, which becomes resident on commit.
@@ -145,15 +150,23 @@ impl WasmTrampolineState {
     /// §7), shared by a refused prepare and an abort. The candidate's held
     /// mail is discarded, and its staged aliases drop with it, so nothing it
     /// did leaves. The reply table and correlation cursor it took over move
-    /// back, past every id it minted. `old` runs `wire` again, since its
-    /// `unwire` ran at prepare, and then receives the mail its gate queued,
-    /// in order. Whatever `unwire` and `on_dehydrate` tore down beyond what
-    /// `wire` rebuilds stays gone, as ADR-0016 §4 accepts.
+    /// back, past every id it minted. `old` then gets back the state its
+    /// `on_dehydrate` saved, `saved`, through its own `on_rehydrate`, so a
+    /// value the dehydrate moved out, a held reply among it, returns to it
+    /// (ADR-0016 §4). It runs `wire` again, since its `unwire` ran at
+    /// prepare, and then receives the mail its gate queued, in order. Only
+    /// teardown outside that saved state and outside what `wire` rebuilds
+    /// stays gone.
+    ///
+    /// A trap in the old guest's `on_rehydrate` aborts the substrate
+    /// (ADR-0063), as a trap in delivery does: there is no other guest to
+    /// fall back to.
     pub(crate) fn reinstate(
         &mut self,
         ctx: &mut NativeCtx<'_, WasmTrampoline>,
         mut old: Component,
         mut candidate: Component,
+        saved: Option<StateBundle>,
         gated: VecDeque<InboundMail>,
     ) {
         candidate.discard_held_outbox();
@@ -161,6 +174,14 @@ impl WasmTrampolineState {
         old.resume_correlations(candidate.correlation_cursor());
         drop(candidate);
 
+        if let Some(bundle) = saved
+            && let Err(e) = old.call_on_rehydrate(&bundle)
+        {
+            ctx.fatal_abort(format!(
+                "component {} trapped restoring its state after an aborted republish: {e}",
+                ctx.path()
+            ));
+        }
         Self::wire_guest(ctx, &mut old, None);
         self.slot = Slot::Live(Box::new(old));
         self.release_gated(ctx, gated);

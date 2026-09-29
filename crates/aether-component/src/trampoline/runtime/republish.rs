@@ -74,7 +74,8 @@ impl WasmTrampolineState {
     /// (#6134). The running guest then runs `unwire` and `on_dehydrate`, its
     /// correlation cursor and reply table move to the candidate, and the
     /// candidate rehydrates. A refusal after the hooks reinstates the running
-    /// guest. A slot that is not live has nothing to prepare and refuses.
+    /// guest with the state it saved. A slot that is not live has nothing to
+    /// prepare and refuses.
     pub(super) fn prepare(
         &mut self,
         ctx: &mut NativeCtx<'_, WasmTrampoline>,
@@ -104,10 +105,13 @@ impl WasmTrampolineState {
             }
         };
 
-        match self.start_candidate(ctx, target, &mut old, &mut new_component, module.manifest().kind_ids()) {
+        let (saved, started) =
+            self.start_candidate(ctx, target, &mut old, &mut new_component, module.manifest().kind_ids());
+        match started {
             Ok(()) => {
                 self.slot = Slot::Prepared(Box::new(PreparedSlot {
                     old,
+                    saved,
                     candidate: new_component,
                     module,
                     type_tag,
@@ -118,7 +122,7 @@ impl WasmTrampolineState {
                 Prepared::Ready
             }
             Err(error) => {
-                self.reinstate(ctx, old, new_component, VecDeque::new());
+                self.reinstate(ctx, old, new_component, saved, VecDeque::new());
                 Prepared::Refused { error }
             }
         }
@@ -140,7 +144,7 @@ impl WasmTrampolineState {
                 ctx.fatal_abort(format!("component {} committed a republish it never prepared", ctx.path()));
             }
         };
-        let PreparedSlot { old, mut candidate, module, type_tag, capabilities, config, gated } = prepared;
+        let PreparedSlot { old, saved: _, mut candidate, module, type_tag, capabilities, config, gated } = prepared;
 
         candidate.flush_held_outbox(ctx);
         Self::stage_inline_aliases(ctx, candidate.drain_pending_aliases());
@@ -173,14 +177,14 @@ impl WasmTrampolineState {
         self.release_gated(ctx, gated);
     }
 
-    /// Discard the prepared candidate and reinstate the kept guest (see
-    /// [`Self::reinstate`]). A slot with nothing prepared has nothing to
-    /// abort.
+    /// Discard the prepared candidate and reinstate the kept guest with the
+    /// state it saved (see [`Self::reinstate`]). A slot with nothing prepared
+    /// has nothing to abort.
     pub(super) fn abort(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>) {
         match mem::replace(&mut self.slot, Slot::Released) {
             Slot::Prepared(prepared) => {
-                let PreparedSlot { old, candidate, gated, .. } = *prepared;
-                self.reinstate(ctx, old, candidate, gated);
+                let PreparedSlot { old, candidate, saved, gated, .. } = *prepared;
+                self.reinstate(ctx, old, candidate, saved, gated);
             }
             other => self.slot = other,
         }
@@ -221,6 +225,11 @@ impl WasmTrampolineState {
     /// announce its retirement before the swap. A save error, a carried
     /// context the replacement does not declare (#6429), or a failed
     /// rehydrate refuses; the caller then reinstates the old guest.
+    ///
+    /// Returns the bundle the old guest saved beside the outcome, on a
+    /// refusal too, so a reinstated old guest gets it back (issue 7125). A
+    /// held-unsaved refusal still saved its state; a `save_state` the host
+    /// rejected deposited none.
     fn start_candidate(
         &self,
         ctx: &NativeCtx<'_, WasmTrampoline>,
@@ -228,11 +237,26 @@ impl WasmTrampolineState {
         old: &mut Component,
         candidate: &mut Component,
         replacement: &HashSet<KindId>,
-    ) -> Result<(), String> {
+    ) -> (Option<StateBundle>, Result<(), String>) {
         old.unwire();
         old.on_dehydrate();
         let saved = old.take_saved_state();
+        let started = self.rehydrate_candidate(ctx, target, old, candidate, saved.as_ref(), replacement);
+        (saved, started)
+    }
 
+    /// The part of [`Self::start_candidate`] after the old guest's hooks:
+    /// move its cursor and reply table to the candidate, then refuse or
+    /// rehydrate the candidate from `saved`.
+    fn rehydrate_candidate(
+        &self,
+        ctx: &NativeCtx<'_, WasmTrampoline>,
+        target: &impl Display,
+        old: &mut Component,
+        candidate: &mut Component,
+        saved: Option<&StateBundle>,
+        replacement: &HashSet<KindId>,
+    ) -> Result<(), String> {
         // ADR-0139 §3 (#6400, #6422, #6409): after `unwire` and
         // `on_dehydrate`, which may still send or answer handles, the
         // candidate continues the mailbox's correlation and reply-lineage
@@ -248,11 +272,11 @@ impl WasmTrampolineState {
         }
         // #6429: the carried contexts are checked against the replacement's
         // kind vocabulary once the old guest's `on_dehydrate` surfaced them.
-        self.check_carried_contexts(ctx, target, saved.as_ref(), replacement)?;
+        self.check_carried_contexts(ctx, target, saved, replacement)?;
 
         // ADR-0016 §4: a failed rehydrate refuses the prepare.
         saved.map_or(Ok(()), |bundle| {
-            candidate.call_on_rehydrate(&bundle).map_err(|e| format!("on_rehydrate failed: {e}"))
+            candidate.call_on_rehydrate(bundle).map_err(|e| format!("on_rehydrate failed: {e}"))
         })
     }
 

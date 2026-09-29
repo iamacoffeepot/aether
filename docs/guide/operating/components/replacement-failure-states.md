@@ -5,8 +5,9 @@ namespaces as one group (ADR-0241 §7): on success every instance runs the
 successor behind its unchanged mailbox, and on failure every instance runs its
 old guest. An error is still not a clean rollback signal. Depending on which
 phase failed, an old guest may already have run its `unwire` and `on_dehydrate`
-hooks; it runs `wire` again, but whatever those hooks tore down beyond what
-`wire` rebuilds stays gone. Nothing a successor sent leaves: its mail is held
+hooks. It gets back the state its `on_dehydrate` saved, through its
+`on_rehydrate`, and runs `wire` again; only teardown outside that saved state
+and outside what `wire` rebuilds stays gone. Nothing a successor sent leaves: its mail is held
 until the group commits, and a failed successor's mail is discarded.
 Introspection can also describe a retained capability snapshot rather than the
 state an installed guest is actually in.
@@ -19,9 +20,9 @@ replace, and drop behavior.
 | Failure phase | Guests left behind | Capability/introspection risk |
 |---|---|---|
 | a pre-check: bad wasm, no predecessor, content-addressed, a republish in flight, a boot, a dropped namespace or narrowed contract (ADR-0231 §5), an unmet added dependency, or a missing or undecodable config | every instance is untouched; no hook ran | existing descriptions still reflect the prior registry snapshot |
-| a successor's `init` fails in one instance | every instance reinstates its old guest; an instance whose own prepare succeeded ran its unwire/dehydrate hooks and its `wire` again | old descriptions remain the best snapshot, but those guests may have changed their own lifecycle state |
-| `save_state` host-call rejection, a carried request context the successor does not declare (ADR-0139 §4), or a failed rehydrate in one instance | every instance reinstates its old guest with its pending replies and counters, and runs its `wire` again; nothing a successor sent from `init` or `on_rehydrate` leaves | as above |
-| the module publish is refused (admission against the table as the owner stages it) | every instance reinstates its old guest and runs its `wire` again | as above |
+| a successor's `init` fails in one instance | every instance reinstates its old guest; an instance whose own prepare succeeded ran its unwire/dehydrate hooks, gets its saved state back through `on_rehydrate`, and runs its `wire` again | old descriptions remain the best snapshot, but those guests may have changed lifecycle state their saved state does not carry |
+| `save_state` host-call rejection, a live held reply left unsaved (ADR-0243 §6), a carried request context the successor does not declare (ADR-0139 §4), or a failed rehydrate in one instance | every instance reinstates its old guest with its pending replies, counters, and the state its `on_dehydrate` saved (none after a rejected `save_state`), and runs its `wire` again; nothing a successor sent from `init` or `on_rehydrate` leaves | as above |
+| the module publish is refused (admission against the table as the owner stages it) | every instance reinstates its old guest with the state it saved and runs its `wire` again | as above |
 | success | every instance runs its successor and the new capabilities are registered | MCP refreshes its cached instances of each republished type from the result |
 
 The exact phase matters more than the generic `Err` shape. Do not say

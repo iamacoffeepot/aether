@@ -34,9 +34,10 @@ enum Place {
     Live,
     /// A stored request context's bytes own it.
     InContext,
-    /// The state a dehydrate saved owns it. A running instance holding a
-    /// saved ticket is one whose replace was refused or rolled back, so the
-    /// `Held` value is still in its memory.
+    /// The state a dehydrate saved owns it. A running instance whose
+    /// replace was refused or rolled back gets that state back through its
+    /// `on_rehydrate`, which claims the ticket back to live as the `Held`
+    /// decodes (issue 7125).
     Saved,
 }
 
@@ -84,7 +85,8 @@ impl HeldTickets {
     }
 
     /// Return every saved ticket to live: the instance that saved it keeps
-    /// running, so its `Held` value is still in memory.
+    /// running, and a ticket its restored state did not claim back must not
+    /// pass a later dehydrate unsaved.
     pub fn revert_saved(&mut self) {
         for ticket in self.tickets.values_mut().filter(|ticket| ticket.place == Place::Saved) {
             ticket.place = Place::Live;

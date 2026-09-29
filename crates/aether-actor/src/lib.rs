@@ -123,8 +123,11 @@ pub const DISPATCH_HANDLED_HOLD: u32 = 4;
 /// Status the guest's `on_dehydrate` export returns when a live held reply
 /// was left unsaved: refuse the replace (ADR-0243 §6). The substrate maps it
 /// onto the save-error rollback, which reinstates the old guest so the
-/// requester is not stranded. `0` is a normal dehydrate and `1` is the
-/// shim's "no instance" status.
+/// requester is not stranded. The refusing export still saves the state it
+/// composed, and the reinstated guest gets that state back through its
+/// `on_rehydrate`, so a held reply the dehydrate moved into it returns too
+/// (issue 7125). `0` is a normal dehydrate and `1` is the shim's "no
+/// instance" status.
 pub const DEHYDRATE_HELD_UNSAVED: u32 = 2;
 
 /// Return code for "no `#[handler]` matched and there's no `#[fallback]`"

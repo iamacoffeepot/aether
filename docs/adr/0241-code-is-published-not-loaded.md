@@ -238,9 +238,11 @@ every member ends up on the new module, or none does.
   the instance.
 - **Abort.** A pre-check refusal, an `init` or `on_rehydrate` failure in any
   member, or a publish failure aborts every member. Each reinstates its old
-  guest with its cursor, reply table, and contexts, and runs `wire` again,
-  so a member whose own prepare succeeded is not left unwired by another
-  member's failure. The candidate's mail is discarded.
+  guest with its cursor, reply table, contexts, and the state its
+  `on_dehydrate` saved, which the old guest gets back through its own
+  `on_rehydrate`, and runs `wire` again, so a member whose own prepare
+  succeeded is left neither unwired nor without what its dehydrate moved out
+  by another member's failure. The candidate's mail is discarded.
 - **The reply.** The replace answers `Ok` only after every member has
   committed and every chain its flush released has settled.
 - **Concurrent traffic.** A spawn or load of a republishing namespace waits
@@ -339,7 +341,7 @@ links its code; the kind crates of ADR-0066 are where these markers live.
 | 0096 multi-actor modules | Accepted | §1, §3: a module publishes its export set; a replace takes no export selector |
 | 0097 sibling spawn | Accepted | §3, §4: a sibling is an ordinary spawn of a published or module-private type |
 | 0099 identity and addressing | Accepted | §5 the `Embedded` fold and §6 `aether.embedded` superseded; the 2026-08-05 runtime-parent amendment superseded |
-| 0101 / 0016 / 0113 hooks | Accepted | hooks run per member of a group republish; a dehydrate refusal or an `init`/rehydrate failure in any member aborts the whole group, and every member reinstates its old guest and runs `wire` again |
+| 0101 / 0016 / 0113 hooks | Accepted | hooks run per member of a group republish; a dehydrate refusal or an `init`/rehydrate failure in any member aborts the whole group, and every member reinstates its old guest with its cursor, reply table, contexts, and the state its `on_dehydrate` saved, through `on_rehydrate`, and runs `wire` again |
 | 0114 inline children | Accepted | D2 the child is `parent/<child NS>:key`; D5 rebuilt from the republished module; the 2026-07-08 `despawn_inline_child` becomes a close, and the name tombstones |
 | 0119 resolver strategies | Accepted | `Embedded` and `EmbeddedMany` retire |
 | 0138 opt-in default entry | Accepted | moot: every spawn names its namespace; `aether.no_default` retires |
