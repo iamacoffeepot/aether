@@ -17,7 +17,7 @@ use std::process;
 
 use aether_actor::{ActorInitError, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx, actor};
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, GateConfig, GateProbe, GateQuery, GateReport, PeerConfig, PeerState,
+    Bump, CountQuery, CountReport, GateConfig, GateProbe, GateQuery, GateQueryResult, PeerConfig, PeerState,
     SubstrateHarnessObserver, TickObserved, WireObserved,
 };
 
@@ -40,8 +40,8 @@ impl WasmActor for Gate {
     }
 
     #[handler::single]
-    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: GateQuery) -> GateReport {
-        GateReport { seqs: self.seqs.clone() }
+    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: GateQuery) -> GateQueryResult {
+        GateQueryResult { seqs: self.seqs.clone() }
     }
 }
 

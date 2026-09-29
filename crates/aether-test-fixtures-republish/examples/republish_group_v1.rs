@@ -13,8 +13,8 @@
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, GateConfig, GateQuery, GateReport, PeerConfig, PeerState, SubstrateHarnessObserver,
-    WireObserved,
+    Bump, CountQuery, CountReport, GateConfig, GateQuery, GateQueryResult, PeerConfig, PeerState,
+    SubstrateHarnessObserver, WireObserved,
 };
 
 pub struct Gate {
@@ -31,8 +31,8 @@ impl WasmActor for Gate {
     }
 
     #[handler::single]
-    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: GateQuery) -> GateReport {
-        GateReport { seqs: self.seqs.clone() }
+    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: GateQuery) -> GateQueryResult {
+        GateQueryResult { seqs: self.seqs.clone() }
     }
 }
 

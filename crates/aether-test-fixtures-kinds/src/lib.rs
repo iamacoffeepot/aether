@@ -635,26 +635,26 @@ pub struct GateProbe {
 }
 
 /// Issue 7109: asks the republish gate for the probes it has recorded. It
-/// replies a [`GateReport`].
+/// replies a [`GateQueryResult`].
 #[aether_data::kind(name = "aether.test_fixtures.gate_query", default)]
 pub struct GateQuery;
 
 /// Issue 7109: the republish gate's answer to a [`GateQuery`], each recorded
 /// [`GateProbe::seq`] in arrival order.
-#[aether_data::kind(name = "aether.test_fixtures.gate_report", default, eq)]
-pub struct GateReport {
+#[aether_data::kind(name = "aether.test_fixtures.gate_query_result", default, eq)]
+pub struct GateQueryResult {
     pub seqs: Vec<u32>,
 }
 
 /// Issue 7109: the config every instance of the republish gate is loaded
 /// with.
-#[aether_data::kind(name = "aether.test_fixtures.gate_config", default, eq)]
+#[aether_data::kind(name = "aether.test_fixtures.gate.config", default, eq)]
 pub struct GateConfig;
 
 /// Issue 7109: the config of the republish peer. With `trap_on_rehydrate`
 /// set, the second version traps in `on_rehydrate`, so a republish that
 /// carries the peer's state fails there.
-#[aether_data::kind(name = "aether.test_fixtures.peer_config", copy, default, eq)]
+#[aether_data::kind(name = "aether.test_fixtures.peer.config", copy, default, eq)]
 pub struct PeerConfig {
     pub trap_on_rehydrate: bool,
 }
