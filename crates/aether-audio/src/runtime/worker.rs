@@ -2,9 +2,8 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::event::{AudioEventSender, new_event_channel};
-use super::pipeline::{AudioBuildError, try_build_pipeline};
-use super::synth::{Synth, synth_rate};
+use super::event::AudioEventSender;
+use super::pipeline::{AudioBuildError, synth_renderer, try_build_pipeline};
 
 /// The rate a `null` output runs at when the config requests none.
 pub const NULL_SAMPLE_RATE: u32 = 48_000;
@@ -59,15 +58,14 @@ pub fn spawn_audio_worker(requested_sample_rate: Option<u32>) -> Result<AudioWor
 /// callback drains them. It stops when the shutdown sender drops.
 pub fn spawn_null_worker(sample_rate: u32) -> Result<AudioWorker, AudioBuildError> {
     spawn_output_thread("aether-audio-null", move || {
-        let (sender, queue) = new_event_channel();
-        let mut synth = Synth::new(queue, synth_rate(sample_rate));
+        let (sender, mut render) = synth_renderer(sample_rate, NULL_CHANNELS);
         let frames = usize::try_from(sample_rate / NULL_BLOCKS_PER_SECOND)
             .map_err(|e| AudioBuildError::StreamBuild(format!("null block size: {e}")))?;
         let run = move |shutdown: mpsc::Receiver<()>| {
             let mut block = vec![0.0f32; frames * NULL_CHANNELS];
-            synth.fill(&mut block, NULL_CHANNELS);
+            render(&mut block);
             while shutdown.recv_timeout(NULL_BLOCK) == Err(RecvTimeoutError::Timeout) {
-                synth.fill(&mut block, NULL_CHANNELS);
+                render(&mut block);
             }
         };
         Ok((sender, sample_rate, run))

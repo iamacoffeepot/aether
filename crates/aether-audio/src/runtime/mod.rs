@@ -77,7 +77,6 @@ pub use self::instrument::builtin_id_ceiling;
 pub use self::load::{AudioLoadContext, BankAssemblyKey, TrackDecodeKey, TrackLoad};
 pub use self::sample::BankAssemblyOutput;
 pub use self::schedule::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
-use self::synth::synth_rate;
 pub use self::track::DecodeOutput;
 use self::worker::{AudioWorker, NULL_SAMPLE_RATE, spawn_audio_worker, spawn_null_worker};
 pub use aether_fs::{FsCapability, Read, ReadResult};
@@ -118,31 +117,17 @@ pub struct AudioCapabilityState {
 }
 
 impl AudioCapabilityState {
-    /// A cap with no synth: every request that needs one replies `Err`.
     pub fn nop() -> Self {
-        Self::with_worker(None)
-    }
-
-    /// A cap whose events feed `worker`'s synth. The state owns the worker
-    /// thread and its shutdown sender, so `Drop` stops and joins it.
-    pub fn running(worker: AudioWorker) -> Self {
-        Self::with_worker(Some(worker))
-    }
-
-    fn with_worker(worker: Option<AudioWorker>) -> Self {
-        let (sender, sample_rate, thread, shutdown) = worker.map_or((None, None, None, None), |w| {
-            (Some(w.sender), Some(synth_rate(w.sample_rate)), Some(w.thread), Some(w.shutdown))
-        });
         Self {
-            sender,
-            sample_rate,
+            sender: None,
+            sample_rate: None,
             assemblies: HashMap::new(),
             assembly_ids: SessionIds::new(),
             track_loads: HashMap::new(),
             track_load_ids: SessionIds::new(),
             instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
-            thread,
-            shutdown,
+            thread: None,
+            shutdown: None,
         }
     }
 }
@@ -185,7 +170,20 @@ impl NativeActor for AudioCapability {
             AudioOutput::Null => spawn_null_worker(config.requested_sample_rate.unwrap_or(NULL_SAMPLE_RATE)),
         };
         match worker {
-            Ok(worker) => Ok(AudioCapabilityState::running(worker)),
+            Ok(AudioWorker { sender, sample_rate, thread, shutdown }) => Ok(AudioCapabilityState {
+                sender: Some(sender),
+                // Audio device rates are bounded well below 2^24 —
+                // exact in f32, matching the synth's own conversion.
+                #[allow(clippy::cast_precision_loss)]
+                sample_rate: Some(sample_rate as f32),
+                assemblies: HashMap::new(),
+                assembly_ids: SessionIds::new(),
+                track_loads: HashMap::new(),
+                track_load_ids: SessionIds::new(),
+                instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
+                thread: Some(thread),
+                shutdown: Some(shutdown),
+            }),
             Err(e) => {
                 tracing::warn!(
                     target: "aether_substrate::audio",

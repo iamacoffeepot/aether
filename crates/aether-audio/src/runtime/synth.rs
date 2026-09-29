@@ -74,14 +74,6 @@ pub struct Synth {
     next_schedule_seq: u64,
 }
 
-/// An output rate in hertz as the `f32` the synth and the track resampler
-/// run at.
-// Audio sample rates are bounded well below 2^24 — exact in f32.
-#[allow(clippy::cast_precision_loss)]
-pub const fn synth_rate(hz: u32) -> f32 {
-    hz as f32
-}
-
 impl Synth {
     pub fn new(events: Arc<ArrayQueue<AudioEvent>>, sample_rate: f32) -> Self {
         Self {
