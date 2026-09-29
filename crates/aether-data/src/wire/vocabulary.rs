@@ -513,6 +513,7 @@ impl WireEncode for InputsRecord {
                 resolver.encode(out)?;
                 namespace.encode(out)
             }
+            Self::Instanced => 6u32.encode(out),
         }
     }
 }
@@ -531,6 +532,7 @@ impl<'de> WireDecode<'de> for InputsRecord {
             3 => Ok(Self::Config { id: crate::KindId::decode(cursor)?, name: Cow::decode(cursor)? }),
             4 => Ok(Self::ActorBoundary { namespace: Cow::decode(cursor)? }),
             5 => Ok(Self::Dependency { resolver: u8::decode(cursor)?, namespace: Cow::decode(cursor)? }),
+            6 => Ok(Self::Instanced),
             other => Err(Error::InvalidEnum(other)),
         }
     }

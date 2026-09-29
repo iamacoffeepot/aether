@@ -44,8 +44,9 @@ mod schema;
 
 pub use inputs::{
     inputs_actor_boundary_len, inputs_component_len, inputs_config_len, inputs_dependency_len, inputs_fallback_len,
-    inputs_handler_len, reply_contract_len, write_inputs_actor_boundary, write_inputs_component, write_inputs_config,
-    write_inputs_dependency, write_inputs_fallback, write_inputs_handler, write_reply_contract,
+    inputs_handler_len, inputs_instanced_len, reply_contract_len, write_inputs_actor_boundary, write_inputs_component,
+    write_inputs_config, write_inputs_dependency, write_inputs_fallback, write_inputs_handler, write_inputs_instanced,
+    write_reply_contract,
 };
 pub use labels::{canonical_len_labels, canonical_serialize_labels};
 pub use schema::{
@@ -495,6 +496,20 @@ mod tests {
         assert_eq!(decoded, InputsRecord::Dependency { resolver: RESOLVER, namespace: NS.into() });
         let record = InputsRecord::Dependency { resolver: RESOLVER, namespace: Cow::Borrowed(NS) };
         assert_eq!(&BYTES[..], wire::to_vec(&record).expect("encode").as_slice());
+    }
+
+    #[test]
+    fn inputs_instanced_const_round_trips() {
+        // Tripwire: the `Instanced` record is the bare wire selector 6 with
+        // no body, and the const-fn writer emits byte-identical output to the
+        // runtime encoder. A drift here means the derive-written cardinality
+        // bytes no longer decode to `Instanced`, or an earlier variant moved.
+        const N: usize = inputs_instanced_len();
+        const BYTES: [u8; N] = write_inputs_instanced::<N>();
+        assert_eq!(BYTES, [6, 0, 0, 0], "Instanced is wire selector 6 with no body");
+        let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
+        assert_eq!(decoded, InputsRecord::Instanced);
+        assert_eq!(&BYTES[..], wire::to_vec(&InputsRecord::Instanced).expect("encode").as_slice());
     }
 
     #[test]

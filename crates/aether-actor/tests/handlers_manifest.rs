@@ -313,6 +313,7 @@ fn manifest_const_round_trips_to_expected_records() {
 
     let mut handler_count = 0usize;
     let mut fallback_count = 0usize;
+    let mut instanced_count = 0usize;
     let mut tick_doc: Option<String> = None;
 
     for rec in &records {
@@ -364,16 +365,35 @@ fn manifest_const_round_trips_to_expected_records() {
             InputsRecord::Dependency { .. } => {
                 panic!("unexpected Dependency record in an inherent inputs manifest")
             }
+            // ADR-0241 §5: the fixture declares `#[actor(instanced)]`.
+            InputsRecord::Instanced => instanced_count += 1,
         }
     }
 
     assert_eq!(handler_count, 3, "expected three #[handler] records");
     assert_eq!(fallback_count, 1, "expected one #[fallback] record");
+    assert_eq!(instanced_count, 1, "expected one Instanced record");
     assert_eq!(
         tick_doc.as_deref(),
         Some("Increments the tick counter."),
         "rustdoc # Agent body should land on the Tick handler"
     );
+}
+
+/// ADR-0241 §5: the host reads cardinality only from the manifest, so the
+/// derive must write exactly one `Instanced` record for an instanced type and
+/// none for a singleton. A dropped record names an instanced actor by its
+/// bare namespace; a stray one makes a singleton demand a key.
+#[test]
+fn the_inputs_manifest_records_cardinality() {
+    fn instanced_records(bytes: &[u8]) -> usize {
+        parse_section(bytes).into_iter().filter(|record| *record == InputsRecord::Instanced).count()
+    }
+
+    assert_eq!(instanced_records(&ManifestProbe::__AETHER_INPUTS_MANIFEST), 1, "instanced child");
+    assert_eq!(instanced_records(&ComposableProbe::__AETHER_INPUTS_MANIFEST), 1, "instanced composable");
+    assert_eq!(instanced_records(&ContractProbe::__AETHER_INPUTS_MANIFEST), 0, "singleton adopting a handler set");
+    assert_eq!(instanced_records(&DependentProbe::__AETHER_INPUTS_MANIFEST), 0, "singleton with dependencies");
 }
 
 #[test]

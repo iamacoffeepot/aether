@@ -164,3 +164,21 @@ pub const fn write_inputs_dependency(resolver: u8, namespace: &str, out: &mut [u
     let pos = write_u8(resolver, out, pos);
     write_str(namespace, out, pos)
 }
+
+/// Byte length of an `Instanced` record's aether-wire encoding (ADR-0241 §5).
+/// A unit variant, so only its `u32` LE variant selector (`6`).
+#[must_use]
+pub const fn inputs_instanced_len() -> usize {
+    U32_WIDTH
+}
+
+/// Serialize an `InputsRecord::Instanced` into a fixed-size array sized by
+/// `inputs_instanced_len`. Exact aether-wire shape for the unit variant the
+/// `#[actor(instanced)]` derive appends to the type's own records.
+#[must_use]
+pub const fn write_inputs_instanced<const N: usize>() -> [u8; N] {
+    let mut out = [0u8; N];
+    let pos = write_u32_le(6, &mut out, 0); // variant selector: Instanced
+    let _ = pos;
+    out
+}

@@ -106,10 +106,8 @@ pub const BOOT_SECTION: &str = "aether.boot";
 /// the bump on `aether.kinds.labels`.
 ///
 /// Note: this is the `aether.kinds` section version, distinct from the
-/// `aether.kinds.inputs` section version (`INPUTS_SECTION_VERSION`, also
-/// `0x05` since ADR-0118 / issue 1984). The two sections version
-/// independently and happen to coincide at this revision — a shared
-/// number, not a shared format.
+/// `aether.kinds.inputs` section version (`INPUTS_SECTION_VERSION`). The
+/// two sections version independently.
 const KINDS_VERSION: u8 = KINDS_SECTION_VERSION;
 
 /// Wire versions accepted in `aether.kinds.labels`. v0x03 added
@@ -347,20 +345,24 @@ pub struct ActorInputs {
     /// The `Dependency` records that belong to this actor type, in
     /// declaration order; empty when the actor declares none.
     pub dependencies: Vec<Dependency>,
+    /// Whether this actor type declares `#[actor(instanced)]`, read from its
+    /// `Instanced` record (ADR-0241 §5); `false` for a singleton.
+    pub instanced: bool,
 }
 
 /// Decode the component's `aether.kinds.inputs` section (ADR-0033 /
 /// ADR-0096) into one [`ActorInputs`] per exported actor type. The
-/// record stream is `[0x05][wire(InputsRecord)]` back-to-back; an
+/// record stream is `[0x06][wire(InputsRecord)]` back-to-back; an
 /// `ActorBoundary { namespace }` record opens a new group and the
-/// Handler / Fallback / Component / Config / Dependency records that
+/// Handler / Fallback / Component / Config / Dependency / Instanced records that
 /// follow belong to it, in declaration order. A single-actor module emits
 /// no boundary, so all its records fall into one implicit `namespace:
 /// None` group (byte-identical to the pre-ADR-0096 layout). The first
 /// group is the entry type. Within each group: every Handler enters
 /// `handlers`, every Dependency enters `dependencies`, at most one
 /// Fallback populates `fallback`, at most one Component populates `doc`,
-/// and at most one Config populates `config` (ADR-0090 / issue 1257) — a
+/// at most one Config populates `config` (ADR-0090 / issue 1257), and at
+/// most one Instanced sets `instanced` (ADR-0241 §5) — a
 /// duplicate of any of the at-most-one records is a substrate-rejected
 /// load error, since the macro emits at most one of each per type. A
 /// module that declares no inputs section at all returns an empty vec.
@@ -404,6 +406,7 @@ fn read_inputs_groups(wasm: &[u8], section: &str) -> Result<Vec<ActorInputs>, St
                     namespace: Some(namespace.into_owned()),
                     capabilities: ComponentCapabilities::default(),
                     dependencies: Vec::new(),
+                    instanced: false,
                 });
             }
             InputsRecord::Handler { id, name, doc, reply } => {
@@ -445,6 +448,13 @@ fn read_inputs_groups(wasm: &[u8], section: &str) -> Result<Vec<ActorInputs>, St
                     .dependencies
                     .push(Dependency { resolver, namespace: namespace.into_owned() });
             }
+            InputsRecord::Instanced => {
+                let group = current_group(&mut groups);
+                if group.instanced {
+                    return Err(format!("{section}: duplicate Instanced record — macro emits at most one per actor"));
+                }
+                group.instanced = true;
+            }
         }
     }
     Ok(groups)
@@ -481,6 +491,7 @@ fn current_group(groups: &mut Vec<ActorInputs>) -> &mut ActorInputs {
             namespace: None,
             capabilities: ComponentCapabilities::default(),
             dependencies: Vec::new(),
+            instanced: false,
         });
     }
     let last = groups.len() - 1;
@@ -1420,6 +1431,41 @@ mod tests {
         assert_eq!(actors[0].dependencies[1].resolver, Embedded::TAG);
         assert_eq!(actors[0].dependencies[1].namespace, "ui.peer");
         assert!(actors[1].dependencies.is_empty());
+    }
+
+    #[test]
+    fn instanced_marks_only_its_own_group() {
+        // ADR-0241 §5: an `Instanced` record flags the open group alone —
+        // a reader that leaked it onto the next group, or ignored it, would
+        // name a singleton by key or an instanced actor by bare namespace.
+        let section = inputs_section(&[
+            InputsRecord::ActorBoundary { namespace: "ui.root".into() },
+            InputsRecord::Instanced,
+            InputsRecord::ActorBoundary { namespace: "ui.panel".into() },
+        ]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let actors = read_actor_inputs_from_bytes(&wasm).unwrap();
+        let flags: Vec<_> = actors.iter().map(|group| (group.namespace.as_deref(), group.instanced)).collect();
+        assert_eq!(flags, [(Some("ui.root"), true), (Some("ui.panel"), false)]);
+    }
+
+    #[test]
+    fn duplicate_instanced_is_rejected() {
+        let section = inputs_section(&[InputsRecord::Instanced, InputsRecord::Instanced]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let err = read_actor_inputs_from_bytes(&wasm).unwrap_err();
+        assert!(err.contains("duplicate Instanced"), "err: {err}");
+    }
+
+    #[test]
+    fn a_module_built_before_cardinality_records_is_refused() {
+        // A v0x05 module cannot carry `Instanced`, so reading it would call
+        // every one of its types a singleton; the reader must refuse it.
+        let mut section = vec![0x05];
+        section.extend(wire::to_vec(&InputsRecord::Fallback { doc: None }).unwrap());
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let err = read_actor_inputs_from_bytes(&wasm).unwrap_err();
+        assert!(err.contains("record version 0x5"), "err: {err}");
     }
 
     #[test]

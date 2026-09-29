@@ -151,6 +151,7 @@ pub fn build_inputs_manifest_consts(
     component_doc: Option<&String>,
     config_kind_ty: Option<&Type>,
     handler_set: Option<(&syn::Path, &Type)>,
+    cardinality: Option<ActorCardinality>,
 ) -> TokenStream2 {
     let mut len_stmts: Vec<TokenStream2> = Vec::new();
     let mut copy_blocks: Vec<TokenStream2> = Vec::new();
@@ -228,6 +229,24 @@ pub fn build_inputs_manifest_consts(
                         <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
                         <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
                     )
+                },
+            ),
+        );
+    }
+
+    // ADR-0241 §5: the host holds bytes, not types, so an instanced type's
+    // cardinality reaches it only as this record. A singleton writes none.
+    if matches!(cardinality, Some(ActorCardinality::Instanced)) {
+        let record_len = quote! {
+            ::aether_actor::__macro_internals::canonical::inputs_instanced_len()
+        };
+        push_ungated(
+            &quote! { (1 + #record_len) },
+            &emit_record_copy_block(
+                &section_version,
+                &record_len,
+                &quote! {
+                    ::aether_actor::__macro_internals::canonical::write_inputs_instanced::<RECORD_LEN>()
                 },
             ),
         );
