@@ -38,9 +38,9 @@ anyhow = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 clap = { workspace = true }
 confique = { workspace = true }
-# ADR-0161 R4: `push_and_settle` polls the crossbeam settlement receiver
-# `SettlementRegistry::subscribe_settlement` hands back, draining the pumped
-# render slot each round so a render-recipient chain settles.
+# The crossbeam settlement receiver `SettlementRegistry::subscribe_settlement`
+# hands back, which a hookless `push_and_settle` waits on (a render hook waits
+# on its own `PumpWake` channel, ADR-0161 §Decision 2).
 crossbeam-channel = "0.5"
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }

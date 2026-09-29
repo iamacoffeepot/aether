@@ -54,6 +54,13 @@ settle before the next observation. A slow-chain heartbeat can extend patience;
 the cumulative cap identifies a genuine wedge and reports pending roots/hold
 counts.
 
+On a harness built with render, `send_and_settle` drains the pumped
+`aether.render` slot on its mail wake while it waits, through the same
+`await_settlement_pumped` the desktop and harness-binary drivers use (ADR-0161
+§Decision 2): a chain that reaches the render actor settles because each render
+mail arrival triggers a drain, and there is no fixed drain round. The heartbeat
+only logs; it never drains.
+
 The frame pump also subscribes to the exact lifecycle root it is waiting on.
 While that chain remains outstanding, quiet polls stay at the 50 µs floor;
 after settlement, or when no exact chain is available, they resume geometric
