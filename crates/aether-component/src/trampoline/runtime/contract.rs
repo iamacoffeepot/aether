@@ -18,10 +18,10 @@ use aether_substrate::mail::KindId;
 use aether_substrate::mail::registry::RouteContract;
 
 /// The type every actor a module can spawn inline publishes on its alias,
-/// with the dependencies its spawn checks, keyed by its actor-type tag (`ActorId::singleton(NAMESPACE)`): the
-/// exported groups, then the private children of
-/// `aether.kinds.inputs.private`, each under the namespace the manifest
-/// resolves for it.
+/// with the dependencies its spawn checks, keyed by its actor-type tag
+/// (`ActorId::singleton(NAMESPACE)`): the exported groups, then the private
+/// children of `aether.kinds.inputs.private`, each under the namespace the
+/// manifest resolves for it.
 pub(super) fn inline_children(manifest: &ModuleManifest) -> Vec<(u64, InlineChildType)> {
     manifest
         .exported_groups()

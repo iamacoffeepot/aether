@@ -1,10 +1,10 @@
 //! ADR-0230 fixture: an inline child with a declared dependency.
 //!
 //! `Holder` is the module's export. Its `wire` spawns its private child
-//! `Needy` inline, and `Needy` declares `depends(ClipboardCapability)`. The module
-//! loads whether or not a clipboard actor is live: dependencies are checked
-//! where an actor stands up (ADR-0241 §4), and for `Needy` that is its spawn.
-//! `Holder` keeps how the spawn ended and answers it to a
+//! `Needy` inline, and `Needy` declares `depends(ClipboardCapability)`. The
+//! module loads whether or not a clipboard actor is live: dependencies are
+//! checked where an actor stands up (ADR-0241 §4), and for `Needy` that is
+//! its spawn. `Holder` keeps how the spawn ended and answers it to a
 //! `SpawnOutcomeQuery`, so a test reads the guest's own `SpawnError`.
 
 #![forbid(unsafe_code)]

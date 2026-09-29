@@ -296,9 +296,9 @@ with `depends(R)`. The actor is the first parameter, the reply mode the second
 
 The `ChildOf<RootManager>` bound rejects a missing placement at compile time.
 At runtime the ctx also verifies that its actual registry actor tag is
-`RootManager` before it allocates the child's alias. A child type whose declared
-dependency has no `Live` route is refused before its alias is allocated, as
-`SpawnError::DependencyNotLive`. The child's `init` runs
+`RootManager` before it allocates the child's alias. A child type whose
+declared dependency has no `Live` route is refused before its alias is
+allocated, as `SpawnError::DependencyNotLive`. The child's `init` runs
 in-process during the call, so an `init` failure comes back as
 `SpawnError::InitFailed`, and the returned `InlineChild<Panel>` checks later
 sends against `Panel`'s handlers.
