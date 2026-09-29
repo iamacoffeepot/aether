@@ -25,7 +25,7 @@ publish = false
 # guest can send `ctx.send::<HttpCapability>(..)` and author
 # `#[http::router]` routes without dragging the substrate through. The
 # `aether_substrate`-typed half (both cap states, the listener and its
-# dispatch shards, the deferred-reply obligation table) is gated behind it.
+# dispatch shards) is gated behind it.
 
 # cargo-machete (the CI unused-deps gate) scans source without resolving
 # features, so `clap` is a false positive — it is used only through the
@@ -55,10 +55,9 @@ runtime = [
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
-# ADR-0131: the `#[http::router]` / `#[http::route]` / `#[http::reply]` proc
-# macros, re-exported from this crate's root. Proc-macro crates are
-# host-compiled, so the unconditional dep leaves the wasm-header-only build
-# unaffected.
+# ADR-0131: the `#[http::router]` / `#[http::route]` proc macros,
+# re-exported from this crate's root. Proc-macro crates are host-compiled, so
+# the unconditional dep leaves the wasm-header-only build unaffected.
 aether-http-derive = { path = "../aether-http-derive" }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # Native-only runtime half — gated so wasm/marker builds skip the substrate

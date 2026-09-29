@@ -1,6 +1,8 @@
 //! Minimal native handler actors behind the server in the integration
 //! tests: one that replies `200` echoing the request, one that closes
-//! before answering its held reply (the close-time `502` path), two
+//! before answering its held reply (the close-time `502` path), one that
+//! holds its reply and forwards to a peer that never answers (the
+//! request-timeout `504` path), two
 //! response-streaming handlers (ADR-0128) — a well-behaved one that
 //! paces chunks against credit, and a flooder that ignores credit —
 //! plus the routed handlers. Most route handlers author their routes
@@ -30,9 +32,10 @@ mod streaming;
 // own unit tests narrow a handler path from, so the basic fixtures reach the
 // whole `server` module rather than this test tree alone.
 pub(in crate::server) use basic::{ClosingHttpHandler, EchoHttpHandler, FixedBodyHttpHandler};
+pub(super) use basic::{HeldForwardHttpHandler, SilentPeer};
 pub(super) use routed::{
-    ApiRouteHandler, ApiV2Handler, BookRouteHandler, DeferRouteHandler, EchoPeer, ExtractRouteHandler,
-    MethodAnyHandler, MethodPostHandler, NestedRouteHandler, SilentPeer, TmpRouteHandler, WiredRouteHandler,
+    ApiRouteHandler, ApiV2Handler, BookRouteHandler, ExtractRouteHandler, MethodAnyHandler, MethodPostHandler,
+    NestedRouteHandler, TmpRouteHandler, WiredRouteHandler,
 };
 pub(super) use shared::{ExclusiveMacroPoolHandler, SharedAlphaHandler, SharedBetaHandler, SharedMacroPoolHandler};
 pub(super) use streaming::{

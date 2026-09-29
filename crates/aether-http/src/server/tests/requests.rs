@@ -1,8 +1,8 @@
 //! Request parsing, framing rejects and the rendered response head: the
 //! method / path / query / body round trip, the size and framing guards
 //! (`413` / `411` / `501`), the no-route `503`, the `502` a router that
-//! closes before answering gives, interim `100 Continue`, and HEAD body
-//! suppression.
+//! closes before answering gives, the `504` a held reply whose peer never
+//! answers waits out, interim `100 Continue`, and HEAD body suppression.
 
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::server::HttpServerCapability;
 
-use super::handlers::{ClosingHttpHandler, EchoHttpHandler, FixedBodyHttpHandler};
-use super::support::{body_of, boot_buffered, config_for, port_of, round_trip, round_trip_live};
+use super::handlers::{ClosingHttpHandler, EchoHttpHandler, FixedBodyHttpHandler, HeldForwardHttpHandler, SilentPeer};
+use super::support::{body_of, boot_buffered, config_for, port_of, round_trip, round_trip_live, timeout_config_for};
 
 /// A GET round-trips to the handler and its reply returns as
 /// well-formed HTTP/1.1, carrying the parsed path / query / method.
@@ -165,6 +165,26 @@ fn closing_router_answers_502() {
     let response = round_trip_live(port_of(&chassis), b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 502 "), "expected 502, got: {response:?}");
     assert_eq!(body_of(&response), "router closed before answering", "the close answered, not the net: {response:?}");
+}
+
+/// A handler that holds its reply and forwards to a peer that never answers
+/// keeps the request's chain open (ADR-0243 §7), so the server answers `504`
+/// at its request timeout. The settlement net is live, so a hold released
+/// early, which would let the chain settle, answers `502` and fails, and a
+/// request timeout that never fires fails the round trip.
+#[test]
+fn held_reply_whose_peer_never_answers_is_504() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor::<SilentPeer>(())
+        .with_actor::<HeldForwardHttpHandler>(())
+        .with_actor_configured::<HttpServerCapability>((), timeout_config_for(1_000))
+        .build_passive()
+        .expect("caps boot");
+
+    let response = round_trip_live(port_of(&chassis), b"GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(response.starts_with("HTTP/1.1 504 "), "expected the request timeout's 504, got: {response:?}");
 }
 
 /// A percent-encoded path is decoded before it reaches the handler

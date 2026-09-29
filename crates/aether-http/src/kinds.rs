@@ -234,8 +234,8 @@ impl HeldReply for HttpRouterResult {
 ///
 /// A handler that returns `HttpRouterResult` covers the row, and so does one
 /// that returns `Pending<HttpRouterResult>` and answers later through its held
-/// reply (ADR-0243), as a `#[http::router]` actor with an ADR-0154 deferred
-/// route does. A manual handler does not cover it.
+/// reply (ADR-0243), as a hand-written handler that forwards to a peer does.
+/// A manual handler does not cover it.
 #[aether_actor::protocol]
 pub trait HttpRouter {
     fn request(mail: HttpServerRequest) -> HttpRouterResult;

@@ -1,10 +1,11 @@
 //! The buffered `/` catch-all fixtures: one handler that replies `200`
-//! echoing the request, one that replies a fixed non-empty body, and one that
+//! echoing the request, one that replies a fixed non-empty body, one that
 //! holds the request's reply and closes before answering (the close-time
-//! `502` path).
+//! `502` path), and one that holds its reply and forwards to a peer that never
+//! answers (the request-timeout `504` path).
 
-use aether_actor::actor;
-use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
+use aether_actor::{Manual, actor};
+use aether_substrate::actor::native::{Erased, Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
 use crate::kinds::{HttpHeader, HttpRouterResult, HttpServerRequest, HttpServerResponse};
@@ -115,6 +116,75 @@ impl NativeActor for ClosingHttpHandler {
         let (pending, held) = ctx.hold::<HttpRouterResult>();
         state.parked = Some(held);
         ctx.shutdown();
+        pending
+    }
+}
+
+/// What [`HeldForwardHttpHandler`] forwards to [`SilentPeer`].
+#[aether_data::kind(name = "aether.http.test_ask")]
+pub struct Ask;
+
+/// The forwarding handler's held reply, parked in the forwarded [`Ask`]'s
+/// request context until the peer's reply takes it back (ADR-0243 §4).
+#[aether_data::kind(name = "aether.http.test_forward_context")]
+struct ForwardContext {
+    held: Held<HttpRouterResult>,
+}
+
+/// A peer that receives [`Ask`] and never replies.
+pub struct SilentPeer;
+
+/// Empty runtime state for the silent peer (ADR-0122).
+pub struct SilentPeerState;
+
+#[actor(singleton, root)]
+impl NativeActor for SilentPeer {
+    type State = SilentPeerState;
+    type Config = ();
+    const NAMESPACE: &'static str = "aether.http.test_silent_peer";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<SilentPeerState, BootError> {
+        Ok(SilentPeerState)
+    }
+
+    // Manual and never answered: the forwarding handler's held reply keeps the
+    // request's chain open, so the server answers `504` at its timeout.
+    #[handler::manual]
+    fn on_ask(_state: &mut SilentPeerState, _ctx: &mut NativeCtx<'_, Erased, Manual>, _ask: Ask) {}
+}
+
+/// Holds the request's reply and forwards an [`Ask`] to [`SilentPeer`] with
+/// the held reply parked in the forwarded request's context: the hand-written
+/// held-reply handler a router that waits on a peer is (ADR-0243 §4). The peer
+/// never replies, so the request waits out the server's request timeout.
+pub struct HeldForwardHttpHandler;
+
+/// Empty runtime state: the held reply rides the request context, not the
+/// actor.
+pub struct HeldForwardHttpHandlerState;
+
+#[actor(singleton, root, depends(HttpServerCapability, SilentPeer))]
+impl NativeActor for HeldForwardHttpHandler {
+    type State = HeldForwardHttpHandlerState;
+    type Config = ();
+    const NAMESPACE: &'static str = "aether.http.test_held_forward_handler";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<HeldForwardHttpHandlerState, BootError> {
+        Ok(HeldForwardHttpHandlerState)
+    }
+
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        bind_catch_all(ctx);
+    }
+
+    #[handler::single]
+    fn on_request(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        _request: HttpServerRequest,
+    ) -> Pending<HttpRouterResult> {
+        let (pending, held) = ctx.hold::<HttpRouterResult>();
+        let _ = ctx.send_with_context::<SilentPeer>(&Ask, ForwardContext { held });
         pending
     }
 }
