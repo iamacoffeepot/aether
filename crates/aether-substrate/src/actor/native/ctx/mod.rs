@@ -122,8 +122,9 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// [`InboundMail`](crate::chassis::inbox::InboundMail) guard for a deferred reply. One envelope in one
     /// place: the detector for a missed settlement is `Option::is_some`,
     /// so a double-settle is structurally unrepresentable. `None` for the
-    /// ctxs that dispatch nothing (init / close-hook / chassis-root /
-    /// cap-test fixtures built through [`Self::new`]).
+    /// ctxs that dispatch nothing (the `wire` hook built through
+    /// [`Self::for_wire`], the pumped host turn and close hooks built through
+    /// [`Self::new_for_actor`]).
     inbound: Option<Envelope>,
     /// ADR-0243 §7: set by the first [`Self::hold`] of this dispatch, so a
     /// second one panics — two debts on one request would send two replies.
