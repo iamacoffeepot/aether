@@ -223,40 +223,49 @@ pub trait WindowManagerSurface {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "synthetic"))]
 mod tests {
-    use aether_actor::ActorPath;
-    use aether_data::{LoadName, Source};
-    use aether_substrate::mail::registry::noop_handler;
-    use aether_substrate::testing::{bare_substrate, drop_ref, registered_ref, unrouted_binding};
+    use aether_data::LoadName;
+    use aether_substrate::testing::await_settled;
 
     use super::*;
-    use crate::{SyntheticWindowCapability, SyntheticWindowInstance};
+    use crate::runtime::subscribers::fixture::Rig;
+    use crate::{CreateWindow, CreateWindowResult, RetireWindow, SyntheticWindowCapability, SyntheticWindowInstance};
+    use crate::{WindowMode, WindowSpec};
 
+    /// The sole window's child departs while a root command for it is
+    /// already queued behind the departure: the window stays listed until
+    /// its `MonitorNotice` is processed, but the command must not be
+    /// forwarded into the dead mailbox, where it would settle with no reply.
+    /// Fails if the root forwards without proving the sole window live.
     #[test]
     fn sole_window_departure_is_refused_before_its_monitor_notice_is_processed() {
-        let (registry, mailer) = bare_substrate();
-        let typed_path = ActorPath::<SyntheticWindowInstance>::child(
-            &ActorPath::<SyntheticWindowCapability>::root(),
-            &LoadName::new("departed").expect("fixture name"),
-        )
-        .expect("fixture path");
-        let reference = registered_ref(&registry, typed_path.as_erased().as_str(), noop_handler());
-        let binding = unrouted_binding(&mailer);
-        let ctx = NativeCtx::<Erased>::new(&binding, Source::NONE, None, None);
-        let target = ctx.resolve(&typed_path.narrow::<WindowCommands>()).expect("the child protocol path is live");
-        let path = typed_path.as_erased().clone();
-        drop_ref(&registry, reference);
-        let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, None, None);
+        let mut rig = Rig::<SyntheticWindowCapability>::boot(());
+        let spec =
+            WindowSpec { name: "main".to_owned(), title: "Main".to_owned(), mode: WindowMode::Windowed, size: None };
+        rig.send(&CreateWindow { spec });
+        let CreateWindowResult::Ok { window } = rig.reply::<CreateWindowResult>() else {
+            panic!("the synthetic manager creates the window");
+        };
+        let main_child = |rig: &Rig<SyntheticWindowCapability>| {
+            rig.chassis().child::<SyntheticWindowCapability, SyntheticWindowInstance>(
+                rig.manager(),
+                LoadName::new("main").expect("fixture name"),
+            )
+        };
+        let child = main_child(&rig).expect("the window child is live");
 
-        let error = route_to_sole_window(
-            &[RoutableWindow { path: path.clone(), target: Some(target) }],
-            &mut ctx,
-            &SetWindowTitle { title: "too late".to_owned() },
-        )
-        .expect_err("a dead child remains listed until its monitor notice, but cannot receive a root command");
+        let too_late = rig.push(&SetWindowTitle { title: "too late".to_owned() });
+        let (_, retired) = rig.chassis().send_tracked(child, &RetireWindow, None);
+        await_settled(&retired, "the child retires");
+        rig.chassis().await_closed(child.erase());
+        assert!(main_child(&rig).is_err(), "the retired child's route is dropped");
+        rig.driver.settle(&[too_late]);
 
-        assert!(error.contains(path.as_str()));
-        assert!(error.contains("not live"));
+        let SetWindowTitleResult::Err { error } = rig.reply::<SetWindowTitleResult>() else {
+            panic!("a dead child remains listed until its monitor notice, but cannot receive a root command");
+        };
+        assert!(error.contains(window.path.as_str()), "the refusal names the window: {error}");
+        assert!(error.contains("not live"), "the refusal says why: {error}");
     }
 }

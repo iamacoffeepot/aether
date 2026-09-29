@@ -320,95 +320,121 @@ impl WindowSubscribers {
     }
 }
 
-/// The window runtimes' test subscriber: a keyed actor type whose paths
-/// narrow to a `Subscriber<K>` of each kind the tests publish, standing as a
-/// registered route the tests choose.
+/// The window runtimes' test rig: a window manager booted pumped on a bare
+/// test chassis, and [`Watcher`] subscribers spawned beside it that report
+/// every published event they receive.
 #[cfg(test)]
 pub mod fixture {
     use std::collections::BTreeSet;
-    use std::sync::Arc;
+    use std::sync::mpsc::{self, Receiver, Sender};
 
-    use aether_actor::{ActorPath, CoveredBy, ErasedActorRef, ProtocolRef, Subscriber};
-    use aether_data::{ErasedActorPath, LoadName};
+    use aether_actor::{ActorPath, ActorRef, ErasedActorRef, HandlesKind, ProtocolRef, ReplyMode, Root};
+    use aether_data::{ErasedActorPath, Kind, KindId, LoadName, SessionToken, Uuid};
     use aether_kinds::{Key, MouseButton, MouseMove, MouseWheel, WindowSize};
-    use aether_substrate::Registry;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::builder::PassiveChassis;
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::mail::registry::InboxHandler;
-    use aether_substrate::testing::registered_ref;
+    #[cfg(feature = "desktop")]
+    use aether_substrate::config::SettlementConfig;
+    use aether_substrate::mail::MailId;
+    use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::testing::{PumpedDriver, TestChassis, boot_bare_test_chassis, fresh_substrate_and_rx};
+    use aether_substrate::{ReplyTarget, Subname};
 
     use super::{Published, WindowSubscribers};
-    use crate::WindowSelector;
+    use crate::{SubscribeWindow, SubscribeWindowResult, WindowSelector, WindowSubscription};
 
-    /// Silent handlers for every kind a window test subscribes.
-    pub struct Watcher;
+    /// One published event a [`Watcher`] received: the watcher's key, the
+    /// event, and the envelope's causal root and stamped sender.
+    pub struct Receipt {
+        pub watcher: String,
+        kind: KindId,
+        payload: Vec<u8>,
+        pub root: Option<MailId>,
+        pub sender: Option<ErasedActorRef>,
+    }
+
+    impl Receipt {
+        /// The event, when it is a `K`.
+        pub fn event<K: Kind>(&self) -> Option<K> {
+            if self.kind == K::ID {
+                K::decode_from_bytes(&self.payload)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Asks a [`Watcher`] to shut down, so the runtime posts its departure
+    /// to every actor monitoring it.
+    #[aether_data::kind(name = "test.window.watcher.leave", copy, eq)]
+    pub struct Leave;
+
+    /// A subscriber with a silent handler for every kind a window test
+    /// subscribes. Each handler reports a [`Receipt`] over the channel its
+    /// config carries; a report whose receiver has already dropped is
+    /// discarded, since a test that wants it awaits it.
+    pub struct Watcher {
+        key: String,
+        report: Sender<Receipt>,
+    }
 
     #[aether_actor::actor(instanced, root)]
     impl NativeActor for Watcher {
         const NAMESPACE: &'static str = "test.window.watcher";
-        type Config = ();
+        type Config = (String, Sender<Receipt>);
 
-        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self)
+        fn init((key, report): (String, Sender<Receipt>), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { key, report })
         }
 
         #[handler::single]
-        fn on_key(&mut self, _ctx: &mut NativeCtx<'_>, _key: Key) {
-            let _ = self;
+        fn on_key(&mut self, ctx: &mut NativeCtx<'_>, mail: Key) {
+            self.record(ctx, &mail);
         }
 
         #[handler::single]
-        fn on_mouse_move(&mut self, _ctx: &mut NativeCtx<'_>, _mail: MouseMove) {
-            let _ = self;
+        fn on_mouse_move(&mut self, ctx: &mut NativeCtx<'_>, mail: MouseMove) {
+            self.record(ctx, &mail);
         }
 
         #[handler::single]
-        fn on_mouse_button(&mut self, _ctx: &mut NativeCtx<'_>, _mail: MouseButton) {
-            let _ = self;
+        fn on_mouse_button(&mut self, ctx: &mut NativeCtx<'_>, mail: MouseButton) {
+            self.record(ctx, &mail);
         }
 
         #[handler::single]
-        fn on_mouse_wheel(&mut self, _ctx: &mut NativeCtx<'_>, _mail: MouseWheel) {
-            let _ = self;
+        fn on_mouse_wheel(&mut self, ctx: &mut NativeCtx<'_>, mail: MouseWheel) {
+            self.record(ctx, &mail);
         }
 
         #[handler::single]
-        fn on_window_size(&mut self, _ctx: &mut NativeCtx<'_>, _mail: WindowSize) {
+        fn on_window_size(&mut self, ctx: &mut NativeCtx<'_>, mail: WindowSize) {
+            self.record(ctx, &mail);
+        }
+
+        #[handler::single]
+        fn on_leave(&mut self, ctx: &mut NativeCtx<'_>, _mail: Leave) {
             let _ = self;
+            ctx.shutdown();
         }
     }
 
-    /// The watcher keyed `key`.
+    impl Watcher {
+        fn record<K: Kind, A, M: ReplyMode>(&self, ctx: &NativeCtx<'_, A, M>, mail: &K) {
+            let _ = self.report.send(Receipt {
+                watcher: self.key.clone(),
+                kind: K::ID,
+                payload: mail.encode_into_bytes(),
+                root: ctx.in_flight_root(),
+                sender: ctx.sender(),
+            });
+        }
+    }
+
+    /// The watcher keyed `key`, where [`Rig::watcher`] spawns it.
     pub fn watcher(key: &str) -> ActorPath<Watcher> {
         ActorPath::instance(&LoadName::new(key).expect("a valid key"))
-    }
-
-    /// Stand a route with `handler` at `key`'s watcher path, answering its
-    /// key.
-    pub fn stand(registry: &Registry, key: &str, handler: Arc<dyn InboxHandler>) -> ErasedActorRef {
-        registered_ref(registry, watcher(key).as_erased().as_str(), handler)
-    }
-
-    /// Prove `key`'s watcher live as a subscriber to `K`, the way a subscribe
-    /// receipt does.
-    pub fn subscriber<K: Published>(ctx: &NativeCtx<'_>, key: &str) -> ProtocolRef<Subscriber<K>>
-    where
-        Subscriber<K>: CoveredBy<Watcher>,
-    {
-        ctx.resolve(&watcher(key).narrow()).expect("the watcher stands live")
-    }
-
-    /// Hold `key`'s watcher as a subscriber to `K` under `selector`.
-    pub fn hold<K: Published>(
-        subscribers: &mut WindowSubscribers,
-        ctx: &mut NativeCtx<'_>,
-        selector: WindowSelector,
-        key: &str,
-    ) where
-        Subscriber<K>: CoveredBy<Watcher>,
-    {
-        let subscriber = subscriber::<K>(ctx, key);
-        subscribers.subscribe(ctx, selector, subscriber);
     }
 
     /// The keys of `K`'s recipients from `window`.
@@ -418,126 +444,287 @@ pub mod fixture {
     ) -> BTreeSet<ErasedActorRef> {
         subscribers.recipients::<K>(window).map(ProtocolRef::erase).collect()
     }
+
+    /// The keys of the watchers that received `receipts`, sorted.
+    pub fn receivers(receipts: &[Receipt]) -> Vec<&str> {
+        let mut keys = receipts.iter().map(|receipt| receipt.watcher.as_str()).collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys
+    }
+
+    fn session() -> ReplyTarget {
+        ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0x7041)), correlation: 1 }
+    }
+
+    /// A window manager `M` booted pumped on a bare test chassis and driven
+    /// through [`PumpedDriver`]. Mail reaches it only through the chassis and
+    /// runs only on the driver's mail-wake drains, so a test decides exactly
+    /// which turns have run. Replies go to one hub session; watchers report
+    /// into one channel.
+    pub struct Rig<M: Root + NativeActor> {
+        pub driver: PumpedDriver<M>,
+        egress: Receiver<EgressEvent>,
+        report: Sender<Receipt>,
+        receipts: Receiver<Receipt>,
+    }
+
+    impl<M: Root + NativeActor<Config = ()>> Rig<M> {
+        pub fn boot(params: M::Params) -> Self {
+            let (registry, mailer, egress) = fresh_substrate_and_rx();
+            let driver = PumpedDriver::boot(boot_bare_test_chassis(&registry, &mailer), (), params);
+            let (report, receipts) = mpsc::channel();
+
+            Self { driver, egress, report, receipts }
+        }
+
+        pub fn chassis(&self) -> &PassiveChassis<TestChassis> {
+            self.driver.chassis()
+        }
+
+        pub fn manager(&self) -> ActorRef<M> {
+            self.chassis().actor_ref::<M>()
+        }
+
+        /// Spawn the watcher keyed `key`, reporting into this rig.
+        pub fn watcher(&self, key: &str) -> ActorRef<Watcher> {
+            self.chassis()
+                .spawn_actor_for_test::<Watcher>(Subname::Named(key), (key.to_owned(), self.report.clone()), ())
+                .finish()
+                .expect("the watcher spawns")
+        }
+
+        /// Queue `mail` on the manager as a tracked root answered to the rig's
+        /// session, without pumping it: for a request whose reply the manager
+        /// holds past its turn, or one that must wait behind later mail.
+        pub fn push<K: Kind>(&self, mail: &K) -> MailId
+        where
+            M: HandlesKind<K>,
+        {
+            self.driver.send_tracked(self.manager(), mail, Some(session()))
+        }
+
+        /// [`Self::send_to`] the manager.
+        pub fn send<K: Kind>(&mut self, mail: &K) -> Vec<Receipt>
+        where
+            M: HandlesKind<K>,
+        {
+            self.send_to(self.manager(), mail).1
+        }
+
+        /// Push `mail` to `to` as a tracked chassis root answered to the rig's
+        /// session, and pump the manager until the whole chain settles:
+        /// answer the root beside every receipt the chain delivered.
+        pub fn send_to<R: HandlesKind<K>, K: Kind>(&mut self, to: ActorRef<R>, mail: &K) -> (MailId, Vec<Receipt>) {
+            let root = self.driver.send_and_settle(to, mail, Some(session()));
+            (root, self.receipts.try_iter().collect())
+        }
+
+        /// Pump the manager on each mail wake until `done` holds of its
+        /// state: the wait for an effect off any chain the test holds.
+        pub fn pump_until(&mut self, what: &str, done: impl FnMut(&M::State) -> bool) {
+            self.driver.pump_until(what, done);
+        }
+
+        /// The next session reply of kind `R`, already sent: a reply precedes
+        /// its root's settlement, so it is read after the wait, never waited on.
+        pub fn reply<R: Kind>(&self) -> R {
+            self.egress
+                .try_iter()
+                .find_map(|event| match event {
+                    EgressEvent::ToSession { kind_name, payload, .. } if kind_name == R::NAME => {
+                        R::decode_from_bytes(&payload)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("a {} reply was sent", R::NAME))
+        }
+
+        /// Every session reply of kind `R` already sent.
+        pub fn replies<R: Kind>(&self) -> Vec<R> {
+            self.egress
+                .try_iter()
+                .filter_map(|event| match event {
+                    EgressEvent::ToSession { kind_name, payload, .. } if kind_name == R::NAME => {
+                        R::decode_from_bytes(&payload)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The next `count` receipts of events published outside any chain
+        /// the rig waits on, each awaited on the watcher channel under the
+        /// settlement cap.
+        #[cfg(feature = "desktop")]
+        pub fn receipts(&self, count: usize) -> Vec<Receipt> {
+            let cap = SettlementConfig::from_env().to_cap();
+            (0..count)
+                .map(|_| self.receipts.recv_timeout(cap).expect("a watcher receipt arrives within the settlement cap"))
+                .collect()
+        }
+
+        /// Subscribe through the explicit `aether.window.subscribe`,
+        /// answering the manager's reply.
+        pub fn subscribe(&mut self, selector: WindowSelector, subscription: WindowSubscription) -> SubscribeWindowResult
+        where
+            M: HandlesKind<SubscribeWindow>,
+        {
+            self.send(&SubscribeWindow { selector, subscription });
+            self.reply()
+        }
+    }
+
+    #[cfg(feature = "synthetic")]
+    impl Rig<crate::SyntheticWindowCapability> {
+        /// Inject `event` as published at `window` and answer the receipts
+        /// its fan-out delivered.
+        pub fn inject<K: Kind>(&mut self, window: &ErasedActorPath, event: &K) -> Vec<Receipt> {
+            self.send(&crate::InjectWindowEvent {
+                window: window.clone(),
+                kind: K::ID,
+                payload: event.encode_into_bytes(),
+            })
+        }
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "synthetic"))]
 mod tests {
     use std::collections::BTreeSet;
-    use std::sync::Arc;
 
-    use aether_data::{SessionToken, Uuid};
     use aether_kinds::{Key, MouseMove};
-    use aether_substrate::Registry;
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::registry::noop_handler;
-    use aether_substrate::mail::{Source, SourceAddr};
-    use aether_substrate::testing::unrouted_binding;
 
-    use super::fixture::{hold, recipients, stand};
+    use super::fixture::{Leave, Rig, receivers, recipients, watcher};
     use super::*;
+    use crate::WindowSelector::All;
+    use crate::{
+        SubscribeWindowResult, SubscribeWindowSelf, SyntheticWindowCapability, UnsubscribeWindow, UnsubscribeWindowSelf,
+    };
 
     fn window(name: &str) -> ErasedActorPath {
         crate::window_path(&aether_data::LoadName::new(name).expect("fixture window name"))
     }
 
-    fn fixture() -> (WindowSubscribers, Arc<NativeBinding>, Arc<Registry>) {
-        let registry = Arc::new(Registry::new());
-        let binding = unrouted_binding(&Arc::new(Mailer::new(Arc::clone(&registry))));
+    fn rig() -> Rig<SyntheticWindowCapability> {
+        Rig::boot(())
+    }
 
-        (WindowSubscribers::new(), binding, registry)
+    fn keys(name: &str) -> WindowSubscription {
+        WindowSubscription::Key(watcher(name).narrow())
+    }
+
+    fn key_at(window: &ErasedActorPath) -> Key {
+        Key { window: window.clone(), code: 41 }
+    }
+
+    fn one(name: &str) -> WindowSelector {
+        WindowSelector::One(window(name))
+    }
+
+    fn subscribed(result: &SubscribeWindowResult) -> bool {
+        matches!(result, SubscribeWindowResult::Ok)
     }
 
     /// The reflexive forms read their subscriber off the host-stamped
-    /// envelope through `ctx.sender()`, so they are only meaningful for an
-    /// in-process actor. A `Session` source (an external MCP session or a
-    /// remote engine) must use the explicit `subscribe` / `unsubscribe`
-    /// instead, and gets an `Err` plus an untouched route table rather than a
-    /// silently mis-attributed subscription.
+    /// envelope, so they are only meaningful for an in-process actor. A
+    /// `Session` source (an external MCP session or a remote engine) must use
+    /// the explicit `subscribe` / `unsubscribe` instead, and is answered `Err`
+    /// rather than a subscription attributed to some other actor. This fails
+    /// if the no-sender arm stops refusing.
     #[test]
-    fn reflexive_subscribe_rejects_a_non_component_source_without_touching_routes() {
-        let mut subscribers = WindowSubscribers::new();
-        let transport = unrouted_binding(&Arc::new(Mailer::new(Arc::new(Registry::new()))));
-        let source = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xFEED))));
-        let mut ctx = NativeCtx::new(&transport, source, None, None);
+    fn reflexive_subscribe_rejects_a_non_component_source() {
+        let mut rig = rig();
 
-        assert!(subscribers.subscribe_self(&mut ctx, WindowSelector::All, Key::ID).is_err());
-        assert!(subscribers.unsubscribe_self(&ctx, WindowSelector::All, Key::ID).is_err());
+        rig.send(&SubscribeWindowSelf { selector: All, kind: Key::ID });
+        assert!(matches!(rig.reply(), SubscribeWindowResult::Err { .. }), "a session cannot subscribe itself");
 
-        assert!(recipients::<Key>(&subscribers, &window("a")).is_empty(), "a rejected subscribe inserts no route");
+        rig.send(&UnsubscribeWindowSelf { selector: All, kind: Key::ID });
+        assert!(matches!(rig.reply(), SubscribeWindowResult::Err { .. }), "a session cannot unsubscribe itself");
     }
 
+    /// Fails if a `One` selector stores its row under every window, or under
+    /// the wrong one.
     #[test]
     fn one_selector_routes_only_the_selected_window() {
-        let (mut subscribers, binding, registry) = fixture();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let key = stand(&registry, "one", noop_handler());
+        let mut rig = rig();
+        rig.watcher("one");
+        assert!(subscribed(&rig.subscribe(one("a"), keys("one"))));
 
-        hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::One(window("a")), "one");
-
-        assert_eq!(recipients::<Key>(&subscribers, &window("a")), BTreeSet::from([key]));
-        assert!(recipients::<Key>(&subscribers, &window("b")).is_empty());
+        assert!(rig.inject(&window("b"), &key_at(&window("b"))).is_empty(), "another window's key reaches nobody");
+        assert_eq!(receivers(&rig.inject(&window("a"), &key_at(&window("a")))), ["one"]);
     }
 
+    /// Fails if an `All` subscription snapshots the windows that existed
+    /// when it was taken instead of covering every later one.
     #[test]
     fn all_selector_is_prospective() {
-        let (mut subscribers, binding, registry) = fixture();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let key = stand(&registry, "all", noop_handler());
+        let mut rig = rig();
+        rig.watcher("all");
+        let mouse = WindowSubscription::MouseMove(watcher("all").narrow());
+        assert!(subscribed(&rig.subscribe(All, mouse)));
 
-        hold::<MouseMove>(&mut subscribers, &mut ctx, WindowSelector::All, "all");
+        let late = window("late");
+        let receipts = rig.inject(&late, &MouseMove { window: late.clone(), x: 1.0, y: 2.0 });
 
-        assert_eq!(recipients::<MouseMove>(&subscribers, &window("a")), BTreeSet::from([key]));
-        assert_eq!(recipients::<MouseMove>(&subscribers, &window("late")), BTreeSet::from([key]));
+        assert_eq!(receivers(&receipts), ["all"], "a window born after the subscription still reaches it");
     }
 
+    /// Fails if an actor subscribed through both `All` and `One` receives
+    /// the window's event twice, or if the union drops a `One`-only
+    /// subscriber.
     #[test]
     fn all_and_one_union_deduplicates_the_same_subscriber() {
-        let (mut subscribers, binding, registry) = fixture();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let key = stand(&registry, "union", noop_handler());
-        let other = stand(&registry, "union-other", noop_handler());
+        let mut rig = rig();
+        rig.watcher("union");
+        rig.watcher("union-other");
+        assert!(subscribed(&rig.subscribe(All, keys("union"))));
+        assert!(subscribed(&rig.subscribe(one("g"), keys("union"))));
+        assert!(subscribed(&rig.subscribe(one("g"), keys("union-other"))));
 
-        hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::All, "union");
-        hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::One(window("g")), "union");
-        hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::One(window("g")), "union-other");
+        let receipts = rig.inject(&window("g"), &key_at(&window("g")));
 
-        assert_eq!(subscribers.recipients::<Key>(&window("g")).count(), 2, "one copy per subscriber");
-        assert_eq!(recipients::<Key>(&subscribers, &window("g")), BTreeSet::from([key, other]));
+        assert_eq!(receivers(&receipts), ["union", "union-other"], "one copy per subscriber");
     }
 
+    /// Fails if an unsubscribe removes a row other than the one it names:
+    /// the subscriber's own `One` row, or another subscriber's.
     #[test]
-    fn unsubscribe_and_departure_cleanup_preserve_other_routes() {
-        let (mut subscribers, binding, registry) = fixture();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let key = stand(&registry, "cleanup", noop_handler());
-        let other = stand(&registry, "cleanup-other", noop_handler());
+    fn unsubscribe_removes_only_the_named_row() {
+        let mut rig = rig();
+        rig.watcher("cleanup");
+        rig.watcher("cleanup-other");
+        assert!(subscribed(&rig.subscribe(All, keys("cleanup"))));
+        assert!(subscribed(&rig.subscribe(one("c"), keys("cleanup"))));
+        assert!(subscribed(&rig.subscribe(one("c"), keys("cleanup-other"))));
 
-        hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::All, "cleanup");
-        hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::One(window("c")), "cleanup");
-        hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::One(window("c")), "cleanup-other");
+        rig.send(&UnsubscribeWindow { selector: All, subscription: keys("cleanup") });
+        assert!(subscribed(&rig.reply()));
 
-        subscribers.unsubscribe::<Key>(WindowSelector::All, key);
-        assert_eq!(recipients::<Key>(&subscribers, &window("c")), BTreeSet::from([key, other]));
-
-        subscribers.unsubscribe_all(key);
-        assert_eq!(recipients::<Key>(&subscribers, &window("c")), BTreeSet::from([other]));
+        assert_eq!(receivers(&rig.inject(&window("c"), &key_at(&window("c")))), ["cleanup", "cleanup-other"]);
+        assert!(rig.inject(&window("d"), &key_at(&window("d"))).is_empty(), "the `All` row is gone");
     }
 
+    /// A subscriber that departs leaves every route it held once its
+    /// `MonitorNotice` is processed, and nobody else's. Fails if departure
+    /// cleanup misses one of the departed subscriber's rows or takes a
+    /// survivor's with it.
     #[test]
-    fn monitor_cleanup_purges_only_the_departed_subscriber_from_every_route() {
-        let (mut subscribers, binding, registry) = fixture();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let departed = stand(&registry, "departed", noop_handler());
-        let survivor = stand(&registry, "survivor", noop_handler());
+    fn departure_purges_only_the_departed_subscriber_from_every_route() {
+        let mut rig = rig();
+        let departed = rig.watcher("departed");
+        let survivor = rig.watcher("survivor");
+        assert!(subscribed(&rig.subscribe(All, keys("departed"))));
+        assert!(subscribed(&rig.subscribe(All, keys("survivor"))));
+        let mouse = WindowSubscription::MouseMove(watcher("departed").narrow());
+        assert!(subscribed(&rig.subscribe(one("c"), mouse)));
 
-        hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::All, "departed");
-        hold::<Key>(&mut subscribers, &mut ctx, WindowSelector::All, "survivor");
-        hold::<MouseMove>(&mut subscribers, &mut ctx, WindowSelector::One(window("c")), "departed");
+        rig.send_to(departed, &Leave);
+        let c = window("c");
+        rig.pump_until("the departure notice", |state| {
+            recipients::<Key>(&state.subscribers, &c) == BTreeSet::from([survivor.erase()])
+                && recipients::<MouseMove>(&state.subscribers, &c).is_empty()
+        });
 
-        subscribers.unsubscribe_all(departed);
-
-        assert_eq!(recipients::<Key>(&subscribers, &window("c")), BTreeSet::from([survivor]));
-        assert!(recipients::<MouseMove>(&subscribers, &window("c")).is_empty());
+        assert_eq!(receivers(&rig.inject(&c, &key_at(&c))), ["survivor"]);
     }
 }
