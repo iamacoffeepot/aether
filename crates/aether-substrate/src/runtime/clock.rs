@@ -53,9 +53,8 @@ impl TraceClock {
         if let (Some(boot_ticks), Some(scale)) = (self.boot_ticks, tsc::scale()) {
             return Nanos(scale.nanos(tsc::ticks().saturating_sub(boot_ticks)));
         }
-        // u128 → u64: trace timestamps overflow after ~584 years of uptime.
-        #[allow(clippy::cast_possible_truncation)]
-        Nanos(Instant::now().saturating_duration_since(self.boot).as_nanos() as u64)
+        // Saturates past ~584 years of uptime.
+        Nanos(u64::try_from(Instant::now().saturating_duration_since(self.boot).as_nanos()).unwrap_or(u64::MAX))
     }
 }
 
