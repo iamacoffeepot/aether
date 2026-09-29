@@ -3,18 +3,12 @@
 //! The fixture module exports `export!(boot = Boot, public = [WidgetA, WidgetB])`: `Boot`
 //! is the unconditional boot actor, `WidgetA` / `WidgetB` are ordinary
 //! selectable exports. `Boot` broadcasts `BOOT_OBSERVED` from `wire` (once per
-//! instance) and `BOOT_TORN_DOWN` from `unwire` (once at teardown), so these
+//! instance) and `BOOT_TORN_DOWN` from `unwire` (once when it closes), so these
 //! scenarios assert the host's per-`(engine, module content hash)` boot
 //! singleton lifecycle end-to-end through mail: cardinality (N selector loads →
 //! 1 boot), non-selectability (an `export = boot-namespace` load → `Err`),
-//! refcount survival (partial unload → boot lives), and teardown (last unload →
-//! boot torn down).
-//!
-//! Teardown is observed via the boot's `BOOT_TORN_DOWN` marker rather than
-//! `ListComponents`: `BootTeardown` releases the boot trampoline's guest but
-//! leaves its mailbox registered and addressable, so a torn-down boot still
-//! appears in the loaded-component list — the marker is the signal that its
-//! `unwire` actually ran.
+//! survival (the boot outlives every widget), a drop at the boot closing it
+//! for good, and a boot module refusing every replace.
 
 use std::fs;
 
@@ -23,8 +17,8 @@ use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{
-    DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, ReplaceComponent,
-    ReplaceResult,
+    DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
+    LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
 };
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -34,10 +28,15 @@ use aether_test_fixtures_kinds as _;
 
 /// ADR-0147 boot fixture markers (`aether-test-fixtures-boot`): the boot
 /// actor broadcasts `BOOT_OBSERVED` from `wire` (once per instance) and
-/// `BOOT_TORN_DOWN` from `unwire` (once at teardown); the scenarios
+/// `BOOT_TORN_DOWN` from `unwire` (once when it closes); the scenarios
 /// count them via `count_observed`.
 const BOOT_OBSERVED: &str = "aether.test_fixture.boot_observed";
 const BOOT_TORN_DOWN: &str = "aether.test_fixture.boot_torn_down";
+/// The boot's published name: the root singleton at its namespace.
+const BOOT_NAMESPACE: &str = "aether.test.boot.boot";
+/// A bootless module, and one of its root exports.
+const BUNDLE: &str = "aether_test_fixtures_bundle";
+const BUNDLE_EXPORT: &str = "test.quiet_probe";
 
 /// Load one named export of the boot fixture, blocking on `LoadResult::Ok`, and
 /// return its trampoline's actor path.
@@ -74,10 +73,9 @@ fn drop_actor(harness: &mut SubstrateHarness, path: ErasedActorPath) {
     }
 }
 
-/// Drain the scheduler one cycle so any fire-and-forget teardown mail the
-/// preceding op set in flight (the host's self-directed `DropComponent` to a
-/// zero-refcount boot) is fully processed before the next `count_observed`
-/// read. No actor in the fixture subscribes `Tick`, so the advance only drains.
+/// Drain the scheduler one cycle so any mail the preceding op set in flight is
+/// processed before the next `count_observed` read. No actor in the fixture
+/// subscribes `Tick`, so the advance only drains.
 fn settle(harness: &mut SubstrateHarness) {
     harness.execute(vec![("settle", HarnessOp::advance(1))]).expect("settle advance");
 }
@@ -194,12 +192,47 @@ fn boot_actor_is_not_selectable_by_export() {
     }
 }
 
-/// Refcount + teardown: the boot survives a partial unload (one of two widgets
-/// dropped) and is torn down only when the last non-boot actor from the module
-/// unloads. Observed via the boot's `unwire` marker, which stays at zero across
-/// the partial unload and reaches one after the final drop.
+/// Drop the module boot, waiting for the drop's whole chain to settle: the
+/// host forwards the drop on the caller's chain, so the boot's `unwire`
+/// marker has been observed once this returns.
+fn drop_boot(harness: &mut SubstrateHarness) {
+    let boot = ErasedActorPath::new(BOOT_NAMESPACE).expect("the boot namespace is an actor path");
+    harness
+        .execute(vec![(
+            "drop boot",
+            HarnessOp::send_and_settle(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &DropComponent { target: boot },
+            ),
+        )])
+        .expect("drop boot sequence");
+}
+
+/// Replace `target` with `wasm`, returning the host's verdict.
+fn replace(harness: &mut SubstrateHarness, target: ErasedActorPath, wasm: Vec<u8>, export: &str) -> ReplaceResult {
+    let replaced = harness
+        .execute(vec![(
+            "replace",
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &ReplaceComponent {
+                    target,
+                    wasm,
+                    drain_timeout_ms: None,
+                    config: Vec::new(),
+                    export: Some(export.to_owned()),
+                },
+            ),
+        )])
+        .expect("replace sequence");
+    replaced.reply::<ReplaceResult>("replace").expect("decode ReplaceResult")
+}
+
+/// Catches a boot torn down when the module's last widget unloads: after
+/// every widget drops, the boot has not run `unwire`, the host still
+/// describes its live guest, and a drop at it still finds it.
 #[test]
-fn module_boot_survives_partial_unload_and_tears_down_on_last() {
+fn module_boot_outlives_every_non_boot_instance() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_boot") else {
         return;
     };
@@ -208,69 +241,110 @@ fn module_boot_survives_partial_unload_and_tears_down_on_last() {
 
     let widget_a = load_boot_export(&mut harness, &wasm, "aether.test.boot.widget_a");
     let widget_b = load_boot_export(&mut harness, &wasm, "aether.test.boot.widget_b");
-    settle(&mut harness);
-    assert_eq!(
-        harness.count_observed(BOOT_OBSERVED),
-        1,
-        "one boot instance should have spawned; observed kinds: {:?}",
-        harness.observed_kinds(),
-    );
-
-    // Partial unload: refcount 2 → 1, boot survives, no teardown marker.
     drop_actor(&mut harness, widget_a);
+    drop_actor(&mut harness, widget_b);
     settle(&mut harness);
+
     assert_eq!(
         harness.count_observed(BOOT_TORN_DOWN),
         0,
-        "the boot must survive a partial unload while WidgetB is still loaded; observed kinds: {:?}",
+        "the boot must outlive every widget of its module; observed kinds: {:?}",
         harness.observed_kinds(),
     );
+    let described = harness
+        .execute(vec![(
+            "describe",
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &DescribeComponent { name: BOOT_NAMESPACE.to_owned() },
+            ),
+        )])
+        .expect("describe sequence");
+    match described.reply::<DescribeComponentResult>("describe").expect("decode DescribeComponentResult") {
+        DescribeComponentResult::Ok { capabilities } => {
+            assert!(!capabilities.handlers.is_empty(), "the boot still hosts its guest");
+        }
+        DescribeComponentResult::Err { error } => panic!("the boot is still live after every widget dropped: {error}"),
+    }
 
-    // Last unload: refcount 1 → 0, the host self-drops the boot and its
-    // `unwire` broadcasts the teardown marker.
-    drop_actor(&mut harness, widget_b);
-    settle(&mut harness);
-    assert_eq!(
-        harness.count_observed(BOOT_TORN_DOWN),
-        1,
-        "the boot must be torn down when the last non-boot actor unloads; observed kinds: {:?}",
-        harness.observed_kinds(),
-    );
+    drop_boot(&mut harness);
+    assert_eq!(harness.count_observed(BOOT_TORN_DOWN), 1, "the boot ends only on its own drop");
 }
 
+/// Catches a boot respawned by a later load after it was dropped (its name
+/// is spent, so the load would fail), and a drop the host refuses at a boot.
 #[test]
-fn same_hash_replacement_preserves_the_boot_reference() {
+fn a_drop_at_the_boot_closes_it_for_good() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_boot") else {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let widget = load_boot_export(&mut harness, &wasm, "aether.test.boot.widget_a");
 
-    let replaced = harness
-        .execute(vec![(
-            "replace",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent {
-                    target: widget.clone(),
-                    wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: Some("aether.test.boot.widget_a".to_owned()),
-                },
+    load_boot_export(&mut harness, &wasm, "aether.test.boot.widget_a");
+    drop_boot(&mut harness);
+    assert_eq!(
+        harness.count_observed(BOOT_TORN_DOWN),
+        1,
+        "a drop at the boot closes it; observed kinds: {:?}",
+        harness.observed_kinds(),
+    );
+
+    load_boot_export(&mut harness, &wasm, "aether.test.boot.widget_b");
+    assert_eq!(
+        harness.count_observed(BOOT_OBSERVED),
+        1,
+        "a later load of the module spawns no second boot; observed kinds: {:?}",
+        harness.observed_kinds(),
+    );
+}
+
+/// Catches a replace that moves a guest onto or off a module that declares a
+/// boot: a widget of the boot module, the boot itself, and a bootless guest
+/// whose replacement declares one are all refused before anything publishes,
+/// so no boot is spawned for the replacement.
+#[test]
+fn a_module_that_declares_a_boot_is_not_replaceable() {
+    let Some(boot_path) = require_wasm("aether_test_fixtures_boot") else {
+        return;
+    };
+    let Some(bundle_path) = require_wasm(BUNDLE) else {
+        return;
+    };
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let boot_wasm = fs::read(&boot_path).expect("read boot fixture wasm");
+    let bundle_wasm = fs::read(&bundle_path).expect("read bundle fixture wasm");
+
+    let widget = load_boot_export(&mut harness, &boot_wasm, "aether.test.boot.widget_a");
+    let boot = ErasedActorPath::new(BOOT_NAMESPACE).expect("the boot namespace is an actor path");
+    for target in [widget, boot] {
+        match replace(&mut harness, target.clone(), bundle_wasm.clone(), BUNDLE_EXPORT) {
+            ReplaceResult::Err { error } => assert!(
+                error.contains(target.as_str()) && error.contains("declares a boot"),
+                "the refusal names {target} and its module's boot: {error}",
             ),
-        )])
-        .expect("replace sequence");
-    assert!(matches!(
-        replaced.reply::<ReplaceResult>("replace").expect("decode ReplaceResult"),
-        ReplaceResult::Ok { .. }
-    ));
-    settle(&mut harness);
-    assert_eq!(harness.count_observed(BOOT_OBSERVED), 1, "same-hash replace must reuse the Live boot");
-    assert_eq!(harness.count_observed(BOOT_TORN_DOWN), 0, "same-hash replace must not transiently release the boot");
+            ReplaceResult::Ok { .. } => panic!("{target} comes from a boot module and must not be replaced"),
+        }
+    }
 
-    drop_actor(&mut harness, widget);
-    settle(&mut harness);
-    assert_eq!(harness.count_observed(BOOT_TORN_DOWN), 1, "the preserved reference releases on the later drop");
+    let (_, probe) = harness
+        .load_any(&LoadComponent {
+            wasm: bundle_wasm,
+            name: None,
+            config: Vec::new(),
+            export: Some(BUNDLE_EXPORT.to_owned()),
+        })
+        .expect("load the bootless probe");
+    match replace(&mut harness, probe, boot_wasm, "aether.test.boot.widget_a") {
+        ReplaceResult::Err { error } => {
+            assert!(error.contains(BOOT_NAMESPACE), "the refusal names the replacement's boot: {error}");
+        }
+        ReplaceResult::Ok { .. } => panic!("a replacement that declares a boot must be refused"),
+    }
+    assert_eq!(
+        harness.count_observed(BOOT_OBSERVED),
+        1,
+        "the refused replacement spawns no boot of its own; observed kinds: {:?}",
+        harness.observed_kinds(),
+    );
 }

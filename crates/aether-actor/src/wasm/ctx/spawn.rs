@@ -300,8 +300,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// departs with the actor it named. The host retires the route and fans
     /// one [`MonitorNotice`](aether_kinds::MonitorNotice) out per watcher, so
     /// a cap holding rows keyed on the child's stamped identity (ADR-0114 §4)
-    /// reclaims them — the despawn counterpart of what a vacate and a close
-    /// already do for a departing cluster.
+    /// reclaims them — the despawn counterpart of what a close already does
+    /// for a departing cluster.
     ///
     /// **The child's name is spent** (ADR-0241 §8): a despawned child closes
     /// and its name tombstones, so a later monitor of it is refused and

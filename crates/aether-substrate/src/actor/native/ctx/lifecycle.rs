@@ -3,15 +3,14 @@
 //!
 //! Issue 607 Phase 4 (ADR-0079) self-shutdown and ADR-0063 fail-fast on one
 //! side; the ADR-0079 §8 monitor surface on the other — register a watch,
-//! declare the caller's own mailbox vacated, or vacate a single inline-child
-//! alias folded onto it (ADR-0114).
+//! or close a single inline-child alias folded onto the caller (ADR-0114).
 
 use std::sync::Arc;
 
 use aether_actor::{ErasedActorRef, HandlesKind, RegistryChanged, ReplyMode};
 use aether_data::{Kind, MailId};
 
-use crate::actor::monitor::{Departure, MonitorHandle, notify_alias_departures, notify_departure};
+use crate::actor::monitor::{MonitorHandle, notify_departure};
 use crate::actor::registry::MonitorError;
 use crate::mail::registry::{PreparedAliasRetirement, RegistrySubscription};
 
@@ -58,14 +57,11 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// The substrate drains the target's monitor list and fires one
     /// [`aether_kinds::MonitorNotice`] per watcher when the target
-    /// goes away — on close (before the slot transitions
-    /// `Live` → `Dead`) or on vacate ([`Self::vacate`]: the occupant
-    /// unloads while the slot stays live), whichever comes first
+    /// goes away, on close, before the slot transitions `Live` → `Dead`
     /// (ADR-0079 §8, amended). The watcher receives that notice as
     /// ordinary mail whose envelope sender is the departed actor, so its
     /// handler reads `ctx.sender()` to get the same [`ErasedActorRef`] it
-    /// monitored; either way the notice means state keyed by that
-    /// reference is stale.
+    /// monitored; the notice means state keyed by that reference is stale.
     ///
     /// Validation: `target` is the ADR-0230 proof that an actor reached
     /// `Live` in the routing [`Registry`](crate::Registry). The runtime check
@@ -142,42 +138,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.binding.subscribe_inventory()
     }
 
-    /// ADR-0079 §8 (amended): declare the calling actor's mailbox
-    /// vacated — its occupant is gone while the actor itself stays
-    /// live and addressable. Drains the caller's own watcher list and
-    /// fires one [`aether_kinds::MonitorNotice`] per watcher, exactly
-    /// as the close path does, but without tombstoning: monitors
-    /// registered after the vacate watch the mailbox's next occupant
-    /// (or its eventual close).
-    ///
-    /// The one production caller is the wasm trampoline's module-boot
-    /// `BootTeardown` handler, which releases its guest behind a mailbox
-    /// that stays addressable, so the close fan-out never reaches it. A
-    /// `DropComponent` closes its trampoline instead (ADR-0241 §8).
-    /// Self-service only: an actor can declare its own mailbox vacated,
-    /// never a peer's.
-    ///
-    /// The departing occupant is a whole cluster (ADR-0114 §2): the
-    /// mailbox itself plus every inline-child alias folded onto it, each
-    /// of which drains and fires under its own name, so a cap holding rows
-    /// keyed on an inline child's stamped identity (ADR-0114 §4) can
-    /// reclaim them.
-    ///
-    /// The notice mail is pushed root-shaped (no parent chain),
-    /// mirroring the close fan-out. A transport with no spawner wired
-    /// (a test binding such as `testing::unrouted_binding`) has no monitor
-    /// index to drain, so the call is a no-op.
-    pub fn vacate(&self) {
-        let Some(spawner) = self.binding.spawner() else {
-            return;
-        };
-        let registry = spawner.actor_registry();
-        let occupant = self.binding.self_mailbox();
-
-        notify_departure(self.binding, occupant, registry.vacate_actor(occupant));
-        notify_alias_departures(registry, self.binding, occupant, Departure::Vacate);
-    }
-
     /// ADR-0241 §8: close one inline-child `alias` folded onto the calling
     /// actor's mailbox, because the child that occupied it was despawned. The
     /// alias tombstones, so a later watch on it is refused
@@ -187,9 +147,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// single-address form of what the close tail does for every alias of a
     /// closing actor.
     ///
-    /// Self-service like `vacate`, and narrower: an actor can only close an
-    /// alias that is folded onto its own mailbox, so a caller cannot reach a
-    /// peer's inline children. An alias that is not this actor's is a no-op
+    /// Self-service only: an actor can only close an alias that is folded
+    /// onto its own mailbox, so a caller cannot reach a peer's inline
+    /// children. An alias that is not this actor's is a no-op
     /// `false`, as is a transport with no spawner wired
     /// (a test binding such as `testing::unrouted_binding`) — there is no
     /// actor registry to tombstone in.

@@ -64,10 +64,10 @@ pub struct BootObserved {
 }
 
 /// ADR-0147 boot fixture: broadcast the module's `boot` actor emits from
-/// its `unwire` teardown hook, once when the host tears the boot singleton
-/// down (its refcount reached zero as the last non-boot actor from the
-/// module unloaded). The scenario asserts it stays at zero across a partial
-/// unload (boot survives) and reaches one after the last unload (teardown).
+/// its `unwire` hook, once when the boot singleton closes on a drop
+/// addressed at it. The scenario asserts it stays at zero while every widget
+/// unloads (the boot outlives them) and reaches one after the boot's own
+/// drop.
 #[aether_data::kind(name = "aether.test_fixture.boot_torn_down")]
 pub struct BootTornDown {
     pub marker: u64,

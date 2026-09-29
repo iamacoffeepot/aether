@@ -531,8 +531,8 @@ impl HttpSupervisorState {
     }
 
     /// Monitor the proven route holder `subscriber` on its first route claim
-    /// so the cap purges its routes itself when the occupant departs — vacate
-    /// or close, whichever comes first (ADR-0079 §8 amended).
+    /// so the cap purges its routes itself when the holder closes (ADR-0079
+    /// §8 amended).
     ///
     /// An `Err` (an actor outside the registry, or a spawner-less test
     /// binding) means "not monitorable", and the claim still stands: the

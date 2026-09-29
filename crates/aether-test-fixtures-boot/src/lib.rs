@@ -5,8 +5,9 @@
 //! export selector a load names, and not itself selectable — while `WidgetA` /
 //! `WidgetB` are ordinary selectable actors (no `default =`, so the module is
 //! selector-load-only). The module carries an `aether.boot` custom section
-//! naming `Boot`'s `NAMESPACE`, which the host reads to spawn and refcount the
-//! boot singleton.
+//! naming `Boot`'s `NAMESPACE`, which the host reads to spawn the boot
+//! singleton once, by the module's first load. A module that declares a boot
+//! is not replaceable.
 //!
 //! `Boot` broadcasts observable markers to the `SubstrateHarness` observer mailbox so a
 //! scenario can assert on the singleton's lifecycle with `count_observed`
@@ -16,14 +17,13 @@
 //! - `wire` → [`BootObserved`], once per boot instance. Two selector loads of
 //!   this module observe it exactly once — the module-boot singleton is
 //!   instantiated once, not per load (cardinality).
-//! - `unwire` → [`BootTornDown`], once when the host tears the boot down (its
-//!   refcount reached zero as the last non-boot actor from the module unloaded).
-//!   Stays at zero across a partial unload (boot survives), reaches one after
-//!   the last unload (teardown).
+//! - `unwire` → [`BootTornDown`], once when the boot closes: on a drop
+//!   addressed at it. Stays at zero while every widget unloads (the boot
+//!   outlives them), and reaches one after the boot's own drop.
 //!
 //! Kept standalone rather than folded into the shared bundle: an unconditional
-//! boot slot on the bundle would spawn a boot on every one of its many
-//! unrelated scenario loads.
+//! boot slot on the bundle would spawn a boot for its many unrelated scenario
+//! loads and make the bundle unreplaceable.
 
 #![forbid(unsafe_code)]
 // The `#[handler]` methods take `&mut self` to match the dispatch ABI even
@@ -54,9 +54,9 @@ impl WasmActor for Boot {
         ctx.send::<SubstrateHarnessObserver>(&BootObserved { marker: 0 });
     }
 
-    /// Broadcast [`BootTornDown`] once when the host tears the boot down (its
-    /// refcount reached zero). `unwire` is the trampoline's pre-shutdown hook,
-    /// reached via the host's self-directed `DropComponent` at last unload.
+    /// Broadcast [`BootTornDown`] once when the boot closes. `unwire` is the
+    /// trampoline's pre-shutdown hook, reached by a `DropComponent` addressed
+    /// at the boot.
     fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.send::<SubstrateHarnessObserver>(&BootTornDown { marker: 0 });
     }
@@ -66,7 +66,7 @@ impl WasmActor for Boot {
 }
 
 /// First ordinary selectable actor, reachable by its `NAMESPACE` export
-/// selector. Refcounts against the module's boot singleton while loaded.
+/// selector.
 pub struct WidgetA;
 
 #[actor(root)]

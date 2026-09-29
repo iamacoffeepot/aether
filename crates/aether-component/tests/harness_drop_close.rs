@@ -172,3 +172,29 @@ fn a_dropped_instance_closes_and_its_name_is_spent() {
     };
     assert!(error.contains(path.as_str()), "the refusal names the path: {error}");
 }
+
+/// Catches a drop the host forwards to an actor it did not load: a live
+/// native actor's path proves at receipt, but the host holds no control proof
+/// for it, so the drop is refused before anything is forwarded.
+#[test]
+fn a_drop_at_a_live_route_the_host_did_not_load_is_refused() {
+    let mut harness = SubstrateHarness::builder()
+        .size(64, 48)
+        .with_component_host()
+        .with_actor::<DepartureWatcher>(())
+        .build()
+        .expect("boot");
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let target = ErasedActorPath::new("test.drop_close.watcher").expect("the watcher's namespace is an actor path");
+
+    let refused = harness
+        .execute(vec![("drop", HarnessOp::send_and_await_reply(&host, &DropComponent { target: target.clone() }))])
+        .expect("drop the watcher");
+    let DropResult::Err { error } = refused.reply::<DropResult>("drop").expect("decode DropResult") else {
+        panic!("a drop at an actor the host did not load is refused");
+    };
+    assert!(
+        error.contains("no live component to drop at") && error.contains(target.as_str()),
+        "the refusal names the path: {error}"
+    );
+}

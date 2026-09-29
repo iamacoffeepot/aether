@@ -53,7 +53,7 @@ impl OwnerCommand {
     ///
     /// A [`MonitorNotice`] joins them (iamacoffeepot/aether#4204). It is the
     /// one signal that a watched mailbox departed, it fires once per
-    /// (target, watcher) pair from the close or vacate fan-out, and nothing
+    /// (target, watcher) pair from the close fan-out, and nothing
     /// re-sends it — a watcher that misses it holds state keyed by a
     /// departed peer for the rest of the process. Reaching the owner at all
     /// means the watcher's own route is `Starting`, which the birth window

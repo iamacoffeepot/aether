@@ -25,7 +25,6 @@ mod placement;
 
 use super::{ComponentHostCapability, LoadResult};
 use crate::component::LoadDelivered;
-use crate::kinds::BootTeardown;
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
 pub use self::config::ComponentHostParams;
@@ -42,8 +41,8 @@ pub use aether_actor::Manual;
 // Crate-local wiring the `#[runtime] impl` handler bodies name (the
 // `MailboxCategory` vocabulary) and the state struct — all used within this
 // module. No sibling-cap imports: drop-time cleanup rides the ADR-0079
-// vacate/close `MonitorNotice` (each cap monitors its registrants and purges
-// its own rows), so the host names no peer cap's type or kinds.
+// close `MonitorNotice` (each cap monitors its registrants and purges its own
+// rows), so the host names no peer cap's type or kinds.
 use aether_actor::{ErasedActorRef, OutboundReply, ProtocolRef, Single};
 use aether_data::ErasedActorPath;
 use aether_data::{MailboxCategory, Source};
@@ -69,7 +68,7 @@ use aether_substrate::mail::registry::RegistrySubscription;
 /// `Arc<Inner>` wrapper) per ADR-0078 — the cap is single-threaded, every
 /// handler runs on the cap's dispatcher thread. The host addresses no
 /// sibling cap: drop-time registration cleanup rides the ADR-0079
-/// vacate/close `MonitorNotice` fired from the trampoline, not host mail.
+/// close `MonitorNotice` fired from the trampoline, not host mail.
 ///
 /// The dispatcher holds this as the cap's state and routes envelopes through
 /// the macro-emitted `Dispatch` impl; the addressing identity is the distinct
@@ -100,24 +99,16 @@ pub struct ComponentHostCapabilityState {
     /// as some trampoline, in-flight load or replace, or staged boot plan
     /// still holds its `Module`.
     pub modules: ModuleCache,
-    /// ADR-0147 module-boot bookkeeping: content hash (the ADR-0238 BLAKE3
-    /// hash of the wasm bytes, [`Module::hash`]) → the module's boot
-    /// singleton. A module that declares a `boot =` slot instantiates exactly one boot actor per `(engine, content hash)`;
-    /// this table is the per-engine half of that pairing (the state itself is
-    /// the per-substrate-process singleton every load runs through). Refcounted
-    /// against the module's non-boot actors and empty for every bootless module,
-    /// so the common case costs nothing. Changed only through
-    /// `register_boot` / `unregister_boot`, which keep [`Self::boot_actors`]
-    /// in lockstep.
-    boot_registry: HashMap<BlobHash, BootEntry>,
-    /// ADR-0147: every live module boot's reference — the reverse index of
-    /// [`Self::boot_registry`], so the drop guard refusing a drop addressed at
-    /// a boot actor is one lookup rather than a scan over every module.
-    boot_actors: HashSet<ErasedActorRef>,
+    /// ADR-0147: the content hash (the ADR-0238 BLAKE3 hash of the wasm
+    /// bytes, [`Module::hash`]) of every module whose boot has been born. A
+    /// module that declares a `boot =` slot spawns its boot once, by its
+    /// first load, and never again: the hash stays after the boot is dropped,
+    /// so a later load of the module proceeds without one. Empty for every
+    /// bootless module, so the common case costs nothing.
+    booted_modules: HashSet<BlobHash>,
     /// Actor-local reservations for module boots that have been staged but are
-    /// not authoritative `Live` yet. Same-hash loads and replacements wait
-    /// here and join the first boot result: a load by its id, a replacement
-    /// with the deferred reply it keeps until #6867.
+    /// not authoritative `Live` yet. Same-hash loads wait here by their ids
+    /// and join the first boot result.
     pending_boots: HashMap<BlobHash, load::PendingBoot>,
     /// Every load in flight (ADR-0243 §9): its held reply and prepared inputs,
     /// keyed by the id its staged work's contexts carry, from the staged
@@ -126,87 +117,50 @@ pub struct ComponentHostCapabilityState {
     loads: HashMap<load::LoadId, load::LoadInFlight>,
     /// The next [`load::LoadId`] a load takes.
     next_load: u64,
-    /// ADR-0147: a loaded non-boot actor → the content hash of the module it
-    /// came from. The key is the actor's proof, taken from its spawn outcome or
-    /// proven once at the receipt of a drop / replace (ADR-0230). Populated only
-    /// for actors sourced from a module that declares a boot slot, so a drop /
-    /// replace can find and decrement the right boot refcount. A bootless module
-    /// inserts nothing.
-    pub boot_hash_by_actor: HashMap<ErasedActorRef, BlobHash>,
-    /// ADR-0147: in-flight `aether.component.replace` forwards awaiting their
-    /// trampoline `ReplaceResult`, keyed by the forward's correlation id. The
-    /// boot-refcount transfer for a replace is committed only after the swap
-    /// succeeds (`finish_replace`), so the caller's reply target and the
-    /// replacement module are parked here across the hop. Empty except while a
-    /// replace is settling.
+    /// In-flight `aether.component.replace` forwards awaiting their
+    /// trampoline `ReplaceResult`, keyed by the forward's correlation id: the
+    /// caller's reply target and the replacement module are parked here
+    /// across the hop. Empty except while a replace is settling.
     pub pending_replace: HashMap<u64, PendingReplace>,
-    /// Host-owned control proof of each successfully born guest, keyed by its
-    /// erased reference: the [`GuestControl`] rows its trampoline serves. The
-    /// guest's public receive surface deliberately replaces the trampoline's
-    /// native surface, so an external path cannot recover this proof by
-    /// casting after load. A drop removes its entry before forwarding, since
-    /// the forwarded drop closes the trampoline (ADR-0241 §8), so a replace
-    /// or a second drop that arrives before its route reads `Dropped` finds
-    /// no entry and is refused.
-    drop_targets: HashMap<ErasedActorRef, ProtocolRef<GuestControl>>,
-    /// Last replace/drop operation sequence allocated for each actor, keyed by
-    /// the proof taken at the drop / replace receipt. A replace reserves its
-    /// sequence when forwarded; a drop reserves the next sequence and
-    /// immediately makes it dominant. A proof compares by the position it
-    /// proves, so entries survive the deterministic mailbox id's drop/reload
-    /// boundary and an older incarnation can never become current again.
-    pub boot_operation_sequence_by_actor: HashMap<ErasedActorRef, u64>,
-    /// Latest successful replacement or drop operation that is allowed to
-    /// mutate each actor's boot mapping, keyed like the sequence table. Failed
-    /// replacements never enter this table, so they cannot suppress an earlier
-    /// successful replacement.
-    pub dominant_boot_operation_by_actor: HashMap<ErasedActorRef, u64>,
+    /// Host-owned control proof of each successfully born guest, a module
+    /// boot included, keyed by its erased reference: the [`GuestControl`]
+    /// rows its trampoline serves. The guest's public receive surface
+    /// deliberately replaces the trampoline's native surface, so an external
+    /// path cannot recover this proof by casting after load. A drop removes
+    /// its entry before forwarding, since the forwarded drop closes the
+    /// trampoline (ADR-0241 §8), so a replace or a second drop that arrives
+    /// before its route reads `Dropped` finds no entry and is refused.
+    drop_targets: HashMap<ErasedActorRef, LoadedGuest>,
 }
 
-/// ADR-0147: a parked `aether.component.replace` forward. `source` is the
-/// original caller's reply target (the trampoline's `ReplaceResult` is routed
-/// to the cap instead, then re-replied here); `actor` — the target proven at
-/// the replace's receipt — and `module` are what `commit_replacement_boot`
-/// needs to commit the boot-refcount transfer once the swap is confirmed
-/// successful. Holding `module` across the hop also keeps its cache entry
-/// live, so the trampoline's own check-in of the forwarded bytes is a hit.
-/// `boot_operation` is reserved when the request is forwarded; it becomes
-/// dominant only if that request succeeds, so a later failed request cannot
-/// suppress this one.
-#[derive(Clone)]
+/// A parked `aether.component.replace` forward. `source` is the original
+/// caller's reply target (the trampoline's `ReplaceResult` is routed to the
+/// cap instead, then re-replied here). Holding `module` across the hop keeps
+/// its cache entry live, so the trampoline's own check-in of the forwarded
+/// bytes is a hit.
 pub struct PendingReplace {
     pub source: Source,
-    pub actor: ErasedActorRef,
     pub module: Module,
-    pub boot_operation: u64,
 }
 
-/// ADR-0147: one module's boot singleton. `boot` is the boot guest's control
-/// proof, taken from its birth outcome (born through the same
-/// `WasmTrampoline` path as any export), which the teardown sends
-/// [`BootTeardown`] through;
-/// `refcount` counts the module's live **non-boot** actors — boot never counts
-/// itself, so its own drop could never be the one that zeroes the count. The
-/// `pending_requests` counts requested actors whose trampoline birth has been
-/// accepted but has not yet promoted or rejected. The boot is torn down only
-/// when both counters are zero: a pending birth keeps a temporarily
-/// zero-refcount boot alive, and its later rejection performs the final
-/// orphan check.
-pub struct BootEntry {
-    boot: ProtocolRef<GuestControl>,
-    refcount: u32,
-    pending_requests: u32,
+/// A guest this host loaded or booted: the control proof it is dropped
+/// through, and whether its module declares a boot. The flag is set at birth
+/// from the module manifest and never changes, because a replace can neither
+/// add nor remove a boot (ADR-0147): a guest from a boot module is not
+/// replaceable.
+pub struct LoadedGuest {
+    control: ProtocolRef<GuestControl>,
+    from_boot_module: bool,
 }
 
 /// The rows the component host controls a guest through: its trampoline's
 /// own framework rows, never the guest's published surface. A guest birth
 /// completes with this proof (ADR-0241 §6), and the host hands a load's
-/// reply off, forwards a drop, and tears a module boot down through it.
+/// reply off and forwards a drop through it.
 #[aether_actor::protocol]
 trait GuestControl {
     fn load_delivered(mail: LoadDelivered) -> LoadResult;
     fn drop_component(mail: DropComponent) -> DropResult;
-    fn boot_teardown(mail: BootTeardown);
 }
 
 #[runtime]
@@ -232,16 +186,12 @@ impl NativeActor for ComponentHostCapability {
             outbound: params.hub_outbound,
             registry_subscription: None,
             last_egressed_inventory: None,
-            boot_registry: HashMap::new(),
-            boot_actors: HashSet::new(),
+            booted_modules: HashSet::new(),
             pending_boots: HashMap::new(),
             loads: HashMap::new(),
             next_load: 0,
-            boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
             drop_targets: HashMap::new(),
-            boot_operation_sequence_by_actor: HashMap::new(),
-            dominant_boot_operation_by_actor: HashMap::new(),
         })
     }
 
@@ -316,8 +266,8 @@ impl NativeActor for ComponentHostCapability {
     }
 
     /// A staged guest birth settled (ADR-0241 §6): a module boot releases
-    /// the loads and replacements waiting on it, and a requested guest takes
-    /// over its load's held reply.
+    /// the loads waiting on it, and a requested guest takes over its load's
+    /// held reply.
     #[handler(task)]
     fn on_guest_born(
         state: &mut Self::State,
@@ -351,7 +301,9 @@ impl NativeActor for ComponentHostCapability {
     ///
     /// # Agent
     /// `DropComponent { target }`. The `target` is the component's actor
-    /// path, `LoadResult.path`: `NS`, `NS:key`, or `parent/NS:key`.
+    /// path, `LoadResult.path`: `NS`, `NS:key`, or `parent/NS:key`. A drop
+    /// at a module boot closes it for good: the module's later loads spawn
+    /// no new one (ADR-0147, ADR-0241 §8).
     #[handler::manual]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: DropComponent) {
         // ADR-0230: prove the address at receipt. An address with no live
@@ -364,44 +316,16 @@ impl NativeActor for ComponentHostCapability {
                 return;
             }
         };
-        // ADR-0147 non-droppability guard: the boot actor is unconditional and
-        // refcounted against its module's non-boot actors, so an external drop
-        // addressed straight at a boot actor must be rejected — letting it
-        // through would tear the boot down out from under the refcount and leave
-        // a dangling `boot_registry` entry. The boot is torn down automatically
-        // (internally, through `release_boot_ref`) when its last non-boot actor
-        // unloads; that internal path is not routed through this handler, so the
-        // guard never blocks it. The guard runs after the receipt proof because
-        // a boot entry's actor is live for as long as the entry exists, so the
-        // proof succeeds for it and the comparison is by reference.
-        if state.boot_actors.contains(&actor) {
-            ctx.reply(&DropResult::Err {
-                error: format!(
-                    "{} is a module boot actor (ADR-0147): the boot singleton is unconditional \
-                     and refcounted against its module's non-boot actors, so it cannot be dropped directly — \
-                     drop the module's non-boot actors and the boot is torn down when the last one unloads",
-                    payload.target
-                ),
-            });
-            return;
-        }
         // The drop closes the trampoline, so its entry leaves now: a second
         // drop or a replace that proves the path before the owner applies its
         // `Dropped` route finds no entry and is refused.
-        let Some(target) = state.drop_targets.remove(&actor) else {
+        let Some(guest) = state.drop_targets.remove(&actor) else {
             ctx.reply(&DropResult::Err { error: format!("no live component to drop at {}", payload.target) });
             return;
         };
-        // ADR-0147: account this actor's departure against its module's boot
-        // singleton before forwarding the drop — the last non-boot actor from a
-        // boot-bearing module tears the boot down here (the boot trampoline's
-        // `BootTeardown` handler releases its guest and vacates its
-        // registrations).
-        state.invalidate_replacement_boot_operation(actor);
-        state.release_boot_ref(ctx, actor);
         // The forward inherits this call's chain, so the call stays open until
         // the trampoline's deferred reply lands at the original caller.
-        ctx.forward_to(target, &payload);
+        ctx.forward_to(guest.control, &payload);
     }
 
     /// Replace the component at `target` with a fresh wasm
@@ -421,7 +345,9 @@ impl NativeActor for ComponentHostCapability {
     /// ignored under the trampoline's binding-stable replace.
     /// `export` (ADR-0096) names which exported actor type of the
     /// replacement module to instantiate; `None` reuses the type the
-    /// trampoline currently hosts.
+    /// trampoline currently hosts. A module that declares a boot, in its
+    /// live or its replacement version, is not replaceable: it upgrades by
+    /// engine restart (ADR-0147).
     #[handler::single]
     fn on_replace_component(
         state: &mut Self::State,
@@ -431,23 +357,17 @@ impl NativeActor for ComponentHostCapability {
         // ADR-0241 §4: the replacement module publishes first, so admission
         // refuses a republish that drops a namespace or narrows a contract
         // before the trampoline is touched, and the replacement's kinds
-        // register. ADR-0147: once the publish commits, forward the replace
-        // to the trampoline but intercept its `ReplaceResult` at this cap
-        // (`forward_replace`), so the boot-refcount
-        // transfer is committed only after the swap actually succeeds
-        // (`finish_replace` / `on_replace_result`). Committing it here — before
-        // the fire-and-forget replace resolves — would desync the refcount on a
-        // failed replace, where the trampoline keeps hosting the old module.
+        // register. ADR-0147: a module whose live or replacement version
+        // declares a boot is refused before anything publishes. Once the
+        // publish commits, the replace is forwarded to the trampoline, whose
+        // `ReplaceResult` comes back to this cap (`on_replace_result`).
         let (pending, held) = ctx.hold::<ReplaceResult>();
         state.begin_replace(ctx, held, payload);
         pending
     }
 
-    /// Settle a forwarded `aether.component.replace` (ADR-0147). The
-    /// trampoline's `ReplaceResult` is routed here rather than straight to the
-    /// caller so the boot-refcount transfer can be gated on the swap's success;
-    /// `finish_replace` commits it on `Ok`, then re-replies the verdict to the
-    /// original caller.
+    /// Settle a forwarded `aether.component.replace`: `finish_replace`
+    /// re-replies the trampoline's `ReplaceResult` to the original caller.
     #[handler::manual]
     fn on_replace_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: ReplaceResult) {
         state.finish_replace(ctx, payload);
@@ -564,10 +484,7 @@ mod tests {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::{
-        boot_authority, decode_session_reply, registered_binding, registered_ref, session_sender, try_registered_ref,
-        unrouted_binding,
-    };
+    use aether_substrate::testing::{boot_authority, registered_binding, registered_ref, try_registered_ref};
 
     use super::*;
 
@@ -589,16 +506,12 @@ mod tests {
                     .subscribe_inventory(),
             ),
             last_egressed_inventory: None,
-            boot_registry: HashMap::new(),
-            boot_actors: HashSet::new(),
+            booted_modules: HashSet::new(),
             pending_boots: HashMap::new(),
             loads: HashMap::new(),
             next_load: 0,
-            boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
             drop_targets: HashMap::new(),
-            boot_operation_sequence_by_actor: HashMap::new(),
-            dominant_boot_operation_by_actor: HashMap::new(),
         };
 
         // Initial wake refreshes both complete inventories in the prescribed
@@ -642,56 +555,5 @@ mod tests {
         assert!(rx.try_recv().is_err());
         state.refresh_registry_inventory();
         assert!(rx.try_recv().is_err());
-    }
-
-    /// A live route without a retained component-host proof is refused at the
-    /// external-address boundary. The guard must run before either boot
-    /// accounting or replacement ordering changes, or a wrong actor kind can
-    /// corrupt component-host state even though no drop was forwarded.
-    #[test]
-    fn unowned_drop_refuses_before_state_mutation() {
-        let registry = Arc::new(Registry::new());
-        let (outbound, rx) = HubOutbound::attached_loopback();
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
-        let binding = unrouted_binding(&mailer);
-        let engine = Arc::new(Engine::default());
-        let mut state = ComponentHostCapabilityState {
-            linker: Arc::new(Linker::new(&engine)),
-            modules: ModuleCache::new(Arc::clone(&engine)),
-            engine,
-            outbound,
-            registry_subscription: None,
-            last_egressed_inventory: None,
-            boot_registry: HashMap::new(),
-            boot_actors: HashSet::new(),
-            pending_boots: HashMap::new(),
-            loads: HashMap::new(),
-            next_load: 0,
-            boot_hash_by_actor: HashMap::new(),
-            pending_replace: HashMap::new(),
-            drop_targets: HashMap::new(),
-            boot_operation_sequence_by_actor: HashMap::new(),
-            dominant_boot_operation_by_actor: HashMap::new(),
-        };
-        let actor = registered_ref(&registry, "test.component.not-a-trampoline", noop_handler());
-        let target =
-            NativeCtx::<ComponentHostCapability>::new_for_actor(&binding, Source::NONE, None, None).actor_path(actor);
-        let hash = BlobHash::from_bytes([7; 32]);
-        state.boot_hash_by_actor.insert(actor, hash);
-        state.boot_operation_sequence_by_actor.insert(actor, 11);
-        state.dominant_boot_operation_by_actor.insert(actor, 10);
-
-        {
-            let mut ctx = NativeCtx::new_dispatching(&binding, session_sender(), None, None);
-            ComponentHostCapability::on_drop_component(&mut state, &mut ctx, DropComponent { target });
-        }
-
-        assert!(matches!(
-            decode_session_reply::<DropResult>(&rx),
-            DropResult::Err { error } if error.contains("no live component to drop at")
-        ));
-        assert_eq!(state.boot_hash_by_actor.get(&actor), Some(&hash));
-        assert_eq!(state.boot_operation_sequence_by_actor.get(&actor), Some(&11));
-        assert_eq!(state.dominant_boot_operation_by_actor.get(&actor), Some(&10));
     }
 }
