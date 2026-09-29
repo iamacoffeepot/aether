@@ -204,6 +204,12 @@ wake, and the wait returns when the roots settle. Boot the actor through
 - **A chain whose actors all dispatch on the pool.** There is no slot to pump:
   send tracked through the chassis and `testing::await_settled` on the root's
   settlement receiver, under the same patience a chassis gate gets.
+- **An actor's close taking effect.** A pooled instanced actor's route drop
+  lands at the registry owner after its closing chain settles, so neither
+  settlement nor its `MonitorNotice` proves the route is gone. Call
+  `PassiveChassis::await_closed(actor)`: it returns once the close cycle ran
+  and the owner applied the drop, so `published_contract` answers `None`.
+  Never poll the route.
 
 Never wait in a `loop { drain; check; sleep }` against a deadline. That loop
 is not the production wait, it fails a slow but healthy chain under load, and
