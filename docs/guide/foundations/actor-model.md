@@ -875,10 +875,11 @@ chain stays held across the hand-off. Dropping a `DeferredReply` without
 replying releases its hold (settlement is never wedged) and then panics, in every
 build, which the scheduler escalates through the chassis aborter, because a lost
 reply strands the caller forever. An actor that closes with debts still owed
-answers them: the engine sends each `Held<R>` its `R::unanswered()` before
-releasing its hold ([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md) §1), and an actor that keeps a
-`DeferredReply` in state answers it in `unwire` with the terminal it knows.
-`abandon_for_actor_close`, which releases a debt with no reply, survives only
+while the engine keeps running answers them: the engine sends each `Held<R>`
+its `R::unanswered()` before releasing its hold ([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md) §1), and an actor that keeps a
+`DeferredReply` in state answers it in `unwire` with the terminal it knows. An
+engine teardown settles held debts silently instead, because every requester
+is closing with it. `abandon_for_actor_close`, which releases a debt with no reply, survives only
 for the component host's boot waiters until #7008 removes it.
 
 Wasm enforces the same `ChildOf` permission when a component creates a child

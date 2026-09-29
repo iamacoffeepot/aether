@@ -25,9 +25,10 @@
 //! idle (`in_flight == 0` and `pending` empty). A held reply exists only
 //! while a request is in flight or buffered pending a slot, so an entry that
 //! holds anything is never idle — idle-reclamation can never drop a hold on
-//! the floor. At actor close the ledger answers every held reply with its
-//! `R::unanswered()` and releases every unstarted task before the dispatcher
-//! drops with the actor's state (ADR-0243 §1).
+//! the floor. Before the dispatcher drops with the actor's state, an actor
+//! close while the engine keeps running answers every held reply with its
+//! `R::unanswered()`, an engine teardown settles them silently, and either
+//! releases every unstarted task (ADR-0243 §1).
 
 use std::collections::{HashMap, VecDeque};
 

@@ -54,10 +54,12 @@ pub(crate) fn answer_unanswered<R: HeldReply>(binding: &NativeBinding, reply_to:
 /// which keeps the caller's settlement hold and reply target.
 /// [`Self::answer`] sends the one terminal `R` and releases the hold.
 /// Dropping it unanswered releases the hold and then panics outside an
-/// unwind, as [`DeferredReply`] does. When the actor closes first, the close
-/// tail answers the entry with [`HeldReply::unanswered`] and then releases
-/// its hold, before the actor's state drops, so the caller still receives an
-/// `R` and a ticket parked in that state finds its entry gone and drops
+/// unwind, as [`DeferredReply`] does. When the actor closes first while the
+/// engine keeps running, the close tail answers the entry with
+/// [`HeldReply::unanswered`] and then releases its hold, so the caller still
+/// receives an `R`; an engine teardown releases it silently, because every
+/// requester is closing too. Either happens before the actor's state drops,
+/// so a ticket parked in that state finds its entry gone and drops
 /// silently. [`NativeCtx::hold`] requires `R: HeldReply` for that answer. It
 /// implements [`IntoDeferredReply`], so every staging surface that takes a
 /// deferred reply takes it unchanged.

@@ -159,13 +159,18 @@ where
     /// `with_stamped` (the hook a hand-rolled driver drain never had), drop
     /// the finalized mailbox's cost rows (iamacoffeepot/aether#3051), and
     /// run the registry close + parent-key release + monitor fan-out.
-    /// Idempotent — the actor is
+    /// Every caller is a chassis tearing the engine down, so the close
+    /// settles the held replies the actor still owes silently rather than
+    /// answering them (ADR-0243 §1). Idempotent — the actor is
     /// taken out on the first call, so a second `shutdown` (or any later
     /// `drain_available`) is a no-op.
     pub fn shutdown(&mut self) {
         let Some(mut actor) = self.actor.take() else {
             return;
         };
+        // Every caller is a chassis tearing the engine down, so the close
+        // tail settles held replies silently (ADR-0243 §1).
+        self.binding.signal_engine_teardown();
         // Phase 2: drain residual inbox synchronously.
         while let Some(env) = self.binding.try_recv() {
             dispatch_envelope::<A>(&mut actor, &self.binding, &self.slots, env);
@@ -243,8 +248,8 @@ mod tests {
         seq: u32,
     }
 
-    // A sentinel the close tail answers a held `Pong` with; no handler ever
-    // replies this `seq`.
+    // A sentinel: no pumped test closes the actor while the engine keeps
+    // running, so no close answers a held `Pong` with it.
     impl HeldReply for Pong {
         fn unanswered() -> Self {
             Self { seq: u32::MAX }
@@ -609,31 +614,20 @@ mod tests {
         slot.shutdown();
     }
 
-    /// Catches a silent close tail, an answer sent to the wrong target or
-    /// correlation, a hold released before the answer's `Sent`, and a close
-    /// tail that drops actor state before answering the ledger (the `Held`
-    /// kept in state would then find its entry still held and panic as a
-    /// lost reply).
+    /// Catches a pumped shutdown, which only a chassis teardown runs, that
+    /// answers a held reply every requester is closing too late to read, and
+    /// a close tail that drops actor state before settling the ledger (the
+    /// `Held` kept in state would then find its entry still held and panic
+    /// as a lost reply).
     #[test]
-    fn shutdown_answers_a_held_reply_before_releasing_its_hold() {
+    fn shutdown_settles_a_held_reply_silently() {
         let fx = fixtures();
         let counter = Arc::clone(fx.mailer.trace_handle().settlement_counter());
         let self_id = MailboxId(0x_0DED_0012);
-        let root = MailId::new(self_id, 1);
-
-        let (tx, reply_rx) = mpsc::channel::<(Envelope, u32)>();
-        let arrival_counter = Arc::clone(&counter);
-        let caller = fx.registry.register_inbox(
-            &boot_authority(),
-            "test.pumped.caller.held".to_owned(),
-            Arc::new(move |d: Envelope| {
-                let held_open = arrival_counter.held_open(root);
-                d.discharge();
-                let _ = tx.send((d, held_open));
-            }) as Arc<dyn InboxHandler>,
-        );
+        let (caller, reply_rx) = caller_inbox(&fx, "test.pumped.caller.held");
         let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
 
+        let root = MailId::new(self_id, 1);
         fx.mailer.record_sent_inflight(root);
         let reply_to = Source::with_correlation(SourceAddr::Component(caller), 41);
         let bytes = HoldReq { seq: 1 }.encode_into_bytes();
@@ -644,18 +638,13 @@ mod tests {
         ));
         slot.drain_available();
         assert_eq!(counter.held_open(root), 1, "the Held kept in state holds the caller's chain open");
-        assert!(reply_rx.try_recv().is_err(), "nothing answers the held reply before close");
 
         slot.shutdown();
-
-        let (reply, held_open) =
-            reply_rx.recv_timeout(Duration::from_secs(2)).expect("shutdown answers the held reply");
-        assert_eq!(reply.kind, Pong::ID, "the answer is the held reply kind");
-        assert_eq!(reply.sender.correlation_id, 41, "the answer echoes the caller's correlation");
-        assert_eq!(reply.root, Some(root), "the answer joins the caller's chain");
-        assert_eq!(Pong::decode_from_bytes(reply.payload.bytes()).expect("reply decodes"), Pong::unanswered());
-        assert_eq!(held_open, 1, "the answer is sent before its hold releases");
-        assert_eq!(counter.held_open(root), 0, "shutdown released the hold after answering");
+        assert_eq!(counter.held_open(root), 0, "shutdown released the held reply's hold");
+        assert!(
+            reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "an engine-teardown shutdown sends no answer for the held reply"
+        );
     }
 
     /// Catches an untaken-reply check that runs before the handler, reads

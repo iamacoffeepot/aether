@@ -332,8 +332,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// The handler returns the [`Pending<R>`] receipt, which declares its
     /// row `-> Pending<R>`, and keeps the [`Held<R>`] debt in state or on a
     /// successor until [`Held::answer`] sends the one `R`. When the actor
-    /// closes first, the close tail sends [`HeldReply::unanswered`] in its
-    /// place, which is why `R` must implement [`HeldReply`].
+    /// closes first while the engine keeps running, the close tail sends
+    /// [`HeldReply::unanswered`] in its place, which is why `R` must
+    /// implement [`HeldReply`]; an engine teardown settles it silently.
     ///
     /// # Panics
     /// Panics on a second `hold` in one dispatch (ADR-0243 §7): two debts

@@ -15,8 +15,10 @@ use aether_actor::HeldReply;
 /// refused at once, never parked. A caller that vanishes leaves its
 /// parked entry until the next wake, and the reply to it is warn-dropped
 /// like any unresolved recipient; there is no `Unwatch`. Watches do not
-/// survive the journal actor's teardown or restart — a caller re-issues
-/// `WatchHead` against the new instance. Duplicate watches from one
+/// survive the journal actor's teardown or restart: a journal that closes
+/// while the engine keeps running answers each parked watch
+/// [`WatchHeadResult::Ended`], and a caller re-issues `WatchHead` against a
+/// new instance. Duplicate watches from one
 /// caller are independent entries, each answered once.
 #[aether_data::kind(name = "aether.bloomery.journal.watch_head", copy, eq)]
 pub struct WatchHead {
@@ -40,10 +42,14 @@ pub enum WatchHeadResult {
         /// Human-readable failure.
         message: String,
     },
+    /// The journal closed while the watch was parked, so the long-poll ends
+    /// without an answer (ADR-0243 §1). Not a failure: the watch has no
+    /// journal left to follow.
+    Ended,
 }
 
 impl HeldReply for WatchHeadResult {
     fn unanswered() -> Self {
-        Self::Err { message: String::from("bloomery journal closed before answering") }
+        Self::Ended
     }
 }

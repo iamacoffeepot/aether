@@ -222,8 +222,9 @@ impl NativeBinding {
 
     /// Answer every held and parked entry still in the ledger with its reply
     /// kind's `unanswered` value, and release every staged task with no
-    /// reply, because the actor that owes them is closing (ADR-0243 §1, §9).
-    /// Each answer is sent before its hold releases, so `Sent` precedes
+    /// reply, because the actor that owes them is closing while the engine
+    /// keeps running (ADR-0243 §1, §9): `ctx.shutdown()`, a cancelled
+    /// activation. Each answer is sent before its hold releases, so `Sent` precedes
     /// `Release` as for `Held::answer`. The entries are collected under the
     /// ledger lock and answered after it is released, because a reply may
     /// route synchronously into an inbox handler. The close paths call it
@@ -241,6 +242,25 @@ impl NativeBinding {
             answer(self, reply_to, hold.as_ref().map(SettlementHold::root));
             drop(hold);
         }
+        drop(released);
+    }
+
+    /// Release every held and parked entry and every staged task still in
+    /// the ledger with no reply and no panic, because the actor is closing
+    /// as part of engine teardown (ADR-0243 §1): every requester is closing
+    /// with the engine, so an answer would reach only closing actors. The
+    /// teardown close paths call it before the actor's state drops, so a
+    /// `Held` or an unstarted staged task in that state then finds its entry
+    /// gone and drops silently. The holds release after the ledger lock is
+    /// released.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn settle_held_for_engine_teardown(&self) {
+        let (owed, released) =
+            self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_close_for_actor();
+        drop(owed);
         drop(released);
     }
 

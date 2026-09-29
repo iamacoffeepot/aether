@@ -129,6 +129,12 @@ pub struct NativeBinding {
     /// Substrate-shutdown (channel disconnect) flows through the same
     /// drain → close → exit path without setting the flag.
     shutdown_flag: Arc<AtomicBool>,
+    /// Set by the chassis teardown walk before it signals shutdown
+    /// ([`Self::signal_engine_teardown`]): this actor is closing because the
+    /// engine is, so every requester it owes is closing too, and its close
+    /// tail settles its held replies silently instead of answering them
+    /// (ADR-0243 §1).
+    engine_teardown: AtomicBool,
     /// ADR-0087 / 2b (iamacoffeepot/aether#1105): per-actor send-side
     /// burst buffer. The per-handler [`super::ctx::NativeCtx`] send
     /// path buffers into this (via [`Self::push_envelope_buffered`]); the handler-end

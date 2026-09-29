@@ -376,7 +376,7 @@ where
 {
     fn shutdown_dyn(mut self: Box<Self>) {
         if let Some(slot) = &self.slot {
-            slot.binding().signal_shutdown();
+            slot.binding().signal_engine_teardown();
         }
         // Drop sender first so the inbox closes; subsequent wakes
         // silently no-op via WakeHandle's Weak failing to upgrade.

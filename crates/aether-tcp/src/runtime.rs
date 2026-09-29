@@ -130,8 +130,9 @@ fn dial<A>(
 /// worker-pool-era tax, not a contention point.
 ///
 /// Every reply a request still owes waits here as a [`Held`] (ADR-0243 §1),
-/// keyed by the work that answers it. Actor close answers the ledger's
-/// entries with each reply kind's `unanswered()` before this state drops
+/// keyed by the work that answers it. Before this state drops, an actor close
+/// while the engine keeps running answers the ledger's entries with each
+/// reply kind's `unanswered()`, and an engine teardown settles them silently
 /// (ADR-0243 §1), so no drain runs at close.
 pub struct TcpCapabilityState {
     /// Live listeners spawned by this cap. Each entry holds the proof the

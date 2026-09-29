@@ -20,9 +20,10 @@
 //! still the waiting request's own. So a request's chain settles when that
 //! request is answered, never when another request's work finishes.
 //!
-//! At actor close the ledger answers every held reply with its
-//! `R::unanswered()` and releases every unstarted task before the queue drops
-//! with the actor's state (ADR-0243 §1).
+//! Before the queue drops with the actor's state, an actor close while the
+//! engine keeps running answers every held reply with its `R::unanswered()`,
+//! an engine teardown settles them silently, and either releases every
+//! unstarted task (ADR-0243 §1).
 
 use std::collections::{HashMap, VecDeque};
 

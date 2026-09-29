@@ -1,7 +1,9 @@
-//! ADR-0243 §1 actor close, driven through a real chassis: a closing actor
-//! answers every held reply it still owes with the reply kind's `unanswered`
-//! value, before it releases that reply's hold, and releases its staged tasks
-//! with no reply.
+//! ADR-0243 §1 actor close, driven through a real chassis: an actor that
+//! closes while the engine keeps running answers every held reply it still
+//! owes with the reply kind's `unanswered` value, before it releases that
+//! reply's hold, and releases its staged tasks with no reply. An engine
+//! teardown settles them all silently, because every requester is closing
+//! with it.
 //!
 //! Every request below reaches the actor through the production dispatcher,
 //! and every answer reaches the recording sink through the binding reply
@@ -242,17 +244,21 @@ fn closing_an_actor_answers_its_live_and_parked_held_replies() {
     drop(scenario.chassis);
 }
 
-/// Catches `DispatcherSlot::drop` settling its ledger silently, answering
-/// after it released a hold, or letting a `Held` kept in state reach its
-/// fail-fast drop. Chassis teardown drops a root's slot with the actor still
-/// in it, so that is the path this close takes; it runs no close hook, and
-/// the test asserts only what the ledger sends.
+/// Catches an engine teardown that answers held replies every requester is
+/// closing too late to read, and a teardown that lets a `Held` kept in state
+/// reach its fail-fast drop. The sink stays registered past the teardown, so
+/// an answer would reach it. Chassis teardown drops a root's slot with the
+/// actor still in it, so the ledger settles there silently, and no close
+/// hook runs.
 #[test]
-fn dropping_the_chassis_answers_held_replies_as_close_does() {
-    let Scenario { chassis, arrivals, record, .. } = scenario();
+fn dropping_the_chassis_settles_held_replies_silently() {
+    let Scenario { chassis, arrivals, settled, record, .. } = scenario();
 
     drop(chassis);
 
-    assert_answered(&answers(&arrivals));
-    assert_eq!(record.reason(), None, "a slot drop that answers its debts fails nothing");
+    assert!(arrivals.recv_timeout(QUIET).is_err(), "an engine teardown answers no held reply");
+    for settled in &settled {
+        settled.recv_timeout(PATIENCE).expect("the teardown releases every request's chain");
+    }
+    assert_eq!(record.reason(), None, "a teardown that settles its debts fails nothing");
 }

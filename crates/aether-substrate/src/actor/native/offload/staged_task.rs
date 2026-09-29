@@ -108,7 +108,7 @@ impl<O> Drop for StagedTask<O> {
 /// Take and drop the context of kind `C` stored under `request`. A `Held`
 /// it carries comes back live and fails fast as it drops, as any dropped
 /// context's debt does (ADR-0243 §4); at actor close the ledger has already
-/// answered it, so the take finds nothing to claim.
+/// answered or settled it, so the take finds nothing to claim.
 fn discard<C: Kind>(binding: &Arc<NativeBinding>, request: RequestId) {
     drop(binding.take_request_context::<C>(request));
 }

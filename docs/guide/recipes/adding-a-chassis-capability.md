@@ -189,7 +189,8 @@ returns the `Pending<LoadFontResult>` receipt the handler returns, which
 sets its row, and a `Held<LoadFontResult>` ticket that answers the one
 `LoadFontResult` from a later turn. `hold` requires the reply kind to implement
 `HeldReply`, whose hand-written `unanswered()` is the failure the engine sends
-in its place if the capability closes first:
+in its place if the capability closes first while the engine keeps running
+(an engine teardown sends nothing):
 
 1. **`on_load_font`** holds the reply and pushes the `Held` onto the font's
    waiters in actor state: `font_loads` maps a font's `(namespace, path)` to

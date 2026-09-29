@@ -454,9 +454,9 @@ pub struct TaskDone<O, C = ()> {
 /// panics outside an unwind, in every build, which the scheduler escalates
 /// through the chassis aborter (ADR-0063) — the distinction from a plain
 /// context value, whose drop means nothing. A `DeferredReply` names no reply
-/// kind, so actor close cannot answer it the way it answers a `Held<R>`
-/// (ADR-0243 §1): its owner answers it with the terminal it knows, in
-/// `unwire`. [`Self::abandon_for_actor_close`] is the one quiet discharge, and
+/// kind, so an actor close while the engine keeps running cannot answer it
+/// the way it answers a `Held<R>` (ADR-0243 §1): its owner answers it with
+/// the terminal it knows, in `unwire`. [`Self::abandon_for_actor_close`] is the one quiet discharge, and
 /// it survives only for the component host's boot waiters until #7008 removes
 /// it.
 ///
@@ -524,9 +524,10 @@ impl DeferredReply {
     }
 
     /// Release the obligation with no reply because the actor that owned its
-    /// pending state is itself closing. Every other close answers its debts
-    /// (ADR-0243 §1): the ledger sends `R::unanswered()` for each `Held<R>`,
-    /// and a manual owner replies to its `DeferredReply`s in `unwire`. This
+    /// pending state is itself closing. Every other close while the engine
+    /// keeps running answers its debts (ADR-0243 §1): the ledger sends
+    /// `R::unanswered()` for each `Held<R>`, and a manual owner replies to
+    /// its `DeferredReply`s in `unwire`. This
     /// survives only for the component host's boot waiters (`PendingBoot`),
     /// which close through a slot drop that runs no `unwire`, until #7008
     /// turns them into `Held`s and removes it.
@@ -880,8 +881,9 @@ impl InflightTable {
 
     /// Remove every entry no worker answers, parked ones and staged tasks
     /// included, for the actor-close tail (ADR-0243 §1, §9). A held or parked
-    /// entry comes back owed, with the answer the close sends before its hold
-    /// releases. A staged task owes nothing and a closing actor handles no
+    /// entry comes back owed, with the answer a close while the engine keeps
+    /// running sends before its hold releases; an engine teardown drops it
+    /// unanswered. A staged task owes nothing and a closing actor handles no
     /// completion, so its hold comes back to release with no reply. Worker
     /// entries stay: their workers' fills and wakes still find them, and the
     /// binding's drop settles them as before.

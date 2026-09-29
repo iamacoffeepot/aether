@@ -158,14 +158,14 @@ where
 {
     /// A slot dropped with its actor still in it never ran its close cycle:
     /// the chassis teardown drops a root actor's last strong reference after
-    /// flagging shutdown, with nothing left to wake it. That is still the
-    /// actor closing, so its ledger first answers each held reply with its
-    /// `R::unanswered()` and releases each staged task (ADR-0243 §1, §9), and
-    /// a `Held` or unstarted task in the actor's state then drops silently
+    /// flagging shutdown, with nothing left to wake it. That is the actor
+    /// closing as part of engine teardown, so its ledger settles the held
+    /// replies and staged tasks silently first (ADR-0243 §1, §9), and a
+    /// `Held` or unstarted task in the actor's state then drops silently
     /// with it, as the close tail would have it. No close hook runs here. A
     /// slot whose close cycle ran finds the ledger already emptied.
     fn drop(&mut self) {
-        self.binding.answer_held_for_actor_close();
+        self.binding.settle_held_for_engine_teardown();
     }
 }
 
@@ -480,13 +480,14 @@ where
     }
 
     /// Issue 685: chassis-teardown signal. Forwards to the binding's
-    /// `signal_shutdown` so the next [`Self::run_cycle`] observes
+    /// `signal_engine_teardown`, so the close settles held replies silently
+    /// (ADR-0243 §1), and the next [`Self::run_cycle`] observes
     /// `should_shutdown` at the top of its drain loop and runs the
     /// close path (phases 2-4 already implemented). Spawner walks
     /// every instanced slot at chassis teardown and calls this before
     /// firing a wake.
-    fn signal_shutdown(&self) {
-        self.binding.signal_shutdown();
+    fn signal_engine_teardown(&self) {
+        self.binding.signal_engine_teardown();
     }
 
     /// Issue 685: chassis-teardown wait predicate. The Closed branch
@@ -686,7 +687,8 @@ where
 /// externally-pumped
 /// [`PumpedSlot`](super::pumped::PumpedSlot) run
 /// (ADR-0160 §1): answer each held reply still in the binding's ledger with
-/// its `R::unanswered()` and then release its hold (ADR-0243 §1), then drain `monitors_of[self_id]`, prune `monitoring[id]`
+/// its `R::unanswered()` and then release its hold, or, when the actor closes
+/// as part of engine teardown, settle them silently (ADR-0243 §1), then drain `monitors_of[self_id]`, prune `monitoring[id]`
 /// from each target, mark the slot Dead, retire the route to `Dropped`,
 /// release this actor's parent-local live child key, and fan one
 /// [`MonitorNotice`](aether_kinds::MonitorNotice) out to every watcher via
@@ -730,7 +732,11 @@ pub fn finalize_close_and_fan_out(
     chain: EffectChain,
 ) {
     debug_assert!(chain.held_root().is_none(), "the close tail runs past its chain's Finished, so it can hold nothing");
-    binding.answer_held_for_actor_close();
+    if binding.is_engine_teardown() {
+        binding.settle_held_for_engine_teardown();
+    } else {
+        binding.answer_held_for_actor_close();
+    }
     let watchers = actor_registry.close_actor(self_id);
     binding.mailer().registry().submit_logged(EffectBatch::new(vec![RegistryEffect::DropMailbox(self_id)]));
     binding.release_parent_child_reservation();

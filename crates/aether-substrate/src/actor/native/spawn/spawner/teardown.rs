@@ -88,7 +88,7 @@ impl Spawner {
         // Wire one (tx, rx) per entry up-front. Installing the tx on
         // the slot before signalling shutdown ensures the close cycle
         // sees the sender to fire — even if the worker enters the
-        // close path before `signal_shutdown` returns control. The
+        // close path before `signal_engine_teardown` returns control. The
         // slot's `set_close_done_tx` fast-paths an already-closed slot
         // by firing immediately, so there's no race window where the
         // close cycle ran without seeing the tx.
@@ -97,7 +97,7 @@ impl Spawner {
             let (tx, rx) = crossbeam_channel::bounded::<()>(1);
             entry.slot.set_close_done_tx(tx);
             waiters.push(rx);
-            entry.slot.signal_shutdown();
+            entry.slot.signal_engine_teardown();
             // Shutdown wake: schedule the slot so the worker observes
             // the shutdown signal. The CAS-win bool is meaningful only
             // for callers wiring up first-time scheduling races; here

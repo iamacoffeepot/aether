@@ -2,9 +2,11 @@
 //! (ADR-0243 §1).
 //!
 //! An actor that holds a reply (`hold::<R>()`) owes its caller exactly one
-//! `R`. When the actor closes before answering, the engine sends
-//! [`HeldReply::unanswered`] in its place, so the caller's reply handler
-//! still runs and frees whatever it stored for the request. Every impl is
+//! `R`. When the actor closes before answering while the engine keeps
+//! running, the engine sends [`HeldReply::unanswered`] in its place, so the
+//! caller's reply handler still runs and frees whatever it stored for the
+//! request. An engine teardown sends nothing: every requester is closing
+//! with it. Every impl is
 //! written by hand next to its kind, because each kind names its own failure
 //! arm.
 //!

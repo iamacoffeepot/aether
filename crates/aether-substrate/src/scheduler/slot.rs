@@ -311,11 +311,12 @@ pub trait Drainable: Send + Sync + 'static {
     /// Issue 685: chassis-teardown signal for `Pooled` instanced
     /// actors. The chassis calls this on every spawned slot before the
     /// pool drops; a real slot forwards to its binding's crate-private
-    /// `signal_shutdown` so the next [`Self::run_cycle`] observes
+    /// `signal_engine_teardown`, so its close settles held replies silently
+    /// (ADR-0243 §1), and the next [`Self::run_cycle`] observes
     /// `should_shutdown` and runs the close path (drain residual → `unwire` → registry close +
     /// monitor fan-out). Default no-op so mock fixtures don't have to
     /// care.
-    fn signal_shutdown(&self) {}
+    fn signal_engine_teardown(&self) {}
 
     /// Issue 685: chassis-teardown wait predicate. Returns `true` once
     /// the slot has finished its `CycleResult::Closed` cycle and the
