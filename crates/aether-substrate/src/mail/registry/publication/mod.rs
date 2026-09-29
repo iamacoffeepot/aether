@@ -40,9 +40,9 @@ mod admission;
 mod tests;
 
 #[cfg(feature = "wasm")]
-pub use admission::AdmissionRefusal;
+pub use admission::{AdmissionRefusal, Admitted};
 #[cfg(feature = "wasm")]
-pub(super) use admission::{Admitted, ModuleSurface, admit};
+pub(super) use admission::{ModuleSurface, admit};
 
 #[cfg(feature = "wasm")]
 use admission::Holder;

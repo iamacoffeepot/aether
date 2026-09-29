@@ -12,8 +12,9 @@ use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
 use crate::actor::native::ResolvePathError;
+use crate::actor::wasm::component::GuestAnswer;
 use crate::actor::wasm::component::{ComponentCtx, StateBundle};
-use crate::actor::wasm::reply_table::ReplyOrigin;
+use crate::actor::wasm::reply_table::ReplyEntry;
 use crate::mail::attachments::{EncodedMail, inline_payload};
 use crate::mail::boundary::is_engine_only;
 use crate::mail::registry::PreparedAliasRoute;
@@ -425,71 +426,43 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 return REPLY_KIND_NOT_FOUND;
             };
 
-            // A reply handle is one-shot: take (not resolve) so the
-            // entry is removed here, capping the table at in-flight
-            // replies rather than lifetime traffic. The mutable
-            // borrow ends with this statement, before the `&self`
-            // uses below. A held slot's chain comes with it and lives
-            // until the arm below has sent: dropping it releases the
+            let reply = GuestReply { kind, kind_name, payload, count, from: MailboxId(from) };
+            let ctx = caller.data_mut();
+
+            // #7067: a held candidate's answer is kept, its slot reserved so
+            // nothing reallocates it and a second answer is refused. A
+            // refused answer puts the slot back, still answerable.
+            if ctx.outbox_held() {
+                let Some((entry, chain)) = ctx.reply_table.reserve(sender) else {
+                    return REPLY_UNKNOWN_HANDLE;
+                };
+                return match guest_answer(ctx, entry, reply) {
+                    Ok(answer) => {
+                        ctx.hold_reply(sender, entry, chain, answer);
+                        REPLY_OK
+                    }
+                    Err(status) => {
+                        ctx.reply_table.restore(sender, entry, chain);
+                        status
+                    }
+                };
+            }
+
+            // A reply handle is one-shot: take (not resolve) so the entry is
+            // removed here, capping the table at in-flight replies rather
+            // than lifetime traffic. A held slot's chain comes with it and
+            // lives until the answer is sent: dropping it releases the
             // requester's settlement hold, which must follow the reply's
-            // `Sent` (ADR-0243 §6).
-            let Some((entry, chain)) = caller.data_mut().reply_table.take(sender) else {
+            // `Sent` (ADR-0243 §6), so the chain stamps the answer on the
+            // requester's chain, not the dispatch in flight.
+            let Some((entry, chain)) = ctx.reply_table.take(sender) else {
                 return REPLY_UNKNOWN_HANDLE;
             };
-            let ctx = caller.data();
-            // ADR-0042: echo the inbound correlation on every reply
-            // path so the originating actor's handler can match its
-            // own reply to the request it sent out of a busy inbox.
-            let correlation = entry.correlation_id;
-            match entry.addr {
-                SourceAddr::Session(token) => {
-                    let Some(payload) = egress_payload(ctx, kind, payload) else {
-                        return REPLY_BLOB_REFUSED;
-                    };
-                    let origin = ctx.registry.mailbox_name(ctx.sender);
-                    // The guest replies in its own name: stamp its own
-                    // position, which the host bound it to (ADR-0230 §3),
-                    // when that position holds a route.
-                    let stamp = ctx.registry.stamped_sender(ctx.sender);
-                    ctx.outbound.egress_to_session(token, &kind_name, payload, origin, correlation, stamp);
-                }
-                SourceAddr::Component(mbox) => {
-                    // Issue iamacoffeepot/aether#1465: `reply` (not
-                    // `send`) so the outgoing reply echoes the inbound
-                    // `correlation` with target `None` — matching native
-                    // `Mailer::send_reply` and the `Session` /
-                    // `EngineMailbox` arms above. `send` would
-                    // fresh-mint a `Component(self)` correlation,
-                    // dropping the originator's id so the reply can't
-                    // be matched home over the RPC `in_flight` table.
-                    //
-                    // Issue 1987: the reply's lineage identity is the
-                    // guest-carried `from`, validated in-cluster (a zero /
-                    // foreign value falls back to the component's own id).
-                    //
-                    // ADR-0243 §6: a held slot's chain stamps the reply on
-                    // the requester's chain, not the dispatch in flight.
-                    let identity = resolve_dispatch_identity(ctx, MailboxId(from));
-                    let origin = ReplyOrigin { correlation, from: identity, chain: chain.as_ref() };
-                    ctx.reply(mbox, kind, payload, count, origin);
-                }
-                SourceAddr::EngineMailbox { engine_id, mailbox_id } => {
-                    // ADR-0037 Phase 2: reply to a component on
-                    // another engine; the kind was validated locally
-                    // above. The hub forwards the frame to the target
-                    // engine's connection as `HubToEngine::MailById`.
-                    let Some(payload) = egress_payload(ctx, kind, payload) else {
-                        return REPLY_BLOB_REFUSED;
-                    };
-                    ctx.outbound.egress_to_engine_mailbox(engine_id, mailbox_id, kind, payload, count, correlation);
-                }
-                SourceAddr::None => {
-                    // Shouldn't happen — `ReplyEntry`s only get
-                    // allocated for mail with a real reply target.
-                    // Treat as unknown-handle to avoid silent drops.
-                    return REPLY_UNKNOWN_HANDLE;
-                }
-            }
+            let answer = match guest_answer(ctx, entry, reply) {
+                Ok(answer) => answer,
+                Err(status) => return status,
+            };
+            ctx.answer(answer, chain.as_ref().map(|chain| (chain.parent, chain.root)));
             // The reply is sent and its `Sent` recorded; only now may a
             // held slot's settlement hold release.
             if let Some(chain) = chain {
@@ -883,6 +856,60 @@ fn resolve_dispatch_identity(ctx: &ComponentCtx, from: MailboxId) -> MailboxId {
         from
     } else {
         ctx.sender
+    }
+}
+
+/// One reply as the `reply_mail_p32` host fn read it from the guest, its
+/// kind validated, before its handle's entry says where it goes.
+struct GuestReply {
+    kind: KindId,
+    kind_name: String,
+    payload: EncodedMail,
+    count: u32,
+    /// The dispatch identity the guest carried (issue 1987).
+    from: MailboxId,
+}
+
+/// The guest's `reply` to the reply `entry`, resolved for sending: a session
+/// or remote answer's payload through the egress rewrite, a local answer as
+/// it is under the identity its `from` resolves to in-cluster. Every answer
+/// echoes the entry's correlation (ADR-0042) so the originating actor
+/// matches it to the request it sent out of a busy inbox.
+///
+/// # Errors
+///
+/// `REPLY_BLOB_REFUSED` when an answer leaving the process would not fit one
+/// frame once its blobs are written as bytes, and `REPLY_UNKNOWN_HANDLE` for
+/// an entry with no reply target, which the table never allocates.
+fn guest_answer(ctx: &ComponentCtx, entry: ReplyEntry, reply: GuestReply) -> Result<GuestAnswer, u32> {
+    let GuestReply { kind, kind_name, payload, count, from } = reply;
+    let correlation = entry.correlation_id;
+    let egress = |payload| egress_payload(ctx, kind, payload).ok_or(REPLY_BLOB_REFUSED);
+    match entry.addr {
+        SourceAddr::Session(token) => {
+            Ok(GuestAnswer::Session { token, kind_name, payload: egress(payload)?, correlation })
+        }
+        // Issue iamacoffeepot/aether#1465: answered through
+        // `ComponentCtx::reply`, which echoes the inbound correlation with
+        // target `None`, matching native `Mailer::send_reply`; a fresh
+        // `Component(self)` correlation could not be matched home over the
+        // RPC `in_flight` table.
+        SourceAddr::Component(recipient) => Ok(GuestAnswer::Component {
+            recipient,
+            kind,
+            payload,
+            count,
+            correlation,
+            from: resolve_dispatch_identity(ctx, from),
+        }),
+        // ADR-0037 Phase 2: an answer to a component on another engine; the
+        // kind was validated locally.
+        SourceAddr::EngineMailbox { engine_id, mailbox_id } => {
+            Ok(GuestAnswer::Engine { engine_id, mailbox_id, kind, payload: egress(payload)?, count, correlation })
+        }
+        // `ReplyEntry`s are only allocated for mail with a real reply target;
+        // treat one without as unknown rather than drop it silently.
+        SourceAddr::None => Err(REPLY_UNKNOWN_HANDLE),
     }
 }
 

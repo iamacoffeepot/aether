@@ -14,10 +14,14 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use aether_actor::Addressable;
 use rustc_hash::FxHashMap;
 
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
 use crate::mail::registry::address::{AddressIndex, AddressTable};
 use crate::mail::registry::effect::{ChangeSubscriber, RegistryInventory};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::owner::RegistryOwnerHandle;
+#[cfg(feature = "wasm")]
+use crate::mail::registry::publication::{AdmissionRefusal, Admitted, ModuleSurface, admit};
 use crate::mail::registry::publication::{NativeHoldRefusal, NativeType, PublicationTable};
 use crate::mail::view::{DoubleBuffer, View, ViewPublisher};
 use crate::mail::{KindId, MailboxId};
@@ -263,6 +267,32 @@ impl Registry {
             .expect("registry lock poisoned; fail-fast per ADR-0063")
             .publications
             .hold(A::NAMESPACE, NativeType::of::<A>())
+    }
+
+    /// What publishing `module` would do to the publication table right now:
+    /// the same [`admit`] the owner's publish arm runs, against the committed
+    /// table and kinds, under one `Inner` lock. It writes nothing and never
+    /// waits on the owner.
+    ///
+    /// Advisory: a publish batch admits again against the table as it has
+    /// staged it, so a preview answered `Ok` can still be refused there.
+    /// The consumer is a republish, refused for a contract break before any
+    /// guest is touched.
+    ///
+    /// # Errors
+    ///
+    /// The [`AdmissionRefusal`] the publish would be refused with.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn admission_preview(&self, module: &Module) -> Result<Admitted, AdmissionRefusal> {
+        let surface = ModuleSurface::of(module);
+        let inner = self.inner.lock().expect("registry lock poisoned; fail-fast per ADR-0063");
+
+        admit(
+            module.hash(),
+            &surface,
+            |namespace| inner.publications.holder(namespace),
+            |kind| inner.kinds.get(&kind).map(|slot| Arc::clone(&slot.name)),
+        )
     }
 }
 

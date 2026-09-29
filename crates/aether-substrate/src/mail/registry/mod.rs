@@ -58,9 +58,9 @@ pub use metrics::RegistryQueueMetrics;
 pub(crate) use names::{canonical_mailbox_id, lineage_mailbox_id};
 pub(crate) use owner::ParkAdmission;
 pub(crate) use owner::RegistryOwnerLease;
-#[cfg(feature = "wasm")]
-pub use publication::AdmissionRefusal;
 pub use publication::NativeHoldRefusal;
 pub(crate) use publication::NativeType;
+#[cfg(feature = "wasm")]
+pub use publication::{AdmissionRefusal, Admitted};
 pub(crate) use relay::RouteRelayHandle;
 pub(crate) use relay::RouteRelayLease;

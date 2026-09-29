@@ -22,6 +22,10 @@
 //! build is ever its predecessor.
 //!
 //! The module's kinds register in the same owner batch, after this check.
+//!
+//! `Registry::admission_preview` runs the same check against the committed
+//! table and commits nothing, so a republish can be refused before any guest
+//! is touched; the publish batch still admits again against its staged table.
 
 use std::fmt;
 use std::sync::Arc;

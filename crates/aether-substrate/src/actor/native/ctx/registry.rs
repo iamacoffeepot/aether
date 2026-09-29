@@ -15,9 +15,13 @@ use aether_kinds::ComponentCapabilities;
 
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::offload::blocking::{DispatchId, IntoDeferredReply};
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
 use crate::mail::attachments::plain_payload;
 use crate::mail::registry::AddressResolutionError;
 use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
+#[cfg(feature = "wasm")]
+use crate::mail::registry::{AdmissionRefusal, Admitted};
 
 use super::NativeCtx;
 
@@ -116,6 +120,22 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn receive_surface(&self, actor: ErasedActorRef) -> Option<ComponentCapabilities> {
         self.binding.receive_surface(actor)
+    }
+
+    /// What publishing `module` would do right now: the registry's admission
+    /// check against the committed publication table, which writes nothing
+    /// and never waits on the owner (ADR-0241 §4). Advisory, since the
+    /// publish batch admits again against the table as it has staged it.
+    ///
+    /// # Errors
+    ///
+    /// The [`AdmissionRefusal`] a publish of `module` would be refused with.
+    ///
+    /// Consumer: the component host's republish, which refuses a contract
+    /// break before any guest is touched.
+    #[cfg(feature = "wasm")]
+    pub fn admission_preview(&self, module: &Module) -> Result<Admitted, AdmissionRefusal> {
+        self.binding.mailer().registry().admission_preview(module)
     }
 
     /// This envelope's payload as wire bytes: tag-1 `Blob` fields rewritten
