@@ -362,6 +362,9 @@ impl Component {
         // one-shot — the trampoline drops the typed-func handle after
         // the call.
         let wire = instance.get_typed_func::<u64, u32>(&mut store, "wire").ok();
+        // #7067: a held outbox must be flushed or discarded from here on. A
+        // failure above drops it unarmed, with the candidate it held for.
+        store.data_mut().arm_held_outbox();
         Ok(Self {
             store,
             memory,

@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::blob_table::BlobTable;
-use crate::actor::wasm::reply_table::{ReplyOrigin, ReplyTable};
+use crate::actor::wasm::reply_table::{HeldChain, ReplyEntry, ReplyOrigin, ReplyTable};
 use crate::mail::attachments::{Attachments, EncodedMail, ResolveError, plain_payload, resolve_on_send};
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
@@ -19,6 +19,7 @@ use crate::scheduler::pending_depth;
 use crate::actor::wasm::asset_manifest::LoadWindow;
 
 use super::StateBundle;
+use super::outbox::{GuestAnswer, HeldMail, HeldOutbox};
 
 /// The next number in each of the two `MailId` correlation spaces a
 /// mailbox's guest mints in: the next send correlation and the next
@@ -198,6 +199,10 @@ pub struct ComponentCtx {
     /// retained for the instance's life so `asset_catalog` still answers.
     /// `None` on the test paths that build a bare ctx.
     pub load_window: Option<LoadWindow>,
+    /// A candidate guest's held outbox (#7067): `Some` from
+    /// [`Self::hold_outbox`] until the candidate is flushed or discarded,
+    /// while every send and reply it makes is held rather than sent.
+    held: Option<HeldOutbox>,
 }
 
 /// The declared type of one inline-child actor the resident module can
@@ -226,7 +231,7 @@ const REPLY_LINEAGE_BASE: u64 = 1 << 63;
 /// the `reply_to` and lineage `mail_id` the caller minted, whether the send
 /// detaches from the in-flight chain, and the dispatch `identity` it is sent
 /// as.
-struct RoutedSend {
+pub(super) struct RoutedSend {
     recipient: MailboxId,
     kind: MailKind,
     payload: Vec<u8>,
@@ -281,6 +286,92 @@ impl ComponentCtx {
             pending_alias_retirements: Vec::new(),
             inline_children: FxHashMap::default(),
             load_window: None,
+            held: None,
+        }
+    }
+
+    /// Hold every send and reply this guest makes from here on, rather than
+    /// sending it, until [`super::Component::flush_held_outbox`] sends it or
+    /// [`super::Component::discard_held_outbox`] drops it (#7067). The
+    /// consumer is a republish preparing a candidate while the old guest is
+    /// kept: it calls this before `Component::instantiate`, so the
+    /// candidate's `init` and `on_rehydrate` are held.
+    pub fn hold_outbox(&mut self) {
+        self.held = Some(HeldOutbox::default());
+    }
+
+    /// Whether this guest's outbox is held.
+    pub(crate) fn outbox_held(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// Arm a held outbox's leak guard once the guest is instantiated, so
+    /// from then on it must be flushed or discarded. Called by
+    /// `Component::instantiate` on success.
+    pub(super) fn arm_held_outbox(&mut self) {
+        if let Some(held) = self.held.as_mut() {
+            held.arm();
+        }
+    }
+
+    /// Hold the guest's `answer` to `handle`, whose slot the caller reserved
+    /// and whose `entry` and `chain` the reservation moved out.
+    ///
+    /// # Panics
+    ///
+    /// When the outbox is not held: the reply path reserves only then.
+    pub(crate) fn hold_reply(&self, handle: u32, entry: ReplyEntry, chain: Option<HeldChain>, answer: GuestAnswer) {
+        self.held.as_ref().expect("a reply is held only while the outbox is").push(HeldMail::Reply {
+            handle,
+            entry,
+            chain,
+            answer,
+        });
+    }
+
+    /// Send every held mail in order and stop holding. A send held without
+    /// lineage is stamped with the flushing turn's `parent` and `root`, so
+    /// that chain settles only after the mail does; a detached send keeps
+    /// its own chain. A reply is sent on its requester's chain when its slot
+    /// held one (ADR-0243 §6), else on the flushing turn's, then its slot is
+    /// freed and the requester's settlement hold released. Read through
+    /// [`super::Component::flush_held_outbox`].
+    pub(super) fn flush_held(&mut self, parent: Option<MailId>, root: Option<MailId>) {
+        let Some(mut held) = self.held.take() else {
+            return;
+        };
+        for mail in held.drain() {
+            match mail {
+                HeldMail::Send(mut send) => {
+                    if send.lineage.is_none() && !send.force_detach {
+                        send.lineage = Some((parent, root));
+                    }
+                    self.route(send);
+                }
+                HeldMail::Reply { handle, entry: _, chain, answer } => {
+                    let lineage = chain.as_ref().map_or((parent, root), |chain| (chain.parent, chain.root));
+                    self.answer(answer, Some(lineage));
+                    self.reply_table.release_reserved(handle);
+                    if let Some(chain) = chain {
+                        chain.release();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drop every held send, which never recorded `Sent`, and put every
+    /// reserved reply slot back exactly, chain included, so the old guest
+    /// answers its requester. Read through
+    /// [`super::Component::discard_held_outbox`].
+    pub(super) fn discard_held(&mut self) {
+        let Some(mut held) = self.held.take() else {
+            return;
+        };
+        for mail in held.drain() {
+            if let HeldMail::Reply { handle, entry, chain, .. } = mail {
+                self.reply_table.restore(handle, entry, chain);
+            }
         }
     }
 
@@ -395,7 +486,16 @@ impl ComponentCtx {
 
     /// Move this guest's reply table out for the slot's next occupant.
     /// Read through [`super::Component::take_pending_replies`].
+    ///
+    /// # Panics
+    ///
+    /// While a held answer reserves a slot: the table would move away from
+    /// the outbox that must release or restore it, stranding its requester.
     pub(super) fn take_pending_replies(&mut self) -> PendingReplies {
+        assert!(
+            !self.reply_table.has_reserved(),
+            "a reply table moved while a held outbox reserves a slot; flush or discard the outbox first",
+        );
         PendingReplies(mem::take(&mut self.reply_table))
     }
 
@@ -550,15 +650,8 @@ impl ComponentCtx {
     /// in flight. The caller keeps the chain, and so its settlement hold,
     /// alive until this returns, by which time the reply's `Sent` is
     /// recorded.
-    pub(crate) fn reply(
-        &self,
-        recipient: MailboxId,
-        kind: MailKind,
-        payload: EncodedMail,
-        count: u32,
-        origin: ReplyOrigin<'_>,
-    ) {
-        let ReplyOrigin { correlation, from, chain } = origin;
+    fn reply(&self, recipient: MailboxId, kind: MailKind, payload: EncodedMail, count: u32, origin: ReplyOrigin) {
+        let ReplyOrigin { correlation, from, lineage } = origin;
         let reply_to = Source::with_correlation(SourceAddr::None, correlation);
         // Issue 1987: a child's reply stamps the child's identity (the
         // guest-carried `from`, already resolved in-cluster by the host fn)
@@ -574,9 +667,37 @@ impl ComponentCtx {
             reply_to,
             mail_id,
             force_detach: false,
-            lineage: chain.map(|chain| (chain.parent, chain.root)),
+            lineage,
             identity: from,
         });
+    }
+
+    /// Send the guest's `answer` to a reply handle. `lineage`, as
+    /// `(parent_mail, root)`, is the chain a local answer is stamped on: a
+    /// held slot's (ADR-0243 §6) or a flushing turn's; `None` inherits the
+    /// dispatch in flight. A session or remote answer leaves the process
+    /// and carries no lineage.
+    ///
+    /// Consumers: the `reply_mail_p32` host fn, and [`Self::flush_held`].
+    pub(crate) fn answer(&self, answer: GuestAnswer, lineage: Option<(Option<MailId>, Option<MailId>)>) {
+        match answer {
+            GuestAnswer::Session { token, kind_name, payload, correlation } => {
+                let origin = self.registry.mailbox_name(self.sender);
+                // The guest replies in its own name: stamp its own position,
+                // which the host bound it to (ADR-0230 §3), when that
+                // position holds a route.
+                let stamp = self.registry.stamped_sender(self.sender);
+                self.outbound.egress_to_session(token, &kind_name, payload, origin, correlation, stamp);
+            }
+            GuestAnswer::Component { recipient, kind, payload, count, correlation, from } => {
+                self.reply(recipient, kind, payload, count, ReplyOrigin { correlation, from, lineage });
+            }
+            GuestAnswer::Engine { engine_id, mailbox_id, kind, payload, count, correlation } => {
+                // ADR-0037 Phase 2: the hub forwards the frame to the target
+                // engine's connection as `HubToEngine::MailById`.
+                self.outbound.egress_to_engine_mailbox(engine_id, mailbox_id, kind, payload, count, correlation);
+            }
+        }
     }
 
     /// Shared routing body of [`Self::send`] and [`Self::reply`]: stamp
@@ -593,7 +714,20 @@ impl ComponentCtx {
     /// causal chain regardless of the in-flight cells; `false` (the
     /// default `send` / a reply) inherits the dispatch's chain. A held
     /// reply's `lineage` (ADR-0243 §6) replaces the in-flight cells.
+    ///
+    /// While the outbox is held (#7067) the send is held as it is, its
+    /// lineage unstamped, and [`Self::flush_held`] routes it later.
     fn send_routed(&self, send: RoutedSend) {
+        if let Some(held) = &self.held {
+            held.push(HeldMail::Send(send));
+            return;
+        }
+        self.route(send);
+    }
+
+    /// Route one send now: the body of [`Self::send_routed`] past the held
+    /// outbox.
+    fn route(&self, send: RoutedSend) {
         let RoutedSend {
             recipient,
             kind,

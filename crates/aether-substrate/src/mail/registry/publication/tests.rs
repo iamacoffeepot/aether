@@ -411,6 +411,32 @@ fn a_republish_binds_the_next_to_what_it_added() {
     assert!(dropped.as_ref().is_err_and(|error| error.starts_with("test.y is exported")), "{dropped:?}");
 }
 
+// Catches: a preview that publishes, so a second preview of the same module
+// answers `Unchanged` and a republish refused later has already bound its
+// namespaces; or one that reads other than the committed table, so it
+// answers otherwise than the publish would.
+#[test]
+fn admission_preview_answers_as_publish_would_and_writes_nothing() {
+    let fixture = Fixture::new();
+    fixture.publish(&fixture.module(&[("test.x", &[KEPT, ADDED])])).expect("first publish");
+    let narrowing = fixture.module(&[("test.x", &[KEPT])]);
+    let growing = fixture.module(&[("test.x", &[KEPT, ADDED]), ("test.y", &[KEPT])]);
+
+    assert!(
+        matches!(
+            fixture.registry.admission_preview(&narrowing),
+            Err(AdmissionRefusal::ContractNarrowed { ref namespace, contract_break: ContractBreak::Row(ADDED), .. })
+                if &**namespace == "test.x"
+        ),
+        "a narrowing republish is refused",
+    );
+    assert_eq!(fixture.registry.admission_preview(&growing), Ok(Admitted::Publish));
+    assert_eq!(fixture.registry.admission_preview(&growing), Ok(Admitted::Publish), "the first preview wrote nothing");
+
+    fixture.publish(&growing).expect("the previewed publish is admitted");
+    assert_eq!(fixture.registry.admission_preview(&growing), Ok(Admitted::Unchanged));
+}
+
 // Catches: the staged table committed by a batch that fails after its
 // publish effect, so a refused load or replace still binds its namespaces.
 #[test]

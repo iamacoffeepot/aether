@@ -1,4 +1,4 @@
-use aether_actor::DEHYDRATE_HELD_UNSAVED;
+use aether_actor::{DEHYDRATE_HELD_UNSAVED, ReplyMode};
 use wasmtime::Store;
 
 use super::instantiate::Placement;
@@ -6,6 +6,7 @@ use super::{
     Component, ComponentCtx, CorrelationCursor, MAX_DELIVERABLE_MAIL_BYTES, PendingReplies, SMALL_REGION_BYTES,
     StateBundle,
 };
+use crate::actor::native::ctx::NativeCtx;
 use crate::mail::registry::{PreparedAliasRetirement, PreparedAliasRoute};
 
 impl Component {
@@ -111,6 +112,30 @@ impl Component {
     /// failed to rehydrate, whose table was moved out (#6134).
     pub fn resume_replies(&mut self, replies: PendingReplies) {
         self.store.data_mut().resume_replies(replies);
+    }
+
+    /// Send every mail this candidate held (#7067) in the order it sent it,
+    /// on the chain of the turn `ctx` is dispatching, and stop holding. A
+    /// send is stamped with that turn's inbound as its parent and root, so
+    /// the turn's chain settles only after the mail does; a detached send
+    /// opens its own chain. A reply goes out on its requester's chain when
+    /// its slot held one (ADR-0243 §6), after which its slot is freed and
+    /// the requester's hold released. A no-op for an outbox never held.
+    ///
+    /// The consumer is a republish committing its candidate.
+    pub fn flush_held_outbox<A, M: ReplyMode>(&mut self, ctx: &NativeCtx<'_, A, M>) {
+        self.store.data_mut().flush_held(ctx.in_flight_mail_id(), ctx.in_flight_root());
+    }
+
+    /// Drop every mail this candidate held (#7067): its sends never recorded
+    /// `Sent` and go nowhere, and each reply slot it reserved is put back
+    /// exactly, chain included, so the old guest answers its requester once
+    /// it takes the reply table back. A no-op for an outbox never held.
+    ///
+    /// The consumer is a republish aborting its candidate, before it moves
+    /// the reply table back to the old guest.
+    pub fn discard_held_outbox(&mut self) {
+        self.store.data_mut().discard_held();
     }
 
     /// Extract the state bundle the guest deposited via `save_state`

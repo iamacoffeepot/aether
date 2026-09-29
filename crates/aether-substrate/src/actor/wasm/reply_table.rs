@@ -42,6 +42,16 @@
 // a replace carries the chains to the next occupant unchanged; actor close
 // drops the table and every hold with it.
 //
+// A candidate guest whose outbox is held (a republish preparing its
+// replacement while the old guest is kept) answers a handle without sending:
+// `reserve` moves the slot's entry and chain out and leaves the slot
+// occupied at its generation, so nothing reallocates it and a second answer
+// to the same handle finds it unknown. A flush sends the answer and
+// `release_reserved` frees the slot under its next generation; a discard
+// `restore`s the entry and chain exactly, so the old guest can still answer
+// its requester on the same chain. `settle_held` skips a reserved slot, and
+// the table is never moved to another guest while one is reserved.
+//
 // The table lives on `ComponentCtx` rather than `Component` because
 // the host fn touches it via `Caller::data_mut()`. The ctx dies with
 // its instance, so the component trampoline moves the table out as an
@@ -157,24 +167,28 @@ impl HeldChain {
 /// Where a guest reply comes from and which chain it answers, as the
 /// `reply_mail_p32` host fn resolved it for `ComponentCtx::reply`.
 #[derive(Clone, Copy, Debug)]
-pub struct ReplyOrigin<'a> {
+pub struct ReplyOrigin {
     /// The inbound's correlation, echoed so the requester matches its reply.
     pub correlation: u64,
     /// The dispatch identity the reply is sent as (issue 1987).
     pub from: MailboxId,
-    /// A held slot's chain (ADR-0243 §6), or `None` for a reply answered
-    /// inside its own dispatch.
-    pub chain: Option<&'a HeldChain>,
+    /// The chain the reply is stamped on as `(parent_mail, root)`: a held
+    /// slot's (ADR-0243 §6), or a flushing turn's for a held outbox's reply
+    /// whose slot held none. `None` for a reply answered inside its own
+    /// dispatch, which inherits the dispatch's chain.
+    pub lineage: Option<(Option<MailId>, Option<MailId>)>,
 }
 
 /// One slab slot: the generation its current or next handle carries, the
-/// entry while a handle is held, and the chain while that handle is held
-/// past its dispatch.
+/// entry while a handle is held, the chain while that handle is held past
+/// its dispatch, and whether a held outbox reserved it: occupied, with its
+/// entry and chain moved out to a held answer.
 #[derive(Debug, Default)]
 struct Slot {
     generation: u32,
     entry: Option<ReplyEntry>,
     chain: Option<HeldChain>,
+    reserved: bool,
 }
 
 /// Maintains the handle→entry slab for one mailbox slot.
@@ -183,6 +197,7 @@ pub struct ReplyTable {
     slots: Vec<Slot>,
     free: VecDeque<u32>,
     live: usize,
+    reserved: usize,
     preallocated: u32,
     next_warning: usize,
 }
@@ -193,6 +208,7 @@ impl Default for ReplyTable {
             slots: Vec::new(),
             free: VecDeque::new(),
             live: 0,
+            reserved: 0,
             preallocated: PREALLOCATED_REPLY_SLOTS,
             next_warning: PREALLOCATED_REPLY_SLOTS as usize,
         }
@@ -260,6 +276,63 @@ impl ReplyTable {
         Some(self.free_slot(index))
     }
 
+    /// Move a live handle's entry and chain out to a held answer, keeping
+    /// the slot occupied at its generation: nothing reallocates it, and a
+    /// second `take` or `reserve` of the handle finds nothing. The slot
+    /// comes back through [`Self::restore`] or is freed through
+    /// [`Self::release_reserved`]. Returns `None` for the same handles
+    /// [`Self::take`] does.
+    pub(crate) fn reserve(&mut self, handle: u32) -> Option<(ReplyEntry, Option<HeldChain>)> {
+        let index = self.live_index(handle)?;
+        let slot = &mut self.slots[index as usize];
+        let entry = slot.entry.take().expect("a live slot holds its entry");
+        slot.reserved = true;
+        self.reserved += 1;
+        Some((entry, slot.chain.take()))
+    }
+
+    /// Put a reserved handle's entry and chain back exactly as
+    /// [`Self::reserve`] moved them out, so the handle answers its own
+    /// requester on its own chain again.
+    ///
+    /// # Panics
+    ///
+    /// When `handle` does not name a slot reserved at its generation: the
+    /// answer would land on another requester's slot.
+    pub(crate) fn restore(&mut self, handle: u32, entry: ReplyEntry, chain: Option<HeldChain>) {
+        let slot = self.reserved_slot(handle);
+        slot.entry = Some(entry);
+        slot.chain = chain;
+        slot.reserved = false;
+        self.reserved -= 1;
+    }
+
+    /// Free a reserved handle's slot under its next generation, once its
+    /// held answer is sent.
+    ///
+    /// # Panics
+    ///
+    /// When `handle` does not name a slot reserved at its generation.
+    pub(crate) fn release_reserved(&mut self, handle: u32) {
+        self.reserved_slot(handle).reserved = false;
+        self.reserved -= 1;
+        self.retire(unpack(handle).0);
+    }
+
+    /// Whether any slot is reserved to a held answer.
+    pub(crate) fn has_reserved(&self) -> bool {
+        self.reserved > 0
+    }
+
+    /// The slot `handle` reserved.
+    fn reserved_slot(&mut self, handle: u32) -> &mut Slot {
+        let (index, generation) = unpack(handle);
+        self.slots
+            .get_mut(index as usize)
+            .filter(|slot| slot.reserved && slot.generation == generation)
+            .unwrap_or_else(|| panic!("reply handle {handle:#x} is not reserved at its generation"))
+    }
+
     /// Arm a live handle's slot with `chain`, keeping the requester's
     /// settlement open until the handle is answered (ADR-0243 §6). Returns
     /// whether the slot was armed. A handle the guest already answered
@@ -312,10 +385,16 @@ impl ReplyTable {
         let slot = &mut self.slots[index as usize];
         let entry = slot.entry.take().expect("only a live slot is freed");
         let chain = slot.chain.take();
+        self.retire(index);
+        (entry, chain)
+    }
+
+    /// Advance an emptied slot's generation and queue its index free.
+    fn retire(&mut self, index: u32) {
+        let slot = &mut self.slots[index as usize];
         slot.generation = next_generation(index, slot.generation);
         self.free.push_back(index);
         self.live -= 1;
-        (entry, chain)
     }
 
     /// The live handle count, once each time it passes the next high-water
@@ -422,6 +501,78 @@ mod tests {
         assert_eq!(trace.settlement_counter().held_open(root(3)), 0);
         assert!(t.take(held).is_none());
         assert!(t.take(kept).is_some(), "a manual handler's handle stays answerable");
+    }
+
+    // Catches: a restore that drops the chain or lands on another slot, so
+    // the reinstated guest's answer leaves its requester's chain open or
+    // answers the wrong requester.
+    #[test]
+    fn reserve_then_restore_round_trips_the_handle_and_chain() {
+        let trace = TraceHandle::new();
+        let mut t = ReplyTable::new();
+        let entry = ReplyEntry::new(SourceAddr::Session(token(6)), 17);
+        let handle = t.allocate(entry).expect("room");
+        assert!(t.hold(handle, chain_on(&trace, root(4))));
+
+        let (reserved, chain) = t.reserve(handle).expect("live");
+        assert!(t.has_reserved());
+        t.restore(handle, reserved, chain);
+
+        assert!(!t.has_reserved());
+        assert_eq!(trace.settlement_counter().held_open(root(4)), 1, "the restored chain still holds the root");
+        let (taken, chain) = t.take(handle).expect("the handle answers again");
+        assert_eq!(taken, entry);
+        assert_eq!(chain.expect("the chain came back").root, Some(root(4)));
+    }
+
+    // Catches: a release that frees the slot under its old generation, so a
+    // late answer to the handle reaches the slot's next requester.
+    #[test]
+    fn reserve_then_release_frees_the_slot_under_the_next_generation() {
+        let mut t = ReplyTable::with_preallocated(1);
+        let first = t.allocate(ReplyEntry::new(SourceAddr::Session(token(1)), 0)).expect("room");
+        t.reserve(first).expect("live");
+
+        t.release_reserved(first);
+
+        let second = t.allocate(ReplyEntry::new(SourceAddr::Session(token(2)), 0)).expect("room");
+        assert_eq!(unpack(first).0, unpack(second).0, "the released slot is the next one allocated");
+        assert_ne!(first, second);
+        assert!(t.take(first).is_none());
+        assert!(!t.has_reserved());
+    }
+
+    // Catches: a reserved slot that still answers, so a candidate answering
+    // one handle twice sends two replies, or that a new allocation reuses
+    // while its answer is held.
+    #[test]
+    fn a_reserved_handle_refuses_a_second_take_or_reserve() {
+        let mut t = ReplyTable::with_preallocated(1);
+        let handle = t.allocate(ReplyEntry::new(SourceAddr::Session(token(3)), 0)).expect("room");
+        t.reserve(handle).expect("live");
+
+        assert!(t.reserve(handle).is_none());
+        assert!(t.take(handle).is_none());
+        let next = t.allocate(ReplyEntry::new(SourceAddr::Session(token(4)), 0)).expect("room");
+        assert_ne!(unpack(next).0, unpack(handle).0, "a reserved slot is never reallocated");
+    }
+
+    // Catches: an unload's settle freeing a reserved slot, whose entry is
+    // out with a held answer, so the restore after it panics or the answer
+    // is sent to a freed slot.
+    #[test]
+    fn settle_held_skips_a_reserved_slot() {
+        let trace = TraceHandle::new();
+        let mut t = ReplyTable::new();
+        let handle = t.allocate(ReplyEntry::new(SourceAddr::Session(token(5)), 0)).expect("room");
+        assert!(t.hold(handle, chain_on(&trace, root(5))));
+        let (entry, chain) = t.reserve(handle).expect("live");
+
+        t.settle_held();
+
+        assert_eq!(trace.settlement_counter().held_open(root(5)), 1);
+        t.restore(handle, entry, chain);
+        assert!(t.take(handle).is_some());
     }
 
     #[test]
