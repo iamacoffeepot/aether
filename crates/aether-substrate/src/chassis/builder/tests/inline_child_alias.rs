@@ -10,16 +10,15 @@ use crate::actor::registry::MonitorError;
 use crate::chassis::builder::{Builder, PassiveChassis};
 use crate::mail::KindId;
 use crate::mail::MailboxId;
-use crate::mail::registry;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
 use crate::mail::registry::lineage_mailbox_id;
 use crate::mail::registry::{MailboxEntry, Registry, RouteContract};
-use crate::testing::{TestChassis, bare_substrate};
+use crate::testing::{TestChassis, await_settled, await_signal, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
-use aether_actor::{Addressable, ErasedActorRef, HandlesKind};
+use aether_actor::{ActorRef, Addressable, ErasedActorRef, HandlesKind};
 use aether_data::Kind;
+use crossbeam_channel::{Receiver, Sender};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 // Tells an `AliasWatcher` which address to monitor.
@@ -27,11 +26,14 @@ pod_kind!(AliasWatchOrder { target_id: u64 }, "test.alias_close.watch_order", 0x
 
 /// Watcher for the alias-close scenarios: monitors whatever address an
 /// `AliasWatchOrder` names and reports each registration's outcome and the
-/// sender of each `MonitorNotice` as it handles them, so a scenario blocks on
-/// the handler having run rather than polling shared state.
+/// sender of each `MonitorNotice` as it handles them. A registration's outcome
+/// lands inside the order's own chain, so the scenario reads it after
+/// settlement; a notice is a close-tail fan-out outside any root the scenario
+/// holds, so the watcher also signals `arrived` once it has reported one.
 struct AliasWatcher {
     monitored: Sender<Result<ErasedActorRef, MonitorError>>,
     notices: Sender<Option<ErasedActorRef>>,
+    arrived: Sender<()>,
     handles: Vec<MonitorHandle>,
 }
 impl Addressable for AliasWatcher {
@@ -43,12 +45,16 @@ impl HandlesKind<AliasWatchOrder> for AliasWatcher {}
 impl HandlesKind<aether_kinds::MonitorNotice> for AliasWatcher {}
 impl aether_actor::Lifecycle<Self> for AliasWatcher {
     type Config = ();
-    type Params = (Sender<Result<ErasedActorRef, MonitorError>>, Sender<Option<ErasedActorRef>>);
+    type Params = (Sender<Result<ErasedActorRef, MonitorError>>, Sender<Option<ErasedActorRef>>, Sender<()>);
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
     type Ctx<'a> = NativeCtx<'a, Self>;
-    fn init((): (), (monitored, notices): Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { monitored, notices, handles: Vec::new() })
+    fn init(
+        (): (),
+        (monitored, notices, arrived): Self::Params,
+        _ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<Self, BootError> {
+        Ok(Self { monitored, notices, arrived, handles: Vec::new() })
     }
 }
 impl aether_actor::Declared for AliasWatcher {
@@ -79,55 +85,47 @@ impl Dispatch<Self> for AliasWatcher {
         if kind.0 == <aether_kinds::MonitorNotice as Kind>::ID.0 {
             <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
             let _ = state.notices.send(ctx.sender());
+            let _ = state.arrived.send(());
             return Some(());
         }
         None
     }
 }
 
-/// A live watcher: its id, and the receivers its registrations and notices
-/// report on.
+/// A live watcher: its reference, and the receivers its registrations and
+/// notices report on.
 struct WatcherProbe {
-    id: MailboxId,
+    actor: ActorRef<AliasWatcher>,
     monitored: Receiver<Result<ErasedActorRef, MonitorError>>,
     notices: Receiver<Option<ErasedActorRef>>,
+    arrived: Receiver<()>,
 }
 
 impl WatcherProbe {
     fn spawn(chassis: &PassiveChassis<TestChassis>) -> Self {
-        let (monitored_tx, monitored) = mpsc::channel();
-        let (notices_tx, notices) = mpsc::channel();
-        let id = chassis
-            .spawn_actor::<AliasWatcher>(Subname::Counter, (), (monitored_tx, notices_tx))
-            .finish_commit()
+        let (monitored_tx, monitored) = crossbeam_channel::unbounded();
+        let (notices_tx, notices) = crossbeam_channel::unbounded();
+        let (arrived_tx, arrived) = crossbeam_channel::unbounded();
+        let actor = chassis
+            .spawn_actor::<AliasWatcher>(Subname::Counter, (), (monitored_tx, notices_tx, arrived_tx))
+            .finish()
             .expect("spawn watcher");
-        Self { id, monitored, notices }
+        Self { actor, monitored, notices, arrived }
     }
 
-    /// Order the watcher to monitor `target` and wait for its handler to
-    /// report the outcome.
-    fn watch(&self, registry: &Registry, target: MailboxId) -> Result<ErasedActorRef, MonitorError> {
-        enqueue(
-            registry,
-            self.id,
-            <AliasWatchOrder as Kind>::ID,
-            &(AliasWatchOrder { target_id: target.0 }).encode_into_bytes(),
-        );
-        self.monitored.recv_timeout(Duration::from_secs(5)).expect("the watcher handles its order")
+    /// Order the watcher to monitor `target` and read the outcome its handler
+    /// reported inside the order's chain.
+    fn watch(&self, chassis: &PassiveChassis<TestChassis>, target: MailboxId) -> Result<ErasedActorRef, MonitorError> {
+        let (_, settled) = chassis.send_tracked(self.actor, &AliasWatchOrder { target_id: target.0 }, None);
+        await_settled(&settled, "test.alias_close.watch_order");
+        self.monitored.try_recv().expect("the watcher handles its order")
     }
 
     /// Wait for the next `MonitorNotice` the watcher handles, as its sender.
     fn next_notice(&self) -> Option<ErasedActorRef> {
-        self.notices.recv_timeout(Duration::from_secs(5)).expect("a departure notice reaches the watcher")
+        await_signal(&self.arrived, "test.alias_close.notice");
+        self.notices.try_recv().expect("a departure notice reaches the watcher")
     }
-}
-
-/// Push one mail into `target`'s inbox through its registered sink.
-fn enqueue(registry: &Registry, target: MailboxId, kind: KindId, payload: &[u8]) {
-    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(target).expect("target sink registered") else {
-        panic!("expected mailbox entry for {target}");
-    };
-    handler.enqueue(registry::test_owned_dispatch(kind, payload, 1));
 }
 
 /// Publish an inline child's alias route onto the live `host`, exactly as the
@@ -224,30 +222,27 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let (closed_tx, closed) = mpsc::channel();
-    let host_id = chassis.spawn_actor::<Host>(Subname::Counter, (), closed_tx).finish_commit().expect("spawn host");
+    let (closed_tx, closed) = crossbeam_channel::unbounded();
+    let host = chassis.spawn_actor::<Host>(Subname::Counter, (), closed_tx).finish().expect("spawn host");
+    let host_id = host.id();
     let (alias_id, alias_name) = publish_alias(&registry, host_id);
 
     let watcher = WatcherProbe::spawn(&chassis);
     let alias_ref = watcher
-        .watch(&registry, alias_id)
+        .watch(&chassis, alias_id)
         .expect("the watcher must be able to register against the inline child's alias");
 
     // Order the host to close the watcher's own address first — a live
     // mailbox that is not an alias folded onto this host. It must refuse, or a
     // despawn could tombstone any actor and drain its watchers.
-    for target in [watcher.id, alias_id] {
-        enqueue(
-            &registry,
-            host_id,
-            <DespawnOrder as Kind>::ID,
-            &(DespawnOrder { target_id: target.0 }).encode_into_bytes(),
-        );
+    let orders = [watcher.actor.id(), alias_id]
+        .map(|target| chassis.send_tracked(host, &DespawnOrder { target_id: target.0 }, None).1);
+    for settled in &orders {
+        await_settled(settled, "test.alias_despawn.order");
     }
-    let answers: Vec<bool> =
-        (0..2).map(|_| closed.recv_timeout(Duration::from_secs(5)).expect("the host handles each order")).collect();
+    let answers: Vec<bool> = (0..2).map(|_| closed.try_recv().expect("the host handles each order")).collect();
     assert_eq!(answers, vec![false, true], "an actor may close an alias folded onto its own mailbox and nothing else");
-    assert!(!chassis.actor_registry().is_tombstoned(watcher.id), "a refused close tombstones nothing");
+    assert!(!chassis.actor_registry().is_tombstoned(watcher.actor.id()), "a refused close tombstones nothing");
     assert!(chassis.actor_registry().is_tombstoned(alias_id), "a despawned alias's name is spent (ADR-0241 §8)");
 
     assert_eq!(
@@ -262,7 +257,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     // the child it named has closed.
     assert!(registry.is_live_alias(alias_id), "the alias still routes until the retirement lands");
     assert_eq!(
-        watcher.watch(&registry, alias_id),
+        watcher.watch(&chassis, alias_id),
         Err(MonitorError::TargetTombstoned),
         "a despawned alias must refuse a new watcher rather than hold it past the child's close",
     );
@@ -334,15 +329,17 @@ fn a_closing_parent_tombstones_its_inline_children() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let host_id = chassis.spawn_actor::<Host>(Subname::Counter, (), ()).finish_commit().expect("spawn host");
+    let host = chassis.spawn_actor::<Host>(Subname::Counter, (), ()).finish().expect("spawn host");
+    let host_id = host.id();
     let (alias_id, _) = publish_alias(&registry, host_id);
 
     let watcher = WatcherProbe::spawn(&chassis);
     let alias_ref = watcher
-        .watch(&registry, alias_id)
+        .watch(&chassis, alias_id)
         .expect("the watcher must be able to register against the inline child's alias");
 
-    enqueue(&registry, host_id, <Quit as Kind>::ID, &(Quit { tag: 1 }).encode_into_bytes());
+    let _ = chassis.send_tracked(host, &Quit { tag: 1 }, None);
+    chassis.await_closed(host.erase());
 
     assert_eq!(
         watcher.next_notice(),

@@ -18,7 +18,7 @@ use crate::server::{HttpServerCapability, HttpServerConfig, HttpServerHandle};
 
 use super::handlers::EchoHttpHandler;
 use super::support::{
-    boot_chassis, config_for, port_of, read_one_response, read_status_line, round_trip, round_trip_live,
+    body_of, boot_chassis, config_for, port_of, read_one_response, read_status_line, round_trip, round_trip_live,
 };
 
 fn shard_canonical_name(index: usize) -> String {
@@ -246,8 +246,10 @@ fn all_shard_activation_failures_refuse_without_implicit_retry() {
 
     let first = round_trip(port, b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(first.starts_with("HTTP/1.1 503 "), "cold retained peer receives controlled refusal: {first:?}");
+    assert_eq!(body_of(&first), "no dispatch shards", "the refusal names the failed shards: {first:?}");
     let later = round_trip(port, b"GET /later HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(later.starts_with("HTTP/1.1 503 "), "failed startup does not retry implicitly: {later:?}");
+    assert_eq!(body_of(&later), "no dispatch shards", "the retry is refused for the same reason: {later:?}");
 
     drop(chassis);
     for collision in collisions {

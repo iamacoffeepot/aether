@@ -65,8 +65,10 @@ fn bare_router_stays_exclusive_second_claim_rejected() {
 #[test]
 fn macro_router_shared_opt_in_joins_a_member_set() {
     // Pinned to one dispatch shard, like `shared_route_spreads_across_members`:
-    // round-robin state is per-shard, so alternation across a request
-    // sequence is only deterministic with a single shard.
+    // the round-robin cursor is per connection, seeded from the shard's own
+    // `next_conn_id`, and each `round_trip` opens a new connection, so
+    // alternation across a request sequence follows one shard's conn-id
+    // sequence only when a single shard takes every connection.
     let chassis = boot_single_shard_fixed_body();
     // Two named instances of the exact same `SharedMacroPoolHandler` type
     // (the accurate replica analog, per the type's own doc comment): each
@@ -116,8 +118,9 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
 
 /// A shared member set (ADR-0136) spreads requests across its members
 /// round-robin: alpha and beta both register `/pool` shared, and with
-/// `dispatch_shards` pinned to 1 (one cursor) sequential requests
-/// alternate between them — both bodies observed, nothing else.
+/// `dispatch_shards` pinned to 1 (one conn-id sequence seeding each
+/// connection's cursor) sequential requests alternate between them — both
+/// bodies observed, nothing else.
 ///
 /// Tripwire: without member sets the second shared claim is rejected
 /// and every request serves "alpha"; with a broken cursor (never
