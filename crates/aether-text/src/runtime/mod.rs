@@ -660,52 +660,129 @@ mod tests {
     use super::super::*;
     use super::atlas::{ATLAS_SIZE, GlyphKey, GlyphSlot};
     use super::layout::build_font_metrics;
-    use super::{Arc, CreateTexture, CreateTextureResult, NativeCtx, QuadSpace, TextCapabilityState, UpdateTexture};
-    use aether_data::Kind;
+    use super::{
+        Arc, CreateTexture, CreateTextureResult, FsCapability, QuadSpace, RenderCapability, TextCapabilityState,
+        UpdateTexture,
+    };
+    use aether_actor::{Addressable, HandlesKind};
+    use aether_data::{Kind, KindId};
     use aether_math::Rgba;
     use aether_render::DrawTexturedQuads;
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::outbound::EgressEvent;
-    use aether_substrate::testing::{assert_next_send_kind, session_sender, test_mailer_and_rx, unrouted_binding};
-    use std::sync::mpsc::Receiver;
-    use std::time::Duration;
+    use aether_substrate::actor::native::PumpedSlot;
+    use aether_substrate::chassis::builder::PassiveChassis;
+    use aether_substrate::mail::registry::OwnedDispatch;
+    use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, fresh_substrate, registered_ref};
+    use std::sync::mpsc::{self, Receiver};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    fn ctx_binding() -> (Arc<NativeBinding>, Receiver<EgressEvent>) {
-        let (mailer, rx) = test_mailer_and_rx();
-        (unrouted_binding(&mailer), rx)
+    /// A booted `aether.text` on a pumped slot, beside the two dependencies
+    /// it declares: a stand-in at `aether.render` that hands every mail it
+    /// receives to [`Self::render`], and a discarding stand-in at
+    /// `aether.fs`. Every mail reaches the cap through the chassis and runs
+    /// through production dispatch when the slot drains.
+    struct TextFixture {
+        chassis: PassiveChassis<TestChassis>,
+        cap: PumpedSlot<TextCapability>,
+        render: Receiver<(KindId, Vec<u8>)>,
     }
 
-    /// Run `on_draw_text` for a `Screen`-space white string over a fresh
-    /// `NativeCtx` on `binding` — the shape the draw tests repeat. Varies
-    /// only `font_id`, `text`, `size_pixels`, and `origin`; color is
-    /// always opaque white and the space is always `Screen`.
-    fn draw_screen(
-        state: &mut TextCapabilityState,
-        binding: &Arc<NativeBinding>,
-        font_id: u32,
-        text: &str,
-        size_pixels: f32,
-        origin: [f32; 2],
-    ) {
-        let mut ctx = NativeCtx::new_for_actor(binding, session_sender(), None, None);
-        TextCapability::on_draw_text(
-            state,
-            &mut ctx,
-            DrawText {
-                font_id,
-                text: text.to_owned(),
-                size_pixels,
-                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
-                origin,
-                space: QuadSpace::Screen,
-                clip: None,
-            },
-        );
+    impl TextFixture {
+        fn boot() -> Self {
+            let (registry, mailer) = fresh_substrate();
+            let (render_tx, render) = mpsc::channel();
+            let render_mailer = Arc::clone(&mailer);
+            registered_ref(
+                &registry,
+                RenderCapability::NAMESPACE,
+                Arc::new(move |dispatch: OwnedDispatch| {
+                    let _ = render_tx.send((dispatch.kind, dispatch.payload.bytes().to_vec()));
+                    render_mailer.record_finished(dispatch.mail_id, dispatch.root);
+                    dispatch.discharge();
+                }),
+            );
+            registered_ref(
+                &registry,
+                FsCapability::NAMESPACE,
+                Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()),
+            );
+
+            let chassis = boot_bare_test_chassis(&registry, &mailer);
+            let (cap, _wake) = chassis.boot_pumped_actor::<TextCapability>((), ()).expect("TextCapability boots");
+            Self { chassis, cap, render }
+        }
+
+        /// [`Self::boot`] with the vendored font resident as `font_id` 0,
+        /// seeded in a host turn: the font-load path is covered by the
+        /// text scenarios, and the draw tests start past it.
+        fn with_font() -> Self {
+            let mut fixture = Self::boot();
+            fixture
+                .cap
+                .host_turn(|state, _ctx| {
+                    state.fonts.insert(0, Arc::new(test_font()));
+                })
+                .expect("the booted slot takes a host turn");
+            fixture
+        }
+
+        /// [`Self::with_font`] whose atlas texture has been created: the
+        /// render cap's `CreateTextureResult` arrives as mail.
+        fn with_atlas(texture_id: u32) -> Self {
+            let mut fixture = Self::with_font();
+            fixture.send(&CreateTextureResult::Ok { texture_id });
+            fixture
+        }
+
+        /// Deliver `mail` to the cap as a tracked chassis root and pump the
+        /// slot until that root's chain settles: the cap has handled it and
+        /// the render stand-in has received everything it sent.
+        fn send<K: Kind>(&mut self, mail: &K)
+        where
+            TextCapability: HandlesKind<K>,
+        {
+            let (_, settled) = self.chassis.send_tracked(self.chassis.actor_ref::<TextCapability>(), mail, None);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while settled.try_recv().is_err() {
+                assert!(Instant::now() < deadline, "{} did not settle within the deadline", K::NAME);
+                self.cap.drain_available();
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn draw(&mut self, font_id: u32, text: &str, size_pixels: f32, origin: [f32; 2]) {
+            self.send(&DrawText { font_id, size_pixels, ..screen_text_item(text, origin, None) });
+        }
+
+        /// Every mail the render stand-in has received since the last read,
+        /// in arrival order.
+        fn render_mail(&self) -> Vec<(KindId, Vec<u8>)> {
+            self.render.try_iter().collect()
+        }
+
+        fn render_kinds(&self) -> Vec<KindId> {
+            self.render_mail().into_iter().map(|(kind, _)| kind).collect()
+        }
+
+        /// The `DrawTexturedQuads` batches among the render mail since the
+        /// last read, skipping the uploads beside them.
+        fn quad_batches(&self) -> Vec<DrawTexturedQuads> {
+            self.render_mail()
+                .into_iter()
+                .filter(|(kind, _)| *kind == DrawTexturedQuads::ID)
+                .map(|(_, payload)| decode(&payload))
+                .collect()
+        }
     }
 
-    fn draw_batch(state: &mut TextCapabilityState, binding: &Arc<NativeBinding>, items: Vec<DrawText>) {
-        let mut ctx = NativeCtx::new_for_actor(binding, session_sender(), None, None);
-        TextCapability::on_draw_batch(state, &mut ctx, DrawTextBatch { items });
+    impl Drop for TextFixture {
+        fn drop(&mut self) {
+            self.cap.shutdown();
+        }
+    }
+
+    fn decode<K: Kind>(payload: &[u8]) -> K {
+        K::decode_from_bytes(payload).expect("test: render mail decodes")
     }
 
     fn screen_text_item(text: &str, origin: [f32; 2], clip: Option<aether_kinds::ClipRect>) -> DrawText {
@@ -720,107 +797,95 @@ mod tests {
         }
     }
 
+    /// Catches a draw for an unknown font that still reaches `aether.render`,
+    /// by creating the atlas or sending an empty batch.
     #[test]
     fn draw_with_unknown_font_emits_nothing() {
-        let mut state = TextCapabilityState::new();
-        let (binding, rx) = ctx_binding();
-        draw_screen(&mut state, &binding, 99, "hi", 32.0, [0.0, 0.0]);
-        assert!(rx.try_recv().is_err(), "an unknown font_id must not emit any render mail");
+        let mut text = TextFixture::boot();
+
+        text.draw(99, "hi", 32.0, [0.0, 0.0]);
+
+        assert!(text.render_mail().is_empty(), "an unknown font_id must not emit any render mail");
     }
 
+    /// Catches a lazy atlas create that draws before the texture exists, or
+    /// that a burst of draws repeats while the first create is in flight.
     #[test]
-    fn first_draw_with_known_font_creates_the_atlas_texture() {
-        let mut state = TextCapabilityState::new();
-        // Register a font directly — the parse path is covered above;
-        // here we exercise the lazy-create branch of `draw`.
-        let font = test_font();
-        state.fonts.insert(0, Arc::new(font));
-        let (binding, rx) = ctx_binding();
-        draw_screen(&mut state, &binding, 0, "hi", 32.0, [0.0, 0.0]);
-        assert!(state.atlas_create_inflight, "first draw should kick off atlas creation");
-        assert!(state.atlas_texture_id.is_none(), "no texture id until create_texture replies");
-        assert_next_send_kind::<CreateTexture>(&binding, &rx);
+    fn first_draw_with_known_font_creates_the_atlas_texture_once() {
+        let mut text = TextFixture::with_font();
+
+        text.draw(0, "hi", 32.0, [0.0, 0.0]);
+        text.draw(0, "hi", 32.0, [0.0, 0.0]);
+
+        assert_eq!(text.render_kinds(), [CreateTexture::ID], "one create, and no draw until its reply lands");
+        let (inflight, texture) = text
+            .cap
+            .read_state(|state| (state.atlas_create_inflight, state.atlas_texture_id))
+            .expect("the slot is live");
+        assert!(inflight, "the create stays in flight until its reply");
+        assert_eq!(texture, None, "no texture id until create_texture replies");
     }
 
+    /// Catches a `CreateTextureResult` whose id is not the one later uploads
+    /// and draws name, or a first glyph that is drawn without its upload.
     #[test]
     fn draw_after_texture_ready_emits_update_and_quads() {
-        let mut state = TextCapabilityState::new();
-        state.fonts.insert(0, Arc::new(test_font()));
-        // Simulate the create_texture reply landing.
-        state.atlas_create_inflight = true;
-        let (binding, rx) = ctx_binding();
-        {
-            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-            TextCapability::on_create_texture_result(&mut state, &mut ctx, CreateTextureResult::Ok { texture_id: 7 });
-        }
-        assert_eq!(state.atlas_texture_id, Some(7));
+        let mut text = TextFixture::with_font();
+        text.draw(0, "A", 48.0, [0.0, 0.0]);
+        assert_eq!(text.render_kinds(), [CreateTexture::ID]);
 
-        draw_screen(&mut state, &binding, 0, "A", 48.0, [0.0, 0.0]);
-        // A printable glyph rasterizes once: first an update_texture for
-        // the new glyph, then the draw_textured_quads batch.
-        assert_next_send_kind::<UpdateTexture>(&binding, &rx);
-        assert_next_send_kind::<DrawTexturedQuads>(&binding, &rx);
+        text.send(&CreateTextureResult::Ok { texture_id: 7 });
+        text.draw(0, "A", 48.0, [0.0, 0.0]);
+
+        let [(update_kind, update), (draw_kind, draw)] =
+            <[_; 2]>::try_from(text.render_mail()).expect("a new glyph sends one upload, then one quad batch");
+        assert_eq!((update_kind, draw_kind), (UpdateTexture::ID, DrawTexturedQuads::ID));
+        assert_eq!(decode::<UpdateTexture>(&update).texture_id, 7, "the upload names the created atlas");
+        assert_eq!(decode::<DrawTexturedQuads>(&draw).texture_id, 7, "the batch samples the created atlas");
     }
 
+    /// Catches a full atlas that drops the glyph instead of resetting: the
+    /// reset re-syncs the whole texture, then the glyph uploads and draws.
     #[test]
     fn draw_after_atlas_full_resets_and_renders_glyph() {
-        let mut state = TextCapabilityState::new();
-        state.fonts.insert(0, Arc::new(test_font()));
-        state.atlas_create_inflight = true;
-        let (binding, rx) = ctx_binding();
-        {
-            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-            TextCapability::on_create_texture_result(&mut state, &mut ctx, CreateTextureResult::Ok { texture_id: 3 });
-        }
-        assert_eq!(state.atlas_texture_id, Some(3));
-
-        // Fill the atlas by directly calling get_or_insert with wide bands
-        // until the atlas reports full. `ATLAS_SIZE`, `GlyphKey`, and
-        // `GlyphSlot` are in scope via the `use super::{…}` import
-        // (the runtime half re-exports the atlas types).
-        {
-            let band_height = 64u32;
-            let coverage = vec![255u8; (ATLAS_SIZE * band_height) as usize];
-            for glyph_index in 0..32u16 {
-                let key = GlyphKey { font_id: 99, glyph_index, size_pixels: 64 };
-                match state.atlas.get_or_insert(key, ATLAS_SIZE, band_height, &coverage) {
-                    GlyphSlot::Placed { .. } => {}
-                    GlyphSlot::Full => break,
-                    GlyphSlot::Empty => panic!("band coverage is not empty"),
+        let mut text = TextFixture::with_atlas(3);
+        text.cap
+            .host_turn(|state, _ctx| {
+                let band_height = 64u32;
+                let coverage = vec![255u8; (ATLAS_SIZE * band_height) as usize];
+                for glyph_index in 0..32u16 {
+                    let key = GlyphKey { font_id: 99, glyph_index, size_pixels: 64 };
+                    match state.atlas.get_or_insert(key, ATLAS_SIZE, band_height, &coverage) {
+                        GlyphSlot::Placed { .. } => {}
+                        GlyphSlot::Full => break,
+                        GlyphSlot::Empty => panic!("band coverage is not empty"),
+                    }
                 }
-            }
-        }
-        assert!(state.atlas.is_full(), "atlas must be full before draw");
+            })
+            .expect("the slot is live");
+        assert!(text.cap.read_state(|state| state.atlas.is_full()).expect("the slot is live"), "atlas starts full");
 
-        // A draw now: the cap should reset the atlas (emitting a full-rect
-        // update_texture for the resync), rasterize the glyph (another
-        // update_texture), then send draw_textured_quads. The glyph renders
-        // rather than drops — proving the reset freed space.
-        draw_screen(&mut state, &binding, 0, "A", 48.0, [0.0, 0.0]);
+        text.draw(0, "A", 48.0, [0.0, 0.0]);
 
-        assert!(!state.atlas.is_full(), "atlas must be clear after reset-triggered draw");
-
-        // The full-rect resync and the per-glyph upload both arrive as
-        // UpdateTexture; the quad batch follows as DrawTexturedQuads.
-        assert_next_send_kind::<UpdateTexture>(&binding, &rx);
-        assert_next_send_kind::<UpdateTexture>(&binding, &rx);
-        assert_next_send_kind::<DrawTexturedQuads>(&binding, &rx);
+        assert!(!text.cap.read_state(|state| state.atlas.is_full()).expect("the slot is live"), "the draw reset it");
+        let mail = text.render_mail();
+        let kinds: Vec<KindId> = mail.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, [UpdateTexture::ID, UpdateTexture::ID, DrawTexturedQuads::ID]);
+        let resync = decode::<UpdateTexture>(&mail[0].1);
+        assert_eq!((resync.width, resync.height), (ATLAS_SIZE, ATLAS_SIZE), "the reset re-syncs the whole atlas");
     }
 
+    /// Catches a batch that sends one quad batch per item instead of
+    /// coalescing same-key items, or that reorders their glyphs.
     #[test]
     fn draw_batch_coalesces_same_key_screen_items_into_one_quad_send() {
-        let mut state = TextCapabilityState::new();
-        state.fonts.insert(0, Arc::new(test_font()));
-        state.atlas_texture_id = Some(1);
-        let (binding, rx) = ctx_binding();
+        let mut text = TextFixture::with_atlas(1);
 
-        draw_batch(
-            &mut state,
-            &binding,
-            vec![screen_text_item("A", [0.0, 0.0], None), screen_text_item("B", [24.0, 0.0], None)],
-        );
+        text.send(&DrawTextBatch {
+            items: vec![screen_text_item("A", [0.0, 0.0], None), screen_text_item("B", [24.0, 0.0], None)],
+        });
 
-        let batches = collect_draw_textured_quad_batches(&binding, &rx);
+        let batches = text.quad_batches();
         assert_eq!(batches.len(), 1, "two same-key text items emit one DrawTexturedQuads");
         assert_eq!(batches[0].space, QuadSpace::Screen);
         assert_eq!(batches[0].clip, None);
@@ -828,122 +893,65 @@ mod tests {
         assert!(batches[0].quads[0].x < batches[0].quads[1].x, "glyph quads retain item order");
     }
 
+    /// Catches a coalescer that merges equal clips across an intervening
+    /// different clip, which would reorder the authored runs.
     #[test]
     fn draw_batch_preserves_noncontiguous_clip_runs() {
-        let mut state = TextCapabilityState::new();
-        state.fonts.insert(0, Arc::new(test_font()));
-        state.atlas_texture_id = Some(1);
-        let (binding, rx) = ctx_binding();
+        let mut text = TextFixture::with_atlas(1);
         let left_clip = aether_kinds::ClipRect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
         let right_clip = aether_kinds::ClipRect { x: 20.0, y: 0.0, width: 20.0, height: 20.0 };
 
-        draw_batch(
-            &mut state,
-            &binding,
-            vec![
+        text.send(&DrawTextBatch {
+            items: vec![
                 screen_text_item("A", [0.0, 0.0], Some(left_clip.clone())),
                 screen_text_item("B", [24.0, 0.0], Some(right_clip.clone())),
                 screen_text_item("C", [48.0, 0.0], Some(left_clip.clone())),
             ],
-        );
+        });
 
-        let batches = collect_draw_textured_quad_batches(&binding, &rx);
+        let batches = text.quad_batches();
         assert_eq!(batches.len(), 3, "noncontiguous equal clips remain separate authored-order runs");
         assert_eq!(batches[0].clip, Some(left_clip.clone()));
         assert_eq!(batches[1].clip, Some(right_clip));
         assert_eq!(batches[2].clip, Some(left_clip));
     }
 
+    /// Catches an unknown-font item that aborts the batch or splits the run
+    /// around it.
     #[test]
     fn draw_batch_drops_an_unknown_font_without_losing_surrounding_items() {
-        let mut state = TextCapabilityState::new();
-        state.fonts.insert(0, Arc::new(test_font()));
-        state.atlas_texture_id = Some(1);
-        let (binding, rx) = ctx_binding();
-        let mut unknown = screen_text_item("ignored", [24.0, 0.0], None);
-        unknown.font_id = 99;
+        let mut text = TextFixture::with_atlas(1);
+        let unknown = DrawText { font_id: 99, ..screen_text_item("ignored", [24.0, 0.0], None) };
 
-        draw_batch(
-            &mut state,
-            &binding,
-            vec![screen_text_item("A", [0.0, 0.0], None), unknown, screen_text_item("B", [48.0, 0.0], None)],
-        );
+        text.send(&DrawTextBatch {
+            items: vec![screen_text_item("A", [0.0, 0.0], None), unknown, screen_text_item("B", [48.0, 0.0], None)],
+        });
 
-        let batches = collect_draw_textured_quad_batches(&binding, &rx);
+        let batches = text.quad_batches();
         assert_eq!(batches.len(), 1, "valid items on either side share their run");
         assert_eq!(batches[0].quads.len(), 2, "the unknown-font item alone is dropped");
         assert!(batches[0].quads[0].x < batches[0].quads[1].x, "surviving items retain authored order");
     }
 
-    /// `Screen` draws at a non-zero `origin` shift every glyph quad by
-    /// that offset. Draw the same string twice — once at `[0,0]` and once
-    /// at `[ox, oy]` — and assert each quad in the offset batch sits
-    /// exactly `(ox, oy)` further right/down than its zero-origin peer.
+    /// Catches a `Screen` draw that ignores `origin`: the same string drawn
+    /// at `[0,0]` and at `[ox, oy]` has every quad shifted by exactly that
+    /// offset.
     #[test]
     fn screen_origin_shifts_quad_positions() {
-        let mut state = TextCapabilityState::new();
-        state.fonts.insert(0, Arc::new(test_font()));
-        state.atlas_create_inflight = true;
-        let (binding, rx) = ctx_binding();
-        {
-            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-            TextCapability::on_create_texture_result(&mut state, &mut ctx, CreateTextureResult::Ok { texture_id: 1 });
-        }
-        assert_eq!(state.atlas_texture_id, Some(1));
+        let mut text = TextFixture::with_atlas(1);
 
-        // Draw at origin [0, 0] — the glyph rasterizes on the first draw
-        // (cache miss), so drain UpdateTexture before collecting quads.
-        draw_screen(&mut state, &binding, 0, "A", 24.0, [0.0, 0.0]);
-        let quads_zero = collect_draw_textured_quads(&binding, &rx).quads;
-
-        // Second draw at a non-zero origin — glyph is cached, so only
-        // DrawTexturedQuads is emitted (no UpdateTexture).
+        text.draw(0, "A", 24.0, [0.0, 0.0]);
+        let quads_zero = text.quad_batches().remove(0).quads;
         let ox = 30.0f32;
         let oy = 50.0f32;
-        draw_screen(&mut state, &binding, 0, "A", 24.0, [ox, oy]);
-        let quads_offset = collect_draw_textured_quads(&binding, &rx).quads;
+        text.draw(0, "A", 24.0, [ox, oy]);
+        let quads_offset = text.quad_batches().remove(0).quads;
 
         assert_eq!(quads_zero.len(), quads_offset.len(), "same text must produce the same number of quads");
         for (z, o) in quads_zero.iter().zip(quads_offset.iter()) {
             assert!((o.x - z.x - ox).abs() < 0.01, "quad x should shift by {ox}: zero={}, offset={}", z.x, o.x);
             assert!((o.y - z.y - oy).abs() < 0.01, "quad y should shift by {oy}: zero={}, offset={}", z.y, o.y);
         }
-    }
-
-    /// Drain egress until the next `DrawTexturedQuads` `UnresolvedMail`
-    /// arrives, skipping any prior `UpdateTexture` or other sends.
-    fn collect_draw_textured_quads(binding: &NativeBinding, rx: &Receiver<EgressEvent>) -> DrawTexturedQuads {
-        binding.flush_outbound();
-        loop {
-            let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
-            if let EgressEvent::UnresolvedMail { kind_id, payload, .. } = event
-                && kind_id == DrawTexturedQuads::ID
-            {
-                return DrawTexturedQuads::decode_from_bytes(&payload)
-                    .expect("test: DrawTexturedQuads payload decodes");
-            }
-        }
-    }
-
-    fn collect_draw_textured_quad_batches(
-        binding: &NativeBinding,
-        rx: &Receiver<EgressEvent>,
-    ) -> Vec<DrawTexturedQuads> {
-        binding.flush_outbound();
-        rx.try_iter()
-            .filter_map(|event| {
-                if let EgressEvent::UnresolvedMail { kind_id, payload, .. } = event
-                    && kind_id == DrawTexturedQuads::ID
-                {
-                    Some(
-                        DrawTexturedQuads::decode_from_bytes(&payload)
-                            .expect("test: DrawTexturedQuads payload decodes"),
-                    )
-                } else {
-                    None
-                }
-            })
-            .collect()
     }
 
     /// A tiny real font for the draw-path tests — the workspace's

@@ -192,75 +192,58 @@ impl NativeActor for HeadlessRenderCapability {
 mod headless_tests {
     use super::*;
     use crate::{TextureFormat, TextureSampling, TextureUsage, VertexAttribute, VertexFormat};
-    use aether_substrate::actor::native::NativeCtx;
-    use aether_substrate::testing::{test_mailer_and_rx, unrouted_binding};
+    use aether_actor::HandlesKind;
+    use aether_data::{Kind, SessionToken, Uuid};
+    use aether_substrate::chassis::builder::ReplyTarget;
+    use aether_substrate::testing::{boot_test_chassis_with, decode_session_reply, fresh_substrate_and_rx};
 
-    /// ADR-0105: `create_texture` against a headless chassis replies
-    /// `Err` (fail-fast, no GPU) rather than hanging on a reply that
-    /// never comes — mirrors `capture_frame`'s headless shape. The handler
-    /// is `#[handler::single]` with a returned reply (aligning the declared
-    /// `create_texture` row with the pumped runtime), so the test asserts on
-    /// the returned value directly.
-    #[test]
-    fn headless_create_texture_replies_err() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = HeadlessRenderCapabilityState;
-        let transport = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&transport, aether_data::Source::NONE, None, None);
-        let result = HeadlessRenderCapability::on_create_texture(
-            &mut state,
-            &mut ctx,
-            CreateTexture {
-                width: 2,
-                height: 2,
-                format: TextureFormat::Rgba8,
-                sampling: TextureSampling::Linear,
-                usage: TextureUsage::Sampled,
-                pixels: vec![0u8; 16],
-            },
-        );
-        match result {
-            CreateTextureResult::Err { error } => {
-                assert!(
-                    error.contains("headless"),
-                    "headless create_texture error should name the chassis; got {error}",
-                );
-            }
-            CreateTextureResult::Ok { .. } => {
-                panic!("headless create_texture must reply Err, not assign an id")
-            }
-        }
+    /// Boot `HeadlessRenderCapability` the way a headless chassis composes
+    /// it, send `mail` with its reply routed to a session, and decode the
+    /// reply the dispatch answers with.
+    fn request<K: Kind, R: Kind>(mail: &K) -> R
+    where
+        HeadlessRenderCapability: HandlesKind<K>,
+    {
+        let (registry, mailer, egress) = fresh_substrate_and_rx();
+        let chassis = boot_test_chassis_with::<HeadlessRenderCapability>(&registry, &mailer, (), ());
+        let reply = ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0x7045)), correlation: 1 };
+        chassis.send_for_reply(chassis.actor_ref::<HeadlessRenderCapability>(), mail, reply);
+        decode_session_reply(&egress)
     }
 
-    /// ADR-0171: `create_geometry` against a headless chassis replies
-    /// `Err` (fail-fast, no GPU) rather than hanging on a reply that
-    /// never comes — the same shape as `create_texture` above, asserted
-    /// on the returned value directly.
+    /// ADR-0105. Catches a headless `create_texture` that assigns an id or
+    /// never answers: a caller must fail fast rather than wait on a GPU the
+    /// chassis does not have.
+    #[test]
+    fn headless_create_texture_replies_err() {
+        let result: CreateTextureResult = request(&CreateTexture {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
+            pixels: vec![0u8; 16],
+        });
+
+        let CreateTextureResult::Err { error } = result else {
+            panic!("headless create_texture must reply Err, not assign an id");
+        };
+        assert!(error.contains("headless"), "headless create_texture error should name the chassis; got {error}");
+    }
+
+    /// ADR-0171. Catches a headless `create_geometry` that assigns an id or
+    /// never answers, the same fail-fast as `create_texture`.
     #[test]
     fn headless_create_geometry_replies_err() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = HeadlessRenderCapabilityState;
-        let transport = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&transport, aether_data::Source::NONE, None, None);
-        let result = HeadlessRenderCapability::on_create_geometry(
-            &mut state,
-            &mut ctx,
-            CreateGeometry {
-                layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
-                vertices: vec![0u8; 36],
-                indices: (0u32..3).flat_map(u32::to_le_bytes).collect(),
-            },
-        );
-        match result {
-            CreateGeometryResult::Err { error } => {
-                assert!(
-                    error.contains("headless"),
-                    "headless create_geometry error should name the chassis; got {error}",
-                );
-            }
-            CreateGeometryResult::Ok { .. } => {
-                panic!("headless create_geometry must reply Err, not assign an id")
-            }
-        }
+        let result: CreateGeometryResult = request(&CreateGeometry {
+            layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
+            vertices: vec![0u8; 36],
+            indices: (0u32..3).flat_map(u32::to_le_bytes).collect(),
+        });
+
+        let CreateGeometryResult::Err { error } = result else {
+            panic!("headless create_geometry must reply Err, not assign an id");
+        };
+        assert!(error.contains("headless"), "headless create_geometry error should name the chassis; got {error}");
     }
 }
