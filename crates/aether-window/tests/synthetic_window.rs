@@ -15,8 +15,8 @@ use aether_window::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult,
     CursorIcon, FocusWindow, FocusWindowResult, ListWindows, ListWindowsResult, RequestWindowRedraw,
     RequestWindowRedrawResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult,
-    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SyntheticWindowCapability,
-    SyntheticWindowInstance, WindowCommand, WindowMenu, WindowMode, WindowSpec, window_path,
+    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, WindowCapability, WindowCommand,
+    WindowInstance, WindowMenu, WindowMode, WindowSpec, window_path,
 };
 
 /// Local twin of the runtime's crate-private `RetireWindow`
@@ -48,18 +48,15 @@ fn create_replies_only_after_the_staged_child_is_live() {
             (
                 "created",
                 HarnessOp::send_and_await_reply(
-                    &harness.actor_ref::<SyntheticWindowCapability>(),
+                    &harness.actor_ref::<WindowCapability>(),
                     &CreateWindow { spec: spec("main", "Main") },
                 ),
             ),
-            (
-                "listed",
-                HarnessOp::send_and_await_reply(&harness.actor_ref::<SyntheticWindowCapability>(), &ListWindows),
-            ),
+            ("listed", HarnessOp::send_and_await_reply(&harness.actor_ref::<WindowCapability>(), &ListWindows)),
             (
                 "duplicate",
                 HarnessOp::send_and_await_reply(
-                    &harness.actor_ref::<SyntheticWindowCapability>(),
+                    &harness.actor_ref::<WindowCapability>(),
                     &CreateWindow { spec: spec("main", "Second") },
                 ),
             ),
@@ -97,42 +94,39 @@ fn root_addressed_commands_reach_the_sole_window_and_refuse_when_it_is_ambiguous
             (
                 "windowless",
                 HarnessOp::send_and_await_reply(
-                    &harness.actor_ref::<SyntheticWindowCapability>(),
+                    &harness.actor_ref::<WindowCapability>(),
                     &SetWindowTitle { title: "Nobody".to_owned() },
                 ),
             ),
             (
                 "created",
                 HarnessOp::send_and_await_reply(
-                    &harness.actor_ref::<SyntheticWindowCapability>(),
+                    &harness.actor_ref::<WindowCapability>(),
                     &CreateWindow { spec: spec("main", "Main") },
                 ),
             ),
             (
                 "routed",
                 HarnessOp::send_and_await_reply(
-                    &harness.actor_ref::<SyntheticWindowCapability>(),
+                    &harness.actor_ref::<WindowCapability>(),
                     &SetWindowTitle { title: "Routed".to_owned() },
                 ),
             ),
             (
                 "second",
                 HarnessOp::send_and_await_reply(
-                    &harness.actor_ref::<SyntheticWindowCapability>(),
+                    &harness.actor_ref::<WindowCapability>(),
                     &CreateWindow { spec: spec("palette", "Tools") },
                 ),
             ),
             (
                 "ambiguous",
                 HarnessOp::send_and_await_reply(
-                    &harness.actor_ref::<SyntheticWindowCapability>(),
+                    &harness.actor_ref::<WindowCapability>(),
                     &SetWindowTitle { title: "Ambiguous".to_owned() },
                 ),
             ),
-            (
-                "listed",
-                HarnessOp::send_and_await_reply(&harness.actor_ref::<SyntheticWindowCapability>(), &ListWindows),
-            ),
+            ("listed", HarnessOp::send_and_await_reply(&harness.actor_ref::<WindowCapability>(), &ListWindows)),
         ])
         .expect("root-addressed window commands settle");
 
@@ -162,7 +156,7 @@ fn root_addressed_commands_reach_the_sole_window_and_refuse_when_it_is_ambiguous
 #[test]
 fn every_root_command_row_forwards_to_the_sole_window() {
     let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
-    let manager = harness.actor_ref::<SyntheticWindowCapability>();
+    let manager = harness.actor_ref::<WindowCapability>();
     let report = harness
         .execute(vec![
             ("created", HarnessOp::send_and_await_reply(&manager, &CreateWindow { spec: spec("main", "Main") })),
@@ -204,7 +198,7 @@ fn every_root_command_row_forwards_to_the_sole_window() {
 #[test]
 fn a_forwarded_command_from_a_non_child_sender_is_refused() {
     let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
-    let manager = harness.actor_ref::<SyntheticWindowCapability>();
+    let manager = harness.actor_ref::<WindowCapability>();
     let report = harness
         .execute(vec![
             ("created", HarnessOp::send_and_await_reply(&manager, &CreateWindow { spec: spec("main", "Main") })),
@@ -231,15 +225,15 @@ fn a_forwarded_command_from_a_non_child_sender_is_refused() {
 
 /// A new per-window command has three places to be wired — the endpoint's
 /// forwarding handler, the manager's apply arm, and the endpoint's
-/// correlation arm in `complete` — and only the first is compile-checked. A missing apply arm leaves the
-/// caller with no reply; a missing correlation arm `fatal_abort`s the
-/// endpoint on the way back. Driving both new commands through a live
-/// window's own mailbox and reading their replies is what covers the round
-/// trip the reducer-only tests cannot see.
+/// correlation arm in `complete` — and only the first is compile-checked. A
+/// missing apply arm leaves the caller with no reply; a missing correlation
+/// arm answers the caller the command's `Err` naming a mismatch. Driving both
+/// new commands through a live window's own mailbox and reading their replies
+/// is what covers the round trip the reducer-only tests cannot see.
 #[test]
 fn the_native_chrome_commands_round_trip_through_a_windows_own_endpoint() {
     let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
-    let window = harness.actor_ref::<SyntheticWindowCapability>();
+    let window = harness.actor_ref::<WindowCapability>();
     harness
         .execute(vec![(
             "created",
@@ -247,7 +241,7 @@ fn the_native_chrome_commands_round_trip_through_a_windows_own_endpoint() {
         )])
         .expect("the window opens");
     let main = harness
-        .child::<SyntheticWindowCapability, SyntheticWindowInstance>(&window, window_key("main"))
+        .child::<WindowCapability, WindowInstance>(&window, window_key("main"))
         .expect("the main window is live");
     let report = harness
         .execute(vec![
@@ -269,7 +263,7 @@ fn the_native_chrome_commands_round_trip_through_a_windows_own_endpoint() {
 #[test]
 fn unexpected_child_departure_closes_only_its_window() {
     let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
-    let window = harness.actor_ref::<SyntheticWindowCapability>();
+    let window = harness.actor_ref::<WindowCapability>();
     harness
         .execute(vec![
             ("first", HarnessOp::send_and_await_reply(&window, &CreateWindow { spec: spec("first", "First") })),
@@ -277,7 +271,7 @@ fn unexpected_child_departure_closes_only_its_window() {
         ])
         .expect("both windows open");
     let first = harness
-        .child::<SyntheticWindowCapability, SyntheticWindowInstance>(&window, window_key("first"))
+        .child::<WindowCapability, WindowInstance>(&window, window_key("first"))
         .expect("the first window is live");
     harness
         .execute(vec![
@@ -301,7 +295,7 @@ fn unexpected_child_departure_closes_only_its_window() {
         .execute(vec![(
             "listed",
             HarnessOp::poll_until(
-                &harness.actor_ref::<SyntheticWindowCapability>(),
+                &harness.actor_ref::<WindowCapability>(),
                 &ListWindows,
                 move |reply: &ListWindowsResult| {
                     matches!(reply, ListWindowsResult::Ok { windows }

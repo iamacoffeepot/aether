@@ -25,17 +25,12 @@ aether-kit = { path = "../aether-kit", features = ["library"] }
 aether-kinds = { path = "../aether-kinds" }
 tracing = { workspace = true, default-features = false }
 
-# `tests/boot.rs` boots the checked-in boot manifest on the real headless
-# chassis; `tests/scenario.rs` drives the same composition through a rendering
-# `SubstrateHarness` and reads the checked-in controller config.
+# `tests/scenario.rs` loads the checked-in boot manifest's entries through a
+# rendering `SubstrateHarness`, encoding each config as the chassis boot does.
 [dev-dependencies]
 aether-chassis = { path = "../aether-chassis" }
-aether-chassis-headless = { path = "../aether-chassis-headless" }
-aether-substrate = { path = "../aether-substrate" }
-aether-data = { path = "../aether-data" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
-clap = { workspace = true }
 serde_json = { workspace = true }
 
 [lints]

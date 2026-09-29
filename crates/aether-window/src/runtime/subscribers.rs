@@ -1,6 +1,6 @@
-//! The selector-aware subscription table every window manager keeps. The
-//! subscription *mail surface* over it lives in the sibling `manager` module,
-//! alongside the rest of the shared manager surface (ADR-0169).
+//! The selector-aware subscription table every window backend keeps. The
+//! subscription *mail surface* over it is the manager's own handlers
+//! (`runtime::mod`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -342,6 +342,10 @@ pub mod fixture {
     use aether_substrate::{ReplyTarget, Subname};
 
     use super::{Published, WindowSubscribers};
+    #[cfg(feature = "desktop")]
+    use crate::runtime::WindowBackend;
+    #[cfg(feature = "desktop")]
+    use crate::runtime::desktop::DesktopWindows;
     use crate::{SubscribeWindow, SubscribeWindowResult, WindowSelector, WindowSubscription};
 
     /// One published event a [`Watcher`] received: the watcher's key, the
@@ -574,10 +578,61 @@ pub mod fixture {
         }
     }
 
-    #[cfg(feature = "synthetic")]
-    impl Rig<crate::SyntheticWindowCapability> {
+    impl Rig<crate::WindowCapability> {
+        /// The manager booted with the synthetic backend.
+        #[cfg(feature = "synthetic")]
+        pub fn synthetic() -> Self {
+            Self::boot(crate::WindowParams::Synthetic)
+        }
+
+        /// The manager booted with the desktop backend, pumped as the desktop
+        /// chassis boots it.
+        #[cfg(feature = "desktop")]
+        pub fn desktop() -> Self {
+            Self::boot(crate::WindowParams::Desktop(crate::DesktopWindowBoot::for_test()))
+        }
+
+        /// Run `turn` against the desktop backend on a host turn, as the
+        /// desktop application does.
+        #[cfg(feature = "desktop")]
+        pub fn desktop_turn<T>(
+            &mut self,
+            turn: impl FnOnce(&mut DesktopWindows, &mut NativeCtx<'_, crate::WindowCapability, aether_actor::Single>) -> T,
+        ) -> Option<T> {
+            self.driver
+                .host_turn(|state, ctx| match &mut state.backend {
+                    WindowBackend::Desktop(windows) => Some(turn(windows, ctx)),
+                    #[cfg(feature = "synthetic")]
+                    WindowBackend::Synthetic(_) => None,
+                })
+                .flatten()
+        }
+
+        /// Read the desktop backend's state.
+        #[cfg(feature = "desktop")]
+        pub fn read_desktop<T>(&self, read: impl FnOnce(&DesktopWindows) -> T) -> Option<T> {
+            self.driver
+                .read_state(|state| match &state.backend {
+                    WindowBackend::Desktop(windows) => Some(read(windows)),
+                    #[cfg(feature = "synthetic")]
+                    WindowBackend::Synthetic(_) => None,
+                })
+                .flatten()
+        }
+
+        /// [`Self::pump_until`] `done` holds of the desktop backend.
+        #[cfg(feature = "desktop")]
+        pub fn pump_desktop_until(&mut self, what: &str, mut done: impl FnMut(&DesktopWindows) -> bool) {
+            self.driver.pump_until(what, |state| match &state.backend {
+                WindowBackend::Desktop(windows) => done(windows),
+                #[cfg(feature = "synthetic")]
+                WindowBackend::Synthetic(_) => false,
+            });
+        }
+
         /// Inject `event` as published at `window` and answer the receipts
         /// its fan-out delivered.
+        #[cfg(feature = "synthetic")]
         pub fn inject<K: Kind>(&mut self, window: &ErasedActorPath, event: &K) -> Vec<Receipt> {
             self.send(&crate::InjectWindowEvent {
                 window: window.clone(),
@@ -598,15 +653,15 @@ mod tests {
     use super::*;
     use crate::WindowSelector::All;
     use crate::{
-        SubscribeWindowResult, SubscribeWindowSelf, SyntheticWindowCapability, UnsubscribeWindow, UnsubscribeWindowSelf,
+        SubscribeWindowResult, SubscribeWindowSelf, UnsubscribeWindow, UnsubscribeWindowSelf, WindowCapability,
     };
 
     fn window(name: &str) -> ErasedActorPath {
         crate::window_path(&aether_data::LoadName::new(name).expect("fixture window name"))
     }
 
-    fn rig() -> Rig<SyntheticWindowCapability> {
-        Rig::boot(())
+    fn rig() -> Rig<WindowCapability> {
+        Rig::synthetic()
     }
 
     fn keys(name: &str) -> WindowSubscription {
@@ -721,8 +776,8 @@ mod tests {
         rig.send_to(departed, &Leave);
         let c = window("c");
         rig.pump_until("the departure notice", |state| {
-            recipients::<Key>(&state.subscribers, &c) == BTreeSet::from([survivor.erase()])
-                && recipients::<MouseMove>(&state.subscribers, &c).is_empty()
+            recipients::<Key>(state.subscribers(), &c) == BTreeSet::from([survivor.erase()])
+                && recipients::<MouseMove>(state.subscribers(), &c).is_empty()
         });
 
         assert_eq!(receivers(&rig.inject(&c, &key_at(&c))), ["survivor"]);

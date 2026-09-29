@@ -24,7 +24,7 @@ use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
 use aether_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
-use aether_window::SyntheticWindowCapability;
+use aether_window::WindowCapability;
 use support::widget_caps;
 
 /// The window the injected input events name.
@@ -100,7 +100,7 @@ fn drain(harness: &mut SubstrateHarness, probe: ErasedActorRef, label: &'static 
         .expect("decode DrainEditorInputsResult")
 }
 
-fn input<K: Kind>(synthetic: ActorRef<SyntheticWindowCapability>, mail: &K) -> HarnessOp {
+fn input<K: Kind>(synthetic: ActorRef<WindowCapability>, mail: &K) -> HarnessOp {
     HarnessOp::window_event(&synthetic, test_window(), mail)
 }
 
@@ -122,7 +122,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
 
     let region_a = load_probe(&mut harness, &fixtures_wasm, "region-a");
     let region_b = load_probe(&mut harness, &fixtures_wasm, "region-b");
-    let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
+    let synthetic = harness.actor_ref::<WindowCapability>();
 
     harness
         .execute(vec![
@@ -199,7 +199,7 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
 
     let region_a = load_probe(&mut harness, &fixtures_wasm, "focus-a");
     let region_b = load_probe(&mut harness, &fixtures_wasm, "focus-b");
-    let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
+    let synthetic = harness.actor_ref::<WindowCapability>();
 
     harness
         .execute(vec![

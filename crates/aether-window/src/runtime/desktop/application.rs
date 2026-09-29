@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use aether_substrate::MailboxWakeSlot;
-use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::settlement::WaitOutcome;
 use aether_substrate::mail::MailId;
 use winit::application::ApplicationHandler;
@@ -18,9 +17,10 @@ use aether_data::ErasedActorPath;
 use crate::{WindowMode, WindowSpec};
 
 use super::{
-    DesktopWindowCapabilityState, DesktopWindowLifecycle, WindowHostAction, WindowHostEffect, menu, resolve_fullscreen,
+    DesktopWindowLifecycle, DesktopWindowSlot, DesktopWindows, WindowHostAction, WindowHostEffect, menu,
+    resolve_fullscreen,
 };
-use crate::DesktopWindowCapability;
+use crate::WindowCapability;
 
 /// Semantic seam between the window application and chassis-owned render,
 /// settlement, and process-lifecycle integration.
@@ -58,18 +58,14 @@ pub enum DesktopWindowUserEvent {
 /// Construction and `run_app` remain chassis responsibilities; this value
 /// neither spawns nor transfers the application thread.
 pub struct DesktopWindowApplication<I> {
-    window_slot: PumpedSlot<DesktopWindowCapability>,
+    window_slot: DesktopWindowSlot,
     integration: I,
     pending_dirty: BTreeSet<ErasedActorPath>,
     shutdown_requested: bool,
 }
 
 impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
-    pub fn new(
-        mut window_slot: PumpedSlot<DesktopWindowCapability>,
-        integration: I,
-        initial_window: WindowSpec,
-    ) -> Self {
+    pub fn new(mut window_slot: DesktopWindowSlot, integration: I, initial_window: WindowSpec) -> Self {
         let _ = window_slot.host_turn(|state, _ctx| {
             if state.queue_initial_window(initial_window).is_err() {
                 state.pending_host_effects.push(WindowHostEffect::LastWindowClosed);
@@ -183,8 +179,8 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
     fn drain_and_take_work(
         &mut self,
         host_turn: impl FnOnce(
-            &mut DesktopWindowCapabilityState,
-            &mut aether_substrate::NativeCtx<'_, DesktopWindowCapability, aether_actor::Single>,
+            &mut DesktopWindows,
+            &mut aether_substrate::NativeCtx<'_, WindowCapability, aether_actor::Single>,
         ),
     ) -> (Vec<WindowHostAction>, Vec<WindowHostEffect>) {
         self.window_slot.drain_available();
@@ -202,8 +198,8 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         request_shutdown: bool,
         flush_frame: bool,
         host_turn: impl FnOnce(
-            &mut DesktopWindowCapabilityState,
-            &mut aether_substrate::NativeCtx<'_, DesktopWindowCapability, aether_actor::Single>,
+            &mut DesktopWindows,
+            &mut aether_substrate::NativeCtx<'_, WindowCapability, aether_actor::Single>,
         ),
     ) {
         self.integration.drain_available();
@@ -292,7 +288,7 @@ impl WindowSnapshot {
     }
 }
 
-impl DesktopWindowCapabilityState {
+impl DesktopWindows {
     fn application_snapshot(&self) -> WindowSnapshot {
         let mut snapshot = WindowSnapshot::default();
         for (path, state) in &self.windows {

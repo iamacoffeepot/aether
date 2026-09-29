@@ -309,12 +309,11 @@ pub enum WindowCommand {
 impl WindowCommand {
     /// This command's own `Err` reply, carrying `error`.
     ///
-    /// Every manager needs the same mapping — a chassis with no window
-    /// peripheral refuses all seven, and a concrete one refuses whichever
+    /// Every backend needs the same mapping — each refuses whichever command
     /// names a window it cannot reach — and the reply variant has to match the
-    /// command or the forwarding child aborts on the correlation check
-    /// (`runtime::instance::complete`). One mapping, so a new command wires its
-    /// refusal once.
+    /// command, or the forwarding child answers its caller a mismatch instead
+    /// of the refusal (`runtime::instance::complete`). One mapping, so a new
+    /// command wires its refusal once.
     pub(crate) fn refused(&self, error: String) -> ApplyWindowCommandResult {
         match self {
             Self::Close => ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }),
@@ -356,7 +355,6 @@ impl HeldReply for ApplyWindowCommandResult {
 /// The manager-private kinds a window child handles. A handled kind enters
 /// its public actor's contract row list, so it is declared `pub` (ADR-0231
 /// §10); this module is private, so no other crate has a path to it.
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
 mod internal {
     /// Manager-private request that retires a child after platform-originated
     /// close.
@@ -364,7 +362,6 @@ mod internal {
     pub struct RetireWindow;
 }
 
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
 pub(crate) use internal::RetireWindow;
 
 /// Writes [`WindowSubscription`] from the published-kind list.

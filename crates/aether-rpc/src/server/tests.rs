@@ -824,21 +824,21 @@ fn forwarded_call_waits_for_remote_terminal_and_route_departure_cleans_up() {
 /// a capability that replies via `HubOutbound::send_reply` (which
 /// only routes `Session` / `EngineMailbox`) drops the reply silently —
 /// the same drop #1316/#1319 fixed for the desktop driver. The
-/// `HeadlessWindowCapability` `Err`-replies on `list`; with
-/// the bug present this `Call` would yield a bare `ReplyEnd` and zero
+/// `WindowCapability`, on its synthetic backend, `Ok`-replies on `list`;
+/// with the bug present this `Call` would yield a bare `ReplyEnd` and zero
 /// `ReplyEvent`s. Routing through the `Mailer` (the complete router)
 /// pushes the reply back locally to the server's `on_any`, so the
-/// `Err` rides home as a `ReplyEvent` before the `ReplyEnd`.
+/// reply rides home as a `ReplyEvent` before the `ReplyEnd`.
 #[test]
-fn call_headless_window_list_err_reaches_component_reply() {
+fn call_window_list_reaches_component_reply() {
     use crate::MailEnvelope;
     use aether_data::Kind;
-    use aether_window::{HeadlessWindowCapability, ListWindows, ListWindowsResult};
+    use aether_window::{ListWindows, ListWindowsResult, WindowCapability, WindowParams};
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<HeadlessWindowCapability>(())
+        .with_actor::<WindowCapability>(WindowParams::Synthetic)
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
             RpcServerConfig { port: Some(0), port_file: None },
@@ -854,16 +854,12 @@ fn call_headless_window_list_err_reaches_component_reply() {
         &mut stream,
         &WireFrame::Call {
             cid: Some(0xdef),
-            envelope: MailEnvelope {
-                to: recipient_of::<HeadlessWindowCapability>(),
-                kind: <ListWindows as Kind>::ID,
-                payload,
-            },
+            envelope: MailEnvelope { to: recipient_of::<WindowCapability>(), kind: <ListWindows as Kind>::ID, payload },
         },
     )
     .expect("test: write_frame Call to rpc server");
 
-    // The `Err` reply must arrive as a ReplyEvent — the drop this
+    // The reply must arrive as a ReplyEvent — the drop this
     // test guards against would leave zero events before ReplyEnd.
     let event: WireFrame = read_frame(&mut stream).expect("read ReplyEvent");
     let envelope = match event {
@@ -876,8 +872,8 @@ fn call_headless_window_list_err_reaches_component_reply() {
     assert_eq!(envelope.kind, <ListWindowsResult as Kind>::ID);
     let decoded = ListWindowsResult::decode_from_bytes(&envelope.payload).expect("decode ListWindowsResult");
     assert!(
-        matches!(decoded, ListWindowsResult::Err { .. }),
-        "headless window manager returns its root-owned list error, got {decoded:?}",
+        matches!(&decoded, ListWindowsResult::Ok { windows } if windows.is_empty()),
+        "the window manager lists its (empty) window set, got {decoded:?}",
     );
 
     let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");

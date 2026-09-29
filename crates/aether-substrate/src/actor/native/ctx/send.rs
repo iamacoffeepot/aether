@@ -152,7 +152,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// so this dispatches through the same lineage-aware path the typed
     /// verbs take without that check. A capability fanning
     /// out pre-encoded bytes to its own subscriber table is the shape this
-    /// exists for: `SyntheticWindowCapability::on_inject` replays an injected
+    /// exists for: `WindowCapability::on_inject` replays an injected
     /// event to the window subscribers, and `aether-lifecycle`'s
     /// `broadcast_to_subscribers` pushes each stage payload to the proofs its
     /// subscriber table holds.

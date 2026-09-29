@@ -31,7 +31,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind, KindId};
 use aether_kinds::{LoadComponent, LoadComponentUnder, NamedMail};
 use aether_substrate::{PassiveChassis, ReplyTarget, mail::MailId};
-use aether_window::{InjectWindowEvent, SyntheticWindowCapability};
+use aether_window::{InjectWindowEvent, WindowCapability};
 use crossbeam_channel::Receiver;
 
 use super::chassis::SubstrateHarnessChassis;
@@ -233,10 +233,10 @@ mod sealed {
 /// ```compile_fail
 /// use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 /// use aether_kinds::Tick;
-/// use aether_window::SyntheticWindowCapability;
+/// use aether_window::WindowCapability;
 ///
 /// let harness = SubstrateHarness::start().expect("boot");
-/// let window = harness.actor_ref::<SyntheticWindowCapability>();
+/// let window = harness.actor_ref::<WindowCapability>();
 /// let _ = HarnessOp::send_and_settle(&window, &Tick::default());
 /// ```
 pub trait SendTarget<K: Kind>: sealed::Sealed {
@@ -329,11 +329,7 @@ impl HarnessOp {
     /// `K` is inferred from `event`; the synthetic runtime forwards its
     /// already-encoded payload without a maintained window-event kind list.
     #[must_use]
-    pub fn window_event<K: Kind>(
-        synthetic: &ActorRef<SyntheticWindowCapability>,
-        window: ErasedActorPath,
-        event: &K,
-    ) -> Self {
+    pub fn window_event<K: Kind>(synthetic: &ActorRef<WindowCapability>, window: ErasedActorPath, event: &K) -> Self {
         let injection = InjectWindowEvent { window, kind: K::ID, payload: event.encode_into_bytes() };
         Self::send_and_settle(synthetic, &injection)
     }
@@ -414,10 +410,10 @@ impl HarnessOp {
     ///
     /// ```no_run
     /// # use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-    /// # use aether_window::{ListWindows, ListWindowsResult, SyntheticWindowCapability};
+    /// # use aether_window::{ListWindows, ListWindowsResult, WindowCapability};
     /// # let harness = SubstrateHarness::start().expect("boot");
     /// # let surviving = aether_window::window_path(&aether_data::LoadName::new("main").expect("name"));
-    /// let window = harness.actor_ref::<SyntheticWindowCapability>();
+    /// let window = harness.actor_ref::<WindowCapability>();
     /// HarnessOp::poll_until(&window, &ListWindows, move |reply: &ListWindowsResult| {
     ///     matches!(reply, ListWindowsResult::Ok { windows }
     ///         if windows.iter().map(|window| &window.path).eq([&surviving]))
@@ -854,7 +850,7 @@ mod tests {
 
         let never = HarnessOp::poll_until_within(
             budget,
-            &harness.actor_ref::<SyntheticWindowCapability>(),
+            &harness.actor_ref::<WindowCapability>(),
             &ListWindows,
             |_: &ListWindowsResult| false,
         );
@@ -890,7 +886,7 @@ mod tests {
             .execute(vec![(
                 "settles",
                 HarnessOp::poll_until(
-                    &harness.actor_ref::<SyntheticWindowCapability>(),
+                    &harness.actor_ref::<WindowCapability>(),
                     &ListWindows,
                     move |_: &ListWindowsResult| {
                         seen += 1;
@@ -940,7 +936,7 @@ mod tests {
 
         let missing = HarnessOp::poll_until_within(
             Duration::ZERO,
-            &harness.actor_ref::<SyntheticWindowCapability>(),
+            &harness.actor_ref::<WindowCapability>(),
             &ListWindows,
             |_: &ListWindowsResult| false,
         );
@@ -982,7 +978,7 @@ mod tests {
             "missing",
             HarnessOp::poll_until_within(
                 Duration::ZERO,
-                &ordinary.actor_ref::<SyntheticWindowCapability>(),
+                &ordinary.actor_ref::<WindowCapability>(),
                 &ListWindows,
                 |_: &ListWindowsResult| false,
             ),
@@ -997,7 +993,7 @@ mod tests {
                 "missing",
                 HarnessOp::poll_until_within(
                     Duration::ZERO,
-                    &diagnosed.actor_ref::<SyntheticWindowCapability>(),
+                    &diagnosed.actor_ref::<WindowCapability>(),
                     &ListWindows,
                     |_: &ListWindowsResult| false,
                 ),
@@ -1019,7 +1015,7 @@ mod tests {
             "missing",
             HarnessOp::poll_until_within(
                 Duration::ZERO,
-                &ordinary.actor_ref::<SyntheticWindowCapability>(),
+                &ordinary.actor_ref::<WindowCapability>(),
                 &ListWindows,
                 |_: &ListWindowsResult| false,
             ),
@@ -1043,7 +1039,7 @@ mod tests {
                     "missing",
                     HarnessOp::poll_until_within(
                         Duration::ZERO,
-                        &diagnosed.actor_ref::<SyntheticWindowCapability>(),
+                        &diagnosed.actor_ref::<WindowCapability>(),
                         &ListWindows,
                         |_: &ListWindowsResult| false,
                     ),

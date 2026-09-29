@@ -12,9 +12,9 @@
 `aether-window` is the bespoke home of window behavior. The application-scoped
 `WindowCapability` manager owns global lifecycle and event routing, while each
 live named window has an addressable `WindowInstance` child for control mail.
-Callers use those platform-neutral identities, stable window names, and
-window paths; they never hold a native window handle or address a
-desktop-, headless-, or test-specific implementation.
+Callers use those two identities, stable window names, and window paths; they
+never hold a native window handle or address a desktop- or test-specific
+implementation.
 
 The desktop chassis still owns the application thread and the call to winit's
 event loop. That is thread ownership, not window-domain ownership:
@@ -24,9 +24,9 @@ aether-chassis-desktop
     EventLoop::run_app(...)
         └── DesktopWindowApplication       // aether-window
               ├── winit ApplicationHandler
-              ├── PumpedSlot<DesktopWindowCapability>
+              ├── DesktopWindowSlot         // WindowCapability, desktop backend
               ├── window path ↔ winit WindowId maps
-              ├── monitored pooled DesktopWindowInstance children
+              ├── monitored pooled WindowInstance children
               └── DesktopWindowIntegration // semantic chassis seam
                     ├── attach/detach render target
                     ├── mark windows dirty
@@ -128,8 +128,8 @@ re-dispatches them at the sole window when exactly one is live and answers with
 that window's own reply. It is a convenience for the single-window engine, not a
 current target: with no window, or with several, the manager replies the
 operation's `Err` naming the situation rather than choosing one, and the caller
-names the window itself. The headless manager and its endpoints both refuse all
-seven, so an op that cannot be applied is always answered rather than dropped.
+names the window itself. An op a backend cannot apply is answered with its own
+`Err` rather than dropped.
 
 For an MCP `send_mail` request, `mode` remains a field of the
 `aether.window.set_mode` params object and the optional windowed dimensions
@@ -230,36 +230,35 @@ window lifecycle and asks the integration to attach or detach the
 corresponding render target. The native `Arc<Window>` remains same-thread host
 state and never becomes a wire payload.
 
-## Runtime variants
+## Backends
 
-All manager variants claim the one shared window namespace, and all child
-variants share the neutral `WindowInstance` identity:
+`WindowCapability` is one identity with one receive surface, written once in
+`runtime/mod.rs`; `WindowInstance` is one endpoint, written once in
+`runtime/instance.rs`. The manager's runtime runs one of two backends, each
+compiled in by its crate feature and chosen at boot by `WindowParams`:
 
-- `DesktopWindowCapability` is pumped by `DesktopWindowApplication` and owns
-  real winit state. It spawns and monitors a pooled `DesktopWindowInstance`
-  for every attached window.
-- `HeadlessWindowCapability` is the production headless runtime and fails
-  every manager request immediately because there is no window peripheral, so
-  it never creates a child.
-- `SyntheticWindowCapability`, declared with
-  `#[actor(singleton, runtime::synthetic)]`, is test-only. It keeps a
-  deterministic in-memory window map, the same selector-aware routing
-  behavior, and monitored pooled `SyntheticWindowInstance` children.
-- `WindowInstance` is the neutral named child facade. Its desktop and synthetic
-  runtimes forward the seven id-less controls to their manager. A matching
-  headless runtime defines fail-fast handlers, but the headless manager does not
-  spawn child endpoints.
-- The hub installs no window actor.
+- **Desktop** (`desktop` feature, `runtime/desktop/`) owns real winit state. It
+  boots only through `DesktopWindowSlot::boot`, which boots the manager pumped
+  on the application thread with `WindowParams::Desktop`; the boot value has no
+  public constructor, so the desktop backend never runs pooled, where nothing
+  would realize its host actions. It spawns and monitors a pooled
+  `WindowInstance` for every attached window.
+- **Synthetic** (`synthetic` feature, `runtime/synthetic/`) is test-only. The
+  harness chassis compose it with `with_actor::<WindowCapability>(WindowParams::Synthetic)`.
+  It keeps a deterministic in-memory window map, the same selector-aware
+  routing, and monitored pooled `WindowInstance` children.
 
-The neutral `WindowCapability` and `WindowInstance` aliases are the identities
-consumer code should name. Concrete manager runtime identities share one
-namespace constant inside `aether-window`; variants do not repeat a namespace
-literal. Native, winit, and render ownership does not move to the children:
-desktop host work stays on the pumped manager/driver boundary, while child
-actors only forward control. The default headless manager implementation is
-`runtime/mod.rs`, the headless named endpoint is `runtime/instance.rs`, and the
-desktop and synthetic implementations live under their matching runtime
-modules.
+`Params`, not the feature, picks the backend because cargo unifies features
+across a build: a workspace build compiles both backends into one crate, so
+only the composer knows which it wants. The crate's default features are
+empty, so a wasm guest names `WindowCapability` without the runtime, and
+`runtime` without a backend is a compile error.
+
+A chassis with no window peripheral — headless, the hub — composes no window
+actor, so a component that depends on `WindowCapability` is refused at load
+there. The endpoint forwards every control to the manager as an
+`ApplyWindowCommand` and holds the caller's reply until the manager answers;
+native, winit, and render ownership stay with the manager.
 
 The initial desktop window still reads `AETHER_WINDOW_MODE` and
 `AETHER_WINDOW_TITLE`. `AETHER_WINDOW_MODE` accepts `windowed`,
@@ -334,9 +333,9 @@ parse costs that item its accelerator and logs a warning; it does not fail the
 menu.
 
 Platform coverage is [muda](https://crates.io/crates/muda)'s: the macOS
-application menu bar and the Windows per-window bar. Every other target, and
-the headless chassis at the root and at a window mailbox alike, replies `Err`
-naming the situation rather than hanging — draw an in-window menu bar there.
+application menu bar and the Windows per-window bar. Every other target replies
+`Err` naming the situation rather than hanging — draw an in-window menu bar
+there.
 Two further asymmetries follow from the platforms themselves: macOS has one
 menu bar per *application*, so the last window to install one owns it (its
 activations still reach that window's own subscribers), and macOS prepends an
@@ -396,7 +395,7 @@ child's reference looked up beneath it, and events with
 `HarnessOp::window_event`:
 
 ```rust
-let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
+let synthetic = harness.actor_ref::<WindowCapability>();
 let subscribe = HarnessOp::send_and_settle(
     &synthetic,
     &SubscribeWindow {
@@ -405,7 +404,7 @@ let subscribe = HarnessOp::send_and_settle(
     },
 );
 
-let main = harness.child::<SyntheticWindowCapability, SyntheticWindowInstance>(&synthetic, LoadName::new("main")?)?;
+let main = harness.child::<WindowCapability, WindowInstance>(&synthetic, LoadName::new("main")?)?;
 let title = HarnessOp::send_and_await_reply(&main, &SetWindowTitle { title: "Inspector".to_owned() });
 
 let press = HarnessOp::window_event(
@@ -420,9 +419,9 @@ creation operation has settled: it proves only a `Live` child. Actor code
 addresses the sole window through the manager, or a window whose proof it
 holds; there is no by-name window lookup in actor code.
 
-Synthetic injection is not a headless production API. The headless runtime
-stays fail-fast so tests cannot accidentally turn unsupported production
-behavior into an implicit mock.
+Synthetic injection is not a production API: `aether.window.inject_event`
+exists only in a build that compiles the `synthetic` feature in, which no
+production chassis enables.
 
 To add a window-originated event, define the kind with a `window:
 ErasedActorPath` field, add it to the `published_window_kinds!` list in

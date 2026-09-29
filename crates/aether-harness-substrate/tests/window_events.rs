@@ -7,8 +7,8 @@ use aether_test_fixtures_kinds::SubstrateHarnessObserver;
 use aether_window::{
     CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
     ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SyntheticWindowCapability, SyntheticWindowInstance,
-    UnsubscribeWindow, WindowMode, WindowSelector, WindowSizeRequest, WindowSpec, WindowSubscription, window_path,
+    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, UnsubscribeWindow, WindowCapability, WindowInstance,
+    WindowMode, WindowSelector, WindowSizeRequest, WindowSpec, WindowSubscription, window_path,
 };
 
 /// The scenario's subscriber: silent `Key` and `MouseMove` handlers, so its
@@ -56,20 +56,20 @@ fn window(name: &str) -> ErasedActorPath {
 }
 
 /// Inject a `Key` press as coming from the window at `window`.
-fn key_from(synthetic: ActorRef<SyntheticWindowCapability>, window: &ErasedActorPath, code: u32) -> HarnessOp {
+fn key_from(synthetic: ActorRef<WindowCapability>, window: &ErasedActorPath, code: u32) -> HarnessOp {
     HarnessOp::window_event(&synthetic, window.clone(), &Key { window: window.clone(), code })
 }
 
 /// Inject a `MouseMove` as coming from the window at `window`.
-fn move_from(synthetic: ActorRef<SyntheticWindowCapability>, window: &ErasedActorPath, x: f32, y: f32) -> HarnessOp {
+fn move_from(synthetic: ActorRef<WindowCapability>, window: &ErasedActorPath, x: f32, y: f32) -> HarnessOp {
     HarnessOp::window_event(&synthetic, window.clone(), &MouseMove { window: window.clone(), x, y })
 }
 
 /// The named window instance the synthetic window capability opened.
-fn window_instance(harness: &SubstrateHarness, name: &str) -> ActorRef<SyntheticWindowInstance> {
-    let window = harness.actor_ref::<SyntheticWindowCapability>();
+fn window_instance(harness: &SubstrateHarness, name: &str) -> ActorRef<WindowInstance> {
+    let window = harness.actor_ref::<WindowCapability>();
     harness
-        .child::<SyntheticWindowCapability, SyntheticWindowInstance>(&window, LoadName::new(name).expect("window name"))
+        .child::<WindowCapability, WindowInstance>(&window, LoadName::new(name).expect("window name"))
         .unwrap_or_else(|error| panic!("window {name} is live: {error}"))
 }
 
@@ -169,7 +169,7 @@ fn assert_window_lifecycle(
 /// can never go green having leaked a live window.
 fn assert_closed_subname_retires(harness: &mut SubstrateHarness) {
     let retired = HarnessOp::poll_until(
-        &harness.actor_ref::<SyntheticWindowCapability>(),
+        &harness.actor_ref::<WindowCapability>(),
         &CreateWindow { spec: spec("first", 320, 200) },
         |reply: &CreateWindowResult| match reply {
             CreateWindowResult::Ok { .. } => {
@@ -193,7 +193,7 @@ fn synthetic_runtime_models_window_lifecycle_and_controls_in_memory() {
     let first_path = window("first");
     let second_path = window("second");
     let mut harness = SubstrateHarness::start().expect("boot synthetic window harness");
-    let window = harness.actor_ref::<SyntheticWindowCapability>();
+    let window = harness.actor_ref::<WindowCapability>();
     let created = harness
         .execute(vec![
             ("initial", HarnessOp::send_and_await_reply(&window, &ListWindows)),
@@ -239,7 +239,7 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
     let second_path = window("second");
     let mut harness =
         SubstrateHarness::builder().with_actor::<Relay>(()).build().expect("boot synthetic window harness");
-    let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
+    let synthetic = harness.actor_ref::<WindowCapability>();
     harness
         .execute(vec![
             (

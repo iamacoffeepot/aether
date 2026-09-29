@@ -596,26 +596,18 @@ accessors are associated functions over `Self::State`:
 
 ```rust
 #[handler_set]
-pub trait WindowManagerSurface {
-    fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers;
+pub trait CounterSurface {
+    fn counter(state: &mut Self::State) -> &mut Counter;
 
     #[handler::single]
-    fn on_unsubscribe(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: UnsubscribeWindow,
-    ) -> SubscribeWindowResult {
-        match Self::subscribers(state).unsubscribe_path(ctx, mail.selector, &mail.subscription) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
-        }
+    fn on_reset(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ResetCounter) -> ResetCounterResult {
+        Self::counter(state).reset();
+        ResetCounterResult::Ok
     }
 }
 ```
 
-`unsubscribe_path` matches the subscription's variant, proves its
-`ProtocolPath<Subscriber<K>>` live with `ctx.resolve`, and removes that
-reference's key from the kind's typed set.
+Each adopter supplies only the accessor; the handler is written once against it.
 
 And under the [split identity / runtime shape](../capability-anatomy.md) the
 adoption is declared on `#[runtime]`, in the runtime file where the dispatch
@@ -623,25 +615,29 @@ table is emitted — the capability struct's `#[actor]` reads it back off that
 attribute when it harvests the file, so the set is named once:
 
 ```rust
-#[runtime(handler_set(WindowManagerSurface))]
-impl NativeActor for DesktopWindowCapability {
-    // only desktop-specific handlers here
+#[runtime(handler_set(CounterSurface))]
+impl NativeActor for ExampleCapability {
+    // only this capability's own handlers here
 }
 
-impl WindowManagerSurface for DesktopWindowCapability {
-    type State = DesktopWindowCapabilityState;
+impl CounterSurface for ExampleCapability {
+    type State = ExampleCapabilityState;
 
-    fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers {
-        &mut state.subscribers
+    fn counter(state: &mut Self::State) -> &mut Counter {
+        &mut state.counter
     }
 }
 ```
 
 A native set's kinds carry `HandlesKind` markers, so kind-checked sends to an
-adopter (`ctx.send_to(&window, &k)` through an `ActorRef<DesktopWindowInstance>`)
-compile for inherited kinds too. The markers travel through a `macro_rules!` bridge the set generates, which
+adopter (`ctx.send_to(&example, &ResetCounter)` through an
+`ActorRef<ExampleCapability>`) compile for inherited kinds too. The markers travel through a `macro_rules!` bridge the set generates, which
 means a set's kind types need spellings that resolve at each adopter's `#[actor]`
-— for a capability crate, the names re-exported at its crate root.
+— for a capability crate, the names re-exported at its crate root. The bridge
+compiles only where the set's module does, so an adopter whose identity must
+compile without its runtime (a capability a wasm guest names) cannot take its
+markers from a native set; such a capability writes its handlers inline in its
+one `#[runtime]` impl instead, as `WindowCapability` does.
 
 A `#[cfg]` on a set handler is resolved by the crate that **defines** the set, and
 that answer reaches every artifact the set produces, the markers included. An

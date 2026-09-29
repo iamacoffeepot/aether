@@ -446,7 +446,6 @@ dependencies = [
  "aether-render",
  "aether-substrate",
  "aether-substrate-harness-cap",
- "aether-window",
  "clap",
  "ctrlc",
  "serde_json",
@@ -555,14 +554,10 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-chassis",
- "aether-chassis-headless",
- "aether-data",
  "aether-harness-substrate",
  "aether-harness-substrate-capture",
  "aether-kinds",
  "aether-kit",
- "aether-substrate",
- "clap",
  "serde_json",
  "tracing",
 ]

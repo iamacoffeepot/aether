@@ -25,7 +25,7 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, TextInput};
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved, UnsubscribeKeys};
-use aether_window::{SyntheticWindowCapability, window_path};
+use aether_window::{WindowCapability, window_path};
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
@@ -68,7 +68,7 @@ fn load_key_probe(harness: &mut SubstrateHarness, wasm_path: &Path, key: &str) {
 /// window actor fans each out to every matching subscriber; `execute` blocks on
 /// settlement, so the `key_observed` broadcasts have landed by return.
 fn send_keys(harness: &mut SubstrateHarness, count: usize) {
-    let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
+    let synthetic = harness.actor_ref::<WindowCapability>();
     let labels: Vec<String> = (0..count).map(|i| format!("key{i}")).collect();
     let steps: Vec<(&str, HarnessOp)> = labels
         .iter()
@@ -139,7 +139,7 @@ fn subscribed_component_receives_published_text_input() {
         .execute(vec![(
             "text",
             HarnessOp::window_event(
-                &harness.actor_ref::<SyntheticWindowCapability>(),
+                &harness.actor_ref::<WindowCapability>(),
                 test_window(),
                 &TextInput { window: test_window(), text: "hi".to_owned() },
             ),
