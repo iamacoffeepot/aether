@@ -14,11 +14,11 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use aether_actor::Addressable;
 use rustc_hash::FxHashMap;
 
+use crate::mail::registry::address::{AddressIndex, AddressTable};
 use crate::mail::registry::effect::{ChangeSubscriber, RegistryInventory};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::owner::RegistryOwnerHandle;
 use crate::mail::registry::publication::{NativeHoldRefusal, NativeType, PublicationTable};
-use crate::mail::registry::{ActorAddressInventoryError, address::AddressIndex};
 use crate::mail::view::{DoubleBuffer, View, ViewPublisher};
 use crate::mail::{KindId, MailboxId};
 use crate::scheduler::SeizeHandle;
@@ -134,7 +134,10 @@ pub struct Registry {
     routes: View<FxHashMap<MailboxId, RouteRecord>>,
     kinds: View<KindTable>,
     inventory: View<RegistryInventory>,
-    addresses: Result<AddressIndex, ActorAddressInventoryError>,
+    /// The short-path index (ADR-0166 §5): native link-time facts plus every
+    /// published module's lineage (ADR-0241 §5), republished by the owner
+    /// apply that commits a module publication.
+    addresses: View<AddressTable>,
     subscribers: Mutex<Vec<Weak<ChangeSubscriber>>>,
     owner: OnceLock<RegistryOwnerHandle>,
 }
@@ -169,6 +172,7 @@ struct Inner {
     route_publisher: DoubleBuffer<MailboxId, RouteRecord>,
     kind_publisher: ViewPublisher<KindTable>,
     inventory_publisher: ViewPublisher<RegistryInventory>,
+    address_publisher: ViewPublisher<AddressTable>,
     mailbox_generation: u64,
     kind_generation: u64,
 }
@@ -188,6 +192,8 @@ impl Registry {
             kind_generation: 0,
         });
         let inventory = inventory_publisher.view();
+        let address_publisher = ViewPublisher::new(AddressIndex::from_publications(&publications));
+        let addresses = address_publisher.view();
         Self {
             inner: Mutex::new(Inner {
                 mailboxes: FxHashMap::default(),
@@ -199,13 +205,14 @@ impl Registry {
                 route_publisher,
                 kind_publisher,
                 inventory_publisher,
+                address_publisher,
                 mailbox_generation: 0,
                 kind_generation: 0,
             }),
             routes,
             kinds,
             inventory,
-            addresses: AddressIndex::from_inventory(),
+            addresses,
             subscribers: Mutex::new(Vec::new()),
             owner: OnceLock::new(),
         }

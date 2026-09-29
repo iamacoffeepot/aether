@@ -11,10 +11,10 @@
 //! boot torn down).
 //!
 //! Teardown is observed via the boot's `BOOT_TORN_DOWN` marker rather than
-//! `ListComponents`: `aether.component.drop` clears a trampoline's `Component`
-//! but leaves its mailbox registered and addressable (an empty slot a
-//! `replace` can refill), so a torn-down boot still appears in the loaded-
-//! component list — the marker is the signal that its `unwire` actually ran.
+//! `ListComponents`: `BootTeardown` releases the boot trampoline's guest but
+//! leaves its mailbox registered and addressable, so a torn-down boot still
+//! appears in the loaded-component list — the marker is the signal that its
+//! `unwire` actually ran.
 
 use std::fs;
 

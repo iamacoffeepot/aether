@@ -13,11 +13,12 @@
 //! trampoline's binding.
 //! `DropComponent` and `ReplaceComponent` are forwarded to the addressed
 //! trampoline with the original `reply_to` intact, so the trampoline answers
-//! the caller directly. The capability keeps no per-component bookkeeping: the
-//! trampoline manages its own lifecycle, dispatch rides the framework's
-//! `NativeActor` loop, and an in-place replace swaps the `Component` inside
-//! the trampoline behind a stable mailbox handle, so a mailbox id or route
-//! cache taken before the swap stays valid (ADR-0022). [`kinds`] holds the
+//! the caller directly. The trampoline manages its own lifecycle and dispatch
+//! rides the framework's `NativeActor` loop. A drop closes the trampoline, so
+//! its name tombstones and is never loaded again (ADR-0241 §8). An in-place
+//! replace swaps the `Component` inside the trampoline behind a stable
+//! mailbox handle, so a mailbox id or route cache taken before the swap stays
+//! valid (ADR-0022). [`kinds`] holds the
 //! capability's own internal mail, such as the module-boot teardown.
 //!
 //! The `runtime` feature carries the wasmtime half:

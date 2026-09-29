@@ -234,6 +234,20 @@ pub const INLINE_WHO_CHILD: u32 = 2;
 #[aether_data::kind(name = "aether.test_fixtures.despawn_child", default)]
 pub struct DespawnChild;
 
+/// ADR-0241 §8 inline-child re-spawn trigger. Sent to the despawn fixture's
+/// parent, which spawns a child at its `respawn` key and replies a
+/// [`RespawnResult`]. Structured-shaped unit struct.
+#[aether_data::kind(name = "aether.test_fixtures.respawn_child", default)]
+pub struct RespawnChild;
+
+/// Reply to [`RespawnChild`]: whether the spawn failed because the host
+/// allocated no alias for the child's key, which is how a guest learns a
+/// despawned child's name is spent.
+#[aether_data::kind(name = "aether.test_fixtures.respawn_result", copy, default, eq)]
+pub struct RespawnResult {
+    pub alias_refused: bool,
+}
+
 /// Issue 2690 typed config for the config-carrying inline-child reload
 /// fixture: the durable counter's starting value. Distinct from the
 /// `()`-config `InlineStatefulChild` — this is the config-bytes case the

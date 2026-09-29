@@ -98,6 +98,36 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
     drop(chassis);
 }
 
+/// Issue #7074: `await_closed` returns only once a self-closing pooled
+/// actor's route drop has been applied at the registry owner. The close tail
+/// queues that drop after the closing chain settles, so a wait that returned
+/// on the close cycle alone, or on settlement, would still read the route
+/// `Live` here. A second call on the already-closed actor takes the slot's
+/// fast path and returns rather than parking on a signal that already fired.
+#[test]
+fn await_closed_returns_once_the_route_drop_applies() {
+    use crate::actor::native::spawn::Subname;
+
+    pod_kind!(Quit { tag: u32 }, "test.await_closed.quit", 0x7074_C105_ED00_0001);
+
+    unit_shutdown_actor!(Closer, "test.await_closed.closer", Quit);
+
+    let (registry, mailer) = bare_substrate();
+    let chassis = Builder::<TestChassis>::new(registry, mailer).build_passive().expect("empty chassis boots");
+
+    let closer = chassis
+        .spawn_actor_for_test::<Closer>(Subname::Named("closer"), (), ())
+        .finish()
+        .expect("spawn instanced actor");
+    assert!(chassis.published_contract(closer.erase()).is_some(), "a spawned actor's route is live");
+
+    let _ = chassis.send_tracked(closer, &Quit { tag: 1 }, None);
+    chassis.await_closed(closer.erase());
+    assert!(chassis.published_contract(closer.erase()).is_none(), "the closed actor's route drop has applied");
+
+    chassis.await_closed(closer.erase());
+}
+
 /// Issue 685: chassis teardown drives `unwire` on every spawned
 /// instanced actor, even those that never received a self-shutdown
 /// trigger. Pre-685 the Pooled spawn path's slot was reachable

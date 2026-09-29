@@ -66,6 +66,10 @@ name *plus its schema* ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/
   `MailboxId` folded from it — is unchanged: senders and route caches survive
   the swap ([ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md); the `replace_component_preserves_mailbox_identity`
   scenario guards it).
+- **A name is used once.** An actor's name goes absent → `Live` → tombstoned,
+  and nothing registers it again. A dropped component closes like any other
+  actor, so a later load of its name is refused as retired rather than handing
+  the id to a different instance ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §8).
 
 One sharp edge follows from the lineage fold: a `/`-rendered address
 (`aether.widget/aether.widget.button:ok`) resolves in the host registry,

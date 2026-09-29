@@ -8,7 +8,8 @@
 //! forwards each to the addressed trampoline preserving the
 //! original `reply_to`, so the trampoline replies directly to the
 //! agent. The trampoline manages its own lifecycle as an instanced
-//! [`NativeActor`].
+//! [`NativeActor`]: a drop closes it and its name tombstones (ADR-0241 §8),
+//! and the host refuses a later replace or drop at that path.
 //!
 //! Every load and replace first publishes its module (ADR-0241 §3): one
 //! registry-owner batch runs admission (§4) and registers the module's kinds,

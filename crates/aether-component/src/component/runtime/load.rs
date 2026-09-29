@@ -726,10 +726,9 @@ impl ComponentHostCapabilityState {
         payload: ReplaceComponent,
     ) {
         let source = ctx.reply_target();
-        // ADR-0230: prove the target address at receipt. A dropped
-        // trampoline keeps its `Live` route (vacate, not close), so a replace
-        // that refills it still proves; an address with no live route answers
-        // `Err` here instead of parking a forward nothing will answer.
+        // ADR-0230: prove the target address at receipt. An address with no
+        // live route answers `Err` here instead of parking a forward nothing
+        // will answer.
         let actor = match ctx.resolve_path(&payload.target) {
             Ok(proven) => proven,
             Err(error) => {
@@ -738,6 +737,15 @@ impl ComponentHostCapabilityState {
                 return;
             }
         };
+        // ADR-0241 §8: only a live guest this host loaded is replaced. A
+        // dropped one left the drop targets when its drop was forwarded, so a
+        // replace that proves its path before the owner applies its `Dropped`
+        // route is refused here, as is a vacated boot slot.
+        if !self.drop_targets.contains_key(&actor) {
+            let error = format!("no live component at {}", payload.target);
+            held.answer(ctx, &ReplaceResult::Err { error });
+            return;
+        }
         let bytes = Arc::from(payload.encode_into_bytes());
 
         // ADR-0241 §2: the replacement module comes from the engine's one

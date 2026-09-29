@@ -144,8 +144,10 @@ pub struct ComponentHostCapabilityState {
     /// erased reference: the [`GuestControl`] rows its trampoline serves. The
     /// guest's public receive surface deliberately replaces the trampoline's
     /// native surface, so an external path cannot recover this proof by
-    /// casting after load. Retained across guest unload and refill because
-    /// the trampoline slot remains the same actor.
+    /// casting after load. A drop removes its entry before forwarding, since
+    /// the forwarded drop closes the trampoline (ADR-0241 §8), so a replace
+    /// or a second drop that arrives before its route reads `Dropped` finds
+    /// no entry and is refused.
     drop_targets: HashMap<ErasedActorRef, ProtocolRef<GuestControl>>,
     /// Last replace/drop operation sequence allocated for each actor, keyed by
     /// the proof taken at the drop / replace receipt. A replace reserves its
@@ -341,11 +343,11 @@ impl NativeActor for ComponentHostCapability {
     /// Drop a component by its actor path. Forwards
     /// [`DropComponent`] mail to the addressed trampoline; the
     /// trampoline's `WasmTrampoline::on_drop_component` handler
-    /// replies `DropResult::Ok` and vacates its mailbox (ADR-0079 §8
-    /// amended), which is what purges the mailbox from every sibling
-    /// cap's fan-out / routing table — each cap monitors its
-    /// registrants and drops its own rows on the `MonitorNotice`, so
-    /// the host mails no cap anything at drop time.
+    /// replies `DropResult::Ok` and closes (ADR-0241 §8): its name
+    /// tombstones, and the close tail's `MonitorNotice` purges the mailbox
+    /// from every sibling cap's fan-out / routing table — each cap monitors
+    /// its registrants and drops its own rows on the notice, so the host
+    /// mails no cap anything at drop time.
     ///
     /// # Agent
     /// `DropComponent { target }`. The `target` is the component's actor
@@ -383,16 +385,17 @@ impl NativeActor for ComponentHostCapability {
             });
             return;
         }
-        let Some(target) = state.drop_targets.get(&actor).copied() else {
-            ctx.reply(&DropResult::Err {
-                error: format!("{} is live but is not owned by the component host", payload.target),
-            });
+        // The drop closes the trampoline, so its entry leaves now: a second
+        // drop or a replace that proves the path before the owner applies its
+        // `Dropped` route finds no entry and is refused.
+        let Some(target) = state.drop_targets.remove(&actor) else {
+            ctx.reply(&DropResult::Err { error: format!("no live component to drop at {}", payload.target) });
             return;
         };
         // ADR-0147: account this actor's departure against its module's boot
         // singleton before forwarding the drop — the last non-boot actor from a
         // boot-bearing module tears the boot down here (the boot trampoline's
-        // `BootTeardown` handler unloads its guest and vacates its
+        // `BootTeardown` handler releases its guest and vacates its
         // registrations).
         state.invalidate_replacement_boot_operation(actor);
         state.release_boot_ref(ctx, actor);
@@ -685,7 +688,7 @@ mod tests {
 
         assert!(matches!(
             decode_session_reply::<DropResult>(&rx),
-            DropResult::Err { error } if error.contains("is not owned by the component host")
+            DropResult::Err { error } if error.contains("no live component to drop at")
         ));
         assert_eq!(state.boot_hash_by_actor.get(&actor), Some(&hash));
         assert_eq!(state.boot_operation_sequence_by_actor.get(&actor), Some(&11));

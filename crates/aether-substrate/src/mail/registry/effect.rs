@@ -98,12 +98,13 @@ impl PreparedAliasRoute {
 
 /// An inline-child alias its guest despawned in one call (ADR-0114 teardown,
 /// #4228), staged by the wasm host once it proved the alias is the guest's
-/// own. The component host hands it to [`NativeCtx::vacate_alias`] for the
-/// departure notices and to [`RegistryBatch::retire_alias`] for the route.
+/// own. The component host hands it to [`NativeCtx::close_alias`] for the
+/// tombstone and the departure notices, and to [`RegistryBatch::retire_alias`]
+/// for the route.
 /// Only the substrate builds one, so host code can retire no route its guest
 /// did not despawn, and the alias position never leaves the crate.
 ///
-/// [`NativeCtx::vacate_alias`]: crate::actor::native::ctx::NativeCtx::vacate_alias
+/// [`NativeCtx::close_alias`]: crate::actor::native::ctx::NativeCtx::close_alias
 pub struct PreparedAliasRetirement {
     pub(crate) alias: MailboxId,
     pub rendered_name: Arc<str>,

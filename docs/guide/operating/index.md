@@ -103,9 +103,9 @@ bytes. If no other name points at the old hash, it becomes unnamed history and
 can later be evicted under the store's disk budget. Do not promise registry
 cleanup that the tool surface cannot perform.
 
-Component drop is also narrower than engine termination: it unloads the guest
-and clears the mailbox's capabilities, but leaves an empty trampoline at the
-same lineage address. Only terminating the substrate tombstones that slot.
+Component drop closes that one instance: its guest's `unwire` runs, its name
+tombstones, and a later load of the same name is refused as retired (ADR-0241
+§8). Engine termination ends every instance at once.
 
 ## Identifier discipline
 

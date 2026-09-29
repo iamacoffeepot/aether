@@ -11,22 +11,17 @@ use crate::trampoline::WasmTrampoline;
 
 /// Per-component trampoline **runtime state** (ADR-0122 identity/runtime
 /// split — the addressing identity is the distinct ZST
-/// [`WasmTrampoline`]). Holds the wasm
-/// `Component` optionally — `None` means the wasm has been unloaded by
-/// `DropComponent` but the trampoline (and its mailbox name) is
-/// still alive, ready to be refilled by `ReplaceComponent` or
-/// recycled by a future load. Distinction matters: dropping the
-/// **component** is a wasm unload that preserves the addressable
-/// name; dropping the **trampoline** would kill the actor and
-/// tombstone the subname. The cap's `DropComponent` handler does
-/// the former; the latter happens at substrate teardown.
+/// [`WasmTrampoline`]). Holds the wasm `Component` optionally: `None` once
+/// the guest is released. A `DropComponent` releases the guest and closes
+/// the trampoline, so its name tombstones (ADR-0241 §8); the host's
+/// module-boot `BootTeardown` releases the guest and vacates the mailbox,
+/// leaving an empty slot until the substrate stops.
 ///
 /// Its fields are crate-private, so no crate outside `aether-component` can
 /// build one to hand [`NativeCtx::sync_guest`].
 pub struct WasmTrampolineState {
-    /// `Some` while wasm is loaded; `None` after a `DropComponent`.
-    /// Mail arriving in the `None` state warn-drops via the
-    /// fallback (the trampoline is just an empty named slot).
+    /// `Some` while wasm is loaded; `None` once the guest is released.
+    /// Mail arriving in the `None` state warn-drops via the fallback.
     pub(crate) component: Option<Component>,
     /// Held for [`Self::handle_replace`] so a fresh
     /// `Component::instantiate` against the same engine + linker
@@ -54,68 +49,53 @@ pub struct WasmTrampolineState {
     pub(crate) modules: ModuleCache,
     /// ADR-0139 §3 (#6400, #6422): the correlation cursor of the last guest
     /// to leave this slot, which the next occupant resumes, so the mailbox's
-    /// request ids and reply-lineage ids both stay monotonic across replace
-    /// and refill. `None` until a guest first leaves; a fresh slot starts
-    /// both counters at their bases.
+    /// request ids and reply-lineage ids both stay monotonic across replace.
+    /// `None` until a guest first leaves; a fresh slot starts both counters
+    /// at their bases.
     pub(crate) retired_correlations: Option<CorrelationCursor>,
     /// #6409: the reply table of the last guest to leave this slot, which
     /// the next occupant to start resumes, so a handle issued before the
     /// swap still answers its own requester and no number is reissued.
-    /// Left in place when a replacement fails to start, for the next
-    /// refill. `None` until a guest first leaves, or once resumed.
+    /// `None` until a guest first leaves, or once resumed.
     pub(crate) retired_replies: Option<PendingReplies>,
 }
 
 impl WasmTrampolineState {
-    /// Unload the **wasm component**: run the guest's `unwire` pre-shutdown
-    /// hook, drop the `Component`, sync the now-empty slot (the accept set
-    /// clears and only the framework cost cells stay), and vacate the mailbox. The
-    /// trampoline itself stays alive as an empty slot a `ReplaceComponent`
-    /// can refill. Both a `DropComponent` and the host's module-boot
-    /// `BootTeardown` end here.
-    pub fn unload(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>) {
+    /// Release the **wasm guest**: run its `unwire` pre-shutdown hook, drop
+    /// the `Component`, and sync the now-empty slot, so the accept set clears
+    /// and only the framework cost cells stay. The caller ends the mailbox:
+    /// a `DropComponent` closes the trampoline, and the host's module-boot
+    /// `BootTeardown` vacates it.
+    pub fn release_guest(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>) {
         if let Some(mut component) = self.component.take() {
             // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
             // single pre-shutdown hook — the legacy `on_drop`
             // retired alongside `WasmActor::on_drop`. Component
             // drops at end of scope, tearing down linear memory.
             component.unwire();
-            // #6400: after `unwire`, which may still send, so a later
-            // refill resumes past every id this guest minted.
+            // #6400: after `unwire`, which may still send.
             self.retired_correlations = Some(component.correlation_cursor());
-            // #6409: after `unwire`, which may still answer handles, so a
-            // later refill answers the rest to their own requesters.
-            // ADR-0243 §6: except held slots. Unload saves no guest state,
-            // so no ticket survives to answer one, and its settlement hold
-            // would keep the requester's chain open until actor close.
+            // #6409: after `unwire`, which may still answer handles.
+            // ADR-0243 §6: held slots settle here. Releasing saves no guest
+            // state, so no ticket survives to answer one, and its settlement
+            // hold would keep the requester's chain open until actor close.
             let mut replies = component.take_pending_replies();
             replies.settle_held();
             self.retired_replies = Some(replies);
         }
         // The slot is empty now, so the declaration reads `None` and the sync
         // releases the guest. iamacoffeepot/aether#1037: the mailbox accepts
-        // nothing until a `replace` refills it; the trampoline (and its
-        // mailbox name) survives as an empty slot with no accept set.
-        // iamacoffeepot/aether#1128: the unloaded guest's cost cells leave
-        // the global table and the per-actor cache together, because `unload`
-        // runs on the trampoline's own thread inside `with_stamped`.
+        // nothing more. iamacoffeepot/aether#1128: the released guest's cost
+        // cells leave the global table and the per-actor cache together,
+        // because the release runs on the trampoline's own thread inside
+        // `with_stamped`.
         //
         // The trampoline's own framework arms are re-seeded rather than
-        // dropped with them (iamacoffeepot/aether#4269): the mailbox survives
-        // this as an empty refillable slot and goes on dispatching
-        // `ReplaceComponent`, `DropComponent` and its task wakes, so retiring
-        // their cells left the arms that outlive the guest unmeasured — the
-        // unloading handler among them, which folds into its cell just after
-        // it returns. The re-seed is neutral, which is the honest reading of
-        // an estimate whose occupant just changed.
+        // dropped with them (iamacoffeepot/aether#4269): the releasing
+        // handler folds into its cell just after it returns, and a vacated
+        // boot slot goes on dispatching its task wakes. The re-seed is
+        // neutral, which is the honest reading of an estimate whose occupant
+        // just changed.
         ctx.sync_guest(self);
-        // ADR-0079 §8 (amended, issue 3741): declare the mailbox
-        // vacated — drain this trampoline's watchers and fire one
-        // `MonitorNotice` each, so every cap holding state keyed by
-        // this mailbox (input subscriptions, lifecycle stages, http
-        // routes) purges its own rows. The slot stays live for a
-        // `replace` refill; the next occupant's watchers register
-        // fresh.
-        ctx.vacate();
     }
 }

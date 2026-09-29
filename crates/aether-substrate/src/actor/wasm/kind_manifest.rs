@@ -462,12 +462,14 @@ fn read_inputs_groups(wasm: &[u8], section: &str) -> Result<Vec<ActorInputs>, St
 
 /// Decode the module's `aether.actor.lineage` section (ADR-0166) into its
 /// placement records, in section order. `export!` emits the section for
-/// the module's exported types; the host reads it to select the
-/// inline-spawnable exported groups — a `ModuleChild` record, or a `Child`
-/// whose parent is exported or private in the same module — whose declared
-/// dependencies it checks when the module loads (ADR-0230 §3). A module
-/// without the section returns an empty vec; an unknown record version is
-/// an error.
+/// the module's exported types and then its private inline children. The
+/// host reads it to select the inline-spawnable exported groups — a
+/// `ModuleChild` record, or a `Child` whose parent is exported or private in
+/// the same module — whose declared dependencies it checks when the module
+/// loads (ADR-0230 §3), to check a load's placement, and, once the module is
+/// published, to fill short-path holes beneath its actors (ADR-0241 §5). A
+/// module without the section returns an empty vec; an unknown record
+/// version is an error.
 pub fn read_actor_lineage_from_bytes(wasm: &[u8]) -> Result<Vec<ActorLineageRecord>, String> {
     let mut out = Vec::new();
     for payload in Parser::new(0).parse_all(wasm) {

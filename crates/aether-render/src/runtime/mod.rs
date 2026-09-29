@@ -1279,12 +1279,16 @@ mod tests {
     use super::super::{ScreenTriangle, ScreenVertex, Shape, TextureFormat, TextureSampling, TextureUsage};
     use super::texture::StagedTexture;
     use super::*;
-    use aether_data::Source;
+    use aether_actor::HandlesKind;
+    use aether_data::{Kind, SessionToken, Uuid};
     use aether_kinds::QuadSpace;
     use aether_math::Rgba;
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::testing::{test_mailer_and_rx, unrouted_binding};
+    use aether_substrate::chassis::builder::ReplyTarget;
+    use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::testing::{
+        PumpedDriver, boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx,
+    };
+    use std::sync::mpsc::Receiver;
 
     fn window(name: &str) -> ErasedActorPath {
         ErasedActorPath::new(&format!("aether.window/aether.window.instance:{name}")).expect("fixture window path")
@@ -1338,8 +1342,69 @@ mod tests {
         }
     }
 
-    fn ctx_binding(mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
-        unrouted_binding(mailer)
+    /// A booted `aether.render` on a pumped slot, the home production
+    /// drives it from, with no GPU: nothing here sends a frame that would
+    /// boot one. Every mail reaches the cap through the chassis and runs
+    /// through production dispatch when the slot drains; replies go to a
+    /// session on the loopback egress.
+    struct RenderFixture {
+        cap: PumpedDriver<RenderCapability>,
+        egress: Receiver<EgressEvent>,
+    }
+
+    impl RenderFixture {
+        fn boot(params: RenderParams) -> Self {
+            let (registry, mailer, egress) = fresh_substrate_and_rx();
+            let chassis = boot_bare_test_chassis(&registry, &mailer);
+            let tuning = RenderTuningConfig {
+                vertex_buffer_bytes: 1024,
+                clear_color: DEFAULT_CLEAR_COLOR.to_owned(),
+                pass_timings: false,
+            };
+            let cap = PumpedDriver::boot(chassis, tuning, params);
+            Self { cap, egress }
+        }
+
+        /// Seed the texture registry with `texture_id` in a host turn: a
+        /// `create_texture` would need a device to realize it.
+        fn with_texture(&mut self, texture_id: u32, pixels: Vec<u8>) {
+            self.cap
+                .host_turn(|state, _ctx| {
+                    state.textures.entries.insert(texture_id, test_staged_texture(pixels));
+                })
+                .expect("the booted slot takes a host turn");
+        }
+
+        /// Deliver `mail` to the cap as a tracked chassis root, its reply
+        /// (if any) routed to `reply`, and pump the slot until that root's
+        /// chain settles.
+        fn deliver<K: Kind>(&mut self, mail: &K, reply: Option<ReplyTarget>)
+        where
+            RenderCapability: HandlesKind<K>,
+        {
+            self.cap.send_and_settle(self.cap.chassis().actor_ref::<RenderCapability>(), mail, reply);
+        }
+
+        fn send<K: Kind>(&mut self, mail: &K)
+        where
+            RenderCapability: HandlesKind<K>,
+        {
+            self.deliver(mail, None);
+        }
+
+        /// [`Self::deliver`] with the reply routed to a session, decoded.
+        fn request<K: Kind, R: Kind>(&mut self, mail: &K) -> R
+        where
+            RenderCapability: HandlesKind<K>,
+        {
+            let reply = ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0x7045)), correlation: 1 };
+            self.deliver(mail, Some(reply));
+            decode_session_reply(&self.egress)
+        }
+
+        fn read<T>(&self, read: impl FnOnce(&RenderCapabilityState) -> T) -> T {
+            self.cap.read_state(read).expect("the slot is live")
+        }
     }
 
     #[test]
@@ -1395,142 +1460,116 @@ mod tests {
         assert_eq!(state.last_submitted, [4, 5, 6], "the replacement frame commits fresh work, not the old cache");
     }
 
+    /// Catches a terminal device that retries acquisition, or a mail shape
+    /// that slips past the unusable gate: request/reply work and captures
+    /// answer the terminal error, and fire-and-forget updates and draws drop.
     #[test]
     fn terminal_device_failure_never_reboots_and_disposes_each_mail_shape() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = headless_state();
-        state.offscreen_size = Some((64, 48));
-        state.device_recovery.force_unusable_for_test("replacement acquisition failed");
-        state.textures.entries.insert(3, test_staged_texture(vec![7; 16]));
-        let binding = ctx_binding(&mailer);
+        let mut render =
+            RenderFixture::boot(RenderParams { offscreen_size: Some((64, 48)), ..RenderParams::default() });
+        render.with_texture(3, vec![7; 16]);
+        render
+            .cap
+            .host_turn(|state, _ctx| state.device_recovery.force_unusable_for_test("replacement acquisition failed"))
+            .expect("the slot is live");
 
-        {
-            let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-            RenderCapability::on_frame(
-                &mut state,
-                &mut ctx,
-                Frame { replay_cache_when_idle: true, windows: Vec::new() },
-            );
-            let registered = RenderCapability::on_program_register(
-                &mut state,
-                &mut ctx,
-                ProgramRegister {
-                    wgsl: String::new(),
-                    bindings: Vec::new(),
-                    transients: Vec::new(),
-                    geometries: Vec::new(),
-                    depth_transients: Vec::new(),
-                    passes: Vec::new(),
-                },
-            );
-            assert!(
-                matches!(registered, ProgramRegisterResult::Err { error } if error.contains("unusable")),
-                "request/reply GPU work returns the terminal structured error",
-            );
-
-            RenderCapability::on_update_texture(
-                &mut state,
-                &mut ctx,
-                UpdateTexture { texture_id: 3, x: 0, y: 0, width: 1, height: 1, pixels: vec![9, 9, 9, 9] },
-            );
-            RenderCapability::on_draw_triangle(&mut state, &mut ctx, &[DrawTriangle::default()]);
-        }
-
-        assert!(state.gpu.is_none(), "terminal state never retries initial device boot");
-        assert_eq!(state.textures.entries[&3].pixels, vec![7; 16], "fire-and-forget updates are dropped");
-        assert!(state.frame_vertices.is_empty(), "fire-and-forget draws are dropped");
-
-        let ctx = NativeCtx::<RenderCapability>::new_for_actor(&binding, Source::NONE, None, None);
-        let capture = CaptureFrame {
+        render.send(&Frame { replay_cache_when_idle: true, windows: Vec::new() });
+        let registered: ProgramRegisterResult = render.request(&ProgramRegister {
+            wgsl: String::new(),
+            bindings: Vec::new(),
+            transients: Vec::new(),
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
+            passes: Vec::new(),
+        });
+        render.send(&UpdateTexture { texture_id: 3, x: 0, y: 0, width: 1, height: 1, pixels: vec![9, 9, 9, 9] });
+        render.send(&DrawTriangle::default());
+        let captured: CaptureFrameResult = render.request(&CaptureFrame {
             window: None,
             mails: Vec::new(),
             after_mails: Vec::new(),
             checks: Vec::new(),
             similarity: None,
-        };
-        let error = state.accept_capture(&ctx, capture).err().expect("a terminal device refuses the capture");
-        assert!(error.contains("unusable"), "capture is refused with the terminal structured error: {error}");
-        assert!(state.gpu.is_none(), "terminal capture does not retry device acquisition");
-    }
-
-    /// Issue #2831: `destroy_texture` removes a user-owned registry entry,
-    /// dropping its staged pixels.
-    #[test]
-    fn destroy_texture_removes_registry_entry() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = headless_state();
-        let texture_id = 7;
-        state.textures.entries.insert(texture_id, test_staged_texture(vec![0xAB; 16]));
-        let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-
-        RenderCapability::on_destroy_texture(&mut state, &mut ctx, DestroyTexture { texture_id });
+        });
 
         assert!(
-            !state.textures.entries.contains_key(&texture_id),
+            matches!(registered, ProgramRegisterResult::Err { ref error } if error.contains("unusable")),
+            "request/reply GPU work returns the terminal structured error: {registered:?}",
+        );
+        assert!(
+            matches!(captured, CaptureFrameResult::Err { ref error } if error.contains("unusable")),
+            "capture is refused with the terminal structured error: {captured:?}",
+        );
+        render.read(|state| {
+            assert!(state.gpu.is_none(), "terminal state never retries device acquisition");
+            assert!(state.pending_capture.is_none(), "a refused capture parks nothing");
+            assert_eq!(state.textures.entries[&3].pixels, vec![7; 16], "fire-and-forget updates are dropped");
+            assert!(state.frame_vertices.is_empty(), "fire-and-forget draws are dropped");
+        });
+    }
+
+    /// Issue #2831. Catches a `destroy_texture` that leaves a user-owned
+    /// registry entry, and its staged pixels, resident.
+    #[test]
+    fn destroy_texture_removes_registry_entry() {
+        let mut render = RenderFixture::boot(RenderParams::default());
+        render.with_texture(7, vec![0xAB; 16]);
+
+        render.send(&DestroyTexture { texture_id: 7 });
+
+        assert!(
+            !render.read(|state| state.textures.entries.contains_key(&7)),
             "destroy_texture should remove the staged registry entry",
         );
     }
 
-    /// Issue #2831: unknown ids and the reserved internal white texture id
-    /// warn-drop and leave the registry untouched.
+    /// Issue #2831. Catches a `destroy_texture` that removes the reserved
+    /// internal white texture, or disturbs the registry for an unknown id:
+    /// both warn-drop.
     #[test]
     fn destroy_texture_unknown_and_reserved_ids_leave_registry_untouched() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = headless_state();
-        let user_texture_id = 3;
-        state.textures.entries.insert(user_texture_id, test_staged_texture(vec![1; 16]));
-        state.textures.entries.insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
-        let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
+        let mut render = RenderFixture::boot(RenderParams::default());
+        render.with_texture(3, vec![1; 16]);
+        render.with_texture(WHITE_TEXTURE_ID, vec![255; 16]);
 
         for texture_id in [99, WHITE_TEXTURE_ID] {
-            RenderCapability::on_destroy_texture(&mut state, &mut ctx, DestroyTexture { texture_id });
+            render.send(&DestroyTexture { texture_id });
         }
 
-        assert_eq!(
-            state.textures.entries.len(),
-            2,
-            "unknown and reserved destroy requests must not remove registry entries",
-        );
-        assert!(state.textures.entries.contains_key(&user_texture_id));
-        assert!(state.textures.entries.contains_key(&WHITE_TEXTURE_ID));
+        render.read(|state| {
+            assert_eq!(state.textures.entries.len(), 2, "unknown and reserved destroys must not remove entries");
+            assert!(state.textures.entries.contains_key(&3));
+            assert!(state.textures.entries.contains_key(&WHITE_TEXTURE_ID));
+        });
     }
 
-    /// The diagnostic white texture id is visible to `SubstrateHarness` callers but
-    /// remains engine-owned: `UpdateTexture` must not recolor later solid
-    /// draws through the shared sentinel texel.
+    /// Catches an `UpdateTexture` that recolors the engine-owned white
+    /// texture: its id is visible to `SubstrateHarness` callers, and every
+    /// later solid draw samples its shared texel.
     #[test]
     fn update_texture_reserved_id_leaves_white_pixels_untouched() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = headless_state();
-        state.textures.entries.insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
-        let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
+        let mut render = RenderFixture::boot(RenderParams::default());
+        render.with_texture(WHITE_TEXTURE_ID, vec![255; 16]);
 
-        RenderCapability::on_update_texture(
-            &mut state,
-            &mut ctx,
-            UpdateTexture { texture_id: WHITE_TEXTURE_ID, x: 0, y: 0, width: 1, height: 1, pixels: vec![0, 0, 0, 255] },
-        );
+        render.send(&UpdateTexture {
+            texture_id: WHITE_TEXTURE_ID,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0, 255],
+        });
 
-        assert_eq!(
-            state.textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture remains registered").pixels,
-            vec![255; 16],
-        );
+        assert_eq!(render.read(|state| state.textures.entries[&WHITE_TEXTURE_ID].pixels.clone()), vec![255; 16]);
     }
 
-    /// ADR-0213: `draw_shapes` accumulates into `overlay_frame` as shape
-    /// geometry — the one accumulator, so painter order interleaves with
-    /// the batches of the other overlay verbs. The triangle batch sent
-    /// before it also proves the reserved white texture is inserted lazily
-    /// on first use. Without a GPU.
+    /// ADR-0213. Catches `draw_shapes` accumulating anywhere but the one
+    /// overlay accumulator, which would break painter order against the
+    /// other overlay verbs, and a first solid send that leaves the reserved
+    /// white texture uninserted.
     #[test]
     fn draw_shapes_accumulates_in_painter_order() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = headless_state();
-        let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
+        let mut render = RenderFixture::boot(RenderParams::default());
         let corner = |x: f32, y: f32| ScreenVertex { x, y, color: Rgba::WHITE };
         let shape = Shape {
             x: 10.0,
@@ -1544,29 +1583,25 @@ mod tests {
             texture: None,
         };
 
-        RenderCapability::on_draw_screen_triangles(
-            &mut state,
-            &mut ctx,
-            DrawScreenTriangles {
-                space: QuadSpace::Screen,
-                clip: None,
-                triangles: vec![ScreenTriangle { a: corner(0.0, 0.0), b: corner(8.0, 0.0), c: corner(4.0, 8.0) }],
-            },
-        );
-        RenderCapability::on_draw_shapes(
-            &mut state,
-            &mut ctx,
-            DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![shape.clone()] },
-        );
+        render.send(&DrawScreenTriangles {
+            space: QuadSpace::Screen,
+            clip: None,
+            triangles: vec![ScreenTriangle { a: corner(0.0, 0.0), b: corner(8.0, 0.0), c: corner(4.0, 8.0) }],
+        });
+        render.send(&DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![shape.clone()] });
 
-        assert_eq!(state.overlay_frame.len(), 2, "both batches share the one overlay accumulator");
-        let OverlayBatch::Shapes { shapes, .. } = &state.overlay_frame[1] else {
-            panic!("a shape submission must accumulate as a shape batch, after the triangles sent before it");
-        };
-        assert_eq!(shapes.as_slice(), &[shape]);
-
-        let white =
-            state.textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture must be lazily inserted on first send");
-        assert_eq!(white.format, TextureFormat::Rgba8, "white texture must remain RGBA8");
+        render.read(|state| {
+            assert_eq!(state.overlay_frame.len(), 2, "both batches share the one overlay accumulator");
+            let OverlayBatch::Shapes { shapes, .. } = &state.overlay_frame[1] else {
+                panic!("a shape submission must accumulate as a shape batch, after the triangles sent before it");
+            };
+            assert_eq!(shapes.as_slice(), &[shape]);
+            let white = state
+                .textures
+                .entries
+                .get(&WHITE_TEXTURE_ID)
+                .expect("white texture must be lazily inserted on first send");
+            assert_eq!(white.format, TextureFormat::Rgba8, "white texture must remain RGBA8");
+        });
     }
 }

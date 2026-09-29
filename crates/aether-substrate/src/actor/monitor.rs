@@ -86,11 +86,35 @@ pub(crate) fn notify_departure(binding: &NativeBinding, target: MailboxId, watch
 /// sender is that alias. A fan-out sent only from `occupant` would leave
 /// every such row behind, outliving the actor that claimed it.
 ///
-/// The alias route itself is left in place: it is served by the parent's
-/// slot, which stays addressable and refillable across a vacate, and a
-/// close retires the parent's own name rather than the alias's.
-pub(crate) fn notify_alias_departures(actor_registry: &ActorRegistry, binding: &NativeBinding, occupant: MailboxId) {
+/// `departure` says how the aliases end. On [`Departure::Close`] each alias
+/// closes with its parent and tombstones (ADR-0241 §8), so it is never
+/// watched or spawned again. On [`Departure::Vacate`] each only drains: the
+/// parent's slot stays addressable and refillable, and a refill's guest may
+/// spawn the same key again.
+///
+/// The alias route itself is left in place: it resolves through its parent,
+/// so it reads `Dropped` when the parent's route does.
+pub(crate) fn notify_alias_departures(
+    actor_registry: &ActorRegistry,
+    binding: &NativeBinding,
+    occupant: MailboxId,
+    departure: Departure,
+) {
     for alias in binding.mailer().registry().aliases_of(occupant) {
-        notify_departure(binding, alias, actor_registry.vacate_actor(alias));
+        let watchers = match departure {
+            Departure::Close => actor_registry.close_alias(alias),
+            Departure::Vacate => actor_registry.vacate_actor(alias),
+        };
+        notify_departure(binding, alias, watchers);
     }
+}
+
+/// How an occupant's inline-child aliases depart with it
+/// ([`notify_alias_departures`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Departure {
+    /// The occupant closed: its aliases close and tombstone with it.
+    Close,
+    /// The occupant vacated a still-live slot: its aliases drain only.
+    Vacate,
 }

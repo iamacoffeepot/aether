@@ -431,12 +431,11 @@ impl NativeActor for HttpServerCapability {
 
     /// Purge a departed mailbox's routes (ADR-0079 §8 amended). The
     /// substrate fires one notice per [`HttpSupervisorState::watch`]ed
-    /// mailbox when it vacates (the wasm trampoline on
-    /// `DropComponent`) or closes, so the route table stops
-    /// dispatching at a dropped trampoline without any drop-time
+    /// mailbox when it closes (the wasm trampoline on `DropComponent`)
+    /// or vacates (a module boot on teardown), so the route table stops
+    /// dispatching at a departed trampoline without any drop-time
     /// fan-out from the component host. Releasing the handle keeps the
-    /// monitor map bounded by live route holders; a later occupant of
-    /// the same mailbox re-registers through its own route claim.
+    /// monitor map bounded by live route holders.
     ///
     /// The host stamps the departed holder as the notice's sender, so
     /// `ctx.sender()` is the same proven reference the monitor map and the

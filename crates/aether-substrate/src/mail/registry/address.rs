@@ -9,6 +9,11 @@ use aether_data::name_inventory::{
 };
 use aether_data::{ActorId, MAILBOX_DOMAIN, MailboxId, PathSegment, ScopePathError, validate_scope_path};
 
+use super::publication::PublicationTable;
+
+#[cfg(feature = "wasm")]
+use aether_data::ActorLineageRecord;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedAddress {
     pub mailbox_id: MailboxId,
@@ -228,8 +233,10 @@ struct RootFact<'a> {
     namespace: &'a str,
 }
 
-impl<'a> From<&'a RootEntry> for RootFact<'a> {
-    fn from(entry: &'a RootEntry) -> Self {
+// A link-time fact is `'static`, so it converts into a fact of any lifetime
+// and chains with a published module's borrowed facts.
+impl From<&'static RootEntry> for RootFact<'_> {
+    fn from(entry: &'static RootEntry) -> Self {
         Self { actor: entry.actor, namespace: entry.namespace }
     }
 }
@@ -242,8 +249,8 @@ struct ChildFact<'a> {
     child_namespace: &'a str,
 }
 
-impl<'a> From<&'a ChildEntry> for ChildFact<'a> {
-    fn from(entry: &'a ChildEntry) -> Self {
+impl From<&'static ChildEntry> for ChildFact<'_> {
+    fn from(entry: &'static ChildEntry) -> Self {
         Self {
             parent: entry.parent,
             child: entry.child,
@@ -259,13 +266,44 @@ struct CardinalityFact<'a> {
     cardinality: Cardinality,
 }
 
+impl From<(&'static str, Cardinality)> for CardinalityFact<'_> {
+    fn from((namespace, cardinality): (&'static str, Cardinality)) -> Self {
+        Self { namespace, cardinality }
+    }
+}
+
+/// The index the registry publishes: built from native link-time facts and
+/// every published module's manifest, or the native inventory's own error.
+pub(super) type AddressTable = Result<AddressIndex, ActorAddressInventoryError>;
+
 impl AddressIndex {
     pub(super) fn from_inventory() -> Result<Self, ActorAddressInventoryError> {
         Self::build(
             root_entries().map(RootFact::from),
             child_entries().map(ChildFact::from),
-            native_cardinality_facts().map(|(namespace, cardinality)| CardinalityFact { namespace, cardinality }),
+            native_cardinality_facts().map(CardinalityFact::from),
         )
+    }
+
+    /// Native link-time facts plus every published module's manifest
+    /// (ADR-0241 §5), so a hole beneath a guest parent fills the way one
+    /// beneath a native parent does. Guest facts never fail the build: a
+    /// module's malformed namespace is skipped where it is read.
+    #[cfg(feature = "wasm")]
+    pub(super) fn from_publications(table: &PublicationTable) -> AddressTable {
+        let guests = GuestFacts::of(table);
+        Self::build(
+            root_entries().map(RootFact::from).chain(guests.roots),
+            child_entries().map(ChildFact::from).chain(guests.edges),
+            native_cardinality_facts().map(CardinalityFact::from).chain(guests.cardinalities),
+        )
+    }
+
+    /// Without guest code the published modules are empty, so the index is
+    /// the native inventory's.
+    #[cfg(not(feature = "wasm"))]
+    pub(super) fn from_publications(_table: &PublicationTable) -> AddressTable {
+        Self::from_inventory()
     }
 
     fn build<'a>(
@@ -466,6 +504,105 @@ impl AddressIndex {
             },
         }
     }
+}
+
+/// The placement facts every published module's manifest contributes to the
+/// index (ADR-0241 §5), read under the rules the native facts follow:
+///
+/// - **Cardinality:** each exported and private group's `instanced`.
+/// - **Roots:** a `Root` record, for an exported namespace only.
+/// - **Edges:** a `Child` record is one edge; a `ModuleChild` record is one
+///   edge from every namespace the module declares, exported or private.
+///
+/// A namespace a native actor declares contributes nothing from a module, so
+/// a module can neither switch off nor reshape a native short path. Every
+/// actor id is derived from its namespace rather than read from the record,
+/// and a namespace that is not a legal address part is skipped with a
+/// warning, so untrusted module data can never fail the whole index.
+/// Conflicts between modules fall to the build's `Contradictory` exclusion.
+#[cfg(feature = "wasm")]
+struct GuestFacts<'a> {
+    roots: Vec<RootFact<'a>>,
+    edges: Vec<ChildFact<'a>>,
+    cardinalities: Vec<CardinalityFact<'a>>,
+}
+
+#[cfg(feature = "wasm")]
+impl<'a> GuestFacts<'a> {
+    fn of(table: &'a PublicationTable) -> Self {
+        let native = native_cardinality_facts().map(|(namespace, _)| namespace).collect::<BTreeSet<_>>();
+        let usable = |namespace: &str| !native.contains(namespace) && guest_namespace_is_valid(namespace);
+        let mut facts = Self { roots: Vec::new(), edges: Vec::new(), cardinalities: Vec::new() };
+        for module in table.modules() {
+            let manifest = module.manifest();
+            let exported = manifest.exported_groups().map(|(namespace, group)| (namespace, group.instanced));
+            let private = manifest.private_groups().map(|(namespace, group)| (namespace, group.instanced));
+            let declared = exported.chain(private).filter(|(namespace, _)| usable(namespace)).collect::<Vec<_>>();
+            facts.cardinalities.extend(declared.iter().map(|&(namespace, instanced)| {
+                let cardinality = if instanced {
+                    Cardinality::Instanced
+                } else {
+                    Cardinality::Singleton
+                };
+                CardinalityFact { namespace, cardinality }
+            }));
+
+            for record in manifest.lineage() {
+                match record {
+                    ActorLineageRecord::Root { namespace, .. } => {
+                        let exported = manifest.exported_groups().any(|(name, _)| name == namespace.as_ref());
+                        if exported && usable(namespace) {
+                            facts.roots.push(RootFact { actor: ActorId::singleton(namespace), namespace });
+                        }
+                    }
+                    ActorLineageRecord::Child { parent_namespace, child_namespace, .. } => {
+                        let parent_valid =
+                            native.contains(parent_namespace.as_ref()) || guest_namespace_is_valid(parent_namespace);
+                        if parent_valid && usable(child_namespace) {
+                            facts.edges.push(ChildFact::between(parent_namespace, child_namespace));
+                        }
+                    }
+                    ActorLineageRecord::ModuleChild { child_namespace, .. } => {
+                        if usable(child_namespace) {
+                            facts.edges.extend(
+                                declared.iter().map(|&(parent, _)| ChildFact::between(parent, child_namespace)),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        facts
+    }
+}
+
+#[cfg(feature = "wasm")]
+impl<'a> ChildFact<'a> {
+    /// The edge from `parent_namespace` to `child_namespace`, each actor id
+    /// derived from its namespace.
+    fn between(parent_namespace: &'a str, child_namespace: &'a str) -> Self {
+        Self {
+            parent: ActorId::singleton(parent_namespace),
+            child: ActorId::singleton(child_namespace),
+            parent_namespace,
+            child_namespace,
+        }
+    }
+}
+
+/// Whether a module's `namespace` is a legal address part, warning when it is
+/// not so the skipped fact is visible.
+#[cfg(feature = "wasm")]
+fn guest_namespace_is_valid(namespace: &str) -> bool {
+    validate_address_part(namespace)
+        .inspect_err(|reason| {
+            tracing::warn!(
+                namespace,
+                ?reason,
+                "published module namespace is invalid; excluded from the address index"
+            );
+        })
+        .is_ok()
 }
 
 fn validate_actor_fact(actor: ActorId, namespace: &str) -> Result<(), ActorAddressInventoryError> {

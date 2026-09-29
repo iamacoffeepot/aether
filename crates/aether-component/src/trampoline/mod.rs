@@ -52,13 +52,13 @@
 //!   `LoadResult::Ok` to the requester in its own name, so the requester
 //!   keeps the reply's stamped sender as its reference (ADR-0230 §3).
 //! - **Drop**: `DropComponent` mail addressed to the trampoline's mailbox
-//!   lands on `on_drop_component`, which drops the `Component` and clears the
-//!   mailbox's accept-set. The trampoline (and its mailbox name) survives as an
-//!   empty slot, refillable by `ReplaceComponent`.
+//!   lands on `on_drop_component`, which releases the guest (its `unwire` runs
+//!   and the `Component` drops) and closes the trampoline. Its name tombstones
+//!   and a later load of it is refused as retired (ADR-0241 §8).
 //! - **Boot teardown** (ADR-0147): when a module's last non-boot actor
-//!   unloads, the host sends `BootTeardown` through the module boot
-//!   guest's control reference, and `on_boot_teardown` unloads the guest the way
-//!   a drop does, with no reply.
+//!   departs, the host sends `BootTeardown` through the module boot
+//!   guest's control reference, and `on_boot_teardown` releases the guest the
+//!   way a drop does and vacates the mailbox, with no reply.
 //! - **Replace**: `ReplaceComponent` mail lands on `on_replace_component`,
 //!   which checks the new bytes in through the engine's module cache
 //!   (ADR-0241 §2), instantiates a new `Component` against the same binding

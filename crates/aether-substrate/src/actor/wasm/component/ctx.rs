@@ -39,7 +39,7 @@ pub struct CorrelationCursor {
 /// handles come from. Taken from a guest leaving its slot with
 /// [`super::Component::take_pending_replies`] and installed on the slot's next
 /// occupant with [`super::Component::resume_replies`], so a handle stays
-/// answerable to its own requester across replace, refill and a failed start,
+/// answerable to its own requester across replace and a failed start,
 /// and a replacement never reissues a handle still held (#6409). Opaque: it
 /// has no public constructor, accessor or codec, so it can only come from a
 /// live component. Neither `Clone` nor `Copy`: two tables holding the same
@@ -48,7 +48,7 @@ pub struct PendingReplies(ReplyTable);
 
 impl PendingReplies {
     /// Free every held slot and release each requester's settlement hold
-    /// unanswered (ADR-0243 §6). The consumer is the trampoline's unload:
+    /// unanswered (ADR-0243 §6). The consumer is the trampoline's guest release:
     /// it saves no guest state, so no ticket survives to answer a held
     /// slot, and keeping the hold would leave the requester's chain open
     /// until actor close. A replace carries the table without calling this.
