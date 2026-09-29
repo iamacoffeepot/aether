@@ -38,8 +38,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_actor::{ErasedActorRef, Manual, Root};
 use aether_data::{Kind, KindId, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
@@ -317,49 +317,26 @@ pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
 /// test that drives the actual re-reply via `on_*_result` reads past
 /// the bubble-up to the `ToSession` re-reply. Shared by the cap test
 /// modules.
+///
+/// Reads with `try_recv`: every caller reads after its chain has settled
+/// or after a synchronous pumped dispatch, so the reply is already queued
+/// on the loopback channel by the time this runs.
+///
+/// # Panics
+/// Panics if no matching reply is queued.
 pub fn decode_session_reply<K>(rx: &Receiver<EgressEvent>) -> K
 where
     K: Kind,
 {
     loop {
-        let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
+        let event = match rx.try_recv() {
+            Ok(event) => event,
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => panic!("test: no reply queued"),
+        };
         if let EgressEvent::ToSession { kind_name, payload, .. } = event
             && kind_name == K::NAME
         {
             return K::decode_from_bytes(&payload).expect("test: reply payload decodes");
-        }
-    }
-}
-
-/// Sibling of [`decode_session_reply`] that also returns which session
-/// the reply targeted, for cap tests that fan replies across sessions.
-pub fn decode_session_reply_with_session<K>(rx: &Receiver<EgressEvent>) -> (SessionToken, K)
-where
-    K: Kind,
-{
-    loop {
-        let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
-        if let EgressEvent::ToSession { session, kind_name, payload, .. } = event
-            && kind_name == K::NAME
-        {
-            return (session, K::decode_from_bytes(&payload).expect("test: reply payload decodes"));
-        }
-    }
-}
-
-/// Flush the cap's buffered sends, then drain egress asserting the next
-/// `UnresolvedMail` carries kind `K`, returning its correlation id. The
-/// bare registry has no `aether.render` / `aether.fs`, so a forwarded
-/// send bubbles to the loopback outbound; `flush_outbound` is what
-/// `NativeCtx::Drop` would otherwise do at the end of a real dispatch
-/// turn.
-pub fn assert_next_send_kind<K: Kind>(binding: &NativeBinding, rx: &Receiver<EgressEvent>) -> u64 {
-    binding.flush_outbound();
-    loop {
-        let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
-        if let EgressEvent::UnresolvedMail { kind_id, correlation_id, .. } = event {
-            assert_eq!(kind_id, K::ID, "unexpected bubbled kind");
-            return correlation_id;
         }
     }
 }
@@ -411,23 +388,6 @@ pub fn manual_dispatch_ctx<A>(binding: &Arc<NativeBinding>, sender: Source) -> N
             binding.self_mailbox(),
         ),
     )
-}
-
-/// Decode the *next* egress as a `ToSession` reply of kind `K`. Strict
-/// sibling of [`decode_session_reply`]: it asserts the immediately
-/// following egress is a `ToSession` carrying `K`, rather than reading
-/// past bubble-ups. For cap tests that drive via the full dispatcher and
-/// egress channel (e.g. `render-runtime`) rather than direct `-> R` calls.
-pub fn decode_reply<K>(rx: &Receiver<EgressEvent>) -> K
-where
-    K: Kind,
-{
-    let event = rx.recv_timeout(Duration::from_secs(1)).expect("test: egress event arrives within 1s deadline");
-    let EgressEvent::ToSession { kind_name, payload, .. } = event else {
-        panic!("expected ToSession egress, got {event:?}");
-    };
-    assert_eq!(kind_name, K::NAME);
-    K::decode_from_bytes(&payload).expect("test: reply payload decodes")
 }
 
 /// Manual tempdir under the system temp root, namespaced by `prefix` and

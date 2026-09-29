@@ -166,6 +166,7 @@ impl Spawner {
         // then so the closure's `get()` is a single relaxed atomic load.
         let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
         let wake_for_handler = Arc::clone(&wake_slot);
+        let mailer_for_handler = Arc::downgrade(&self.mailer);
         // iamacoffeepot/aether#848 PR 3: closure takes `OwnedDispatch`
         // and routes it through [`relay_or_transfer`] — the shared
         // upgrade → send → wake core with both ADR-0094 transfer seams.
@@ -183,7 +184,7 @@ impl Spawner {
             id,
             full_name.to_string(),
             Arc::new(move |dispatch: OwnedDispatch| {
-                match relay_or_transfer(dispatch, &weak_for_handler, &wake_for_handler) {
+                match relay_or_transfer(dispatch, &weak_for_handler, &wake_for_handler, &mailer_for_handler) {
                     RelayOutcome::Delivered => {}
                     RelayOutcome::SenderGone { kind } => {
                         tracing::warn!(
