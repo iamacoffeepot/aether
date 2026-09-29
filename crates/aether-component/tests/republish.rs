@@ -11,7 +11,9 @@
 //! says so. v3 changes the gate's config kind. `republish_loader` is a guest
 //! that loads a component through the host. The courier pair's v2 mails the
 //! host from `on_rehydrate`, so its load or drop arrives on the republish's
-//! own commit chain.
+//! own commit chain. The keep pair (issue 7125) is a keeper that moves a held
+//! reply and its count out of itself in `on_dehydrate`, beside a refuser
+//! whose v2 traps in `on_rehydrate`.
 //!
 //! The tests that hold a republish in flight compose the component host
 //! pumped: it dispatches only while the harness drains it, and
@@ -35,13 +37,16 @@ use aether_kinds::{
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, CourierConfig, CourierQuery, CourierQueryResult, GateLabelledConfig, GateProbe,
-    GateQuery, GateQueryResult, GuestLoad, PeerConfig, TickObserved, WireCountQuery, WireObserved,
+    GateQuery, GateQueryResult, GuestLoad, HeldRequest, HeldRequestResult, PeerConfig, ReleaseCarried, TickObserved,
+    WireCountQuery, WireObserved,
 };
 
 const GATE: &str = "test.republish.gate";
 const PEER: &str = "test.republish.peer";
 const COURIER: &str = "test.republish.courier";
 const PARCEL: &str = "test.republish.parcel";
+const KEEPER: &str = "test.republish.keep.keeper";
+const REFUSER: &str = "test.republish.keep.refuser";
 
 /// The courier pair's two versions, or `None` when they are not built.
 struct Couriers {
@@ -86,6 +91,24 @@ fn republish_courier(
 
     expect_ok(&republish(harness, &replace));
     call::<_, CourierQueryResult>(harness, courier, &CourierQuery).outcomes
+}
+
+/// The keep pair's two versions, or `None` when they are not built.
+struct Keeps {
+    v1: Vec<u8>,
+    v2: Vec<u8>,
+}
+
+fn keeps() -> Option<Keeps> {
+    let read = |stem: &str| require_wasm(stem).map(|path| fs::read(path).expect("read fixture wasm"));
+    Some(Keeps { v1: read("republish_keep_v1")?, v2: read("republish_keep_v2")? })
+}
+
+/// Send the keeper a `ReleaseCarried` and wait for its chain to settle.
+fn release_keeper(harness: &mut SubstrateHarness, keeper: ErasedActorRef) {
+    harness
+        .execute(vec![("release", HarnessOp::send_and_settle(keeper, &ReleaseCarried))])
+        .expect("release the keeper");
 }
 
 /// The group pair's two versions and v3, or `None` when they are not built.
@@ -214,6 +237,61 @@ fn an_abort_after_ready_reinstates_and_rewires_the_ready_member() {
     assert_eq!(gate_wired.count, 2, "the ready gate's old guest is wired again after its abort");
     assert_eq!(harness.count_observed(WireObserved::NAME), peer_wired + 1, "the refusing peer is wired again too");
     assert_eq!(harness.count_observed(TickObserved::NAME), 0, "the failed candidate's mail never leaves");
+}
+
+#[test]
+fn an_abort_gives_each_ready_member_its_dehydrated_state_back() {
+    // Catches: a reinstated Ready member missing the value its
+    // `on_dehydrate` moved out, or a moved-out `Held` whose requester is
+    // never answered.
+    let Some(fixtures) = keeps() else {
+        return;
+    };
+    let mut harness = pooled();
+    let (keeper, _) = load_export(&mut harness, &fixtures.v1, KEEPER, None);
+    let _refuser = load_export(&mut harness, &fixtures.v1, REFUSER, None);
+    // The keeper's mailbox is FIFO, so the request reaches it ahead of the
+    // host's prepare.
+    let pending = harness.send_deferred_to(keeper, &HeldRequest { tag: 7 }).expect("send the held request");
+
+    let replaced = republish(&mut harness, &replace(&fixtures.v2));
+
+    assert!(expect_err(&replaced).contains("on_rehydrate failed"), "the refuser's refusal is reported: {replaced:?}");
+    let kept: CountReport = call(&mut harness, keeper, &CountQuery);
+    assert_eq!(kept.count, 1, "the reinstated keeper has the count its dehydrate moved out");
+
+    release_keeper(&mut harness, keeper);
+    let answered = harness.await_deferred::<HeldRequestResult>(pending).expect("the held reply");
+    assert_eq!(answered.tag, 7, "the moved-out held reply answers its requester");
+}
+
+#[test]
+fn a_held_unsaved_refusal_gives_the_member_its_dehydrated_state_back() {
+    // Catches: a member refusing as held-unsaved drops the `Held` its
+    // `on_dehydrate` had already moved into encoded state.
+    let Some(fixtures) = keeps() else {
+        return;
+    };
+    let mut harness = pooled();
+    let (keeper, _) = load_export(&mut harness, &fixtures.v1, KEEPER, None);
+    let first = harness.send_deferred_to(keeper, &HeldRequest { tag: 7 }).expect("send the first held request");
+    // The second request's reply stays live as a stray, so the dehydrate
+    // refuses.
+    let second = harness.send_deferred_to(keeper, &HeldRequest { tag: 8 }).expect("send the second held request");
+
+    let replaced = republish(&mut harness, &replace(&fixtures.v2));
+
+    assert!(
+        expect_err(&replaced).contains("held reply is live and was not saved"),
+        "the keeper's held-unsaved refusal is reported: {replaced:?}"
+    );
+    let kept: CountReport = call(&mut harness, keeper, &CountQuery);
+    assert_eq!(kept.count, 2, "the reinstated keeper has the count its dehydrate moved out");
+
+    release_keeper(&mut harness, keeper);
+    let first = harness.await_deferred::<HeldRequestResult>(first).expect("the saved held reply");
+    let second = harness.await_deferred::<HeldRequestResult>(second).expect("the stray held reply");
+    assert_eq!((first.tag, second.tag), (7, 8), "both held replies answer their requesters");
 }
 
 #[test]

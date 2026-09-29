@@ -33,6 +33,10 @@ publish = false
 # - `republish_courier_v{1,2}` (issue 7086): a root courier and an instanced
 #   parcel. v2's courier mails the component host from `on_rehydrate`, so its
 #   load or drop reaches the host on the republish's own commit chain.
+# - `republish_keep_v{1,2}` (issue 7125): the shared root
+#   `test.republish.keep.keeper`, which moves a held reply and its count out of
+#   itself in `on_dehydrate`, and a root `test.republish.keep.refuser` that
+#   saves a bundle. v2's refuser traps in `on_rehydrate`.
 [lib]
 crate-type = ["rlib"]
 
@@ -114,6 +118,14 @@ crate-type = ["cdylib"]
 
 [[example]]
 name = "republish_carry_v2"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_keep_v1"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_keep_v2"
 crate-type = ["cdylib"]
 
 [lints]

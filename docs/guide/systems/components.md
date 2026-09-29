@@ -455,10 +455,14 @@ A refusal in any member's prepare (a failed `init`, a rejected state save, a
 carried request context the candidate does not declare
 ([ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md)
 §4), or a failed rehydrate), or a refused publish, aborts every member: each
-reinstates its old guest with its reply table and counters, runs its `wire`
+reinstates its old guest with its reply table and counters, hands it back the
+state its `on_dehydrate` saved through its `on_rehydrate`, runs its `wire`
 again, and receives the mail its gate queued; nothing a candidate sent leaves.
-Hooks that already ran are not undone
-([ADR-0016](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0016-persistent-state-across-hot-reload.md) §4).
+Only teardown outside that saved state and outside what `wire` rebuilds is not
+undone
+([ADR-0016](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0016-persistent-state-across-hot-reload.md) §4),
+so an `on_rehydrate` override should assign from `prior` rather than accumulate
+onto what the instance already holds.
 While the replace is in flight, a load of one of its namespaces and a drop of a
 member wait for the answer and then run against the code that won; a replace
 that arrives while a load of its namespaces is in flight waits for those births.

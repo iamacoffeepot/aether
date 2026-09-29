@@ -210,15 +210,16 @@ Then every instance prepares its successor while mail for it waits at its inbox
 gate, the module publishes, and every instance commits, receiving the waiting
 mail in order. The reply, `{engine_id, types: [{namespace, capabilities}]}`,
 comes once every commit's chain has settled. A refusal while preparing, or a
-publish failure, aborts every instance: each reinstates its old guest and runs
-its `wire` again, and whatever its `unwire` and `on_dehydrate` tore down beyond
-what `wire` rebuilds stays. Nothing a failed successor sent leaves. Loads and
+publish failure, aborts every instance: each reinstates its old guest, which
+gets back the state its `on_dehydrate` saved through its `on_rehydrate`, and runs
+its `wire` again. Only teardown outside that saved state and outside what `wire`
+rebuilds stays gone. Nothing a failed successor sent leaves. Loads and
 drops of the module's namespaces that arrive meanwhile wait for the answer.
 
 Require an explicit successful result, then re-run `describe_component` and a
 safe probe. After an error MCP's cache and the capability registry describe the
 old handler sets, which a reinstated guest may no longer fully serve if its
-hooks tore down state. Use
+hooks tore down state its saved state does not carry. Use
 [Replacement failure states](components/replacement-failure-states.md) rather
 than treating `describe_component` as rollback proof.
 

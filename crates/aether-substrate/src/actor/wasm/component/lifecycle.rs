@@ -52,8 +52,9 @@ impl Component {
     /// `DEHYDRATE_HELD_UNSAVED`. That is recorded as a save error, so the
     /// trampoline's replace takes its existing save-error rollback through
     /// [`Self::take_save_error`] and reinstates this guest rather than
-    /// stranding the requester. A save error the hook already recorded is
-    /// kept.
+    /// stranding the requester. The refusing hook still saved its state, so
+    /// [`Self::take_saved_state`] yields the bundle the reinstated guest gets
+    /// back (issue 7125). A save error the hook already recorded is kept.
     pub fn on_dehydrate(&mut self) {
         let Some(f) = self.on_dehydrate.clone() else {
             return;
@@ -211,7 +212,11 @@ impl Component {
     }
 
     /// Write the prior-state bytes into a delivery region (ADR-0095, via
-    /// `place`) and invoke `on_rehydrate(version, ptr, len)`. Returns
+    /// `place`) and invoke `on_rehydrate(version, ptr, len)`. The component
+    /// trampoline calls it on a republish's candidate with the old guest's
+    /// bundle, and on the old guest itself with that same bundle when the
+    /// republish aborts, so the reinstated guest gets back what its
+    /// `on_dehydrate` saved (ADR-0016 §4, issue 7125). Returns
     /// `Ok(())` if the instance doesn't export `on_rehydrate` (ADR-0016 §3: the
     /// bundle is silently discarded when no handler claims it).
     ///

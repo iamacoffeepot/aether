@@ -444,8 +444,11 @@ impl Registry {
 
     /// Return every ticket a dehydrate saved to live. The `export!`
     /// `on_dehydrate` shim calls it before the hooks run, so a ticket saved
-    /// by a replace that was later rolled back is checked again, and after a
-    /// refusal, because this instance keeps running with those values.
+    /// by a replace that was later rolled back is checked again even when
+    /// the reinstated instance's `on_rehydrate` did not claim it back. A
+    /// refused dehydrate does not call it: its state is still saved, and the
+    /// reinstated instance claims the saved tickets back as that state
+    /// returns through `on_rehydrate` (issue 7125).
     #[doc(hidden)]
     pub fn __revert_dehydrate(&self) {
         self.held.borrow_mut().revert_saved();
