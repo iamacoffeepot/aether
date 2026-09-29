@@ -141,7 +141,7 @@ fn no_handler_is_503() {
 
 /// A router that holds the request's reply and closes before answering
 /// answers `502` at once, from its close: the engine sends
-/// `HttpRouterReply::unanswered()` for the live held reply (ADR-0243 §1).
+/// `HttpRouterResult::unanswered()` for the live held reply (ADR-0243 §1).
 /// Catches a close that settles the held reply silently, which the
 /// settlement net would answer with its own `502` body, and an unanswered
 /// reply that never reaches the shard, which would wait out the request

@@ -4,13 +4,13 @@
 //!
 //! A deferred route forwards its request to a peer and answers only when that
 //! reply lands. [`DeferredRequest::to`] holds the router's
-//! [`HttpRouterReply`], which keeps the request's chain open, and parks the
+//! [`HttpRouterResult`], which keeps the request's chain open, and parks the
 //! [`Held`] ticket in the request context `send_with_context` stores for the
 //! forwarded request. The paired `#[http::reply]` route takes that context
 //! back by the reply's `in_reply_to` correlation, no correlation in any
 //! signature, and answers the held reply through [`answer_deferred`]. A
 //! router that closes first answers `502` through
-//! [`HttpRouterReply`]'s `unanswered` reply; a peer that never replies leaves
+//! [`HttpRouterResult`]'s `unanswered` reply; a peer that never replies leaves
 //! the request to the server's request timeout, `504`.
 //!
 //! Deferred requests are addressed by their request kind, so the
@@ -27,7 +27,7 @@ use aether_actor::{CallerAddressable, DependencyResolver, DependsOn, HandlesKind
 use aether_data::ActorMail;
 use aether_substrate::actor::native::{Held, NativeCtx, Pending};
 
-use super::kinds::{HttpRouterReply, HttpServerResponse};
+use super::kinds::{HttpRouterResult, HttpServerResponse};
 use super::typed::Ctx;
 
 /// What a native route that may defer answers with (ADR-0154 §2). A
@@ -56,15 +56,15 @@ pub enum Outcome {
 /// [`Outcome::Deferred`] always names a reply some `#[http::reply]` route
 /// owes.
 #[must_use = "return the Outcome from the route so the router glue returns its receipt"]
-pub struct Deferred(Pending<HttpRouterReply>);
+pub struct Deferred(Pending<HttpRouterResult>);
 
 impl Deferred {
     /// The held reply's receipt, which the `#[http::router]` glue returns as
-    /// its handler's `Pending<HttpRouterReply>`. Public for the
+    /// its handler's `Pending<HttpRouterResult>`. Public for the
     /// macro-generated glue only.
     #[doc(hidden)]
     #[must_use]
-    pub fn into_receipt(self) -> Pending<HttpRouterReply> {
+    pub fn into_receipt(self) -> Pending<HttpRouterResult> {
         self.0
     }
 }
@@ -75,7 +75,7 @@ impl Deferred {
 /// request.
 #[aether_data::kind(name = "aether.http.deferred_route")]
 struct DeferredRoute {
-    held: Held<HttpRouterReply>,
+    held: Held<HttpRouterResult>,
 }
 
 impl<'transport, A> Ctx<'_, NativeCtx<'transport, A>> {
@@ -119,20 +119,20 @@ impl<A, K: ActorMail> DeferredRequest<'_, '_, NativeCtx<'_, A>, K> {
         R::Resolver: DependencyResolver,
         A: DependsOn<R>,
     {
-        let (pending, held) = self.ctx.hold::<HttpRouterReply>();
+        let (pending, held) = self.ctx.hold::<HttpRouterResult>();
         let _ = self.ctx.send_with_context::<R>(self.request, DeferredRoute { held });
         Outcome::Deferred(Deferred(pending))
     }
 }
 
 /// Answer a synchronous arm of a router whose handler holds its reply
-/// (`-> Pending<HttpRouterReply>`, because some route defers): hold the reply
+/// (`-> Pending<HttpRouterResult>`, because some route defers): hold the reply
 /// and answer it with `response` at once (ADR-0243 §2). Public for the
 /// macro-generated `#[http::router]` glue only.
 #[doc(hidden)]
-pub fn answer_now<A>(ctx: &mut NativeCtx<'_, A>, response: HttpServerResponse) -> Pending<HttpRouterReply> {
-    let (pending, held) = ctx.hold::<HttpRouterReply>();
-    held.answer(ctx, &HttpRouterReply::Response(response));
+pub fn answer_now<A>(ctx: &mut NativeCtx<'_, A>, response: HttpServerResponse) -> Pending<HttpRouterResult> {
+    let (pending, held) = ctx.hold::<HttpRouterResult>();
+    held.answer(ctx, &HttpRouterResult::Response(response));
     pending
 }
 
@@ -144,6 +144,6 @@ pub fn answer_now<A>(ctx: &mut NativeCtx<'_, A>, response: HttpServerResponse) -
 #[doc(hidden)]
 pub fn answer_deferred<A>(ctx: &mut NativeCtx<'_, A>, response: HttpServerResponse) {
     if let Some(DeferredRoute { held }) = ctx.take_context::<DeferredRoute>() {
-        held.answer(ctx, &HttpRouterReply::Response(response));
+        held.answer(ctx, &HttpRouterResult::Response(response));
     }
 }

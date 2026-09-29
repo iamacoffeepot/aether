@@ -7,7 +7,7 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate as http;
-use crate::kinds::{HttpRouterReply, HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
+use crate::kinds::{HttpRouterResult, HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
 use crate::server::HttpServerCapability;
 
 /// A routed handler whose `wire` registers each claim `shared: true`
@@ -42,8 +42,8 @@ macro_rules! shared_routed_handler {
                 _state: &mut Self::State,
                 _ctx: &mut NativeCtx<'_>,
                 _request: HttpServerRequest,
-            ) -> HttpRouterReply {
-                HttpRouterReply::Response(HttpServerResponse {
+            ) -> HttpRouterResult {
+                HttpRouterResult::Response(HttpServerResponse {
                     status: 200,
                     headers: Vec::new(),
                     body: $tag.to_vec(),

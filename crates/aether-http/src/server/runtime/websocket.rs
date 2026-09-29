@@ -423,7 +423,7 @@ pub fn run_ws_reader_loop(
 
 impl HttpShardState {
     /// Accept a websocket upgrade (ADR-0129 §1): the handler replied
-    /// `HttpRouterReply::WebSocket` to a stashed-key upgrade request. Compute
+    /// `HttpRouterResult::WebSocket` to a stashed-key upgrade request. Compute
     /// `Sec-WebSocket-Accept`, write the `101 Switching Protocols` head
     /// (inline, strictly before the writer thread starts, so the two never
     /// interleave on the shared fd), spawn the ADR-0128 writer thread for

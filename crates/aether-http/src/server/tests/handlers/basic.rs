@@ -7,7 +7,7 @@ use aether_actor::actor;
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
-use crate::kinds::{HttpHeader, HttpRouterReply, HttpServerRequest, HttpServerResponse};
+use crate::kinds::{HttpHeader, HttpRouterResult, HttpServerRequest, HttpServerResponse};
 use crate::server::HttpServerCapability;
 
 use super::bind_catch_all;
@@ -36,7 +36,7 @@ impl NativeActor for EchoHttpHandler {
     }
 
     #[handler::single]
-    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, request: HttpServerRequest) -> HttpRouterReply {
+    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, request: HttpServerRequest) -> HttpRouterResult {
         let headers = vec![
             HttpHeader { name: "x-aether-method".to_string(), value: format!("{:?}", request.method) },
             HttpHeader { name: "x-aether-path".to_string(), value: request.path.clone() },
@@ -44,7 +44,7 @@ impl NativeActor for EchoHttpHandler {
             HttpHeader { name: "x-aether-peer-addr".to_string(), value: request.peer_addr.clone() },
             HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() },
         ];
-        HttpRouterReply::Response(HttpServerResponse { status: 200, headers, body: request.body })
+        HttpRouterResult::Response(HttpServerResponse { status: 200, headers, body: request.body })
     }
 }
 
@@ -72,8 +72,8 @@ impl NativeActor for FixedBodyHttpHandler {
     }
 
     #[handler::single]
-    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterReply {
-        HttpRouterReply::Response(HttpServerResponse {
+    fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterResult {
+        HttpRouterResult::Response(HttpServerResponse {
             status: 200,
             headers: vec![HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() }],
             body: b"fixed body".to_vec(),
@@ -84,12 +84,12 @@ impl NativeActor for FixedBodyHttpHandler {
 /// Holds the request's reply, parks the ticket in its state, and closes
 /// itself before answering: the actor close that answers every live held
 /// reply with its `unanswered` value (ADR-0243 §1), which for
-/// `HttpRouterReply` is a `502`.
+/// `HttpRouterResult` is a `502`.
 pub struct ClosingHttpHandler;
 
 /// The held reply the closing handler never answers.
 pub struct ClosingHttpHandlerState {
-    parked: Option<Held<HttpRouterReply>>,
+    parked: Option<Held<HttpRouterResult>>,
 }
 
 #[actor(singleton, root, depends(HttpServerCapability))]
@@ -111,8 +111,8 @@ impl NativeActor for ClosingHttpHandler {
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
         _request: HttpServerRequest,
-    ) -> Pending<HttpRouterReply> {
-        let (pending, held) = ctx.hold::<HttpRouterReply>();
+    ) -> Pending<HttpRouterResult> {
+        let (pending, held) = ctx.hold::<HttpRouterResult>();
         state.parked = Some(held);
         ctx.shutdown();
         pending

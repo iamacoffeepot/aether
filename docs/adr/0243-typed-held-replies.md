@@ -168,7 +168,7 @@ held.answer(ctx, &WatchHeadResult { .. });
 
 - A deferred handler's row names its reply. The about 33 native manual sites, the two false `Silent` rows, and the three guest sites (#6960) cover protocol rows `-> R`, and `describe_component` / `describe_handlers` report their reply kind.
 - Answering with the wrong kind is a compile error, and answering twice cannot compile, because `answer` consumes the `Held<R>`. The existing runtime guarantees carry over: a lost reply fails fast, and a parked reply holds its chain open.
-- The HTTP router glue returns `-> Pending<HttpRouterReply>`. With the #6957 enum, `HttpRouter` becomes `fn request(mail: HttpServerRequest) -> HttpRouterReply`, and every HTTP handler is single.
+- The HTTP router glue returns `-> Pending<HttpRouterResult>`. With the #6957 enum, `HttpRouter` becomes `fn request(mail: HttpServerRequest) -> HttpRouterResult`, and every HTTP handler is single.
 
 ### Negative / limits
 

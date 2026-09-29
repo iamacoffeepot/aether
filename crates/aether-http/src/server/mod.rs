@@ -16,7 +16,7 @@
 //! to the inbound request), records the open response socket in an
 //! in-flight table keyed by the dispatch's correlation id, and subscribes
 //! to settlement of the dispatched root. The handler replies one
-//! [`HttpRouterReply`](crate::kinds::HttpRouterReply); the reply routes back
+//! [`HttpRouterResult`](crate::kinds::HttpRouterResult); the reply routes back
 //! to the dispatching shard, whose typed reply handler formats a buffered
 //! response and writes it to the held socket, or opens a response stream or
 //! a websocket. A response-less chain settles into `502`, a

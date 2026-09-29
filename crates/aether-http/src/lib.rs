@@ -50,7 +50,7 @@ pub use typed::{Ctx, FromPathSegment, FromRequest, Path, Route, route_matches, r
 // route that may defer returns, and the glue helpers the `#[http::router]` /
 // `#[http::reply]` macros emit calls to answer through the router's held
 // reply. `Pending` is re-exported so a router with a deferred route returns
-// `::aether_http::Pending<HttpRouterReply>`, a path whose last segment
+// `::aether_http::Pending<HttpRouterResult>`, a path whose last segment
 // `#[actor]` reads as a held reply. Re-exported here so the macros emit one
 // `::aether_http::…` path a consumer resolves through its existing
 // dependency. Runtime-only — the held reply is native.

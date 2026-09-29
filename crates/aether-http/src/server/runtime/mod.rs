@@ -302,7 +302,7 @@ impl NativeActor for HttpServerCapability {
     ///
     /// The handler arrives as a `ProtocolPath<HttpRouter>`, so the contextual
     /// decode already proved that the live route at the path takes
-    /// `aether.http.server.request` and replies `HttpRouterReply` (ADR-0231 §3);
+    /// `aether.http.server.request` and replies `HttpRouterResult` (ADR-0231 §3);
     /// `resolve` proves it still stands there, and the route holds that
     /// proof. Its erased twin is the identity the table, the monitors, and a
     /// departure are keyed by.
@@ -365,7 +365,7 @@ impl NativeActor for HttpServerCapability {
             return RegisterRouteResult::Err {
                 error: format!(
                     "{} does not cover HttpRouter: a route holder takes aether.http.server.request \
-                     and replies aether.http.server.router_reply",
+                     and replies aether.http.server.router_result",
                     ctx.actor_path(sender),
                 ),
             };

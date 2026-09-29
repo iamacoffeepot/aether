@@ -2,7 +2,7 @@
 //! recipe (issue 1762, ADR-0108). Not a demo, not exemplary — its only
 //! job is to prove the `aether.http.server` guest load path end to end:
 //! `HttpServerCapability` dispatches an `HttpServerRequest` here; this
-//! actor path-matches and replies `HttpRouterReply::Response`; the cap formats
+//! actor path-matches and replies `HttpRouterResult::Response`; the cap formats
 //! the HTTP/1.1 response and writes it to the client socket.
 //!
 //! Behaviour:
@@ -30,7 +30,7 @@ use aether_data::ErasedActorPath;
 use aether_http as http;
 use aether_http::HttpServerCapability;
 use aether_http::kinds::{
-    HttpResponseStreamOpen, HttpRouterReply, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
+    HttpResponseStreamOpen, HttpRouterResult, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
     RegisterRouteSelf, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use aether_http::{ResponseStream, WebSocketStream};
@@ -67,8 +67,8 @@ impl WasmActor for HttpHandler {
     /// Not sent manually — the `aether.http.server` cap dispatches it on
     /// every inbound request; this actor binds the `/` catch-all in `wire`.
     #[handler::single]
-    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpRouterReply {
-        HttpRouterReply::Response(HttpServerResponse {
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpRouterResult {
+        HttpRouterResult::Response(HttpServerResponse {
             status: 200,
             headers: Vec::new(),
             body: format!("hello from aether: {}", req.path).into_bytes(),
@@ -160,7 +160,7 @@ impl StreamProgress {
 }
 
 /// Reference response-streaming handler fixture (ADR-0128) for the
-/// `serving-http` streaming e2e test. It replies `HttpRouterReply::Stream`
+/// `serving-http` streaming e2e test. It replies `HttpRouterResult::Stream`
 /// instead of `HttpServerResponse`, emits `STREAM_CHUNK_COUNT` chunks paced
 /// against the cap's `HttpStreamCredit` grants, and terminates with
 /// `HttpResponseStreamEnd`. Each chunk is `"chunk-{i}\n"`, so the client
@@ -192,8 +192,8 @@ impl WasmActor for StreamingHttpHandler {
     /// Not sent manually — the `aether.http.server` cap dispatches it on
     /// every inbound request; this actor binds the `/` catch-all in `wire`.
     #[handler::single]
-    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterReply {
-        HttpRouterReply::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterResult {
+        HttpRouterResult::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
     }
 
     /// Spend the granted credit: emit up to `credit.credit` more chunks, then
@@ -249,11 +249,11 @@ impl WasmActor for WebSocketHandler {
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches an
     /// `HttpServerRequest` for a websocket upgrade; replying
-    /// `HttpRouterReply::WebSocket` completes the handshake,
-    /// `HttpRouterReply::Response` declines it.
+    /// `HttpRouterResult::WebSocket` completes the handshake,
+    /// `HttpRouterResult::Response` declines it.
     #[handler::single]
-    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterReply {
-        HttpRouterReply::WebSocket(WebSocketAccept { subprotocol: None, headers: Vec::new() })
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterResult {
+        HttpRouterResult::WebSocket(WebSocketAccept { subprotocol: None, headers: Vec::new() })
     }
 
     /// Echo one inbound message back to the peer by its `stream_id`
@@ -386,7 +386,7 @@ impl WasmActor for RoutedHttpHandler {
 /// route** (ADR-0128 streaming × ADR-0131 route dispatch). It claims
 /// `/routed-stream` for its own mailbox with a raw `RegisterRouteSelf` from
 /// `wire`, then behaves exactly like [`StreamingHttpHandler`]: replies
-/// `HttpRouterReply::Stream` and emits `STREAM_CHUNK_COUNT` credit-paced
+/// `HttpRouterResult::Stream` and emits `STREAM_CHUNK_COUNT` credit-paced
 /// `"chunk-{i}\n"` chunks. Unlike the other fixtures it does **not** claim
 /// the `/` catch-all, so a `/routed-stream` request can only reach it via
 /// the specific route it registered — the initial response-stream credit
@@ -427,8 +427,8 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// request matching the `/routed-stream` route this actor claimed in
     /// `wire`.
     #[handler::single]
-    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterReply {
-        HttpRouterReply::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterResult {
+        HttpRouterResult::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
     }
 
     /// Spend the granted credit exactly as [`StreamingHttpHandler`] does. On

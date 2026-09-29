@@ -17,7 +17,7 @@
 #[allow(clippy::wildcard_imports)]
 use crate::server::runtime::*;
 
-use crate::kinds::{HttpInboundReady, HttpRouterReply};
+use crate::kinds::{HttpInboundReady, HttpRouterResult};
 use aether_actor::runtime;
 use aether_data::RequestId;
 
@@ -265,7 +265,7 @@ impl NativeActor for HttpDispatchShard {
     /// [`Self::on_websocket_message`]), keyed by their explicit `stream_id`
     /// payload — a second correlation regime living beside this one.
     #[handler::single]
-    fn on_router_reply(state: &mut Self::State, ctx: &mut NativeCtx<'_>, reply: HttpRouterReply) {
+    fn on_router_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, reply: HttpRouterResult) {
         let Some(RequestId(correlation)) = ctx.in_reply_to() else {
             return;
         };
@@ -273,9 +273,9 @@ impl NativeActor for HttpDispatchShard {
             return;
         };
         match reply {
-            HttpRouterReply::Response(response) => state.finish_buffered(correlation, pending, &response),
-            HttpRouterReply::Stream(open) => state.open_stream(ctx, correlation, pending.conn_id, &open),
-            HttpRouterReply::WebSocket(accept) => {
+            HttpRouterResult::Response(response) => state.finish_buffered(correlation, pending, &response),
+            HttpRouterResult::Stream(open) => state.open_stream(ctx, correlation, pending.conn_id, &open),
+            HttpRouterResult::WebSocket(accept) => {
                 state.accept_websocket(ctx, correlation, pending.conn_id, pending.handler, &accept);
             }
         }

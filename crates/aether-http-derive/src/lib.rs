@@ -10,7 +10,7 @@
 //! the methods, groups the routes sharing a `(static-head, method)` claim,
 //! emits one `#[handler::single]` over `HttpServerRequest` for the whole
 //! router (the one row of the `HttpRouter` protocol every route holder
-//! covers, replying `HttpRouterReply`), injects one `RegisterRouteSelf`
+//! covers, replying `HttpRouterResult`), injects one `RegisterRouteSelf`
 //! registration per group into `wire`, and hands `#[actor]` an ordinary impl
 //! block.
 //!
@@ -20,12 +20,12 @@
 //! group's templates, most specific first, matching path segments, binding
 //! `{capture}` segments through `FromPathSegment`, and running `FromRequest`
 //! extractors. Every answer, a route's response, a bind failure's, or the
-//! `404` when no group or template matches, is an `HttpRouterReply::Response`.
+//! `404` when no group or template matches, is an `HttpRouterResult::Response`.
 //!
 //! The handler's return depends on whether any route returns `http::Outcome`
-//! (ADR-0154 §2, native only). With none, it returns `HttpRouterReply`, and
+//! (ADR-0154 §2, native only). With none, it returns `HttpRouterResult`, and
 //! every arm returns its reply. With one, it returns
-//! `Pending<HttpRouterReply>` (ADR-0243 §2): a deferred route's
+//! `Pending<HttpRouterResult>` (ADR-0243 §2): a deferred route's
 //! `ctx.defer(..).to::<R>()` holds the reply and its receipt is returned, and
 //! every synchronous arm holds and answers at once. A `#[http::reply]` method
 //! maps a deferred route's downstream reply into the response, and its
@@ -766,10 +766,10 @@ fn parse_return_kind(output: &ReturnType) -> syn::Result<bool> {
 /// `http::Outcome`.
 #[derive(Clone, Copy)]
 enum Answer {
-    /// No route defers: the handler returns `HttpRouterReply` and every arm
+    /// No route defers: the handler returns `HttpRouterResult` and every arm
     /// returns its reply.
     Direct,
-    /// A route defers: the handler returns `Pending<HttpRouterReply>`, a
+    /// A route defers: the handler returns `Pending<HttpRouterResult>`, a
     /// deferred route hands back its held reply's receipt, and every
     /// synchronous arm holds and answers at once (ADR-0243 §2).
     Held,
@@ -779,15 +779,15 @@ impl Answer {
     /// The handler's return type.
     fn return_type(self) -> TokenStream2 {
         match self {
-            Self::Direct => quote! { ::aether_http::kinds::HttpRouterReply },
-            Self::Held => quote! { ::aether_http::Pending<::aether_http::kinds::HttpRouterReply> },
+            Self::Direct => quote! { ::aether_http::kinds::HttpRouterResult },
+            Self::Held => quote! { ::aether_http::Pending<::aether_http::kinds::HttpRouterResult> },
         }
     }
 
     /// The handler's answer with the `HttpServerResponse` value `response`.
     fn respond(self, response: &TokenStream2) -> TokenStream2 {
         match self {
-            Self::Direct => quote! { ::aether_http::kinds::HttpRouterReply::Response(#response) },
+            Self::Direct => quote! { ::aether_http::kinds::HttpRouterResult::Response(#response) },
             Self::Held => quote! { ::aether_http::answer_now(__aether_ctx, #response) },
         }
     }
@@ -799,8 +799,8 @@ impl Answer {
 /// then tries that group's templates most-specific first: matching literals,
 /// binding captures through `FromPathSegment`, running `FromRequest`
 /// extractors, and calling the matched route. A request no group or template
-/// matches answers `404`. Its return is `HttpRouterReply`, or
-/// `Pending<HttpRouterReply>` when a route returns `http::Outcome`.
+/// matches answers `404`. Its return is `HttpRouterResult`, or
+/// `Pending<HttpRouterResult>` when a route returns `http::Outcome`.
 fn emit_router_glue(groups: &[Group<'_>], first: &Routed) -> TokenStream2 {
     let glue_first = match &first.call_style {
         CallStyle::SelfReceiver => {

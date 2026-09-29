@@ -88,7 +88,7 @@ impl HttpShardState {
     }
 
     /// Promote a buffered request to a response stream on the handler's
-    /// `HttpRouterReply::Stream` reply (ADR-0128): drop its
+    /// `HttpRouterResult::Stream` reply (ADR-0128): drop its
     /// in-flight entry so the settlement safety net no longer trips `502` on
     /// this chain, write the chunked response head, spawn the per-connection
     /// writer thread, and grant the handler its initial credit window.
