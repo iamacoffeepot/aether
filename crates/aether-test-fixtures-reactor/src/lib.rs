@@ -5,12 +5,14 @@
 //! generates one root at [`aether_bloomery_kinds::BUNDLE_NAMESPACE`]. Load it
 //! under the journal artifact digest with empty config.
 
+use std::collections::BTreeMap;
+
 use core::error::Error;
 use core::fmt;
 
 use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Seq, SetHead, Tree};
 use aether_bloomery_reactor::{And, Guard, reactor};
-use aether_bloomery_view::{Heads, Publish, PublishError, View};
+use aether_bloomery_view::{Heads, Publish, PublishError, View, ViewCursor, view};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
 use aether_test_fixtures_kinds::REACTOR_FOLD_FAIL_KIND;
 
@@ -76,14 +78,39 @@ impl Publish for FoldTally {
     }
 }
 
+/// Generated aggregate shared by both reactor guards.
+#[derive(Default)]
+struct AuthoredMoves {
+    cursor: ViewCursor,
+    by_head: BTreeMap<String, u64>,
+}
+
+#[view(cursor = cursor)]
+impl View for AuthoredMoves {
+    #[fold]
+    fn moved(&mut self, event: HeadMoved<Tree>) {
+        *self.by_head.entry(event.head().as_str().to_owned()).or_default() += 1;
+    }
+}
+
+impl AuthoredMoves {
+    fn count(&self, head: &Head<Tree>) -> u64 {
+        self.by_head.get(head.as_str()).copied().unwrap_or_default()
+    }
+}
+
 /// Declines until the `current` program head is bound.
 struct CurrentCompilation;
 
 impl Guard<HeadMoved<Tree>> for CurrentCompilation {
-    type Views = And<Heads, FoldTally>;
+    type Views = And<Heads, And<FoldTally, AuthoredMoves>>;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, (heads, _tally): (&Heads, &FoldTally)) -> Option<Self> {
-        heads.get(&CURRENT).map(|_| Self)
+    fn resolve(
+        trigger: &HeadMoved<Tree>,
+        (heads, (_tally, moves)): (&Heads, (&FoldTally, &AuthoredMoves)),
+    ) -> Option<Self> {
+        heads.get(&CURRENT)?;
+        (moves.count(trigger.head()) == 1).then_some(Self)
     }
 }
 
@@ -91,10 +118,10 @@ impl Guard<HeadMoved<Tree>> for CurrentCompilation {
 struct FoldAdvanced;
 
 impl Guard<HeadMoved<Tree>> for FoldAdvanced {
-    type Views = FoldTally;
+    type Views = And<FoldTally, AuthoredMoves>;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, tally: &FoldTally) -> Option<Self> {
-        (tally.cursor.0 > 0).then_some(Self)
+    fn resolve(trigger: &HeadMoved<Tree>, (tally, moves): (&FoldTally, &AuthoredMoves)) -> Option<Self> {
+        (tally.cursor.0 > 0 && moves.count(trigger.head()) > 0).then_some(Self)
     }
 }
 

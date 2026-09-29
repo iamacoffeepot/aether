@@ -8,6 +8,7 @@ description = "Typed last-move Heads fold over supplied journal entries, with op
 
 [dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-view-derive = { path = "../aether-bloomery-view-derive" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 
 [dev-dependencies]
