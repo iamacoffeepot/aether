@@ -255,13 +255,12 @@ const MAX_CHUNK_TRAILERS: usize = MAX_HEADER_COUNT;
 /// shared set, ADR-0136). A request matching no route resolves to
 /// [`NoHandler`](ReaderResolution::NoHandler) — the catch-all is just a
 /// `prefix: "/"` route registration (ADR-0130), not a config knob.
-/// `streaming` is the resolved handler's accept-set verdict on
-/// [`HttpRequestStreamOpen`] — the same structural opt-in the
-/// dispatcher used to read.
+/// Whether the body streams is the member's [`RequestStreamRouter`] cast,
+/// made when its route was registered, so no request reads the registry
+/// for it.
 enum ReaderResolution {
-    /// A live handler: the dispatch target and whether it takes the
-    /// streamed body path.
-    Live { handler: ProtocolRef<HttpRouter>, streaming: bool },
+    /// A live member: the dispatch target and its data-phase casts.
+    Live { member: RouteMember },
     /// A route matched but no member of its set is live — `503`, never
     /// silently rerouted (that would reroute a claimed family).
     Dead,
@@ -280,7 +279,7 @@ fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, meth
                 let mut live = None;
                 for offset in 0..len {
                     let member = route.members[(start + offset) % len];
-                    if shared.probe.is_live(member.erase()) {
+                    if shared.probe.is_live(member.router.erase()) {
                         live = Some(member);
                         break;
                     }
@@ -293,10 +292,7 @@ fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, meth
             None => None,
         }
     };
-    picked.map_or(ReaderResolution::NoHandler, |handler| ReaderResolution::Live {
-        handler,
-        streaming: shared.probe.accepts(handler.erase(), <HttpRequestStreamOpen as Kind>::ID),
-    })
+    picked.map_or(ReaderResolution::NoHandler, |member| ReaderResolution::Live { member })
 }
 
 /// Re-arm the socket read timeout to `want` if it differs from `current`,
@@ -452,8 +448,8 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
             return;
         };
         let resolution = resolve_at_reader(shared, &mut route_cursor, &head.path, method);
-        let (handler, streaming) = match resolution {
-            ReaderResolution::Live { handler, streaming } => (handler, streaming),
+        let member = match resolution {
+            ReaderResolution::Live { member } => member,
             ReaderResolution::Dead => {
                 reject_and_close(&mut stream, sink, conn_id, 503, "routed handler gone");
                 return;
@@ -480,13 +476,13 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
             None
         };
         // Whether this request will be buffered rather than streamed: a
-        // websocket upgrade always buffers (line ~594 forces the
-        // `else`-branch below) regardless of the `streaming` flag; a
-        // non-upgrade request buffers unless it is both streaming-capable
-        // and not an upgrade (the ADR-0128 streaming exemption). Shared by
+        // websocket upgrade always buffers (the body read below forces the
+        // `else`-branch) regardless of the member's request-stream cast; a
+        // non-upgrade request buffers unless the member covers
+        // `RequestStreamRouter` (the ADR-0128 streaming exemption). Shared by
         // both the framing rejects and the body-size cap below so the two
         // checks read off one determinant.
-        let will_buffer = ws_key.is_some() || !streaming;
+        let will_buffer = ws_key.is_some() || member.request_stream.is_none();
         // Framing rejects, applied on every path — upgrade included
         // (ADR-0128 + ADR-0129): a websocket handshake carries no body
         // (RFC 6455), so a smuggling shape or a lone `chunked` body on an
@@ -534,7 +530,9 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
         // streaming handlers). Then Phase 3: wait for the response
         // deadline. Both paths leave the reader ready to loop with the
         // over-read (pipelined) bytes in `next_buf`, or return to close.
-        let next_buf = if streaming && ws_key.is_none() {
+        let next_buf = if let Some(handler) = member.request_stream
+            && ws_key.is_none()
+        {
             let parsed_head = ParsedHead {
                 method: head.method.clone(),
                 path: head.path.clone(),
@@ -543,7 +541,7 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
                 framing: head.framing,
                 keep_alive,
             };
-            if !sink.post(InboundEvent::RequestHeadParsed { conn_id, head: parsed_head, handler: handler.erase() }) {
+            if !sink.post(InboundEvent::RequestHeadParsed { conn_id, head: parsed_head, member, handler }) {
                 return;
             }
             // A timeout means the shard never answered (wedged / torn
@@ -587,7 +585,7 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
                     if !sink.post(InboundEvent::RequestParsed(PreparedRequest {
                         conn_id,
                         payload,
-                        handler,
+                        handler: member,
                         method,
                         keep_alive,
                         ws_key,

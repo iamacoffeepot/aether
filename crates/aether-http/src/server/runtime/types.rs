@@ -18,8 +18,9 @@ pub type SharedRoutes = Arc<RwLock<RouteTable>>;
 /// decision itself (ADR-0135 §2): the shared route table, the connection's
 /// peer string (captured once at adoption; every request's `peer_addr`
 /// clones it on the reader thread rather than the shard), and the probe
-/// route resolution reads the matched member's liveness and streamed-body
-/// acceptance through, over its proven reference (ADR-0230).
+/// route resolution reads the matched member's liveness through, over its
+/// proven reference (ADR-0230). Whether the body streams is the member's
+/// own registration-time cast, never a probe read.
 pub struct ReaderShared {
     pub routes: SharedRoutes,
     pub peer: String,
@@ -124,12 +125,13 @@ pub enum ReaderControl {
 /// A complete, size-bounded buffered request the reader resolved and
 /// encoded (ADR-0135 §2): `payload` is the ready-to-send
 /// `HttpServerRequest`, typed by the kind it encodes, and `handler` the
-/// route holder's `HttpRouter` proof; the shard's dispatch is send +
-/// settlement-subscribe + in-flight insert.
+/// route member, whose `HttpRouter` proof takes the request and whose
+/// data-phase casts serve a `Stream` or `WebSocket` reply; the shard's
+/// dispatch is send + settlement-subscribe + in-flight insert.
 pub struct PreparedRequest {
     pub conn_id: ConnId,
     pub payload: Encoded<HttpServerRequest>,
-    pub handler: ProtocolRef<HttpRouter>,
+    pub handler: RouteMember,
     pub method: HttpMethod,
     pub keep_alive: bool,
     /// `Some` on a websocket upgrade handshake (ADR-0129) the
@@ -146,11 +148,17 @@ pub enum InboundEvent {
     /// The accept thread took a new connection.
     PeerAccepted { stream: TcpStream, peer: SocketAddr },
     /// A reader parsed a request head bound for a *streaming* handler
-    /// (ADR-0128 / ADR-0135 §2): the reader already resolved `handler`
-    /// and read its accept-set; the shard opens the inbound request
-    /// stream and replies [`ReaderControl::Stream`] down the control
-    /// channel. Buffered requests never take this round trip.
-    RequestHeadParsed { conn_id: ConnId, head: ParsedHead, handler: ErasedActorRef },
+    /// (ADR-0128 / ADR-0135 §2): the reader already resolved `member`
+    /// and unwrapped its [`RequestStreamRouter`] cast into `handler`; the
+    /// shard opens the inbound request stream and replies
+    /// [`ReaderControl::Stream`] down the control channel. Buffered
+    /// requests never take this round trip.
+    RequestHeadParsed {
+        conn_id: ConnId,
+        head: ParsedHead,
+        member: RouteMember,
+        handler: ProtocolRef<RequestStreamRouter>,
+    },
     /// A complete, size-bounded buffered request, resolved and encoded
     /// at the reader (ADR-0135 §2).
     RequestParsed(PreparedRequest),
@@ -255,9 +263,11 @@ pub struct ConnState {
 /// `stream_id` in [`HttpShardState::streams`]; `handler` is the
 /// actor each inbound message is dispatched to.
 pub struct WsConn {
-    /// The handler resolved at handshake — inbound messages dispatch here,
-    /// and outbound credit grants address it.
-    pub handler: ErasedActorRef,
+    /// The handler resolved at handshake, cast to [`WebSocketRouter`] when
+    /// its route was registered — inbound messages and the peer's close
+    /// dispatch here. Its credit grants go through the stream's
+    /// [`StreamState::handler`].
+    pub handler: ProtocolRef<WebSocketRouter>,
     /// The `stream_id` of this connection's outbound writer [`StreamState`].
     pub stream_id: u64,
 }
@@ -265,7 +275,8 @@ pub struct WsConn {
 /// Bookkeeping for one in-flight request. Looked up by the dispatch's
 /// auto-minted `correlation_id` (== the dispatched envelope's
 /// `MailId.correlation_id`, which is also the root id since the cap
-/// always dispatches via `send_envelope_detached_to`).
+/// always dispatches on a fresh chain, `send_encoded_detached_to` for a
+/// buffered request and `send_detached_to` for a stream's terminator).
 #[derive(Copy, Clone)]
 pub struct PendingRequest {
     pub conn_id: ConnId,
@@ -276,10 +287,11 @@ pub struct PendingRequest {
     /// `Connection: keep-alive` and resumes the reader) rather than
     /// closing it. Set from the [`ParsedHead`] at dispatch.
     pub keep_alive: bool,
-    /// The handler this request dispatched to. Carried so a `WebSocketAccept`
-    /// reply (ADR-0129) resolves the same handler for the upgraded
-    /// connection's inbound dispatch + credit grants without re-resolving.
-    pub handler: ErasedActorRef,
+    /// The route member this request dispatched to. Carried so a `Stream`
+    /// or `WebSocketAccept` reply (ADR-0128, ADR-0129) reaches the same
+    /// holder's data-phase casts for credit grants and the upgraded
+    /// connection's inbound dispatch without re-resolving.
+    pub handler: RouteMember,
 }
 
 /// Per-connection response-stream state (ADR-0128), keyed in
@@ -292,11 +304,12 @@ pub struct StreamState {
     pub conn_id: ConnId,
     /// The handler this stream's credit grants address. For a response stream
     /// (ADR-0128) it is the registrant of the matched route (ADR-0130); for a
-    /// websocket (ADR-0129) it is the handler resolved at handshake. Stored so
-    /// credit replenishment addresses the right actor without a re-lookup.
-    /// `None` for a response stream whose in-flight record was already gone
-    /// at open, which then grants no credit.
-    pub handler: Option<ErasedActorRef>,
+    /// websocket (ADR-0129) it is the handler resolved at handshake. Either
+    /// way it is that holder's [`StreamCreditRouter`] cast from registration,
+    /// stored so credit replenishment addresses the right actor without a
+    /// re-lookup. `None` for a response stream whose in-flight record was
+    /// already gone at open, which then grants no credit.
+    pub handler: Option<ProtocolRef<StreamCreditRouter>>,
     /// Bounded hand-off to the writer thread. `try_send` never blocks the
     /// dispatcher: the credit accounting keeps the invariant
     /// `credit_outstanding + queued <= window`, so a slot is always free when
@@ -341,9 +354,13 @@ pub struct RequestStreamState {
     /// stream by connection through this field.
     pub conn_id: ConnId,
     /// The resolved handler the cap delivers `HttpRequestChunk` /
-    /// `HttpRequestStreamEnd` to. Captured at stream open so mid-stream
-    /// delivery skips route re-resolution.
-    pub handler: ErasedActorRef,
+    /// `HttpRequestStreamEnd` to, the route member's [`RequestStreamRouter`]
+    /// cast. Captured at stream open so mid-stream delivery skips route
+    /// re-resolution.
+    pub handler: ProtocolRef<RequestStreamRouter>,
+    /// The route member the stream belongs to, carried to the final
+    /// response's [`PendingRequest`].
+    pub member: RouteMember,
     /// The request method, carried to the final response's [`PendingRequest`]
     /// so a HEAD response suppresses its body.
     pub method: HttpMethod,
@@ -408,7 +425,7 @@ pub struct ShardSink {
     /// The shard's wake-coalescing flag, shared with its own sidecar sinks.
     pub dirty: Arc<AtomicBool>,
     /// The shard, proven by its `SpawnOutcome`.
-    pub shard: ErasedActorRef,
+    pub shard: ActorRef<HttpDispatchShard>,
 }
 
 impl ShardSink {

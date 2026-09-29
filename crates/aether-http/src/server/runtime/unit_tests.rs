@@ -380,16 +380,23 @@ fn config_layer_defaults_match_the_named_consts() {
 /// pinned deterministically, with no dependence on the order two
 /// independent actors' registration mail happens to reach the table.
 mod route_registration {
-    use super::super::RouteTable;
+    use super::super::{RouteMember, RouteTable};
     use super::{
         Arc, ErasedActorRef, RegisterRouteResult, RwLock, SharedRoutes, register_route, unregister_route,
         unregister_routes_all,
     };
-    use crate::kinds::HttpMethod;
+    use crate::kinds::{HttpMethod, HttpRouter};
     use crate::server::tests::handlers::router_holders as holders;
+    use aether_actor::ProtocolRef;
 
     fn fresh_routes() -> SharedRoutes {
         Arc::new(RwLock::new(RouteTable::default()))
+    }
+
+    /// The route member for a holder that covers only `HttpRouter`, as the
+    /// fixture handlers do: no data-phase cast.
+    fn member(router: ProtocolRef<HttpRouter>) -> RouteMember {
+        RouteMember { router, credit: None, request_stream: None, websocket: None }
     }
 
     #[track_caller]
@@ -414,7 +421,7 @@ mod route_registration {
         let table = routes.read().expect("route table lock");
         assert_eq!(table.routes.len(), 1, "expected exactly one route, got {}", table.routes.len());
         let route = table.routes.values().next().expect("one route");
-        let snapshot = (route.members.iter().map(|member| member.erase()).collect(), route.shared);
+        let snapshot = (route.members.iter().map(|member| member.router.erase()).collect(), route.shared);
         drop(table);
         snapshot
     }
@@ -431,8 +438,8 @@ mod route_registration {
         let routes = fresh_routes();
         let (_chassis, first, second) = holders();
 
-        expect_ok(register_route(&routes, "/dup", None, first, false));
-        expect_err_containing(register_route(&routes, "/dup", None, second, false), "already claimed by");
+        expect_ok(register_route(&routes, "/dup", None, member(first), false));
+        expect_err_containing(register_route(&routes, "/dup", None, member(second), false), "already claimed by");
 
         assert_eq!(only_route(&routes), (vec![first.erase()], false));
     }
@@ -446,8 +453,8 @@ mod route_registration {
         let routes = fresh_routes();
         let (_chassis, holder, _) = holders();
 
-        expect_ok(register_route(&routes, "/dup", None, holder, false));
-        expect_ok(register_route(&routes, "/dup", None, holder, false));
+        expect_ok(register_route(&routes, "/dup", None, member(holder), false));
+        expect_ok(register_route(&routes, "/dup", None, member(holder), false));
 
         assert_eq!(only_route(&routes), (vec![holder.erase()], false));
     }
@@ -460,8 +467,8 @@ mod route_registration {
         let routes = fresh_routes();
         let (_chassis, a, b) = holders();
 
-        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Get), a, false));
-        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Post), b, false));
+        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Get), member(a), false));
+        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Post), member(b), false));
 
         assert_eq!(routes.read().expect("route table lock").routes.len(), 2);
     }
@@ -475,14 +482,14 @@ mod route_registration {
         // Shared claim onto an exclusive key: rejected, stays exclusive.
         let excl = fresh_routes();
         let (_chassis, a, b) = holders();
-        expect_ok(register_route(&excl, "/k", None, a, false));
-        expect_err_containing(register_route(&excl, "/k", None, b, true), "exclusively claimed");
+        expect_ok(register_route(&excl, "/k", None, member(a), false));
+        expect_err_containing(register_route(&excl, "/k", None, member(b), true), "exclusively claimed");
         assert_eq!(only_route(&excl), (vec![a.erase()], false));
 
         // Exclusive claim onto a shared key: rejected, stays shared.
         let shared = fresh_routes();
-        expect_ok(register_route(&shared, "/k", None, a, true));
-        expect_err_containing(register_route(&shared, "/k", None, b, false), "shared member set");
+        expect_ok(register_route(&shared, "/k", None, member(a), true));
+        expect_err_containing(register_route(&shared, "/k", None, member(b), false), "shared member set");
         assert_eq!(only_route(&shared), (vec![a.erase()], true));
     }
 
@@ -495,10 +502,10 @@ mod route_registration {
         let routes = fresh_routes();
         let (_chassis, a, b) = holders();
 
-        expect_ok(register_route(&routes, "/pool", None, a, true));
-        expect_ok(register_route(&routes, "/pool", None, b, true));
+        expect_ok(register_route(&routes, "/pool", None, member(a), true));
+        expect_ok(register_route(&routes, "/pool", None, member(b), true));
         // Idempotent re-registration of an existing member.
-        expect_ok(register_route(&routes, "/pool", None, a, true));
+        expect_ok(register_route(&routes, "/pool", None, member(a), true));
 
         assert_eq!(only_route(&routes), (vec![a.erase(), b.erase()], true));
 
@@ -516,8 +523,8 @@ mod route_registration {
     fn unregister_releases_members_and_drops_empty_routes() {
         let routes = fresh_routes();
         let (_chassis, a, b) = holders();
-        expect_ok(register_route(&routes, "/pool", None, a, true));
-        expect_ok(register_route(&routes, "/pool", None, b, true));
+        expect_ok(register_route(&routes, "/pool", None, member(a), true));
+        expect_ok(register_route(&routes, "/pool", None, member(b), true));
 
         // One member leaves; the set survives with the rest.
         expect_ok(unregister_route(&routes, "/pool", None, a.erase()));
@@ -528,8 +535,8 @@ mod route_registration {
         assert!(routes.read().expect("route table lock").routes.is_empty());
 
         // unregister_routes_all clears every route the holder holds.
-        expect_ok(register_route(&routes, "/x", None, a, false));
-        expect_ok(register_route(&routes, "/y", None, a, false));
+        expect_ok(register_route(&routes, "/x", None, member(a), false));
+        expect_ok(register_route(&routes, "/y", None, member(a), false));
         unregister_routes_all(&routes, a.erase());
         assert!(routes.read().expect("route table lock").routes.is_empty());
     }
@@ -542,12 +549,13 @@ mod shard_startup {
     //! owner/activation/task turns.
 
     use super::super::{
-        Arc, HttpServerConfig, HttpSupervisorState, InboundEvent, PendingPeer, ShardSettlement, ShardSink, ShardSlot,
-        ShardStartup,
+        Arc, HttpDispatchShard, HttpServerConfig, HttpSupervisorState, InboundEvent, PendingPeer, ShardSettlement,
+        ShardSink, ShardSlot, ShardStartup,
     };
     use super::{Supervisor, boot_supervisor};
-    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
-    use aether_substrate::testing::registered_ref;
+    use aether_substrate::Subname;
+    use aether_substrate::chassis::builder::PassiveChassis;
+    use aether_substrate::testing::TestChassis;
     use std::collections::VecDeque;
     use std::io::Read;
     use std::iter::once;
@@ -564,15 +572,18 @@ mod shard_startup {
         (PendingPeer { stream, peer }, client)
     }
 
-    fn discharging() -> Arc<dyn InboxHandler> {
-        Arc::new(|dispatch: OwnedDispatch| dispatch.discharge())
-    }
-
-    /// A shard sink over a test-local inbox, proven the way the shard's
-    /// `SpawnOutcome` hands the supervisor its proof.
-    fn sink(registry: &Registry, name: &str) -> (ShardSink, mpsc::Receiver<InboundEvent>) {
+    /// A shard sink over a test-owned channel, joined with the proof of a
+    /// real dispatch shard spawned from the seed the supervisor builds, as the
+    /// shard's `SpawnOutcome` hands the supervisor its proof. The shard drains
+    /// its own channel, so every event a test posts stays on the returned
+    /// receiver.
+    fn sink(chassis: &PassiveChassis<TestChassis>, subname: &str) -> (ShardSink, mpsc::Receiver<InboundEvent>) {
         let (inbound_tx, inbound_rx) = mpsc::channel();
-        let shard = registered_ref(registry, name, discharging());
+        let (seed, _channel) = HttpSupervisorState::disabled(config(8)).shard_seed();
+        let shard = chassis
+            .spawn_actor_for_test::<HttpDispatchShard>(Subname::Named(subname), seed, ())
+            .finish()
+            .expect("the test dispatch shard spawns");
 
         (ShardSink { inbound_tx, dirty: Arc::new(AtomicBool::new(false)), shard }, inbound_rx)
     }
@@ -627,8 +638,8 @@ mod shard_startup {
         let (third, third_client) = socket_pair();
         let expected = [first.peer, second.peer, third.peer];
         let mut supervisor = booted_starting(8, 3, [first, second, third].into_iter().collect());
-        let (sink_zero, rx_zero) = sink(&supervisor.registry, "test.http.shard-zero");
-        let (sink_two, rx_two) = sink(&supervisor.registry, "test.http.shard-two");
+        let (sink_zero, rx_zero) = sink(&supervisor.chassis, "test-zero");
+        let (sink_two, rx_two) = sink(&supervisor.chassis, "test-two");
 
         let early = supervisor.slot.host_turn(|state, ctx| {
             let settled = state.finish_shard_spawn(2, Some(sink_two));
@@ -665,9 +676,9 @@ mod shard_startup {
     /// remaining index settles.
     #[test]
     fn duplicate_completion_cannot_finish_startup_twice() {
-        let registry = Registry::new();
+        let supervisor = boot_supervisor(config(8));
         let mut state = starting_state(2, VecDeque::new());
-        let (sink_zero, _rx_zero) = sink(&registry, "test.http.duplicate-zero");
+        let (sink_zero, _rx_zero) = sink(&supervisor.chassis, "test-duplicate-zero");
 
         assert!(matches!(state.finish_shard_spawn(0, Some(sink_zero)), ShardSettlement::Pending));
         assert!(matches!(state.finish_shard_spawn(0, None), ShardSettlement::Stale));

@@ -156,9 +156,9 @@ pub struct HttpShardState {
     /// `request_timeout`, which stays the in-flight read + response
     /// deadline.
     pub keep_alive_timeout: Duration,
-    /// Answers the reader threads' two route questions over the matched
-    /// member's proven reference — whether it is `Live` and whether it takes
-    /// the streamed body (ADR-0135 §2, ADR-0230). Every reader gets a clone.
+    /// Answers the reader threads' route question over the matched member's
+    /// proven reference — whether it is `Live` (ADR-0135 §2, ADR-0230).
+    /// Every reader gets a clone.
     pub probe: ActorProbe,
     /// Wakes this shard; every reader and writer sink holds a clone.
     pub wake: SelfWake<HttpInboundReady>,
@@ -284,27 +284,11 @@ impl HttpSupervisorState {
             return false;
         };
 
-        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
-        let wake_dirty = Arc::new(AtomicBool::new(false));
-        let seed = HttpShardSeed {
-            inbound_rx: Some(inbound_rx),
-            inbound_tx: inbound_tx.clone(),
-            wake_dirty: Arc::clone(&wake_dirty),
-            routes: Arc::clone(&self.routes),
-            live_connections: Arc::clone(&self.live_connections),
-            max_request_bytes: self.config.max_request_bytes,
-            max_header_bytes: self.config.max_header_bytes,
-            request_timeout: Duration::from_millis(self.config.request_timeout_millis),
-            keep_alive_timeout: Duration::from_millis(self.config.keep_alive_timeout_millis),
-            ws_idle_timeout: Duration::from_millis(self.config.websocket_idle_timeout_millis),
-            response_stream_window: self.config.response_stream_window,
-            request_stream_window: self.config.request_stream_window,
-            next_stream_id: Arc::clone(&self.next_stream_id),
-        };
+        let (seed, channel) = self.shard_seed();
         if let ShardStartup::Starting { slots_by_index, .. } = &mut self.shard_startup
             && let Some(slot) = slots_by_index.get_mut(index)
         {
-            *slot = ShardSlot::Staged(ShardChannel { inbound_tx, wake_dirty });
+            *slot = ShardSlot::Staged(channel);
         }
         let subname = shard_subname(index);
         let key = ShardSpawnKey { index: index as u64 };
@@ -330,10 +314,34 @@ impl HttpSupervisorState {
         true
     }
 
+    /// A fresh dispatch shard's boot seed over this supervisor's shared
+    /// tables and tuning, beside the channel the supervisor keeps to reach it.
+    pub fn shard_seed(&self) -> (HttpShardSeed, ShardChannel) {
+        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
+        let wake_dirty = Arc::new(AtomicBool::new(false));
+        let seed = HttpShardSeed {
+            inbound_rx: Some(inbound_rx),
+            inbound_tx: inbound_tx.clone(),
+            wake_dirty: Arc::clone(&wake_dirty),
+            routes: Arc::clone(&self.routes),
+            live_connections: Arc::clone(&self.live_connections),
+            max_request_bytes: self.config.max_request_bytes,
+            max_header_bytes: self.config.max_header_bytes,
+            request_timeout: Duration::from_millis(self.config.request_timeout_millis),
+            keep_alive_timeout: Duration::from_millis(self.config.keep_alive_timeout_millis),
+            ws_idle_timeout: Duration::from_millis(self.config.websocket_idle_timeout_millis),
+            response_stream_window: self.config.response_stream_window,
+            request_stream_window: self.config.request_stream_window,
+            next_stream_id: Arc::clone(&self.next_stream_id),
+        };
+
+        (seed, ShardChannel { inbound_tx, wake_dirty })
+    }
+
     /// The sink of the staged shard at `index`, now that its birth proved
     /// `shard`: the channel its slot kept, joined with the proof. `None` when
     /// no staged slot is waiting at `index`.
-    pub fn staged_sink(&self, index: usize, shard: ErasedActorRef) -> Option<ShardSink> {
+    pub fn staged_sink(&self, index: usize, shard: ActorRef<HttpDispatchShard>) -> Option<ShardSink> {
         let ShardStartup::Starting { slots_by_index, .. } = &self.shard_startup else {
             return None;
         };
@@ -524,7 +532,7 @@ impl HttpSupervisorState {
         &mut self,
         prefix: &str,
         method: Option<HttpMethod>,
-        holder: ProtocolRef<HttpRouter>,
+        holder: RouteMember,
         shared: bool,
     ) -> RegisterRouteResult {
         register_route(&self.routes, prefix, method, holder, shared)
@@ -731,20 +739,20 @@ impl HttpShardState {
         {
             conn.ws_pending_key = ws_key;
         }
-        let Some(mail_id) = ctx.send_encoded_detached_to(handler, &payload) else {
+        let Some(mail_id) = ctx.send_encoded_detached_to(handler.router, &payload) else {
             return;
         };
         // Safety net (ADR-0108 §5): if the chain settles with no
         // response, `on_settled` answers `502`. Best-effort — a chassis
         // without the settlement registry still serves the reply path.
         let _ = ctx.subscribe_settlement::<Settled>(mail_id);
-        self.in_flight
-            .insert(mail_id.correlation_id, PendingRequest { conn_id, method, keep_alive, handler: handler.erase() });
+        self.in_flight.insert(mail_id.correlation_id, PendingRequest { conn_id, method, keep_alive, handler });
     }
 
     /// Open the inbound request stream for a reader-posted head bound
     /// for a streaming handler (ADR-0128 / ADR-0135 §2). The reader
-    /// resolved `handler` and made every reject decision; the shard
+    /// resolved `member`, unwrapped its `handler` cast, and made every
+    /// reject decision; the shard
     /// seats the session — minting the stream id and seeding credit —
     /// because the stream tables live here. The method re-parses from
     /// the head's raw string; the reader already rejected
@@ -755,14 +763,15 @@ impl HttpShardState {
         ctx: &mut NativeCtx<'_, A>,
         conn_id: ConnId,
         head: ParsedHead,
-        handler: ErasedActorRef,
+        member: RouteMember,
+        handler: ProtocolRef<RequestStreamRouter>,
     ) {
         let Some(method) = parse_http_method(&head.method) else {
             self.write_status_response(conn_id, 501, "method not implemented");
             self.close_connection(conn_id, "unsupported method");
             return;
         };
-        self.start_request_stream(ctx, conn_id, handler, method, head);
+        self.start_request_stream(ctx, conn_id, member, handler, method, head);
     }
 
     /// Send a control message to a connection's parked reader; a send failure

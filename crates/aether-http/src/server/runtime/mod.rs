@@ -26,7 +26,7 @@
 // `init`'s signature, `HttpServerCapability` is the impl's `Self` type, and
 // `HttpServerHandle` is the boot artifact `init` publishes.
 use super::{HttpDispatchShard, HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle};
-use aether_actor::{ErasedActorRef, ProtocolRef, ReplyMode, Single, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef, ReplyMode, Single, runtime};
 
 pub use std::collections::{HashMap, HashSet, VecDeque};
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -35,7 +35,7 @@ pub use std::sync::{Arc, RwLock, mpsc};
 pub use std::thread;
 pub use std::time::Duration;
 
-pub use aether_data::{Encoded, Kind};
+pub use aether_data::Encoded;
 pub use aether_substrate::actor::native::{
     ActorProbe, NativeActor, NativeCtx, NativeInitCtx, SelfWake, SpawnOutcome, TaskDone,
 };
@@ -50,7 +50,8 @@ pub use crate::kinds::{
     HttpStreamCredit, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use crate::kinds::{
-    HttpRouter, RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf,
+    HttpRouter, RegisterRoute, RegisterRouteResult, RegisterRouteSelf, RequestStreamRouter, StreamCreditRouter,
+    UnregisterRoute, UnregisterRouteSelf, WebSocketRouter,
 };
 use aether_kinds::MonitorNotice;
 pub use aether_kinds::trace::Settled;
@@ -282,7 +283,7 @@ impl NativeActor for HttpServerCapability {
             return;
         };
         let sink = match done.into_output().result {
-            Ok(shard) => state.staged_sink(index, shard.erase()),
+            Ok(shard) => state.staged_sink(index, shard),
             Err(error) => {
                 tracing::warn!(
                     target: "aether_http::server",
@@ -305,7 +306,9 @@ impl NativeActor for HttpServerCapability {
     /// takes `aether.http.server.request` and replies `HttpRouterResult`
     /// (ADR-0231 §3); `resolve` proves it is live, answering `Err` naming the
     /// path when its handler has closed, and the route holds that proof. Its erased twin is the identity the table, the monitors, and a
-    /// departure are keyed by.
+    /// departure are keyed by. The proof is cast once, here, to each
+    /// data-phase protocol ([`RouteMember::cast`]), so the route holds the
+    /// references its streams and websockets send through.
     ///
     /// # Agent
     /// `RegisterRoute { prefix, method, handler, shared }`. The external
@@ -325,7 +328,8 @@ impl NativeActor for HttpServerCapability {
             Ok(handler) => handler,
             Err(error) => return RegisterRouteResult::Err { error: error.to_string() },
         };
-        let result = state.register_route(&payload.prefix, payload.method, handler, payload.shared);
+        let member = RouteMember::cast(ctx, handler);
+        let result = state.register_route(&payload.prefix, payload.method, member, payload.shared);
         if matches!(result, RegisterRouteResult::Ok) {
             state.watch(ctx, handler.erase());
         }
@@ -338,6 +342,7 @@ impl NativeActor for HttpServerCapability {
     /// `aether.window.subscribe_self`. The sender is cast to `HttpRouter`
     /// once, here, so the route holds the same proof an explicit
     /// registration holds; a sender whose rows do not cover it is refused.
+    /// The same [`RouteMember::cast`] then types it for the data phase.
     ///
     /// # Agent
     /// `RegisterRouteSelf { prefix, method, shared }`, typically sent
@@ -370,7 +375,8 @@ impl NativeActor for HttpServerCapability {
                 ),
             };
         };
-        let result = state.register_route(&payload.prefix, payload.method, handler, payload.shared);
+        let member = RouteMember::cast(ctx, handler);
+        let result = state.register_route(&payload.prefix, payload.method, member, payload.shared);
         if matches!(result, RegisterRouteResult::Ok) {
             state.watch(ctx, sender);
         }
