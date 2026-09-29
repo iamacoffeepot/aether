@@ -102,6 +102,74 @@ fn deferred_arm_returns_hold() {
     mem::forget(held);
 }
 
+#[repr(C)]
+#[aether_data::kind(name = "test.wasm.strict_probe.poke", pod)]
+struct Poke {
+    seq: u32,
+}
+
+/// A strict receiver (no `#[fallback]`) probing whether its one handler ran.
+struct StrictProbe {
+    ran: bool,
+}
+
+#[crate::actor]
+impl crate::WasmActor for StrictProbe {
+    const NAMESPACE: &'static str = "test.wasm.strict_probe";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self { ran: false })
+    }
+
+    #[handler::single]
+    fn on_poke(&mut self, _ctx: &mut WasmCtx<'_>, _poke: Poke) {
+        self.ran = true;
+    }
+}
+
+/// iamacoffeepot/aether#2455 regression: the macro-generated dispatch arm
+/// must decode-check before reporting handled, so a recognized kind id with
+/// an undecodable payload falls through to the strict tail
+/// (`DISPATCH_UNKNOWN_KIND`) rather than the handler's `DISPATCH_HANDLED`.
+/// Pre-fix the arm returned `DISPATCH_HANDLED` unconditionally once the kind
+/// id matched, so a corrupt/truncated payload for a known kind reported
+/// success while the handler never ran and no reply was emitted — diverging
+/// from the native arm (which routes the same case to the fallback /
+/// unknown-kind path) and hanging a request-shaped caller to its settlement
+/// timeout with no diagnostic.
+///
+/// Drives the same generated dispatch table `receive_p32` calls
+/// (`WasmDispatch::dispatch`), the way `deferred_arm_returns_hold` does, over
+/// a strict `Poke` receiver: `Poke` is a `#[repr(C)]` 4-byte cast-shape kind
+/// (`seq: u32`), and a 2-byte payload fails the cast decoder's
+/// `len() == size_of` check, so the matched arm's `decode_kind::<Poke>()` is
+/// `None`.
+#[test]
+fn undecodable_payload_for_a_known_kind_falls_to_the_strict_tail() {
+    let registry = Registry::new();
+    let mut probe = StrictProbe { ran: false };
+    let payload = [0u8, 0u8];
+    // SAFETY: `payload` outlives the `Mail` built over it.
+    let mail = unsafe {
+        Mail::__from_ptr(Poke::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, NO_REPLY_HANDLE, 0x10)
+    };
+
+    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let rc = <StrictProbe as crate::WasmDispatch<StrictProbe>>::dispatch(&mut probe, &mut ctx, mail);
+
+    // Tripwire: pre-fix the arm returned `DISPATCH_HANDLED` (0) once the kind
+    // id matched, regardless of decode outcome; post-fix the failed decode
+    // falls through to the strict tail → `DISPATCH_UNKNOWN_KIND` (1).
+    assert_eq!(
+        rc,
+        crate::DISPATCH_UNKNOWN_KIND,
+        "a recognized kind with an undecodable payload must fall through to the tail \
+         (DISPATCH_UNKNOWN_KIND), not report DISPATCH_HANDLED",
+    );
+    assert_ne!(rc, crate::DISPATCH_HANDLED);
+    assert!(!probe.ran, "the handler must not run over an undecodable payload");
+}
+
 #[test]
 fn local_dispatch_ctx_never_reads_host_reply_correlation() {
     let registry = Registry::new();
