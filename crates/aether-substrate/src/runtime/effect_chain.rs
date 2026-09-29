@@ -60,10 +60,14 @@ impl EffectChain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Uncaused {
     /// A chassis-boot birth. Boot runs before any mail exists, so the rule
-    /// holds over an empty chain.
+    /// holds over an empty chain. Its `wire` sends still settle together:
+    /// boot opens one held wire root for every pre-seal birth, which is fresh
+    /// rather than causing (ADR-0244).
     ChassisBoot,
     /// An embedder thread reaching into the chassis — `spawn_actor`,
-    /// `boot_pumped_actor` — carries no mail of its own.
+    /// `boot_pumped_actor` — carries no mail of its own. A post-seal
+    /// `spawn_actor` opens a fresh held wire root for its birth's `wire`
+    /// sends (ADR-0244).
     EmbedderCall,
     /// The actor close tail. It runs its registry work after the closing
     /// chain has already recorded `Finished`, so no root remains to hold.

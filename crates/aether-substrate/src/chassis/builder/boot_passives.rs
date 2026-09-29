@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::Mutex;
 use std::time::Duration;
 
 use aether_kinds::trace::Settled;
+#[cfg(any(test, feature = "test-support"))]
+use crossbeam_channel::Receiver;
 
 use super::passive_boot::{DynShutdown, PassiveBoot};
 use super::references::ComposedReferences;
@@ -67,6 +71,13 @@ pub(super) struct BootedPassives {
     /// registry, mailer, aborter) so per-handler `spawn_child` reaches
     /// them without separate plumbing.
     pub(super) spawner: Arc<crate::Spawner>,
+    /// ADR-0244: fires once the boot's wire root settles — after the seal
+    /// releases its hold and every mail a pre-seal `wire` sent, and
+    /// everything those mails caused, has been handled. Taken by the first
+    /// test-support `PassiveChassis::await_boot_settled`, so a later call
+    /// finds it gone and returns at once.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) boot_settled: Mutex<Option<Receiver<()>>>,
     /// ADR-0165 additive owner foundation. Retains the scheduler slot and
     /// keeps effect submission accepting until chassis teardown. Declared
     /// before `_pool` so the owner detaches before workers join.
@@ -320,6 +331,11 @@ pub(super) fn boot_passives(
         pool.wake_sink(),
         ring_capacities,
     ));
+    // ADR-0244: every pre-seal birth's `wire` runs under one held root, opened
+    // here before any birth and released by the seal.
+    spawner.open_boot_wire();
+    #[cfg(any(test, feature = "test-support"))]
+    let boot_settled = spawner.subscribe_boot_wire();
     // Issue 697: multi-pass boot — claim → init → wire → spawn,
     // synchronized across all passives. Each pass below walks every
     // passive that advanced through the prior pass; on failure,
@@ -424,7 +440,7 @@ pub(super) fn boot_passives(
 
     // Pass 3 — wire.
     for boot in &mut *booted {
-        if let Err(e) = boot.wire() {
+        if let Err(e) = boot.wire(spawner.boot_wire_root()) {
             let mut ctx = build_ctx!();
             rollback(&mut ctx, booted, Vec::new());
             return Err(e);
@@ -458,6 +474,8 @@ pub(super) fn boot_passives(
         reserved_driver_mailboxes,
         references,
         spawner,
+        #[cfg(any(test, feature = "test-support"))]
+        boot_settled: Mutex::new(Some(boot_settled)),
         registry_owner: Some(registry_owner),
         _route_relay: route_relay,
         _pool: pool,

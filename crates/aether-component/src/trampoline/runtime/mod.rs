@@ -150,10 +150,15 @@ impl NativeActor for WasmTrampoline {
     /// `Component::instantiate` (step 4, before registration) and
     /// races the window cap proving the subscriber at receipt through
     /// `ctx.resolve_live`, silently dropping subscribes.
+    ///
+    /// The guest's `wire` sends inherit this ctx's in-flight root. For a
+    /// chainless birth that is its wire root (ADR-0244), so they settle with
+    /// the rest of the birth's `wire` mail; a handler-staged birth has none.
     fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         ctx.sync_guest(state);
+        let root = ctx.in_flight_root();
         let (aliases, retired) = state.component.as_mut().map_or_else(Default::default, |component| {
-            if let Err(e) = component.wire() {
+            if let Err(e) = component.wire(root) {
                 tracing::error!(
                     target: "aether_component",
                     error = %e,

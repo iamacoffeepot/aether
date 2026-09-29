@@ -257,6 +257,6 @@ impl<A: Instanced + NativeActor, O: BirthOutcome<A>> PreparedBirth<A, O> {
             ),
             None => NativeSpawnFinalizer::<A, O>::rooted(completion, mailbox_id, canonical_name),
         };
-        parent_binding.stage_child_birth(spawner.prepare_commit_as(staged, Some(finalizer), chain, guest));
+        parent_binding.stage_child_birth(spawner.prepare_commit_as(staged, Some(finalizer), chain, guest, None));
     }
 }

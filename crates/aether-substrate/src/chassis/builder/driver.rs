@@ -362,6 +362,11 @@ impl<'a> DriverCtx<'a> {
 /// a driver recovering a Claim-stage reservation is chassis boot, and a
 /// post-boot `PassiveChassis::boot_pumped_actor` is an embedder — so the
 /// answer belongs to the caller rather than to this shared body.
+///
+/// `wire` runs under the boot's wire root while boot is open (ADR-0244), so a
+/// driver `Start` pumped actor's `wire` mail settles with the rest of boot's.
+/// After the seal there is none, and a post-boot pumped actor's `wire` sends
+/// mint their own roots, and a test's `PumpedDriver` settles them instead.
 #[allow(
     clippy::redundant_pub_crate,
     reason = "crate-internal boot helper shared across the private driver / built modules"
@@ -438,7 +443,7 @@ where
     // (ADR-0231 §4).
     transport.hold_outbound_for_activation();
     local::with_stamped(&slots, || {
-        let mut wire_ctx = NativeCtx::for_wire(&transport, EffectChain::Uncaused(born));
+        let mut wire_ctx = NativeCtx::for_wire(&transport, EffectChain::Uncaused(born), spawner.boot_wire_root());
         A::wire(actor.as_mut(), &mut wire_ctx);
     });
 

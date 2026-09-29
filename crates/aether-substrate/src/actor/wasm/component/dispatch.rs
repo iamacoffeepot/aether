@@ -5,7 +5,7 @@ use aether_actor::{DISPATCH_HANDLED_HOLD, DISPATCH_HANDLED_RELEASE};
 
 use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::reply_table::{HeldChain, NO_REPLY_HANDLE, ReplyEntry};
-use crate::mail::SourceAddr;
+use crate::mail::{MailId, SourceAddr};
 
 use super::instantiate::Placement;
 use super::{Component, MAX_DELIVERABLE_MAIL_BYTES, SMALL_REGION_BYTES};
@@ -27,12 +27,21 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 
 impl Component {
-    pub fn wire(&mut self) -> wasmtime::Result<()> {
+    /// Run the guest's `wire` export, once. `root` is the `wire` ctx's
+    /// in-flight root: a chainless birth's wire root (ADR-0244), which every
+    /// send the guest makes from `wire` inherits, or `None` for a
+    /// handler-staged birth, whose guest sends mint their own roots. It is
+    /// published on the in-flight cells for the call and cleared after, as
+    /// [`Self::deliver`] does with an inbound's lineage.
+    pub fn wire(&mut self, root: Option<MailId>) -> wasmtime::Result<()> {
         let Some(wire_fn) = self.wire.take() else {
             return Ok(());
         };
         let mailbox_id = self.self_mailbox_id;
-        let rc = wire_fn.call(&mut self.store, mailbox_id)?;
+        self.store.data().set_in_flight(None, root);
+        let result = wire_fn.call(&mut self.store, mailbox_id);
+        self.store.data().clear_in_flight();
+        let rc = result?;
         if rc != 0 {
             return Err(wasmtime::Error::msg(format!("guest wire returned non-zero rc {rc}")));
         }

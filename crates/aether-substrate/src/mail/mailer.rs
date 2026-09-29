@@ -310,6 +310,18 @@ impl Mailer {
         MintedRoot { root, recipient, kind }
     }
 
+    /// Mint the next chassis root as a chainless birth's wire root
+    /// (ADR-0244). It draws from the same counter as
+    /// [`Self::mint_chassis_root`], so it can collide with no other root, but
+    /// records no `Sent`: no mail carries it as its own id, only as the
+    /// inherited root of the sends its `wire` makes. Only
+    /// [`WireRoot::open`](crate::runtime::wire_root::WireRoot::open) calls
+    /// it, and takes the hold that keeps the root open before anything can
+    /// count against it.
+    pub(crate) fn mint_wire_root(&self) -> aether_data::MailId {
+        aether_data::MailId::new(aether_data::MailboxId::CHASSIS_MAILBOX_ID, self.next_chassis_correlation())
+    }
+
     /// Push the minted root's mail with `reply_to` (`Source::NONE` for no
     /// reply target) and return the root.
     pub(crate) fn push_minted_root(

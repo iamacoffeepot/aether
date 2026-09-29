@@ -97,7 +97,7 @@ use crate::actor::native::ctx::NativeCtx;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, RegistryEffect};
-use crate::mail::{MailboxId, Source};
+use crate::mail::{MailId, MailboxId, Source};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::scheduler::{
     BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, cascade_note_mail, time_budget,
@@ -219,12 +219,14 @@ where
     /// the staging caller's `Settled` covers the newborn's birth-completing
     /// work — the inline-child alias a `WasmTrampoline` publishes from `wire`
     /// is the motivating case. An embedder's post-seal `spawn_actor` reaches
-    /// this same path from a thread holding no mail and declares so.
-    pub(crate) fn wire_activation(&self, chain: EffectChain) {
+    /// this same path from a thread holding no mail and declares so, and
+    /// passes the fresh wire root it opened for the hook's sends as
+    /// `wire_root` (ADR-0244).
+    pub(crate) fn wire_activation(&self, chain: EffectChain, wire_root: Option<MailId>) {
         let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         let actor = actor_guard.as_mut().expect("prepared activation owns an initialized actor");
         local::with_stamped(&self.slots, || {
-            let mut ctx = NativeCtx::for_wire(&self.binding, chain);
+            let mut ctx = NativeCtx::for_wire(&self.binding, chain, wire_root);
             A::wire(actor.as_mut(), &mut ctx);
         });
         drop(actor_guard);

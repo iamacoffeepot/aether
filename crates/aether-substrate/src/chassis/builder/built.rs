@@ -28,6 +28,8 @@ use crate::mail::registry::{
     AddressResolutionError, AdoptRefused, ChildRefused, Registry, ResolvedAddress, RouteContract,
 };
 use crate::runtime::effect_chain::Uncaused;
+#[cfg(any(test, feature = "test-support"))]
+use crate::testing::await_settled;
 
 macro_rules! chassis_accessors {
     () => {
@@ -605,6 +607,30 @@ impl<C: Chassis> PassiveChassis<C> {
     #[cfg(any(test, feature = "test-support"))]
     pub fn await_registry_applied(&self) {
         self.booted.spawner.await_registry_applied("testing.await_registry_applied");
+    }
+
+    /// Block until the boot's wire root has settled (ADR-0244): every mail a
+    /// boot `wire` sent — the capability `wire` pass, a pre-seal spawn, a
+    /// driver's pumped actor — and everything those mails caused, has been
+    /// handled. The **test-scoped** wait on boot, gated on the `test-support`
+    /// feature like [`Self::await_closed`]. It waits on settlement, never on
+    /// the clock; a boot whose `wire` sends nothing returns at once.
+    ///
+    /// Idempotent: the first call consumes the settlement, and every later
+    /// call returns at once.
+    ///
+    /// # Panics
+    /// Panics when the root does not settle within the settlement cap
+    /// (`AETHER_SETTLEMENT_CAP_SECS`), naming the `chassis.boot_settled`
+    /// gate. Work a boot `wire` starts on its own chain must finish for the
+    /// root to settle; long-lived work opens a detached chain.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn await_boot_settled(&self) {
+        let mut settled = self.booted.boot_settled.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(receiver) = settled.as_ref() {
+            await_settled(receiver, "chassis.boot_settled");
+            *settled = None;
+        }
     }
 
     chassis_accessors!();

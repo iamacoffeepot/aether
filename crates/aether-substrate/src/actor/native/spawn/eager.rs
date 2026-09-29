@@ -20,6 +20,8 @@ use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::mail::registry::{DispatchParts, Registry};
 use crate::mail::{KindId, MailRef, MailboxId, Source};
+#[cfg(any(test, feature = "test-support"))]
+use crate::testing::await_settled;
 
 use super::spawner::Spawner;
 use super::spawner::commit::SpawnCommit;
@@ -192,6 +194,36 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     /// boot/embedder authority as [`Self::finish`].
     pub fn finish_with_name(self) -> Result<(ActorRef<A>, ErasedActorPath), SpawnError> {
         self.finish_internal().map(|commit| (Registry::activated(commit.mailbox_id), commit.canonical_name))
+    }
+
+    /// Consume the builder, run the spawn lifecycle as [`Self::finish`] does,
+    /// and return only once everything the new actor's `wire` sent, and
+    /// everything those mails caused, has been handled — the **test-scoped**
+    /// wait on the birth's wire root (ADR-0244), gated on the `test-support`
+    /// feature like `PassiveChassis::await_closed`. A `wire` that sends
+    /// nothing returns at once.
+    ///
+    /// It waits on settlement, never on the clock, so work `wire` starts on
+    /// its own chain must finish: a chain that never does makes this panic at
+    /// the settlement cap, naming the `spawn.wire_settled` gate.
+    ///
+    /// # Errors
+    /// Returns the [`SpawnError`] [`Self::finish`] would.
+    ///
+    /// # Panics
+    /// Panics when the spawn committed before the chassis sealed, whose
+    /// `wire` ran under the boot's wire root and has no root of its own —
+    /// await `PassiveChassis::await_boot_settled` for it — or when the wire
+    /// root does not settle within the settlement cap
+    /// (`AETHER_SETTLEMENT_CAP_SECS`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finish_wire_settled(self) -> Result<ActorRef<A>, SpawnError> {
+        let commit = self.finish_internal()?;
+        let settled = commit.wire_settled.expect(
+            "a pre-seal spawn's wire runs under the boot's wire root; await PassiveChassis::await_boot_settled",
+        );
+        await_settled(&settled, "spawn.wire_settled");
+        Ok(Registry::activated(commit.mailbox_id))
     }
 
     /// Consume the builder and return the committed position. Substrate-internal

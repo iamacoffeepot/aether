@@ -2,6 +2,7 @@ use crate::actor::native::ExportedHandles;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
 use crate::chassis::error::BootError;
 use crate::config::{ConfigError, ConfigSources};
+use crate::mail::MailId;
 
 pub(super) trait DynShutdown {
     fn shutdown_dyn(self: Box<Self>);
@@ -90,7 +91,11 @@ pub(super) trait PassiveBoot: Send {
 
     /// Phase 3 — post-init mail-allowed lifecycle hook
     /// ([`Lifecycle::wire`](aether_actor::Lifecycle::wire), ADR-0079 amended). Default no-op.
-    fn wire(&mut self) -> Result<(), BootError> {
+    ///
+    /// `wire_root` is the boot's held wire root (ADR-0244), which every send
+    /// the hook makes inherits.
+    fn wire(&mut self, wire_root: Option<MailId>) -> Result<(), BootError> {
+        let _ = wire_root;
         Ok(())
     }
 

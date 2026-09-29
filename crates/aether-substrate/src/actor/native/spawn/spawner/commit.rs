@@ -15,6 +15,8 @@ use std::time::Duration;
 
 use aether_actor::Instanced;
 use aether_data::ErasedActorPath;
+#[cfg(any(test, feature = "test-support"))]
+use crossbeam_channel::Receiver;
 
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::local;
@@ -27,6 +29,7 @@ use crate::mail::registry::effect::{EffectBatch, RegistryEffect};
 use crate::mail::registry::{BootAuthority, NameConflict, OwnedDispatch};
 use crate::mail::{KindId, MailboxId};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
+use crate::runtime::wire_root::WireRoot;
 use crate::scheduler::{Drainable, SeizeHandle, WakeHandle};
 
 use super::super::{SpawnError, SpawnOutcome};
@@ -42,6 +45,11 @@ const BIRTH_PATIENCE: Duration = Duration::from_secs(30);
 pub(in crate::actor::native::spawn) struct SpawnCommit {
     pub(in crate::actor::native::spawn) mailbox_id: MailboxId,
     pub(in crate::actor::native::spawn) canonical_name: ErasedActorPath,
+    /// The receiver for the post-seal birth's own wire root (ADR-0244), which
+    /// fires once everything its `wire` sent has been handled. `None` for a
+    /// pre-seal commit, whose `wire` ran under the boot's wire root.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::actor::native::spawn) wire_settled: Option<Receiver<()>>,
 }
 
 impl Spawner {
@@ -101,6 +109,10 @@ impl Spawner {
     /// completion is the single answer, and it is the more precise one: it
     /// distinguishes a retired name from a live occupant where the batch error
     /// collapses both into a name conflict.
+    ///
+    /// The birth opens a fresh wire root (ADR-0244) and hands its hold to the
+    /// activation, which releases it once `wire`'s held mail is flushed; the
+    /// commit carries the receiver for a caller that awaits it.
     fn commit_through_owner<A>(self: Arc<Self>, staged: StagedActor<A>) -> Result<SpawnCommit, SpawnError>
     where
         A: Instanced + NativeActor,
@@ -109,12 +121,26 @@ impl Spawner {
         let name = staged.identity.canonical_name.clone();
         let (decided, birth) = crossbeam_channel::bounded(1);
         let finalizer = NativeSpawnFinalizer::<A>::external(decided, mailbox_id, name.clone());
-        let commit = self.prepare_commit(staged, Some(finalizer), EffectChain::Uncaused(Uncaused::EmbedderCall));
+        let wire_root = WireRoot::open(&self.mailer);
+        #[cfg(any(test, feature = "test-support"))]
+        let wire_settled = wire_root.subscribe(&self.mailer);
+        let commit = self.prepare_commit_as(
+            staged,
+            Some(finalizer),
+            EffectChain::Uncaused(Uncaused::EmbedderCall),
+            None,
+            Some(wire_root),
+        );
         if self.registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).is_none() {
             return Err(SpawnError::OwnerClosed);
         }
         match birth.recv_timeout(BIRTH_PATIENCE) {
-            Ok(SpawnOutcome { canonical_name, result }) => result.map(|_| SpawnCommit { mailbox_id, canonical_name }),
+            Ok(SpawnOutcome { canonical_name, result }) => result.map(|_| SpawnCommit {
+                mailbox_id,
+                canonical_name,
+                #[cfg(any(test, feature = "test-support"))]
+                wire_settled: Some(wire_settled),
+            }),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 tracing::warn!(
                     target: "aether_substrate::spawn",
@@ -278,9 +304,13 @@ impl Spawner {
         // (ADR-0165's hold): a publisher that casts a `wire`-time subscribe
         // request's sender reads the rows (ADR-0231 §4), and they are
         // published only once `wire` has recorded a guest host's guest.
+        //
+        // Its `wire` runs under the boot's wire root (ADR-0244), which the
+        // seal releases, so this birth's `wire` mail settles with boot's.
         transport.hold_outbound_for_activation();
         local::with_stamped(&slots, || {
-            let mut wire_ctx = NativeCtx::for_wire(&transport, EffectChain::Uncaused(Uncaused::ChassisBoot));
+            let mut wire_ctx =
+                NativeCtx::for_wire(&transport, EffectChain::Uncaused(Uncaused::ChassisBoot), self.boot_wire_root());
             A::wire(actor.as_mut(), &mut wire_ctx);
         });
         if let Err(error) = self.registry.publish_contract(authority, id, transport.route_contract::<A>()) {
@@ -362,6 +392,11 @@ impl Spawner {
         // closure was installed (see comment above).
         let _ = manual_wake.wake();
 
-        Ok(SpawnCommit { mailbox_id: id, canonical_name: full_name })
+        Ok(SpawnCommit {
+            mailbox_id: id,
+            canonical_name: full_name,
+            #[cfg(any(test, feature = "test-support"))]
+            wire_settled: None,
+        })
     }
 }

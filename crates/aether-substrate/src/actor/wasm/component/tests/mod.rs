@@ -783,7 +783,7 @@ fn wire_invokes_export_and_writes_marker() {
     let mut component = instantiate(WAT_WIRE_UNWIRE);
     // wire hasn't been invoked yet — `instantiate` no longer fires it.
     assert_eq!(component.read_u32(100), 0);
-    component.wire().expect("wire ok");
+    component.wire(None).expect("wire ok");
     assert_eq!(component.read_u32(100), 0x77, "wire must run when Component::wire is invoked");
     // Mailbox id stamped into offset 108 by the WAT — test ctx
     // uses MailboxId(0), so the low 32 bits are 0.
@@ -813,7 +813,7 @@ fn unwire_invokes_export_and_writes_marker() {
 #[test]
 fn wire_trap_propagates_via_component_wire() {
     let mut component = instantiate(WAT_WIRE_TRAPS);
-    let result = component.wire();
+    let result = component.wire(None);
     assert!(result.is_err(), "Component::wire must propagate the guest trap as wasmtime::Error");
 }
 
