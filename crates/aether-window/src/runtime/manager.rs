@@ -229,6 +229,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use aether_data::LoadName;
+    use aether_substrate::testing::await_settled;
 
     use super::*;
     use crate::runtime::subscribers::fixture::Rig;
@@ -250,22 +251,22 @@ mod tests {
             panic!("the synthetic manager creates the window");
         };
         let main_child = |rig: &Rig<SyntheticWindowCapability>| {
-            rig.chassis.child::<SyntheticWindowCapability, SyntheticWindowInstance>(
+            rig.chassis().child::<SyntheticWindowCapability, SyntheticWindowInstance>(
                 rig.manager(),
                 LoadName::new("main").expect("fixture name"),
             )
         };
         let child = main_child(&rig).expect("the window child is live");
 
-        rig.push(&SetWindowTitle { title: "too late".to_owned() });
-        let (_, retired) = rig.chassis.send_tracked(child, &RetireWindow, None);
-        retired.recv_timeout(Duration::from_secs(2)).expect("the child retires");
+        let too_late = rig.push(&SetWindowTitle { title: "too late".to_owned() });
+        let (_, retired) = rig.chassis().send_tracked(child, &RetireWindow, None);
+        await_settled(&retired, "the child retires");
         let deadline = Instant::now() + Duration::from_secs(2);
         while main_child(&rig).is_ok() {
             assert!(Instant::now() < deadline, "the child's route did not drop within the deadline");
             thread::sleep(Duration::from_millis(1));
         }
-        rig.slot.drain_available();
+        rig.driver.settle(&[too_late]);
 
         let SetWindowTitleResult::Err { error } = rig.reply::<SetWindowTitleResult>() else {
             panic!("a dead child remains listed until its monitor notice, but cannot receive a root command");

@@ -64,7 +64,7 @@ pub struct SyntheticWindowCapabilityState {
     /// reference. The same reverse index identifies a command sender and a
     /// departing child's `MonitorNotice` (ADR-0230).
     child_monitors: HashMap<ErasedActorRef, (ErasedActorPath, MonitorHandle)>,
-    subscribers: WindowSubscribers,
+    pub(super) subscribers: WindowSubscribers,
 }
 
 impl SyntheticWindowCapabilityState {
@@ -443,7 +443,7 @@ mod tests {
             !rig.replies::<SubscribeWindowResult>().iter().any(|reply| matches!(reply, SubscribeWindowResult::Ok)),
             "an unproven subscriber is never accepted",
         );
-        let held = rig.slot.read_state(|state| recipients::<Key>(&state.subscribers, &main_path()));
+        let held = rig.driver.read_state(|state| recipients::<Key>(&state.subscribers, &main_path()));
         assert_eq!(held, Some(BTreeSet::new()), "a refused subscribe adds no route");
     }
 

@@ -327,20 +327,18 @@ impl WindowSubscribers {
 pub mod fixture {
     use std::collections::BTreeSet;
     use std::sync::mpsc::{self, Receiver, Sender};
-    use std::thread;
-    use std::time::{Duration, Instant};
 
     use aether_actor::{ActorPath, ActorRef, ErasedActorRef, HandlesKind, ProtocolRef, ReplyMode, Root};
     use aether_data::{ErasedActorPath, Kind, KindId, LoadName, SessionToken, Uuid};
     use aether_kinds::{Key, MouseButton, MouseMove, MouseWheel, WindowSize};
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, PumpedSlot};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::builder::PassiveChassis;
     use aether_substrate::chassis::error::BootError;
+    #[cfg(feature = "desktop")]
+    use aether_substrate::config::SettlementConfig;
     use aether_substrate::mail::MailId;
     use aether_substrate::mail::outbound::EgressEvent;
-    use aether_substrate::testing::{
-        TestChassis, boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx,
-    };
+    use aether_substrate::testing::{PumpedDriver, TestChassis, boot_bare_test_chassis, fresh_substrate_and_rx};
     use aether_substrate::{ReplyTarget, Subname};
 
     use super::{Published, WindowSubscribers};
@@ -458,15 +456,13 @@ pub mod fixture {
         ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0x7041)), correlation: 1 }
     }
 
-    const DEADLINE: Duration = Duration::from_secs(2);
-
-    /// A window manager `M` booted pumped on a bare test chassis. Mail
-    /// reaches it only through the chassis and runs only when the rig pumps
-    /// its slot, so a test decides exactly which turns have run. Replies go
-    /// to one hub session; watchers report into one channel.
-    pub struct Rig<M: NativeActor> {
-        pub slot: PumpedSlot<M>,
-        pub chassis: PassiveChassis<TestChassis>,
+    /// A window manager `M` booted pumped on a bare test chassis and driven
+    /// through [`PumpedDriver`]. Mail reaches it only through the chassis and
+    /// runs only on the driver's mail-wake drains, so a test decides exactly
+    /// which turns have run. Replies go to one hub session; watchers report
+    /// into one channel.
+    pub struct Rig<M: Root + NativeActor> {
+        pub driver: PumpedDriver<M>,
         egress: Receiver<EgressEvent>,
         report: Sender<Receipt>,
         receipts: Receiver<Receipt>,
@@ -475,33 +471,36 @@ pub mod fixture {
     impl<M: Root + NativeActor<Config = ()>> Rig<M> {
         pub fn boot(params: M::Params) -> Self {
             let (registry, mailer, egress) = fresh_substrate_and_rx();
-            let chassis = boot_bare_test_chassis(&registry, &mailer);
-            let (slot, _wake) = chassis.boot_pumped_actor::<M>((), params).expect("the window manager boots pumped");
+            let driver = PumpedDriver::boot(boot_bare_test_chassis(&registry, &mailer), (), params);
             let (report, receipts) = mpsc::channel();
 
-            Self { slot, chassis, egress, report, receipts }
+            Self { driver, egress, report, receipts }
+        }
+
+        pub fn chassis(&self) -> &PassiveChassis<TestChassis> {
+            self.driver.chassis()
         }
 
         pub fn manager(&self) -> ActorRef<M> {
-            self.chassis.actor_ref::<M>()
+            self.chassis().actor_ref::<M>()
         }
 
         /// Spawn the watcher keyed `key`, reporting into this rig.
         pub fn watcher(&self, key: &str) -> ActorRef<Watcher> {
-            self.chassis
+            self.chassis()
                 .spawn_actor_for_test::<Watcher>(Subname::Named(key), (key.to_owned(), self.report.clone()), ())
                 .finish()
                 .expect("the watcher spawns")
         }
 
-        /// Queue `mail` on the manager with its reply routed to the rig's
+        /// Queue `mail` on the manager as a tracked root answered to the rig's
         /// session, without pumping it: for a request whose reply the manager
         /// holds past its turn, or one that must wait behind later mail.
-        pub fn push<K: Kind>(&self, mail: &K)
+        pub fn push<K: Kind>(&self, mail: &K) -> MailId
         where
             M: HandlesKind<K>,
         {
-            self.chassis.send_for_reply(self.manager(), mail, session());
+            self.driver.send_tracked(self.manager(), mail, Some(session()))
         }
 
         /// [`Self::send_to`] the manager.
@@ -516,38 +515,28 @@ pub mod fixture {
         /// session, and pump the manager until the whole chain settles:
         /// answer the root beside every receipt the chain delivered.
         pub fn send_to<R: HandlesKind<K>, K: Kind>(&mut self, to: ActorRef<R>, mail: &K) -> (MailId, Vec<Receipt>) {
-            let (root, settled) = self.chassis.send_tracked(to, mail, Some(session()));
-            let deadline = Instant::now() + DEADLINE;
-
-            loop {
-                self.slot.drain_available();
-                if settled.try_recv().is_ok() {
-                    break;
-                }
-                assert!(Instant::now() < deadline, "{} did not settle within the deadline", K::NAME);
-                thread::sleep(Duration::from_millis(1));
-            }
+            let root = self.driver.send_and_settle(to, mail, Some(session()));
             (root, self.receipts.try_iter().collect())
         }
 
-        /// Pump the manager until `done` holds of its state, reading it in a
-        /// host turn between drains.
-        pub fn pump_until(&mut self, what: &str, mut done: impl FnMut(&mut M::State) -> bool) {
-            let deadline = Instant::now() + DEADLINE;
-
-            loop {
-                self.slot.drain_available();
-                if self.slot.host_turn(|state, _ctx| done(state)).expect("the manager is live") {
-                    return;
-                }
-                assert!(Instant::now() < deadline, "{what} did not happen within the deadline");
-                thread::sleep(Duration::from_millis(1));
-            }
+        /// Pump the manager on each mail wake until `done` holds of its
+        /// state: the wait for an effect off any chain the test holds.
+        pub fn pump_until(&mut self, what: &str, done: impl FnMut(&M::State) -> bool) {
+            self.driver.pump_until(what, done);
         }
 
-        /// The next session reply of kind `R`.
+        /// The next session reply of kind `R`, already sent: a reply precedes
+        /// its root's settlement, so it is read after the wait, never waited on.
         pub fn reply<R: Kind>(&self) -> R {
-            decode_session_reply::<R>(&self.egress)
+            self.egress
+                .try_iter()
+                .find_map(|event| match event {
+                    EgressEvent::ToSession { kind_name, payload, .. } if kind_name == R::NAME => {
+                        R::decode_from_bytes(&payload)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("a {} reply was sent", R::NAME))
         }
 
         /// Every session reply of kind `R` already sent.
@@ -563,12 +552,14 @@ pub mod fixture {
                 .collect()
         }
 
-        /// The next `count` receipts, however the events that produced them
-        /// were sent.
+        /// The next `count` receipts of events published outside any chain
+        /// the rig waits on, each awaited on the watcher channel under the
+        /// settlement cap.
         #[cfg(feature = "desktop")]
         pub fn receipts(&self, count: usize) -> Vec<Receipt> {
+            let cap = SettlementConfig::from_env().to_cap();
             (0..count)
-                .map(|_| self.receipts.recv_timeout(DEADLINE).expect("a watcher receipt arrives within the deadline"))
+                .map(|_| self.receipts.recv_timeout(cap).expect("a watcher receipt arrives within the settlement cap"))
                 .collect()
         }
 
@@ -606,7 +597,6 @@ mod tests {
     use super::fixture::{Leave, Rig, receivers, recipients, watcher};
     use super::*;
     use crate::WindowSelector::All;
-    use crate::runtime::manager::WindowManagerSurface;
     use crate::{
         SubscribeWindowResult, SubscribeWindowSelf, SyntheticWindowCapability, UnsubscribeWindow, UnsubscribeWindowSelf,
     };
@@ -731,9 +721,8 @@ mod tests {
         rig.send_to(departed, &Leave);
         let c = window("c");
         rig.pump_until("the departure notice", |state| {
-            let subscribers = SyntheticWindowCapability::subscribers(state);
-            recipients::<Key>(subscribers, &c) == BTreeSet::from([survivor.erase()])
-                && recipients::<MouseMove>(subscribers, &c).is_empty()
+            recipients::<Key>(&state.subscribers, &c) == BTreeSet::from([survivor.erase()])
+                && recipients::<MouseMove>(&state.subscribers, &c).is_empty()
         });
 
         assert_eq!(receivers(&rig.inject(&c, &key_at(&c))), ["survivor"]);

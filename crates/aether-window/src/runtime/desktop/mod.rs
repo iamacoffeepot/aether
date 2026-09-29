@@ -1167,7 +1167,7 @@ mod tests {
     #[test]
     fn list_windows_is_sorted_by_window_path() {
         let mut rig = rig();
-        rig.slot
+        rig.driver
             .host_turn(|state, _ctx| {
                 insert_window(state, "two", false);
                 insert_window(state, "nine", false);
@@ -1193,9 +1193,9 @@ mod tests {
     fn a_reserved_window_child_is_not_enumerable_and_rolls_back_when_its_birth_fails() {
         let mut rig = rig();
         rig.push(&CreateWindow { spec: spec("tools", "Tools") });
-        rig.slot.drain_available();
+        rig.pump_until("the create's reservation", |state| state.pending_creates.contains_key(&path("tools")));
         let tools = rig
-            .slot
+            .driver
             .host_turn(|state, _ctx| {
                 let tools = insert_window(state, "tools", false);
                 state.windows.get_mut(&tools).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
@@ -1209,7 +1209,7 @@ mod tests {
         };
         assert!(windows.is_empty(), "a reserved window child is absent from live enumeration");
 
-        rig.slot
+        rig.driver
             .host_turn(|state, ctx| {
                 state.finish_window_child_spawn(
                     ctx,
@@ -1224,7 +1224,7 @@ mod tests {
             .expect("the desktop manager is live");
 
         assert!(matches!(rig.reply(), CreateWindowResult::Err { .. }), "the caller is answered once, with the failure");
-        rig.slot
+        rig.driver
             .read_state(|state| {
                 assert!(!state.windows.contains_key(&tools), "a rejected birth rolls its window back");
                 assert!(state.pending_creates.is_empty(), "a rejected birth clears its reservation");
@@ -1314,7 +1314,7 @@ mod tests {
     fn closing_one_window_does_not_request_global_shutdown() {
         let mut rig = rig();
 
-        rig.slot
+        rig.driver
             .host_turn(|state, ctx| {
                 let first = insert_window(state, "first", true);
                 let second = insert_window(state, "second", false);
@@ -1341,7 +1341,7 @@ mod tests {
     fn closing_the_last_window_requests_shutdown_after_removal() {
         let mut rig = rig();
 
-        rig.slot
+        rig.driver
             .host_turn(|state, ctx| {
                 let first = insert_window(state, "first", true);
 
@@ -1361,11 +1361,12 @@ mod tests {
     #[test]
     fn pending_replacement_defers_last_window_shutdown_until_create_resolves() {
         let mut rig = rig();
-        let first = rig.slot.host_turn(|state, _ctx| insert_window(state, "first", true)).expect("the manager is live");
+        let first =
+            rig.driver.host_turn(|state, _ctx| insert_window(state, "first", true)).expect("the manager is live");
         rig.push(&CreateWindow { spec: spec("replacement", "Replacement") });
-        rig.slot.drain_available();
+        rig.pump_until("the create's reservation", |state| state.pending_creates.contains_key(&path("replacement")));
 
-        rig.slot
+        rig.driver
             .host_turn(|state, ctx| {
                 assert!(state.finish_window_close(&first, ctx).is_empty());
                 assert!(state.shutdown_when_idle);
@@ -1383,7 +1384,7 @@ mod tests {
     fn failed_initial_create_rolls_back_and_requests_shutdown() {
         let mut rig = rig();
 
-        rig.slot
+        rig.driver
             .host_turn(|state, ctx| {
                 state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
                 let effects = state.fail_window_creation(ctx, &path("main"), "native create failed".to_owned());
@@ -1400,7 +1401,7 @@ mod tests {
     fn failed_attachment_removes_the_staged_initial_window_before_shutdown() {
         let mut rig = rig();
 
-        rig.slot
+        rig.driver
             .host_turn(|state, ctx| {
                 state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
                 let main = insert_window(state, "main", false);
@@ -1469,7 +1470,7 @@ mod tests {
         }
 
         let window = rig
-            .slot
+            .driver
             .host_turn(|state, ctx| {
                 let (window, winit_id) = insert_scaled_window(state, 2.0);
                 let device_id = DeviceId::dummy();
