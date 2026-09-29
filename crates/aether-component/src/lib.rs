@@ -19,7 +19,8 @@
 //! replace swaps the `Component` inside the trampoline behind a stable
 //! mailbox handle, so a mailbox id or route cache taken before the swap stays
 //! valid (ADR-0022). [`kinds`] holds the
-//! capability's own internal mail, such as the module-boot teardown.
+//! capability's own internal mail, such as the contexts its staged loads
+//! carry.
 //!
 //! The `runtime` feature carries the wasmtime half:
 //! `ComponentHostCapabilityState`, `WasmTrampolineState`, and the

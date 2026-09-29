@@ -107,8 +107,8 @@ pub struct LifecycleCapabilityState {
 /// broadcasts rather than peeking at these.
 impl LifecycleCapabilityState {
     /// Monitor `subscriber` on its first stage subscription so the cap
-    /// purges its rows itself when the occupant departs —
-    /// vacate or close, whichever comes first (ADR-0079 §8 amended).
+    /// purges its rows itself when the subscriber closes (ADR-0079 §8
+    /// amended).
     /// An `Err` (an actor outside the registry, or a spawner-less test
     /// binding) means "not monitorable": the rows then live until
     /// substrate teardown, exactly as they would for a mailbox that
@@ -379,8 +379,8 @@ impl NativeActor for LifecycleCapability {
 
     /// Purge a departed subscriber (ADR-0079 §8 amended). The substrate
     /// fires one notice per [`LifecycleCapabilityState::watch`]ed
-    /// subscriber when it closes (the wasm trampoline on `DropComponent`)
-    /// or vacates (a module boot on teardown), so a dropped component's
+    /// subscriber when it closes (the wasm trampoline on `DropComponent`),
+    /// so a dropped component's
     /// stage broadcasts stop landing at its mailbox without any drop-time
     /// fan-out from the component host. Releasing the handle keeps the
     /// monitor map bounded by live subscribers.

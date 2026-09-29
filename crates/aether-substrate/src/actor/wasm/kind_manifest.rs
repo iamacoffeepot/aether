@@ -88,8 +88,8 @@ pub const NO_DEFAULT_SECTION: &str = "aether.no_default";
 /// `Addressable::NAMESPACE` bytes here — the raw UTF-8 string, no version
 /// prefix or wire wrapper, exactly like [`NAMESPACE_SECTION`]. The host
 /// reads it to learn the module's unconditional boot type: the actor
-/// instantiated once per loaded module content hash, refcounted against the
-/// module's other actors, and not selectable through an `export` selector.
+/// spawned once per module content hash by the module's first load, never
+/// replaced, and not selectable through an `export` selector.
 /// Absence means the module declares no boot slot (the zero-overhead case).
 pub const BOOT_SECTION: &str = "aether.boot";
 

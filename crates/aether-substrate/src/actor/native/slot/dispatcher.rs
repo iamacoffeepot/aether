@@ -90,7 +90,7 @@ impl Deref for PooledSlots {
     }
 }
 
-use crate::actor::monitor::{Departure, notify_alias_departures, notify_departure};
+use crate::actor::monitor::{notify_alias_departures, notify_departure};
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
@@ -742,5 +742,5 @@ pub fn finalize_close_and_fan_out(
     binding.mailer().registry().submit_logged(EffectBatch::new(vec![RegistryEffect::DropMailbox(self_id)]));
     binding.release_parent_child_reservation();
     notify_departure(binding, self_id, watchers);
-    notify_alias_departures(actor_registry, binding, self_id, Departure::Close);
+    notify_alias_departures(actor_registry, binding, self_id);
 }

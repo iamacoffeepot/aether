@@ -32,7 +32,6 @@ pub use std::sync::Arc;
 
 use super::WasmTrampoline;
 use crate::component::LoadDelivered;
-use crate::kinds::BootTeardown;
 pub use aether_actor::Local;
 use aether_actor::{Single, runtime};
 use aether_kinds::ComponentCapabilities;
@@ -184,19 +183,6 @@ impl NativeActor for WasmTrampoline {
         state.release_guest(ctx);
         ctx.shutdown();
         DropResult::Ok
-    }
-
-    /// The component host's module-boot teardown (ADR-0147): the host sends
-    /// it when the module's last non-boot actor departs. The trampoline
-    /// releases its guest and vacates its mailbox, with no reply, and stays
-    /// an empty slot until the substrate stops.
-    #[handler::single]
-    fn on_boot_teardown(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: BootTeardown) {
-        state.release_guest(ctx);
-        // ADR-0079 §8 (amended, issue 3741): drain this trampoline's
-        // watchers and fire one `MonitorNotice` each, so every cap holding
-        // state keyed by this mailbox purges its own rows.
-        ctx.vacate();
     }
 
     /// Replace the wasm component with a fresh module. ADR-0022 +

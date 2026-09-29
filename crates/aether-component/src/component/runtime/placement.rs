@@ -5,8 +5,8 @@
 //! record for every cardinality. A `load_under` places it beneath a live
 //! parent, so its type must declare `child_of` the parent's type, a `Child`
 //! record naming both. The checks run before the module publishes or
-//! anything is staged: a load, or a replace whose module boot type has no
-//! `Root`, is refused whole, and no route registers (#6821).
+//! anything is staged: a load whose selected or boot type has no `Root` is
+//! refused whole, and no route registers (#6821).
 //!
 //! A `ModuleChild` record satisfies neither; `composable` names an inline
 //! spawn beneath any actor of the same module, which a guest reaches

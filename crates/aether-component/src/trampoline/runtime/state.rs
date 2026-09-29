@@ -13,9 +13,7 @@ use crate::trampoline::WasmTrampoline;
 /// split — the addressing identity is the distinct ZST
 /// [`WasmTrampoline`]). Holds the wasm `Component` optionally: `None` once
 /// the guest is released. A `DropComponent` releases the guest and closes
-/// the trampoline, so its name tombstones (ADR-0241 §8); the host's
-/// module-boot `BootTeardown` releases the guest and vacates the mailbox,
-/// leaving an empty slot until the substrate stops.
+/// the trampoline, so its name tombstones (ADR-0241 §8).
 ///
 /// Its fields are crate-private, so no crate outside `aether-component` can
 /// build one to hand [`NativeCtx::sync_guest`].
@@ -63,9 +61,8 @@ pub struct WasmTrampolineState {
 impl WasmTrampolineState {
     /// Release the **wasm guest**: run its `unwire` pre-shutdown hook, drop
     /// the `Component`, and sync the now-empty slot, so the accept set clears
-    /// and only the framework cost cells stay. The caller ends the mailbox:
-    /// a `DropComponent` closes the trampoline, and the host's module-boot
-    /// `BootTeardown` vacates it.
+    /// and only the framework cost cells stay. The caller, a `DropComponent`,
+    /// then closes the trampoline.
     pub fn release_guest(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>) {
         if let Some(mut component) = self.component.take() {
             // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
@@ -92,8 +89,8 @@ impl WasmTrampolineState {
         //
         // The trampoline's own framework arms are re-seeded rather than
         // dropped with them (iamacoffeepot/aether#4269): the releasing
-        // handler folds into its cell just after it returns, and a vacated
-        // boot slot goes on dispatching its task wakes. The re-seed is
+        // handler folds into its cell just after it returns, and the closing
+        // trampoline dispatches until its inbox drains. The re-seed is
         // neutral, which is the honest reading of an estimate whose occupant
         // just changed.
         ctx.sync_guest(self);

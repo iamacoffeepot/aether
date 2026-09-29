@@ -9,7 +9,7 @@
 //! state-bearing **runtime**. [`WasmTrampoline`] is a ZST identity carrying
 //! only the addressing surface — `Addressable` (`NAMESPACE` / `Resolver`),
 //! the per-handler `HandlesKind<DropComponent>` / `HandlesKind<ReplaceComponent>`
-//! / `HandlesKind<BootTeardown>` markers, and the `OnePer("component")` name-inventory entry — all emitted
+//! markers, and the `OnePer("component")` name-inventory entry — all emitted
 //! always-on by `#[actor]`. The state-bearing runtime
 //! (`WasmTrampolineState`, which owns the wasmtime `Component` plus the
 //! `Engine` / `Linker` / `HubOutbound` handles, the resident `Module` and the
@@ -35,7 +35,7 @@
 //!
 //! Instanced. Anything the trampoline doesn't handle
 //! natively (today: `DropComponent`, `ReplaceComponent`, and the host's
-//! `LoadDelivered` hand-off and `BootTeardown`) falls through the
+//! `LoadDelivered` hand-off) falls through the
 //! `#[fallback]` (`forward_to_wasm`) to the wasm guest via `Component::deliver`.
 //! The framework dispatcher reads from the trampoline's `NativeBinding`;
 //! un-handled kinds reach `forward_to_wasm`; the guest's `send_mail_p32` /
@@ -55,10 +55,10 @@
 //!   lands on `on_drop_component`, which releases the guest (its `unwire` runs
 //!   and the `Component` drops) and closes the trampoline. Its name tombstones
 //!   and a later load of it is refused as retired (ADR-0241 §8).
-//! - **Boot teardown** (ADR-0147): when a module's last non-boot actor
-//!   departs, the host sends `BootTeardown` through the module boot
-//!   guest's control reference, and `on_boot_teardown` releases the guest the
-//!   way a drop does and vacates the mailbox, with no reply.
+//! - **Module boot** (ADR-0147): a module's boot is born once, by the
+//!   module's first load, and never replaced. It outlives every other
+//!   instance of the module and ends only on its own drop, which closes it
+//!   for good, or at engine stop.
 //! - **Replace**: `ReplaceComponent` mail lands on `on_replace_component`,
 //!   which checks the new bytes in through the engine's module cache
 //!   (ADR-0241 §2), instantiates a new `Component` against the same binding
