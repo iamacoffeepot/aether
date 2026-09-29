@@ -76,8 +76,8 @@ const PROCESS: Head<OpaqueBytes> = Head::new("process");
 #[test]
 fn the_driver_loads_each_bundle_under_its_unit_name() -> Result<(), Box<dyn Error>> {
     // Catches a driver that keys a bundle root by anything but its unit key:
-    // only the driver's own root holding `<bundle namespace>.<hash>:<unit key>`
-    // makes a second load of the same bytes under that key `SubnameInUse`.
+    // a second load of the same bytes under that key answers with the live
+    // root at `<bundle namespace>.<hash>:<unit key>` (ADR-0241 §9).
     let Some(wasm_path) = require_wasm("aether_test_fixtures_program") else {
         return Ok(());
     };
@@ -105,10 +105,12 @@ fn the_driver_loads_each_bundle_under_its_unit_name() -> Result<(), Box<dyn Erro
         config: Vec::new(),
         export: Some(BUNDLE_NAMESPACE.to_owned()),
     });
-    match result {
-        LoadResult::Err { error } => assert!(error.contains("SubnameInUse"), "the unit name is taken: {error}"),
-        LoadResult::Ok { .. } => panic!("the driver's root must already hold the unit's bundle name"),
-    }
+    let LoadResult::Ok { path, .. } = result else {
+        panic!("a load of the unit's live bundle name answers with its root: {result:?}");
+    };
+    let (published, key) = path.as_str().split_once(':').expect("an instanced root is keyed");
+    assert_eq!(key, UNIT, "the root is keyed by the unit: {path}");
+    assert!(published.starts_with(&format!("{BUNDLE_NAMESPACE}.")), "the root is the bundle's publication: {path}");
     Ok(())
 }
 

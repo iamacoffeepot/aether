@@ -1,20 +1,24 @@
-//! A replace as one group republish (ADR-0241 §7).
+//! A publish routed by its pre-checks, and a successor's publish as one
+//! group republish (ADR-0241 §7).
 //!
-//! The pre-checks ([`precheck`]) refuse before any member is touched. Then
+//! Every publish, a `Publish`'s, a load's, or a replace's, runs the
+//! pre-checks ([`precheck`]), which decide whether the module is unchanged,
+//! published for the first time ([`super::publish`]), or republished. A
+//! republish's pre-checks refuse before any member is touched. Then
 //! every member prepares a candidate beside its running guest; once all are
 //! ready the module publishes, and every member commits on a chain of its
 //! own, whose settlement the answer waits for. A member's refusal, or a
 //! publish failure, aborts every member that prepared, and the answer waits
 //! for each to reinstate its old guest.
 //!
-//! While a republish is in flight its namespaces are held: a load of one
-//! waits in the republish and publishes once the replace has answered, a
-//! drop of a member waits the same way, and a second republish of the
-//! module is refused. A replace that arrives while a load of its
-//! namespaces is in flight queues until those births settle.
+//! While a republish is in flight its namespaces are held: a load or a spawn
+//! of one waits in the republish and runs once the republish has answered,
+//! a drop of a member waits the same way, and a second republish of the
+//! module is refused. A publish that arrives while a spawn or a first
+//! publish of its namespaces is in flight queues until those settle.
 //!
-//! One exception keeps the hold from deadlocking its own republish: a load
-//! or drop that arrives on one of the republish's commit chains runs at
+//! One exception keeps the hold from deadlocking its own republish: a load,
+//! spawn, or drop that arrives on one of the republish's commit chains runs at
 //! once. A committing candidate flushes the mail its `on_rehydrate` held on
 //! its commit's chain, and the replace answers only once that chain
 //! settles; parked, such a request's held reply would keep the chain open,
@@ -29,18 +33,20 @@ mod precheck;
 use std::mem;
 use std::sync::Arc;
 
-use aether_actor::{ErasedActorRef, ProtocolRef, ReplyMode, Single};
+use aether_actor::{ErasedActorRef, ProtocolRef, ReplyMode};
 use aether_data::{Blob, ErasedActorPath, MailId};
 use aether_kinds::trace::Settled;
 use aether_kinds::{
-    DropComponent, DropResult, LoadResult, ReplaceComponent, ReplaceConfig, ReplaceResult, ReplacedType,
+    DropComponent, DropResult, InstanceConfig, LoadResult, ReplaceComponent, ReplaceConfig, ReplaceResult, Spawn,
+    SpawnResult,
 };
 use aether_substrate::actor::native::{Held, NativeCtx, RegistryBatch, RegistryBatchResult};
 use aether_substrate::actor::wasm::module::Module;
 
 use crate::component::runtime::load::PreparedLoad;
-use crate::component::runtime::{ComponentHostCapabilityState, GuestControl};
-use crate::component::{Abort, Commit, ComponentHostCapability, Prepare, Prepared};
+use crate::component::runtime::publish::Publisher;
+use crate::component::runtime::{ComponentHostCapabilityState, GuestControl, HostCtx};
+use crate::component::{Abort, Commit, Prepare, Prepared};
 use crate::kinds::{RepublishMember, RepublishPublished};
 
 use self::precheck::Plan;
@@ -50,25 +56,33 @@ use self::precheck::Plan;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct RepublishId(u64);
 
-/// One republish in flight: the replace's held reply, the successor module,
-/// the members moving to it, and what waits for it to answer.
+/// One republish in flight: what waits on its publish, the successor
+/// module, the members moving to it, and what waits for it to answer.
 pub(super) struct Republish {
-    held: Held<ReplaceResult>,
+    publisher: Publisher,
     module: Module,
     namespaces: Vec<String>,
     members: Vec<Member>,
     /// Each member's refusal, or the publish's, in arrival order. Any entry
     /// aborts the group.
     refusals: Vec<String>,
-    parked_loads: Vec<(Held<LoadResult>, Arc<PreparedLoad>)>,
+    parked_loads: Vec<(Held<LoadResult>, Arc<PreparedLoad>, Blob)>,
+    parked_spawns: Vec<(Held<SpawnResult>, Spawn)>,
     parked_drops: Vec<(Held<DropResult>, DropComponent)>,
 }
 
 impl Republish {
-    /// Hold a load of one of this republish's namespaces until the replace
-    /// answers.
-    pub(super) fn park_load(&mut self, held: Held<LoadResult>, load: Arc<PreparedLoad>) {
-        self.parked_loads.push((held, load));
+    /// Hold a load of one of this republish's namespaces, with its code,
+    /// until the republish answers.
+    pub(super) fn park_load(&mut self, held: Held<LoadResult>, load: Arc<PreparedLoad>, code: Blob) {
+        self.parked_loads.push((held, load, code));
+    }
+
+    /// Hold a spawn of one of this republish's namespaces until the
+    /// republish answers. It is prepared again then, against the code that
+    /// won.
+    pub(super) fn park_spawn(&mut self, held: Held<SpawnResult>, spawn: Spawn) {
+        self.parked_spawns.push((held, spawn));
     }
 
     fn is_member(&self, actor: ErasedActorRef) -> bool {
@@ -125,36 +139,28 @@ pub(super) struct CommitRoot {
     member: usize,
 }
 
-/// A replace that waits for the loads of its namespaces to settle before
-/// its pre-checks run. It keeps its checked-in module, so the module's cache
-/// entry stays live meanwhile.
-pub(super) struct QueuedReplace {
-    held: Held<ReplaceResult>,
+/// A publish that waits for the spawns and first publishes of its
+/// namespaces to settle before its pre-checks run. It keeps its checked-in
+/// module, so the module's cache entry stays live meanwhile.
+pub(super) struct QueuedPublish {
+    publisher: Publisher,
     code: Blob,
     module: Module,
-    configs: Vec<ReplaceConfig>,
+    configs: Vec<InstanceConfig>,
 }
 
-/// Each type `module` publishes, with its receive surface, as the replace
-/// reports it.
-fn replaced_types(module: &Module) -> Vec<ReplacedType> {
-    let assets = module.manifest().asset_catalog();
-    module
-        .published_groups()
-        .map(|(namespace, group)| {
-            let mut capabilities = group.capabilities.clone();
-            capabilities.assets = assets.to_vec();
-            ReplacedType { namespace: namespace.into_owned(), capabilities }
-        })
-        .collect()
+impl QueuedPublish {
+    /// A publish of `module`, checked in from `code`, for `publisher`, with
+    /// the configs a successor's instances are built with.
+    pub(super) fn new(publisher: Publisher, code: Blob, module: Module, configs: Vec<InstanceConfig>) -> Self {
+        Self { publisher, code, module, configs }
+    }
 }
-
-/// The host's own ctx, in either reply mode.
-type HostCtx<'a, M> = NativeCtx<'a, ComponentHostCapability, M>;
 
 impl ComponentHostCapabilityState {
-    /// Check a replace's bytes in, then run it, or queue it while a load of
-    /// its namespaces is in flight.
+    /// Check a replace's bytes in, then publish them as a successor: an
+    /// adapter over the publish that answers as a replace, until its callers
+    /// move to `Publish` (#7163).
     pub(super) fn begin_replace<M: ReplyMode>(
         &mut self,
         ctx: &mut HostCtx<'_, M>,
@@ -162,36 +168,45 @@ impl ComponentHostCapabilityState {
         payload: ReplaceComponent,
     ) {
         let ReplaceComponent { wasm, configs } = payload;
+        let configs =
+            configs.into_iter().map(|ReplaceConfig { path, config }| InstanceConfig { path, config }).collect();
         let code = ctx.check_in(wasm.into_boxed_slice());
         match self.modules.check_in(&ctx.blob_check_in(), &code) {
-            Ok(module) => self.replace_or_queue(ctx, QueuedReplace { held, code, module, configs }),
+            Ok(module) => {
+                self.publish_or_queue(ctx, QueuedPublish::new(Publisher::Replace(held), code, module, configs));
+            }
             Err(error) => held.answer(ctx, &ReplaceResult::Err { error }),
         }
     }
 
-    /// Run every queued replace whose namespaces no load holds any more, in
-    /// arrival order.
-    pub(super) fn release_queued_replaces<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>) {
-        for queued in mem::take(&mut self.queued_replaces) {
-            self.replace_or_queue(ctx, queued);
+    /// Run every queued publish whose namespaces nothing in flight holds any
+    /// more, in arrival order.
+    pub(super) fn release_queued_publishes<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>) {
+        for queued in mem::take(&mut self.queued_publishes) {
+            self.publish_or_queue(ctx, queued);
         }
     }
 
-    fn replace_or_queue<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, queued: QueuedReplace) {
-        let loading = queued
-            .module
-            .published_groups()
-            .any(|(namespace, _)| self.loads.values().any(|load| load.published() == namespace));
-        if loading {
-            self.queued_replaces.push(queued);
+    /// Run a publish's pre-checks and route it, or queue it while a spawn or
+    /// a first publish of its namespaces is in flight: an unchanged module
+    /// is bound already, a first publish binds it, and a successor
+    /// republishes its group.
+    pub(super) fn publish_or_queue<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, queued: QueuedPublish) {
+        let busy = queued.module.published_groups().any(|(namespace, _)| {
+            self.loads.values().any(|load| load.published() == namespace)
+                || self.publishes.values().any(|publish| publish.publishes(&namespace))
+        });
+        if busy {
+            self.queued_publishes.push(queued);
             return;
         }
 
-        let QueuedReplace { held, code, module, configs } = queued;
+        let QueuedPublish { publisher, code, module, configs } = queued;
         match self.plan_republish(ctx, &module, configs) {
-            Ok(Plan::Unchanged) => held.answer(ctx, &ReplaceResult::Ok { types: replaced_types(&module) }),
-            Ok(Plan::Group(members)) => self.start_republish(ctx, held, code, module, members),
-            Err(error) => held.answer(ctx, &ReplaceResult::Err { error: format!("replace refused: {error}") }),
+            Ok(Plan::Unchanged) => self.conclude_publish(ctx, publisher, &module),
+            Ok(Plan::Publish) => self.first_publish(ctx, publisher, module),
+            Ok(Plan::Group(members)) => self.start_republish(ctx, publisher, code, module, members),
+            Err(error) => publisher.refuse(ctx, &error),
         }
     }
 
@@ -200,7 +215,7 @@ impl ComponentHostCapabilityState {
     fn start_republish<M: ReplyMode>(
         &mut self,
         ctx: &mut HostCtx<'_, M>,
-        held: Held<ReplaceResult>,
+        publisher: Publisher,
         code: Blob,
         module: Module,
         mut members: Vec<Member>,
@@ -219,12 +234,13 @@ impl ComponentHostCapabilityState {
         }
         let empty = members.is_empty();
         let republish = Republish {
-            held,
+            publisher,
             module,
             namespaces,
             members,
             refusals: Vec::new(),
             parked_loads: Vec::new(),
+            parked_spawns: Vec::new(),
             parked_drops: Vec::new(),
         };
         self.republishes.insert(id, republish);
@@ -271,9 +287,9 @@ impl ComponentHostCapabilityState {
     /// The successor's publish settled. A commit rewrites each member's
     /// module and sends each its commit on a chain of its own, whose
     /// settlement the answer waits for; a refusal aborts the group.
-    pub(super) fn finish_republish_publish(
+    pub(super) fn finish_republish_publish<M: ReplyMode>(
         &mut self,
-        ctx: &mut HostCtx<'_, Single>,
+        ctx: &mut HostCtx<'_, M>,
         republish: u64,
         published: RegistryBatchResult,
     ) {
@@ -329,16 +345,15 @@ impl ComponentHostCapabilityState {
         self.conclude_commit_if_done(ctx, id);
     }
 
-    /// Answer `Ok` once every member has committed and its commit's chain
-    /// has settled.
+    /// Conclude the publish once every member has committed and its
+    /// commit's chain has settled.
     fn conclude_commit_if_done<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, id: RepublishId) {
         let done = self.republishes.get(&id).is_some_and(|republish| {
             republish.members.iter().all(|member| member.step == Step::Committing { committed: true, settled: true })
         });
         if done {
             let republish = self.republishes.remove(&id).expect("a concluded republish is in flight");
-            let types = replaced_types(&republish.module);
-            self.release_republish(ctx, republish, &ReplaceResult::Ok { types });
+            self.release_republish(ctx, republish, Ok(()));
         }
     }
 
@@ -368,33 +383,39 @@ impl ComponentHostCapabilityState {
 
     fn conclude_abort_if_done<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, id: RepublishId) {
         if self.republishes.get(&id).is_some_and(Republish::quiet) {
-            let republish = self.republishes.remove(&id).expect("a concluded republish is in flight");
-            let error = format!("replace refused: {}", republish.refusals.join("; "));
-            self.release_republish(ctx, republish, &ReplaceResult::Err { error });
+            let mut republish = self.republishes.remove(&id).expect("a concluded republish is in flight");
+            let refusals = mem::take(&mut republish.refusals).join("; ");
+            self.release_republish(ctx, republish, Err(refusals));
         }
     }
 
-    /// Answer the replace, release its namespaces, and run what waited for
-    /// it: each parked load publishes, each parked drop runs, and each
-    /// queued replace is retried.
+    /// Release the republish's namespaces, conclude its publish with its
+    /// `outcome`, and run what waited for it: each parked load publishes, each
+    /// parked spawn and drop runs, and each queued publish is retried.
     fn release_republish<M: ReplyMode>(
         &mut self,
         ctx: &mut HostCtx<'_, M>,
         republish: Republish,
-        answer: &ReplaceResult,
+        outcome: Result<(), String>,
     ) {
-        let Republish { held, namespaces, parked_loads, parked_drops, .. } = republish;
-        held.answer(ctx, answer);
+        let Republish { publisher, module, namespaces, parked_loads, parked_spawns, parked_drops, .. } = republish;
         for namespace in namespaces {
             self.republishing.remove(&namespace);
         }
-        for (held, load) in parked_loads {
-            self.publish_load(ctx, held, load);
+        match outcome {
+            Ok(()) => self.conclude_publish(ctx, publisher, &module),
+            Err(refusals) => publisher.refuse(ctx, &refusals),
+        }
+        for (held, load, code) in parked_loads {
+            self.publish_then_spawn(ctx, held, load, code);
+        }
+        for (held, payload) in parked_spawns {
+            self.begin_spawn(ctx, held, payload);
         }
         for (held, payload) in parked_drops {
             self.begin_drop(ctx, held, payload);
         }
-        self.release_queued_replaces(ctx);
+        self.release_queued_publishes(ctx);
     }
 
     /// Drop the guest a `DropComponent` names: hand the drop to it, and it
@@ -439,6 +460,20 @@ impl ComponentHostCapabilityState {
 }
 
 impl ComponentHostCapabilityState {
+    /// The republish that holds `namespace`, which a load or spawn of it
+    /// waits in, unless the request arrives on that republish's own commit
+    /// chain, where the successor has already published and waiting would
+    /// hold the chain the republish waits on open (see the module docs).
+    pub(super) fn holding_republish<M: ReplyMode>(
+        &mut self,
+        ctx: &HostCtx<'_, M>,
+        namespace: &str,
+    ) -> Option<&mut Republish> {
+        let committing = self.committing_republish(ctx);
+        let republish = *self.republishing.get(namespace).filter(|republish| committing != Some(**republish))?;
+        Some(self.republishes.get_mut(&republish).expect("a republishing namespace names a republish in flight"))
+    }
+
     /// The republish whose commit chain the handled mail rides, read from
     /// the ctx's in-flight root: a request a committing candidate held and
     /// its commit flushed. Such a request runs at once rather than waiting

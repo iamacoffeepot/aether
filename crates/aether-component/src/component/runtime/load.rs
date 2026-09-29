@@ -1,27 +1,40 @@
-//! Owner-staged component load and module-boot stages. A load's held reply
-//! waits in host state keyed by its [`LoadId`] (ADR-0243 §9) until the
-//! guest's birth answers it or hands it off. A load of a namespace a
-//! republish holds waits in that republish until the replace answers
-//! (ADR-0241 §7).
+//! A load is a publish and then a spawn (ADR-0241 §9), and this module owns
+//! the spawn half every door shares: the prepared guest, its module boot,
+//! its birth, and the requester it answers.
+//!
+//! A load prepares its guest before anything publishes, then publishes its
+//! module through the host's one publish path ([`super::publish`]): a
+//! module already published is not published again, a first publish binds
+//! it, and a successor republishes every live instance of its namespaces as
+//! one group (§7) before the load's guest is spawned. A load of a namespace
+//! a republish holds waits in that republish until the replace answers.
+//!
+//! The spawn half answers a name that is already live with the instance
+//! there, which is not re-initialised, and otherwise stages the guest's
+//! birth. The requester's held reply waits in host state keyed by its
+//! [`LoadId`] (ADR-0243 §9) until the birth answers it or hands it off.
 
 use std::sync::Arc;
 
-use aether_actor::{ErasedActorRef, ReplyMode, Single};
-use aether_data::{BlobHash, ErasedActorPath};
-use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder};
+use aether_actor::{ErasedActorRef, ProtocolRef, ReplyMode};
+use aether_data::{Blob, BlobHash, ErasedActorPath};
+use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder, SpawnResult};
 
 use aether_substrate::actor::native::{
-    GuestBirth, GuestOutcome, Held, NativeCtx, RegistryBatch, RegistryBatchResult, TaskDone, spawn::Subname,
+    GuestBirth, GuestOutcome, Held, RegistryBatch, RegistryBatchResult, TaskDone, spawn::Subname,
 };
 use aether_substrate::actor::wasm::kind_manifest::Dependency;
 use aether_substrate::actor::wasm::module::{Module, ModuleManifest};
+use aether_substrate::mail::registry::Admitted;
 
 use super::LoadResult;
 use super::dependencies::dependency_refusal;
 use super::placement::{child_refusal, root_refusal};
-use crate::component::runtime::{ComponentHostCapabilityState, GuestControl, LoadedGuest};
-use crate::component::{ComponentHostCapability, LoadDelivered};
-use crate::kinds::{GuestBorn, LoadPublished, RepublishPublished};
+use super::publish::Publisher;
+use super::republish::QueuedPublish;
+use crate::component::runtime::{ComponentHostCapabilityState, GuestControl, HostCtx, LoadedGuest};
+use crate::component::{LoadDelivered, SpawnDelivered};
+use crate::kinds::{GuestBorn, LoadPublished, ModulePublished, RepublishPublished};
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
 pub(super) struct PreparedLoad {
@@ -60,9 +73,20 @@ impl LoadKey {
     }
 }
 
+/// What a load or a spawn asks for: the type `export` selects from `module`
+/// (its default when `None`), keyed by `name`, placed at `placement`, and
+/// built with `config`.
+pub(super) struct Selection {
+    pub(super) module: Module,
+    pub(super) export: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) config: Vec<u8>,
+    pub(super) placement: LoadPlacement,
+}
+
 /// Where a load places its guest: at the root, or beneath a proven parent.
 #[derive(Clone, Copy)]
-enum LoadPlacement {
+pub(super) enum LoadPlacement {
     Root,
     Under { parent: ErasedActorRef },
 }
@@ -89,6 +113,20 @@ impl PreparedLoad {
             type_tag: self.type_tag,
         }
     }
+
+    /// The name the guest takes (ADR-0241 §5), or `None` when a counter
+    /// draws its key, which names no instance yet.
+    fn name<M: ReplyMode>(&self, ctx: &HostCtx<'_, M>) -> Option<String> {
+        let leaf = match &self.key {
+            LoadKey::Singleton => self.published.clone(),
+            LoadKey::Named(key) => format!("{}:{key}", self.published),
+            LoadKey::Counter => return None,
+        };
+        Some(match self.placement {
+            LoadPlacement::Root => leaf,
+            LoadPlacement::Under { parent } => format!("{}/{leaf}", ctx.actor_path(parent)),
+        })
+    }
 }
 
 /// The name `namespace`, an exported type of `module`, publishes under
@@ -100,6 +138,18 @@ fn published_name(module: &Module, namespace: &str) -> Option<String> {
         .zip(module.published_groups())
         .find(|((declared, _), _)| *declared == namespace)
         .map(|(_, (published, _))| published.into_owned())
+}
+
+/// The declared namespace of the exported type `module` publishes as
+/// `published` (ADR-0241 §3): the inverse of [`published_name`], which the
+/// export selector and the type tag read.
+pub(super) fn declared_name(module: &Module, published: &str) -> Option<String> {
+    module
+        .manifest()
+        .exported_groups()
+        .zip(module.published_groups())
+        .find(|(_, (name, _))| name == published)
+        .map(|((declared, _), _)| declared.to_owned())
 }
 
 pub(super) struct PreparedBoot {
@@ -146,18 +196,53 @@ impl PreparedBoot {
     }
 }
 
-/// One load in flight, keyed by its [`LoadId`] from the moment its module
-/// publish is staged until the guest's birth settles it (ADR-0243 §9). The
-/// held reply leaves only through `answer` or `Held::hand_off`; at host
-/// close the ledger answers it `LoadResult::unanswered()`.
+/// Who a guest's spawn answers: a load, with a [`LoadResult`], or a spawn,
+/// with a [`SpawnResult`]. The guest answers either in its own name, so the
+/// requester keeps the reply's stamped sender as its reference (ADR-0230
+/// §3); only a refusal is answered by the host.
+pub(super) enum Requester {
+    Load(Held<LoadResult>),
+    Spawn(Held<SpawnResult>),
+}
+
+impl Requester {
+    fn refuse<M: ReplyMode>(self, ctx: &mut HostCtx<'_, M>, error: String) {
+        match self {
+            Self::Load(held) => held.answer(ctx, &LoadResult::Err { error }),
+            Self::Spawn(held) => held.answer(ctx, &SpawnResult::Err { error }),
+        }
+    }
+
+    /// Hand the owed reply to the guest `control` reaches, which answers
+    /// with `path` and `capabilities`: a spawn hears whether it was `live`
+    /// before the request arrived.
+    fn deliver<M: ReplyMode>(
+        self,
+        ctx: &mut HostCtx<'_, M>,
+        control: ProtocolRef<GuestControl>,
+        path: ErasedActorPath,
+        capabilities: ComponentCapabilities,
+        live: bool,
+    ) {
+        match self {
+            Self::Load(held) => held.hand_off(ctx, control, &LoadDelivered { path, capabilities }),
+            Self::Spawn(held) => held.hand_off(ctx, control, &SpawnDelivered { path, capabilities, live }),
+        }
+    }
+}
+
+/// One spawn in flight, a load's or a spawn's, keyed by its [`LoadId`] from
+/// the moment it is staged until the guest's birth settles it (ADR-0243 §9).
+/// The held reply leaves only through an answer or `Held::hand_off`; at host
+/// close the ledger answers it unanswered.
 pub(super) struct LoadInFlight {
-    held: Held<LoadResult>,
+    requester: Requester,
     load: Arc<PreparedLoad>,
 }
 
 impl LoadInFlight {
-    /// The name the load's guest is born at, which a replace of its module
-    /// waits on until the birth settles (ADR-0241 §7).
+    /// The name the guest is born at, which a publish of its module waits
+    /// on until the birth settles (ADR-0241 §7).
     pub(super) fn published(&self) -> &str {
         &self.load.published
     }
@@ -167,9 +252,10 @@ impl LoadInFlight {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct LoadId(u64);
 
-/// A staged module boot and the loads waiting on it, the first included,
-/// each found in the host's loads by its id, with the name and module the
-/// boot guest is recorded under once it is born.
+/// A staged module boot and the spawns waiting on it, each found in the
+/// host's loads by its id, with the name and module the boot guest is
+/// recorded under once it is born. A boot a `Publish` staged starts with no
+/// waiter.
 pub(super) struct PendingBoot {
     waiters: Vec<LoadId>,
     namespace: String,
@@ -177,93 +263,128 @@ pub(super) struct PendingBoot {
 }
 
 impl ComponentHostCapabilityState {
-    pub fn begin_load<A, M: ReplyMode>(
+    pub fn begin_load<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut HostCtx<'_, M>,
         held: Held<LoadResult>,
         payload: LoadComponent,
     ) {
         self.begin_load_at(ctx, held, payload, LoadPlacement::Root);
     }
 
-    pub fn begin_load_under<A, M: ReplyMode>(
+    /// A load beneath a live parent: an adapter over the load, with the
+    /// parent proven first, until its callers move to `Spawn` (#7163).
+    pub fn begin_load_under<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut HostCtx<'_, M>,
         held: Held<LoadResult>,
         payload: LoadComponentUnder,
     ) {
-        // ADR-0230 §1: the parent must be `Live`. A `Starting` parent resolves
-        // as an address but does not prove, so a child is never staged beneath
-        // an unborn parent; the proof carries the parent's own canonical path.
-        let resolved = ErasedActorPath::new(&payload.parent)
+        let placement = ErasedActorPath::new(&payload.parent)
             .map_err(|error| error.to_string())
-            .and_then(|parent| ctx.resolve_path(&parent).map_err(|error| error.to_string()));
-        let parent = match resolved {
-            Ok(parent) => parent,
-            Err(error) => {
-                held.answer(
-                    ctx,
-                    &LoadResult::Err {
-                        error: format!("component parent {:?} did not resolve: {error}", payload.parent),
-                    },
-                );
-                return;
-            }
-        };
-        self.begin_load_at(ctx, held, payload.load, LoadPlacement::Under { parent });
+            .and_then(|parent| Self::placement_under(ctx, &parent));
+        match placement {
+            Ok(placement) => self.begin_load_at(ctx, held, payload.load, placement),
+            Err(error) => held.answer(
+                ctx,
+                &LoadResult::Err { error: format!("component parent {:?} did not resolve: {error}", payload.parent) },
+            ),
+        }
     }
 
-    fn begin_load_at<A, M: ReplyMode>(
+    /// The placement beneath the live actor `parent` names. ADR-0230 §1: the
+    /// parent must be `Live`. A `Starting` parent resolves as an address but
+    /// does not prove, so a child is never staged beneath an unborn parent;
+    /// the proof carries the parent's own canonical path.
+    pub(super) fn placement_under<M: ReplyMode>(
+        ctx: &HostCtx<'_, M>,
+        parent: &ErasedActorPath,
+    ) -> Result<LoadPlacement, String> {
+        ctx.resolve_path(parent).map(|parent| LoadPlacement::Under { parent }).map_err(|error| error.to_string())
+    }
+
+    fn begin_load_at<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut HostCtx<'_, M>,
         held: Held<LoadResult>,
         payload: LoadComponent,
         placement: LoadPlacement,
     ) {
-        let load = match self.prepare_load(ctx, payload, placement) {
+        let LoadComponent { wasm, name, config, export } = payload;
+
+        // ADR-0241 §2: check the bytes in and take the module from the
+        // engine's one cache, which compiles and parses them once per content
+        // hash. The code blob is kept for a republish's prepare.
+        let code = ctx.check_in(wasm.into_boxed_slice());
+        let prepared = self
+            .modules
+            .check_in(&ctx.blob_check_in(), &code)
+            .and_then(|module| Self::prepare_load(ctx, Selection { module, export, name, config, placement }));
+        let load = match prepared {
             Ok(load) => load,
-            Err(result) => {
-                held.answer(ctx, &result);
+            Err(error) => {
+                held.answer(ctx, &LoadResult::Err { error });
                 return;
             }
         };
-        // ADR-0241 §7: a load of a namespace a republish holds waits until
-        // the replace answers, then publishes against the code that won,
-        // unless it arrives on that republish's own commit chain, where the
-        // successor has already published and waiting would hold the chain
-        // the replace waits on open (see the republish module docs).
-        let committing = self.committing_republish(ctx);
-        if let Some(&republish) = self.republishing.get(&load.published)
-            && committing != Some(republish)
-        {
-            self.republishes
-                .get_mut(&republish)
-                .expect("a republishing namespace names a republish in flight")
-                .park_load(held, load);
+
+        if let Some(republish) = self.holding_republish(ctx, &load.published) {
+            republish.park_load(held, load, code);
             return;
         }
-        self.publish_load(ctx, held, load);
+        self.publish_then_spawn(ctx, held, load, code);
     }
 
-    /// Publish a prepared load's module before anything spawns (ADR-0241 §3,
-    /// §4). The owner runs admission and registers the module's kinds in one
-    /// batch; the held reply waits here, keyed by the load, until its
-    /// completion (ADR-0243 §9).
-    pub(super) fn publish_load<A, M: ReplyMode>(
+    /// Publish a prepared load's module, then spawn its guest (ADR-0241 §9).
+    /// A module that already publishes every namespace it exports spawns at
+    /// once; any other goes through the host's one publish path, which
+    /// spawns the guest once the module is bound or its republish commits.
+    pub(super) fn publish_then_spawn<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut HostCtx<'_, M>,
+        held: Held<LoadResult>,
+        load: Arc<PreparedLoad>,
+        code: Blob,
+    ) {
+        if ctx.admission_preview(&load.module) == Ok(Admitted::Unchanged) {
+            self.spawn_prepared(ctx, Requester::Load(held), load);
+            return;
+        }
+        let module = load.module.clone();
+        self.publish_or_queue(ctx, QueuedPublish::new(Publisher::Load { held, load }, code, module, Vec::new()));
+    }
+
+    /// Publish a load's module for the first time before anything spawns
+    /// (ADR-0241 §3, §4). The owner runs admission and registers the
+    /// module's kinds in one batch; the held reply waits here, keyed by the
+    /// load, until its completion (ADR-0243 §9).
+    pub(super) fn publish_load<M: ReplyMode>(
+        &mut self,
+        ctx: &mut HostCtx<'_, M>,
         held: Held<LoadResult>,
         load: Arc<PreparedLoad>,
     ) {
-        let id = self.next_load_id();
         let batch = RegistryBatch::publish_module(&load.module);
-        self.loads.insert(id, LoadInFlight { held, load });
+        let id = self.track_load(Requester::Load(held), load);
         ctx.stage_registry_batch(batch, LoadPublished { load: id.0 });
     }
 
-    fn next_load_id(&mut self) -> LoadId {
+    /// Spawn a prepared guest of a published module: its module boot first,
+    /// once, then the guest at its name (ADR-0241 §6, §9).
+    pub(super) fn spawn_prepared<M: ReplyMode>(
+        &mut self,
+        ctx: &mut HostCtx<'_, M>,
+        requester: Requester,
+        load: Arc<PreparedLoad>,
+    ) {
+        let id = self.track_load(requester, load);
+        self.continue_load(ctx, id);
+    }
+
+    fn track_load(&mut self, requester: Requester, load: Arc<PreparedLoad>) -> LoadId {
         let id = LoadId(self.next_load);
         self.next_load = self.next_load.checked_add(1).expect("the component host's load ids cannot overflow");
+        self.loads.insert(id, LoadInFlight { requester, load });
         id
     }
 
@@ -271,40 +392,29 @@ impl ComponentHostCapabilityState {
         self.loads.remove(&id).expect("a load in flight waits in state until it is answered")
     }
 
-    #[allow(
-        clippy::result_large_err,
-        reason = "cold synchronous preparation returns the exact public LoadResult error shape"
-    )]
-    fn prepare_load<A, M: ReplyMode>(
-        &self,
-        ctx: &NativeCtx<'_, A, M>,
-        payload: LoadComponent,
-        placement: LoadPlacement,
-    ) -> Result<Arc<PreparedLoad>, LoadResult> {
-        let LoadComponent { wasm, name, config, export } = payload;
-
-        // ADR-0241 §2: check the bytes in and take the module from the
-        // engine's one cache, which compiles and parses them once per content
-        // hash. The code blob is let go once the module is built.
-        let module = self
-            .modules
-            .check_in(&ctx.blob_check_in(), &ctx.check_in(wasm.into_boxed_slice()))
-            .map_err(|error| LoadResult::Err { error })?;
+    /// Select the type a [`Selection`] names from its module and place it,
+    /// or refuse (ADR-0138, ADR-0147, ADR-0241 §5). A load and a spawn
+    /// prepare their guest here, before anything publishes or stands up.
+    pub(super) fn prepare_load<M: ReplyMode>(
+        ctx: &HostCtx<'_, M>,
+        selection: Selection,
+    ) -> Result<Arc<PreparedLoad>, String> {
+        let Selection { module, export, name, config, placement } = selection;
         let manifest = module.manifest();
         let actors = manifest.actors();
 
         // ADR-0241 §5: a module boot is always a root singleton, whatever the
         // requested placement, so its type must declare `root`.
         if let Some(error) = manifest.boot().and_then(|boot_ns| root_refusal(manifest.lineage(), boot_ns)) {
-            return Err(LoadResult::Err { error });
+            return Err(error);
         }
 
         if let Some(boot_ns) = manifest.boot()
             && export.as_deref() == Some(boot_ns)
         {
-            return Err(LoadResult::Err {
-                error: format!("export {boot_ns:?} names this module's boot actor, which is not selectable (ADR-0147)"),
-            });
+            return Err(format!(
+                "export {boot_ns:?} names this module's boot actor, which is not selectable (ADR-0147)"
+            ));
         }
 
         // A single-actor module (`export!(public = [A])`) carries no actor boundaries, so
@@ -326,19 +436,15 @@ impl ComponentHostCapabilityState {
         } else if let Some(requested) = &export {
             let Some(group) = actors.iter().find(|actor| actor.namespace.as_deref() == Some(requested.as_str())) else {
                 let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
-                return Err(LoadResult::Err {
-                    error: format!("export {requested:?} not found in module; exported types: {available:?}"),
-                });
+                return Err(format!("export {requested:?} not found in module; exported types: {available:?}"));
             };
             let tag = aether_data::ActorId::singleton(requested).0;
             (group.capabilities.clone(), group.dependencies.clone(), Some(tag), Some(requested.clone()))
         } else if manifest.no_default() {
             let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
-            return Err(LoadResult::Err {
-                error: format!(
-                    "module has no default (ADR-0138): load one of its exports by name via the export selector; exported types: {available:?}"
-                ),
-            });
+            return Err(format!(
+                "module has no default (ADR-0138): load one of its exports by name via the export selector; exported types: {available:?}"
+            ));
         } else {
             let default_actor = manifest.boot().map_or_else(
                 || actors.first(),
@@ -353,13 +459,10 @@ impl ComponentHostCapabilityState {
         };
 
         let Some(namespace) = selected_namespace.or_else(|| manifest.namespace().map(str::to_owned)) else {
-            return Err(LoadResult::Err {
-                error: "the load selects no actor namespace, so it cannot be placed or keyed".to_owned(),
-            });
+            return Err("the load selects no actor namespace, so it cannot be placed or keyed".to_owned());
         };
 
-        let key = Self::placement_key(ctx, manifest, &namespace, name, placement)
-            .map_err(|error| LoadResult::Err { error })?;
+        let key = Self::placement_key(ctx, manifest, &namespace, name, placement)?;
         let published = published_name(&module, &namespace).unwrap_or_else(|| namespace.clone());
 
         capabilities.assets = manifest.asset_catalog().to_vec();
@@ -386,8 +489,8 @@ impl ComponentHostCapabilityState {
     /// counter. Both are refused before the module publishes, so a refused
     /// load registers no route (#6821). A single-actor module's implicit
     /// group is named by the module's namespace.
-    fn placement_key<A, M: ReplyMode>(
-        ctx: &NativeCtx<'_, A, M>,
+    fn placement_key<M: ReplyMode>(
+        ctx: &HostCtx<'_, M>,
         manifest: &ModuleManifest,
         namespace: &str,
         name: Option<String>,
@@ -418,50 +521,68 @@ impl ComponentHostCapabilityState {
         }
     }
 
-    /// A module publish settled, a load's or a republish's, as its context
-    /// names it.
-    pub(super) fn finish_publish(
+    /// A module publish settled, a load's, a `Publish`'s, or a republish's,
+    /// as its context names it.
+    pub(super) fn finish_publish<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
+        ctx: &mut HostCtx<'_, M>,
         done: TaskDone<RegistryBatchResult>,
     ) {
         if let Some(LoadPublished { load }) = ctx.take_context() {
-            self.finish_load_publish(ctx, LoadId(load), done);
+            self.finish_load_publish(ctx, LoadId(load), done.into_output());
+        } else if let Some(ModulePublished { publish }) = ctx.take_context() {
+            self.finish_module_publish(ctx, publish, done.into_output());
         } else if let Some(RepublishPublished { republish }) = ctx.take_context() {
             self.finish_republish_publish(ctx, republish, done.into_output());
         }
     }
 
-    /// A load's module publish settled (ADR-0241 §3): a refusal (admission
-    /// or a kind conflict) answers the caller and spawns nothing; a commit
-    /// records a boot module's namespaces as not replaceable and continues
-    /// to the module boot and the requested guest.
-    fn finish_load_publish(
+    /// A load's first module publish settled (ADR-0241 §3): a refusal
+    /// (admission or a kind conflict) answers the caller and spawns nothing;
+    /// a commit continues to the module boot and the requested guest.
+    fn finish_load_publish<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
+        ctx: &mut HostCtx<'_, M>,
         id: LoadId,
-        done: TaskDone<RegistryBatchResult>,
+        published: RegistryBatchResult,
     ) {
-        match done.into_output() {
+        match published {
             Ok(()) => {
-                let module = &self.loads.get(&id).expect("a published load waits in state").load.module;
-                if module.manifest().boot().is_some() {
-                    self.boot_namespaces.extend(module.published_groups().map(|(published, _)| published.into_owned()));
-                }
+                let module = self.loads.get(&id).expect("a published load waits in state").load.module.clone();
+                self.record_published(&module);
                 self.continue_load(ctx, id);
             }
             Err(error) => {
                 let error = format!("module publish refused: {error}");
-                self.take_load(id).held.answer(ctx, &LoadResult::Err { error });
+                self.take_load(id).requester.refuse(ctx, error);
             }
         }
     }
 
-    fn continue_load(&mut self, ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>, id: LoadId) {
+    /// Record a module whose first publish committed: a module that declares
+    /// a boot has its namespaces recorded as not replaceable (ADR-0147).
+    pub(super) fn record_published(&mut self, module: &Module) {
+        if module.manifest().boot().is_some() {
+            self.boot_namespaces.extend(module.published_groups().map(|(published, _)| published.into_owned()));
+        }
+    }
+
+    /// Stage `module`'s boot, which no spawn waits on, when it declares one
+    /// that is neither born nor staged: a `Publish` spawns it once, when the
+    /// module is first published (ADR-0147, ADR-0241 §8).
+    pub(super) fn boot_published<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, module: &Module) {
+        if let Some(plan) = PreparedBoot::of(module).filter(|plan| {
+            !self.booted_modules.contains(&plan.hash()) && !self.pending_boots.contains_key(&plan.hash())
+        }) {
+            self.stage_module_boot(ctx, &plan, Vec::new());
+        }
+    }
+
+    fn continue_load<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, id: LoadId) {
         let module = self.loads.get(&id).expect("a published load waits in state").load.module.clone();
-        // ADR-0147, ADR-0241 §8: a module's boot spawns once, by its first
-        // load. A later load, including one after the boot was dropped,
-        // proceeds without one.
+        // ADR-0147, ADR-0241 §8: a module's boot spawns once. A later spawn,
+        // including one after the boot was dropped, proceeds without one,
+        // and one that arrives while it is staged waits for it.
         let Some(plan) = PreparedBoot::of(&module).filter(|plan| !self.booted_modules.contains(&plan.hash())) else {
             self.stage_requested(ctx, id);
             return;
@@ -469,20 +590,15 @@ impl ComponentHostCapabilityState {
         if let Some(pending) = self.pending_boots.get_mut(&plan.hash()) {
             pending.waiters.push(id);
         } else {
-            self.stage_module_boot(ctx, &plan, id);
+            self.stage_module_boot(ctx, &plan, vec![id]);
         }
     }
 
     /// Stage a module's boot guest, the root singleton at the boot type's
-    /// published name (ADR-0241 §5), with `first` as its first waiter.
-    fn stage_module_boot(
-        &mut self,
-        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
-        plan: &PreparedBoot,
-        first: LoadId,
-    ) {
+    /// published name (ADR-0241 §5), with `waiters` waiting on it.
+    fn stage_module_boot<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, plan: &PreparedBoot, waiters: Vec<LoadId>) {
         if let Some(namespace) = ctx.missing_dependency(&plan.dependencies) {
-            self.refuse_boot_waiter(ctx, first, dependency_refusal(&plan.namespace, namespace));
+            self.refuse_boot_waiters(ctx, waiters, &dependency_refusal(&plan.namespace, namespace));
             return;
         }
         let hash = plan.hash();
@@ -492,28 +608,30 @@ impl ComponentHostCapabilityState {
             .stage_with(GuestBorn::Boot { hash: *hash.as_bytes() })
         {
             Ok(_) => {
-                let pending = PendingBoot {
-                    waiters: vec![first],
-                    namespace: plan.published.clone(),
-                    module: plan.module.clone(),
-                };
+                let pending = PendingBoot { waiters, namespace: plan.published.clone(), module: plan.module.clone() };
                 let previous = self.pending_boots.insert(hash, pending);
                 debug_assert!(previous.is_none(), "one actor-local reservation owns a module boot hash");
             }
             Err((error, _)) => {
                 let error = format!("module boot failed before requested actor: boot guest spawn failed: {error:?}");
-                self.refuse_boot_waiter(ctx, first, error);
+                self.refuse_boot_waiters(ctx, waiters, &error);
             }
         }
     }
 
-    /// Stage the load's guest at its published name (ADR-0241 §5, §6):
-    /// `NS`, `NS:key`, or `parent/NS:key`.
-    fn stage_requested(&mut self, ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>, id: LoadId) {
+    /// Stage the guest at its published name (ADR-0241 §5, §6): `NS`,
+    /// `NS:key`, or `parent/NS:key`. A name already live answers with the
+    /// instance there, which is not re-initialised (§9).
+    fn stage_requested<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, id: LoadId) {
         let load = Arc::clone(&self.loads.get(&id).expect("a published load waits in state").load);
+        if let Some((actor, control)) = self.live_instance(ctx, &load) {
+            let path = ctx.actor_path(actor);
+            self.take_load(id).requester.deliver(ctx, control, path, load.capabilities.clone(), true);
+            return;
+        }
         if let Some(namespace) = ctx.missing_dependency(&load.dependencies) {
             let error = dependency_refusal(&load.namespace, namespace);
-            self.take_load(id).held.answer(ctx, &LoadResult::Err { error });
+            self.take_load(id).requester.refuse(ctx, error);
             return;
         }
         let birth = GuestBirth {
@@ -527,15 +645,30 @@ impl ComponentHostCapabilityState {
             .stage_with(GuestBorn::Requested { load: id.0 })
         {
             let error = format!("guest spawn failed: {error:?}");
-            self.take_load(id).held.answer(ctx, &LoadResult::Err { error });
+            self.take_load(id).requester.refuse(ctx, error);
         }
     }
 
+    /// The live guest of the load's type at the name the load would take,
+    /// with its control proof. A name nothing is live at, a tombstoned one
+    /// included, answers `None`, and the birth there decides the answer.
+    fn live_instance<M: ReplyMode>(
+        &self,
+        ctx: &HostCtx<'_, M>,
+        load: &PreparedLoad,
+    ) -> Option<(ErasedActorRef, ProtocolRef<GuestControl>)> {
+        let actor = ErasedActorPath::new(&load.name(ctx)?).ok().and_then(|name| ctx.resolve_path(&name).ok())?;
+        self.drop_targets
+            .get(&actor)
+            .filter(|guest| guest.namespace == load.published)
+            .map(|guest| (actor, guest.control))
+    }
+
     /// A staged guest birth settled: a module boot releases its waiters, and
-    /// a requested guest takes over its load's held reply.
-    pub(super) fn finish_guest_birth(
+    /// a requested guest takes over its requester's held reply.
+    pub(super) fn finish_guest_birth<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
+        ctx: &mut HostCtx<'_, M>,
         done: TaskDone<GuestOutcome<GuestControl>>,
     ) {
         match ctx.take_context::<GuestBorn>() {
@@ -550,11 +683,11 @@ impl ComponentHostCapabilityState {
     /// A module's boot birth settled. On success its hash joins the booted
     /// modules for good, so the boot is never spawned again, and its control
     /// reference joins the drop targets, so a drop reaches it and closes it
-    /// (ADR-0241 §8); every waiting load continues to its requested guest.
-    /// On failure every waiting load is refused.
-    fn finish_module_boot(
+    /// (ADR-0241 §8); every waiting spawn continues to its requested guest.
+    /// On failure every waiting spawn is refused.
+    fn finish_module_boot<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
+        ctx: &mut HostCtx<'_, M>,
         hash: BlobHash,
         outcome: GuestOutcome<GuestControl>,
     ) {
@@ -569,44 +702,44 @@ impl ComponentHostCapabilityState {
                 }
             }
             Err(error) => {
-                for id in waiters {
-                    self.refuse_boot_waiter(ctx, id, format!("module boot failed before requested actor: {error:?}"));
-                }
+                let error = format!("module boot failed before requested actor: {error:?}");
+                self.refuse_boot_waiters(ctx, waiters, &error);
             }
         }
     }
 
-    /// Answer a load whose module boot never came up with `error`.
-    fn refuse_boot_waiter(
-        &mut self,
-        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
-        id: LoadId,
-        error: String,
-    ) {
-        self.take_load(id).held.answer(ctx, &LoadResult::Err { error });
+    /// Answer each spawn whose module boot never came up with `error`. A
+    /// boot no spawn waits on, one a `Publish` staged, is logged instead,
+    /// and the module's next spawn stages it again.
+    fn refuse_boot_waiters<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, waiters: Vec<LoadId>, error: &str) {
+        if waiters.is_empty() {
+            tracing::warn!(target: "aether_component", error, "module boot failed with no spawn waiting on it");
+        }
+        for id in waiters {
+            self.take_load(id).requester.refuse(ctx, error.to_owned());
+        }
     }
 
-    fn finish_requested(
+    fn finish_requested<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
+        ctx: &mut HostCtx<'_, M>,
         id: LoadId,
         outcome: GuestOutcome<GuestControl>,
     ) {
-        let LoadInFlight { held, load } = self.take_load(id);
+        let LoadInFlight { requester, load } = self.take_load(id);
         let control = match outcome.result {
             Ok(control) => control,
             Err(error) => {
-                held.answer(ctx, &LoadResult::Err { error: format!("guest spawn failed: {error:?}") });
+                requester.refuse(ctx, format!("guest spawn failed: {error:?}"));
                 return;
             }
         };
 
         let guest = LoadedGuest { control, namespace: load.published.clone(), module: load.module.clone() };
         self.drop_targets.insert(control.erase(), guest);
-        // ADR-0230 §3: the loaded guest answers the requester itself, so the
-        // reply's stamped sender is the reference the requester keeps; the
-        // host hands it the held reply rather than replying.
-        let delivered = LoadDelivered { path: outcome.canonical_name, capabilities: load.capabilities.clone() };
-        held.hand_off(ctx, control, &delivered);
+        // ADR-0230 §3: the guest answers the requester itself, so the reply's
+        // stamped sender is the reference the requester keeps; the host hands
+        // it the held reply rather than replying.
+        requester.deliver(ctx, control, outcome.canonical_name, load.capabilities.clone(), false);
     }
 }

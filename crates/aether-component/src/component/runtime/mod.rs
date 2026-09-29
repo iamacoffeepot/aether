@@ -22,10 +22,12 @@ mod config;
 mod dependencies;
 mod load;
 mod placement;
+mod publish;
 mod republish;
+mod spawn;
 
 use super::{ComponentHostCapability, LoadResult};
-use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare, Prepared};
+use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare, Prepared, SpawnDelivered};
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
 pub use self::config::ComponentHostParams;
@@ -33,7 +35,7 @@ pub use self::config::ComponentHostParams;
 use aether_kinds::trace::Settled;
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
-    LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult,
+    LoadComponent, LoadComponentUnder, Publish, PublishResult, ReplaceComponent, ReplaceResult, Spawn, SpawnResult,
 };
 
 pub use aether_actor::Manual;
@@ -117,6 +119,11 @@ pub struct ComponentHostCapabilityState {
     loads: HashMap<load::LoadId, load::LoadInFlight>,
     /// The next [`load::LoadId`] a load takes.
     next_load: u64,
+    /// Every `Publish` whose first publish of a module is staged, keyed by
+    /// the id its completion's context carries, until the owner answers it.
+    publishes: HashMap<u64, publish::PublishInFlight>,
+    /// The next id a staged `Publish` takes.
+    next_publish: u64,
     /// Every published namespace of every module that declares a boot
     /// (ADR-0147), recorded when its publish commits. A republish of any of
     /// them is refused, whether or not an instance is live: a boot module is
@@ -129,15 +136,15 @@ pub struct ComponentHostCapabilityState {
     /// The next [`republish::RepublishId`] a republish takes.
     next_republish: u64,
     /// Which republish in flight owns each namespace, so a second republish
-    /// of it is refused and a load of it waits.
+    /// of it is refused and a load or spawn of it waits.
     republishing: HashMap<String, republish::RepublishId>,
     /// The root of each commit a republish sent on its own chain, keyed to
     /// the republish and member, until that chain's `Settled` arrives.
     commit_roots: HashMap<MailId, republish::CommitRoot>,
-    /// Replaces whose namespaces had a load or boot in flight when they
-    /// arrived, in arrival order. Each runs its pre-checks once no load of
-    /// its namespaces is in flight.
-    queued_replaces: Vec<republish::QueuedReplace>,
+    /// Publishes whose namespaces had a spawn or a first publish in flight
+    /// when they arrived, in arrival order. Each runs its pre-checks once
+    /// none of its namespaces has.
+    queued_publishes: Vec<republish::QueuedPublish>,
     /// Host-owned control proof of each successfully born guest, a module
     /// boot included, keyed by its erased reference: the [`GuestControl`]
     /// rows its trampoline serves. The guest's public receive surface
@@ -160,14 +167,18 @@ pub struct LoadedGuest {
     module: Module,
 }
 
+/// The host's own ctx, in either reply mode.
+type HostCtx<'a, M> = NativeCtx<'a, ComponentHostCapability, M>;
+
 /// The rows the component host controls a guest through: its trampoline's
 /// own framework rows, never the guest's published surface. A guest birth
-/// completes with this proof (ADR-0241 §6), and the host hands a load's
-/// reply off, forwards a drop, and drives a republish's prepare, commit and
-/// abort (ADR-0241 §7) through it.
+/// completes with this proof (ADR-0241 §6), and the host hands a load's or
+/// a spawn's reply off, forwards a drop, and drives a republish's prepare,
+/// commit and abort (ADR-0241 §7) through it.
 #[aether_actor::protocol]
 trait GuestControl {
     fn load_delivered(mail: LoadDelivered) -> LoadResult;
+    fn spawn_delivered(mail: SpawnDelivered) -> SpawnResult;
     fn drop_component(mail: DropComponent) -> DropResult;
     fn prepare(mail: Prepare) -> Prepared;
     fn commit(mail: Commit) -> Committed;
@@ -201,12 +212,14 @@ impl NativeActor for ComponentHostCapability {
             pending_boots: HashMap::new(),
             loads: HashMap::new(),
             next_load: 0,
+            publishes: HashMap::new(),
+            next_publish: 0,
             boot_namespaces: HashSet::new(),
             republishes: HashMap::new(),
             next_republish: 0,
             republishing: HashMap::new(),
             commit_roots: HashMap::new(),
-            queued_replaces: Vec::new(),
+            queued_publishes: Vec::new(),
             drop_targets: HashMap::new(),
         })
     }
@@ -215,20 +228,24 @@ impl NativeActor for ComponentHostCapability {
         state.registry_subscription = Some(ctx.subscribe_inventory());
     }
 
-    /// Load a fresh wasm component into the substrate.
+    /// Load a wasm component into the substrate: a publish of its module,
+    /// then a spawn of the selected type (ADR-0241 §9).
     ///
     /// # Agent
     /// Pass the wasm bytes plus an optional `name`. The cap publishes the
     /// module (ADR-0241 §3): admission checks its exported namespaces and
     /// their contracts, and the kinds the wasm declared in its `aether.kinds`
-    /// section register. On Ok it spawns the selected type as a guest under
-    /// its own published name (ADR-0241 §5): a singleton at `NS`, where a
-    /// load that names any key is refused before the publish; an instanced
-    /// type at `NS:name`, or `NS:<counter>` when the load names none. The
-    /// loaded guest itself replies `LoadResult::Ok { path, capabilities }`,
-    /// where `path` is that name — agents send subsequent mail to that
-    /// address, and an actor requester keeps the reply's stamped sender as
-    /// its reference.
+    /// section register. A module that succeeds the one publishing its
+    /// namespaces republishes every live instance of them as one group first
+    /// (§7), as `Publish` does. Then it spawns the selected type as a guest
+    /// under its own published name (ADR-0241 §5): a singleton at `NS`, where
+    /// a load that names any key is refused before the publish; an instanced
+    /// type at `NS:name`, or `NS:<counter>` when the load names none. A name
+    /// already live answers with that instance, which is not
+    /// re-initialised. The guest itself replies `LoadResult::Ok { path,
+    /// capabilities }`, where `path` is that name — agents send subsequent
+    /// mail to that address, and an actor requester keeps the reply's
+    /// stamped sender as its reference.
     /// Errors (bad wire bytes, a publish admission refuses, kind conflict,
     /// name conflict, invalid wasm, instantiation trap) come back from the
     /// host as `LoadResult::Err`.
@@ -247,6 +264,7 @@ impl NativeActor for ComponentHostCapability {
     /// selected type must declare `child_of` the parent's type (ADR-0241
     /// §5); any other placement is refused before the module publishes.
     /// Its `LoadResult` is held and answered the same way `on_load_component`'s is.
+    /// An adapter over the load, until its callers move to `Spawn` (#7163).
     #[handler::single]
     fn on_load_component_under(
         state: &mut Self::State,
@@ -259,9 +277,10 @@ impl NativeActor for ComponentHostCapability {
     }
 
     /// A module publish settled (ADR-0241 §3): a load's commit continues to
-    /// the module boot and the requested guest, and a republish's commit
-    /// sends every member its commit (§7). A refusal answers the load, or
-    /// aborts every member of the republish.
+    /// the module boot and the requested guest, a `Publish`'s spawns the
+    /// module's boot and answers, and a republish's commit sends every
+    /// member its commit (§7). A refusal answers the load or the `Publish`,
+    /// or aborts every member of the republish.
     #[handler(task)]
     fn on_module_published(
         state: &mut Self::State,
@@ -269,12 +288,12 @@ impl NativeActor for ComponentHostCapability {
         done: TaskDone<RegistryBatchResult>,
     ) {
         state.finish_publish(ctx, done);
-        state.release_queued_replaces(ctx);
+        state.release_queued_publishes(ctx);
     }
 
     /// A staged guest birth settled (ADR-0241 §6): a module boot releases
-    /// the loads waiting on it, and a requested guest takes over its load's
-    /// held reply.
+    /// the spawns waiting on it, and a requested guest takes over its load's
+    /// or spawn's held reply.
     #[handler(task)]
     fn on_guest_born(
         state: &mut Self::State,
@@ -282,7 +301,7 @@ impl NativeActor for ComponentHostCapability {
         done: TaskDone<GuestOutcome<GuestControl>>,
     ) {
         state.finish_guest_birth(ctx, done);
-        state.release_queued_replaces(ctx);
+        state.release_queued_publishes(ctx);
     }
 
     /// Refresh the hub's registry projection after a coalesced publication.
@@ -326,7 +345,8 @@ impl NativeActor for ComponentHostCapability {
 
     /// Republish a module (ADR-0241 §7, §9): every live instance of every
     /// namespace it republishes moves to the successor as one group, or none
-    /// does.
+    /// does. An adapter over `Publish` that answers as a replace, until its
+    /// callers move to `Publish` (#7163).
     ///
     /// # Agent
     /// `ReplaceComponent { wasm, configs }`. `wasm` must succeed the module
@@ -349,6 +369,53 @@ impl NativeActor for ComponentHostCapability {
     ) -> Pending<ReplaceResult> {
         let (pending, held) = ctx.hold::<ReplaceResult>();
         state.begin_replace(ctx, held, payload);
+        pending
+    }
+
+    /// Publish a module: bind every namespace it exports to it (ADR-0241
+    /// §3, §9).
+    ///
+    /// # Agent
+    /// `Publish { code, configs }`, where `code` is the module's wasm bytes.
+    /// Identical bytes answer `Ok` with nothing changed. A module none of
+    /// whose namespaces is published binds them, and spawns the module's
+    /// boot once when it declares one. A module that succeeds the one
+    /// publishing its namespaces must export each of them, keep each one's
+    /// handler rows and fallback, and declare no boot; it republishes every
+    /// live instance of them as one group, or none (§7). `configs` lists
+    /// `{ path, config }` for an instance whose type's config kind changed,
+    /// which needs one; every other instance keeps its stored config. The
+    /// reply is `PublishResult::Ok { types }`: each namespace as published
+    /// (`NS.<hash>` for a content-addressed module) with its capabilities,
+    /// the `namespace` a `Spawn` names. A republish answers once every
+    /// commit's chain has settled.
+    #[handler::single]
+    fn on_publish(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Publish) -> Pending<PublishResult> {
+        let (pending, held) = ctx.hold::<PublishResult>();
+        state.begin_publish(ctx, held, payload);
+        pending
+    }
+
+    /// Spawn an instance of a published type (ADR-0241 §9).
+    ///
+    /// # Agent
+    /// `Spawn { namespace, key, parent, config }`, where `namespace` is a
+    /// published name `PublishResult` reported. The name the instance takes
+    /// decides the answer: `NS` for a singleton (which names no `key`),
+    /// `NS:key` for an instanced type (`NS:<counter>` when `key` is `None`),
+    /// or `parent/NS:key` beneath the live `parent`, whose type the spawned
+    /// type must declare `child_of`. A live name answers
+    /// `SpawnResult::Live { path, capabilities }` and nothing is
+    /// re-initialised; an absent name stands the instance up with `config`
+    /// and answers `Spawned`; a dropped name is spent and refused. The
+    /// instance itself answers, so an actor requester keeps the reply's
+    /// stamped sender as its reference. A namespace no module publishes is
+    /// refused, and a spawn of one whose module is republishing waits until
+    /// the republish answers.
+    #[handler::single]
+    fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Spawn) -> Pending<SpawnResult> {
+        let (pending, held) = ctx.hold::<SpawnResult>();
+        state.begin_spawn(ctx, held, payload);
         pending
     }
 
@@ -426,9 +493,12 @@ impl NativeActor for ComponentHostCapability {
     /// # Agent
     /// `DescribeComponent { name }` to the `aether.component` mailbox, where
     /// `name` is the lineage address `ListComponents` / `LoadResult.path`
-    /// hand back (`NS`, `NS:key`, or `parent/NS:key`). Reply `DescribeComponentResult::Ok
+    /// hand back (`NS`, `NS:key`, or `parent/NS:key`), or a published
+    /// namespace no live actor is named by, such as an instanced type's,
+    /// which is answered from its published module. Reply `DescribeComponentResult::Ok
     /// { capabilities }` carries the full handler kinds, docs, fallback, and
-    /// config kind; `Err { error }` means nothing is registered at that name.
+    /// config kind; `Err { error }` means nothing is registered or published
+    /// at that name.
     /// Name-addressed so a boot-manifest-loaded component (ADR-0116), whose
     /// spawner never receives a mailbox id, stays introspectable.
     #[handler::single]
@@ -447,9 +517,17 @@ impl NativeActor for ComponentHostCapability {
         let actor = match proven {
             Ok(actor) => actor,
             Err(error) => {
-                return DescribeComponentResult::Err {
-                    error: format!("no component registered at name {}: {error}", payload.name),
-                };
+                // ADR-0241 §3: a published namespace no live actor is named
+                // by answers from the module the table binds it to.
+                let published = ctx.published_module(&payload.name).and_then(|module| {
+                    publish::published_surfaces(&module).find(|(namespace, _)| *namespace == payload.name)
+                });
+                return published.map_or_else(
+                    || DescribeComponentResult::Err {
+                        error: format!("no component registered at name {}: {error}", payload.name),
+                    },
+                    |(_, capabilities)| DescribeComponentResult::Ok { capabilities },
+                );
             }
         };
         match ctx.receive_surface(actor) {

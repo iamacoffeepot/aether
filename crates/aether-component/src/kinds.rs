@@ -8,6 +8,14 @@ pub struct LoadPublished {
     pub load: u64,
 }
 
+/// `aether.component.module_published` — the context a `Publish`'s first
+/// publish of a module carries into its completion (ADR-0243 §9): the id of
+/// the publish, whose held reply and module wait in host state under it.
+#[aether_data::kind(name = "aether.component.module_published", copy, no_serde)]
+pub struct ModulePublished {
+    pub publish: u64,
+}
+
 /// `aether.component.guest_born` — the context a staged guest birth carries
 /// into its completion (ADR-0243 §9): which leg of a load the birth is, keyed
 /// by what waits for it in host state.
@@ -15,7 +23,7 @@ pub struct LoadPublished {
 pub enum GuestBorn {
     /// A module's boot guest, keyed by the module's content hash.
     Boot { hash: [u8; 32] },
-    /// A load's requested guest, keyed by its load id.
+    /// A load's or a spawn's requested guest, keyed by its load id.
     Requested { load: u64 },
 }
 

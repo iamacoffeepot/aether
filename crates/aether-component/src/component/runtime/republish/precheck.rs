@@ -1,18 +1,20 @@
-//! The checks a republish runs before any member prepares (ADR-0241 §4, §7).
-//! The first failing check refuses the whole replace, and a check that
-//! applies to instances names every instance it refuses.
+//! The checks a publish runs before anything is staged, and a republish
+//! before any member prepares (ADR-0241 §4, §7). The first failing check
+//! refuses the whole publish, and a check that applies to instances names
+//! every instance it refuses.
 //!
-//! In order: an unchanged module answers with no swap; a content-addressed
-//! module, a module with no predecessor, a namespace already republishing,
-//! and a boot module on either side are refused; then admission, the added
-//! dependencies of each live instance the republish rebuilds, loaded or
-//! inline, and each instance's config.
+//! In order: an unchanged module answers with no swap, and a module no
+//! predecessor holds any namespace of is a first publish; then, for a
+//! successor, a namespace already republishing and a boot module on either
+//! side are refused; then admission, the added dependencies of each live
+//! instance the republish rebuilds, loaded or inline, and each instance's
+//! config.
 
 use std::collections::{HashMap, HashSet};
 
 use aether_actor::{ErasedActorRef, ProtocolRef, ReplyMode};
 use aether_data::{ErasedActorPath, MailboxCategory, SchemaType};
-use aether_kinds::{ConfigCapability, ReplaceConfig};
+use aether_kinds::{ConfigCapability, InstanceConfig};
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::actor::wasm::module::{Module, ModuleManifest};
@@ -30,42 +32,36 @@ use super::Member;
 /// length from allocating past it.
 const ZERO_WIDTH_CONFIG_VALUES: usize = 1 << 16;
 
-/// What the pre-checks decided for an admitted replace.
+/// What the pre-checks decided for an admitted publish.
 pub(super) enum Plan {
     /// The module already publishes every namespace it exports: answer `Ok`
     /// with no swap.
     Unchanged,
+    /// No predecessor holds any of the module's namespaces: bind it for the
+    /// first time.
+    Publish,
     /// Swap these members, each with the config its candidate is built with.
     Group(Vec<Member>),
 }
 
 impl ComponentHostCapabilityState {
-    /// Run every pre-check of a republish of `module`, with the instance
-    /// configs the replace supplied, and decide what it does. `Err` is the
-    /// refusal the caller answers with.
+    /// Run every pre-check of a publish of `module`, with the instance
+    /// configs a successor's publish supplied, and decide what it does.
+    /// `Err` is the refusal the caller answers with.
     pub(super) fn plan_republish<A, M: ReplyMode>(
         &self,
         ctx: &NativeCtx<'_, A, M>,
         module: &Module,
-        configs: Vec<ReplaceConfig>,
+        configs: Vec<InstanceConfig>,
     ) -> Result<Plan, String> {
         let manifest = module.manifest();
         let admitted = ctx.admission_preview(module);
-        if admitted == Ok(Admitted::Unchanged) {
-            return Ok(Plan::Unchanged);
-        }
-        if manifest.content_addressed() {
-            return Err("the module is content-addressed: each build publishes its namespaces as its own, so it \
-                        succeeds no module and cannot replace one (ADR-0241 §3)"
-                .to_owned());
+        match admitted {
+            Ok(Admitted::Unchanged) => return Ok(Plan::Unchanged),
+            Ok(Admitted::Publish) => return Ok(Plan::Publish),
+            Ok(Admitted::Republish) | Err(_) => {}
         }
         let namespaces: Vec<String> = module.published_groups().map(|(published, _)| published.into_owned()).collect();
-        if admitted == Ok(Admitted::Publish) {
-            return Err(format!(
-                "none of the module's namespaces {namespaces:?} is published, so it has no predecessor to replace: \
-                 load it instead"
-            ));
-        }
         if let Some(namespace) = namespaces.iter().find(|namespace| self.republishing.contains_key(*namespace)) {
             return Err(format!("{namespace} is already republishing: one republish of a module runs at a time"));
         }
@@ -163,15 +159,15 @@ impl ComponentHostCapabilityState {
         members
     }
 
-    /// The replace's configs by the member each names. A path that names no
-    /// live member, or names one twice, refuses the replace.
+    /// The publish's configs by the member each names. A path that names no
+    /// live member, or names one twice, refuses the publish.
     fn supplied_configs<A, M: ReplyMode>(
         ctx: &NativeCtx<'_, A, M>,
         members: &[(ErasedActorPath, GuestView<'_>)],
-        configs: Vec<ReplaceConfig>,
+        configs: Vec<InstanceConfig>,
     ) -> Result<HashMap<ErasedActorRef, Vec<u8>>, String> {
         let mut supplied = HashMap::new();
-        for ReplaceConfig { path, config } in configs {
+        for InstanceConfig { path, config } in configs {
             let actor = ctx
                 .resolve_path(&path)
                 .map_err(|error| format!("a config names {path}, which is not a live instance: {error}"))?;

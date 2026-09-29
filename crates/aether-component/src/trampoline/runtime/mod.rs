@@ -33,10 +33,10 @@ pub use std::io;
 pub use std::sync::Arc;
 
 use super::WasmTrampoline;
-use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare, Prepared};
+use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare, Prepared, SpawnDelivered};
 pub use aether_actor::Local;
 use aether_actor::{Single, runtime};
-use aether_kinds::ComponentCapabilities;
+use aether_kinds::{ComponentCapabilities, SpawnResult};
 pub use aether_kinds::{DropComponent, DropResult, LoadResult};
 use aether_substrate::actor::native::ctx::GuestHost;
 pub use aether_substrate::actor::native::envelope::Envelope;
@@ -210,6 +210,22 @@ impl NativeActor for WasmTrampoline {
     fn on_load_delivered(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: LoadDelivered) -> LoadResult {
         let LoadDelivered { path, capabilities } = payload;
         LoadResult::Ok { path, capabilities }
+    }
+
+    /// Answer the requester of a spawn that names this trampoline, in the
+    /// trampoline's own name (ADR-0230 §3, ADR-0241 §9): `Live` when it was
+    /// already live and nothing was re-initialised, `Spawned` when the spawn
+    /// just stood it up. The host hands its held spawn reply here the way it
+    /// hands a load's to [`Self::on_load_delivered`], which answers only the
+    /// mail's own reply target in the same way.
+    #[handler::single]
+    fn on_spawn_delivered(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: SpawnDelivered) -> SpawnResult {
+        let SpawnDelivered { path, capabilities, live } = payload;
+        if live {
+            SpawnResult::Live { path, capabilities }
+        } else {
+            SpawnResult::Spawned { path, capabilities }
+        }
     }
 
     /// Prepare a candidate of this guest's type from `code` beside the

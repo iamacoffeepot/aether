@@ -215,6 +215,16 @@ impl PublicationTable {
         })
     }
 
+    /// The module that publishes `namespace`, or `None` when the namespace is
+    /// native or unpublished.
+    #[cfg(feature = "wasm")]
+    pub(super) fn module(&self, namespace: &str) -> Option<Module> {
+        match self.namespaces.get(namespace)? {
+            Published::Native(_) => None,
+            Published::Module(publication) => Some(publication.module.clone()),
+        }
+    }
+
     /// Point every namespace `surface` exports at `module`. Called only by the
     /// registry owner's publish arm, after [`admit`] accepted the module.
     #[cfg(feature = "wasm")]

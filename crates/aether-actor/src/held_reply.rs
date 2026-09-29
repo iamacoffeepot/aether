@@ -14,7 +14,10 @@
 //! defines: that crate cannot depend on this one, which depends on it.
 
 use aether_data::ActorMail;
-use aether_kinds::{CaptureFrameResult, DropResult, LoadResult, MeshLoadResult, ReplaceResult, SpawnEngineResult};
+use aether_kinds::{
+    CaptureFrameResult, DropResult, LoadResult, MeshLoadResult, PublishResult, ReplaceResult, SpawnEngineResult,
+    SpawnResult,
+};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -41,6 +44,21 @@ impl HeldReply for DropResult {
 }
 
 impl HeldReply for ReplaceResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "component host closed before answering".into() }
+    }
+}
+
+/// A publish the component host holds until its module is bound, or its
+/// republish has answered (ADR-0241 §7, §9).
+impl HeldReply for PublishResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "component host closed before answering".into() }
+    }
+}
+
+/// A spawn the component host holds until the instance's birth settles.
+impl HeldReply for SpawnResult {
     fn unanswered() -> Self {
         Self::Err { error: "component host closed before answering".into() }
     }
