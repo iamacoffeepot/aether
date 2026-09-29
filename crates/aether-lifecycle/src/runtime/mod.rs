@@ -568,7 +568,6 @@ impl NativeActor for LifecycleCapability {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, mpsc};
-    use std::thread;
 
     use aether_actor::{ActorPath, ActorRef, HandlesKind, Publisher};
     use aether_data::{Kind, LoadName, MailId, SessionToken, Uuid};
@@ -760,16 +759,10 @@ mod tests {
         }
 
         /// [`Self::quit`], then wait until the listener's route stops
-        /// answering live. The route retires in the close tail, past the
-        /// `Quit` chain's settlement and outside any signal a test can wait
-        /// on (#7062), so this one wait still polls.
+        /// answering live.
         fn close(&self, listener: ActorRef<Listener>) {
             self.quit(listener);
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while self.driver.chassis().published_contract(listener.erase()).is_some() {
-                assert!(Instant::now() < deadline, "the listener did not close within the deadline");
-                thread::sleep(Duration::from_millis(5));
-            }
+            self.driver.chassis().await_closed(listener.erase());
         }
     }
 
