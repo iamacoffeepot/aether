@@ -1254,7 +1254,9 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use aether_data::{MailId, MailboxId, Source, SourceAddr};
+    use aether_actor::Manual;
+    use aether_data::{MailId, MailboxId, SessionToken, Source, Uuid};
+    use aether_kinds::{MonitorNotice, Tick};
 
     use crate::NativeInitCtx;
     use crate::actor::native::NativeActor;
@@ -1262,9 +1264,13 @@ mod tests {
     use crate::actor::native::ctx::NativeCtx;
     use crate::chassis::builder::ReplyTarget;
     use crate::chassis::error::BootError;
-    use crate::mail::registry::{InboxHandler, OwnedDispatch};
+    use crate::chassis::settlement_table::SettlementTable;
+    use crate::mail::mailer::Mailer;
+    use crate::mail::outbound::EgressEvent;
+    use crate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
     use crate::testing::{
-        PumpedDriver, bare_substrate, boot_authority, boot_bare_test_chassis, fresh_substrate, registered_ref,
+        PumpedDriver, bare_substrate, boot_authority, boot_bare_test_chassis, fresh_substrate, fresh_substrate_and_rx,
+        registered_ref,
     };
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces and `resolve`
@@ -1316,6 +1322,26 @@ mod tests {
         assert_eq!(env.kind, TaskCompletionWake::ID, "only the wake is expected");
         let wake = TaskCompletionWake::decode_from_bytes(env.payload.bytes()).expect("wake decodes");
         DispatchId(wake.dispatch_id)
+    }
+
+    /// A caller registered under `name` that forwards each mail it receives
+    /// for the test to read, then finishes it, so the chain the mail joined
+    /// settles only once the test can read it.
+    fn finishing_caller(
+        registry: &Registry,
+        mailer: &Arc<Mailer>,
+        name: &str,
+    ) -> (ErasedActorRef, mpsc::Receiver<OwnedDispatch>) {
+        let (tx, rx) = mpsc::channel::<OwnedDispatch>();
+        let mailer = Arc::clone(mailer);
+        let sink: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
+            let (mail_id, root) = (dispatch.mail_id, dispatch.root);
+            dispatch.discharge();
+            let _ = tx.send(dispatch);
+            mailer.record_finished(mail_id, root);
+        });
+
+        (registered_ref(registry, name, sink), rx)
     }
 
     /// The reply [`GatedAsk`]'s worker produces and its completion resolves
@@ -1375,20 +1401,7 @@ mod tests {
     fn dispatch_blocking_replies_and_releases_after_reply() {
         let (registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let sink_mailer = Arc::clone(&mailer);
-        let caller = registered_ref(
-            &registry,
-            "test.dispatch_blocking.caller",
-            Arc::new(move |dispatch: OwnedDispatch| {
-                // The caller forwards the reply, then finishes it so the
-                // chain it joined settles only once the test can read it.
-                let (mail_id, root) = (dispatch.mail_id, dispatch.root);
-                dispatch.discharge();
-                let _ = reply_tx.send(dispatch);
-                sink_mailer.record_finished(mail_id, root);
-            }),
-        );
+        let (caller, reply_rx) = finishing_caller(&registry, &mailer, "test.dispatch_blocking.caller");
         let (open_gate, gate) = mpsc::channel::<()>();
         let mut driver = PumpedDriver::<GatedAsk>::boot(boot_bare_test_chassis(&registry, &mailer), (), gate);
 
@@ -1410,74 +1423,130 @@ mod tests {
         assert_eq!(counter.held_open(root), 0, "resolve releases the hold after re-replying");
     }
 
+    /// Accepts a request and buffers its hold and caller, as a caller
+    /// deferring a request's dispatch does.
+    #[aether_data::kind(name = "test.dispatch_blocking.accept")]
+    struct Accept;
+
+    /// Dispatches the buffered request's work from a later turn.
+    #[aether_data::kind(name = "test.dispatch_blocking.drain")]
+    struct Drain;
+
+    /// A pumped root that captures a request's `(hold, reply_to)` in one
+    /// turn and replays them into `dispatch_blocking_resumed` from another,
+    /// whose worker waits on the test's gate.
+    struct Resumer {
+        /// The gate the one worker waits on, handed in as the boot params.
+        gate: Option<mpsc::Receiver<()>>,
+        /// What `on_accept` captured, until `on_drain` replays it.
+        buffered: Option<(Option<SettlementHold>, Source)>,
+    }
+
+    #[aether_actor::actor(singleton, root)]
+    impl NativeActor for Resumer {
+        const NAMESPACE: &'static str = "test.dispatch_blocking.resumer";
+        type Config = ();
+        type Params = mpsc::Receiver<()>;
+
+        fn init((): (), gate: mpsc::Receiver<()>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { gate: Some(gate), buffered: None })
+        }
+
+        #[handler::manual]
+        fn on_accept(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, _accept: Accept) {
+            self.buffered = Some((ctx.acquire_settlement_hold(), ctx.reply_target()));
+        }
+
+        #[handler::single]
+        fn on_drain(&mut self, ctx: &mut NativeCtx<'_>, _drain: Drain) {
+            let (hold, reply_to) = self.buffered.take().expect("a drain follows its accept");
+            let gate = self.gate.take().expect("one drain per probe");
+            let _id = ctx.dispatch_blocking_resumed(hold, reply_to, move || {
+                gate.recv().expect("the test opens the gate");
+                Answer { value: 7 }
+            });
+        }
+
+        #[handler(task)]
+        fn on_resumed(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<Answer>) {
+            assert!(self.gate.is_none(), "a completion follows the drain that dispatched it");
+            done.resolve(ctx);
+        }
+    }
+
     /// The resumed entry uses the *supplied* `(hold, reply_to)`, not the
     /// dispatching ctx's — the property a caller that captured them at
     /// accept relies on when it dispatches from a *different* handler's turn.
-    /// Accept on one root/caller, dispatch via `dispatch_blocking_resumed`
-    /// from a ctx with a different root and reply target, then assert the
-    /// *accept* chain is the one held and the *original* caller is replied
-    /// to.
+    /// Accept on one root and caller, drain on another root answered to
+    /// another caller, then assert the drain chain settles while the worker
+    /// still waits, the *accept* chain is the one held, and the *original*
+    /// caller is replied to.
     #[test]
     fn dispatch_blocking_resumed_uses_supplied_hold_and_reply_to() {
-        let (registry, mailer) = bare_substrate();
+        let (registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let (accept_caller, accept_replies) = finishing_caller(&registry, &mailer, "test.dispatch_resumed.caller");
+        let (drain_caller, drain_replies) = finishing_caller(&registry, &mailer, "test.dispatch_resumed.drainer");
+        let (open_gate, gate) = mpsc::channel::<()>();
+        let mut driver = PumpedDriver::<Resumer>::boot(boot_bare_test_chassis(&registry, &mailer), (), gate);
+        let resumer = driver.chassis().actor_ref::<Resumer>();
 
-        let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox(&boot_authority(), "test.dispatch_resumed.caller", forward_to(reply_tx));
-
-        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        let actor_mailbox =
-            registry.register_inbox(&boot_authority(), "test.dispatch_resumed.actor", forward_to(wake_tx));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-
-        let accept_root = root_id(1);
-        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 77);
-
-        // "Accept": acquire the hold on the accept root + capture the
-        // caller, as a caller deferring a request's dispatch does.
-        let buffered_hold = {
-            let ctx = NativeCtx::new(&binding, caller_reply_to, None, Some(accept_root));
-            ctx.acquire_settlement_hold()
-        };
+        let accept_root =
+            driver.send_tracked(resumer, &Accept, Some(ReplyTarget::Actor { to: accept_caller, correlation: 77 }));
+        driver.pump_until("the accept buffers its hold and caller", |resumer| resumer.buffered.is_some());
         assert_eq!(counter.held_open(accept_root), 1, "the accept-time hold keeps the chain open while buffered");
 
-        // "Drain": dispatch the buffered work from a *different* handler
-        // turn — a ctx with a different root and reply target — passing the
-        // captured `(hold, reply_to)` explicitly.
-        let other_root = root_id(2);
-        let id = {
-            let mut ctx =
-                NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 99), None, Some(other_root));
-            ctx.dispatch_blocking_resumed(buffered_hold, caller_reply_to, move || Answer { value: 7 })
-        };
-
-        // The held chain is the accept root, not the drain ctx's root.
+        let drain_root =
+            driver.send_tracked(resumer, &Drain, Some(ReplyTarget::Actor { to: drain_caller, correlation: 99 }));
+        driver.settle(&[drain_root]);
         assert_eq!(
             counter.held_open(accept_root),
             1,
             "the supplied hold keeps the accept chain open across the resumed dispatch"
         );
-        assert_eq!(counter.held_open(other_root), 0, "the drain ctx's own chain is never held");
 
-        let landed = await_wake(&wake_rx);
-        assert_eq!(landed, id);
+        open_gate.send(()).expect("the worker waits on the gate");
+        driver.settle(&[accept_root]);
 
-        {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-            let done = ctx.take_task_done::<Answer, ()>(id).expect("the resumed dispatch is in the ledger");
-            assert_eq!(*done.output(), Answer { value: 7 });
-            done.resolve(&mut ctx);
+        let reply = accept_replies.try_recv().expect("the re-reply lands on the captured caller");
+        assert_eq!(reply.sender.correlation_id, 77, "the resumed dispatch replies to the captured caller");
+        assert_eq!(reply.root, Some(accept_root), "the reply joins the chain the supplied hold kept open");
+        assert_eq!(Answer::decode_from_bytes(reply.payload.bytes()), Some(Answer { value: 7 }));
+        assert!(drain_replies.try_recv().is_err(), "the drain turn's caller is never replied to");
+        assert_eq!(counter.held_open(accept_root), 0, "resolve releases the captured hold");
+    }
+
+    /// Asks [`ContextFold`] to dispatch a worker carrying its offset.
+    #[aether_data::kind(name = "test.dispatch_blocking.count")]
+    struct Count;
+
+    /// A pumped root whose request dispatches a worker with an opt-in
+    /// context, and whose completion folds the context into the reply.
+    struct ContextFold {
+        /// The context the worker carries, handed in as the boot params.
+        offset: u64,
+    }
+
+    #[aether_actor::actor(singleton, root)]
+    impl NativeActor for ContextFold {
+        const NAMESPACE: &'static str = "test.dispatch_blocking.context_fold";
+        type Config = ();
+        type Params = u64;
+
+        fn init((): (), offset: u64, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { offset })
         }
 
-        // Reply went to the *original* caller (corr 77), not the drain ctx.
-        let reply = reply_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("the re-reply lands on the captured caller, not the drain ctx");
-        assert_eq!(
-            reply.sender.correlation_id, 77,
-            "the resumed dispatch replies to the captured caller, not the drain ctx"
-        );
-        assert_eq!(counter.held_open(accept_root), 0, "resolve releases the captured hold");
+        #[handler::manual]
+        fn on_count(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, _count: Count) {
+            let _id = ctx.dispatch_blocking_with(self.offset, move || 7u64);
+        }
+
+        #[handler(task)]
+        fn on_counted(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<u64, u64>) {
+            assert_eq!(*done.context(), self.offset, "the completion reads back the context the dispatch parked");
+            done.resolve_with(ctx, |output, offset| Answer { value: output + offset });
+        }
     }
 
     /// `dispatch_blocking_with` carries an opt-in context the completion
@@ -1485,36 +1554,17 @@ mod tests {
     /// `(output, context)` to the reply.
     #[test]
     fn dispatch_blocking_with_context_resolve_with() {
-        let (registry, mailer) = bare_substrate();
+        let (registry, mailer) = fresh_substrate();
+        let (caller, reply_rx) = finishing_caller(&registry, &mailer, "test.dispatch_blocking.caller2");
+        let mut driver = PumpedDriver::<ContextFold>::boot(boot_bare_test_chassis(&registry, &mailer), (), 100);
 
-        let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox(&boot_authority(), "test.dispatch_blocking.caller2", forward_to(reply_tx));
+        driver.send_and_settle(
+            driver.chassis().actor_ref::<ContextFold>(),
+            &Count,
+            Some(ReplyTarget::Actor { to: caller, correlation: 5 }),
+        );
 
-        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        let actor_mailbox =
-            registry.register_inbox(&boot_authority(), "test.dispatch_blocking.actor2", forward_to(wake_tx));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-
-        let root = root_id(2);
-        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 5);
-
-        {
-            let mut ctx = NativeCtx::new(&binding, caller_reply_to, None, Some(root));
-            // Worker produces a raw count; context carries an offset the
-            // completion handler folds in.
-            let _id = ctx.dispatch_blocking_with(100u64, move || 7u64);
-        }
-
-        let id = await_wake(&wake_rx);
-        {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-            let done = ctx.take_task_done::<u64, u64>(id).expect("the dispatch is in the ledger");
-            assert_eq!(*done.output(), 7);
-            assert_eq!(*done.context(), 100);
-            done.resolve_with(&mut ctx, |output, cx| Answer { value: output + cx });
-        }
-
-        let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the mapped re-reply lands");
+        let reply = reply_rx.try_recv().expect("the mapped re-reply lands");
         // A Component-targeted reply is encoded through the kind codec by
         // `Mailer::send_reply` (not cast), so decode it the same way.
         let answer = Answer::decode_from_bytes(reply.payload.bytes()).expect("reply decodes");
@@ -1823,40 +1873,59 @@ mod tests {
         assert_eq!(counter.held_open(root), 0, "terminal successor release closes the one continuous hold");
     }
 
+    /// Asks [`Forwarder`] to dispatch a worker whose completion forwards.
+    #[aether_data::kind(name = "test.dispatch_blocking.forward")]
+    struct Forward;
+
+    /// A pumped root whose completion forwards the request, tracked, to the
+    /// target handed in as the boot params.
+    struct Forwarder {
+        target: ErasedActorRef,
+        /// The forward's id once the completion sent it.
+        forwarded: Option<MailId>,
+    }
+
+    #[aether_actor::actor(singleton, root)]
+    impl NativeActor for Forwarder {
+        const NAMESPACE: &'static str = "test.dispatch_blocking.forwarder";
+        type Config = ();
+        type Params = ErasedActorRef;
+
+        fn init((): (), target: ErasedActorRef, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { target, forwarded: None })
+        }
+
+        #[handler::single]
+        fn on_forward(&mut self, ctx: &mut NativeCtx<'_>, _forward: Forward) {
+            assert!(self.forwarded.is_none(), "one forward per probe");
+            let _id = ctx.dispatch_blocking_with((), move || Answer { value: 1 });
+        }
+
+        #[handler(task)]
+        fn on_forward_ready(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<Answer>) {
+            let forwarded = done
+                .forward_tracked(ctx, self.target, Answer::ID, &Answer { value: 2 }.encode_into_bytes())
+                .unwrap_or_else(|_| panic!("an actor kind forwards"));
+            self.forwarded = Some(forwarded);
+        }
+    }
+
     /// Catches a forward pushed on the completion turn's own unchained
     /// lineage instead of the held root: the caller's chain would settle at
     /// the release, before the forwarded request is answered.
     #[test]
     fn forward_tracked_sends_under_the_held_root_and_releases_the_hold() {
-        use crate::testing::registered_ref;
-
-        let (registry, mailer) = bare_substrate();
+        let (registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let root = root_id(19);
-        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        let actor_mailbox =
-            registry.register_inbox(&boot_authority(), "test.deferred_completion.forward", forward_to(wake_tx));
-        let (target_tx, target_rx) = mpsc::channel::<OwnedDispatch>();
-        let target = registered_ref(&registry, "test.deferred_completion.forward_target", forward_to(target_tx));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
+        let (target, target_rx) = finishing_caller(&registry, &mailer, "test.deferred_completion.forward_target");
+        let mut driver = PumpedDriver::<Forwarder>::boot(boot_bare_test_chassis(&registry, &mailer), (), target);
 
-        let completion =
-            binding.dispatch_arm::<Answer, _>(Some(mailer.acquire_settlement_hold(root)), Source::NONE, ());
-        let id = completion.dispatch_id();
-        completion.complete(Answer { value: 1 });
-        assert_eq!(await_wake(&wake_rx), id);
-        let done = binding.dispatch_take::<Answer, ()>(id).expect("the completion remains takeable");
+        let root = driver.send_and_settle(driver.chassis().actor_ref::<Forwarder>(), &Forward, None);
 
-        let ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let forwarded = done
-            .forward_tracked(&ctx, target, Answer::ID, &Answer { value: 2 }.encode_into_bytes())
-            .unwrap_or_else(|_| panic!("an actor kind forwards"));
-        assert_eq!(counter.held_open(root), 0, "the forward discharges the hold");
-        binding.flush_outbound();
-
-        let delivered = target_rx.recv_timeout(Duration::from_secs(2)).expect("the forward is delivered");
+        let delivered = target_rx.try_recv().expect("the forward is delivered before the chain settles");
         assert_eq!(delivered.root, Some(root), "the forward joins the chain the hold kept open");
-        assert_eq!(delivered.mail_id, Some(forwarded));
+        assert_eq!(delivered.mail_id, driver.read_state(|forwarder| forwarder.forwarded).flatten());
+        assert_eq!(counter.held_open(root), 0, "the forward discharges the hold");
     }
 
     #[test]
@@ -1881,66 +1950,98 @@ mod tests {
         assert!(binding.dispatch_take::<Answer, ()>(id).is_none(), "the abandoned entry was removed");
     }
 
+    /// Asks [`Relayer`] to forward already-encoded replies ahead of its
+    /// terminal one: two ticks, or one engine-only notice.
+    #[aether_data::kind(name = "test.dispatch_blocking.relay", copy)]
+    struct Relay {
+        engine_only: bool,
+    }
+
+    /// A pumped root whose manual handler defers its reply, forwards
+    /// encoded replies through the debt, reads the holds open on its chain,
+    /// and then sends the typed terminal reply.
+    struct Relayer {
+        /// The engine's settlement table, handed in as the boot params.
+        counter: Arc<SettlementTable>,
+        /// The holds open on the chain after the forwards, before the
+        /// terminal reply.
+        held_after_forwards: Option<u32>,
+    }
+
+    #[aether_actor::actor(singleton, root)]
+    impl NativeActor for Relayer {
+        const NAMESPACE: &'static str = "test.dispatch_blocking.relayer";
+        type Config = ();
+        type Params = Arc<SettlementTable>;
+
+        fn init((): (), counter: Arc<SettlementTable>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { counter, held_after_forwards: None })
+        }
+
+        #[handler::manual]
+        fn on_relay(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, relay: Relay) {
+            let root = ctx.in_flight_root().expect("the relay runs on a tracked root");
+            let owed = ctx.defer_reply_to(ctx.reply_target());
+            if relay.engine_only {
+                owed.reply_envelope(ctx, MonitorNotice::ID, &MonitorNotice.encode_into_bytes());
+            } else {
+                owed.reply_envelope(ctx, Tick::ID, &Tick { delta_micros: 1 }.encode_into_bytes());
+                owed.reply_envelope(ctx, Tick::ID, &Tick { delta_micros: 2 }.encode_into_bytes());
+            }
+            self.held_after_forwards = Some(self.counter.held_open(root));
+            owed.reply(ctx, &Tick { delta_micros: 3 });
+        }
+    }
+
+    /// Boot a [`Relayer`], send it `relay` answered to a session, and wait
+    /// for the chain to settle. Returns the holds the turn read after its
+    /// forwards and each session reply's kind name and payload, in order.
+    fn relay_to_session(relay: Relay) -> (Option<u32>, Vec<(String, Vec<u8>)>) {
+        let (registry, mailer, egress) = fresh_substrate_and_rx();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let mut driver = PumpedDriver::<Relayer>::boot(boot_bare_test_chassis(&registry, &mailer), (), counter);
+        let session = ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0x7049)), correlation: 1 };
+
+        driver.send_and_settle(driver.chassis().actor_ref::<Relayer>(), &relay, Some(session));
+
+        let delivered = egress
+            .try_iter()
+            .filter_map(|event| match event {
+                EgressEvent::ToSession { kind_name, payload, .. } => Some((kind_name, payload)),
+                _ => None,
+            })
+            .collect();
+        (driver.read_state(|relayer| relayer.held_after_forwards).flatten(), delivered)
+    }
+
+    fn tick(delta_micros: u32) -> (String, Vec<u8>) {
+        (Tick::NAME.to_owned(), Tick { delta_micros }.encode_into_bytes())
+    }
+
     /// `reply_envelope` forwards each already-encoded reply to the debt's
     /// caller as it is called, under the name the registry gives its kind,
     /// and leaves the debt owed: the hold stays until the typed terminal
     /// `reply` goes out behind them.
     #[test]
     fn reply_envelope_forwards_in_order_and_keeps_the_debt_owed() {
-        use crate::mail::outbound::EgressEvent;
-        use crate::testing::{fresh_substrate_and_rx, session_sender, token_root, unrouted_binding};
-        use aether_kinds::Tick;
+        let (held_after_forwards, delivered) = relay_to_session(Relay { engine_only: false });
 
-        let (_registry, mailer, egress) = fresh_substrate_and_rx();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let binding = unrouted_binding(&mailer);
-        let root = token_root(23);
-
-        let mut ctx = NativeCtx::new(&binding, session_sender(), None, Some(root));
-        let owed = ctx.defer_reply_to(ctx.reply_target());
-        let first = Tick { delta_micros: 1 }.encode_into_bytes();
-        let second = Tick { delta_micros: 2 }.encode_into_bytes();
-        owed.reply_envelope(&mut ctx, Tick::ID, &first);
-        owed.reply_envelope(&mut ctx, Tick::ID, &second);
-        assert_eq!(counter.held_open(root), 1, "forwarded replies leave the debt owed");
-
-        owed.reply(&mut ctx, &Tick { delta_micros: 3 });
-        assert_eq!(counter.held_open(root), 0, "the typed reply discharges the debt");
-
-        let delivered: Vec<(String, Vec<u8>)> = egress
-            .try_iter()
-            .map(|event| {
-                let EgressEvent::ToSession { kind_name, payload, .. } = event else {
-                    panic!("only session replies are expected, got {event:?}");
-                };
-                (kind_name, payload)
-            })
-            .collect();
-        let third = Tick { delta_micros: 3 }.encode_into_bytes();
-        let expected: Vec<(String, Vec<u8>)> =
-            [first, second, third].into_iter().map(|payload| (Tick::NAME.to_owned(), payload)).collect();
-        assert_eq!(delivered, expected, "both forwarded replies arrive in order, ahead of the terminal");
+        assert_eq!(held_after_forwards, Some(1), "forwarded replies leave the debt owed");
+        assert_eq!(
+            delivered,
+            vec![tick(1), tick(2), tick(3)],
+            "both forwarded replies arrive in order, ahead of the terminal"
+        );
     }
 
     /// An engine-only kind (ADR-0233) never leaves through `reply_envelope`:
     /// nothing is sent and the debt stays owed.
     #[test]
     fn reply_envelope_refuses_an_engine_only_kind() {
-        use crate::testing::{fresh_substrate_and_rx, session_sender, token_root, unrouted_binding};
-        use aether_kinds::MonitorNotice;
+        let (held_after_forwards, delivered) = relay_to_session(Relay { engine_only: true });
 
-        let (_registry, mailer, egress) = fresh_substrate_and_rx();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let binding = unrouted_binding(&mailer);
-        let root = token_root(24);
-
-        let mut ctx = NativeCtx::new(&binding, session_sender(), None, Some(root));
-        let owed = ctx.defer_reply_to(ctx.reply_target());
-        owed.reply_envelope(&mut ctx, MonitorNotice::ID, &MonitorNotice.encode_into_bytes());
-
-        assert!(egress.try_recv().is_err(), "an engine-only reply is refused, not sent");
-        assert_eq!(counter.held_open(root), 1, "a refused reply leaves the debt owed");
-        owed.abandon_for_actor_close();
+        assert_eq!(held_after_forwards, Some(1), "a refused reply leaves the debt owed");
+        assert_eq!(delivered, vec![tick(3)], "an engine-only reply is refused, not sent; only the terminal leaves");
     }
 
     /// A discarded receipt is a handler hiding the reply it owes behind a
