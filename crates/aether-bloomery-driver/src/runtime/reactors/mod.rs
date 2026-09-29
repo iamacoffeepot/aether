@@ -19,7 +19,8 @@ mod restart;
 use std::collections::{BTreeMap, VecDeque};
 
 use aether_bloomery_kinds::{
-    ActivationRejected, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, ReactorName, ReactorSet, SetHead,
+    ActivationRejected, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, ReactorName, ReactorSet,
+    SetHeads,
 };
 use aether_bloomery_view::Heads;
 
@@ -127,7 +128,7 @@ pub enum ActivationStep {
     Terminal,
 }
 
-/// One `SetHead` awaiting its destination check.
+/// One `SetHeads` group awaiting its destination checks.
 #[derive(Debug, Clone)]
 pub struct PendingDestination {
     /// Trigger or catch-up seq causing the move or its failure.
@@ -136,8 +137,10 @@ pub struct PendingDestination {
     pub bundle: Digest,
     /// Reactor that returned the intent.
     pub reactor: ReactorName,
-    /// The move to attempt.
-    pub set_head: SetHead,
+    /// The atomic group to attempt.
+    pub set_heads: SetHeads,
+    /// Index of the next destination to check.
+    pub next_change: usize,
 }
 
 /// Per-seq phase for `N = R + 1`.
@@ -209,9 +212,9 @@ pub struct SeqWork {
     pub activation: Option<ActivationWork>,
     /// Accumulated plan in append order.
     pub order: BTreeMap<PlanOrder, PlannedRecord>,
-    /// `SetHead`s awaiting destination checks, in plan order.
+    /// `SetHeads` groups awaiting destination checks, in plan order.
     pub destinations: BTreeMap<PlanOrder, PendingDestination>,
-    /// The `SetHead` whose destination read is outstanding.
+    /// The `SetHeads` group whose next destination read is outstanding.
     pub checking: Option<(PlanOrder, PendingDestination)>,
 }
 

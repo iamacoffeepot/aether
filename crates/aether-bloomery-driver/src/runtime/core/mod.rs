@@ -44,8 +44,8 @@ pub enum ArtifactRead {
     Bundle(Digest),
     /// A reactor set's stored membership.
     ReactorSet(Digest),
-    /// The destination of the `SetHead` the current seq is checking.
-    SetHeadDestination,
+    /// One destination of the `SetHeads` group the current seq is checking.
+    SetHeadsDestination,
     /// One digest bundle roots fetched on a miss, shared by every waiting fetch.
     Fetch(Digest),
 }
@@ -74,7 +74,7 @@ pub struct ProgramCore {
     pub(crate) waiters: BTreeMap<u64, (u64, Vec<CallerId>)>,
     pub(crate) activations: BTreeMap<u64, Activation>,
     pub(crate) artifact_reads: BTreeMap<ArtifactTicket, ArtifactRead>,
-    /// Found artifacts reused by fetches and `SetHead` destination checks.
+    /// Found artifacts reused by fetches and `SetHeads` destination checks.
     pub(crate) artifacts: ArtifactCache,
     /// Fetches waiting on each digest's one in-flight read, in arrival order.
     pub(crate) fetching: BTreeMap<Digest, Vec<CallerId>>,
@@ -233,7 +233,7 @@ impl ProgramCore {
             ArtifactRead::ReactorSet(digest) => {
                 self.continue_set_artifact(digest, result, &mut out);
             }
-            ArtifactRead::SetHeadDestination => {
+            ArtifactRead::SetHeadsDestination => {
                 self.continue_destination_artifact(result, &mut out);
             }
             ArtifactRead::Fetch(digest) => {

@@ -1,13 +1,13 @@
 error: #[rule] methods return exactly one mail-capable typed output; `Option` is unsupported
   --> tests/ui/fail_option_return.rs:13:97
    |
-13 |     fn publish(&self, change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> Option<SetHead> {
-   |                                                                                                 ^^^^^^^^^^^^^^^
+13 |     fn publish(&self, change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> Option<SetHeads> {
+   |                                                                                                 ^^^^^^^^^^^^^^^^
 
-warning: unused import: `SetHead`
+warning: unused import: `SetHeads`
  --> tests/ui/fail_option_return.rs:1:35
   |
-1 | use aether_bloomery_kinds::{Head, SetHead, Tree};
-  |                                   ^^^^^^^
+1 | use aether_bloomery_kinds::{Head, SetHeads, Tree};
+  |                                   ^^^^^^^^
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

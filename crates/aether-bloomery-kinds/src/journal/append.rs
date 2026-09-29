@@ -35,7 +35,7 @@ pub enum DriverRecord {
     ActivationRejected { cause: u64, record: ActivationRejected },
     /// A reactor reaction that failed. Caused by the trigger seq.
     ReactionFailed { cause: u64, record: ReactionFailed },
-    /// A head move caused by a reactor's `SetHead`. Caused by the trigger seq.
+    /// One head move caused by a reactor's atomic `SetHeads` group. Caused by the trigger seq.
     HeadMoved { cause: u64, record: RecordedHeadMove },
 }
 

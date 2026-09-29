@@ -11,37 +11,43 @@ use crate::runtime::reactors::intents::reaction_failed;
 
 /// Resolve a routing plan against `heads`, the journal view at the fence.
 ///
-/// Each `SetHead` compares against the view plus the earlier moves in the
-/// same batch: a pass becomes `HeadMoved`, a mismatch fails that intent alone.
+/// Each `SetHeads` group compares against the view plus earlier successful
+/// groups in the same batch. Every comparison passes before any group move is
+/// exposed; a mismatch fails that group once.
 fn resolve_plan(heads: &Heads, plan: &[PlannedRecord]) -> (Vec<EncodedArtifact>, Vec<DriverRecord>) {
     let mut moved: BTreeMap<RecordedHead, Digest> = BTreeMap::new();
     let mut artifacts = Vec::new();
-    let mut records = Vec::with_capacity(plan.len());
+    let mut records = Vec::new();
     for planned in plan {
-        let record = match planned {
-            PlannedRecord::Ready(record) => record.clone(),
+        match planned {
+            PlannedRecord::Ready(record) => records.push(record.clone()),
             PlannedRecord::SuppliedCall { input, record } => {
                 artifacts.push(input.clone());
-                record.clone()
+                records.push(record.clone());
             }
-            PlannedRecord::SetHead { cause, bundle, reactor, set_head } => {
-                let current = moved.get(set_head.head()).copied().or_else(|| heads.binding(set_head.head()));
-                if current == set_head.from() {
-                    moved.insert(set_head.head().clone(), set_head.to());
-                    DriverRecord::HeadMoved { cause: *cause, record: set_head.to_move() }
-                } else {
-                    let reason = Detail::new("set_head compare-and-swap mismatch");
-                    reaction_failed(*cause, *bundle, Some(reactor.clone()), reason)
+            PlannedRecord::SetHeads { cause, bundle, reactor, set_heads } => {
+                let matches = set_heads.changes().iter().all(|change| {
+                    moved.get(change.head()).copied().or_else(|| heads.binding(change.head())) == change.from()
+                });
+                if !matches {
+                    let reason = Detail::new("set_heads compare-and-swap mismatch");
+                    records.push(reaction_failed(*cause, *bundle, Some(reactor.clone()), reason));
+                    continue;
+                }
+                for change in set_heads.changes() {
+                    moved.insert(change.head().clone(), change.to());
+                }
+                for change in set_heads.changes() {
+                    records.push(DriverRecord::HeadMoved { cause: *cause, record: change.to_move() });
                 }
             }
-        };
-        records.push(record);
+        }
     }
     (artifacts, records)
 }
 
 impl ProgramCore {
-    /// Take one planning step: check the next `SetHead` destination, or
+    /// Take one planning step: check the next `SetHeads` destination, or
     /// queue the seq's batch and finish the seq.
     ///
     /// An empty plan appends nothing.

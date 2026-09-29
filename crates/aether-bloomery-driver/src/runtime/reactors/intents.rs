@@ -1,11 +1,11 @@
 //! Reply-to-plan mapping: intents to `Requested`, moves, and failures (ADR-0226 decisions 6 and 8).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aether_bloomery_kinds::{
-    CallInput, CallProgram, Detail, Digest, DriverRecord, EncodedArtifact, LEGACY_CALL_PROGRAM_ID, ProgramRef,
-    ReactionFailed, ReactorIntent, ReactorName, ReadArtifact, ReadArtifactResult, RequestSource, Requested, RuleName,
-    SetHead, decode_call_program,
+    CallInput, CallProgram, Detail, Digest, DriverRecord, EncodedArtifact, LEGACY_CALL_PROGRAM_ID, LEGACY_SET_HEAD_ID,
+    ProgramRef, ReactionFailed, ReactorIntent, ReactorName, ReadArtifact, ReadArtifactResult, RequestSource, Requested,
+    RuleName, SetHeads, decode_call_program, decode_set_heads,
 };
 use aether_bloomery_view::Heads;
 use aether_data::{Kind, KindId};
@@ -13,7 +13,7 @@ use aether_data::{Kind, KindId};
 use crate::runtime::core::{ArtifactRead, ArtifactTicket, Command, PlannedRecord, ProgramCore};
 use crate::runtime::reactors::PendingDestination;
 
-/// One intent's plan: a ready record, a supplied-input call, or a `SetHead`
+/// One intent's plan: a ready record, a supplied-input call, or a `SetHeads`
 /// awaiting its destination check.
 pub enum PlannedIntent {
     /// A record appended as decided.
@@ -48,18 +48,24 @@ pub fn plan_intents(bundle: Digest, cause: u64, intents: Vec<ReactorIntent>, hea
             *next += 1;
             let failed =
                 |reason: Detail| PlannedIntent::Ready(reaction_failed(cause, bundle, Some(reactor.clone()), reason));
-            if kind == SetHead::ID {
-                return SetHead::decode_from_bytes(&bytes).map_or_else(
-                    || failed(Detail::new("undecodable set_head intent")),
-                    |set_head| {
-                        PlannedIntent::Destination(PendingDestination {
-                            cause,
-                            bundle,
-                            reactor: reactor.clone(),
-                            set_head,
-                        })
-                    },
-                );
+            if kind == SetHeads::ID || kind == LEGACY_SET_HEAD_ID {
+                let Some(set_heads) = decode_set_heads(kind, &bytes) else {
+                    return failed(Detail::new("undecodable set_heads intent"));
+                };
+                if set_heads.changes().is_empty() {
+                    return failed(Detail::new("set_heads group is empty"));
+                }
+                let mut heads = BTreeSet::new();
+                if !set_heads.changes().iter().all(|change| heads.insert(change.head().clone())) {
+                    return failed(Detail::new("set_heads group contains a duplicate head"));
+                }
+                return PlannedIntent::Destination(PendingDestination {
+                    cause,
+                    bundle,
+                    reactor: reactor.clone(),
+                    set_heads,
+                    next_change: 0,
+                });
             }
             if kind != CallProgram::ID && kind != LEGACY_CALL_PROGRAM_ID {
                 return failed(Detail::new(format!("unsupported intent kind {}", kind.0)));
@@ -92,24 +98,46 @@ pub fn plan_intents(bundle: Digest, cause: u64, intents: Vec<ReactorIntent>, hea
         .collect()
 }
 
-/// Plan one checked `SetHead` from its destination's stored kind.
+/// Result of checking one destination in an atomic group.
+enum DestinationStep {
+    /// More destinations remain in the group.
+    Continue(PendingDestination),
+    /// The group is accepted for derivation or refused once.
+    Complete(PlannedRecord),
+}
+
+/// Check one `SetHeads` destination against its stored kind.
 ///
-/// A destination stored under the head's kind leaves the move for
-/// derivation; a missing (`None`) or wrong-kind destination fails the intent.
-fn plan_destination(pending: PendingDestination, stored: Option<KindId>) -> PlannedRecord {
-    let PendingDestination { cause, bundle, reactor, set_head } = pending;
+/// Every destination stored under its target head's kind leaves the whole
+/// group for derivation. A missing or wrong-kind destination refuses it once.
+fn plan_destination(mut pending: PendingDestination, stored: Option<KindId>) -> DestinationStep {
+    let change = &pending.set_heads.changes()[pending.next_change];
     let reason = match stored {
-        Some(kind) if kind == set_head.head().kind() => {
-            return PlannedRecord::SetHead { cause, bundle, reactor, set_head };
+        Some(kind) if kind == change.head().kind() => {
+            pending.next_change += 1;
+            if pending.next_change < pending.set_heads.changes().len() {
+                return DestinationStep::Continue(pending);
+            }
+            return DestinationStep::Complete(PlannedRecord::SetHeads {
+                cause: pending.cause,
+                bundle: pending.bundle,
+                reactor: pending.reactor,
+                set_heads: pending.set_heads,
+            });
         }
-        Some(_) => "set_head destination has the wrong kind",
-        None => "set_head destination is missing",
+        Some(_) => "set_heads destination has the wrong kind",
+        None => "set_heads destination is missing",
     };
-    PlannedRecord::Ready(reaction_failed(cause, bundle, Some(reactor), Detail::new(reason)))
+    DestinationStep::Complete(PlannedRecord::Ready(reaction_failed(
+        pending.cause,
+        pending.bundle,
+        Some(pending.reactor),
+        Detail::new(reason),
+    )))
 }
 
 impl ProgramCore {
-    /// Check the next queued `SetHead` destination, in plan order.
+    /// Check the next queued `SetHeads` destination, in plan order.
     ///
     /// A destination in the artifact cache is planned at once, with no read;
     /// any other is read from the journal. Returns `false` when none is
@@ -119,16 +147,22 @@ impl ProgramCore {
         else {
             return false;
         };
-        let digest = pending.set_head.to();
+        let digest = pending.set_heads.changes()[pending.next_change].to();
         if let Some(kind) = self.artifacts.kind(digest) {
-            let planned = plan_destination(pending, Some(kind));
             if let Some(work) = self.routing.current.as_mut() {
-                work.order.insert(order, planned);
+                match plan_destination(pending, Some(kind)) {
+                    DestinationStep::Continue(pending) => {
+                        work.destinations.insert(order, pending);
+                    }
+                    DestinationStep::Complete(planned) => {
+                        work.order.insert(order, planned);
+                    }
+                }
             }
             return true;
         }
         let ticket = self.mint(ArtifactTicket::mint);
-        self.artifact_reads.insert(ticket, ArtifactRead::SetHeadDestination);
+        self.artifact_reads.insert(ticket, ArtifactRead::SetHeadsDestination);
         if let Some(work) = self.routing.current.as_mut() {
             work.checking = Some((order, pending));
         }
@@ -136,7 +170,7 @@ impl ProgramCore {
         true
     }
 
-    /// Continue the checked `SetHead`'s destination read.
+    /// Continue the checked `SetHeads` destination read.
     ///
     /// A found destination enters the artifact cache before it is planned,
     /// so a later check of the same digest reads nothing. Only its existence
@@ -144,24 +178,30 @@ impl ProgramCore {
     /// journal answered, as it always was.
     pub(crate) fn continue_destination_artifact(&mut self, result: ReadArtifactResult, out: &mut Vec<Command>) {
         let Some((order, pending)) = self.routing.current.as_mut().and_then(|work| work.checking.take()) else {
-            self.abort("set_head destination arrived with none being checked".to_string(), out);
+            self.abort("set_heads destination arrived with none being checked".to_string(), out);
             return;
         };
         let stored = match result {
             ReadArtifactResult::Found { artifact } => {
                 let kind = artifact.kind();
-                self.artifacts.insert(pending.set_head.to(), artifact);
+                self.artifacts.insert(pending.set_heads.changes()[pending.next_change].to(), artifact);
                 Some(kind)
             }
             ReadArtifactResult::Missing { .. } => None,
             ReadArtifactResult::Err { message, .. } => {
-                self.abort(format!("set_head destination read failed: {message}"), out);
+                self.abort(format!("set_heads destination read failed: {message}"), out);
                 return;
             }
         };
-        let planned = plan_destination(pending, stored);
         if let Some(work) = self.routing.current.as_mut() {
-            work.order.insert(order, planned);
+            match plan_destination(pending, stored) {
+                DestinationStep::Continue(pending) => {
+                    work.destinations.insert(order, pending);
+                }
+                DestinationStep::Complete(planned) => {
+                    work.order.insert(order, planned);
+                }
+            }
         }
         self.drive_routing(out);
     }

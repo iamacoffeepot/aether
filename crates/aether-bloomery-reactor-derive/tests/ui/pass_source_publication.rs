@@ -1,7 +1,7 @@
 // Named current-head guard plus a direct Heads parameter. The generated
 // Arg chain must typecheck with Rust inferring roles.
 
-use aether_bloomery_kinds::{Head, HeadMoved, Program, Ref, SetHead, Tree};
+use aether_bloomery_kinds::{Head, HeadMoved, Program, Ref, SetHeads, Tree};
 use aether_bloomery_reactor::{ArmVisitor, Guard, Output, Params, Reactor, Trigger, reactor};
 use aether_bloomery_view::Heads;
 
@@ -32,9 +32,9 @@ impl Reactor for SourcePublisher {
         change: HeadMoved<Tree>,
         current: CurrentCompilation,
         heads: Heads,
-    ) -> SetHead {
+    ) -> SetHeads {
         let _ = (current, heads);
-        SetHead::new(&PUBLISHED, None, change.to())
+        SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&PUBLISHED, None, change.to())])
     }
 }
 

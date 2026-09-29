@@ -13,7 +13,7 @@
 
 use std::collections::VecDeque;
 
-use aether_bloomery_kinds::{Call, Digest, DriverRecord, EncodedArtifact, JournalEntry, ReactorName, SetHead};
+use aether_bloomery_kinds::{Call, Digest, DriverRecord, EncodedArtifact, JournalEntry, ReactorName, SetHeads};
 use aether_bloomery_view::{Activations, HeadHistory, Heads, Requests};
 
 use super::ticket::{AppendTicket, CallerId, EventsTicket};
@@ -22,7 +22,7 @@ use super::ticket::{AppendTicket, CallerId, EventsTicket};
 pub const EVENTS_PAGE: u32 = 128;
 
 /// One planned routing record: ready to append, a supplied-input call, or a
-/// `SetHead` awaiting its compare-and-swap at derivation.
+/// `SetHeads` awaiting its compare-and-swaps at derivation.
 #[derive(Debug, Clone)]
 pub enum PlannedRecord {
     /// A record decided during routing, appended unchanged.
@@ -34,19 +34,19 @@ pub enum PlannedRecord {
         /// The request naming `input.digest()`.
         record: DriverRecord,
     },
-    /// A `SetHead` intent whose destination is stored under the head's kind.
-    /// Derivation checks the compare-and-swap against the journal view's
-    /// `Heads` plus earlier moves in the same batch; a pass becomes
-    /// `HeadMoved`, a failure becomes `ReactionFailed` for this intent alone.
-    SetHead {
+    /// A `SetHeads` intent whose destinations are stored under each head's kind.
+    /// Derivation checks every compare-and-swap against the journal view's
+    /// `Heads` plus earlier successful groups in the same batch; a pass becomes
+    /// one `HeadMoved` per change, while a failure becomes one `ReactionFailed`.
+    SetHeads {
         /// Trigger or catch-up seq causing the move or its failure.
         cause: u64,
         /// Bundle whose rule returned the intent.
         bundle: Digest,
         /// Reactor that returned the intent.
         reactor: ReactorName,
-        /// The move to attempt.
-        set_head: SetHead,
+        /// The atomic group to attempt.
+        set_heads: SetHeads,
     },
 }
 
@@ -74,7 +74,7 @@ pub enum PendingWrite {
     /// One startup batch. Recomputed from the outstanding set on conflict.
     Startup,
     /// One routing batch. Re-derived from the carried plan on conflict, so
-    /// each `SetHead` swap is checked again against the refolded view.
+    /// each `SetHeads` group is checked again against the refolded view.
     Routing {
         /// Trigger seq whose records this batch carries.
         trigger: u64,

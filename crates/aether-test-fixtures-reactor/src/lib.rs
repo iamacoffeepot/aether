@@ -1,5 +1,5 @@
 //! Reactor-bundle fixture: two reactors share one views owner inside a
-//! digest-loaded root, and both publish the triggering tree as a `SetHead`.
+//! digest-loaded root, and both publish the triggering tree as a `SetHeads`.
 //!
 //! Authors declare reactors and guards. `export!(public = […], generators = [aether_bloomery_bundle::bundle])`
 //! generates one root at [`aether_bloomery_kinds::BUNDLE_NAMESPACE`]. Load it
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use core::error::Error;
 use core::fmt;
 
-use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Seq, SetHead, Tree};
+use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Seq, SetHeads, Tree};
 use aether_bloomery_reactor::{And, Guard, reactor};
 use aether_bloomery_view::{Heads, Publish, PublishError, View, ViewCursor, view};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
@@ -18,6 +18,7 @@ use aether_test_fixtures_kinds::REACTOR_FOLD_FAIL_KIND;
 
 const CURRENT: Head<Program> = Head::new("current");
 const PUBLISHED: Head<Tree> = Head::new("published");
+const MIRRORED: Head<Tree> = Head::new("mirrored");
 
 /// Shared published fold used by both reactors.
 #[derive(Clone, Debug)]
@@ -132,8 +133,11 @@ impl Reactor for SourcePublisher {
     const NAMESPACE: &'static str = "test.bloomery.source.publisher";
 
     #[rule]
-    fn publish_source(&self, change: HeadMoved<Tree>, _current: CurrentCompilation, heads: Heads) -> SetHead {
-        SetHead::new(&PUBLISHED, heads.get(&PUBLISHED), change.to())
+    fn publish_source(&self, change: HeadMoved<Tree>, _current: CurrentCompilation, heads: Heads) -> SetHeads {
+        SetHeads::new(vec![
+            aether_bloomery_kinds::HeadChange::new(&PUBLISHED, heads.get(&PUBLISHED), change.to()),
+            aether_bloomery_kinds::HeadChange::new(&MIRRORED, heads.get(&MIRRORED), change.to()),
+        ])
     }
 }
 
@@ -144,8 +148,8 @@ impl Reactor for SourceWitness {
     const NAMESPACE: &'static str = "test.bloomery.source.witness";
 
     #[rule]
-    fn note_heads(&self, change: HeadMoved<Tree>, _advanced: FoldAdvanced) -> SetHead {
-        SetHead::new(&PUBLISHED, None, change.to())
+    fn note_heads(&self, change: HeadMoved<Tree>, _advanced: FoldAdvanced) -> SetHeads {
+        SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&PUBLISHED, None, change.to())])
     }
 }
 
