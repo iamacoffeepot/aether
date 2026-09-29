@@ -3,28 +3,18 @@
 //! the context carries comes back live (ADR-0243 §4).
 
 use std::sync::Arc;
-use std::sync::mpsc;
-use std::time::Duration;
 
 use aether_data::wire::{self, HeldClaim, HeldLedger, LedgerEncoder};
-use aether_data::{Kind, KindId, MailId, MailboxId, RequestId};
+use aether_data::{Kind, KindId, MailboxId, RequestId};
 
 use crate::actor::native::NativeCtx;
 use crate::actor::native::binding::NativeBinding;
-use crate::actor::native::envelope::Envelope;
-use crate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
 use crate::mail::{Source, SourceAddr};
-use crate::testing::{bare_substrate, boot_authority};
+use crate::testing::bare_substrate;
 
-use super::support::{CastOnly, HeldContext, NativeRequestContext, StubActor, TestReply};
-
-/// A terminal test sink (ADR-0094): discharge each dispatch, then forward it.
-fn sink(tx: mpsc::Sender<Envelope>) -> Arc<dyn InboxHandler> {
-    Arc::new(move |dispatch: OwnedDispatch| {
-        dispatch.discharge();
-        let _ = tx.send(dispatch);
-    })
-}
+use super::support::{
+    Bouncer, HeldContext, HeldRig, HoldReq, LedgerRead, NativeRequestContext, ParkReq, Poke, TestReply,
+};
 
 #[test]
 fn native_ctx_take_context_consumes_stored_reply_context() {
@@ -41,44 +31,29 @@ fn native_ctx_take_context_consumes_stored_reply_context() {
 
 /// Catches a `Held` drop that fires when its context parks, and a claim that
 /// fails to rebuild the weak ledger link: the stored debt must drop silently
-/// and keep the chain held, and the taken one must answer the caller the
-/// hold captured, from a later ctx, echoing that caller's correlation.
+/// and stay parked, and the taken one must answer the caller the hold
+/// captured, from the later turn the reply runs, echoing that caller's
+/// correlation.
 #[test]
 fn parked_context_drops_silently_and_take_answers_the_original_caller() {
-    let (registry, mailer) = bare_substrate();
-    let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-    let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
-    let caller = registry.register_inbox(&boot_authority(), "test.held_context.caller", sink(reply_tx));
-    let (peer_tx, _peer_rx) = mpsc::channel::<Envelope>();
-    let peer = Registry::declared_dependency::<StubActor>(registry.register_inbox(
-        &boot_authority(),
-        "test.held_context.peer",
-        sink(peer_tx),
-    ));
-    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00BE_EF11)));
-    let root = MailId::new(MailboxId(0xC2), 1);
+    let mut rig = HeldRig::boot();
+    let (caller, replies) = rig.caller("test.held_context.caller");
 
-    let request = {
-        let caller_source = Source::with_correlation(SourceAddr::Component(caller), 77);
-        let mut ctx = NativeCtx::new(&binding, caller_source, None, Some(root));
-        let (pending, held) = ctx.hold::<TestReply>();
-        pending.__defuse();
-        ctx.send_to_with_context(peer, &CastOnly { code: 1 }, HeldContext { held, tag: 4 })
-    };
-    assert_eq!(counter.held_open(root), 1, "the parked debt keeps the caller's chain open");
+    let root = rig.push(&ParkReq { tag: 4 }, Some(caller));
+    rig.driver.settle(&[root]);
 
-    {
-        let reply_source = Source::with_correlation(SourceAddr::None, request.correlation_id);
-        let mut ctx = NativeCtx::new(&binding, reply_source, None, None);
-        let context = ctx.take_context::<HeldContext>().expect("the reply takes its stored context");
-        assert_eq!(context.tag, 4, "the context's other fields come back beside the debt");
-        context.held.answer(&mut ctx, &TestReply { value: 5 });
-    }
-    assert_eq!(counter.held_open(root), 0, "answering the taken debt releases the hold");
+    let (parked, taken) = rig.driver.read_state(|host| (host.parked, host.taken)).expect("the host is live");
+    assert_eq!(
+        parked,
+        Some(LedgerRead { entry: Some("parked"), held_open: 1 }),
+        "storing the context parked the entry, which keeps the caller's chain open, and the stored ticket dropped silently",
+    );
+    assert_eq!(taken, Some((4, Some("held"))), "the take claims the entry back beside the context's other fields");
+    assert_eq!(rig.held_open(root), 0, "answering the taken debt releases the hold");
 
-    let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the answer reaches the original caller");
-    assert_eq!(reply.sender.correlation_id, 77, "the captured correlation is echoed, not the reply ctx's");
-    assert_eq!(TestReply::decode_from_bytes(reply.payload.bytes()), Some(TestReply { value: 5 }));
+    let reply = replies.try_recv().expect("the answer reaches the original caller");
+    assert_eq!(reply.sender.correlation_id, 77, "the captured correlation is echoed, not the reply turn's");
+    assert_eq!(TestReply::decode_from_bytes(reply.payload.bytes()), Some(TestReply { value: 4 }));
 }
 
 /// A ledger that accepts every park, so a test can read the bytes the
@@ -100,35 +75,37 @@ impl HeldLedger for AcceptAll {
 /// refuses and leaves the entry parked for its context's take.
 #[test]
 fn held_encode_and_decode_outside_the_table_refuse() {
-    let (_registry, mailer) = bare_substrate();
-    let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF12)));
-    let context = {
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let (pending, held) = ctx.hold::<TestReply>();
-        pending.__defuse();
-        HeldContext { held, tag: 3 }
-    };
-    let id = context.held.dispatch_id();
+    let mut rig = HeldRig::boot();
+    let root = rig.push(&HoldReq, None);
+    rig.driver.pump_until("the host holds the request", |host| host.held.is_some());
+    let held = rig.driver.host_turn(|host, _ctx| host.held.take()).flatten().expect("the host holds a ticket");
+    let id = held.dispatch_id();
+    let context = HeldContext { held, tag: 3 };
+    let entry = |rig: &mut HeldRig| rig.driver.host_turn(|_host, ctx| ctx.binding.dispatch_state_of(id)).flatten();
 
     assert_eq!(
         context.encode_with(&mut Vec::new()),
         Err(wire::Error::HeldUngranted { reply: TestReply::ID }),
         "a plain buffer grants no ledger",
     );
-    assert_eq!(binding.dispatch_state_of(id), Some("held"), "a refused encode leaves the entry held");
+    assert_eq!(entry(&mut rig), Some("held"), "a refused encode leaves the entry held");
 
     let mut ledger = AcceptAll;
     let mut encoder = LedgerEncoder::new(&mut ledger);
     context.encode_with(&mut encoder).expect("a granting encoder writes the ticket");
     let bytes = encoder.into_bytes();
-    binding.store_request_context(RequestId(9), context);
-    assert_eq!(binding.dispatch_state_of(id), Some("parked"), "storing the context parks its entry");
+    rig.driver
+        .host_turn(|_host, ctx| {
+            let _request = ctx.send_with_context::<Bouncer>(&Poke, context);
+        })
+        .expect("the host is live");
+    assert_eq!(entry(&mut rig), Some("parked"), "storing the context parks its entry");
 
     assert!(HeldContext::decode_from_bytes(&bytes).is_none(), "a plain decode grants no claim");
-    assert_eq!(binding.dispatch_state_of(id), Some("parked"), "a refused decode leaves the entry parked");
+    assert_eq!(entry(&mut rig), Some("parked"), "a refused decode leaves the entry parked");
 
-    let mut ctx = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 9), None, None);
-    let taken = ctx.take_context::<HeldContext>().expect("the table's take claims the parked entry");
-    assert_eq!(binding.dispatch_state_of(id), Some("held"), "the take claims the entry back to held");
-    taken.held.answer(&mut ctx, &TestReply { value: 0 });
+    rig.driver.pump_until("the reply takes the stored context", |host| host.taken.is_some());
+    let taken = rig.driver.read_state(|host| host.taken).flatten();
+    assert_eq!(taken, Some((3, Some("held"))), "the table's take claims the parked entry back to held");
+    rig.driver.settle(&[root]);
 }

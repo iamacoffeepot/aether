@@ -229,20 +229,22 @@ impl NativeActor for InventoryCapability {
 mod tests {
     use super::*;
     use crate::kinds::ParamKindWire;
-    use aether_actor::actor;
+    use aether_actor::{HandlesKind, actor};
     use aether_data::name_inventory::{
         ChildEntry, HandlerEntry, NameEntry, ParamKind as InventoryParamKind, RootEntry, TemplateEntry,
     };
     use aether_data::tagged_id;
-    use aether_data::{ActorId, MAILBOX_DOMAIN, SessionToken, Tag, ThreadId, Uuid, thread_id_from_name, with_tag};
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::outbound::HubOutbound;
+    use aether_data::{
+        ActorId, Kind, MAILBOX_DOMAIN, SessionToken, Tag, ThreadId, Uuid, thread_id_from_name, with_tag,
+    };
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::mail::{Source, SourceAddr};
     use aether_substrate::runtime::thread_name::{register, resolve_runtime};
-    use aether_substrate::testing::{registered_ref, unrouted_binding};
+    use aether_substrate::testing::{
+        TestChassis, await_settled, boot_test_chassis_with, fresh_substrate_and_rx, registered_ref,
+    };
+    use aether_substrate::{EgressEvent, PassiveChassis, ReplyTarget};
     use std::sync::Arc;
+    use std::sync::mpsc::Receiver;
 
     const ADDRESS_TEST_ROOT: &str = "aether.test.inventory_address_root";
     const ADDRESS_TEST_CHILD: &str = "aether.test.inventory_address_child";
@@ -323,30 +325,47 @@ mod tests {
         }
     }
 
-    /// The stateless cap + a fully-wired test mailer + `NativeBinding`
-    /// transport. Handlers are called directly and return their
-    /// result; no egress channel decode needed (ADR-0112 `-> R`
-    /// migration). The engine `Registry` reaches the handlers through
-    /// the ctx's mailer, the same way it does on a live chassis.
-    struct Fixture {
-        transport: Arc<NativeBinding>,
-        state: InventoryCapabilityState,
-        /// The same `Registry` the handlers reach through the ctx — held
-        /// so a test can seed it the way a live chassis registration would.
+    /// `InventoryCapability` booted pooled on a `TestChassis`, as production
+    /// composes it (the aether-tcp test pattern). Holds the engine
+    /// `Registry` a test seeds directly, the same one the handlers reach
+    /// through the ctx, and the egress receiver a settled send's reply is
+    /// already sitting on.
+    struct InventoryFixture {
         registry: Arc<Registry>,
+        chassis: PassiveChassis<TestChassis>,
+        egress: Receiver<EgressEvent>,
     }
 
-    fn fixture() -> Fixture {
-        let registry = Arc::new(Registry::new());
-        let (outbound, _rx) = HubOutbound::attached_loopback();
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
-        let transport = unrouted_binding(&mailer);
-        Fixture { transport, state: InventoryCapabilityState, registry }
-    }
+    impl InventoryFixture {
+        fn boot() -> Self {
+            let (registry, mailer, egress) = fresh_substrate_and_rx();
+            let chassis = boot_test_chassis_with::<InventoryCapability>(&registry, &mailer, (), ());
+            Self { registry, chassis, egress }
+        }
 
-    fn session_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A> {
-        let sender = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
-        NativeCtx::new_for_actor(transport, sender, None, None)
+        /// Send `mail` to the cap as a tracked session root and wait for its
+        /// whole chain to settle, so its `R` reply is already on egress; take
+        /// the first such reply with `try_iter` rather than a timed receive
+        /// (settlement already guarantees it is there).
+        fn request<K: Kind, R: Kind>(&self, mail: &K) -> R
+        where
+            InventoryCapability: HandlesKind<K>,
+        {
+            let reply = ReplyTarget::Session { session: SessionToken(Uuid::nil()), correlation: 0 };
+            let (_, settled) =
+                self.chassis.send_tracked(self.chassis.actor_ref::<InventoryCapability>(), mail, Some(reply));
+            await_settled(&settled, K::NAME);
+
+            self.egress
+                .try_iter()
+                .find_map(|event| match event {
+                    EgressEvent::ToSession { kind_name, payload, .. } if kind_name == R::NAME => {
+                        Some(R::decode_from_bytes(&payload).expect("test: reply payload decodes"))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("settlement guaranteed a {} reply on egress for {}", R::NAME, K::NAME))
+        }
     }
 
     /// The served manifest carries a known chassis mailbox name
@@ -365,10 +384,8 @@ mod tests {
         // templates to link by referencing the resolve chain.
         let _ = resolve_runtime(0);
 
-        let mut fix = fixture();
-        let mut ctx = session_ctx(&fix.transport);
-        let result = InventoryCapability::on_manifest(&mut fix.state, &mut ctx, Manifest {});
-        drop(ctx);
+        let fixture = InventoryFixture::boot();
+        let result = fixture.request::<Manifest, ManifestResult>(&Manifest {});
 
         assert!(
             result.names.iter().any(|n| n.name == "aether.fs"),
@@ -408,29 +425,23 @@ mod tests {
         // id carries a 60-bit hash body, so body 1 is never one of them.
         let mailbox_tag = tagged_id::encode(with_tag(Tag::Mailbox, 1)).expect("a mailbox-tagged id encodes");
 
-        let mut fix = fixture();
+        let fixture = InventoryFixture::boot();
 
         // A mailbox registered at runtime, held as the tagged id its
         // registration returns. No link-time manifest carries this name, so
         // the engine `Registry` is the only table that can reverse it.
         let component_tag =
-            registered_ref(&fix.registry, "aether.inventory-test.runtime-probe", noop_handler()).id().to_string();
+            registered_ref(&fixture.registry, "aether.inventory-test.runtime-probe", noop_handler()).id().to_string();
 
-        let mut ctx = session_ctx(&fix.transport);
-        let result = InventoryCapability::on_resolve(
-            &mut fix.state,
-            &mut ctx,
-            Resolve {
-                ids: vec![
-                    registered_tag.clone(),
-                    unseen_tag.clone(),
-                    component_tag.clone(),
-                    mailbox_tag.clone(),
-                    "not-a-tagged-id".to_string(),
-                ],
-            },
-        );
-        drop(ctx);
+        let result = fixture.request::<Resolve, ResolveResult>(&Resolve {
+            ids: vec![
+                registered_tag.clone(),
+                unseen_tag.clone(),
+                component_tag.clone(),
+                mailbox_tag.clone(),
+                "not-a-tagged-id".to_string(),
+            ],
+        });
         assert_eq!(result.resolved.len(), 5, "one entry per requested id");
 
         assert_eq!(result.resolved[0].id, registered_tag);
@@ -461,26 +472,23 @@ mod tests {
     fn resolve_address_serves_canonical_short_and_engine_errors() {
         let name = "camera";
         let canonical = format!("{ADDRESS_TEST_ROOT}/{ADDRESS_TEST_CHILD}:{name}");
-        let mut fix = fixture();
-        registered_ref(&fix.registry, &canonical, noop_handler());
+        let fixture = InventoryFixture::boot();
+        registered_ref(&fixture.registry, &canonical, noop_handler());
         // Both candidates hold `camera` live, so the hole stays ambiguous
         // rather than filling with the one live holder (ADR-0166 §5).
         for child in [AMBIGUOUS_ADDRESS_TEST_FIRST_CHILD, AMBIGUOUS_ADDRESS_TEST_SECOND_CHILD] {
-            registered_ref(&fix.registry, &format!("{AMBIGUOUS_ADDRESS_TEST_ROOT}/{child}:{name}"), noop_handler());
+            registered_ref(&fixture.registry, &format!("{AMBIGUOUS_ADDRESS_TEST_ROOT}/{child}:{name}"), noop_handler());
         }
-        let mut ctx = session_ctx(&fix.transport);
 
         for address in [canonical.clone(), format!("{ADDRESS_TEST_ROOT}/:{name}")] {
             assert_eq!(
-                InventoryCapability::on_resolve_address(&mut fix.state, &mut ctx, ResolveAddress { address },),
+                fixture.request::<ResolveAddress, ResolveAddressResult>(&ResolveAddress { address }),
                 ResolveAddressResult::Ok { canonical_path: canonical.clone() },
             );
         }
-        let missing = InventoryCapability::on_resolve_address(
-            &mut fix.state,
-            &mut ctx,
-            ResolveAddress { address: format!("{ADDRESS_TEST_ROOT}/:missing") },
-        );
+        let missing = fixture.request::<ResolveAddress, ResolveAddressResult>(&ResolveAddress {
+            address: format!("{ADDRESS_TEST_ROOT}/:missing"),
+        });
         match missing {
             ResolveAddressResult::Err { error } => {
                 assert!(error.contains("has no live mailbox"), "engine diagnostic is preserved: {error}");
@@ -491,11 +499,9 @@ mod tests {
             }
         }
 
-        let ambiguous = InventoryCapability::on_resolve_address(
-            &mut fix.state,
-            &mut ctx,
-            ResolveAddress { address: format!("{AMBIGUOUS_ADDRESS_TEST_ROOT}/:camera") },
-        );
+        let ambiguous = fixture.request::<ResolveAddress, ResolveAddressResult>(&ResolveAddress {
+            address: format!("{AMBIGUOUS_ADDRESS_TEST_ROOT}/:camera"),
+        });
         match ambiguous {
             ResolveAddressResult::Err { error } => {
                 assert!(error.contains("camera"), "ambiguity diagnostic names the supplied segment: {error}");
@@ -583,10 +589,8 @@ mod tests {
     /// `describe_handlers` double-reports every window handler.
     #[test]
     fn on_handlers_folds_field_identical_rows() {
-        let mut fix = fixture();
-        let mut ctx = session_ctx(&fix.transport);
-        let result = InventoryCapability::on_handlers(&mut fix.state, &mut ctx, ListHandlers {});
-        drop(ctx);
+        let fixture = InventoryFixture::boot();
+        let result = fixture.request::<ListHandlers, HandlersResult>(&ListHandlers {});
 
         let served = result.handlers.iter().filter(|h| h.namespace == "aether.test.window_dedup").count();
         assert_eq!(served, 1, "two field-identical HandlerEntry rows must fold to one served row; got {served}");

@@ -7,15 +7,17 @@
 //! correlation the inbound answers — and the chain a hold taken from this
 //! context gates.
 
+use std::fmt::Display;
 use std::sync::Arc;
 
 use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::wire::DecodeCtx;
-use aether_data::{Kind, MailId, RequestId};
+use aether_data::{Kind, KindId, MailId, RequestId};
+use aether_kinds::DecodeRefused;
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::inbox::InboundMail;
-use crate::mail::attachments::AttachedEntries;
+use crate::mail::attachments::{AttachedEntries, EncodedMail};
 use crate::mail::{Source, SourceAddr};
 use crate::runtime::trace::SettlementHold;
 
@@ -85,10 +87,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///   protocol, refuses.
     ///
     /// A refusal is logged once at warn, naming the kind and the error, and
-    /// answers `None`, the typed arm's miss. The `#[actor]` typed arms and
-    /// native handler-set arms call it; a hand decoder of an `&Envelope` is
-    /// not affected. It decodes only the mail being handled, so it grants
-    /// nothing the handler does not already receive.
+    /// answers `None`, the typed arm's miss. The reply target hears it only
+    /// when it opts in (see `answer_decode_refusal`); no other sender
+    /// does. The `#[actor]` typed arms and native handler-set arms call it; a
+    /// hand decoder of an `&Envelope` is not affected. It decodes only the
+    /// mail being handled, so it grants nothing the handler does not already
+    /// receive.
     #[doc(hidden)]
     #[must_use]
     pub fn __decode_inbound<K: Kind>(&self, payload: &[u8]) -> Option<K> {
@@ -97,10 +101,50 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let mut ctx = DecodeCtx::empty().blobs(&mut blobs).routes(&**self.binding.mailer().registry());
 
         K::decode_with(payload, &mut ctx)
-            .inspect_err(
-                |error| tracing::warn!(target: "aether_substrate::mail", kind = K::NAME, %error, "decode refused"),
-            )
+            .inspect_err(|error| {
+                tracing::warn!(target: "aether_substrate::mail", kind = K::NAME, %error, "decode refused");
+                self.answer_decode_refusal(K::ID, error);
+            })
             .ok()
+    }
+
+    /// Answer a decode refusal of a `kind` payload to the reply target with a
+    /// [`DecodeRefused`] naming the kind and `error`, when the target opts in:
+    /// it is an actor that asked under a correlation, and its published
+    /// contract carries a `DecodeRefused` row. The notice goes through the
+    /// binding's reply path, so it joins the in-flight chain and is handled
+    /// before that chain's `Settled`, and this actor is its sender.
+    ///
+    /// The opt-in is the target's own declared handler, which only the RPC
+    /// server declares: a wire payload is untrusted and its caller cannot
+    /// read actor logs. Every other sender is typed code, so a refusal it
+    /// causes is a codec bug the warn records, and it hears nothing.
+    fn answer_decode_refusal(&self, kind: KindId, error: &impl Display) {
+        let SourceAddr::Component(target) = self.source.addr else {
+            return;
+        };
+        if self.source.correlation_id == Source::NO_CORRELATION {
+            return;
+        }
+        let opted_in = self
+            .binding
+            .mailer()
+            .registry()
+            .published_contract(target)
+            .is_some_and(|contract| contract.handles(DecodeRefused::ID));
+        if !opted_in {
+            return;
+        }
+
+        let notice = DecodeRefused { kind, error: error.to_string() };
+        let payload = EncodedMail { bytes: notice.encode_into_bytes(), attachments: None };
+        self.binding.send_reply_envelope_for_handler(
+            self.source,
+            DecodeRefused::ID,
+            payload,
+            self.in_flight_root,
+            self.outbound_parent(),
+        );
     }
 
     /// ADR-0080 §5: the [`MailId`] of the mail currently being

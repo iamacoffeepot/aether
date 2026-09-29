@@ -277,104 +277,195 @@ impl<R: ActorMail> fmt::Debug for Held<R> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
+    use std::any::Any;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::{Arc, mpsc};
-    use std::time::Duration;
 
-    use aether_data::{CrossesActors, Kind, KindId, MailId, MailboxId, Source, SourceAddr};
+    use aether_actor::{ActorRef, ErasedActorRef};
+    use aether_data::{Kind, MailId};
 
     use super::*;
-    use crate::mail::registry::{InboxHandler, OwnedDispatch};
-    use crate::testing::{bare_substrate, boot_authority};
+    use crate::NativeInitCtx;
+    use crate::actor::native::{NativeActor, Pending};
+    use crate::chassis::builder::ReplyTarget;
+    use crate::chassis::error::BootError;
+    use crate::mail::mailer::Mailer;
+    use crate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
+    use crate::testing::{PumpedDriver, boot_bare_test_chassis, fresh_substrate, registered_ref};
 
-    #[repr(C)]
-    #[derive(
-        Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize,
-    )]
+    #[aether_data::kind(name = "test.held.answer", copy, partial_eq)]
     struct Answer {
         value: u64,
     }
 
-    impl Kind for Answer {
-        const NAME: &'static str = "test.held.answer";
-        const ID: KindId = KindId(0xD15B_0CC1_0000_0002);
-        aether_data::pod_kind_codec!();
-    }
-
-    impl ActorMail for Answer {}
-    impl CrossesActors for Answer {}
-
-    // A sentinel: these tests never close the actor holding an `Answer`.
+    // A sentinel: these tests never close the actor holding an `Answer`
+    // while the engine keeps running.
     impl HeldReply for Answer {
         fn unanswered() -> Self {
             Self { value: u64::MAX }
         }
     }
 
-    fn forward_to(tx: mpsc::Sender<OwnedDispatch>) -> Arc<dyn InboxHandler> {
-        Arc::new(move |dispatch: OwnedDispatch| {
-            dispatch.discharge();
-            let _ = tx.send(dispatch);
-        })
+    #[aether_data::kind(name = "test.held.hold")]
+    struct HoldReq;
+
+    #[aether_data::kind(name = "test.held.release", copy)]
+    struct Release {
+        value: u64,
     }
 
-    fn root_id(cid: u64) -> MailId {
-        MailId { sender: MailboxId(0xAB), correlation_id: cid }
+    #[aether_data::kind(name = "test.held.hold_twice")]
+    struct HoldTwice;
+
+    /// A pumped root that holds its reply in one turn and answers it from a
+    /// later one.
+    #[derive(Default)]
+    struct HeldProbe {
+        /// Set by `on_hold` and `on_hold_twice`, taken by `on_release`.
+        held: Option<Held<Answer>>,
     }
 
-    /// Catches `answer` replying to the answering ctx's `reply_target()`
+    #[aether_actor::actor(singleton, root)]
+    impl NativeActor for HeldProbe {
+        const NAMESPACE: &'static str = "test.held.probe";
+        type Config = ();
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self::default())
+        }
+
+        #[handler::single]
+        fn on_hold(&mut self, ctx: &mut NativeCtx<'_>, _hold: HoldReq) -> Pending<Answer> {
+            let (pending, held) = ctx.hold::<Answer>();
+            self.held = Some(held);
+            pending
+        }
+
+        #[handler::single]
+        fn on_release(&mut self, ctx: &mut NativeCtx<'_>, release: Release) {
+            self.held.take().expect("a hold is waiting").answer(ctx, &Answer { value: release.value });
+        }
+
+        #[handler::single]
+        fn on_hold_twice(&mut self, ctx: &mut NativeCtx<'_>, _hold: HoldTwice) -> Pending<Answer> {
+            let (pending, first) = ctx.hold::<Answer>();
+            self.held = Some(first);
+            let _second = ctx.hold::<Answer>();
+            pending
+        }
+    }
+
+    /// A booted [`HeldProbe`] and the mailer its chains settle through.
+    struct Rig {
+        driver: PumpedDriver<HeldProbe>,
+        registry: Arc<Registry>,
+        mailer: Arc<Mailer>,
+    }
+
+    impl Rig {
+        fn boot() -> Self {
+            let (registry, mailer) = fresh_substrate();
+            let driver = PumpedDriver::boot(boot_bare_test_chassis(&registry, &mailer), (), ());
+
+            Self { driver, registry, mailer }
+        }
+
+        fn probe(&self) -> ActorRef<HeldProbe> {
+            self.driver.chassis().actor_ref::<HeldProbe>()
+        }
+
+        /// A caller registered under `name` that forwards each reply it
+        /// receives for the test to read, then finishes it, so the chain the
+        /// reply joined settles only once the reply is readable.
+        fn caller(&self, name: &str) -> (ErasedActorRef, mpsc::Receiver<OwnedDispatch>) {
+            let (tx, rx) = mpsc::channel::<OwnedDispatch>();
+            let mailer = Arc::clone(&self.mailer);
+            let sink: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
+                let (mail_id, root) = (dispatch.mail_id, dispatch.root);
+                dispatch.discharge();
+                let _ = tx.send(dispatch);
+                mailer.record_finished(mail_id, root);
+            });
+
+            (registered_ref(&self.registry, name, sink), rx)
+        }
+
+        /// Send [`HoldReq`] as a root answered to `caller` under correlation
+        /// 77, and pump until the probe holds it.
+        fn hold(&mut self, caller: ErasedActorRef) -> MailId {
+            let root = self.driver.send_tracked(
+                self.probe(),
+                &HoldReq,
+                Some(ReplyTarget::Actor { to: caller, correlation: 77 }),
+            );
+            self.driver.pump_until("the probe holds the request", |probe| probe.held.is_some());
+            root
+        }
+
+        /// Move the held ticket out of the probe's state.
+        fn take_held(&mut self) -> Held<Answer> {
+            self.driver.host_turn(|probe, _ctx| probe.held.take()).flatten().expect("the probe holds a ticket")
+        }
+
+        fn held_open(&self, root: MailId) -> u32 {
+            self.mailer.trace_handle().settlement_counter().held_open(root)
+        }
+    }
+
+    /// The panic message `payload` carries.
+    fn panic_message(payload: &(dyn Any + Send)) -> Option<&str> {
+        payload.downcast_ref::<&str>().copied().or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+    }
+
+    /// Catches `answer` replying to the answering turn's reply target
     /// instead of the target the hold captured, or releasing before `Sent`.
     #[test]
-    fn answer_from_a_later_ctx_echoes_the_captured_correlation_and_releases() {
-        let (registry, mailer) = bare_substrate();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox(&boot_authority(), "test.held.answer.caller", forward_to(reply_tx));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
-        let root = root_id(1);
+    fn answer_from_a_later_turn_echoes_the_captured_correlation_and_releases() {
+        let mut rig = Rig::boot();
+        let (caller, replies) = rig.caller("test.held.answer.caller");
+        let (other, other_replies) = rig.caller("test.held.answer.other");
 
-        let held = {
-            let mut ctx =
-                NativeCtx::new(&binding, Source::with_correlation(SourceAddr::Component(caller), 77), None, Some(root));
-            let (pending, held) = ctx.hold::<Answer>();
-            pending.__defuse();
-            held
-        };
-        assert_eq!(counter.held_open(root), 1, "the held entry keeps the caller's chain open");
+        let root = rig.hold(caller);
+        assert_eq!(rig.held_open(root), 1, "the held entry keeps the caller's chain open");
 
-        let mut later = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 99), None, None);
-        held.answer(&mut later, &Answer { value: 5 });
-        assert_eq!(counter.held_open(root), 0, "answer releases the hold");
+        let release = rig.driver.send_tracked(
+            rig.probe(),
+            &Release { value: 5 },
+            Some(ReplyTarget::Actor { to: other, correlation: 99 }),
+        );
+        rig.driver.settle(&[root, release]);
+        assert_eq!(rig.held_open(root), 0, "answer releases the hold");
 
-        let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the answer reaches the captured caller");
-        assert_eq!(reply.sender.correlation_id, 77, "the captured correlation is echoed, not the answering ctx's");
-        assert_eq!(Answer::decode_from_bytes(reply.payload.bytes()).unwrap(), Answer { value: 5 });
+        let reply = replies.try_recv().expect("the answer reaches the captured caller");
+        assert_eq!(reply.sender.correlation_id, 77, "the captured correlation is echoed, not the answering turn's");
+        assert_eq!(Answer::decode_from_bytes(reply.payload.bytes()), Some(Answer { value: 5 }));
+        assert!(other_replies.try_recv().is_err(), "the answering turn's reply target hears nothing");
     }
 
     /// Catches a silent leak: an unanswered ticket must release its hold,
     /// remove its entry, and fail fast.
     #[test]
     fn unanswered_drop_panics_and_releases_the_hold() {
-        let (_registry, mailer) = bare_substrate();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
-        let root = root_id(2);
+        let mut rig = Rig::boot();
+        let (caller, replies) = rig.caller("test.held.unanswered.caller");
 
-        let (pending, held) = NativeCtx::new(&binding, Source::NONE, None, Some(root)).hold::<Answer>();
-        pending.__defuse();
+        let root = rig.hold(caller);
+        let held = rig.take_held();
         let id = held.dispatch_id();
+        let ledger = held.ledger().upgrade().expect("the probe's ledger is live");
 
         let payload = catch_unwind(AssertUnwindSafe(|| drop(held))).expect_err("an unanswered Held fails fast");
-        let message =
-            payload.downcast_ref::<&str>().copied().or_else(|| payload.downcast_ref::<String>().map(String::as_str));
         assert!(
-            message.is_some_and(|message| message.starts_with("Held dropped without an answer")),
+            panic_message(payload.as_ref())
+                .is_some_and(|message| message.starts_with("Held dropped without an answer")),
             "the panic names the lost reply"
         );
-        assert_eq!(counter.held_open(root), 0, "the dropped ticket released its hold");
-        assert_eq!(binding.dispatch_state_of(id), None, "the dropped ticket removed its entry");
+        assert_eq!(rig.held_open(root), 0, "the dropped ticket released its hold");
+        assert_eq!(ledger.dispatch_state_of(id), None, "the dropped ticket removed its entry");
+
+        rig.driver.settle(&[root]);
+        assert!(replies.try_recv().is_err(), "the lost reply is never sent");
     }
 
     /// Catches a double release: staging moves the one hold into the
@@ -382,33 +473,38 @@ mod tests {
     /// nor actor close releases it again.
     #[test]
     fn into_deferred_reply_moves_the_hold_and_removes_the_entry() {
-        let (_registry, mailer) = bare_substrate();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
-        let root = root_id(3);
+        let mut rig = Rig::boot();
+        let (caller, _replies) = rig.caller("test.held.deferred.caller");
 
-        let (pending, held) = NativeCtx::new(&binding, Source::NONE, None, Some(root)).hold::<Answer>();
-        pending.__defuse();
+        let root = rig.hold(caller);
+        let held = rig.take_held();
         let id = held.dispatch_id();
+        let ledger = held.ledger().upgrade().expect("the probe's ledger is live");
 
         let owed = held.into_deferred_reply();
-        assert_eq!(counter.held_open(root), 1, "staging keeps the chain held");
-        assert_eq!(binding.dispatch_state_of(id), None, "staging removed the entry");
+        assert_eq!(rig.held_open(root), 1, "staging keeps the chain held");
+        assert_eq!(ledger.dispatch_state_of(id), None, "staging removed the entry");
 
-        binding.answer_held_for_actor_close();
-        assert_eq!(counter.held_open(root), 1, "actor close finds no entry to release twice");
+        ledger.answer_held_for_actor_close();
+        assert_eq!(rig.held_open(root), 1, "actor close finds no entry to release twice");
         owed.abandon_for_actor_close();
-        assert_eq!(counter.held_open(root), 0, "the successor debt owns the one hold");
+        assert_eq!(rig.held_open(root), 0, "the successor debt owns the one hold");
+        rig.driver.settle(&[root]);
     }
 
+    /// Catches a handler that holds two replies for one request: the second
+    /// hold fails fast, naming the rule.
     #[test]
-    #[should_panic(expected = "a second NativeCtx::hold in one dispatch")]
     fn second_hold_in_one_dispatch_panics() {
-        let (_registry, mailer) = bare_substrate();
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, Some(root_id(4)));
+        let mut rig = Rig::boot();
+        let root = rig.driver.send_tracked(rig.probe(), &HoldTwice, None);
 
-        let (_pending, _first) = ctx.hold::<Answer>();
-        let _second = ctx.hold::<Answer>();
+        let payload =
+            catch_unwind(AssertUnwindSafe(|| rig.driver.settle(&[root]))).expect_err("the second hold fails fast");
+        assert!(
+            panic_message(payload.as_ref())
+                .is_some_and(|message| message.starts_with("a second NativeCtx::hold in one dispatch")),
+            "the panic names the second hold"
+        );
     }
 }

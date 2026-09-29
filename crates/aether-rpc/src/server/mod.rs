@@ -20,7 +20,10 @@
 //! gets lifted into a `ReplyEvent`, which carries its kind and bytes and
 //! no address, and written to the originating
 //! connection; the settlement notice closes the call with a
-//! `ReplyEnd`.
+//! `ReplyEnd`. A recipient that refuses the payload at decode answers this
+//! cap a `DecodeRefused`, which it declares a handler for, so the call closes
+//! with `RpcError::DecodeRefused` naming the refuser's path, the kind and the
+//! decode error, rather than `Ok` with no reply.
 //!
 //! Engine routes: a `Call` addressed at `engine = Some(id)` goes to the
 //! proxy that registered itself for `id` with `RegisterEngineRoute`,
@@ -34,11 +37,11 @@
 // Handler-signature kinds need to be importable at file root for the
 // `#[actor]`-emitted `HandlesKind<K>` markers (always-on against the
 // identity, ADR-0122). `RpcInboundReady` and `RegisterEngineRoute` are the
-// cap's own kinds (ADR-0121); `Settled` and `MonitorNotice` stay in
-// `aether-kinds`.
+// cap's own kinds (ADR-0121); `Settled`, `MonitorNotice` and `DecodeRefused`
+// stay in `aether-kinds`.
 use crate::kinds::{RegisterEngineRoute, RpcInboundReady};
-use aether_kinds::MonitorNotice;
 use aether_kinds::trace::Settled;
+use aether_kinds::{DecodeRefused, MonitorNotice};
 
 // Re-export the cap's config + params at file root for chassis builders. The
 // `RpcServerConfig` / `RpcServerParams` / `RpcBind` types name no
@@ -92,7 +95,7 @@ pub struct RpcServerCapability;
 // markers (`Addressable`, one `HandlesKind<K>` per handler, the
 // name-inventory entry) against this struct. The kind types those markers
 // name (`RpcInboundReady` / `RegisterEngineRoute` / `Settled` /
-// `MonitorNotice`) are imported at file root above.
+// `MonitorNotice` / `DecodeRefused`) are imported at file root above.
 use aether_actor::actor;
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,

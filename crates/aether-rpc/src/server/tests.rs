@@ -555,6 +555,44 @@ fn call_carrying_an_engine_only_kind_closes_with_err_before_dispatch() {
     assert_eq!(end, WireFrame::ReplyEnd { cid: 13, result: Err(RpcError::Other { reason }) });
 }
 
+/// A `Call` whose payload the recipient refuses at decode closes with
+/// `ReplyEnd` `Err(DecodeRefused)` naming the refuser's path and the kind, and
+/// nothing streams before it. Fails if the refusal never reaches the server
+/// (an `Ok` end with no reply, as before), if it lands after `Settled`, or if
+/// the server streams the notice as a `ReplyEvent` instead of closing on it.
+#[test]
+fn call_with_a_payload_the_recipient_refuses_closes_decode_refused() {
+    use crate::server::test_echo::{TestEchoActor, TestEchoRequest};
+    use crate::{MailEnvelope, RpcError};
+    use aether_data::Kind;
+
+    let chassis = boot_with_echo_server();
+    let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(5));
+    complete_handshake(&mut stream);
+
+    let recipient = recipient_of::<TestEchoActor>();
+    let mut payload = TestEchoRequest { value: 42 }.encode_into_bytes();
+    payload.pop();
+    write_frame(
+        &mut stream,
+        &WireFrame::Call {
+            cid: Some(21),
+            envelope: MailEnvelope { to: recipient.clone(), kind: <TestEchoRequest as Kind>::ID, payload },
+        },
+    )
+    .expect("test: write_frame Call to rpc server");
+
+    let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
+    assert!(
+        matches!(
+            &end,
+            WireFrame::ReplyEnd { cid: 21, result: Err(RpcError::DecodeRefused { path, kind, .. }) }
+                if *path == recipient.path && *kind == <TestEchoRequest as Kind>::ID
+        ),
+        "a refused payload closes DecodeRefused naming the refuser and the kind: {end:?}",
+    );
+}
+
 /// A `Call` addressed at an engine no proxy has registered closes at once
 /// with `ReplyEnd` `Err(UnknownEngine)` naming that engine. Without it the
 /// no-route branch returns without writing a `ReplyEnd` and the call hangs

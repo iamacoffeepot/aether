@@ -45,6 +45,13 @@ ambiguous or illegal short path), closes the call at once with
 diagnostic. The hub relays that refusal to its caller unchanged. A reply
 (`ReplyEvent`) carries its kind and bytes and no address.
 
+A native recipient that refuses the payload at decode (a raw client, schema
+drift between versions, or an encoding against a stale schema) runs no handler
+for it and sends no reply. The call still closes naming the refusal: once its
+chain settles it ends with `RpcError::DecodeRefused { path, kind, error }`,
+where `path` is the refusing actor and `error` the decode error, and the hub
+relays it unchanged. A guest recipient's refusal still ends `Ok` with no reply.
+
 Each `FleetProxy` registers its engine with the hub's RPC server once it is
 live (`aether.rpc.register_engine_route`), and the server forwards every
 `Some(id)` call straight to that proxy. The server monitors each registrant:
