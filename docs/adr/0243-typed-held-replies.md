@@ -11,7 +11,7 @@ ADR-0109 made a handler's return type its reply contract: `-> R` replies on retu
 
 That gap is most of the manual surface. A census at `164e9625d` found 150 `#[handler::manual]` handlers. About 33 native handlers are manual only because they answer one exact reply kind later, from somewhere other than a task completion:
 
-- **a peer's reply:** audio and text loads, window commands, and the HTTP router glue's deferred routes;
+- **a peer's reply:** audio and text loads and window commands;
 - **a monitor notice:** tcp `on_unbind`;
 - **a long-poll wake:** the bloomery journal's `on_watch_head`;
 - **a sans-io core:** the bloomery driver;
@@ -22,7 +22,7 @@ Two single handlers declare a `Silent` row but reply later: `aether-component`'s
 
 The obligation these handlers carry is already a value. `DeferredReply` (`offload/blocking.rs`), minted by `NativeCtx::defer_reply_to`, holds the caller's `SettlementHold` and reply target. It is `#[must_use]`, and its `Drop` fails fast when it is dropped unanswered. `abandon_for_actor_close` is its one silent discharge, and `IntoDeferredReply` hands it to a successor (`HandlerSpawnBuilder::continue_from`, `TaskDone`). What it lacks is a reply type: `DeferredReply::reply` takes any `R: ActorMail`, so the handler's row cannot name what it will send, and the handler is manual (`Undeclared`, ADR-0231 §6).
 
-Protocols already accept a deferred answer. A target's `-> Pending<O>` handler covers the protocol row `-> O` (`aether-actor-derive/src/protocol.rs`), so now versus later is invisible to the sender. The HTTP router shows the cost of the gap. Its glue replies only `HttpServerResponse`, and it is manual only because a deferred route answers from the `#[http::reply]` handler through `answer_deferred`. That keeps `HttpRouter` at `-> Undeclared` and forces every hand-written HTTP handler to be manual too (#6935, #6957).
+Protocols already accept a deferred answer. A target's `-> Pending<O>` handler covers the protocol row `-> O` (`aether-actor-derive/src/protocol.rs`), so now versus later is invisible to the sender. The HTTP router shows the cost of the gap. Its glue replies only `HttpServerResponse`, and it is manual only because a route may answer later, from the handler that receives a peer's reply. That keeps `HttpRouter` at `-> Undeclared` and forces every hand-written HTTP handler to be manual too (#6935, #6957).
 
 ## Decision
 
@@ -168,7 +168,7 @@ held.answer(ctx, &WatchHeadResult { .. });
 
 - A deferred handler's row names its reply. The about 33 native manual sites, the two false `Silent` rows, and the three guest sites (#6960) cover protocol rows `-> R`, and `describe_component` / `describe_handlers` report their reply kind.
 - Answering with the wrong kind is a compile error, and answering twice cannot compile, because `answer` consumes the `Held<R>`. The existing runtime guarantees carry over: a lost reply fails fast, and a parked reply holds its chain open.
-- The HTTP router glue returns `-> Pending<HttpRouterResult>`. With the #6957 enum, `HttpRouter` becomes `fn request(mail: HttpServerRequest) -> HttpRouterResult`, and every HTTP handler is single.
+- The HTTP router glue returns `-> HttpRouterResult`, and a handler that forwards to a peer holds its reply and returns `-> Pending<HttpRouterResult>` (§4). With the #6957 enum, `HttpRouter` becomes `fn request(mail: HttpServerRequest) -> HttpRouterResult`, and every HTTP handler is single.
 
 ### Negative / limits
 

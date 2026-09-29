@@ -1,10 +1,10 @@
 //! The routed handler fixtures: actors that claim a path through the typed
 //! `#[http::router]` / `#[http::route]` authoring surface (ADR-0131), the
-//! path-template resource (ADR-0154), the deferred-route relay pair, and the
-//! macro-authored precedence handlers the routing tests drive.
+//! path-template resource (ADR-0154), and the macro-authored precedence
+//! handlers the routing tests drive.
 
-use aether_actor::{Manual, actor};
-use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
+use aether_actor::actor;
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate as http;
@@ -198,150 +198,6 @@ impl NativeActor for BookRouteHandler {
         id: http::Path<u64>,
     ) -> HttpServerResponse {
         HttpServerResponse { status: 200, headers: Vec::new(), body: format!("books:checkout:{}", id.0).into_bytes() }
-    }
-}
-
-/// The request/reply kind pair for the deferred-route fixtures
-/// (ADR-0154 §2): a route forwards `EchoAsk` to a peer cap, which
-/// replies `EchoSay`.
-#[aether_data::kind(name = "aether.http.test_echo_ask")]
-pub struct EchoAsk {
-    pub text: String,
-}
-
-#[aether_data::kind(name = "aether.http.test_echo_say")]
-pub struct EchoSay {
-    pub text: String,
-}
-
-/// Named only by the cfg-disabled `#[http::reply]` on [`DeferRouteHandler`].
-/// This tests module compiles under `cfg(test)`, so the type is stripped;
-/// generated glue that still names it fails compilation. That is the leak
-/// `#[http::router]` used to produce: reply glue was emitted unconditionally
-/// while the method and kind were cfg-gated (a no-default-features
-/// chassis could not resolve github-gated `ArchiveRecordsResult` /
-/// `ListArchiveResult`).
-#[cfg(not(test))]
-struct GatedOutReply;
-
-/// A peer cap that answers `EchoAsk` with `EchoSay` — the downstream a
-/// deferred route forwards to and answers on.
-pub struct EchoPeer;
-pub struct EchoPeerState;
-
-#[actor(singleton, root)]
-impl NativeActor for EchoPeer {
-    type State = EchoPeerState;
-    type Config = ();
-    const NAMESPACE: &'static str = "aether.http.test_echo_peer";
-
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<EchoPeerState, BootError> {
-        Ok(EchoPeerState)
-    }
-
-    #[handler::single]
-    fn on_ask(_state: &mut EchoPeerState, _ctx: &mut NativeCtx<'_>, ask: EchoAsk) -> EchoSay {
-        EchoSay { text: ask.text }
-    }
-}
-
-/// A peer that receives `EchoAsk` and never replies — the downstream whose
-/// deferred route keeps its reply held until the server's `504` timeout.
-pub struct SilentPeer;
-pub struct SilentPeerState;
-
-#[actor(singleton, root)]
-impl NativeActor for SilentPeer {
-    type State = SilentPeerState;
-    type Config = ();
-    const NAMESPACE: &'static str = "aether.http.test_silent_peer";
-
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<SilentPeerState, BootError> {
-        Ok(SilentPeerState)
-    }
-
-    // Deliberately manual + no reply: the deferred route's held reply keeps
-    // the request's chain open, so the server answers `504` at its timeout.
-    #[handler::manual]
-    fn on_ask(_state: &mut SilentPeerState, _ctx: &mut NativeCtx<'_, Erased, Manual>, _ask: EchoAsk) {}
-}
-
-/// A deferred-route handler (ADR-0154 §2): `/echo` forwards to
-/// [`EchoPeer`] and answers on its `EchoSay` reply; `/blackhole`
-/// forwards to [`SilentPeer`], which never replies, so its held reply keeps
-/// the request open until the server answers `504` at its request timeout
-/// (ADR-0243 §7). `ctx.defer(..)` forwards to a declared dependency, hence
-/// `depends` names both peers.
-pub struct DeferRouteHandler;
-pub struct DeferRouteHandlerState;
-
-#[http::router]
-#[actor(singleton, root, depends(HttpServerCapability, EchoPeer, SilentPeer))]
-impl NativeActor for DeferRouteHandler {
-    type State = DeferRouteHandlerState;
-    type Config = ();
-    const NAMESPACE: &'static str = "aether.http.test_route_defer";
-
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<DeferRouteHandlerState, BootError> {
-        Ok(DeferRouteHandlerState)
-    }
-
-    /// `GET /echo` — forward to the echo peer by type, answer on its
-    /// reply. `defer(&request)` captures the request; `.to::<R>()` forwards it.
-    #[http::route(Get, "/echo")]
-    fn echo(_state: &mut DeferRouteHandlerState, mut ctx: http::Ctx<'_, NativeCtx<'_>>) -> http::Outcome {
-        ctx.defer(&EchoAsk { text: "hi".to_string() }).to::<EchoPeer>()
-    }
-
-    /// `GET /echo/{word}` — a synchronous route on the deferred `/echo`
-    /// routes' claim, so the router's one held-reply handler answers both
-    /// kinds of arm.
-    #[http::route(Get, "/echo/{word}")]
-    fn echo_now(
-        _state: &mut DeferRouteHandlerState,
-        _ctx: http::Ctx<'_, NativeCtx<'_>>,
-        word: http::Path<String>,
-    ) -> HttpServerResponse {
-        HttpServerResponse { status: 200, headers: Vec::new(), body: format!("now:{}", word.0).into_bytes() }
-    }
-
-    /// `GET /blackhole` — forward to the silent peer; it never replies, so the
-    /// held reply keeps the request open until the server's `504`.
-    #[http::route(Get, "/blackhole")]
-    fn blackhole(_state: &mut DeferRouteHandlerState, mut ctx: http::Ctx<'_, NativeCtx<'_>>) -> http::Outcome {
-        ctx.defer(&EchoAsk { text: "void".to_string() }).to::<SilentPeer>()
-    }
-
-    /// Map the peer's `EchoSay` reply into the response answered through
-    /// the router's held reply.
-    ///
-    /// Literal `#[cfg(test)]` must ride the generated `#[handler::single]`
-    /// glue (the actor `handler_cfgs` contract). This fixture compiles with
-    /// `cfg(test)`, so the predicate is true and the deferred-route
-    /// end-to-end test still exercises `EchoSay` dispatch through cfg-gated
-    /// glue.
-    #[cfg(test)]
-    #[http::reply]
-    fn on_say(_state: &mut DeferRouteHandlerState, _ctx: &mut NativeCtx<'_>, say: EchoSay) -> HttpServerResponse {
-        HttpServerResponse { status: 200, headers: Vec::new(), body: format!("echoed:{}", say.text).into_bytes() }
-    }
-
-    /// Regression: `syn` does not evaluate `cfg`, so `#[http::router]` used
-    /// to emit reply glue unconditionally. A
-    /// `#[cfg(not(test))]` reply method then produced glue that named
-    /// [`GatedOutReply`] — a kind that does not exist under `cfg(test)`.
-    /// Both predicates must ride the generated handler so every derived
-    /// reference vanishes with the method; a true-only leak of
-    /// `#[cfg(feature = "runtime")]` would still name the missing kind.
-    #[cfg(feature = "runtime")]
-    #[cfg(not(test))]
-    #[http::reply]
-    fn on_gated_out(
-        _state: &mut DeferRouteHandlerState,
-        _ctx: &mut NativeCtx<'_>,
-        _reply: GatedOutReply,
-    ) -> HttpServerResponse {
-        HttpServerResponse { status: 200, headers: Vec::new(), body: Vec::new() }
     }
 }
 

@@ -72,12 +72,12 @@ convention.
 
 `#[http::router]` derives registration from typed `#[route]` methods and
 emits the router's one single `aether.http.server.request` handler, replying
-`HttpRouterResult`. A native route that returns `http::Outcome` may defer
-(ADR-0154 §2): `ctx.defer(&request).to::<Peer>()` holds the router's reply,
-parks it in the forwarded request's context, and an `#[http::reply]` method
-answers it through that held reply when the peer replies; a router with such a
-route returns `Pending<HttpRouterResult>`. A deferred request whose peer never
-replies keeps its chain open until the server's `504`. The actor
+`HttpRouterResult`; every typed route returns `HttpServerResponse`. A handler
+that forwards to a peer is a hand-written `HttpServerRequest` handler that
+holds its reply (ADR-0243): it returns `Pending<HttpRouterResult>`, parks the
+`Held` in the forwarded request's context with `send_with_context`, and
+answers it from the peer's reply handler after `take_context`. A held reply
+whose peer never replies keeps its chain open until the server's `504`. The actor
 must declare `depends(HttpServerCapability)`, because the injected `wire`
 registration mails the server; without it, the actor fails to compile at
 `#[http::router]`.

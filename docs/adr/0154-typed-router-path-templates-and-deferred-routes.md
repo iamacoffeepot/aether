@@ -1,9 +1,10 @@
 # ADR-0154: Typed Router Path Templates and Deferred Routes
 
-- **Status:** Accepted (shipped — typed path templates and deferred routes in `crates/aether-http/src/typed.rs` and `crates/aether-http/src/defer.rs`)
+- **Status:** Accepted (shipped — typed path templates in `crates/aether-http/src/typed.rs`; deferred routes removed, see the 2026-09-28 #7025 amendment)
 - **Date:** 2026-07-19
 - **Amended:** 2026-09-23 (#6468) — a deferred route forwards to a declared dependency of the router actor: `ctx.defer(&request).to::<R>()` sends through the router's own `send_with_context::<R>`, bounded `A: DependsOn<R>` (ADR-0232 §1), and no longer resolves `R` through the component-host carry. A loaded embedded component is therefore not a deferral target.
 - **Amended:** 2026-09-28 (#6935) — The one-reply-class-per-group rule is removed. A router compiles to one `#[handler::manual]` handler (ADR-0131), so synchronous and deferred routes may share a `(prefix, method)` claim: a synchronous route's response and a deferred route's `Outcome::Reply` both reply through the handler's obligation, and `Outcome::Deferred` leaves the answer to the `#[http::reply]` route.
+- **Amended:** 2026-09-28 (#7025) — Deferred routes (§2, §3) are removed: `ctx.defer(&request).to::<R>()`, `http::Outcome` / `Deferred`, `#[http::reply]`, the `answer_now` / `answer_deferred` glue, and the `aether.http.deferred_route` context kind. They had no production caller, and this ADR's named consumer, bloomery's hand-rolled api router, no longer exists. Typed held replies (ADR-0243) replace them: a handler that forwards to a peer is a hand-written `HttpServerRequest` handler that returns `Pending<HttpRouterResult>`, parks its `Held` in the forwarded request's context, and answers from the peer's reply handler. Every typed route returns `HttpServerResponse`, and the `#[http::router]` handler returns `HttpRouterResult`. §1 path templates stand.
 
 Amends **ADR-0131** (the typed route-authoring surface): the route macro grows from a `(prefix, method)` dispatcher that must reply synchronously into one that owns the whole route tree — nested path templates with captures, and routes that answer a downstream reply instead of returning inline. Builds on the guest-side extraction principle of **ADR-0130**, the handler classes of **ADR-0134**, and the kind-typed request contexts of **ADR-0139**; takes the data-phase reasoning of **ADR-0133** as the reason a deferred reply cannot simply ride the request chain.
 
@@ -34,7 +35,7 @@ The route macro owns the whole route tree. Two additions, each a self-contained 
 
 The capture matching runs entirely guest-side in generated glue. The cap does **not** gain a routing trie or any knowledge of sub-paths — the load-bearing invariant from ADR-0130 that keeps route shape out of the capability.
 
-### 2. Deferred routes
+### 2. Deferred routes (removed 2026-09-28, #7025)
 
 A route may answer a downstream reply instead of returning inline. A deferred route is authored as a pair:
 
@@ -45,7 +46,7 @@ This is bloomery's exact structure for a one-request-one-reply route — a reque
 
 **Out of scope: N-way scatter/gather.** A route that fans one request into N downstream replies, joins them, and answers only when all N complete is a quorum barrier, not a deferred reply — bloomery's seal (`POST /drafts/{id}/seal`) is the one such route, holding one obligation across N member-signature verifies (`PendingSeal.remaining`) with a fail-closed teardown, then chaining to a second single-reply `Admit` defer. `take_context` is take-once and `#[http::reply]` maps one reply to one response, so neither expresses the join; ADR-0139 likewise scoped N-reply correlation out. The deferred route deliberately does not try to absorb this: the seal keeps its explicit join (its single-reply `Admit` tail migrates to a deferred route like any other), and a general gather primitive — `defer_all` plus a quorum join — is a separate future decision an ADR of its own would make if a second N-join consumer appears. Forcing seal through a not-yet-designed primitive on the strength of one consumer is the leaky abstraction this avoids.
 
-### 3. Deferred routes are the ADR-0139 relay — no obligation table
+### 3. Deferred routes are the ADR-0139 relay — no obligation table (removed 2026-09-28, #7025)
 
 A deferred route needs no bespoke held-obligation table, no held reply guard, and no settlement `504` net. It is the same relay every async capability already runs (audio / text / aether-kit answering an `aether.fs` read): capture the requester's `Source`, `send_with_context` it to the peer, and answer later via `take_context` + `reply_to`.
 

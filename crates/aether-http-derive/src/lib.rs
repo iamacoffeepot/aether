@@ -22,21 +22,16 @@
 //! extractors. Every answer, a route's response, a bind failure's, or the
 //! `404` when no group or template matches, is an `HttpRouterResult::Response`.
 //!
-//! The handler's return depends on whether any route returns `http::Outcome`
-//! (ADR-0154 §2, native only). With none, it returns `HttpRouterResult`, and
-//! every arm returns its reply. With one, it returns
-//! `Pending<HttpRouterResult>` (ADR-0243 §2): a deferred route's
-//! `ctx.defer(..).to::<R>()` holds the reply and its receipt is returned, and
-//! every synchronous arm holds and answers at once. A `#[http::reply]` method
-//! maps a deferred route's downstream reply into the response, and its
-//! generated single handler answers the held reply with it.
+//! Every route returns `HttpServerResponse`, and the handler returns
+//! `HttpRouterResult`, every arm its reply. A handler that forwards to a peer
+//! and answers when the peer replies, or that streams, is a hand-written
+//! `HttpServerRequest` handler that holds its reply (ADR-0243), not a route.
 //!
 //! A template's static head, its leading run of literal segments, is what is
 //! claimed with the capability, which keys routes by `(prefix, method)`.
 //! Capture and sub-path matching run in the generated guest-side glue, so the
 //! capability never grows a routing trie (ADR-0154). Routes sharing a claim
-//! collapse into one registration. A synchronous route and a deferred one may
-//! share a claim, since the handler holds its reply for both.
+//! collapse into one registration.
 //!
 //! Bare `#[http::router]` registers every route exclusively.
 //! `#[http::router(shared)]` registers them all `shared: true` instead
@@ -55,15 +50,15 @@
 //! author-written `wire` that spells an explicit `Erased` ctx fails to compile
 //! at the generated send.
 //!
-//! A route's or reply method's ctx that omits its actor is typed by the
-//! router's actor: `http::Ctx<'_, WasmCtx<'_>>` reads as
-//! `http::Ctx<'_, WasmCtx<'_, Self>>`, and the generated handler takes the
-//! same typed ctx (ADR-0231 §7). A route therefore reaches its declared
-//! dependencies through the flat verbs, `ctx.send::<R>(..)` and its siblings,
-//! and a route that sends to `R` needs `depends(R)`. A ctx that names its
-//! actor, including an explicit erased one, passes through unchanged. Every
-//! route and reply method takes the single ctx the generated handler has; one
-//! that names the `Manual` reply mode is a compile error at the method.
+//! A route's ctx that omits its actor is typed by the router's actor:
+//! `http::Ctx<'_, WasmCtx<'_>>` reads as `http::Ctx<'_, WasmCtx<'_, Self>>`,
+//! and the generated handler takes the same typed ctx (ADR-0231 §7). A route
+//! therefore reaches its declared dependencies through the flat verbs,
+//! `ctx.send::<R>(..)` and its siblings, and a route that sends to `R` needs
+//! `depends(R)`. A ctx that names its actor, including an explicit erased one,
+//! passes through unchanged. Every route takes the single ctx the generated
+//! handler has; one that names the `Manual` reply mode is a compile error at
+//! the method.
 
 #![forbid(unsafe_code)]
 
@@ -90,24 +85,6 @@ pub fn route(_args: TokenStream, item: TokenStream) -> TokenStream {
     quote_spanned! { item.span() =>
         ::core::compile_error!(
             "#[http::route] requires #[http::router] on the enclosing impl block (written above #[actor])"
-        );
-        #item
-    }
-    .into()
-}
-
-/// `#[http::reply(ReplyKind)]` — a marker attribute consumed by
-/// `#[http::router]` (ADR-0154 §2): it names the method that maps a
-/// deferred route's downstream reply into the response, and the router
-/// generates the glue that recovers the held request and answers it.
-/// Like `#[http::route]`, reaching this expansion means the enclosing
-/// impl is missing `#[http::router]`.
-#[proc_macro_attribute]
-pub fn reply(_args: TokenStream, item: TokenStream) -> TokenStream {
-    let item = TokenStream2::from(item);
-    quote_spanned! { item.span() =>
-        ::core::compile_error!(
-            "#[http::reply] requires #[http::router] on the enclosing impl block (written above #[actor])"
         );
         #item
     }
@@ -305,38 +282,9 @@ struct Routed {
     ctx_c: Type,
     /// Each parameter after the receiver + ctx, in signature order.
     params: Vec<Param>,
-    /// `true` when the method returns `http::Outcome` (deferred-capable,
-    /// ADR-0154 §2); `false` for a synchronous `HttpServerResponse` route.
-    returns_outcome: bool,
     /// `#[doc]` attributes carried onto the glue handler for
     /// `describe_component` prose.
     docs: Vec<Attribute>,
-}
-
-/// A `#[http::reply(ReplyKind)]` method (ADR-0154 §2): maps a deferred
-/// route's downstream reply into the response and answers the held
-/// request. It registers no route; the `#[actor]` dispatch table routes
-/// its reply kind to the generated glue, which recovers the obligation.
-struct ReplyRoute {
-    /// The retained user method's name.
-    fn_name: Ident,
-    /// The reply kind this method maps — its third parameter's type, the
-    /// kind the generated glue dispatches on.
-    reply_kind: Type,
-    /// The receiver parameter, copied onto the glue.
-    first_arg: FnArg,
-    /// How the glue calls back into the retained method.
-    call_style: CallStyle,
-    /// The transport ctx type `C` (from `ctx: &mut C`), with its actor
-    /// filled in when the author omitted it.
-    ctx_c: Type,
-    /// `#[doc]` attributes carried onto the glue.
-    docs: Vec<Attribute>,
-    /// Literal `#[cfg]` attributes cloned from the user method (the actor
-    /// `handler_cfgs` contract: `path().is_ident("cfg")` only, not `cfg_attr`)
-    /// and replayed onto the generated glue so a configuration that strips the
-    /// method also strips the handler that names its reply kind (ADR-0183).
-    cfgs: Vec<Attribute>,
 }
 
 /// How a glue handler dispatches back into the retained user method:
@@ -369,21 +317,15 @@ fn expand_router(mut item: ItemImpl, shared: bool) -> syn::Result<TokenStream2> 
         return Err(syn::Error::new(item.generics.span(), "#[http::router] does not support generic impl blocks"));
     }
 
-    // Collect routed + reply methods, stripping the `#[http::route]` /
-    // `#[http::reply]` markers so each survives as a plain helper `#[actor]`
-    // re-emits verbatim.
+    // Collect routed methods, stripping the `#[http::route]` markers so each
+    // survives as a plain helper `#[actor]` re-emits verbatim.
     let mut routed = Vec::new();
-    let mut reply_routes = Vec::new();
     for impl_item in &mut item.items {
         let ImplItem::Fn(method) = impl_item else {
             continue;
         };
         if let Some(desc) = take_routed(method)? {
             routed.push(desc);
-            continue;
-        }
-        if let Some(desc) = take_reply(method)? {
-            reply_routes.push(desc);
         }
     }
 
@@ -396,11 +338,8 @@ fn expand_router(mut item: ItemImpl, shared: bool) -> syn::Result<TokenStream2> 
 
     let groups = build_groups(&routed)?;
 
-    let mut glue = vec![emit_router_glue(&groups, first)];
-    glue.extend(reply_routes.iter().map(emit_reply_glue));
-    for handler in glue {
-        item.items.push(parse_quote!(#handler));
-    }
+    let handler = emit_router_glue(&groups, first);
+    item.items.push(parse_quote!(#handler));
 
     inject_registration(&mut item, &groups, first, shared)?;
 
@@ -462,14 +401,7 @@ fn take_routed(method: &mut ImplItemFn) -> syn::Result<Option<Routed>> {
     let (first_arg, call_style) = parse_receiver(method)?;
     let ctx_c = parse_ctx_type(method)?;
     let params = classify_params(method)?;
-    let returns_outcome = parse_return_kind(&method.sig.output)?;
-    if returns_outcome && is_wasm_ctx(&ctx_c) {
-        return Err(syn::Error::new(
-            method.sig.output.span(),
-            "a WasmCtx route returns HttpServerResponse: http::Outcome is native-only, because only a native \
-             route defers (ADR-0154 §2)",
-        ));
-    }
+    parse_return_kind(&method.sig.output)?;
 
     let path_count = params.iter().filter(|param| matches!(param, Param::Path { .. })).count();
     if path_count != template.capture_count {
@@ -485,17 +417,7 @@ fn take_routed(method: &mut ImplItemFn) -> syn::Result<Option<Routed>> {
 
     let docs = method.attrs.iter().filter(|attr| attr.path().is_ident("doc")).cloned().collect();
 
-    Ok(Some(Routed {
-        fn_name,
-        method_ident: args.method,
-        template,
-        first_arg,
-        call_style,
-        ctx_c,
-        params,
-        returns_outcome,
-        docs,
-    }))
+    Ok(Some(Routed { fn_name, method_ident: args.method, template, first_arg, call_style, ctx_c, params, docs }))
 }
 
 /// Group routes by `(static-head, method)`, sorting each group's routes
@@ -529,89 +451,6 @@ fn build_groups(routed: &[Routed]) -> syn::Result<Vec<Group<'_>>> {
 /// segment, so it works through any import style).
 fn attr_is_route(attr: &Attribute) -> bool {
     attr.path().segments.last().is_some_and(|seg| seg.ident == "route")
-}
-
-/// True for `#[http::reply]` / `#[reply]` (matched on the last path
-/// segment, like [`attr_is_route`]).
-fn attr_is_reply(attr: &Attribute) -> bool {
-    attr.path().segments.last().is_some_and(|seg| seg.ident == "reply")
-}
-
-/// If `method` carries `#[http::reply]`, strip it and build the reply-route
-/// descriptor (ADR-0154 §2): a `fn(&mut self | state, ctx: &mut C, reply:
-/// K) -> HttpServerResponse` that maps a deferred route's downstream reply
-/// `K` into the response answered through the held obligation.
-fn take_reply(method: &mut ImplItemFn) -> syn::Result<Option<ReplyRoute>> {
-    let positions: Vec<usize> =
-        method.attrs.iter().enumerate().filter(|(_, attr)| attr_is_reply(attr)).map(|(index, _)| index).collect();
-    let Some(&index) = positions.first() else {
-        return Ok(None);
-    };
-    if positions.len() > 1 {
-        return Err(syn::Error::new(
-            method.attrs[positions[1]].span(),
-            "a reply method takes exactly one #[http::reply] attribute",
-        ));
-    }
-    method.attrs.remove(index);
-
-    let fn_name = method.sig.ident.clone();
-    let (first_arg, call_style) = parse_receiver(method)?;
-    let ctx_c = parse_ref_ctx_type(method)?;
-    let reply_kind = parse_reply_kind(method)?;
-    if parse_return_kind(&method.sig.output)? {
-        return Err(syn::Error::new(
-            method.sig.output.span(),
-            "a #[http::reply] method must return HttpServerResponse (it maps the downstream reply into the response)",
-        ));
-    }
-    let docs = method.attrs.iter().filter(|attr| attr.path().is_ident("doc")).cloned().collect();
-    // Clone literal `#[cfg]`s without removing them from the user method
-    // (only `#[http::reply]` is stripped). Replay them onto the generated
-    // handler so a configuration that strips the method also strips the
-    // glue that names its reply kind (ADR-0183 / actor `handler_cfgs`).
-    let cfgs = method.attrs.iter().filter(|attr| attr.path().is_ident("cfg")).cloned().collect();
-
-    Ok(Some(ReplyRoute { fn_name, reply_kind, first_arg, call_style, ctx_c, docs, cfgs }))
-}
-
-/// Extract the transport ctx type `C` from a `#[http::reply]` method's
-/// second parameter, which is `ctx: &mut C` (a reply method takes the raw
-/// transport ctx, not the request-shaped `Ctx`, since it serves a reply
-/// rather than a request). A `C` that omits its actor is filled with
-/// [`fill_actor`] in the method's own signature, and the filled type is
-/// returned for the glue.
-fn parse_ref_ctx_type(method: &mut ImplItemFn) -> syn::Result<Type> {
-    let signature_span = method.sig.span();
-    let ctx_arg = method.sig.inputs.iter_mut().nth(1).ok_or_else(|| {
-        syn::Error::new(signature_span, "a reply method's second parameter must be `ctx: &mut NativeCtx<'_>`")
-    })?;
-    let ctx_span = ctx_arg.span();
-    let FnArg::Typed(PatType { ty, .. }) = ctx_arg else {
-        return Err(syn::Error::new(ctx_span, "a reply method's second parameter must be `ctx: &mut …`"));
-    };
-    let ty_span = ty.span();
-    let Type::Reference(reference) = ty.as_mut() else {
-        return Err(syn::Error::new(ty_span, "a reply method's ctx parameter must be a `&mut` transport ctx"));
-    };
-    reject_manual_ctx(&reference.elem)?;
-    fill_actor(&mut reference.elem);
-    Ok((*reference.elem).clone())
-}
-
-/// The reply kind a `#[http::reply]` method maps — its third parameter's
-/// type (after the receiver and ctx).
-fn parse_reply_kind(method: &ImplItemFn) -> syn::Result<Type> {
-    let arg = method.sig.inputs.iter().nth(2).ok_or_else(|| {
-        syn::Error::new(
-            method.sig.span(),
-            "a reply method needs a reply-kind parameter (`fn(&mut self, ctx, reply: K)`)",
-        )
-    })?;
-    let FnArg::Typed(PatType { ty, .. }) = arg else {
-        return Err(syn::Error::new(arg.span(), "a reply method's reply parameter must be a plainly-typed kind"));
-    };
-    Ok((**ty).clone())
 }
 
 /// Map a `#[http::route]` method identifier to its
@@ -742,13 +581,13 @@ fn path_param_inner(ty: &Type) -> Option<Type> {
     })
 }
 
-/// Read the routed method's return type: `HttpServerResponse` (a
-/// synchronous route, the rung-1 shape) or `http::Outcome` (a deferred
-/// route, ADR-0154 §2). Returns `true` for `Outcome`. Any other return is
-/// an error — a streaming route keeps the raw `#[handler]` surface.
-fn parse_return_kind(output: &ReturnType) -> syn::Result<bool> {
-    const EXPECTED: &str = "a routed method must return HttpServerResponse or http::Outcome \
-                            (a streaming route keeps the raw #[handler] surface)";
+/// Check the routed method returns `HttpServerResponse`. Any other return is
+/// an error naming the replacement: a handler that forwards to a peer or
+/// streams is a hand-written `HttpServerRequest` handler that holds its reply
+/// (ADR-0243).
+fn parse_return_kind(output: &ReturnType) -> syn::Result<()> {
+    const EXPECTED: &str = "a routed method must return HttpServerResponse; a route that forwards to a peer or \
+                            streams keeps a hand-written HttpServerRequest handler (ADR-0243 held reply)";
     let ReturnType::Type(_, ty) = output else {
         return Err(syn::Error::new(output.span(), EXPECTED));
     };
@@ -756,40 +595,8 @@ fn parse_return_kind(output: &ReturnType) -> syn::Result<bool> {
         return Err(syn::Error::new(ty.span(), EXPECTED));
     };
     match path.segments.last() {
-        Some(seg) if seg.ident == "HttpServerResponse" => Ok(false),
-        Some(seg) if seg.ident == "Outcome" => Ok(true),
+        Some(seg) if seg.ident == "HttpServerResponse" => Ok(()),
         _ => Err(syn::Error::new(ty.span(), EXPECTED)),
-    }
-}
-
-/// How the router's handler answers, fixed by whether any route returns
-/// `http::Outcome`.
-#[derive(Clone, Copy)]
-enum Answer {
-    /// No route defers: the handler returns `HttpRouterResult` and every arm
-    /// returns its reply.
-    Direct,
-    /// A route defers: the handler returns `Pending<HttpRouterResult>`, a
-    /// deferred route hands back its held reply's receipt, and every
-    /// synchronous arm holds and answers at once (ADR-0243 §2).
-    Held,
-}
-
-impl Answer {
-    /// The handler's return type.
-    fn return_type(self) -> TokenStream2 {
-        match self {
-            Self::Direct => quote! { ::aether_http::kinds::HttpRouterResult },
-            Self::Held => quote! { ::aether_http::Pending<::aether_http::kinds::HttpRouterResult> },
-        }
-    }
-
-    /// The handler's answer with the `HttpServerResponse` value `response`.
-    fn respond(self, response: &TokenStream2) -> TokenStream2 {
-        match self {
-            Self::Direct => quote! { ::aether_http::kinds::HttpRouterResult::Response(#response) },
-            Self::Held => quote! { ::aether_http::answer_now(__aether_ctx, #response) },
-        }
     }
 }
 
@@ -799,8 +606,7 @@ impl Answer {
 /// then tries that group's templates most-specific first: matching literals,
 /// binding captures through `FromPathSegment`, running `FromRequest`
 /// extractors, and calling the matched route. A request no group or template
-/// matches answers `404`. Its return is `HttpRouterResult`, or
-/// `Pending<HttpRouterResult>` when a route returns `http::Outcome`.
+/// matches answers `404`. Its return is `HttpRouterResult`.
 fn emit_router_glue(groups: &[Group<'_>], first: &Routed) -> TokenStream2 {
     let glue_first = match &first.call_style {
         CallStyle::SelfReceiver => {
@@ -810,19 +616,13 @@ fn emit_router_glue(groups: &[Group<'_>], first: &Routed) -> TokenStream2 {
         CallStyle::State(state_ty) => quote! { __aether_state: #state_ty },
     };
     let glue_ctx = &first.ctx_c;
-    let answer = if groups.iter().flat_map(|group| group.routes.iter()).any(|route| route.returns_outcome) {
-        Answer::Held
-    } else {
-        Answer::Direct
-    };
-    let return_type = answer.return_type();
-    let not_found = answer.respond(&quote! {
-        ::aether_http::kinds::HttpServerResponse {
+    let not_found = quote! {
+        ::aether_http::kinds::HttpRouterResult::Response(::aether_http::kinds::HttpServerResponse {
             status: 404,
             headers: ::std::vec::Vec::new(),
             body: ::std::vec::Vec::from(&b"no matching route"[..]),
-        }
-    });
+        })
+    };
     let docs = groups.iter().flat_map(|group| group.routes.iter()).flat_map(|route| route.docs.iter());
     let claim_count = groups.len();
     let claims = groups.iter().map(|group| {
@@ -831,7 +631,7 @@ fn emit_router_glue(groups: &[Group<'_>], first: &Routed) -> TokenStream2 {
         quote! { (#static_head, #method_expr) }
     });
     let arms = groups.iter().enumerate().map(|(index, group)| {
-        let routes = group.routes.iter().map(|route| emit_route_arm(route, group, &first.call_style, answer));
+        let routes = group.routes.iter().map(|route| emit_route_arm(route, group, &first.call_style));
         quote! {
             if __aether_group == ::core::option::Option::Some(#index) {
                 #(#routes)*
@@ -846,7 +646,7 @@ fn emit_router_glue(groups: &[Group<'_>], first: &Routed) -> TokenStream2 {
             #glue_first,
             __aether_ctx: &mut #glue_ctx,
             __aether_request: ::aether_http::kinds::HttpServerRequest,
-        ) -> #return_type {
+        ) -> ::aether_http::kinds::HttpRouterResult {
             let __aether_path = __aether_request.path.clone();
             let __aether_segs: ::std::vec::Vec<&str> =
                 __aether_path.split('/').filter(|__aether_seg| !__aether_seg.is_empty()).collect();
@@ -875,7 +675,7 @@ fn emit_router_glue(groups: &[Group<'_>], first: &Routed) -> TokenStream2 {
 /// One route's match arm inside its group: a length + literal guard, then
 /// capture and extractor binding, then the call, each answer returned as the
 /// handler's reply.
-fn emit_route_arm(route: &Routed, group: &Group<'_>, call_style: &CallStyle, answer: Answer) -> TokenStream2 {
+fn emit_route_arm(route: &Routed, group: &Group<'_>, call_style: &CallStyle) -> TokenStream2 {
     let seglen = route.template.segments.len();
     // Every route matches its exact segment structure (#3697) — a route
     // claims its own path, not the subtree beneath it, so it never swallows a
@@ -886,10 +686,9 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>, call_style: &CallStyle, ans
     let len_check = quote! { __aether_segs.len() == #seglen };
     // A bind failure (unparseable capture / rejected extractor) answers with
     // its response and ends the handler.
-    let fail_answer = answer.respond(&quote! { __aether_response });
     let on_fail = quote! {
         {
-            return #fail_answer;
+            return ::aether_http::kinds::HttpRouterResult::Response(__aether_response);
         }
     };
     let literal_checks = route.template.segments.iter().enumerate().filter_map(|(index, seg)| match seg {
@@ -939,26 +738,6 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>, call_style: &CallStyle, ans
         CallStyle::SelfReceiver => quote! { self.#fn_name(__aether_http_ctx #(, #param_idents)*) },
         CallStyle::State(_) => quote! { Self::#fn_name(__aether_state, __aether_http_ctx #(, #param_idents)*) },
     };
-    // A synchronous route returns the response, which the glue answers
-    // with; a deferred route returns `Outcome`, which the glue answers inline
-    // (`Reply`) or whose held reply's receipt it returns (`Deferred` —
-    // `defer` already held the reply and forwarded the request, so the reply
-    // route answers when the peer replies). Only a router whose handler holds
-    // has a route that returns `Outcome`.
-    let response_answer = answer.respond(&quote! { __aether_response });
-    let call_and_tail = if route.returns_outcome {
-        quote! {
-            match #invoke {
-                ::aether_http::Outcome::Reply(__aether_response) => return #response_answer,
-                ::aether_http::Outcome::Deferred(__aether_deferred) => return __aether_deferred.into_receipt(),
-            }
-        }
-    } else {
-        quote! {
-            let __aether_response = #invoke;
-            return #response_answer;
-        }
-    };
 
     let static_head = LitStr::new(&group.static_head, Span::call_site());
     let method_expr = &group.method_expr;
@@ -974,36 +753,7 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>, call_style: &CallStyle, ans
                     method: #method_expr,
                 },
             );
-            #call_and_tail
-        }
-    }
-}
-
-/// The `#[handler::single]` glue for one `#[http::reply]` route (ADR-0154
-/// §2): call the user method to map the downstream reply into a response,
-/// then `answer_deferred`, which takes the router's held reply back via
-/// `take_context` (keyed by the reply's `in_reply_to`, no correlation crosses
-/// the call) and answers the original request with it (ADR-0243 §4). The
-/// handler replies nothing to the peer. An unmatched reply (no stored
-/// context) is a no-op.
-fn emit_reply_glue(reply: &ReplyRoute) -> TokenStream2 {
-    let ReplyRoute { fn_name, reply_kind, first_arg, call_style, ctx_c, docs, cfgs } = reply;
-    let glue_name = format_ident!("__aether_reply_{fn_name}");
-    let glue_first = match call_style {
-        CallStyle::SelfReceiver => quote! { #first_arg },
-        CallStyle::State(state_ty) => quote! { __aether_state: #state_ty },
-    };
-    let call = match call_style {
-        CallStyle::SelfReceiver => quote! { self.#fn_name(__aether_ctx, __aether_reply) },
-        CallStyle::State(_) => quote! { Self::#fn_name(__aether_state, __aether_ctx, __aether_reply) },
-    };
-    quote! {
-        #(#cfgs)*
-        #(#docs)*
-        #[handler::single]
-        fn #glue_name(#glue_first, __aether_ctx: &mut #ctx_c, __aether_reply: #reply_kind) {
-            let __aether_response = #call;
-            ::aether_http::answer_deferred(__aether_ctx, __aether_response);
+            return ::aether_http::kinds::HttpRouterResult::Response(#invoke);
         }
     }
 }
@@ -1024,7 +774,7 @@ fn registration_send(group: &Group<'_>, ctx: &Ident, shared: bool) -> TokenStrea
     }
 }
 
-/// Type a route's or reply method's transport ctx by the router's actor when
+/// Type a route's transport ctx by the router's actor when
 /// it omits one: `NativeCtx<'_>` becomes `NativeCtx<'_, Self>` and a bare
 /// `WasmCtx` becomes `WasmCtx<'_, Self>`, inserting `Self` as the first type
 /// argument after the lifetimes. The router types a route's ctx by its actor
@@ -1054,7 +804,7 @@ fn fill_actor(ty: &mut Type) {
     }
 }
 
-/// Refuse a route's or reply method's transport ctx that names the `Manual`
+/// Refuse a route's transport ctx that names the `Manual`
 /// reply mode, as `NativeCtx<'_, Self, Manual>` does: its second type
 /// argument's last segment is `Manual`. The generated handler covers the
 /// `HttpRouter` row with a single handler, so it passes a single ctx, and a
@@ -1074,9 +824,8 @@ fn reject_manual_ctx(ty: &Type) -> syn::Result<()> {
     if mode.segments.last().is_some_and(|seg| seg.ident == "Manual") {
         return Err(syn::Error::new(
             ty.span(),
-            "a route or #[http::reply] method takes the single ctx the #[http::router] handler passes, not a \
-             Manual one: it answers by returning, and a deferred route holds its reply through \
-             `ctx.defer(..).to::<R>()` (ADR-0243)",
+            "a route takes the single ctx the #[http::router] handler passes, not a Manual one: it answers by \
+             returning, and a handler that answers later is a hand-written one that holds its reply (ADR-0243)",
         ));
     }
     Ok(())
@@ -1182,7 +931,6 @@ fn wire_ctx_ident(wire: &ImplItemFn) -> syn::Result<Ident> {
 // through the http server's native route fixtures and the
 // `RoutedHttpHandler` wasm fixture — a routed dispatch decoding the request,
 // nested templates sharing a prefix, nested claims picking their group, a
-// synchronous and a deferred route sharing a claim, a path-param parse
-// failure early-returning its 400, and registration reaching the cap over
+// path-param parse failure early-returning its 400, and registration reaching the cap over
 // the wire — rather than by unit tests over token output here, which would
 // only restate the `quote!` blocks.

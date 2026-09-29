@@ -375,12 +375,35 @@ Drop to the raw `register_route_self` surface above for a streaming route
 (`HttpRouterResult::Stream`) — the typed surface returns `HttpServerResponse`,
 so a streamed response keeps its own hand-written request handler.
 
-A native route may instead return `http::Outcome` to answer later (ADR-0154
-§2): `ctx.defer(&request).to::<Peer>()` forwards a request to a declared
-dependency and holds the router's reply (ADR-0243), and an `#[http::reply]`
-method maps the peer's reply into the `HttpServerResponse` that answers it.
-A router with such a route returns `Pending<HttpRouterResult>`. `Outcome` is
-native-only, so a wasm route returns `HttpServerResponse`.
+A typed route returns `HttpServerResponse` and answers at once. A handler that
+forwards to a peer and answers when the peer replies is a hand-written
+`HttpServerRequest` handler that holds its reply (ADR-0243): it returns
+`Pending<HttpRouterResult>` from `ctx.hold::<HttpRouterResult>()`, forwards
+with `send_with_context`, carrying the `Held` in the request context, and
+answers from the peer's reply handler, where `take_context` hands the `Held`
+back. The peer is a declared dependency (`depends(.., Peer)`), and the held
+reply is native, so this handler is a native actor's:
+
+```rust
+#[aether_data::kind(name = "my_app.forward_context")]
+struct ForwardContext {
+    held: Held<HttpRouterResult>,
+}
+
+#[handler::single]
+fn on_request(_state: &mut State, ctx: &mut NativeCtx<'_>, request: HttpServerRequest) -> Pending<HttpRouterResult> {
+    let (pending, held) = ctx.hold::<HttpRouterResult>();
+    let _ = ctx.send_with_context::<Peer>(&Ask { path: request.path }, ForwardContext { held });
+    pending
+}
+
+#[handler::single]
+fn on_answer(_state: &mut State, ctx: &mut NativeCtx<'_>, answer: Answer) {
+    if let Some(ForwardContext { held }) = ctx.take_context::<ForwardContext>() {
+        held.answer(ctx, &HttpRouterResult::Response(answer.into_response()));
+    }
+}
+```
 
 ### Scaling one handler to N instances
 
@@ -401,7 +424,7 @@ and answers later. A router that closes while it still holds a reply answers
 settles with no answer, such as a streamed upload whose `request_stream_end`
 handler replies nothing, triggers the server's own `502` safety net. If the
 answer takes longer than `AETHER_HTTP_SERVER_REQUEST_TIMEOUT_MILLIS` (default
-30 000 ms), as a deferred route whose peer never replies does, the server sends
+30 000 ms), as a held reply whose peer never replies does, the server sends
 `504 Gateway Timeout`. A request matching no route (nothing has
 claimed it — e.g. no handler loaded yet) returns `503 Service Unavailable`.
 
