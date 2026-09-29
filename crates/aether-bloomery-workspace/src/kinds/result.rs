@@ -91,4 +91,6 @@ pub enum Refusal {
     UnknownTool(ToolName),
     /// An input the request cites is not stored.
     InputMissing(Digest),
+    /// The storage the run's `source` names is not live.
+    SourceUnavailable,
 }

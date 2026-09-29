@@ -5,13 +5,15 @@
 //! [`Batch`](aether_bloomery_journal::Batch)es appended in order to a scratch
 //! journal before boot; the `Ref`s staging returns are the handles its
 //! expected values cite. Its **drive** is the mail it sends the mounted
-//! journal owner and bundle driver — [`BloomeryHarness::call`],
+//! journal owner, bundle driver, and workspace — [`BloomeryHarness::call`],
 //! [`BloomeryHarness::move_head`], [`BloomeryHarness::publish`],
 //! [`BloomeryHarness::watch_head`], and [`BloomeryHarness::settle`], which
 //! follows the `AwaitProcessed` → `Processed` protocol to quiescence rather
 //! than sleeping — plus [`BloomeryHarness::load`], which loads a wasm
 //! component through the component host, for a scenario whose drive is a
-//! script component's own mail. Its **expectation** is the record sequence the loop
+//! script component's own mail, and [`BloomeryHarness::import`] /
+//! [`BloomeryHarness::run`], which send the workspace a request over the
+//! unit's journal as its [`BloomeryHarness::source`]. Its **expectation** is the record sequence the loop
 //! appended ([`SeededJournal::assert_appended`] over [`Record`]s), plus any
 //! view the scenario folds over the actual journal
 //! ([`SeededJournal::fold`]). The seed owns those reads because it owns the
@@ -42,8 +44,9 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 
-use aether_actor::ActorRef;
-use aether_bloomery_journal::{Digest, Seq};
+use aether_actor::{ActorPath, ActorRef, ProtocolPath};
+use aether_bloomery_journal::{Digest, JournalActor, Seq};
+use aether_bloomery_kinds::{ArtifactStorage, UnitKey};
 use aether_bloomery_view::View;
 use aether_chassis_bloomery::{BloomeryChassis, Mounted};
 use aether_data::Storage;
@@ -85,6 +88,19 @@ pub struct BloomeryHarness {
 }
 
 impl BloomeryHarness {
+    /// The unit's journal as a storage source, `aether.bloomery.journal:primary`,
+    /// written from [`UNIT`]: the `source` a scenario's `Import` or `Run`
+    /// names, as the unit's driver names it on every run it relays.
+    ///
+    /// # Panics
+    ///
+    /// Never: [`UNIT`] is a valid unit key.
+    #[must_use]
+    pub fn source(&self) -> ProtocolPath<ArtifactStorage> {
+        let unit = UnitKey::new(UNIT).expect("the harness unit key is valid");
+        ActorPath::<JournalActor>::instance(unit.as_load_name()).narrow::<ArtifactStorage>()
+    }
+
     /// [`SeededJournal::assert_appended`] over the journal the chassis writes.
     ///
     /// # Panics

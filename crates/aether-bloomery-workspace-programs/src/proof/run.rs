@@ -5,7 +5,7 @@
 //! estimate.
 
 use aether_bloomery_kinds::Refusal;
-use aether_bloomery_workspace::{EnvVar, Mount, Mounts, Network, Run, Scratch, Step, Steps, ToolName, TreePath};
+use aether_bloomery_workspace::{EnvVar, Mount, Mounts, Network, RunRequest, Scratch, Step, Steps, ToolName, TreePath};
 
 use super::{ClippyInput, refused};
 
@@ -57,7 +57,7 @@ const ARGS: [&str; 11] = [
 /// # Errors
 ///
 /// A [`Refusal::Refused`] naming the value a request constructor refused.
-pub(super) fn request(input: &ClippyInput) -> Result<Run, Refusal> {
+pub(super) fn request(input: &ClippyInput) -> Result<RunRequest, Refusal> {
     let step = Step {
         tool: ToolName::new(TOOL).map_err(|error| refused(format!("tool {TOOL:?}: {error}")))?,
         args: ARGS.iter().map(|&arg| arg.to_owned()).collect(),
@@ -69,7 +69,7 @@ pub(super) fn request(input: &ClippyInput) -> Result<Run, Refusal> {
     };
     let vendor = Mount { at: path(VENDOR)?, tree: input.vendor };
 
-    Ok(Run {
+    Ok(RunRequest {
         tree: input.source,
         environment: input.environment,
         mounts: Mounts::new(vec![vendor]).map_err(|error| refused(format!("the vendor mount: {error}")))?,

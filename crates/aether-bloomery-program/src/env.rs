@@ -68,12 +68,17 @@ pub struct PendingCall {
 }
 
 impl PendingCall {
-    fn new<A, K>(api: ProgramApi, mail: &K) -> Self
+    /// Capture `mail`, the payload the driver relays as the provider's row
+    /// `K`, whose reply `A: Replies<K>` types. For most calls the payload is
+    /// the row itself (`P = K`); a `Workspace` call's payload is the
+    /// `RunRequest` the driver sends on as a `Run`.
+    fn new<A, K, P>(api: ProgramApi, mail: &P) -> Self
     where
         A: Replies<K>,
         K: ActorMail,
+        P: ActorMail,
     {
-        Self { api, kind_id: K::ID, expected_reply: A::Reply::ID, payload: mail.encode_into_bytes() }
+        Self { api, kind_id: P::ID, expected_reply: <A as Replies<K>>::Reply::ID, payload: mail.encode_into_bytes() }
     }
 
     /// The mail that relays this call as the invocation's `call`th.
@@ -145,12 +150,23 @@ impl<A: Addressable> Binding<A> {
     }
 
     /// Send `mail` and await `<A as Replies<K>>::Reply`.
-    fn call<K>(&mut self, mail: K) -> Call<A, K>
+    fn call<K>(&mut self, mail: K) -> Call<A, K, K>
     where
         A: Singleton + CallerAddressable + Replies<K> + Unpin + 'static,
         K: ActorMail + Send + Unpin + 'static,
     {
-        Call::<A, K> { env: self.env, api: self.api, mail: Some(mail), _target: PhantomData }
+        self.relay::<K, K>(mail)
+    }
+
+    /// Send `mail`, which the driver relays to `A` as a `K`, and await
+    /// `<A as Replies<K>>::Reply`.
+    fn relay<K, P>(&mut self, mail: P) -> Call<A, K, P>
+    where
+        A: Singleton + CallerAddressable + Replies<K> + Unpin + 'static,
+        K: ActorMail + Send + Unpin + 'static,
+        P: ActorMail + Send + Unpin + 'static,
+    {
+        Call::<A, K, P> { env: self.env, api: self.api, mail: Some(mail), _target: PhantomData }
     }
 }
 
@@ -214,6 +230,9 @@ impl InjectedApi for Workspace {
 impl Workspace {
     /// Await the outcome of `run`, or the workspace's refusal. A non-zero exit is an outcome.
     ///
+    /// The request names no storage: the driver that relays it runs it over
+    /// the journal of the program's own unit (ADR-0240 I-5).
+    ///
     /// An exhausted allotment or an executor failure ends the invocation instead of
     /// resolving; the program never observes either.
     ///
@@ -223,12 +242,12 @@ impl Workspace {
     /// refusal when the call could not be sent.
     pub fn run(
         &mut self,
-        run: aether_bloomery_workspace::Run,
+        run: aether_bloomery_workspace::RunRequest,
     ) -> impl Future<
         Output = Result<Result<aether_bloomery_workspace::Outcome, aether_bloomery_workspace::Refusal>, Refusal>,
     > + Send
     + 'static {
-        RunCall { call: self.0.call(run) }
+        RunCall { call: self.0.relay::<aether_bloomery_workspace::Run, _>(run) }
     }
 }
 
@@ -236,7 +255,11 @@ impl Workspace {
 /// exhausted allotment or an executor failure ends the invocation through
 /// [`Env::end`] and never resolves.
 struct RunCall {
-    call: Call<aether_bloomery_workspace::WorkspaceCapability, aether_bloomery_workspace::Run>,
+    call: Call<
+        aether_bloomery_workspace::WorkspaceCapability,
+        aether_bloomery_workspace::Run,
+        aether_bloomery_workspace::RunRequest,
+    >,
 }
 
 impl Future for RunCall {
@@ -267,27 +290,30 @@ impl Future for RunCall {
     }
 }
 
-struct Call<A, K> {
+/// One captured call: the payload `P` the driver relays to `A` as its row
+/// `K`, answered by `<A as Replies<K>>::Reply`.
+struct Call<A, K, P> {
     env: Env<Async>,
     api: ProgramApi,
-    mail: Option<K>,
-    _target: PhantomData<A>,
+    mail: Option<P>,
+    _target: PhantomData<fn() -> (A, K)>,
 }
 
-impl<A, K> Future for Call<A, K>
+impl<A, K, P> Future for Call<A, K, P>
 where
     A: Singleton + CallerAddressable + Replies<K> + Unpin + 'static,
     K: ActorMail + Send + Unpin + 'static,
+    P: ActorMail + Send + Unpin + 'static,
 {
-    type Output = Result<A::Reply, Refusal>;
+    type Output = Result<<A as Replies<K>>::Reply, Refusal>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if let Some(result) = this.env.take_call_reply() {
-            return Poll::Ready(decode_call_reply::<A::Reply>(result));
+            return Poll::Ready(decode_call_reply::<<A as Replies<K>>::Reply>(result));
         }
         if let Some(mail) = this.mail.take() {
-            this.env.request_send(PendingCall::new::<A, K>(this.api, &mail));
+            this.env.request_send(PendingCall::new::<A, K, P>(this.api, &mail));
             return Poll::Pending;
         }
         Poll::Pending

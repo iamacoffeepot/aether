@@ -14,11 +14,14 @@
 //! request's turn, so its caller's chain stays held from accept to reply
 //! (ADR-0243 §9). Its task starts when the run is admitted, now or from a
 //! later completion's turn, with work built from the allotment admission
-//! gave it, and the queue answers the held reply from the task's output.
-//! No dispatcher thread ever waits.
+//! gave it and a storage session opened over the source the run was received
+//! with, and the queue answers the held reply from the task's output. No
+//! dispatcher thread ever waits.
 
 use std::collections::{HashMap, VecDeque};
 
+use aether_actor::ProtocolRef;
+use aether_bloomery_kinds::ArtifactStorage;
 use aether_data::RequestId;
 use aether_substrate::actor::native::{Held, NativeCtx, Pending, StagedTask, TaskDone};
 
@@ -26,7 +29,8 @@ use super::budget::Budget;
 use super::estimate::{Amounts, Estimates};
 use super::key::RunKey;
 use crate::runtime::run::{Allotment, Observed, Ran, Runner};
-use crate::{Run, RunResult, WorkspaceCapability};
+use crate::runtime::storage::{StorageDesk, StorageSession};
+use crate::{RunRequest, RunResult, WorkspaceCapability};
 
 /// An admitted run's key and what it was given, kept while it runs so the
 /// completion can learn from it and release it.
@@ -94,10 +98,12 @@ impl<W> Admission<W> {
     }
 }
 
-/// A run waiting for the budget: its task, staged in its own request's
-/// turn, and the reply it owes its caller.
+/// A run waiting for the budget: its request and the source it reads and
+/// stages through, proven live at receipt, its task, staged in its own
+/// request's turn, and the reply it owes its caller.
 struct Waiting {
-    run: Run,
+    source: ProtocolRef<ArtifactStorage>,
+    run: RunRequest,
     task: StagedTask<Ran>,
     held: Held<RunResult>,
 }
@@ -116,19 +122,27 @@ impl RunQueue {
         Self { runner, admission: Admission::new(budget, estimates), running: HashMap::new() }
     }
 
-    /// Accept `run` in its own turn: hold its reply and stage its task, then
-    /// start the task now when the run is admitted, or queue it.
-    pub fn submit(&mut self, ctx: &mut NativeCtx<'_, WorkspaceCapability>, run: Run) -> Pending<RunResult> {
+    /// Accept `run` over `source` in its own turn: hold its reply and stage
+    /// its task, then start the task now when the run is admitted, opening
+    /// its storage session at `desk`, or queue it.
+    pub fn submit(
+        &mut self,
+        ctx: &mut NativeCtx<'_, WorkspaceCapability>,
+        desk: &mut StorageDesk,
+        source: ProtocolRef<ArtifactStorage>,
+        run: RunRequest,
+    ) -> Pending<RunResult> {
         let key = RunKey::of(&run);
         let (pending, held) = ctx.hold::<RunResult>();
         let task = ctx.stage_blocking::<Ran>();
+        let waiting = Waiting { source, run, task, held };
         if let Some(admitted) = self.admission.admit_now(key) {
-            self.start(ctx, admitted, Waiting { run, task, held });
+            self.start(ctx, desk, admitted, waiting);
             return pending;
         }
 
         let amounts = self.admission.amounts(&key);
-        self.admission.enqueue(key, Waiting { run, task, held });
+        self.admission.enqueue(key, waiting);
         tracing::info!(
             target: "aether_bloomery_workspace",
             %key,
@@ -147,7 +161,12 @@ impl RunQueue {
     /// # Panics
     /// Panics when `ctx` is not dispatching the completion of a run this
     /// queue started.
-    pub fn complete(&mut self, ctx: &mut NativeCtx<'_, WorkspaceCapability>, done: TaskDone<Ran>) {
+    pub fn complete(
+        &mut self,
+        ctx: &mut NativeCtx<'_, WorkspaceCapability>,
+        desk: &mut StorageDesk,
+        done: TaskDone<Ran>,
+    ) {
         let (held, admitted) = ctx
             .in_reply_to()
             .and_then(|request| self.running.remove(&request))
@@ -156,24 +175,37 @@ impl RunQueue {
         self.admission.finish(&admitted, &result, &observed);
         held.answer(ctx, &result);
         while let Some((admitted, waiting)) = self.admission.next() {
-            self.start(ctx, admitted, waiting);
+            self.start(ctx, desk, admitted, waiting);
         }
     }
 
     /// Start an admitted run's staged task with work built from its
-    /// allotment, and keep its reply and allotment until it completes.
-    fn start(&mut self, ctx: &NativeCtx<'_, WorkspaceCapability>, admitted: Admitted, waiting: Waiting) {
-        let Waiting { run, task, held } = waiting;
+    /// allotment and a storage session over its source, and keep its reply
+    /// and allotment until it completes.
+    fn start(
+        &mut self,
+        ctx: &NativeCtx<'_, WorkspaceCapability>,
+        desk: &mut StorageDesk,
+        admitted: Admitted,
+        waiting: Waiting,
+    ) {
+        let Waiting { source, run, task, held } = waiting;
         self.log_admitted(&admitted);
-        let request = task.start(ctx, self.work(&admitted, run));
+        let session = desk.open(source, ctx.blob_check_in());
+        let request = task.start(ctx, self.work(&admitted, run, session));
         self.running.insert(request, (held, admitted));
     }
 
     /// The worker's whole job for one admitted run.
-    fn work(&self, admitted: &Admitted, run: Run) -> impl FnOnce() -> Ran + Send + 'static {
+    fn work(
+        &self,
+        admitted: &Admitted,
+        run: RunRequest,
+        session: StorageSession,
+    ) -> impl FnOnce() -> Ran + Send + 'static {
         let runner = self.runner.clone();
         let allotment = admitted.allotment.clone();
-        move || runner.answer(&run, &allotment)
+        move || runner.answer(&run, &allotment, session)
     }
 
     fn log_admitted(&self, admitted: &Admitted) {

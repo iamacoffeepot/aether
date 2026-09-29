@@ -1,6 +1,7 @@
 //! The bootstrap's config: the two images to import and the two actors to mail.
 
-use aether_actor::ActorInitError;
+use aether_actor::{ActorInitError, ActorPath};
+use aether_bloomery_journal::JournalActor;
 use aether_bloomery_workspace::ImageRef;
 use aether_data::{ErasedActorPath, Kind};
 
@@ -19,8 +20,9 @@ pub struct BootstrapConfig {
     /// The Rust toolchain image, `toolchain=` in `publish.sh`'s output.
     pub toolchain: Option<ImageRef>,
     /// The journal owner, `aether.bloomery.journal:<key>` on a Bloomery engine,
-    /// where `<key>` is the unit's key.
-    pub journal: Option<ErasedActorPath>,
+    /// where `<key>` is the unit's key. The imports stage into it, so it is
+    /// typed: a path whose leaf is not a journal owner does not decode.
+    pub journal: Option<ActorPath<JournalActor>>,
     /// The bundle driver, `aether.bloomery.driver:driver` on a Bloomery engine.
     pub driver: Option<ErasedActorPath>,
 }
@@ -33,7 +35,7 @@ pub struct Bootstrap {
     /// The Rust toolchain image.
     pub toolchain: ImageRef,
     /// The journal owner's path.
-    pub journal: ErasedActorPath,
+    pub journal: ActorPath<JournalActor>,
     /// The bundle driver's path.
     pub driver: ErasedActorPath,
 }

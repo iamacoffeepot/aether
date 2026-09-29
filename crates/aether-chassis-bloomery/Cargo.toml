@@ -38,8 +38,8 @@ aether-rpc = { path = "../aether-rpc" }
 aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-driver = { path = "../aether-bloomery-driver" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
-# The `aether.bloomery.workspace` actor, composed over the opened journal's artifact
-# store.
+# The `aether.bloomery.workspace` actor, composed once with no store: each
+# request names the journal it reads and stages through.
 aether-bloomery-workspace = { path = "../aether-bloomery-workspace" }
 clap = { workspace = true }
 # `BloomeryConfig` derives `aether_substrate::Config`; the macro emits a

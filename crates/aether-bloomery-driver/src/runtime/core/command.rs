@@ -133,12 +133,14 @@ pub enum Command {
         /// The program's request.
         request: aether_http::Fetch,
     },
-    /// Send one program's relayed `Workspace` call to the unit's workspace.
+    /// Send one program's relayed `Workspace` call to the workspace, over
+    /// the unit's journal as its source.
     RunWorkspace {
         /// Ticket the matching [`RunResult`](aether_bloomery_workspace::RunResult) arrives under.
         ticket: ApiTicket,
-        /// The program's run.
-        request: aether_bloomery_workspace::Run,
+        /// The program's run, which names no source: the shell adds its
+        /// unit's.
+        request: aether_bloomery_workspace::RunRequest,
     },
     /// Deliver the answer to one relayed program API call.
     ApiAnswered {

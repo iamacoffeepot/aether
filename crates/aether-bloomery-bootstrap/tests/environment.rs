@@ -7,11 +7,12 @@ use std::error::Error;
 use std::fs;
 use std::thread;
 
+use aether_actor::ActorPath;
 use aether_bloomery_bootstrap::BootstrapConfig;
-use aether_bloomery_journal::{Batch, JournalReader, Seq};
+use aether_bloomery_journal::{Batch, JournalActor, JournalReader, Seq};
 use aether_bloomery_kinds::{
     Head, Name, NativeOrigin, Node, OpaqueBytes, ProgramName, ProgramRef, RecordedHead, RecordedHeadMove,
-    RequestSource, Requested, Transition, Tree, WatchHeadResult,
+    RequestSource, Requested, Transition, Tree, UnitKey, WatchHeadResult,
 };
 use aether_bloomery_view::Heads;
 use aether_bloomery_workspace::testing::{StubDaemon, StubReply, StubRequest, TarWriter};
@@ -99,7 +100,7 @@ fn the_bootstrap_script_imports_merges_and_publishes_the_environment_head() -> R
     let config = BootstrapConfig {
         base: Some(ImageRef::new(BASE)?),
         toolchain: Some(ImageRef::new(TOOLCHAIN)?),
-        journal: Some(ErasedActorPath::new(&format!("aether.bloomery.journal:{UNIT}"))?),
+        journal: Some(ActorPath::<JournalActor>::instance(UnitKey::new(UNIT)?.as_load_name())),
         driver: Some(ErasedActorPath::new("aether.bloomery.driver:driver")?),
     };
     let load =

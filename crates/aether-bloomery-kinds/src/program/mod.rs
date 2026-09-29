@@ -24,7 +24,7 @@ pub use api::{ApiCall, ApiCallResult, ProgramApi};
 pub use events::{ProgramHeadMoved, Transition};
 pub use executor::ExecutorFault;
 pub use fault::{Detail, DetailError, Fault, FaultReason};
-pub use invoke::{ClaimedDigest, ClosureArtifact, DigestMismatch, Invoke, Invoked};
+pub use invoke::{ClaimedDigest, ClosureArtifact, DigestMismatch, Invoke, Invoked, VerifiedRead};
 pub use mode::Mode;
 pub use name::{
     NativeOrigin, NativeOriginError, ProgramName, ProgramNameError, ReactorName, ReactorNameError, RuleName,

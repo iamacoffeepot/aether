@@ -3,20 +3,24 @@
 //! a tree.
 //!
 //! The identity half of the ADR-0122 split is always on: the mail kinds
-//! ([`Run`] / [`RunResult`], [`Import`] / [`ImportResult`]), the stored
-//! [`Environment`], the values they carry, the [`WorkspaceCapability`]
-//! marker, and the [`WorkspaceConfig`] domain struct. The runtime half, behind
-//! the `runtime` feature, is the `aether.bloomery.workspace` actor that answers them
-//! (ADR-0237 decision 8): a root singleton that talks to the Docker Engine API
-//! through a private client and writes what it imports into the journal
-//! through the [`ArtifactStore`](aether_bloomery_journal::ArtifactStore) it is
-//! composed with. It answers [`Import`] and [`Run`].
+//! ([`Run`] / [`RunResult`], [`Import`] / [`ImportResult`]), the program-side
+//! [`RunRequest`], the stored [`Environment`], the values they carry, the
+//! [`WorkspaceCapability`] marker, and the [`WorkspaceConfig`] domain struct.
+//! The runtime half, behind the `runtime` feature, is the
+//! `aether.bloomery.workspace` actor that answers them (ADR-0237 decision 8,
+//! ADR-0240 D7): a root singleton, one per engine, that talks to the Docker
+//! Engine API through a private client. It holds no store. Each [`Run`] and
+//! [`Import`] names its storage as a `source`, a path to an
+//! [`ArtifactStorage`](aether_bloomery_kinds::ArtifactStorage) such as a
+//! unit's journal, and every read and stage of that request goes through it
+//! as mail.
 //!
 //! Every constrained value is a newtype with a private field, a fallible
 //! `new`, and the same check on every decode path (`#[storage(validate)]`), so
 //! an invalid value cannot be built in code or arrive in mail or from the
 //! journal. No kind carries a mailbox id, an actor reference, a duration, a
-//! host name, or a timestamp.
+//! host name, or a timestamp; a `source` is a checked path, proven live on
+//! receipt.
 //!
 //! `no_std` + `alloc` without the `runtime` feature, so a wasm program can
 //! cite these kinds.
@@ -51,17 +55,15 @@ mod kinds;
 
 pub use kinds::{
     EnvVar, EnvVarError, Environment, ImageRef, ImageRefError, Import, ImportResult, MAX_STEPS, Mount, Mounts,
-    MountsError, Network, Outcome, Platform, PlatformError, Provides, Refusal, Resource, Run, RunResult, RustToolchain,
-    RustToolchainError, Scratch, ScratchError, Step, StepOutcome, Steps, StepsError, Tool, ToolName, ToolNameError,
-    ToolRecord, Tools, ToolsError, TreePath, TreePathError,
+    MountsError, Network, Outcome, Platform, PlatformError, Provides, Refusal, Resource, Run, RunRequest, RunResult,
+    RustToolchain, RustToolchainError, Scratch, ScratchError, Step, StepOutcome, Steps, StepsError, StorageWake, Tool,
+    ToolName, ToolNameError, ToolRecord, Tools, ToolsError, TreePath, TreePathError,
 };
 
 pub use config::{DEFAULT_ENDPOINT, WorkspaceConfig};
 
 #[cfg(feature = "runtime")]
 pub use config::{WorkspaceConfigLayer, WorkspaceOverlay};
-#[cfg(feature = "runtime")]
-pub use runtime::WorkspaceParams;
 
 /// Only for tests: the scripted Engine API server the runtime's tests dial.
 #[cfg(all(unix, any(test, feature = "test-support")))]

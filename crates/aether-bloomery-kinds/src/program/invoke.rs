@@ -8,7 +8,7 @@ use core::fmt;
 use aether_actor::HeldReply;
 use aether_data::{Blob, BlobReader, KindId};
 
-use crate::artifact::{Sink, blob_digest, stream};
+use crate::artifact::{ArtifactHasher, Sink, blob_digest, stream};
 use crate::program::executor::ExecutorFault;
 use crate::program::fault::Detail;
 use crate::program::name::ProgramName;
@@ -96,6 +96,86 @@ impl ClosureArtifact {
         if streamed.read == len && streamed.digest == expected {
             Ok(whole)
         } else {
+            Err(mismatch)
+        }
+    }
+}
+
+impl ClosureArtifact {
+    /// A reader over the payload that hashes each window as it hands it out
+    /// and, at the end of the payload, fails unless every byte, under the
+    /// kind prefix, hashed to `expected`.
+    ///
+    /// It streams: nothing past one caller buffer is held, so a large member
+    /// crosses into a writer a window at a time. The windows before the end
+    /// are unverified until the end is reached, so a caller that must not act
+    /// on bad bytes reads to the end before trusting any of them.
+    #[must_use]
+    pub fn verified_reader(&self, expected: Digest) -> VerifiedRead {
+        VerifiedRead {
+            expected,
+            bytes: self.bytes.clone(),
+            offset: 0,
+            hasher: Some(ArtifactHasher::new(self.kind)),
+            mismatched: false,
+        }
+    }
+}
+
+/// One member's payload read a window at a time and verified at its end, from
+/// [`ClosureArtifact::verified_reader`].
+pub struct VerifiedRead {
+    expected: Digest,
+    bytes: Blob,
+    offset: u64,
+    /// Taken when the end is reached and the digest compared.
+    hasher: Option<ArtifactHasher>,
+    mismatched: bool,
+}
+
+impl VerifiedRead {
+    /// The payload length in bytes. It reads no bytes.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        BlobReader::open(&self.bytes).len()
+    }
+
+    /// Whether the payload is empty. It reads no bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Copy the next window of the payload into `buf` and return how many
+    /// bytes it holds; `0` once the whole payload has been read and verified,
+    /// or when `buf` is empty.
+    ///
+    /// # Errors
+    ///
+    /// [`DigestMismatch`] at the end of the payload, and on every read after
+    /// it, when the kind and payload do not hash to the expected digest.
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, DigestMismatch> {
+        let mismatch = DigestMismatch { expected: self.expected };
+        if self.mismatched {
+            return Err(mismatch);
+        }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let copied = BlobReader::open(&self.bytes).read_range(self.offset, buf);
+        if copied > 0 {
+            if let Some(hasher) = &mut self.hasher {
+                hasher.update(&buf[..copied]);
+            }
+            self.offset += copied as u64;
+            return Ok(copied);
+        }
+        let verified =
+            self.hasher.take().is_none_or(|hasher| hasher.finish() == self.expected && self.offset == self.len());
+        if verified {
+            Ok(0)
+        } else {
+            self.mismatched = true;
             Err(mismatch)
         }
     }
@@ -212,11 +292,12 @@ impl HeldReply for Invoked {
 #[cfg(test)]
 mod tests {
     use alloc::vec;
+    use alloc::vec::Vec;
 
     use aether_data::wire::{decode_from_slice, encode_to_vec};
     use aether_data::{Kind, MAX_READ_BYTES};
 
-    use super::{ClosureArtifact, DigestMismatch};
+    use super::{ClosureArtifact, DigestMismatch, VerifiedRead};
     use crate::{Digest, Utf8Text, artifact_digest};
 
     /// `artifact` decoded again after one byte of its claimed digest was flipped: the member a
@@ -255,5 +336,38 @@ mod tests {
         let foreign = Digest::from_bytes([7; 32]);
         assert_eq!(artifact.load(foreign), Err(DigestMismatch { expected: foreign }));
         assert_eq!(artifact.load(artifact.claimed().unverified()), Ok(b"payload".to_vec()));
+    }
+
+    /// Every window `reader` hands out, then the result of the read past the end.
+    fn read_all(reader: &mut VerifiedRead) -> (Vec<u8>, Result<usize, DigestMismatch>) {
+        let mut buffer = vec![0; MAX_READ_BYTES];
+        let mut read = Vec::new();
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return (read, Ok(0)),
+                Ok(copied) => read.extend_from_slice(&buffer[..copied]),
+                Err(mismatch) => return (read, Err(mismatch)),
+            }
+        }
+    }
+
+    #[test]
+    fn a_verified_reader_hands_out_every_window_and_fails_only_at_the_end_on_a_mismatch() {
+        // Catches a reader that verifies only its first window, returns `Ok(0)` at the end of bytes that do
+        // not hash to the expected digest, or stops handing out windows before the end.
+        let mut payload = vec![b'a'; MAX_READ_BYTES + 1];
+        let artifact = ClosureArtifact::new(Utf8Text::ID, payload.clone());
+        let matching = artifact_digest(Utf8Text::ID, &payload);
+        payload[MAX_READ_BYTES] = b'z';
+        let altered_last = artifact_digest(Utf8Text::ID, &payload);
+
+        let (read, end) = read_all(&mut artifact.verified_reader(altered_last));
+        assert_eq!(read.len(), MAX_READ_BYTES + 1, "every window before the end");
+        assert_eq!(end, Err(DigestMismatch { expected: altered_last }));
+
+        let mut reader = artifact.verified_reader(matching);
+        let (read, end) = read_all(&mut reader);
+        assert_eq!((read.len(), end), (MAX_READ_BYTES + 1, Ok(0)));
+        assert_eq!(reader.read(&mut [0; 8]), Ok(0), "a read past a verified end stays at the end");
     }
 }

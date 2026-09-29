@@ -1,14 +1,18 @@
 # Workspace imports and runs
 
 > **Governing ADR:** [ADR-0237](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0237-workspaces-run-steps-over-trees.md)
-> (workspaces run steps over trees), decisions 2, 3, 4, 7, 8, and 9. The actor
-> answers `Import` and `Run`.
+> (workspaces run steps over trees), decisions 2, 3, 4, 7, 8, and 9, and
+> [ADR-0240](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0240-several-bloomery-journal-units-per-engine.md)
+> D7 (one workspace per engine over a typed storage source). The actor answers
+> `Import` and `Run`.
 
 The `aether.bloomery.workspace` actor is the Bloomery engine's only route to a container.
-It talks to the Docker Engine API through a small client it owns privately, and
-everything it produces goes into the journal as trees and blobs. No program,
-component, or operator addresses the daemon directly, and there is no general
-Docker actor.
+It talks to the Docker Engine API through a small client it owns privately. It
+holds no store: each request names its storage as a `source`, a unit's
+journal, and the actor reads every input from it and stages everything it
+produces to it as trees and blobs. One workspace serves every unit this way,
+and each unit's runs stay in that unit's journal. No program, component, or
+operator addresses the daemon directly, and there is no general Docker actor.
 
 `Import` pulls a digest-pinned image and decodes its filesystem into a stored
 tree. Only an environment's base and toolchain layers enter the journal this
@@ -22,12 +26,50 @@ they produce.
 
 | Request | Fields | Reply | Arms |
 |---|---|---|---|
-| `aether.workspace.import` | `image: ImageRef` | `aether.workspace.import_result` | `Ok { tree: Ref<Tree> }`, `Failed { detail: Detail }` |
-| `aether.workspace.run` | `tree`, `environment`, `mounts`, `steps`, `scratch`, `network` | `aether.workspace.run_result` | `Ok(Outcome)`, `Refused(Refusal)`, `Exhausted(Resource)`, `Failed { detail: Detail }` |
+| `aether.workspace.import` | `image: ImageRef`, `source: ProtocolPath<ArtifactStorage>` | `aether.workspace.import_result` | `Ok { tree: Ref<Tree> }`, `Failed { detail: Detail }` |
+| `aether.workspace.run` | `source: ProtocolPath<ArtifactStorage>`, `request: RunRequest` | `aether.workspace.run_result` | `Ok(Outcome)`, `Refused(Refusal)`, `Exhausted(Resource)`, `Failed { detail: Detail }` |
+
+`RunRequest` (`aether.workspace.run_request`) holds every field of a run but
+its source: `tree`, `environment`, `mounts`, `steps`, `scratch`, and `network`.
+It is what a program's `Workspace` call carries, so a program never names the
+storage its run reads and writes (see [From a program](#from-a-program)).
 
 `ImageRef` is `<repository>@sha256:<64 lowercase hex>`, validated on
 construction and on decode. It never carries a tag, because a tag can move and
 an imported tree must be a function of the request that named it.
+
+### The source
+
+`source` is the path of an actor that covers the `ArtifactStorage` protocol
+(`read`, `read_closure`, and `stage`); on a Bloomery engine that is a unit's
+journal owner, `aether.bloomery.journal:<unit key>`, written as
+`ActorPath::<JournalActor>::instance(key).narrow::<ArtifactStorage>()`. The
+mail that carries it decodes only when a route covering the protocol has stood
+at the path, so a path no journal ever stood at is dropped at decode with a
+warning and gets no reply. On receipt the actor proves the source live before
+anything is queued: one that is not answers `Refused(SourceUnavailable)` for a
+run and `Failed { detail }` for an import, without a single Engine API request.
+
+Every read and stage of the request then goes through that source as mail. The
+tar codec runs on a worker thread, which sends no mail, so each read or stage it
+needs is a request its own actor sends for it and hands the answer back:
+
+- **Reads, closure first.** A tree is prefetched with one `ReadClosure` under
+  the rest of the run's read budget (`AETHER_WORKSPACE_PREFETCH_BYTES`), which
+  answers every member at once as shared blobs from the journal's read cache. A
+  closure over the budget reads that one directory with `ReadArtifact` and
+  prefetches each subdirectory the same way, over an explicit work stack, so
+  only the spine of oversized directories and the blobs directly inside them
+  are read one at a time. Every member is verified against its digest before
+  it is trusted; a blob hashes as it streams into a container and fails the
+  write at its end on a mismatch.
+- **Writes, bounded batches.** Each blob and tree is staged as it is produced,
+  in `Stage` batches of up to 64 MiB or 4,096 artifacts; a larger blob goes
+  alone. One `Stage` is in flight while the next fills, and each is answered
+  before the next is sent. Children are staged before the parents that cite
+  them, so every citation in a batch names an artifact already stored or in the
+  same batch. A request that ends in anything but its `Ok` leaves what it staged
+  cited by nothing.
 
 The actor is a root singleton at `aether.bloomery.workspace`, so a program binding can
 name it in `depends(...)` (ADR-0230). Import is operator mail, reachable over RPC
@@ -39,7 +81,7 @@ The actor records no event. An operator publishes the tree under a head
 
 The whole sequence runs on a worker thread through the ADR-0093
 hold-until-resolve dispatch, so the caller's settlement chain stays held until
-the reply lands and no dispatcher thread blocks on the daemon or the journal:
+the reply lands and no dispatcher thread blocks on the daemon or the source:
 
 1. `POST /images/create?fromImage=<ref>` pulls the image and reads its progress
    stream to the end. An `error` object in that stream fails the import, even
@@ -48,20 +90,21 @@ the reply lands and no dispatcher thread blocks on the daemon or the journal:
 3. `POST /containers/create` creates a container from the ref, labelled
    `aether.workspace=import`. It is never started.
 4. `GET /containers/{id}/export` streams the container's filesystem through the
-   tar decoder into one journal batch, one copy buffer at a time.
+   tar decoder, one copy buffer at a time, staging each blob and tree to the
+   source as it decodes.
 5. `DELETE /containers/{id}?force=true&v=true` runs on every path once the
    container exists.
-6. The batch commits only when the decode and the removal both succeeded.
+6. When the decode and the removal both succeeded, the last stage is answered
+   before the reply, so the tree the reply names is stored.
 
-A failed pull, an unlisted digest, an export the decoder refuses, a failed
-removal, or a failed commit all answer `Failed { detail }`. No row is committed
-and no container is left behind. Blob files a failed decode already wrote are
-harmless orphans named by their content (ADR-0220). The pulled image stays in
-the daemon's cache.
+A source that is not live, a failed pull, an unlisted digest, an export the
+decoder refuses, a failed removal, or a refused stage all answer
+`Failed { detail }`. No container is left behind, and what a failed import
+staged is cited by nothing: harmless content named by its digest. The pulled
+image stays in the daemon's cache.
 
-Importing the same image twice gives the same tree digest, and the journal's
-artifact row count does not grow: every blob and tree is content-addressed, and
-the commit inserts only absent rows.
+Importing the same image twice gives the same tree digest: every blob and tree
+is content-addressed, and staging bytes already stored stores them once.
 
 ## What a run does
 
@@ -75,20 +118,21 @@ those are the executor's (see [Provisioning](#provisioning)).
 Once the run is admitted, the whole sequence runs on the worker thread, held
 like an import:
 
-1. **Resolve.** Open one journal batch and load the environment, the tree,
-   every mount tree, and every stdin blob. Then check the tree's
+1. **Resolve.** Load the environment, prefetch the run tree and every mount
+   tree, and read every stdin blob, all from the source. Then check the tree's
    `rust-toolchain.toml`, when it has one: its channel must be the
    environment's `provides.rust` channel, and its components and targets a
    subset. Then resolve each step's tool through the environment's `tools`
    table to a `Node::Executable` in the root, walking one directory per
-   segment. These checks read only the journal. Last, `GET /info` maps the
+   segment, a few reads per tool. These checks read only the source. Last, `GET /info` maps the
    daemon's architecture and OS to a target triple (`<arch>-unknown-linux-gnu`
    on Linux), which must equal the environment's `platform`.
 2. **Environment image.** The daemon must hold
    `aether-workspace-environment:<environment hex>` labelled
    `aether.workspace.environment=<hex>`. When it holds no such image, the root
-   tree streams as a canonical tar to `POST /images/create?fromSrc=-`, which
-   applies the label, and the image is inspected again. The image has no `Env`
+   tree is prefetched and streams as a canonical tar to
+   `POST /images/create?fromSrc=-`, which applies the label, and the image is
+   inspected again. The image has no `Env`
    of its own; every variable is constructed per step. It stays after the run
    as a rebuildable derivative of the journal.
 3. **Volumes.** One daemon-named volume for `/work`, shared by every step's
@@ -103,17 +147,18 @@ like an import:
    only, so a failed or dropped stats stream never changes the answer. The
    wait's read timeout is the run's remaining deadline. `inspect`
    gives the exit code; each output is one counting read of the demultiplexed
-   log stream, which fixes the blob's length, then one writing read into the
-   journal, so no log is held whole. The steps stop after the first non-zero
+   log stream, which fixes the blob's length, then one writing read staged to
+   the source. The steps stop after the first non-zero
    exit.
 5. **Output.** `GET …/archive?path=/work` on the last step's container decodes
-   under the canonical rules and the output bounds. The `work` entry is the
+   under the canonical rules and the output bounds, staged to the source as it
+   decodes. The `work` entry is the
    output, minus each scratch path; a scratch tmpfs comes back as an empty
    directory, so only its ancestors are rebuilt. Mount paths are never read
    back.
 6. **Finish.** Every container and volume is removed on every path. Only then,
-   and only for `Ok`, does the batch commit, before the reply, so a result
-   that cites the output tree names rows that exist.
+   and only for `Ok`, is the last stage answered, before the reply, so a
+   result that cites the output tree names artifacts that are stored.
 
 Running the same `Run` twice gives the same `RunResult` digest: the result
 carries no container id, volume name, duration, host name, or timestamp, and
@@ -144,19 +189,20 @@ directory and its destination on the same side.
 | Answer | When |
 |---|---|
 | `Ok(Outcome)` | The steps ran. `steps` holds one `StepOutcome` per step that ran, each with `exit_code: Some(code)`, the stored stdout and stderr, and the `ToolRecord` naming the executable blob that ran; `tree` is `/work` minus scratch. A non-zero exit is an outcome. Docker reports a signal death as 128 + n, which cannot be told apart from `exit(128 + n)`, so this backend always answers `Some`. |
-| `Refused(InputMissing(digest))` | The journal lacks the environment, the tree, a mount tree, a stdin blob, or anything they cite. |
+| `Refused(InputMissing(digest))` | The source lacks the environment, the tree, a mount tree, a stdin blob, or anything they cite. |
+| `Refused(SourceUnavailable)` | The source is not live when the run is received. Answered before the run is queued. |
 | `Refused(ToolchainMismatch)` | The tree's `rust-toolchain.toml` asks for a channel, component, or target the environment does not provide. |
 | `Refused(UnknownTool(name))` | A step's tool is not in the table, or its path does not hold an executable. |
 | `Refused(PlatformMismatch)` | The environment's platform is not the daemon's. |
 | `Refused(EnvironmentUnavailable)` | The daemon answered but could not produce the environment image, or the image's label names another environment. Never a mid-run failure. |
 | `Exhausted(Time)` | A step was still running at the deadline; it is killed. |
 | `Exhausted(Memory)` | The kernel killed a step for memory (`OOMKilled`). |
-| `Failed { detail }` | The executor failed after accepting the run: a daemon or transport error, an output over the decode bounds, a `/work` no tree can represent (a FIFO, a device, an absolute symlink, a name the kinds refuse), an unreadable `rust-toolchain.toml`, a journal I/O failure, or a failed removal. `detail` names the failed call or the in-tree path and the class of failure (for example `reading the daemon's platform: connecting to the Docker daemon failed (entity not found)`), never a host path, a socket, a host name, or the daemon's own message, because the driver records it. The actor's log keeps the full text. |
+| `Failed { detail }` | The executor failed after accepting the run: a daemon or transport error, an output over the decode bounds, a `/work` no tree can represent (a FIFO, a device, an absolute symlink, a name the kinds refuse), an unreadable `rust-toolchain.toml`, a read or stage the source refused, or a failed removal. `detail` names the failed call or the in-tree path and the class of failure (for example `reading the daemon's platform: connecting to the Docker daemon failed (entity not found)`), never a host path, a socket, a host name, the daemon's own message, or the source's, because the driver records it. The actor's log keeps the full text. |
 
 `Exhausted` and `Failed` are faults about the attempt, never results: the
 `Workspace` program binding ends the invocation on either, and the program
-never sees them (see [From a program](#from-a-program)). Nothing from a failed
-or exhausted run is committed, so retrying it is safe.
+never sees them (see [From a program](#from-a-program)). Nothing a failed or
+exhausted run staged is cited, so retrying it is safe.
 
 ## From a program
 
@@ -172,14 +218,17 @@ async fn run(input: Self::Input, env: &mut Env<Async>, mut workspace: Workspace)
 }
 ```
 
-`workspace.run(run).await` gives `Ok(Ok(outcome))` for an outcome, a non-zero
+`run` is a `RunRequest`, which names no source. `workspace.run(run).await` gives `Ok(Ok(outcome))` for an outcome, a non-zero
 exit included, and `Ok(Err(refusal))` for the workspace's `Refused` answer. The
 outer `Err` is the program's own `Refusal` for a call that broke: a reply that
 is not a `RunResult`, or a send the invocation could not make.
 
 The bundle's invocation declares no dependency. It sends the captured call to
 its bundle root, which relays it to the driver that sent the `Invoke`, and the
-driver maps `Workspace` to the workspace it holds (ADR-0240 D6). Each program's
+driver maps `Workspace` to the workspace it holds (ADR-0240 D6). The driver
+sends it as a `Run` whose `source` is its own unit's journal, written once from
+the unit key it was born with, so a program's runs read and stage only in its
+own unit (ADR-0240 D7, I-5). Each program's
 record in the `aether.bloomery.programs` section lists the APIs its `run`
 binds, so before a request's closure read or load the driver records a
 `BundleUnavailable` fault for a program that binds an API with no provider in
@@ -295,6 +344,7 @@ environment variable of its own.
 | `AETHER_WORKSPACE_PIDS_LIMIT` | `--workspace-pids-limit` | 4,096 |
 | `AETHER_WORKSPACE_OUTPUT_MAX_ENTRIES` | `--workspace-output-max-entries` | 1,000,000 |
 | `AETHER_WORKSPACE_OUTPUT_MAX_BYTES` | `--workspace-output-max-bytes` | 8 GiB |
+| `AETHER_WORKSPACE_PREFETCH_BYTES` | `--workspace-prefetch-bytes` | 256 MiB |
 
 - `unix://<absolute path>` dials the daemon's socket, on Unix only.
 - `tcp://<host>:<port>` dials a daemon anywhere, always over mutual TLS. The
@@ -327,18 +377,19 @@ environment variable of its own.
   naming its key.
 - The pids limit and the output bounds are the same for every run; memory and
   pids apply to each step's container.
+- `prefetch_bytes` bounds what one run holds prefetched from its source, each
+  artifact counted as its payload plus its eight-byte kind prefix. A tree whose
+  closure fits what is left is read in one request; a larger one is read a
+  directory at a time. Below 8 or above 4 GiB refuses boot naming
+  `AETHER_WORKSPACE_PREFETCH_BYTES`.
 
 ## Composition
 
-The Bloomery chassis composes the actor beside the component host and HTTP
-egress, over the artifact store of the journal it opened. The store is handed
-out only by that journal (`Journal::artifact_store`), and only the chassis's own
-boot sets it, so no embedder can compose the workspace over a root the engine
-did not open. `aether.process` is not composed on the Bloomery chassis.
-
-`--describe` and `--print-config` compose the chassis to list the actor and its
-knobs without a store and never boot it. A boot that reaches the actor without a
-store is refused, naming the missing journal store.
+The Bloomery chassis composes the actor once, beside the component host and HTTP
+egress, with no params: it holds no store and depends on no journal crate at
+runtime. Each unit's journal owner covers `ArtifactStorage` and stays the only
+writer of its root, so a request writes into a journal only by naming it as its
+source. `aether.process` is not composed on the Bloomery chassis.
 
 ## Building an environment
 
@@ -425,7 +476,8 @@ images get a new key. The script records nothing of its own.
 The script proves both actors from its config at `wire`, then sends, one
 request at a time:
 
-1. **Import.** `aether.workspace.import { image }` to `aether.bloomery.workspace`, once
+1. **Import.** `aether.workspace.import { image, source }` to `aether.bloomery.workspace`,
+   with `source` the configured journal owner, once
    per reference, the base first. Each answers `Ok { tree }`, and a
    second import of the same reference answers the same tree.
 2. **Merge.** After `aether.bloomery.journal.read_head` for the fence, it

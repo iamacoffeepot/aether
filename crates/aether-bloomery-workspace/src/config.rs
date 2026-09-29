@@ -1,10 +1,10 @@
 //! Resolved configuration for the `aether.bloomery.workspace` actor (ADR-0237
 //! decisions 8 and 9, ADR-0090). The Engine API endpoint and its TLS files,
 //! the import bounds, the host budget runs are provisioned from, the default
-//! allotment a run key never seen gets, and the fixed per-container limits are
-//! configuration resolved at chassis boot (argv > env > file > default) and
-//! handed to `init`; the actor reads no environment variable of its own, and
-//! never `DOCKER_HOST`.
+//! allotment a run key never seen gets, the fixed per-container limits, and
+//! the read budget one run prefetches under are configuration resolved at
+//! chassis boot (argv > env > file > default) and handed to `init`; the actor
+//! reads no environment variable of its own, and never `DOCKER_HOST`.
 //!
 //! The actor chooses each run's cores, memory, and deadline itself (decision
 //! 9): the budget knobs state what it may hand out, and whatever the host
@@ -106,6 +106,13 @@ pub struct WorkspaceConfig {
     /// An output over it answers `Failed`. `0` refuses boot.
     #[cfg_attr(feature = "runtime", config(default = 8_589_934_592u64))]
     pub output_max_bytes: u64,
+    /// The most bytes one run holds prefetched from its source
+    /// (`AETHER_WORKSPACE_PREFETCH_BYTES`), each stored artifact counted as
+    /// its payload plus its eight-byte kind prefix. A tree whose closure fits
+    /// what is left is read in one request; a larger one is read a directory
+    /// at a time. Default 256 MiB. Below 8 or above 4 GiB refuses boot.
+    #[cfg_attr(feature = "runtime", config(default = 268_435_456u64))]
+    pub prefetch_bytes: u64,
 }
 
 impl Default for WorkspaceConfig {
@@ -130,6 +137,7 @@ impl Default for WorkspaceConfig {
             pids_limit: 4_096,
             output_max_entries: 1_000_000,
             output_max_bytes: 8 << 30,
+            prefetch_bytes: 256 << 20,
         }
     }
 }

@@ -2,6 +2,7 @@
 
 use aether_actor::{DependsOn, ReplyMode};
 use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery};
+use aether_bloomery_workspace::Run;
 use aether_component::ComponentHostCapability;
 use aether_data::{ActorMail, Kind};
 use aether_http::HttpCapability;
@@ -82,7 +83,8 @@ impl BundleDriverState {
                     let _ = ctx.send_with_context::<HttpCapability>(&request, ticket);
                 }
                 Command::RunWorkspace { ticket, request } => {
-                    let _ = ctx.send_to_with_context(self.workspace, &request, ticket);
+                    let run = Run { source: self.source.clone(), request };
+                    let _ = ctx.send_to_with_context(self.workspace, &run, ticket);
                 }
                 Command::ApiAnswered { caller, result } => match self.callers.remove(&caller) {
                     Some(Caller::Api(held)) => held.answer(ctx, &result),

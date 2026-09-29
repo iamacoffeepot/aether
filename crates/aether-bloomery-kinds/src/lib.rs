@@ -44,7 +44,7 @@ pub use program::{
     ApiCall, ApiCallResult, ClaimedDigest, ClosureArtifact, Detail, DetailError, DigestMismatch, ExecutorFault, Fault,
     FaultReason, Invoke, Invoked, Mode, NativeOrigin, NativeOriginError, Program, ProgramApi, ProgramHeadMoved,
     ProgramName, ProgramNameError, ProgramRef, ReactorName, ReactorNameError, Refusal, RequestSource, Requested,
-    RuleName, RuleNameError, Transition,
+    RuleName, RuleNameError, Transition, VerifiedRead,
 };
 pub use reactor::{
     Evaluated, Event, REACTORS_SECTION, ReactorDeclaration, ReactorDeclarationError, ReactorDeclarationsError,

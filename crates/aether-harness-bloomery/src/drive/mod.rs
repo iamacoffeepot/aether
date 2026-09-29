@@ -1,5 +1,5 @@
-//! Drive: requests to the mounted journal owner, the bundle driver, and the
-//! component host, and the replies the sink forwards back.
+//! Drive: requests to the mounted journal owner, the bundle driver, the
+//! component host, and the workspace, and the replies the sink forwards back.
 //!
 //! Every request goes out through the embedder's
 //! `BuiltChassis::send_for_reply` with the sink as its reply target and a
@@ -20,6 +20,7 @@ use aether_bloomery_kinds::{
     AwaitProcessed, Call, CallOutcome, MoveHead, MoveHeadResult, Processed, Publish, PublishResult, Seq, WatchHead,
     WatchHeadResult,
 };
+use aether_bloomery_workspace::{Import, ImportResult, Run, RunResult, WorkspaceCapability};
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
@@ -48,8 +49,8 @@ pub struct Pending<K> {
 }
 
 /// A reply kind the harness's sink receives: [`CallOutcome`],
-/// [`MoveHeadResult`], [`PublishResult`], [`Processed`], [`LoadResult`], or
-/// [`WatchHeadResult`].
+/// [`MoveHeadResult`], [`PublishResult`], [`Processed`], [`LoadResult`],
+/// [`WatchHeadResult`], [`ImportResult`], or [`RunResult`].
 pub trait Answer: sealed::Sealed {}
 
 mod sealed {
@@ -116,12 +117,32 @@ impl sealed::Sealed for WatchHeadResult {
     }
 }
 
+impl sealed::Sealed for ImportResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::Import(result) => Ok(result),
+            other => Err(other),
+        }
+    }
+}
+
+impl sealed::Sealed for RunResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::Run(result) => Ok(*result),
+            other => Err(other),
+        }
+    }
+}
+
 impl Answer for CallOutcome {}
 impl Answer for MoveHeadResult {}
 impl Answer for PublishResult {}
 impl Answer for Processed {}
 impl Answer for LoadResult {}
 impl Answer for WatchHeadResult {}
+impl Answer for ImportResult {}
+impl Answer for RunResult {}
 
 impl BloomeryHarness {
     /// Send one `Call` to the bundle driver as a tracked root, wait for its
@@ -194,6 +215,61 @@ impl BloomeryHarness {
         self.wait(pending)
     }
 
+    /// Send one `Import` to the composed workspace and wait for its result,
+    /// which lands once the whole import is done.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no result arrives within thirty seconds.
+    pub fn import(&mut self, import: &Import) -> ImportResult {
+        let pending = self.send_import(import);
+        self.wait(pending)
+    }
+
+    /// Send one `Import` to the composed workspace without waiting, for a
+    /// scenario that acts while it is outstanding.
+    pub fn send_import(&mut self, import: &Import) -> Pending<ImportResult> {
+        self.request(self.chassis.actor_ref::<WorkspaceCapability>(), import)
+    }
+
+    /// Send one `Import` to the composed workspace as a tracked root and block
+    /// until its causal chain settles, handing back its reply to wait on:
+    /// what a scenario observes between the two is what had happened by the
+    /// time the chain settled.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the chain has not settled within thirty seconds.
+    pub fn settle_import(&mut self, import: &Import) -> Pending<ImportResult> {
+        self.settle_request(self.chassis.actor_ref::<WorkspaceCapability>(), import)
+    }
+
+    /// [`BloomeryHarness::settle_import`] for a `Run`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the chain has not settled within thirty seconds.
+    pub fn settle_run(&mut self, run: &Run) -> Pending<RunResult> {
+        self.settle_request(self.chassis.actor_ref::<WorkspaceCapability>(), run)
+    }
+
+    /// Send one `Run` to the composed workspace and wait for its result,
+    /// which lands once the whole run is done.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no result arrives within thirty seconds.
+    pub fn run(&mut self, run: &Run) -> RunResult {
+        let pending = self.send_run(run);
+        self.wait(pending)
+    }
+
+    /// Send one `Run` to the composed workspace without waiting, for a
+    /// scenario that acts while it is outstanding.
+    pub fn send_run(&mut self, run: &Run) -> Pending<RunResult> {
+        self.request(self.chassis.actor_ref::<WorkspaceCapability>(), run)
+    }
+
     /// Send one `AwaitProcessed { through }` to the bundle driver without
     /// waiting, for a scenario that acts while the barrier is outstanding.
     pub fn await_processed(&mut self, through: Seq) -> Pending<Processed> {
@@ -244,6 +320,22 @@ impl BloomeryHarness {
         let correlation = self.next_correlation();
         self.chassis.send_for_reply(to, mail, ReplyTarget::Actor { to: self.sink.erase(), correlation });
         Pending { correlation, request: format!("{} {mail:?}", K::NAME), answer: PhantomData }
+    }
+
+    /// Send `mail` to `to` as a tracked root with the sink as its reply
+    /// target, and block until its causal chain settles.
+    fn settle_request<K: Kind + Debug, I, A>(&mut self, to: impl ChassisTarget<K, I>, mail: &K) -> Pending<A> {
+        let correlation = self.next_correlation();
+        let (_, settled) =
+            self.chassis.send_tracked(to, mail, Some(ReplyTarget::Actor { to: self.sink.erase(), correlation }));
+        let request = format!("{} {mail:?}", K::NAME);
+
+        assert!(
+            settled.recv_timeout(REPLY_TIMEOUT).is_ok(),
+            "the causal chain of {request} did not settle within {} seconds",
+            REPLY_TIMEOUT.as_secs()
+        );
+        Pending { correlation, request, answer: PhantomData }
     }
 
     /// Mint a fresh correlation for one request.

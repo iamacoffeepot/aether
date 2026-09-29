@@ -45,6 +45,13 @@ impl UnitKey {
     pub const fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    /// The key as the load name an instance of the unit's actors is keyed
+    /// by, such as its journal at `aether.bloomery.journal:<key>`.
+    #[must_use]
+    pub const fn as_load_name(&self) -> &LoadName {
+        &self.0
+    }
 }
 
 impl fmt::Display for UnitKey {

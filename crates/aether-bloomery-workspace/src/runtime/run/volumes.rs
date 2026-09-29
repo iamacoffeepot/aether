@@ -12,13 +12,13 @@
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_journal::ArtifactBatch;
 use serde_json::{Value, json};
 
 use super::cleanup::Cleanup;
 use super::{Stop, engine_failed, write_tree};
 use crate::Mounts;
 use crate::runtime::engine::{Engine, VolumeName};
+use crate::runtime::storage::StorageSession;
 
 /// The label every container and volume a run creates carries, so an
 /// operator can find what a crash left behind.
@@ -41,7 +41,7 @@ impl Volumes {
 pub fn prepare(
     engine: &Engine,
     cleanup: &mut Cleanup<'_>,
-    batch: &ArtifactBatch,
+    session: &mut StorageSession,
     image: &str,
     mounts: &Mounts,
 ) -> Result<Volumes, Stop> {
@@ -66,7 +66,7 @@ pub fn prepare(
     let helper = engine.create(&helper_spec(image, &volumes)).map_err(engine_failed("creating the mount helper"))?;
     cleanup.container(helper.clone());
     for (mount, (path, _)) in mounts.as_slice().iter().zip(&volumes) {
-        write_tree(engine, batch, &helper, path, &mount.tree)?;
+        write_tree(engine, session, &helper, path, &mount.tree)?;
     }
     Ok(Volumes { work, mounts: volumes })
 }

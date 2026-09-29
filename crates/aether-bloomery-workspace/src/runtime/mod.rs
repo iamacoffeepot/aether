@@ -1,21 +1,26 @@
 //! The `aether.bloomery.workspace` runtime half (ADR-0122 split), compiled only under
 //! `feature = "runtime"`.
 //!
-//! Each `Import` and each `Run` runs on a worker thread as a staged task
-//! (ADR-0243 §9): the handler holds the caller's reply, stages the whole
-//! sequence, and returns at once, the caller's settlement chain stays held
-//! until the `#[handler(task)]` completion answers the result, and a request
-//! that cannot start yet queues rather than being dropped. Imports are bounded by
-//! a cap-level [`TaskQueue`] counting requests; runs are provisioned
-//! (ADR-0237 decision 9) and admitted in FIFO order against the host budget
-//! by [`provision::RunQueue`]. No dispatcher thread ever blocks on the
-//! daemon, the journal, or the budget.
+//! Each `Import` and each `Run` first proves its `source` live, answering a
+//! source that is not before anything is queued. It then runs on a worker
+//! thread as a staged task (ADR-0243 §9): the handler holds the caller's
+//! reply, stages the whole sequence, and returns at once, the caller's
+//! settlement chain stays held until the `#[handler(task)]` completion answers
+//! the result, and a request that cannot start yet queues rather than being
+//! dropped. Imports are bounded by a cap-level [`TaskQueue`] counting
+//! requests; runs are provisioned (ADR-0237 decision 9) and admitted in FIFO
+//! order against the host budget by [`provision::RunQueue`].
+//!
+//! Every read and stage a task makes goes through its source as mail the
+//! actor sends for its worker ([`storage`], ADR-0240 D7), so the workspace
+//! holds no store and serves every unit's journal alike. No dispatcher thread
+//! ever blocks on the daemon, the source, or the budget.
 
 mod engine;
 mod import;
-mod journal;
 mod provision;
 mod run;
+mod storage;
 
 #[cfg(all(unix, any(test, feature = "test-support")))]
 pub mod testing;
@@ -25,35 +30,28 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use aether_actor::runtime;
-use aether_bloomery_journal::ArtifactStore;
+use aether_bloomery_kinds::{ClosureLimit, Detail, ReadArtifactResult, ReadClosureResult, StageResult};
 use aether_bloomery_tar::{Limits, LimitsError, Rules};
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 pub use aether_substrate::chassis::error::BootError;
 
-use crate::{Import, ImportResult, Run, RunResult, WorkspaceCapability, WorkspaceConfig};
+use crate::{Import, ImportResult, Refusal, Run, RunResult, StorageWake, WorkspaceCapability, WorkspaceConfig};
 use engine::{Endpoint, Engine};
 use import::Importer;
 use provision::{Amounts, Budget, CpuSet, Estimates, Headroom, RunQueue};
 use run::{Ran, Runner};
-
-/// Composer-supplied construction params (ADR-0156 §3): the live artifact
-/// store of the journal the chassis opened. It is a value the composer holds,
-/// not operator-typed config, so it rides `Params`.
-///
-/// It is `None` only where a chassis is composed to be described and never
-/// booted (`--describe` / `--print-config`, ADR-0155); `init` refuses `None`.
-pub struct WorkspaceParams {
-    pub artifacts: Option<ArtifactStore>,
-}
+use storage::{StorageAnswer, StorageDesk, StorageTicket};
 
 /// `aether.bloomery.workspace` runtime state: the importer each import clones onto its
 /// worker and the queue that bounds how many imports talk to the daemon at
-/// once, and the run queue that provisions and admits every run.
+/// once, the run queue that provisions and admits every run, and the desk
+/// that carries every task's storage requests.
 pub struct WorkspaceCapabilityState {
     importer: Importer,
     imports: TaskQueue<ImportResult>,
     runs: RunQueue,
+    desk: StorageDesk,
 }
 
 #[runtime]
@@ -61,22 +59,15 @@ impl NativeActor for WorkspaceCapability {
     type State = WorkspaceCapabilityState;
 
     type Config = WorkspaceConfig;
-    type Params = WorkspaceParams;
 
     const NAMESPACE: &'static str = "aether.bloomery.workspace";
 
     /// Check the endpoint, the import bounds, the host budget, the default
-    /// allotment, and the fixed limits, and take the journal's store. A
-    /// `tcp://` endpoint's TLS files are read here, once. Nothing dials the
-    /// daemon here, so an engine boots without one.
-    fn init(
-        config: WorkspaceConfig,
-        params: WorkspaceParams,
-        _ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<WorkspaceCapabilityState, BootError> {
-        let artifacts = params.artifacts.ok_or_else(|| {
-            boot_error("the aether.bloomery.workspace actor needs the artifact store of the journal the chassis opened")
-        })?;
+    /// allotment, the fixed limits, and the prefetch budget, and mint the
+    /// wake the storage desk's workers send. A `tcp://` endpoint's TLS files
+    /// are read here, once. Nothing dials the daemon here, so an engine boots
+    /// without one.
+    fn init(config: WorkspaceConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WorkspaceCapabilityState, BootError> {
         let endpoint = Endpoint::from_config(&config).map_err(|error| BootError::Other(Box::new(error)))?;
         let import_limits = limits(config.import_max_entries, config.import_max_bytes, "IMPORT")?;
         let cpuset = CpuSet::parse(&config.cpuset).map_err(|error| {
@@ -98,6 +89,14 @@ impl NativeActor for WorkspaceCapability {
         })?;
         let pids = at_least_one(config.pids_limit, "PIDS_LIMIT")?;
         let output = limits(config.output_max_entries, config.output_max_bytes, "OUTPUT")?;
+        let prefetch = ClosureLimit::new(config.prefetch_bytes).map_err(|error| {
+            boot_error(&format!(
+                "AETHER_WORKSPACE_PREFETCH_BYTES={} is refused: {error}; it must be between {} and {}",
+                config.prefetch_bytes,
+                ClosureLimit::MIN_BYTES,
+                ClosureLimit::MAX_BYTES
+            ))
+        })?;
 
         tracing::info!(
             target: "aether_bloomery_workspace",
@@ -119,35 +118,51 @@ impl NativeActor for WorkspaceCapability {
             pids_limit = config.pids_limit,
             output_max_entries = config.output_max_entries,
             output_max_bytes = config.output_max_bytes,
+            prefetch_bytes = config.prefetch_bytes,
             "workspace actor configured",
         );
         let engine = Engine::new(endpoint);
         Ok(WorkspaceCapabilityState {
-            importer: Importer {
-                engine: engine.clone(),
-                artifacts: artifacts.clone(),
-                rules: Rules::userland(import_limits),
-            },
+            importer: Importer { engine: engine.clone(), rules: Rules::userland(import_limits) },
             imports: TaskQueue::new(config.max_in_flight),
             runs: RunQueue::new(
-                Runner { engine, artifacts, pids, output },
+                Runner { engine, pids, output },
                 Budget::new(&cpuset, budget_memory_bytes),
                 Estimates::new(defaults, headroom, ceiling),
             ),
+            desk: StorageDesk::new(ctx.self_wake(), prefetch),
         })
     }
 
-    /// Import a digest-pinned image into a tree in the journal.
+    /// Import a digest-pinned image into a tree staged to its source.
     ///
     /// # Agent
-    /// Reply: `import_result`. Pulls the image through the Docker Engine API,
-    /// decodes its exported filesystem under the userland rules, and answers
-    /// `Ok { tree }`, or `Failed { detail }` with no rows committed and no
-    /// container left behind. The reply lands when the whole import is done.
+    /// Reply: `import_result`. Answers `Failed { detail }` at once when
+    /// `source` is not live. Otherwise pulls the image through the Docker
+    /// Engine API, decodes its exported filesystem under the userland rules,
+    /// stages the tree to `source` as it decodes, and answers `Ok { tree }`
+    /// once every stage is answered, or `Failed { detail }` with no container
+    /// left behind; what a failed import staged is cited by nothing. The
+    /// reply lands when the whole import is done.
     #[handler::single]
     fn on_import(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Import) -> Pending<ImportResult> {
-        let importer = state.importer.clone();
-        state.imports.submit(ctx, move || importer.answer(&mail.image))
+        let Import { image, source } = mail;
+        match ctx.resolve(&source) {
+            Ok(source) => {
+                let session = state.desk.open(source, ctx.blob_check_in());
+                let importer = state.importer.clone();
+                state.imports.submit(ctx, move || importer.answer(&image, session))
+            }
+            Err(error) => {
+                tracing::warn!(target: "aether_bloomery_workspace", image = image.as_str(), %error, "import source is not live");
+                let (pending, held) = ctx.hold::<ImportResult>();
+                held.answer(
+                    ctx,
+                    &ImportResult::Failed { detail: Detail::new(format!("the import's source: {error}")) },
+                );
+                pending
+            }
+        }
     }
 
     /// Completion of an import: the queue answers the original caller with
@@ -157,10 +172,12 @@ impl NativeActor for WorkspaceCapability {
         state.imports.complete(ctx, done);
     }
 
-    /// Run steps over a stored tree in a stored environment.
+    /// Run steps over a stored tree in a stored environment, reading and
+    /// staging through the run's source.
     ///
     /// # Agent
-    /// Reply: `run_result`. The actor provisions the run itself: it picks
+    /// Reply: `run_result`. Answers `Refused(SourceUnavailable)` at once when
+    /// `source` is not live. The actor provisions the run itself: it picks
     /// the run's cores, memory, and deadline from its host budget and what
     /// it has seen of runs doing the same steps, and the run may wait, in
     /// arrival order, until they are free; it is never dropped. Runs each
@@ -171,11 +188,22 @@ impl NativeActor for WorkspaceCapability {
     /// `Exhausted(Time | Memory)` when a step outran the allotment, after
     /// which a retry is given twice as much of it, up to the budget; or
     /// `Failed { detail }` when the executor failed. No container or volume
-    /// is left behind, and rows commit only for `Ok`. The reply lands when
-    /// the whole run is done.
+    /// is left behind. Every input is read from `source` and every output
+    /// staged to it; an `Ok` answers only once every stage is answered, and
+    /// what a run that ends any other way staged is cited by nothing. The
+    /// reply lands when the whole run is done.
     #[handler::single]
     fn on_run(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Run) -> Pending<RunResult> {
-        state.runs.submit(ctx, mail)
+        let Run { source, request } = mail;
+        match ctx.resolve(&source) {
+            Ok(source) => state.runs.submit(ctx, &mut state.desk, source, request),
+            Err(error) => {
+                tracing::info!(target: "aether_bloomery_workspace", %error, "run refused: its source is not live");
+                let (pending, held) = ctx.hold::<RunResult>();
+                held.answer(ctx, &RunResult::Refused(Refusal::SourceUnavailable));
+                pending
+            }
+        }
     }
 
     /// Completion of a run: learn from it, release its budget, answer its
@@ -183,7 +211,38 @@ impl NativeActor for WorkspaceCapability {
     /// while they fit.
     #[handler(task)]
     fn on_run_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<Ran>) {
-        state.runs.complete(ctx, done);
+        state.runs.complete(ctx, &mut state.desk, done);
+    }
+
+    /// A worker queued storage requests: send each through its task's
+    /// source.
+    #[handler::single]
+    fn on_storage_wake(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _wake: StorageWake) {
+        state.desk.drain(ctx);
+    }
+
+    /// A source's answer to a worker's `ReadArtifact`, handed to the worker.
+    #[handler::single]
+    fn on_read_artifact_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ReadArtifactResult) {
+        if let Some(ticket) = ctx.take_context::<StorageTicket>() {
+            state.desk.answer(ticket, StorageAnswer::Read(result));
+        }
+    }
+
+    /// A source's answer to a worker's `ReadClosure`, handed to the worker.
+    #[handler::single]
+    fn on_read_closure_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ReadClosureResult) {
+        if let Some(ticket) = ctx.take_context::<StorageTicket>() {
+            state.desk.answer(ticket, StorageAnswer::ReadClosure(result));
+        }
+    }
+
+    /// A source's answer to a worker's `Stage`, handed to the worker.
+    #[handler::single]
+    fn on_stage_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: StageResult) {
+        if let Some(ticket) = ctx.take_context::<StorageTicket>() {
+            state.desk.answer(ticket, StorageAnswer::Stage(result));
+        }
     }
 }
 

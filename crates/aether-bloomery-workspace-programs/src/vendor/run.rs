@@ -10,7 +10,7 @@
 //! estimate.
 
 use aether_bloomery_kinds::{Ref, Refusal, Tree};
-use aether_bloomery_workspace::{EnvVar, Mount, Mounts, Network, Run, Scratch, Step, Steps, ToolName, TreePath};
+use aether_bloomery_workspace::{EnvVar, Mount, Mounts, Network, RunRequest, Scratch, Step, Steps, ToolName, TreePath};
 
 use super::{VendorInput, refused};
 
@@ -51,7 +51,7 @@ const ARGS: [&str; 5] = ["vendor", "--locked", "--manifest-path", "/source/Cargo
 /// # Errors
 ///
 /// A [`Refusal::Refused`] naming the value a request constructor refused.
-pub(super) fn request(input: &VendorInput) -> Result<Run, Refusal> {
+pub(super) fn request(input: &VendorInput) -> Result<RunRequest, Refusal> {
     let step = Step {
         tool: ToolName::new(TOOL).map_err(|error| refused(format!("tool {TOOL:?}: {error}")))?,
         args: ARGS.iter().map(|&arg| arg.to_owned()).collect(),
@@ -63,7 +63,7 @@ pub(super) fn request(input: &VendorInput) -> Result<Run, Refusal> {
     };
     let source = Mount { at: path(SOURCE)?, tree: input.source };
 
-    Ok(Run {
+    Ok(RunRequest {
         tree: Ref::of_encoded(&Tree::empty()).map_err(|error| refused(format!("the empty tree: {error}")))?,
         environment: input.environment,
         mounts: Mounts::new(vec![source]).map_err(|error| refused(format!("the source mount: {error}")))?,
