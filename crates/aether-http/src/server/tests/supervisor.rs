@@ -17,9 +17,7 @@ use crate::server::shard::HttpDispatchShard;
 use crate::server::{HttpServerCapability, HttpServerConfig, HttpServerHandle};
 
 use super::handlers::EchoHttpHandler;
-use super::support::{
-    body_of, boot_chassis, config_for, port_of, read_one_response, read_status_line, round_trip, round_trip_live,
-};
+use super::support::{body_of, boot_chassis, config_for, port_of, read_one_response, read_status_line, round_trip};
 
 fn shard_canonical_name(index: usize) -> String {
     format!(
@@ -98,12 +96,6 @@ fn over_capacity_connection_is_503() {
 
     let port = port_of(&chassis);
 
-    // Poll the async `/` catch-all live first: a held request that beat
-    // the registration would be refused for "no handler" and closed
-    // (releasing its slot) instead of staying resident, which would
-    // race the ceiling this test exercises.
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-
     // Fill the connection table: each socket completes a keep-alive
     // request and reads its response, proving the connection was
     // charged to `live_connections` at dispatch, then stays open, since
@@ -147,10 +139,6 @@ fn connections_distribute_across_shards() {
     });
 
     let port = port_of(&chassis);
-
-    // Poll the async `/` catch-all live before driving the concurrent
-    // connections so none of them races the registration.
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     let mut streams: Vec<(TcpStream, Vec<u8>)> = (0..4)
         .map(|_| {
@@ -206,8 +194,9 @@ fn cold_first_request_survives_partial_shard_activation_failure() {
         )
         .build_passive()
         .expect("http server boots with test-only shard collision");
+    chassis.await_boot_settled();
 
-    let response = round_trip_live(port_of(&chassis), b"GET /cold HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let response = round_trip(port_of(&chassis), b"GET /cold HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 "), "surviving shard serves the cold peer: {response:?}");
     chassis
         .child::<HttpServerCapability, HttpDispatchShard>(
@@ -279,10 +268,6 @@ fn stalled_peer_does_not_block_sibling_connections() {
         ..HttpServerConfig::default()
     });
     let port = port_of(&chassis);
-
-    // Poll the async `/` catch-all live before the stall setup, so both
-    // connections dispatch to the echo handler rather than racing it.
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     // Connection A: a 16 MiB echo whose response the client never
     // reads — far past loopback socket buffering, so the reader's
