@@ -268,33 +268,32 @@ impl NativeActor for HttpServerCapability {
     /// Settle one dispatch-shard birth. A successful child becomes
     /// selectable only from its authoritative `SpawnOutcome`; startup waits
     /// for every deterministic index so completion order cannot reorder the
-    /// round-robin set. The task carries no application reply, so discharge
-    /// its settlement hold explicitly after reading the typed result.
+    /// round-robin set. The birth owes no reply, and the rest of the shard's
+    /// sink waits in its startup slot under the index its key names.
     #[handler(task)]
     fn on_shard_spawn_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<HttpDispatchShard>, ShardSpawnContext>,
+        done: TaskDone<SpawnOutcome<HttpDispatchShard>>,
     ) {
-        let index = done.context().index;
-        let subname = done.context().subname.clone();
-        let sink = match &done.output().result {
-            Ok(shard) => Some(ShardSink {
-                inbound_tx: done.context().inbound_tx.clone(),
-                dirty: Arc::clone(&done.context().wake_dirty),
-                shard: shard.erase(),
-            }),
+        let Some(ShardSpawnKey { index }) = ctx.take_context() else {
+            return;
+        };
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let sink = match done.into_output().result {
+            Ok(shard) => state.staged_sink(index, shard.erase()),
             Err(error) => {
                 tracing::warn!(
                     target: "aether_http::server",
-                    shard = %subname,
+                    shard = %shard_subname(index),
                     error = ?error,
                     "http dispatch shard activation failed",
                 );
                 None
             }
         };
-        done.release_no_reply();
 
         let settlement = state.finish_shard_spawn(index, sink);
         state.apply_shard_settlement(ctx, settlement);

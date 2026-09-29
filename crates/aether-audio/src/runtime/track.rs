@@ -105,19 +105,6 @@ impl TrackVoice {
     }
 }
 
-/// Completion context the `play_track` decode dispatch carries so the
-/// `#[handler(task)]` arm can build the `TrackStart` event + the reply
-/// without re-deriving anything (ADR-0093 §5). The worker produces the
-/// decoded PCM; this carries the synth key + play parameters alongside.
-pub struct TrackDecodeContext {
-    pub sender: Option<ErasedActorRef>,
-    pub lane: Option<String>,
-    pub namespace: String,
-    pub path: String,
-    pub gain: f32,
-    pub looping: bool,
-}
-
 /// Output of the decode dispatch worker — the resampled mono PCM, or
 /// the decode failure to relay as `PlayTrackResult::Err`.
 pub type DecodeOutput = Result<Vec<f32>, DecodeError>;

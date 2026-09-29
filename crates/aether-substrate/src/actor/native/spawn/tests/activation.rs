@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
-use aether_data::{ActorId, Kind as _};
+use aether_data::{ActorId, Kind as _, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
@@ -18,7 +18,7 @@ use crate::mail::registry::effect::{
     ActivationToken, EffectBatch, RegistryApplied, RegistryEffect, RegistryEffectError,
 };
 use crate::mail::registry::{RegistryOwnerLease, RouteRelayLease, canonical_mailbox_id, noop_handler};
-use crate::mail::{Mail, MailId, Source};
+use crate::mail::{Mail, MailId};
 use crate::runtime::effect_chain::EffectChain;
 use crate::runtime::lifecycle::FatalAbortRecord;
 use crate::scheduler::WakeSink;
@@ -80,10 +80,9 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
         spawner.prepare_identity::<ActivationProbe>(Subname::Named("owner-close-before-apply"), None).unwrap();
     let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events_tx), (), Vec::new()).unwrap();
     let causing_chain = MailId::new(parent_id, 1);
-    let deferred = parent.dispatch_arm::<SpawnOutcome<ActivationProbe>, _>(
+    let deferred = parent.dispatch_stage::<SpawnOutcome<ActivationProbe>>(
         Some(mailer.acquire_settlement_hold(causing_chain)),
-        Source::NONE,
-        (),
+        RequestId(parent.mint_correlation()),
     );
     let dispatch_id = deferred.dispatch_id();
     let finalizer = NativeSpawnFinalizer::parented(
@@ -111,7 +110,7 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
         .expect("owner-close finalization fills the typed deferred result");
     assert_eq!(done.output().canonical_name, child_name, "a rejection still names the birth it belongs to");
     assert!(matches!(done.output().result, Err(SpawnError::OwnerClosed)));
-    done.release_no_reply();
+    drop(done);
     drop(parent.reserve_child(key).expect("owner-close rejection releases the staged parent key"));
 
     assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
@@ -171,15 +170,15 @@ fn rejected_multi_birth_batch_marks_unvisited_native_finalizer_as_activation_rej
     let first_done = await_spawn_done(&parent, first_dispatch);
     assert_eq!(first_done.output().canonical_name, first_name, "each rejection names its own birth");
     assert!(matches!(first_done.output().result, Err(SpawnError::ActivationRejected)));
-    first_done.release_no_reply();
+    drop(first_done);
     let middle_done = await_spawn_done(&parent, middle_dispatch);
     assert_eq!(middle_done.output().canonical_name, middle_name);
     assert!(matches!(middle_done.output().result, Err(SpawnError::SubnameInUse { .. })));
-    middle_done.release_no_reply();
+    drop(middle_done);
     let later_done = await_spawn_done(&parent, later_dispatch);
     assert_eq!(later_done.output().canonical_name, later_name);
     assert!(matches!(later_done.output().result, Err(SpawnError::ActivationRejected)));
-    later_done.release_no_reply();
+    drop(later_done);
     for key in [first_key, middle_key, later_key] {
         drop(parent.reserve_child(key).expect("transactional rejection releases every parent key"));
     }
@@ -269,7 +268,7 @@ fn closed_child_subname_restages_as_retired_not_in_use() {
         done.output(),
         SpawnOutcome { result: Ok(child), .. } if child.id() == child_id
     ));
-    done.release_no_reply();
+    drop(done);
     assert!(parent.reserve_child(key).is_none(), "Live promotion carries the same key into the live-child set");
 
     mailer.push(Mail::new(child_id, ActivationClose::ID, ActivationClose.encode_into_bytes(), 1));
@@ -300,7 +299,7 @@ fn closed_child_subname_restages_as_retired_not_in_use() {
         "the owner classified the surviving route of a retired id, not a live occupant: {:?}",
         reborn_done.output()
     );
-    reborn_done.release_no_reply();
+    drop(reborn_done);
 
     spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1), &FatalAbortRecord::new());
     drop(owner);

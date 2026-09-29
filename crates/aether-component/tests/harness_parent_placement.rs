@@ -231,11 +231,10 @@ impl NativeActor for Launcher {
     }
 
     #[handler(task)]
-    fn on_held_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<HeldParent>, ()>) {
-        if self.staged.as_ref() == Some(&done.output().canonical_name) {
+    fn on_held_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<HeldParent>>) {
+        if self.staged.as_ref() == Some(&done.into_output().canonical_name) {
             self.staged = None;
         }
-        done.release_no_reply();
     }
 }
 

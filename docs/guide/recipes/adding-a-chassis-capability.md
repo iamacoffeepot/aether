@@ -109,14 +109,17 @@ impl NativeActor for TextCapability {
         // … rasterize glyphs, send the quad batch …
     }
 
-    // Reply-bearing, answered later: hold the owed `LoadFontResult`, carry
-    // the held reply in the forwarded `aether.fs.read`'s request context,
-    // and answer it from `on_read_result` or the parse completion.
+    // Reply-bearing, answered later: hold the owed `LoadFontResult`, keep
+    // the held reply with the font's waiters in state, and answer it from
+    // `on_read_result` or the parse completion. Only the font's first
+    // waiter forwards the `aether.fs.read`.
     // See "text's held-reply variant" below.
     #[handler::single]
-    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: LoadFont) -> Pending<LoadFontResult> {
+    fn on_load_font(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: LoadFont) -> Pending<LoadFontResult> {
         let (pending, held) = ctx.hold::<LoadFontResult>();
-        TextCapabilityState::forward_font_read(ctx, mail.namespace, mail.path, FontLoadContext::LoadFont { held });
+        if state.join_font_load(&mail.namespace, &mail.path, |waiters| waiters.load.push(held)) {
+            TextCapabilityState::forward_font_read(ctx, mail.namespace, mail.path);
+        }
         pending
     }
 }
@@ -186,25 +189,34 @@ returns the `Pending<LoadFontResult>` receipt the handler returns, which
 sets its row, and a `Held<LoadFontResult>` ticket that answers the one
 `LoadFontResult` from a later turn:
 
-1. **`on_load_font`** holds the reply and moves the `Held` into the
-   `FontLoadContext::LoadFont` variant of the request context, then forwards
-   an `aether.fs.read` with
-   `ctx.send_with_context::<FsCapability>(&read, context)`, which compiles
-   because `TextCapability` declares `depends(FsCapability)`. The context
-   is a kind with one variant per owed reply shape (`LoadFont` holds a
-   `Held<LoadFontResult>`, `FontMetrics` a `Held<FontMetricsResult>`), so
-   answering a request in the wrong shape is a compile error. Correlation
-   lives in the binding's request table, not a path-keyed actor-state map,
-   so two requests for the same path remain distinct.
-2. **`on_read_result`** takes the matching context back with
-   `ctx.take_context::<FontLoadContext>()`, which returns the `Held` live.
-   On the error arm it answers with `held.answer(ctx, &LoadFontResult::Err { … })`;
-   on success it hands the ticket and a `FontParseContext` to
-   `ctx.dispatch_blocking_held_with(held, cx, …)` for the off-thread parse.
+1. **`on_load_font`** holds the reply and pushes the `Held` onto the font's
+   waiters in actor state: `font_loads` maps a font's `(namespace, path)` to
+   a `FontWaiters { load: Vec<Held<LoadFontResult>>, metrics:
+   Vec<Held<FontMetricsResult>> }`, one list per owed reply shape, so
+   answering a request in the wrong shape is a compile error. Only the
+   font's first waiter forwards an `aether.fs.read`, with
+   `ctx.send_with_context::<FsCapability>(&read, FontRead { namespace, path })`,
+   which compiles because `TextCapability` declares `depends(FsCapability)`.
+   A `font_metrics` grab that misses the resident registry joins the same
+   waiters, so every request for one font shares one read and one parse.
+2. **`on_read_result`** takes the context back with
+   `ctx.take_context::<FontRead>()`, which names the font. On the error arm
+   it removes the font's waiters and answers each with its own kind's `Err`.
+   On success it stages the off-thread parse
+   ([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)
+   §9), which owes no reply of its own: the waiters stay in state, and the
+   task carries only a kind naming the font:
+
+   ```rust
+   ctx.stage_blocking_with::<FontParseOutput, FontParse>(FontParse { namespace, path, name })
+       .start(ctx, move || parse_font_bytes(bytes));
+   ```
 3. **`on_font_parsed`** (the `#[handler(task)]` completion) receives
-   `TaskDone<FontParseOutput, FontParseContext>`, registers the parsed font under
-   a session-scoped `font_id`, and answers the caller the held entry captured
-   with `done.resolve_value(ctx, &LoadFontResult::Ok { … })`.
+   `TaskDone<FontParseOutput>`, takes its `FontParse` with
+   `ctx.take_context()`, removes the font's waiters, registers the parsed
+   font once under a session-scoped `font_id`, and answers every waiter with
+   `held.answer(ctx, …)`: a `LoadFontResult::Ok { … }` for each load, a
+   `FontMetricsResult::Ok { … }` for each grab.
 
 Trace the full correlation in `runtime/mod.rs` rather than reading it
 re-explained here.

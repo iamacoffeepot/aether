@@ -316,21 +316,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         id
     }
 
-    /// Arm the shared ADR-0093 ledger for a typed deferred producer without
-    /// tying completion to a blocking worker. Future staged effects can move
-    /// this capability to their authoritative owner and retain no parent
-    /// lifetime beyond a weak binding reference.
-    ///
-    /// The armed completion carries whatever hold this context can give it —
-    /// the in-flight root of a dispatching handler, or the causing chain of a
-    /// `wire` hook (ADR-0168 §1). It carries none where the context has
-    /// neither, and the staged effect is then outside settlement entirely.
-    pub(crate) fn arm_deferred_completion<O, C>(&self, context: C) -> DeferredCompletion<O>
-    where
-        C: Send + 'static,
-    {
-        self.binding.dispatch_arm(self.acquire_settlement_hold(), self.reply_target(), context)
-    }
     /// Capture the current root as a reply this actor still owes, directing
     /// the eventual terminal reply to an explicitly carried target. The
     /// returned [`DeferredReply`] keeps the caller's chain open until it is

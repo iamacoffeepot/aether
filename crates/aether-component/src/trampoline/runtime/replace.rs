@@ -26,7 +26,7 @@ impl WasmTrampolineState {
     /// actor turn so rejection cannot silently lose the originating chain.
     pub fn stage_inline_aliases<A>(ctx: &mut NativeCtx<'_, A, Single>, aliases: Vec<PreparedAliasRoute>) {
         for alias in aliases {
-            let context = InlineAliasContext { alias: Arc::clone(&alias.rendered_name) };
+            let context = InlineAliasContext { alias: alias.rendered_name.to_string() };
             let _ = ctx.stage_registry_batch(RegistryBatch::publish_alias(alias), context);
         }
     }
@@ -42,20 +42,24 @@ impl WasmTrampolineState {
     ) {
         for alias in aliases {
             ctx.vacate_alias(&alias);
-            let context = InlineAliasContext { alias: Arc::clone(&alias.rendered_name) };
+            let context = InlineAliasContext { alias: alias.rendered_name.to_string() };
             let _ = ctx.stage_registry_batch(RegistryBatch::retire_alias(alias), context);
         }
     }
 
-    pub(super) fn finish_inline_aliases(done: TaskDone<RegistryBatchResult, InlineAliasContext>) {
-        if let Err(error) = done.output() {
+    /// Log an alias batch the owner refused after staging. The batch owes no
+    /// reply; its context names the alias it staged (ADR-0243 §9).
+    pub(super) fn finish_inline_aliases<A>(ctx: &mut NativeCtx<'_, A, Single>, done: TaskDone<RegistryBatchResult>) {
+        let Some(InlineAliasContext { alias }) = ctx.take_context() else {
+            return;
+        };
+        if let Err(error) = done.into_output() {
             tracing::warn!(
                 target: "aether_component",
-                alias = %done.context().alias,
+                alias = %alias,
                 "inline-child alias registry batch failed after owner staging: {error}",
             );
         }
-        done.release_no_reply();
     }
 
     /// ADR-0096: resolve the **effective tag** an export-targeted replace
@@ -387,7 +391,9 @@ impl WasmTrampolineState {
     }
 }
 
-#[derive(Clone)]
+/// The context an inline alias batch carries into its task completion: the
+/// alias's rendered name, for the refusal's log line.
+#[aether_data::kind(name = "aether.component.trampoline.inline_alias", no_serde)]
 pub(super) struct InlineAliasContext {
-    alias: Arc<str>,
+    alias: String,
 }

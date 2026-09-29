@@ -774,7 +774,7 @@ a birth cannot be placed under a parent other than the one running.
 A native birth **stages** during the handler turn and commits afterward. The
 handler chains any
 `after_init` bootstrap mail and ends with `.stage()` (or `.stage_with(context)`
-to carry your own value forward), which does the local half of the work — the
+to carry a context kind forward), which does the local half of the work — the
 permission and subname checks, `A::init`, the transport — and appends one
 ordered prepared birth to the parent's buffer
 ([ADR-0165](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0165-handlers-read-views-emit-effects.md)). Nothing in the shared
@@ -782,9 +782,10 @@ registry moves while the handler runs, so no spawn takes a global lock
 mid-turn. What comes back is a `SpawnReceipt`: the child's `canonical_name`,
 an `ErasedActorPath` derived from the parent's identity and proven against the
 ADR-0166 address grammar on the spot, which names the child for correlation,
-plus a `completion` `DispatchId`. A lineage too deep or too long for that
+plus the birth's `request` id. A lineage too deep or too long for that
 grammar never gets a receipt: `.stage()` itself returns
-`SpawnError::PathInvalid`. Neither field is a send target: the child is not
+`SpawnError::PathInvalid`, and `.stage_with` hands its context back beside the
+error. Neither field is a send target: the child is not
 `Live` yet, so nothing can prove it. Mail the child must see first
 rides `after_init` on the birth itself, and later mail goes through
 `ctx.send_to(&child, &k)` once the `Ok` completion hands back its reference.
@@ -802,8 +803,10 @@ else {
 The receipt says the birth was accepted locally; the registry owner applies it
 after the handler returns, and *that* result is authoritative. It arrives back
 at the spawner through the ordinary task-completion path as
-`TaskDone<SpawnOutcome<A>, C>` for a child of type `A`, keyed by
-`receipt.completion` — so an apply-time conflict (a name another actor won
+`TaskDone<SpawnOutcome<A>>` for a child of type `A`, correlated to
+`receipt.request`, and owes nothing
+([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)
+§9) — so an apply-time conflict (a name another actor won
 first, say) surfaces as one typed failure rather than a silent half-spawn. A
 `SpawnOutcome` names itself on both arms:
 
@@ -815,10 +818,12 @@ struct SpawnOutcome<A> {
 ```
 
 so a handler correlates the completion with the birth it staged by
-`canonical_name`, straight off the outcome, and `C` stays `()` unless there is
-something the spawn genuinely does not know — a peer address, a channel, which
+`canonical_name`, straight off the outcome, and stages with no context unless
+there is something the spawn genuinely does not know — a peer address, which
 leg of a multi-step plan this birth belongs to. A handler whose correlation key
-is not the child's name passes that key as `C`. A handler that keeps or mails its child holds the `Ok` reference
+is not the child's name stages with that key as a context kind and takes it in
+the completion with `ctx.take_context()`; a live value the completion needs,
+such as a channel or a held reply, waits in actor state under that key. A handler that keeps or mails its child holds the `Ok` reference
 and sends through `ctx.send_to(&child, &k)`, so a handler that mails its child after the
 bootstrap waits for that completion the same way one that must know the child
 is live before it reports success does. Synchronous commit still
@@ -857,7 +862,7 @@ out exactly once:
 
 ```rust
 match ctx.spawn_child::<Worker>(Subname::Named(&name), config, ()).continue_from(done, plan) {
-    Ok(receipt) => { /* the successor now owns the reply */ }
+    Ok(_) => { /* the successor now owns the reply */ }
     Err((error, done)) => done.resolve_err(ctx, &Failed { error: format!("{error:?}") }),
 }
 ```

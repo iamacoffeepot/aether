@@ -18,14 +18,23 @@ pub struct PendingPeer {
     pub peer: SocketAddr,
 }
 
-/// Move-only context attached to one staged shard birth. The child's proof
-/// rides its `SpawnOutcome`; what stays supervisor-owned until authoritative
-/// activation is the half of the [`ShardSink`] no spawn result can supply —
-/// the shard's index in the round-robin set, its inbound sender, and its wake
-/// flag.
-pub struct ShardSpawnContext {
-    pub index: usize,
-    pub subname: String,
+/// The context a staged shard birth carries into its task completion
+/// (ADR-0243 §9): the shard's index in the round-robin set, which keys its
+/// [`ShardSlot`].
+#[aether_data::kind(name = "aether.http.server.shard_spawn_key", copy)]
+pub struct ShardSpawnKey {
+    pub index: u64,
+}
+
+/// The subname of the dispatch shard at `index`.
+pub fn shard_subname(index: usize) -> String {
+    format!("shard-{index}")
+}
+
+/// The half of a [`ShardSink`] no spawn result can supply, kept in a staged
+/// shard's slot until its authoritative activation: its inbound sender and
+/// its wake flag.
+pub struct ShardChannel {
     pub inbound_tx: mpsc::Sender<InboundEvent>,
     pub wake_dirty: Arc<AtomicBool>,
 }
@@ -35,6 +44,8 @@ pub struct ShardSpawnContext {
 /// twice.
 pub enum ShardSlot {
     Pending,
+    /// Staged, awaiting its birth's completion.
+    Staged(ShardChannel),
     Ready(ShardSink),
     Failed,
 }
@@ -290,9 +301,16 @@ impl HttpSupervisorState {
             request_stream_window: self.config.request_stream_window,
             next_stream_id: Arc::clone(&self.next_stream_id),
         };
-        let subname = format!("shard-{index}");
-        let shard = ShardSpawnContext { index, subname: subname.clone(), inbound_tx, wake_dirty };
-        if let Err(error) = ctx.spawn_child::<HttpDispatchShard>(Subname::Named(&subname), seed, ()).stage_with(shard) {
+        if let ShardStartup::Starting { slots_by_index, .. } = &mut self.shard_startup
+            && let Some(slot) = slots_by_index.get_mut(index)
+        {
+            *slot = ShardSlot::Staged(ShardChannel { inbound_tx, wake_dirty });
+        }
+        let subname = shard_subname(index);
+        let key = ShardSpawnKey { index: index as u64 };
+        if let Err((error, _)) =
+            ctx.spawn_child::<HttpDispatchShard>(Subname::Named(&subname), seed, ()).stage_with(key)
+        {
             tracing::warn!(
                 target: "aether_http::server",
                 shard = %subname,
@@ -312,6 +330,19 @@ impl HttpSupervisorState {
         true
     }
 
+    /// The sink of the staged shard at `index`, now that its birth proved
+    /// `shard`: the channel its slot kept, joined with the proof. `None` when
+    /// no staged slot is waiting at `index`.
+    pub fn staged_sink(&self, index: usize, shard: ErasedActorRef) -> Option<ShardSink> {
+        let ShardStartup::Starting { slots_by_index, .. } = &self.shard_startup else {
+            return None;
+        };
+        let Some(ShardSlot::Staged(ShardChannel { inbound_tx, wake_dirty })) = slots_by_index.get(index) else {
+            return None;
+        };
+        Some(ShardSink { inbound_tx: inbound_tx.clone(), dirty: Arc::clone(wake_dirty), shard })
+    }
+
     /// Record one synchronous or authoritative shard result. Completions may
     /// arrive out of index order; the final compaction always walks the slots
     /// in deterministic index order.
@@ -321,7 +352,7 @@ impl HttpSupervisorState {
                 let Some(slot) = slots_by_index.get_mut(index) else {
                     return ShardSettlement::Stale;
                 };
-                if !matches!(slot, ShardSlot::Pending) {
+                if !matches!(slot, ShardSlot::Pending | ShardSlot::Staged(_)) {
                     return ShardSettlement::Stale;
                 }
                 *slot = sink.map_or_else(|| ShardSlot::Failed, ShardSlot::Ready);
@@ -345,7 +376,7 @@ impl HttpSupervisorState {
             .into_iter()
             .filter_map(|slot| match slot {
                 ShardSlot::Ready(sink) => Some(sink),
-                ShardSlot::Pending | ShardSlot::Failed => None,
+                ShardSlot::Pending | ShardSlot::Staged(_) | ShardSlot::Failed => None,
             })
             .collect::<Vec<_>>();
         if shards.is_empty() {

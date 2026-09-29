@@ -79,7 +79,7 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
             .expect("NativeCtx::spawn_child requires a typed production binding")
             .clone();
         let builder = SpawnBuilder::new_child(Arc::clone(spawner), subname, config, params, sender, parent);
-        HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root, self.reply_target())
+        HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root)
     }
 
     /// Stage a child under an already-`Live` logical parent that shares this
@@ -106,7 +106,7 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
             Source { addr: SourceAddr::Component(self.binding.self_mailbox()), correlation_id: Source::NO_CORRELATION };
         let parent = ActorRuntimeIdentity::new(parent.id(), None, parent.id().0, self.actor_path(parent));
         let builder = SpawnBuilder::new_child(Arc::clone(spawner), subname, config, params, sender, parent);
-        HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root, self.reply_target())
+        HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root)
     }
 
     /// The namespace of the first declared dependency with no `Live` route

@@ -162,7 +162,7 @@ fn ctx_spawn_child_routes_through_handler() {
                     }
                     Err(error) => panic!("unexpected staged-birth completion: {error:?}"),
                 }
-                done.release_no_reply();
+                drop(done);
                 return Some(());
             }
             None

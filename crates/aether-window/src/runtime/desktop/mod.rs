@@ -149,6 +149,13 @@ struct PendingCreate {
     shutdown_on_failure: bool,
 }
 
+/// The context a staged window child carries into its task completion
+/// (ADR-0243 §9): the window's path, which keys its [`PendingCreate`].
+#[aether_data::kind(name = "aether.window.desktop.spawn_key")]
+struct WindowSpawnKey {
+    path: ErasedActorPath,
+}
+
 /// A window child that reached `Live`: the reference its spawn outcome proved,
 /// which every later retire is sent through, and the monitor whose notice
 /// removes the entry once the child departs.
@@ -312,10 +319,10 @@ impl DesktopWindowCapabilityState {
                 // three call frames away from this line. The birth carries the
                 // window's path as its completion context, since that path is
                 // what the reservation is keyed by.
-                if let Err(error) = ctx
+                if let Err((error, _)) = ctx
                     .spawn_child::<DesktopWindowInstance>(Subname::Named(&pending.spec.name), (), ())
                     .ordered_by(OrderingDevice::RetainedReplyDebt)
-                    .stage_with(path.clone())
+                    .stage_with(WindowSpawnKey { path: path.clone() })
                 {
                     return self.rollback_attached_create(
                         path,
@@ -903,10 +910,12 @@ impl NativeActor for DesktopWindowCapability {
     fn on_window_child_spawn_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<DesktopWindowInstance>, ErasedActorPath>,
+        done: TaskDone<SpawnOutcome<DesktopWindowInstance>>,
     ) {
-        state.finish_window_child_spawn(ctx, done.context(), done.output());
-        done.release_no_reply();
+        let Some(WindowSpawnKey { path }) = ctx.take_context() else {
+            return;
+        };
+        state.finish_window_child_spawn(ctx, &path, &done.into_output());
     }
 
     #[handler::manual]

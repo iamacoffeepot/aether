@@ -240,12 +240,8 @@ impl NativeActor for WasmTrampoline {
     }
 
     #[handler(task)]
-    fn on_inline_alias_done(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        done: TaskDone<RegistryBatchResult, replace::InlineAliasContext>,
-    ) {
-        WasmTrampolineState::finish_inline_aliases(done);
+    fn on_inline_alias_done(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<RegistryBatchResult>) {
+        WasmTrampolineState::finish_inline_aliases(ctx, done);
     }
 
     /// Forward un-handled mail to the wasm guest.

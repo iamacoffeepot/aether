@@ -1593,49 +1593,6 @@ mod tests {
         assert!(wake_rx.recv_timeout(Duration::from_millis(50)).is_err(), "parent loss emits no stale wake");
     }
 
-    #[test]
-    fn ctx_armer_captures_current_hold_reply_target_and_context() {
-        let (registry, mailer) = bare_substrate();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let root = root_id(17);
-
-        let (caller_sink_tx, caller_sink_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox(
-            &boot_authority(),
-            "test.deferred_completion.ctx_caller",
-            forward_to(caller_sink_tx),
-        );
-        let reply_to = Source::with_correlation(SourceAddr::Component(caller), 77);
-
-        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        let actor_mailbox =
-            registry.register_inbox(&boot_authority(), "test.deferred_completion.ctx_actor", forward_to(wake_tx));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-
-        let completion = {
-            let ctx = NativeCtx::new(&binding, reply_to, None, Some(root));
-            ctx.arm_deferred_completion::<Answer, _>(22_u64)
-        };
-        let id = completion.dispatch_id();
-        assert_eq!(counter.held_open(root), 1, "ctx arming holds the current root");
-
-        completion.complete(Answer { value: 20 });
-        assert_eq!(await_wake(&wake_rx), id);
-        assert_eq!(counter.held_open(root), 1, "completion fill retains the hold through TaskDone routing");
-
-        {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-            let done = ctx.take_task_done::<Answer, u64>(id).expect("typed output and context remain parked");
-            assert_eq!(*done.context(), 22);
-            done.resolve_with(&mut ctx, |output, context| Answer { value: output.value + context });
-        }
-
-        let reply = caller_sink_rx.recv_timeout(Duration::from_secs(2)).expect("reply reaches the ctx-captured target");
-        assert_eq!(reply.sender.correlation_id, 77);
-        assert_eq!(Answer::decode_from_bytes(reply.payload.bytes()).expect("reply decodes"), Answer { value: 42 });
-        assert_eq!(counter.held_open(root), 0, "TaskDone release closes the ctx-captured hold");
-    }
-
     /// Tripwire: an owed reply that is dropped without being replied to or
     /// staged onto a successor releases its hold (so settlement isn't wedged)
     /// and then panics, in every build profile. The panic is what separates

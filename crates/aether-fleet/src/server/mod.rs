@@ -163,7 +163,7 @@ mod tests {
     // the server and the reply sink — test wiring, not a production chassis.
     #![allow(clippy::disallowed_methods)]
     use super::runtime::{
-        EngineEntry, FleetServerState, FleetSpawnContext, ProxySpawnOutcome, SpawnOrigin, SpawnRecipe, Supervision,
+        EngineEntry, FleetServerState, PendingEngine, ProxySpawnOutcome, SpawnOrigin, SpawnRecipe, Supervision,
         spawn_args,
     };
     use super::{FleetConfig, FleetServer, ReplyCells, ReplySink, RestartPolicy};
@@ -265,6 +265,24 @@ mod tests {
         SpawnRecipe { hash: "0".repeat(64), args: vec!["--seed".into(), "7".into()], boot_manifest: None }
     }
 
+    /// The pending row a staged birth leaves, forked from `recipe`. Its
+    /// origin is a restart, which owes no reply, so a reducer test needs no
+    /// actor to hold one.
+    fn pending(rpc_port: u16, recipe: SpawnRecipe) -> PendingEngine {
+        PendingEngine {
+            rpc_port,
+            hash: recipe.hash.clone(),
+            supervision: Supervision::new(recipe),
+            origin: SpawnOrigin::Restarted,
+            early_death: None,
+        }
+    }
+
+    /// A recipe naming the binary `hash`.
+    fn recipe_for(hash: &str) -> SpawnRecipe {
+        SpawnRecipe { hash: hash.to_owned(), args: Vec::new(), boot_manifest: None }
+    }
+
     /// Drive one request kind at `aether.fleet`, reply-to the sink,
     /// and block until `probe` sees a recorded reply (or the deadline
     /// passes).
@@ -324,18 +342,11 @@ mod tests {
         let (mut state, root) = lifecycle_state(None);
         let engine_id = EngineId(Uuid::from_u128(1));
         let rpc_port = 40_680;
-        state.begin_pending_spawn(engine_id, rpc_port, test_recipe().hash);
+        state.begin_pending_spawn(engine_id, pending(rpc_port, test_recipe()));
 
         assert!(state.engines.is_empty(), "a prepared proxy is not yet supervised");
-        let reply = state
-            .settle_pending_spawn(
-                FleetSpawnContext {
-                    engine_id,
-                    supervision: Supervision::new(test_recipe()),
-                    origin: SpawnOrigin::Requested,
-                },
-                ProxySpawnOutcome::Applied(0x4068),
-            )
+        let (reply, _) = state
+            .settle_pending_spawn(engine_id, ProxySpawnOutcome::Applied(0x4068))
             .expect("the matching completion settles once");
 
         assert!(matches!(reply, SpawnEngineResult::Ok { rpc_port: port, .. } if port == rpc_port));
@@ -355,12 +366,7 @@ mod tests {
         let (mut state, root) = lifecycle_state(None);
         let engine_id = EngineId(Uuid::from_u128(2));
         let rpc_port = 40_681;
-        let spawn = FleetSpawnContext {
-            engine_id,
-            supervision: Supervision::new(test_recipe()),
-            origin: SpawnOrigin::Requested,
-        };
-        state.begin_pending_spawn(engine_id, rpc_port, test_recipe().hash);
+        state.begin_pending_spawn(engine_id, pending(rpc_port, test_recipe()));
 
         state.observe_engine_death(
             engine_id,
@@ -371,8 +377,8 @@ mod tests {
             DeathReason::Evicted { detail: "duplicate late heartbeat report".to_owned() },
         );
 
-        let reply = state
-            .settle_pending_spawn(spawn.clone(), ProxySpawnOutcome::Applied(0x4068_0002))
+        let (reply, _) = state
+            .settle_pending_spawn(engine_id, ProxySpawnOutcome::Applied(0x4068_0002))
             .expect("the first completion settles");
         assert!(
             matches!(reply, SpawnEngineResult::Err { engine_id: Some(ref id), ref error }
@@ -385,7 +391,9 @@ mod tests {
             if detail == "connection closed during activation"));
 
         assert!(
-            state.settle_pending_spawn(spawn, ProxySpawnOutcome::Rejected("stale owner result".to_owned())).is_none(),
+            state
+                .settle_pending_spawn(engine_id, ProxySpawnOutcome::Rejected("stale owner result".to_owned()))
+                .is_none(),
             "a duplicate/stale completion has no second reply value",
         );
         assert_eq!(state.recently_died.len(), 1, "a stale completion cannot duplicate the death record");
@@ -402,17 +410,10 @@ mod tests {
         let (mut state, root) = lifecycle_state(None);
         let engine_id = EngineId(Uuid::from_u128(3));
         let rpc_port = 40_682;
-        state.begin_pending_spawn(engine_id, rpc_port, test_recipe().hash);
+        state.begin_pending_spawn(engine_id, pending(rpc_port, test_recipe()));
 
-        let reply = state
-            .settle_pending_spawn(
-                FleetSpawnContext {
-                    engine_id,
-                    supervision: Supervision::new(test_recipe()),
-                    origin: SpawnOrigin::Requested,
-                },
-                ProxySpawnOutcome::Rejected("canonical route collision".to_owned()),
-            )
+        let (reply, _) = state
+            .settle_pending_spawn(engine_id, ProxySpawnOutcome::Rejected("canonical route collision".to_owned()))
             .expect("matching owner rejection settles");
         assert!(matches!(reply, SpawnEngineResult::Err { engine_id: Some(ref id), .. }
             if id == &engine_id.0.to_string()));
@@ -639,17 +640,10 @@ mod tests {
     fn a_committed_engine_retains_the_recipe_its_spawn_carried() {
         let (mut state, root) = lifecycle_state(None);
         let engine_id = EngineId(Uuid::from_u128(0xA3));
-        state.begin_pending_spawn(engine_id, 7100, test_recipe().hash);
+        state.begin_pending_spawn(engine_id, pending(7100, test_recipe()));
 
         state
-            .settle_pending_spawn(
-                FleetSpawnContext {
-                    engine_id,
-                    supervision: Supervision::new(test_recipe()),
-                    origin: SpawnOrigin::Requested,
-                },
-                ProxySpawnOutcome::Applied(0x4068),
-            )
+            .settle_pending_spawn(engine_id, ProxySpawnOutcome::Applied(0x4068))
             .expect("the matching completion settles");
 
         let entry = state.engines.get(&engine_id).expect("an applied spawn is supervised");
@@ -683,14 +677,10 @@ mod tests {
     }
 
     /// Settle a staged birth as an authoritative apply, committing the
-    /// engine on a recipe naming `hash`.
-    fn settle_applied(state: &mut FleetServerState<u64>, engine_id: EngineId, rpc_port: u16, hash: &str) {
-        let recipe = SpawnRecipe { hash: hash.to_owned(), args: Vec::new(), boot_manifest: None };
-        let reply = state
-            .settle_pending_spawn(
-                FleetSpawnContext { engine_id, supervision: Supervision::new(recipe), origin: SpawnOrigin::Requested },
-                ProxySpawnOutcome::Applied(u64::from(rpc_port)),
-            )
+    /// engine on the recipe its pending row carries.
+    fn settle_applied(state: &mut FleetServerState<u64>, engine_id: EngineId, rpc_port: u16) {
+        let (reply, _) = state
+            .settle_pending_spawn(engine_id, ProxySpawnOutcome::Applied(u64::from(rpc_port)))
             .expect("the matching completion settles");
         assert!(matches!(reply, SpawnEngineResult::Ok { .. }), "test setup: the staged birth commits");
     }
@@ -699,8 +689,8 @@ mod tests {
     /// authoritative apply — so it is supervised exactly the way `on_spawn`
     /// leaves it rather than inserted into the table by hand.
     fn commit_engine(state: &mut FleetServerState<u64>, engine_id: EngineId, rpc_port: u16, hash: &str) {
-        state.begin_pending_spawn(engine_id, rpc_port, hash.to_owned());
-        settle_applied(state, engine_id, rpc_port, hash);
+        state.begin_pending_spawn(engine_id, pending(rpc_port, recipe_for(hash)));
+        settle_applied(state, engine_id, rpc_port);
     }
 
     /// Lay down the scratch dir a fork leaves for `engine_id`: the
@@ -747,18 +737,11 @@ mod tests {
     fn a_birth_that_never_commits_reclaims_what_it_materialized() {
         let (mut state, root) = lifecycle_state(None);
         let engine_id = EngineId(Uuid::from_u128(0xC3));
-        state.begin_pending_spawn(engine_id, 7502, test_recipe().hash);
+        state.begin_pending_spawn(engine_id, pending(7502, test_recipe()));
         let dir = materialize_engine_dir(&state, engine_id);
 
         state
-            .settle_pending_spawn(
-                FleetSpawnContext {
-                    engine_id,
-                    supervision: Supervision::new(test_recipe()),
-                    origin: SpawnOrigin::Requested,
-                },
-                ProxySpawnOutcome::Rejected("canonical route collision".to_owned()),
-            )
+            .settle_pending_spawn(engine_id, ProxySpawnOutcome::Rejected("canonical route collision".to_owned()))
             .expect("matching owner rejection settles");
         assert!(!dir.exists(), "a rejected birth reclaims the binary its fork materialized");
 
@@ -781,12 +764,12 @@ mod tests {
         let sibling = store_binary(&mut state, b"sibling-bbbb");
         let engine_id = EngineId(Uuid::from_u128(0xB1));
 
-        state.begin_pending_spawn(engine_id, 7200, held.clone());
+        state.begin_pending_spawn(engine_id, pending(7200, recipe_for(&held)));
         store_binary(&mut state, b"upload-ccccc");
         assert!(state.store.contains(&held), "a staged birth's binary is not a reclaim candidate");
         assert!(!state.store.contains(&sibling), "its unheld sibling is reclaimed in its place");
 
-        settle_applied(&mut state, engine_id, 7200, &held);
+        settle_applied(&mut state, engine_id, 7200);
         store_binary(&mut state, b"upload-ddddd");
         assert!(state.store.contains(&held), "the commit carries the hold onto the supervised engine");
 

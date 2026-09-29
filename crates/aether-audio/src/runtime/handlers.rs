@@ -5,9 +5,9 @@ use aether_actor::DependsOn;
 use super::event::TrackStart;
 use super::sample::SampleBank;
 use super::{
-    AudioCapabilityState, AudioEvent, AudioLoadContext, BankAssemblyContext, BankAssemblyOutput, DecodeOutput,
+    AudioCapabilityState, AudioEvent, AudioLoadContext, BankAssemblyKey, BankAssemblyOutput, DecodeOutput,
     FsCapability, NativeCtx, Pending, Read, ReadResult, SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS, TaskDone,
-    TrackDecodeContext, TrackLoad,
+    TrackDecodeKey, TrackLoad,
 };
 use crate::kinds::{
     LoadInstrument, LoadInstrumentResult, NoteOff, NoteOn, PlayTrack, PlayTrackResult, Schedule, ScheduleResult,
@@ -184,7 +184,15 @@ impl AudioCapabilityState {
         };
         self.track_loads.insert(
             load_id,
-            TrackLoad { held, sender: ctx.sender(), lane: mail.lane, gain: mail.gain, looping: mail.looping },
+            TrackLoad {
+                held,
+                sender: ctx.sender(),
+                lane: mail.lane,
+                namespace: mail.namespace.clone(),
+                path: mail.path.clone(),
+                gain: mail.gain,
+                looping: mail.looping,
+            },
         );
         let context = AudioLoadContext::Track { load_id };
 
@@ -204,12 +212,7 @@ impl AudioCapabilityState {
         };
         match mail {
             ReadResult::Ok { addr, bytes } => match context {
-                AudioLoadContext::Track { load_id } => {
-                    let Some(load) = self.track_loads.remove(&load_id) else {
-                        return;
-                    };
-                    self.start_track_decode(ctx, load, addr.namespace, addr.path, bytes);
-                }
+                AudioLoadContext::Track { load_id } => self.start_track_decode(ctx, load_id, bytes),
                 AudioLoadContext::Instrument { held } => {
                     self.on_sfz_loaded(ctx, held, addr.namespace, addr.path, &bytes);
                 }
@@ -239,51 +242,41 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_track_decoded<A>(
-        &mut self,
-        ctx: &mut NativeCtx<'_, A>,
-        done: TaskDone<DecodeOutput, TrackDecodeContext>,
-    ) {
-        // Build the lane event while the output/context borrows are
-        // live, then end them before `resolve_with` consumes `done`.
-        let decode_err = match done.output() {
+    /// Decode completion: take the load its key names, start the track on
+    /// the mixer lane, and answer the load's held `PlayTrackResult`.
+    pub fn handle_track_decoded<A>(&mut self, ctx: &mut NativeCtx<'_, A>, done: TaskDone<DecodeOutput>) {
+        let Some(TrackDecodeKey { load_id }) = ctx.take_context() else {
+            return;
+        };
+        let Some(TrackLoad { held, sender, lane, namespace, path, gain, looping }) = self.track_loads.remove(&load_id)
+        else {
+            return;
+        };
+
+        let reply = match done.into_output() {
             Ok(pcm) => {
-                let cx = done.context();
-                if let Some(sender) = self.sender.as_ref() {
+                if let Some(events) = self.sender.as_ref() {
                     let event = AudioEvent::TrackStart(TrackStart {
-                        sender: cx.sender,
-                        lane: cx.lane.clone(),
-                        namespace: cx.namespace.clone(),
-                        path: cx.path.clone(),
-                        pcm: Arc::from(pcm.as_slice()),
-                        gain: cx.gain,
-                        looping: cx.looping,
+                        sender,
+                        lane: lane.clone(),
+                        namespace: namespace.clone(),
+                        path: path.clone(),
+                        pcm: Arc::from(pcm),
+                        gain,
+                        looping,
                     });
-                    if sender.push(event).is_err() {
+                    if events.push(event).is_err() {
                         tracing::warn!(
                             target: "aether_substrate::audio",
                             "event queue full — dropping track_start",
                         );
                     }
                 }
-                None
+                PlayTrackResult::Ok { namespace, path, lane }
             }
-            Err(error) => Some(error.to_string()),
+            Err(error) => PlayTrackResult::Err { namespace, path, lane, error: error.to_string() },
         };
-
-        match decode_err {
-            None => done.resolve_with(ctx, |_out, cx| PlayTrackResult::Ok {
-                namespace: cx.namespace.clone(),
-                path: cx.path.clone(),
-                lane: cx.lane.clone(),
-            }),
-            Some(error) => done.resolve_with(ctx, move |_out, cx| PlayTrackResult::Err {
-                namespace: cx.namespace.clone(),
-                path: cx.path.clone(),
-                lane: cx.lane.clone(),
-                error,
-            }),
-        }
+        held.answer(ctx, &reply);
     }
 
     pub fn handle_stop_track<A>(&mut self, ctx: &mut NativeCtx<'_, A>, mail: StopTrack) {
@@ -368,32 +361,20 @@ impl AudioCapabilityState {
         Ok(LoadInstrumentResult::Ok { instrument_id, name, resident_bytes })
     }
 
-    pub fn handle_instrument_assembled<A>(
-        &mut self,
-        ctx: &mut NativeCtx<'_, A>,
-        done: TaskDone<BankAssemblyOutput, BankAssemblyContext>,
-    ) {
-        // The assembled-or-failed reply value, built while the
-        // output/context borrows are live so the side effects (id
-        // assignment, register event) run before `resolve_with` consumes
-        // `done`.
-        let outcome: LoadInstrumentResult = match done.output() {
-            Ok(bank) => match self.register_assembled_bank(bank) {
-                Ok(registered) => registered,
-                Err(error) => {
-                    let cx = done.context();
-                    LoadInstrumentResult::Err { namespace: cx.namespace.clone(), path: cx.path.clone(), error }
-                }
-            },
-            Err(error) => {
-                let cx = done.context();
-                LoadInstrumentResult::Err {
-                    namespace: cx.namespace.clone(),
-                    path: cx.path.clone(),
-                    error: error.clone(),
-                }
-            }
+    /// Bank-assembly completion: take the assembly its key names, register
+    /// the bank, and answer the assembly's held `LoadInstrumentResult`.
+    pub fn handle_instrument_assembled<A>(&mut self, ctx: &mut NativeCtx<'_, A>, done: TaskDone<BankAssemblyOutput>) {
+        let Some(BankAssemblyKey { assembly_id }) = ctx.take_context() else {
+            return;
         };
-        done.resolve_with(ctx, move |_out, _cx| outcome);
+        let Some(assembly) = self.assemblies.remove(&assembly_id) else {
+            return;
+        };
+
+        let reply = match done.into_output().and_then(|bank| self.register_assembled_bank(&bank)) {
+            Ok(registered) => registered,
+            Err(error) => LoadInstrumentResult::Err { namespace: assembly.namespace, path: assembly.sfz_path, error },
+        };
+        assembly.held.answer(ctx, &reply);
     }
 }

@@ -5,9 +5,7 @@
 use std::fmt;
 
 use aether_actor::{ActorRef, Addressable};
-use aether_data::ErasedActorPath;
-
-use crate::actor::native::DispatchId;
+use aether_data::{ErasedActorPath, RequestId};
 
 use super::SpawnError;
 
@@ -17,7 +15,10 @@ use super::SpawnError;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpawnReceipt {
     pub canonical_name: ErasedActorPath,
-    pub completion: DispatchId,
+    /// The birth's request id: the completion is correlated to it, so it is
+    /// what `ctx.in_reply_to()` returns in the `#[handler(task)]` completion
+    /// and the id its context is stored under (ADR-0243 §9).
+    pub request: RequestId,
 }
 
 /// The authoritative fate of one staged child birth of an `A`, delivered

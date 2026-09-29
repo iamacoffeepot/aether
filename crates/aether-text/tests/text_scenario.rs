@@ -33,7 +33,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_fs::NamespaceRoots;
+use aether_data::Kind;
+use aether_fs::{NamespaceRoots, ReadResult};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{
     Image, background_top_left, bounding_box, centroid, coverage, decode_png,
@@ -42,7 +43,7 @@ use aether_harness_substrate_capture::{
     RenderHarnessBuilderExt,
     test_helpers::{envelope, has_wgpu_adapter, init_save_sandbox, pixel_is_lit},
 };
-use aether_kinds::{CachedFontMetrics, ClipRect, QuadScale, QuadSpace};
+use aether_kinds::{CachedFontMetrics, ClipRect, CostTailResult, QuadScale, QuadSpace};
 use aether_math::{Mat4, Rgba, Vec3};
 use aether_render::{DrawShapes, RenderCapability, Shape, ViewProjection};
 use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
@@ -512,6 +513,94 @@ fn font_metrics_grab_measures_like_the_draw_path() {
 
     assert!(local > 0.0, "a non-empty run has positive extent");
     assert_eq!(local, draw_pen, "local measure must equal the draw-path advance sum exactly");
+}
+
+/// What three requests for one font, in flight together, came back with:
+/// two `load_font`s and one `font_metrics` grab by the same path.
+struct JoinedReplies {
+    loads: [LoadFontResult; 2],
+    metrics: FontMetricsResult,
+    /// How many `aether.fs.read` replies the text cap handled.
+    reads: u64,
+}
+
+/// Send two `load_font`s and one `font_metrics` grab for `path` before
+/// pumping any of them, await all three replies, and count the fs reads the
+/// text cap handled. The three requests are queued before the first is
+/// dispatched, and a font's waiters stay joined across its read and parse,
+/// so the later two find the first's load in flight.
+fn load_one_font_three_ways(path: &str) -> JoinedReplies {
+    let mut harness = SubstrateHarness::builder()
+        .with_render()
+        .with_actor::<TextCapability>(())
+        .size(64, 32)
+        .namespace_roots(font_namespace_roots())
+        .build()
+        .expect("boot");
+    let text = harness.actor_ref::<TextCapability>();
+    let load = LoadFont { namespace: "assets".to_owned(), path: path.to_owned() };
+    let grab = FontMetricsRequest { font: FontRef::Path { namespace: "assets".to_owned(), path: path.to_owned() } };
+
+    let first = harness.send_deferred(text, &load);
+    let second = harness.send_deferred(text, &load);
+    let metrics = harness.send_deferred(text, &grab);
+    let loads = [
+        harness.await_deferred::<LoadFontResult>(first).expect("the first load is answered"),
+        harness.await_deferred::<LoadFontResult>(second).expect("the second load is answered"),
+    ];
+    let metrics = harness.await_deferred::<FontMetricsResult>(metrics).expect("the metrics grab is answered");
+
+    // A round trip through the text cap orders this read after every
+    // handler turn before it, so the `ReadResult` cost row is complete.
+    let probe = FontMetricsRequest { font: FontRef::Id(u32::MAX) };
+    harness.execute(vec![("probe", HarnessOp::send_and_await_reply(&text, &probe))]).expect("the probe is answered");
+    let CostTailResult::Ok { rows } = harness.actor_cost(text.erase()) else {
+        panic!("the text cap reports its cost table");
+    };
+    let reads = rows.iter().find(|row| row.kind_id == ReadResult::ID).map_or(0, |row| row.samples);
+
+    JoinedReplies { loads, metrics, reads }
+}
+
+/// Catches a text cap that reads and parses a font once per request, or a
+/// join that answers its waiters in one reply kind: two `load_font`s and a
+/// `font_metrics` grab for one path share one fs read, and each is answered
+/// in its own kind — both loads with the one registered font id.
+#[test]
+fn requests_for_one_font_share_one_read_and_each_get_their_own_reply() {
+    if !require_wgpu_only() {
+        return;
+    }
+
+    let JoinedReplies { loads, metrics, reads } = load_one_font_three_ways(FONT_PATH);
+
+    assert_eq!(reads, 1, "one fs read serves every request for the font");
+    let [LoadFontResult::Ok { font_id: first, .. }, LoadFontResult::Ok { font_id: second, .. }] = &loads else {
+        panic!("both loads succeed: {loads:?}");
+    };
+    assert_eq!(first, second, "both loads are answered with the one registered font");
+    assert!(matches!(metrics, FontMetricsResult::Ok { .. }), "the grab is answered with metrics: {metrics:?}");
+}
+
+/// Catches a failed read that answers only the request that started it:
+/// the join's other waiters, of either reply kind, would never be answered.
+#[test]
+fn a_failed_font_read_answers_every_request_waiting_on_it() {
+    if !require_wgpu_only() {
+        return;
+    }
+
+    let JoinedReplies { loads, metrics, reads } = load_one_font_three_ways("fonts/Missing.ttf");
+
+    assert_eq!(reads, 1, "one fs read serves every request for the font");
+    assert!(
+        loads.iter().all(|load| matches!(load, LoadFontResult::Err { .. })),
+        "both loads are answered with the read's failure: {loads:?}",
+    );
+    assert!(
+        matches!(metrics, FontMetricsResult::Err { .. }),
+        "the grab is answered with the read's failure: {metrics:?}"
+    );
 }
 
 /// ADR-0105 screen-space text origin (issue 1773): drawing `Screen` text
