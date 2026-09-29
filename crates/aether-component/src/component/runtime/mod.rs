@@ -485,86 +485,131 @@ impl ComponentHostCapabilityState {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::mpsc;
 
-    use aether_data::Source;
+    use aether_data::{KindDescriptor, MailboxDescriptor};
+    use aether_substrate::chassis::ctx::MailboxWakeFn;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::{boot_authority, registered_binding, registered_ref, try_registered_ref};
+    use aether_substrate::testing::{
+        await_signal, boot_authority, boot_test_chassis_with, registered_ref, try_registered_ref,
+    };
 
     use super::*;
 
+    /// Await the next egress pair the host's `on_registry_changed` handler
+    /// produces: `refresh_registry_inventory` always egresses kinds before
+    /// mailboxes, each event firing its own wake right after it lands on
+    /// `egress_rx` (`HubOutbound::attach_recording`'s contract), so one
+    /// [`await_signal`] per event reads the pair in the prescribed order.
+    fn next_pair(
+        signal_rx: &crossbeam_channel::Receiver<()>,
+        egress_rx: &mpsc::Receiver<EgressEvent>,
+    ) -> (Vec<KindDescriptor>, Vec<MailboxDescriptor>) {
+        await_signal(signal_rx, "component host egress: kinds");
+        let kinds = match egress_rx.try_recv() {
+            Ok(EgressEvent::KindsChanged { descriptors }) => descriptors,
+            other => panic!("expected KindsChanged first, got {other:?}"),
+        };
+
+        await_signal(signal_rx, "component host egress: mailboxes");
+        let mailboxes = match egress_rx.try_recv() {
+            Ok(EgressEvent::MailboxesChanged { descriptors }) => descriptors,
+            other => panic!("expected MailboxesChanged second, got {other:?}"),
+        };
+
+        (kinds, mailboxes)
+    }
+
+    /// [`next_pair`] repeated until the pair carries `name` (in `kinds` when
+    /// `in_kinds`, else in `mailboxes`): the pool can service a registry
+    /// publication that lands between the handler's inventory read and its
+    /// `acknowledge` re-arm, so the mutation a step just made may take more
+    /// than one pair to surface.
+    fn next_pair_carrying(
+        signal_rx: &crossbeam_channel::Receiver<()>,
+        egress_rx: &mpsc::Receiver<EgressEvent>,
+        name: &str,
+        in_kinds: bool,
+    ) -> (Vec<KindDescriptor>, Vec<MailboxDescriptor>) {
+        loop {
+            let pair = next_pair(signal_rx, egress_rx);
+            let carries = if in_kinds {
+                pair.0.iter().any(|d| d.name == name)
+            } else {
+                pair.1.iter().any(|d| d.name == name)
+            };
+            if carries {
+                return pair;
+            }
+        }
+    }
+
+    /// The host's registry-inventory egress (`wire`'s `subscribe_inventory`
+    /// through `on_registry_changed`'s `refresh_registry_inventory`) is
+    /// change-driven and always a complete kinds-then-mailboxes pair: booting
+    /// the real host on a pooled chassis, rather than hand-building its
+    /// `NativeCtx` and calling `refresh_registry_inventory` as a plain
+    /// function, exercises `wire`, the `RegistryChanged` wake, the
+    /// macro-generated dispatch arm, and the handler-end flush together.
     #[test]
-    fn registry_inventory_refresh_is_complete_idempotent_and_generation_gated() {
+    fn registry_inventory_egress_is_complete_and_change_driven() {
         let registry = Arc::new(Registry::new());
-        let (outbound, rx) = HubOutbound::attached_loopback();
+        let outbound = HubOutbound::disconnected();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
+
+        let (signal_tx, signal_rx) = crossbeam_channel::unbounded();
+        let wake: MailboxWakeFn = Arc::new(move || {
+            let _ = signal_tx.send(());
+        });
+        let egress_rx = outbound.attach_recording(Some(wake));
+
         let engine = Arc::new(Engine::default());
-        let (binding, _subscriber) =
-            registered_binding(&registry, &mailer, "test.component.inventory-subscriber", noop_handler());
-        let mut state = ComponentHostCapabilityState {
+        let params = ComponentHostParams {
+            engine: Arc::clone(&engine),
             linker: Arc::new(Linker::new(&engine)),
-            modules: ModuleCache::new(Arc::clone(&engine)),
-            engine,
-            outbound,
-            registry_subscription: Some(
-                NativeCtx::<ComponentHostCapability>::new_for_actor(&binding, Source::NONE, None, None)
-                    .subscribe_inventory(),
-            ),
-            last_egressed_inventory: None,
-            booted_modules: HashSet::new(),
-            pending_boots: HashMap::new(),
-            loads: HashMap::new(),
-            next_load: 0,
-            boot_namespaces: HashSet::new(),
-            republishes: HashMap::new(),
-            next_republish: 0,
-            republishing: HashMap::new(),
-            commit_roots: HashMap::new(),
-            queued_replaces: Vec::new(),
-            drop_targets: HashMap::new(),
+            hub_outbound: Arc::clone(&outbound),
         };
+        let _chassis = boot_test_chassis_with::<ComponentHostCapability>(&registry, &mailer, (), params);
 
-        // Initial wake refreshes both complete inventories in the prescribed
-        // kinds-then-mailboxes order.
-        state.refresh_registry_inventory();
-        assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { .. })));
-        let initial_mailbox_count = match rx.try_recv() {
-            Ok(EgressEvent::MailboxesChanged { descriptors }) => descriptors.len(),
-            other => panic!("expected initial mailbox inventory, got {other:?}"),
-        };
-        assert!(rx.try_recv().is_err());
+        // The initial wake `wire`'s `subscribe_inventory` arms egresses a
+        // complete pair in the prescribed order, with no kind registered yet
+        // and the boot-time mailboxes only.
+        let (initial_kinds, initial_mailboxes) = next_pair(&signal_rx, &egress_rx);
+        assert!(initial_kinds.is_empty(), "no kind is registered before the test's own registrations");
+        assert!(
+            initial_mailboxes.iter().any(|d| d.name == "aether.component"),
+            "the booted host's own mailbox is in the initial inventory: {initial_mailboxes:?}"
+        );
 
-        // A kind-only publication and a mailbox-only publication each refresh
-        // the entire coherent projection. The #4062 registry tests cover the
-        // producer's coalescing and publish-vs-clear re-arm internals.
+        // A kind-only publication refreshes both complete inventories.
         registry.register_kind(&boot_authority(), "test.component.inventory.kind");
-        state.refresh_registry_inventory();
-        assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { descriptors }) if descriptors.len() == 1));
-        assert!(
-            matches!(rx.try_recv(), Ok(EgressEvent::MailboxesChanged { descriptors }) if descriptors.len() == initial_mailbox_count)
-        );
+        let (kinds, mailboxes) = next_pair_carrying(&signal_rx, &egress_rx, "test.component.inventory.kind", true);
+        assert!(kinds.iter().any(|d| d.name == "test.component.inventory.kind"));
+        assert!(mailboxes.iter().any(|d| d.name == "aether.component"));
 
+        // A mailbox-only publication refreshes both complete inventories
+        // too, and keeps the earlier kind.
         registered_ref(&registry, "test.component.inventory.mailbox", noop_handler());
-        state.refresh_registry_inventory();
-        assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { descriptors }) if descriptors.len() == 1));
-        assert!(
-            matches!(rx.try_recv(), Ok(EgressEvent::MailboxesChanged { descriptors }) if descriptors.len() == initial_mailbox_count + 1)
-        );
+        let (kinds, mailboxes) = next_pair_carrying(&signal_rx, &egress_rx, "test.component.inventory.mailbox", false);
+        assert!(kinds.iter().any(|d| d.name == "test.component.inventory.kind"));
+        assert!(mailboxes.iter().any(|d| d.name == "test.component.inventory.mailbox"));
 
-        // Bursts collapse to their latest inventory. An unchanged wake and a
-        // rejected mutation cannot cause another egress.
-        registry.register_kind(&boot_authority(), "test.component.inventory.burst-first");
-        registry.register_kind(&boot_authority(), "test.component.inventory.burst-latest");
-        state.refresh_registry_inventory();
-        assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { descriptors }) if descriptors.len() == 3));
-        assert!(
-            matches!(rx.try_recv(), Ok(EgressEvent::MailboxesChanged { descriptors }) if descriptors.len() == initial_mailbox_count + 1)
-        );
+        // A rejected duplicate mailbox claim causes no egress of its own;
+        // fenced by the next real kind registration, whose pair — the first
+        // to carry the new kind — lists the claimed mailbox name exactly
+        // once, never doubled by the rejected claim.
         assert!(try_registered_ref(&registry, "test.component.inventory.mailbox", noop_handler()).is_err());
-        state.refresh_registry_inventory();
-        assert!(rx.try_recv().is_err());
-        state.refresh_registry_inventory();
-        assert!(rx.try_recv().is_err());
+        registry.register_kind(&boot_authority(), "test.component.inventory.fence");
+        let (kinds, mailboxes) = next_pair_carrying(&signal_rx, &egress_rx, "test.component.inventory.fence", true);
+        assert!(kinds.iter().any(|d| d.name == "test.component.inventory.kind"));
+        assert!(kinds.iter().any(|d| d.name == "test.component.inventory.fence"));
+        assert!(mailboxes.iter().any(|d| d.name == "aether.component"));
+        assert_eq!(
+            mailboxes.iter().filter(|d| d.name == "test.component.inventory.mailbox").count(),
+            1,
+            "the rejected duplicate claim must not double the mailbox's inventory entry: {mailboxes:?}"
+        );
     }
 }
