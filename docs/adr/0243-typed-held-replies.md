@@ -54,10 +54,10 @@ held.answer(ctx, &WatchHeadResult { .. });
    pub struct Held<R>    { id: DispatchId, ledger: Weak<NativeBinding>, _reply: PhantomData<fn() -> R> }   // the ticket; move-only
    ```
 
-   - **The ledger owns the obligation, not the value.** A `Held<R>` is a typed ticket to its ledger entry. It also keeps a weak link to that ledger, because its `Drop` and `into_deferred_reply` get no ctx. The weak link is never encoded. `DeferredCompletion` is the in-tree precedent for a ticket holding a weak binding link.
+   - **The ledger owns the obligation, not the value.** A `Held<R>` is a typed ticket to its ledger entry. It also keeps a weak link to that ledger, because its `Drop` gets no ctx. The weak link is never encoded. `DeferredCompletion` is the in-tree precedent for a ticket holding a weak binding link.
    - **`answer` completes the entry.** `answer(self, ctx, &R)` sends the terminal reply to the entry's target and releases its hold.
    - **An unanswered drop fails fast.** `Held<R>` is `#[must_use]`, and dropping it unanswered fails fast, as `DeferredReply` does.
-   - **Staging takes it unchanged.** `Held<R>` implements `IntoDeferredReply`, so `continue_from` and the other staging surfaces accept it.
+   - **It stays on its actor.** A `Held<R>` never converts into another obligation and never moves to another ledger entry. Work the actor stages (offload, a child birth, a registry batch) owes no reply, and the `Held` waits in that work's context or in actor state (§9). `hand_off` is the one way a debt leaves its actor.
    - **Actor close answers every live debt.** `R` must implement `HeldReply`, which names the reply a caller receives when the actor holding its debt closes before answering:
 
      ```rust
@@ -106,8 +106,8 @@ held.answer(ctx, &WatchHeadResult { .. });
      This is the pattern the guest `Blob` (ADR-0238, `BlobTable`) and `ReplyHandle` (`ReplyTable`) already use: the value is an id, and the runtime's table owns the resource.
    - **A context holding a `Held` needs no flag.** `#[aether_data::kind]` recognizes a `Held<..>` field and leaves `Clone` and serde out of the derives, the same way `#[actor]` reads a handler's ctx type from its tokens. Serde exists only for the wire, and a `Held` field makes the kind actor-reach, so the kind never needs it. A `Held` hidden behind a type alias is not recognized, and the build then fails at the field.
    - **Its schema names its reply kind.** `aether-data` gains one `SchemaType` node, `Ticket { reply: KindId }`, which describes a runtime-owned obligation that answers `reply`. `Held<R>` emits `Ticket { reply: R::ID }`. So a context holding `Held<A>` has a different kind id from one holding `Held<B>`, and the ADR-0139 carried-context check refuses a replacement that changed a held reply's kind. The node has actor reach only, and the JSON and MCP codecs refuse it as they refuse any field that cannot leave the engine.
-   - **Dropping the context drops the debt.** An untaken context whose `Held` is live fails fast like any unanswered `Held`. When the actor closes, the ledger's teardown answers its entries with `R::unanswered()` (§1). A context that holds several variants, such as `aether-text`'s load and metrics requests, is one enum context and one take.
-   - **The ledger never evicts.** An entry leaves only when it is answered, when it is staged onto a successor, or when actor close answers it with `R::unanswered()`. This replaces the hand-built pairs of `send_with_context` and a stored `Source` or `InboundMail`: `aether-http`'s `DeferredSource` and `aether-window`'s `instance.rs` `pending` map.
+   - **Dropping the context drops the debt.** An untaken context whose `Held` is live fails fast like any unanswered `Held`. When the actor closes, the ledger's teardown answers its entries with `R::unanswered()` (§1). Requests of different reply kinds that wait on the same work are waiters in actor state, keyed by that work (§9), not an enum of `Held`s in one context.
+   - **The ledger never evicts.** An entry leaves only when it is answered, when it is handed off (§9), or when actor close answers it with `R::unanswered()`. This replaces the hand-built pairs of `send_with_context` and a stored `Source` or `InboundMail`: `aether-http`'s `DeferredSource` and `aether-window`'s `instance.rs` `pending` map.
 
 5. **A `Held<R>` answers on its actor.** `answer` takes the actor's `NativeCtx`. Work on another thread posts a wake mail, and the woken handler answers from state; this is tcp's `ConnectReady` shape. A reply that must be sent from a thread outside the actor stays manual. `aether-substrate-harness-cap`'s `on_advance`, which hands its `InboundMail` to the embedder loop, is the one such site.
 
@@ -137,6 +137,30 @@ held.answer(ctx, &WatchHeadResult { .. });
 
    The `Undeclared` row and ADR-0231 §6 are unchanged.
 
+9. **A task takes its context the way a reply does.** Work an actor stages — an offload dispatch, a child birth, a registry batch — is a request to the engine. It gets a `RequestId` from the same counter as outbound requests, and its context is an ADR-0139 request context stored under that id. The completion wake is delivered correlated to that id and on the staging turn's chain, so the completion handler takes its context with the same `ctx.take_context::<C>()` a reply handler uses, and the §7 untaken-context guard covers it.
+
+   ```rust
+   // main: the context is a generic of the completion, and the debt is converted into the work
+   ctx.spawn_child::<FleetProxy>(..).continue_from(held, FleetSpawnContext { engine_id, origin, supervision });
+   #[handler(task)] fn on_spawn_done(state, ctx, done: TaskDone<SpawnOutcome<FleetProxy>, FleetSpawnContext>) {
+       done.resolve_value(ctx, &reply);
+   }
+
+   // decision: the context is a kind taken from the ctx; live values and debts wait in state under its key
+   state.pending_engines.insert(engine_id, PendingEngine { held: Some(held), supervision, .. });
+   ctx.spawn_child::<FleetProxy>(..).stage_with(FleetSpawnKey { engine_id });
+   #[handler(task)] fn on_spawn_done(state, ctx, done: TaskDone<SpawnOutcome<FleetProxy>>) {
+       let Some(FleetSpawnKey { engine_id }) = ctx.take_context() else { return };
+       if let Some(held) = state.pending_engines.get_mut(&engine_id).and_then(|p| p.held.take()) { held.answer(ctx, &reply) }
+   }
+   ```
+
+   - **A task context is a kind.** It describes the work (an index, a path, an id), as a request context does. Live values — channels, `Arc`s, prepared plans, `Held`s — wait in actor state keyed by what the context names; the actors that stage work already keep such a table (`aether-http`'s shard slots, `aether-component`'s `pending_boots`, `aether-fleet`'s `pending_engines`, `aether-audio`'s `track_loads`). An actor handles one mail at a time, so the entry a staging handler inserts is always present when the completion runs.
+   - **Waiters on the same work are a join in state.** Requests of different reply kinds that need the same work wait under one key, each list typed by its own reply: `aether-text` keeps `{ load: Vec<Held<LoadFontResult>>, metrics: Vec<Held<FontMetricsResult>> }` per font, so one read and one parse serve every request for that font.
+   - **Staged work owes no reply.** Its ledger entry has no reply target. It keeps the staging turn's chain hold, if that turn had a chain, until the completion is handled, so a completion that stages the next step stays in the causal tree. `TaskDone<O>` carries only the output.
+   - **`hand_off` is the one way a debt leaves its actor.** `held.hand_off(ctx, &child, &payload)` sends `payload` to a child with the requester as its reply target and ends the entry, so the child answers in its own name and the requester keeps the child's stamped sender as its reference (ADR-0230 §3). The component host's load hand-off to its trampoline is the one consumer.
+   - **Removed:** `HandlerSpawnBuilder::continue_from`, `NativeCtx::stage_registry_batch_from`, `IntoDeferredReply`, `dispatch_blocking_held_with`, the `dispatch_blocking` variants that arm a reply, and `TaskDone`'s `resolve`, `resolve_with`, `resolve_value`, `resolve_err`, `release_no_reply`, `hand_off`, and `forward_tracked`. `stage_with` and `stage_registry_batch` take the context alone, and a failed stage hands the context back. `DeferredReply` and `defer_reply_to` remain for manual handlers only.
+
 ## Consequences
 
 ### Positive
@@ -151,11 +175,13 @@ held.answer(ctx, &WatchHeadResult { .. });
 - There are two values where one handler used to have none. The receipt is the cost of keeping the contract on the return type.
 - Every reply kind a handler holds implements `HeldReply`, one line per kind. A kind with no failure variant must gain one: a reply that can go unanswered has to be able to say so. The field shapes differ between kinds (`ConnectResult::Err` also carries `addr`), so the impl is written by hand, not derived.
 - A guest `hold` encodes its `unanswered` reply once, whether or not it is ever needed.
+- A task context must be a kind, so a staging actor keeps its live values in state under a key instead of in the context, which some staging sites do not do today.
+- Taking a task's context checks its type at run time, as a reply's does; today a completion's context type is a compile-time generic.
 - `send_with_context` changes from `&context` to `context` at every existing caller.
 
 ### Neutral / forward
 
-- This extends ADR-0109 and closes its "deferral outside ADR-0093" limit. ADR-0139 request contexts take their context by value, and may carry an actor-reach `Held`. The ADR-0093 hold mechanic and ADR-0231 §6 manual rows are unchanged.
+- This extends ADR-0109 and closes its "deferral outside ADR-0093" limit. ADR-0139 request contexts take their context by value, may carry an actor-reach `Held`, and now also key an actor's staged work (§9). ADR-0093's completion changes shape: `TaskDone<O>` carries the output alone, and its reply surface moves to the `Held` the actor keeps. The ADR-0231 §6 manual rows are unchanged.
 - Native work is #6959, wasm work is #6960, and #6961 moves the handlers that are manual for no deferral reason. #6955's remaining half, renaming the handler classes and giving a missing return type a meaning, is independent of this ADR.
 
 ## Alternatives considered
@@ -164,6 +190,10 @@ held.answer(ctx, &WatchHeadResult { .. });
 - **A typed manual ctx** (`NativeCtx<'_, Self, Manual<R>>`). Rejected: manual means the handler answers by hand. Typing its ctx blurs the one class kept for untyped replies, and the deferred sites are not manual in kind; they answer exactly once, later.
 - **Mint `Pending<R>` from `send_with_context` and answer by the peer-reply handler's return.** This covers only the peer-reply sites. Notices, long-polls, sans-io cores, and frame loops answer from handlers that do not handle the peer's reply.
 - **A separate held table with its own verbs** (`send_holding` / `take_held`, with or without a `with_context` modifier). This splits one request's state across two tables and two takes, so a handler could claim one half and strand the other. The debt belongs in the context that already carries the request's state.
+- **Convert the debt into the staged work** (`continue_from`, `IntoDeferredReply`). This was the first design. The conversion drops `R`, so a staged debt cannot be answered with `unanswered()` at close, and a completion that answers several kinds re-selects the kind by hand.
+- **Move the `Held`'s ledger entry into the staged work in place.** This keeps `R`, but it ties a reply obligation to one piece of work: a completion that chains further work, or several requests waiting on one work, need the entry to move again or split.
+- **A reply-kind parameter on `TaskDone<O, C, R>`.** One completion can answer different kinds by context variant (`aether-component`'s load and replace publication), which one `R` cannot express.
+- **Take the context from the completion value** (`done.take_context::<C>()`). This removes the generic, but it is a second context system beside the request-context table, and the §7 guard does not cover it.
 - **Actor close settles held debts silently.** The caller's chain ends, but it never receives an `R`: its reply handler never runs, and a context it stored with `send_with_context` stays in its table until it too closes, stranding any `Held` inside it. Silence also differed from what some actors sent before (window answered its in-flight commands with a shutdown `Err`).
 - **Each actor answers its own debts in `unwire`.** This keeps a typed failure, but every actor has to remember it; tcp already abandons its connects silently. The engine owns the ledger, so the engine answers.
 - **A generic `RequestAbandoned` notice to the caller.** The caller's handler for `R` would not run, so its context would still be stranded unless the framework intercepted the notice. A typed `R` reaches the handler the caller already has.
