@@ -211,6 +211,15 @@ wake, and the wait returns when the roots settle. Boot the actor through
   `SpawnBuilder::finish_wire_settled()` in place of `finish()`. Each returns
   once every mail `wire` sent, and everything it caused, has been handled,
   and at once for a `wire` that sends nothing.
+- **A detached effect that lands on a pooled actor** — a `MonitorNotice` from a
+  close tail, a handler-staged birth's `wire` send, a `send_detached` send, a
+  child's `after_init` mail.
+  No root the test holds covers it, so the observing actor signals a test
+  channel and the test waits with `testing::await_signal`, which names the
+  wait as the signal it is rather than as settlement. A FIFO tracked barrier
+  (a tracked send of the same kind to the same inbox) fits only mail already
+  in the inbox: an actor's own sends flush onto the pool, so a barrier the
+  test delivers directly can overtake them.
 - **An actor's close taking effect.** A pooled instanced actor's route drop
   lands at the registry owner after its closing chain settles, so neither
   settlement nor its `MonitorNotice` proves the route is gone. Call

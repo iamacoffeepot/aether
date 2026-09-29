@@ -27,18 +27,22 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use aether_actor::{ErasedActorRef, OutboundReply};
+use aether_actor::OutboundReply;
 use aether_data::{Kind, Source, SourceAddr};
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::mail::MailRef;
+use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::registry::{DispatchParts, InboxHandler, OwnedDispatch};
 use aether_substrate::runtime::lifecycle::{FatalAbortRecord, PanicAborter, RecordingAborter};
-use aether_substrate::testing::{TestChassis, bare_substrate, registered_ref, unrouted_binding};
+use aether_substrate::testing::{
+    TestChassis, await_settled, await_signal, bare_substrate, registered_ref, unrouted_binding,
+};
 use aether_substrate::{
     Addressable, BootError, Builder, Dispatch, Erased, Manual, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis,
-    Registry,
+    ReplyTarget,
 };
+use crossbeam_channel::Sender;
 use std::thread;
 
 /// Structured-shape kind via the derive — exercises the
@@ -59,15 +63,19 @@ struct Ping {
 struct MacroProbeCap {
     greet_total: Arc<AtomicU32>,
     ping_total: Arc<AtomicU32>,
+    greeted: Sender<()>,
 }
 
 /// Per-cap config — caps without a domain-specific config type
 /// would write `()`, but here we thread shared atomic counters in
-/// so the test can observe each handler's effect.
+/// so the test can observe each handler's effect, and a channel the
+/// cap signals on each `Greet`, for a test waiting on a detached send
+/// no root it holds covers.
 #[derive(Clone)]
 struct ProbeParams {
     greet_total: Arc<AtomicU32>,
     ping_total: Arc<AtomicU32>,
+    greeted: Sender<()>,
 }
 
 #[aether_actor::actor(root)]
@@ -79,13 +87,14 @@ impl NativeActor for MacroProbeCap {
     const NAMESPACE: &'static str = "test.macro_native_actor.probe";
 
     fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { greet_total: params.greet_total, ping_total: params.ping_total })
+        Ok(Self { greet_total: params.greet_total, ping_total: params.ping_total, greeted: params.greeted })
     }
 
     /// Handles structured-shape `Greet` mail.
     #[aether_actor::handler::single]
     fn on_greet(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) {
         self.greet_total.fetch_add(mail.tag, AtomicOrdering::SeqCst);
+        let _ = self.greeted.send(());
     }
 
     /// Handles cast-shape `Ping` mail.
@@ -95,42 +104,25 @@ impl NativeActor for MacroProbeCap {
     }
 }
 
-fn push_envelope<K: Kind>(registry: &Registry, recipient: ErasedActorRef, payload: &K) {
-    use aether_substrate::mail::registry::MailboxEntry;
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(recipient).expect("entry exists") else {
-        panic!("expected mailbox entry under {recipient:?}");
-    };
-    let bytes = payload.encode_into_bytes();
-    handler.enqueue(OwnedDispatch::disarmed(DispatchParts::new(<K as Kind>::ID, MailRef::from(bytes)), recipient));
-}
-
-fn wait_for(target: u32, counter: &AtomicU32, budget: Duration) -> bool {
-    let deadline = Instant::now() + budget;
-    while counter.load(AtomicOrdering::SeqCst) < target && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    counter.load(AtomicOrdering::SeqCst) >= target
-}
-
 #[test]
 fn macro_emitted_cap_routes_structured_kind_through_dispatch() {
     let (registry, mailer) = bare_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
+    let (greeted, _) = crossbeam_channel::unbounded();
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<MacroProbeCap>(ProbeParams {
             greet_total: Arc::clone(&greet_total),
             ping_total: Arc::clone(&ping_total),
+            greeted,
         })
         .build_passive()
         .expect("macro-emitted cap boots");
 
-    push_envelope(&registry, chassis.actor_ref::<MacroProbeCap>().erase(), &Greet { tag: 7 });
-    assert!(
-        wait_for(7, &greet_total, Duration::from_millis(500)),
-        "macro dispatcher should route Greet → on_greet within budget"
-    );
+    let (_, settled) = chassis.send_tracked(chassis.actor_ref::<MacroProbeCap>(), &Greet { tag: 7 }, None);
+    await_settled(&settled, "test.macro_native_actor.greet");
+    assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 7, "macro dispatcher should route Greet → on_greet");
     assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
 
     drop(chassis);
@@ -150,11 +142,13 @@ fn seize_and_run_dispatches_seed_in_place() {
     let (registry, mailer) = bare_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
+    let (greeted, _) = crossbeam_channel::unbounded();
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<MacroProbeCap>(ProbeParams {
             greet_total: Arc::clone(&greet_total),
             ping_total: Arc::clone(&ping_total),
+            greeted,
         })
         .build_passive()
         .expect("macro-emitted cap boots");
@@ -200,20 +194,20 @@ fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
     let (registry, mailer) = bare_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
+    let (greeted, _) = crossbeam_channel::unbounded();
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<MacroProbeCap>(ProbeParams {
             greet_total: Arc::clone(&greet_total),
             ping_total: Arc::clone(&ping_total),
+            greeted,
         })
         .build_passive()
         .expect("macro-emitted cap boots");
 
-    push_envelope(&registry, chassis.actor_ref::<MacroProbeCap>().erase(), &Ping { seq: 42 });
-    assert!(
-        wait_for(42, &ping_total, Duration::from_millis(500)),
-        "macro dispatcher should route Ping → on_ping within budget"
-    );
+    let (_, settled) = chassis.send_tracked(chassis.actor_ref::<MacroProbeCap>(), &Ping { seq: 42 }, None);
+    await_settled(&settled, "test.macro_native_actor.ping");
+    assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 42, "macro dispatcher should route Ping → on_ping");
     assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 0);
 
     drop(chassis);
@@ -239,12 +233,13 @@ fn macro_routes_task_completions_by_output_type() {
     // the ledger and pushes a `TaskCompletionWake` back to this actor's
     // own mailbox; the chassis redelivers those wakes through the macro's
     // single completion arm, which routes each to its output-typed
-    // handler.
-    push_envelope(&registry, chassis.actor_ref::<TaskRouteCap>().erase(), &KickA { seed: 7 });
-    push_envelope(&registry, chassis.actor_ref::<TaskRouteCap>().erase(), &KickB { seed: 9 });
-
-    assert!(wait_for(1, &obs.a_calls, Duration::from_secs(2)), "the ResultA completion routed to on_result_a");
-    assert!(wait_for(1, &obs.b_calls, Duration::from_secs(2)), "the ResultB completion routed to on_result_b");
+    // handler. The dispatch's hold keeps each root open until its
+    // completion resolves.
+    let cap = chassis.actor_ref::<TaskRouteCap>();
+    let (_, kicked_a) = chassis.send_tracked(cap, &KickA { seed: 7 }, None);
+    let (_, kicked_b) = chassis.send_tracked(cap, &KickB { seed: 9 }, None);
+    await_settled(&kicked_a, "test.macro_native_actor.kick_a");
+    await_settled(&kicked_b, "test.macro_native_actor.kick_b");
 
     // Each completion landed on the correct handler with the correct
     // payload — output-type routing, not a kind id.
@@ -278,7 +273,8 @@ fn macro_pending_request_borrow_completion_replies_once() {
     let obs = DeferredObs::new();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller = registered_ref(&registry, "test.macro_native_actor.deferred_caller", forward_to(reply_tx));
+    let caller =
+        registered_ref(&registry, "test.macro_native_actor.deferred_caller", forward_to(reply_tx, Arc::clone(&mailer)));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<DeferredReplyCap>(obs.clone())
@@ -286,16 +282,16 @@ fn macro_pending_request_borrow_completion_replies_once() {
         .expect("deferred-reply cap boots");
 
     // The inbound names the caller as its reply target, so the deferred
-    // reply routes back there.
-    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller.id()), 55);
-    push_envelope_replying_to(
-        &registry,
-        chassis.actor_ref::<DeferredReplyCap>().erase(),
+    // reply routes back there. The caller finishes the reply only after
+    // forwarding it, so the root settles once the reply is readable.
+    let (_, settled) = chassis.send_tracked(
+        chassis.actor_ref::<DeferredReplyCap>(),
         &KickP { seed: 21 },
-        caller_reply_to,
+        Some(ReplyTarget::Actor { to: caller, correlation: 55 }),
     );
+    await_settled(&settled, "test.macro_native_actor.kick_p");
 
-    let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the deferred reply lands on the caller");
+    let reply = reply_rx.try_recv().expect("the deferred reply lands on the caller");
     assert_eq!(reply.kind, <EchoReply as Kind>::ID, "the completion's `-> EchoReply` return routed back as the reply");
     let echoed = EchoReply::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
     assert_eq!(echoed.value, 21, "resolve_value sent the value the completion handler returned");
@@ -304,10 +300,7 @@ fn macro_pending_request_borrow_completion_replies_once() {
 
     // Exactly one reply settles — the macro must not also drop the
     // TaskDone (which would re-release) or double-send.
-    assert!(
-        reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "exactly one reply settles for the deferred request"
-    );
+    assert!(reply_rx.try_recv().is_err(), "exactly one reply settles for the deferred request");
 
     drop(chassis);
 }
@@ -322,32 +315,33 @@ fn macro_borrow_task_no_reply_releases_without_replying() {
     let obs = DeferredObs::new();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller = registered_ref(&registry, "test.macro_native_actor.deferred_silent_caller", forward_to(reply_tx));
+    let caller = registered_ref(
+        &registry,
+        "test.macro_native_actor.deferred_silent_caller",
+        forward_to(reply_tx, Arc::clone(&mailer)),
+    );
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<DeferredReplyCap>(obs.clone())
         .build_passive()
         .expect("deferred-reply cap boots");
 
-    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller.id()), 9);
-    push_envelope_replying_to(
-        &registry,
-        chassis.actor_ref::<DeferredReplyCap>().erase(),
+    let (_, settled) = chassis.send_tracked(
+        chassis.actor_ref::<DeferredReplyCap>(),
         &KickS { seed: 88 },
-        caller_reply_to,
+        Some(ReplyTarget::Actor { to: caller, correlation: 9 }),
     );
+    await_settled(&settled, "test.macro_native_actor.kick_s");
 
-    assert!(
-        wait_for(1, &obs.silent_calls, Duration::from_secs(2)),
+    assert_eq!(
+        obs.silent_calls.load(AtomicOrdering::SeqCst),
+        1,
         "the no-reply completion ran (release_no_reply, no lost-reply panic)"
     );
     assert_eq!(obs.silent_value.load(AtomicOrdering::SeqCst), 88, "the no-reply completion saw its own worker output");
 
     // No reply was sent — release_no_reply discharges without replying.
-    assert!(
-        reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "a `&TaskDone -> ()` completion sends nothing back to the caller"
-    );
+    assert!(reply_rx.try_recv().is_err(), "a `&TaskDone -> ()` completion sends nothing back to the caller");
 
     drop(chassis);
 }
@@ -368,12 +362,7 @@ fn macro_pending_worker_panic_fails_fast() {
         .build_passive()
         .expect("deferred-reply cap boots");
 
-    push_envelope_replying_to(
-        &registry,
-        chassis.actor_ref::<DeferredReplyCap>().erase(),
-        &KickPanic { seed: 4217 },
-        Source::NONE,
-    );
+    let _ = chassis.send_tracked(chassis.actor_ref::<DeferredReplyCap>(), &KickPanic { seed: 4217 }, None);
 
     let _tripped = record.tripwire().recv_timeout(Duration::from_secs(2));
     let reason = record.reason().expect("the worker panic reached the chassis aborter");
@@ -410,21 +399,28 @@ fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
     let (registry, mailer) = bare_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
+    let (greeted, _) = crossbeam_channel::unbounded();
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<MacroProbeCap>(ProbeParams {
             greet_total: Arc::clone(&greet_total),
             ping_total: Arc::clone(&ping_total),
+            greeted,
         })
         .build_passive()
         .expect("macro-emitted cap boots");
 
-    push_envelope(&registry, chassis.actor_ref::<MacroProbeCap>().erase(), &Unknown { payload: 99 });
-
-    // Settle: give the dispatcher time to observe + drop the envelope.
-    // The macro-emitted dispatch returns None; the chassis-side
-    // dispatcher logs a warn but doesn't increment any handler counter.
-    thread::sleep(Duration::from_millis(50));
+    // `Unknown` is outside the cap's handled kinds, so it enters through
+    // the boundary door a wire `Call` takes. The macro-emitted dispatch
+    // returns None; the chassis-side dispatcher logs a warn but doesn't
+    // increment any handler counter, and the root settles either way.
+    let path =
+        chassis.actor_path(chassis.actor_ref::<MacroProbeCap>().erase()).expect("the composed cap keeps its path");
+    let unknown = chassis
+        .accept_call(&path, <Unknown as Kind>::ID, Unknown { payload: 99 }.encode_into_bytes())
+        .expect("the composed cap's path proves live");
+    let (_, settled) = chassis.deliver_tracked(unknown, None);
+    await_settled(&settled, "test.macro_native_actor.unknown");
     assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 0);
     assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
 
@@ -982,19 +978,25 @@ fn a_wire_hook_that_names_its_actor_receives_the_typed_ctx() {
     let (registry, mailer) = bare_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
+    let (greeted, greeted_rx) = crossbeam_channel::unbounded();
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<MacroProbeCap>(ProbeParams {
             greet_total: Arc::clone(&greet_total),
             ping_total: Arc::clone(&ping_total),
+            greeted,
         })
         .with_actor::<TypedWireCap>(())
         .build_passive()
         .expect("an actor with typed lifecycle hooks boots");
 
-    assert!(
-        wait_for(13, &greet_total, Duration::from_millis(500)),
-        "the typed wire hook's flat send should reach its declared dependency within budget"
+    // The wire hook's detached send flushes onto the pool outside any root
+    // the test holds, so the probe's Greet signal is the event to wait on.
+    await_signal(&greeted_rx, "test.macro_native_actor.typed_wire_greet");
+    assert_eq!(
+        greet_total.load(AtomicOrdering::SeqCst),
+        13,
+        "the typed wire hook's flat send should reach its declared dependency"
     );
 
     drop(chassis);
@@ -1047,20 +1049,28 @@ fn an_omitted_ctx_actor_is_typed_by_self_on_the_native_path() {
     let (registry, mailer) = bare_substrate();
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
+    let (greeted, greeted_rx) = crossbeam_channel::unbounded();
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<MacroProbeCap>(ProbeParams {
             greet_total: Arc::clone(&greet_total),
             ping_total: Arc::clone(&ping_total),
+            greeted,
         })
         .with_actor::<OmittedCtxCap>(())
         .build_passive()
         .expect("an actor whose ctxs omit their actor boots");
 
-    push_envelope(&registry, chassis.actor_ref::<OmittedCtxCap>().erase(), &Ping { seq: 1 });
-
-    assert!(
-        wait_for(36, &greet_total, Duration::from_millis(500)),
+    // Both Greets are detached sends — one from the wire hook, one from the
+    // Ping handler — so neither joins the Ping's root; each is observed by
+    // the probe's Greet signal instead.
+    let (_, settled) = chassis.send_tracked(chassis.actor_ref::<OmittedCtxCap>(), &Ping { seq: 1 }, None);
+    await_settled(&settled, "test.macro_native_actor.omitted_ctx_ping");
+    await_signal(&greeted_rx, "test.macro_native_actor.omitted_ctx_greet");
+    await_signal(&greeted_rx, "test.macro_native_actor.omitted_ctx_greet");
+    assert_eq!(
+        greet_total.load(AtomicOrdering::SeqCst),
+        36,
         "the wire hook's and the handler's typed flat sends should both reach the declared dependency"
     );
 
@@ -1144,29 +1154,18 @@ fn instanced_root_takes_placement_without_claiming_an_address_anchor() {
 // a registered caller inbox.
 
 /// Forward every dispatched envelope onto `tx` so a test can observe the
-/// reply (or its absence) on a registered caller mailbox.
-fn forward_to(tx: mpsc::Sender<OwnedDispatch>) -> Arc<dyn InboxHandler> {
+/// reply (or its absence) on a registered caller mailbox, then finish it on
+/// `mailer`: the chain the reply joined settles only once the test can read
+/// it.
+fn forward_to(tx: mpsc::Sender<OwnedDispatch>, mailer: Arc<Mailer>) -> Arc<dyn InboxHandler> {
     Arc::new(move |dispatch: OwnedDispatch| {
         // ADR-0094: terminal test consumer — discharge before the value is
-        // forwarded for the test to observe.
+        // forwarded for the test to observe, and finish it after.
+        let (mail_id, root) = (dispatch.mail_id, dispatch.root);
         dispatch.discharge();
         let _ = tx.send(dispatch);
+        mailer.record_finished(mail_id, root);
     })
-}
-
-/// Like [`push_envelope`] but stamps an explicit `reply_to` [`Source`] so
-/// the handler's deferred reply has somewhere to route — a registered
-/// caller inbox the test reads back.
-fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: ErasedActorRef, payload: &K, reply_to: Source) {
-    use aether_substrate::mail::registry::MailboxEntry;
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(recipient).expect("entry exists") else {
-        panic!("expected mailbox entry under {recipient:?}");
-    };
-    let bytes = payload.encode_into_bytes();
-    handler.enqueue(OwnedDispatch::disarmed(
-        DispatchParts { sender: reply_to, ..DispatchParts::new(<K as Kind>::ID, MailRef::from(bytes)) },
-        recipient,
-    ));
 }
 
 /// Trigger for the reply path: makes the cap dispatch an `EchoReply`
@@ -1337,7 +1336,8 @@ fn manual_handler_replies_through_ctx() {
     let (registry, mailer) = bare_substrate();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller = registered_ref(&registry, "test.macro_native_actor.manual_caller", forward_to(reply_tx));
+    let caller =
+        registered_ref(&registry, "test.macro_native_actor.manual_caller", forward_to(reply_tx, Arc::clone(&mailer)));
 
     let binding = unrouted_binding(&mailer);
     let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller.id()), 91);

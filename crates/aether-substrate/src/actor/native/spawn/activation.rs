@@ -652,9 +652,10 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
         let seize_cell = SeizeCell::default();
         let weak_sender = Arc::downgrade(&strong_sender);
         let handler_wake = Arc::clone(&wake_slot);
+        let handler_mailer = Arc::downgrade(spawner.mailer());
         let entry = MailboxEntry::Inbox {
             handler: Arc::new(move |dispatch: OwnedDispatch| {
-                match relay_or_transfer(dispatch, &weak_sender, &handler_wake) {
+                match relay_or_transfer(dispatch, &weak_sender, &handler_wake, &handler_mailer) {
                     RelayOutcome::Delivered => {}
                     RelayOutcome::SenderGone { kind } | RelayOutcome::ReceiverGone { kind } => {
                         tracing::warn!(target: "aether_substrate::spawn", kind = %kind, "activating actor discarded mail");

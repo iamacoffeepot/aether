@@ -6,16 +6,12 @@ use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
-use crate::mail::registry;
-use crate::testing::{TestChassis, bare_substrate};
+use crate::testing::{TestChassis, await_signal, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, HandlesKind};
+use crossbeam_channel::Sender;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::thread;
 use std::time::Duration;
-use std::time::Instant;
 
 /// Issue 607 Phase 4a verify: `ctx.shutdown()` from inside an
 /// instanced actor's handler triggers the drain → unwire → exit
@@ -27,7 +23,6 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
     use crate::actor::native::spawn::{SpawnError, Subname};
     use crate::mail::registry::MailboxEntry;
     use aether_actor::HandlesKind;
-    use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
     pod_kind!(Quit { tag: u32 }, "test.shutdown.quit", 0xE0E1_E2E3_E4E5_E6E7);
@@ -40,50 +35,35 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let id = chassis
+    let closer = chassis
         .spawn_actor::<Closer>(Subname::Counter, (), Arc::clone(&close_observed))
-        .finish_commit()
+        .finish()
         .expect("spawn instanced actor");
 
-    // Push a Quit envelope at the spawned mailbox via the
-    // registered sink handler. The handler's `ctx.shutdown()`
-    // flips the dispatcher's flag; after the handler returns the
-    // trampoline drains, runs `unwire`, marks Dead, tombstones.
-    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(id).expect("sink registered") else {
-        panic!("expected mailbox entry for instanced actor");
-    };
-    let bytes = (Quit { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(<Quit as Kind>::ID, &bytes, 1));
-
-    // Wait for unwire to run + the registry slot to flip Dead.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while close_observed.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    // The handler's `ctx.shutdown()` flips the dispatcher's flag; after
+    // the handler returns the trampoline drains, runs `unwire`, marks
+    // Dead, tombstones, and the close tail stages the route's retirement
+    // through the registry owner. `await_closed` returns once that
+    // route drop has applied.
+    let _ = chassis.send_tracked(closer, &Quit { tag: 1 }, None);
+    chassis.await_closed(closer.erase());
     assert_eq!(
         close_observed.load(AtomicOrdering::SeqCst),
         1,
         "unwire fired exactly once after the dispatcher drained"
     );
-    // Spin until the slot transitions Dead — the dispatcher
-    // thread runs `mark_dead` after `unwire`, so there's a
-    // small window between the close-observed bump above and the
-    // registry update.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().is_live_at(id) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(!chassis.actor_registry().is_live_at(id), "registry slot should transition Live → Dead after unwire runs");
-    assert!(chassis.actor_registry().is_tombstoned(id), "tombstone insertion forbids reuse of the retired full name");
-
-    // The close tail stages the route's retirement through the registry
-    // owner, so it lands at the owner's next apply: the route reads
-    // `Dropped`, and route readers stop proving the closed actor.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while !matches!(registry.entry_at(id), Some(MailboxEntry::Dropped)) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(matches!(registry.entry_at(id), Some(MailboxEntry::Dropped)), "a closed actor's route retires to Dropped");
+    assert!(
+        !chassis.actor_registry().is_live_at(closer.id()),
+        "registry slot should transition Live → Dead after unwire runs"
+    );
+    assert!(
+        chassis.actor_registry().is_tombstoned(closer.id()),
+        "tombstone insertion forbids reuse of the retired full name"
+    );
+    assert!(
+        matches!(registry.entry_at(closer.id()), Some(MailboxEntry::Dropped)),
+        "a closed actor's route retires to Dropped"
+    );
 
     // Spawning again under the same `Subname::Counter` would
     // increment the per-Spawner counter (so it'd target a fresh
@@ -230,7 +210,6 @@ fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
 #[test]
 fn teardown_reports_the_handler_panic_that_aborted_the_chassis() {
     use crate::actor::native::spawn::Subname;
-    use crate::mail::registry::MailboxEntry;
     use crate::runtime::lifecycle::FatalAborter;
     use aether_data::Kind;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -278,41 +257,32 @@ fn teardown_reports_the_handler_panic_that_aborted_the_chassis() {
         }
     }
 
-    /// A `PanicAborter` that flags the abort before panicking, so the
+    /// A `PanicAborter` that signals the abort before panicking, so the
     /// test observes the escalation without racing it: the recorder runs
-    /// ahead of the aborter it wraps, so a set flag means the reason is
-    /// already on the chassis's record.
+    /// ahead of the aborter it wraps, so a received signal means the
+    /// reason is already on the chassis's record.
     struct FlaggingAborter {
-        aborted: Arc<AtomicBool>,
+        aborted: Sender<()>,
     }
 
     impl FatalAborter for FlaggingAborter {
         fn abort(&self, reason: String) -> ! {
-            self.aborted.store(true, Ordering::SeqCst);
+            let _ = self.aborted.send(());
             panic!("aether-substrate fatal abort: {reason}");
         }
     }
 
     let (registry, mailer) = bare_substrate();
-    let aborted = Arc::new(AtomicBool::new(false));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
-        .with_aborter(Arc::new(FlaggingAborter { aborted: Arc::clone(&aborted) }))
+    let (aborted, aborted_rx) = crossbeam_channel::unbounded();
+    let chassis = Builder::<TestChassis>::new(registry, mailer)
+        .with_aborter(Arc::new(FlaggingAborter { aborted }))
         .with_teardown_budget(Duration::from_secs(2))
         .build_passive()
         .expect("empty chassis boots");
 
-    let id = chassis.spawn_actor::<Exploder>(Subname::Named("boom"), (), ()).finish_commit().expect("spawn exploder");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(id).expect("exploder inbox registered") else {
-        panic!("expected spawned actor inbox");
-    };
-    let boom = Boom { tag: 1 }.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(Boom::ID, &boom, 1));
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !aborted.load(Ordering::SeqCst) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(aborted.load(Ordering::SeqCst), "the panicking handler must escalate through the chassis aborter");
+    let exploder = chassis.spawn_actor::<Exploder>(Subname::Named("boom"), (), ()).finish().expect("spawn exploder");
+    let _ = chassis.send_tracked(exploder, &Boom { tag: 1 }, None);
+    await_signal(&aborted_rx, "test.abort_attribution.aborted");
 
     let teardown = catch_unwind(AssertUnwindSafe(|| drop(chassis)));
     let reported = *teardown

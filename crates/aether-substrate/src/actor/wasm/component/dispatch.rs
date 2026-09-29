@@ -27,14 +27,18 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 
 impl Component {
-    /// Run the guest's `wire` export, once. `root` is the `wire` ctx's
-    /// in-flight root: a chainless birth's wire root (ADR-0244), which every
-    /// send the guest makes from `wire` inherits, or `None` for a
-    /// handler-staged birth, whose guest sends mint their own roots. It is
-    /// published on the in-flight cells for the call and cleared after, as
-    /// [`Self::deliver`] does with an inbound's lineage.
+    /// Run the guest's `wire` hook, if it exports one. The trampoline runs it
+    /// at birth and again on a guest it reinstates after a republish aborts
+    /// (ADR-0241 §7), since that guest's `unwire` ran at prepare.
+    ///
+    /// `root` is the `wire` ctx's in-flight root: a chainless birth's wire
+    /// root (ADR-0244), which every send the guest makes from `wire`
+    /// inherits, or `None` for a handler-staged birth or a reinstatement,
+    /// whose guest sends mint their own roots. It is published on the
+    /// in-flight cells for the call and cleared after, as [`Self::deliver`]
+    /// does with an inbound's lineage.
     pub fn wire(&mut self, root: Option<MailId>) -> wasmtime::Result<()> {
-        let Some(wire_fn) = self.wire.take() else {
+        let Some(wire_fn) = self.wire.clone() else {
             return Ok(());
         };
         let mailbox_id = self.self_mailbox_id;
