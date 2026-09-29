@@ -302,9 +302,14 @@ impl<C: Chassis> PassiveChassis<C> {
     /// - **Not reserved.** Claims `A::NAMESPACE` fresh and runs the two-ack
     ///   activation handshake against the ADR-0165 registry owner, below.
     ///
-    /// Either way it returns the slot plus its [`MailboxWakeSlot`], so the
-    /// embedder installs whatever wake nudges its pump cadence (or none — the
-    /// harness busy-polls its drain).
+    /// Either way it returns the slot plus its [`MailboxWakeSlot`], and the
+    /// embedder installs the wake its pump waits on:
+    /// [`install_pump_wake`](crate::chassis::settlement::install_pump_wake)
+    /// for a wait that only drains, as the test-support
+    /// `testing::PumpedDriver` does, or a hook that also turns the embedder's
+    /// own loop, as the desktop driver and the harness chassis binary install.
+    /// A slot with no wake drains only when its owner calls
+    /// [`PumpedSlot::drain_available`], so no wait on it can be woken by mail.
     ///
     /// The fresh claim runs post-seal by construction: the build seals
     /// immediately before handing out the `PassiveChassis` this is called on,

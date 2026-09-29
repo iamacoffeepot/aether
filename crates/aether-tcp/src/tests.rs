@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::{
     BindListener, BindListenerResult, BindListenerSelf, Connect, ConnectResult, ListListeners, ListListenersResult,
@@ -17,18 +17,18 @@ use super::{
 use aether_actor::{ActorPath, Addressable, ErasedActorRef, ProtocolPath, actor};
 use aether_data::{ErasedActorPath, Kind, LoadName, SessionToken, Uuid};
 use aether_kinds::descriptors;
-use aether_substrate::ReplyTarget;
 use aether_substrate::actor::native::spawn::Subname;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, PumpedSlot, SpawnOutcome, TaskDone};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::mail::MailId;
+use aether_substrate::config::SettlementConfig;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
-use aether_substrate::mail::registry::{DispatchParts, OwnedDispatch};
-use aether_substrate::mail::registry::{MailboxEntry, Registry};
-use aether_substrate::mail::{MailRef, Source, SourceAddr};
-use aether_substrate::testing::{TestChassis, boot_authority, registered_ref, withdraw_ref};
+use aether_substrate::mail::registry::{OwnedDispatch, Registry};
+use aether_substrate::testing::{
+    PumpedDriver, TestChassis, await_settled, boot_authority, boot_bare_test_chassis, registered_ref, withdraw_ref,
+};
+use aether_substrate::{ChassisTarget, ReplyTarget};
 
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());
@@ -42,8 +42,8 @@ fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>
 
 /// Boot a fresh substrate with `TcpCapability` registered as a
 /// passive actor and return the pieces every test in this
-/// module reaches for: the kind registry (for mailbox lookup
-/// in [`drive_and_decode`]), the egress receiver (for reply
+/// module reaches for: the kind registry (for route collisions and
+/// address resolution), the egress receiver (for reply
 /// decode), and the [`PassiveChassis`] (held by the caller so
 /// the cap's actor thread stays alive for the test body).
 ///
@@ -68,61 +68,32 @@ fn boot_tcp_substrate_with(
     (registry, mailer, rx, chassis)
 }
 
-/// Boot the same substrate as [`boot_tcp_substrate`] but with `TcpCapability`
-/// as an **externally-pumped** actor (ADR-0161) instead of a pool-dispatched
-/// passive: nothing on its inbox is dispatched until the caller asks for it
-/// via [`PumpedSlot::drain_available`]. That is the hold point
-/// [`duplicate_unbind_preserves_the_first_parked_reply`] needs — it stages two
-/// mails on the cap before either turn runs, which no pool-dispatched boot can
-/// promise.
-///
-/// The slot is `!Send` and its close is the caller's (the chassis never learns
-/// about a post-seal pumped actor), so the test drives it on its own thread and
-/// calls [`PumpedSlot::shutdown`] before the chassis drops.
-fn boot_pumped_tcp_substrate()
--> (Arc<Registry>, mpsc::Receiver<EgressEvent>, PassiveChassis<TestChassis>, PumpedSlot<TcpCapability>) {
-    let (registry, mailer, rx) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .build_passive()
-        .expect("driverless chassis boots");
-    let (cap, _wake) = chassis.boot_pumped_actor::<TcpCapability>((), ()).expect("TcpCapability boots pumped");
-    (registry, rx, chassis, cap)
+fn session_reply() -> ReplyTarget {
+    ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0xfeed)), correlation: 0 }
 }
 
-/// Pump `cap` until the next outbound reply lands on `rx`, bounded by the same
-/// two-second deadline [`drive_and_decode`] uses. A pumped cap only advances
-/// while this loop runs, so the pump is what carries a parked reply's own
-/// chain — the `MonitorNotice` an unbind waits on arrives as cap mail like any
-/// other.
-fn pump_for_reply(cap: &mut PumpedSlot<TcpCapability>, rx: &mpsc::Receiver<EgressEvent>, what: &str) -> EgressEvent {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        cap.drain_available();
-        if let Ok(event) = rx.try_recv() {
-            return event;
+/// Push `mail` to `to` as a tracked chassis root and wait for its whole
+/// chain to settle, so every reply the chain sends is already on egress.
+fn send_and_settle<K: Kind, I>(
+    chassis: &PassiveChassis<TestChassis>,
+    to: impl ChassisTarget<K, I>,
+    mail: &K,
+    reply: Option<ReplyTarget>,
+) {
+    let (_, settled) = chassis.send_tracked(to, mail, reply);
+    await_settled(&settled, K::NAME);
+}
+
+/// Take the next egress event, which a settled chain has already sent, as a
+/// session reply of kind `R`: its session, its correlation, and the reply.
+fn next_reply<R: Kind>(rx: &mpsc::Receiver<EgressEvent>, what: &str) -> (SessionToken, u64, R) {
+    match rx.try_recv() {
+        Ok(EgressEvent::ToSession { session, kind_name, payload, correlation_id, .. }) => {
+            assert_eq!(kind_name, R::NAME, "{what} is not a {}", R::NAME);
+            (session, correlation_id, R::decode_from_bytes(&payload).expect("decode reply"))
         }
-        assert!(Instant::now() < deadline, "{what} did not arrive within the deadline");
-        thread::sleep(Duration::from_millis(5));
+        other => panic!("expected {what} as a session reply, got {other:?}"),
     }
-}
-
-fn session_reply() -> Source {
-    Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xfeed))))
-}
-
-fn enqueue<K: Kind>(registry: &Arc<Registry>, target: ErasedActorRef, mail: &K, source: Source, root: Option<MailId>) {
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("cap entry") else {
-        panic!("expected mailbox entry");
-    };
-    handler.enqueue(OwnedDispatch::disarmed(
-        DispatchParts {
-            sender: source,
-            mail_id: root,
-            root,
-            ..DispatchParts::new(K::ID, MailRef::from(mail.encode_into_bytes()))
-        },
-        target,
-    ));
 }
 
 #[derive(Debug)]
@@ -171,9 +142,10 @@ const NESTED_CONSUMER_KEY: &str = "probe";
 
 /// A root singleton whose `wire` stages one [`SessionConsumer`] beneath
 /// itself at [`NESTED_CONSUMER_KEY`], handing it the capture channel, and
-/// keeps the receipt's name until the birth is decided.
+/// signals its birth channel once the registry owner has decided the birth.
 struct ConsumerHost {
     captures: Option<mpsc::Sender<CapturedSessionMail>>,
+    born: mpsc::Sender<()>,
     staged: Option<ErasedActorPath>,
 }
 
@@ -181,14 +153,14 @@ struct ConsumerHost {
 impl NativeActor for ConsumerHost {
     const NAMESPACE: &'static str = "test.tcp.consumer_host";
     type Config = ();
-    type Params = mpsc::Sender<CapturedSessionMail>;
+    type Params = (mpsc::Sender<CapturedSessionMail>, mpsc::Sender<()>);
 
     fn init(
         (): (),
-        captures: mpsc::Sender<CapturedSessionMail>,
+        (captures, born): (mpsc::Sender<CapturedSessionMail>, mpsc::Sender<()>),
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<Self, BootError> {
-        Ok(Self { captures: Some(captures), staged: None })
+        Ok(Self { captures: Some(captures), born, staged: None })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
@@ -204,6 +176,7 @@ impl NativeActor for ConsumerHost {
     fn on_consumer_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<SessionConsumer>>) {
         if self.staged.as_ref() == Some(&done.into_output().canonical_name) {
             self.staged = None;
+            let _ = self.born.send(());
         }
     }
 }
@@ -283,37 +256,16 @@ fn register_route_collision(registry: &Registry, canonical_name: &str) -> Erased
     registered_ref(registry, canonical_name, Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()))
 }
 
-/// Push an encoded mail (via the kind's `encode_into_bytes`) at
-/// the cap's mailbox via the registered sink handler, then wait
-/// for the next outbound reply on `rx` and decode as `R`.
-fn drive_and_decode<K, R>(
-    registry: &Arc<Registry>,
+/// Send `mail` to `to` with the session reply target, wait for its chain to
+/// settle, and decode the reply it sent as `R`.
+fn drive_and_decode<K: Kind, R: Kind, I>(
+    chassis: &PassiveChassis<TestChassis>,
     rx: &mpsc::Receiver<EgressEvent>,
-    target: ErasedActorRef,
+    to: impl ChassisTarget<K, I>,
     mail: &K,
-) -> R
-where
-    K: Kind,
-    R: Kind,
-{
-    enqueue(registry, target, mail, session_reply(), None);
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let frame = loop {
-        if let Ok(f) = rx.try_recv() {
-            break f;
-        }
-        assert!(Instant::now() < deadline, "reply did not arrive within deadline for {}", K::NAME);
-        thread::sleep(Duration::from_millis(5));
-    };
-    let payload = match frame {
-        EgressEvent::ToSession { kind_name, payload, .. } => {
-            assert_eq!(kind_name, R::NAME, "the next reply for {} is not a {}", K::NAME, R::NAME);
-            payload
-        }
-        other => panic!("expected ToSession egress, got {other:?}"),
-    };
-    R::decode_from_bytes(&payload).expect("decode reply")
+) -> R {
+    send_and_settle(chassis, to, mail, Some(session_reply()));
+    next_reply::<R>(rx, K::NAME).2
 }
 
 /// Issue 607 Phase 6a: bind → list → unbind round-trip on a
@@ -321,12 +273,12 @@ where
 /// reflects every step (bound, listed, unbound).
 #[test]
 fn bind_then_list_then_unbind_roundtrip() {
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
 
     // Bind to port 0 — let the OS pick a free port.
     let bind_reply: BindListenerResult =
-        drive_and_decode(&registry, &rx, tcp, &BindListener { addr: "127.0.0.1:0".into(), name: None, consumer: None });
+        drive_and_decode(&chassis, &rx, tcp, &BindListener { addr: "127.0.0.1:0".into(), name: None, consumer: None });
     let (listener_name, local_port) = match bind_reply {
         BindListenerResult::Ok { listener_name, local_port, .. } => (listener_name, local_port),
         BindListenerResult::Err { error, .. } => panic!("bind failed: {error}"),
@@ -335,7 +287,7 @@ fn bind_then_list_then_unbind_roundtrip() {
     assert!(local_port > 0, "OS-picked port should be non-zero");
 
     // List enumerates the one listener.
-    let list_reply: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
+    let list_reply: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
     assert_eq!(list_reply.listeners.len(), 1, "exactly one listener");
     let entry = &list_reply.listeners[0];
     assert_eq!(entry.name, listener_name);
@@ -344,7 +296,7 @@ fn bind_then_list_then_unbind_roundtrip() {
 
     // Unbind — asynchronous reply via MonitorNotice.
     let unbind_reply: UnbindListenerResult =
-        drive_and_decode(&registry, &rx, tcp, &UnbindListener { listener_name: listener_name.clone() });
+        drive_and_decode(&chassis, &rx, tcp, &UnbindListener { listener_name: listener_name.clone() });
     match unbind_reply {
         UnbindListenerResult::Ok { listener_name: ln } => assert_eq!(ln, listener_name),
         UnbindListenerResult::Err { error, .. } => panic!("unbind failed: {error}"),
@@ -352,48 +304,39 @@ fn bind_then_list_then_unbind_roundtrip() {
 
     // List should now be empty — cap-local supervisor map
     // dropped the entry on MonitorNotice.
-    let list_reply: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
+    let list_reply: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
     assert!(list_reply.listeners.is_empty(), "list should drop the unbound listener");
 }
 
 #[test]
 fn staged_bind_reply_preserves_the_original_root_and_follows_monitor_commit() {
     const LISTENER_NAME: &str = "held-bind";
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
     let session = SessionToken(Uuid::from_u128(0x4066_B1AD));
     let correlation_id = 0x4066;
-    let (_, settled) = chassis.send_tracked(
+    send_and_settle(
+        &chassis,
         tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
         Some(ReplyTarget::Session { session, correlation: correlation_id }),
     );
 
-    let event = rx.recv_timeout(Duration::from_secs(2)).expect("staged bind reply arrives");
-    let EgressEvent::ToSession {
-        session: reply_session, kind_name, payload, correlation_id: reply_correlation_id, ..
-    } = event
-    else {
-        panic!("expected staged bind reply to the originating session");
-    };
+    let (reply_session, reply_correlation_id, reply) = next_reply::<BindListenerResult>(&rx, "the staged bind reply");
     assert_eq!(reply_session, session);
     assert_eq!(reply_correlation_id, correlation_id);
-    assert_eq!(kind_name, BindListenerResult::NAME);
-    let BindListenerResult::Ok { listener_name, local_port, .. } =
-        BindListenerResult::decode_from_bytes(&payload).expect("decode staged BindListenerResult")
-    else {
+    let BindListenerResult::Ok { listener_name, local_port, .. } = reply else {
         panic!("staged bind should succeed");
     };
     assert_eq!(listener_name, LISTENER_NAME);
-    settled.recv_timeout(Duration::from_secs(2)).expect("the original root settles after the staged reply");
 
-    let listed: ListListenersResult = drive_and_decode(&registry, &rx, tcp.erase(), &ListListeners::default());
+    let listed: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
     assert!(
         listed.listeners.iter().any(|entry| entry.name == LISTENER_NAME && entry.port == local_port),
         "the success reply is sent only after monitor installation and supervisor-map commit",
     );
     let unbound: UnbindListenerResult =
-        drive_and_decode(&registry, &rx, tcp.erase(), &UnbindListener { listener_name: LISTENER_NAME.into() });
+        drive_and_decode(&chassis, &rx, tcp, &UnbindListener { listener_name: LISTENER_NAME.into() });
     assert!(matches!(unbound, UnbindListenerResult::Ok { .. }));
 }
 
@@ -403,11 +346,11 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
     let socket_addr = available_loopback_addr();
     let canonical_name = format!("{}/{}:{LISTENER_NAME}", TcpCapability::NAMESPACE, TcpListenerActor::NAMESPACE);
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let collision = register_route_collision(&registry, &canonical_name);
 
     let rejected: BindListenerResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
         tcp,
         &BindListener { addr: socket_addr.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
@@ -417,10 +360,7 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
             if addr == &socket_addr.to_string() && error.contains("spawn failed")),
         "owner rejection returns one typed bind failure: {rejected:?}",
     );
-    assert!(
-        matches!(rx.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)),
-        "authoritative rejection emits exactly one bind result",
-    );
+    assert!(rx.try_recv().is_err(), "authoritative rejection emits exactly one bind result");
 
     let rebound =
         TcpListener::bind(socket_addr).expect("the prepared listener socket is dropped before failure completion");
@@ -428,7 +368,7 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
     withdraw_ref(&registry, collision);
 
     let retried: BindListenerResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
         tcp,
         &BindListener { addr: socket_addr.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
@@ -440,7 +380,7 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
     );
 
     let unbound: UnbindListenerResult =
-        drive_and_decode(&registry, &rx, tcp, &UnbindListener { listener_name: LISTENER_NAME.into() });
+        drive_and_decode(&chassis, &rx, tcp, &UnbindListener { listener_name: LISTENER_NAME.into() });
     assert!(matches!(unbound, UnbindListenerResult::Ok { .. }), "retry listener shuts down cleanly");
 }
 
@@ -453,36 +393,30 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
     let addr_beta = reservation_beta.local_addr().expect("beta duplicate-name address");
     drop(reservation_alpha);
     drop(reservation_beta);
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let session_alpha = SessionToken(Uuid::from_u128(0x4066_DA1A));
     let session_beta = SessionToken(Uuid::from_u128(0x4066_DB7A));
 
-    enqueue(
-        &registry,
+    let (_, settled_alpha) = chassis.send_tracked(
         tcp,
         &BindListener { addr: addr_alpha.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
-        Source::with_correlation(SourceAddr::Session(session_alpha), 1),
-        None,
+        Some(ReplyTarget::Session { session: session_alpha, correlation: 1 }),
     );
-    enqueue(
-        &registry,
+    let (_, settled_beta) = chassis.send_tracked(
         tcp,
         &BindListener { addr: addr_beta.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
-        Source::with_correlation(SourceAddr::Session(session_beta), 2),
-        None,
+        Some(ReplyTarget::Session { session: session_beta, correlation: 2 }),
     );
+    await_settled(&settled_alpha, "the alpha duplicate-name bind");
+    await_settled(&settled_beta, "the beta duplicate-name bind");
 
-    let mut replies = Vec::new();
-    for _ in 0..2 {
-        let EgressEvent::ToSession { session, kind_name, payload, .. } =
-            rx.recv_timeout(Duration::from_secs(2)).expect("both duplicate-name callers receive a result")
-        else {
-            panic!("expected duplicate bind reply to a session");
-        };
-        assert_eq!(kind_name, BindListenerResult::NAME);
-        replies.push((session, BindListenerResult::decode_from_bytes(&payload).expect("decode duplicate bind result")));
-    }
+    let replies: Vec<_> = (0..2)
+        .map(|_| {
+            let (session, _, result) = next_reply::<BindListenerResult>(&rx, "a duplicate-name bind result");
+            (session, result)
+        })
+        .collect();
     assert!(replies.iter().any(|(session, _)| *session == session_alpha), "alpha receives its own result");
     assert!(replies.iter().any(|(session, _)| *session == session_beta), "beta receives its own result");
 
@@ -511,7 +445,7 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
     assert!(TcpListener::bind(live_addr).is_err(), "the accepted listener retains its socket");
 
     let unbound: UnbindListenerResult =
-        drive_and_decode(&registry, &rx, tcp, &UnbindListener { listener_name: LISTENER_NAME.into() });
+        drive_and_decode(&chassis, &rx, tcp, &UnbindListener { listener_name: LISTENER_NAME.into() });
     assert!(matches!(unbound, UnbindListenerResult::Ok { .. }));
 }
 
@@ -523,6 +457,9 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
     let socket_addr = listener.local_addr().expect("rejection probe address");
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept the staged outbound stream");
+        // A plain socket thread outside the engine has no settlement to wait
+        // on; the read timeout only keeps an unclosed socket from hanging the
+        // join.
         stream.set_read_timeout(Some(Duration::from_secs(2))).expect("bound rejection wait");
         let mut byte = [0_u8; 1];
         stream.read(&mut byte).expect("rejected prepared session closes its socket")
@@ -530,10 +467,10 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
 
     let canonical_name = format!("{}/{}:{SESSION_NAME}", TcpCapability::NAMESPACE, TcpSessionActor::NAMESPACE);
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let _collision = register_route_collision(&registry, &canonical_name);
     let rejected: ConnectResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
         tcp,
         &Connect { addr: socket_addr.to_string(), name: Some(SESSION_NAME.into()), consumer: None },
@@ -545,10 +482,7 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
         "owner rejection returns one typed connect failure: {rejected:?}",
     );
     assert_eq!(server.join().expect("rejection server completes"), 0, "the peer observes EOF after rollback");
-    assert!(
-        matches!(rx.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)),
-        "authoritative rejection emits exactly one connect result",
-    );
+    assert!(rx.try_recv().is_err(), "authoritative rejection emits exactly one connect result");
 }
 
 /// Issue 3051: asynchronous unbind retains the originating settlement root
@@ -557,12 +491,12 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
 /// after that deferred reply has been emitted.
 #[test]
 fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
     let bind_reply: BindListenerResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
-        tcp.erase(),
+        tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("held-unbind".into()), consumer: None },
     );
     let listener_name = match bind_reply {
@@ -572,33 +506,24 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
 
     let session = SessionToken(Uuid::from_u128(0x3051));
     let correlation_id = 0x3051;
-    let (_, settled) = chassis.send_tracked(
+    send_and_settle(
+        &chassis,
         tcp,
         &UnbindListener { listener_name: listener_name.clone() },
         Some(ReplyTarget::Session { session, correlation: correlation_id }),
     );
 
-    let event = rx.recv_timeout(Duration::from_secs(2)).expect("deferred unbind reply arrives before deadline");
-    let EgressEvent::ToSession {
-        session: reply_session, kind_name, payload, correlation_id: reply_correlation_id, ..
-    } = event
-    else {
-        panic!("expected deferred unbind reply to the originating session");
-    };
+    let (reply_session, reply_correlation_id, reply) =
+        next_reply::<UnbindListenerResult>(&rx, "the deferred unbind reply");
     assert_eq!(reply_session, session);
     assert_eq!(reply_correlation_id, correlation_id);
-    assert_eq!(kind_name, UnbindListenerResult::NAME);
-    match UnbindListenerResult::decode_from_bytes(&payload).expect("decode deferred UnbindListenerResult") {
+    match reply {
         UnbindListenerResult::Ok { listener_name: replied_name } => assert_eq!(replied_name, listener_name),
         UnbindListenerResult::Err { error, .. } => panic!("unbind failed: {error}"),
     }
+    assert!(rx.try_recv().is_err(), "deferred unbind emits exactly one result");
 
-    settled.recv_timeout(Duration::from_secs(2)).expect("originating root settles after deferred reply");
-    assert!(
-        matches!(rx.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)),
-        "deferred unbind emits exactly one result",
-    );
-    let listeners: ListListenersResult = drive_and_decode(&registry, &rx, tcp.erase(), &ListListeners::default());
+    let listeners: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
     assert!(listeners.listeners.is_empty(), "monitor cleanup removes the unbound listener");
 }
 
@@ -612,24 +537,20 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
 /// buffers `Close` to the listener — ahead of the duplicate. The listener's
 /// `MonitorNotice`, the mail that retires the parked entry, cannot be minted
 /// until that `Close` flushes, so it can never overtake a duplicate that is
-/// already queued. Enqueueing both against a pool-dispatched cap left the
+/// already queued. Sending both to a pool-dispatched cap left the
 /// duplicate racing the whole close chain, and a lost race took the
 /// already-closed path instead of the parked one under CI load.
 #[test]
 fn duplicate_unbind_preserves_the_first_parked_reply() {
-    let (registry, rx, chassis, mut cap) = boot_pumped_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
-    enqueue(
-        &registry,
+    let (registry, mailer, rx) = fresh_substrate();
+    let mut cap = PumpedDriver::<TcpCapability>::boot(boot_bare_test_chassis(&registry, &mailer), (), ());
+    let tcp = cap.chassis().actor_ref::<TcpCapability>();
+    cap.send_and_settle(
         tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("duplicate-unbind".into()), consumer: None },
-        session_reply(),
-        None,
+        Some(session_reply()),
     );
-    let EgressEvent::ToSession { payload, .. } = pump_for_reply(&mut cap, &rx, "the bind reply") else {
-        panic!("expected the bind reply to a session");
-    };
-    let listener_name = match BindListenerResult::decode_from_bytes(&payload).expect("decode BindListenerResult") {
+    let listener_name = match next_reply::<BindListenerResult>(&rx, "the bind reply").2 {
         BindListenerResult::Ok { listener_name, .. } => listener_name,
         BindListenerResult::Err { error, .. } => panic!("bind failed: {error}"),
     };
@@ -637,19 +558,15 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
     let first_session = SessionToken(Uuid::from_u128(0x3051_0001));
     let duplicate_session = SessionToken(Uuid::from_u128(0x3051_0002));
     let unbind = UnbindListener { listener_name: listener_name.clone() };
-    enqueue(&registry, tcp, &unbind, Source::with_correlation(SourceAddr::Session(first_session), 1), None);
-    enqueue(&registry, tcp, &unbind, Source::with_correlation(SourceAddr::Session(duplicate_session), 2), None);
+    let first = cap.send_tracked(tcp, &unbind, Some(ReplyTarget::Session { session: first_session, correlation: 1 }));
+    let duplicate =
+        cap.send_tracked(tcp, &unbind, Some(ReplyTarget::Session { session: duplicate_session, correlation: 2 }));
+    cap.settle(&[first, duplicate]);
 
     let mut first_reply = None;
     let mut duplicate_reply = None;
     for _ in 0..2 {
-        let EgressEvent::ToSession { session, kind_name, payload, .. } =
-            pump_for_reply(&mut cap, &rx, "both unbind replies")
-        else {
-            panic!("expected unbind reply to a session");
-        };
-        assert_eq!(kind_name, UnbindListenerResult::NAME);
-        let reply = UnbindListenerResult::decode_from_bytes(&payload).expect("decode UnbindListenerResult");
+        let (session, _, reply) = next_reply::<UnbindListenerResult>(&rx, "an unbind reply");
         if session == first_session {
             first_reply = Some(reply);
         } else if session == duplicate_session {
@@ -671,8 +588,6 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
         ),
         "the duplicate caller receives the in-progress error: {duplicate_reply:?}",
     );
-
-    cap.shutdown();
 }
 
 /// Tripwire: an outbound dial must correlate its parked reply to the
@@ -688,6 +603,8 @@ fn connect_roundtrip_spawns_writable_session() {
     let server_thread = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept connect-side session");
         stream.write_all(&framed_reply).expect("write framed reply to connect-side session");
+        // A plain socket thread outside the engine has no settlement to wait
+        // on; the read timeout only keeps a lost write from hanging the join.
         stream.set_read_timeout(Some(Duration::from_secs(2))).expect("set server read timeout");
         let mut received = [0_u8; 17];
         stream.read_exact(&mut received).expect("connect-side SessionWrite reaches loopback server");
@@ -695,14 +612,10 @@ fn connect_roundtrip_spawns_writable_session() {
     });
 
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let (consumer, consumer_rx) = spawn_consumer(&chassis, "connect-consumer");
-    let connect_reply = drive_and_decode::<Connect, ConnectResult>(
-        &registry,
-        &rx,
-        tcp,
-        &Connect { addr: addr.to_string(), name: None, consumer: Some(consumer) },
-    );
+    let connect_reply: ConnectResult =
+        drive_and_decode(&chassis, &rx, tcp, &Connect { addr: addr.to_string(), name: None, consumer: Some(consumer) });
     let (session_name, peer) = match connect_reply {
         ConnectResult::Ok { session_name, peer } => (session_name, peer),
         ConnectResult::Err { error, .. } => panic!("connect failed: {error}"),
@@ -717,6 +630,8 @@ fn connect_roundtrip_spawns_writable_session() {
     let peer = peer.parse::<SocketAddr>().expect("connect result peer is a socket address");
     assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST), "connect result peer should be on 127.0.0.1");
 
+    // Session mail is driven by the socket, not by a root this test holds, so
+    // the capture channel is the only signal and its wait is time-bounded.
     let received = consumer_rx.recv_timeout(Duration::from_secs(2)).expect("connect consumer receives SessionData");
     let CapturedSessionMail::Data(received) = received else {
         panic!("expected SessionData, got {received:?}");
@@ -731,7 +646,7 @@ fn connect_roundtrip_spawns_writable_session() {
             LoadName::new(&session_name).expect("session name is a load name"),
         )
         .expect("the connect-side session is live");
-    enqueue(&registry, session.erase(), &SessionWrite { bytes: b"connect-roundtrip".to_vec() }, session_reply(), None);
+    send_and_settle(&chassis, session, &SessionWrite { bytes: b"connect-roundtrip".to_vec() }, None);
 
     assert_eq!(server_thread.join().expect("loopback server thread completes"), *b"connect-roundtrip");
 }
@@ -766,30 +681,14 @@ fn concurrent_connects_reply_to_their_own_origins() {
         Some(ReplyTarget::Session { session: session_beta, correlation: correlation_beta }),
     );
 
+    await_settled(&settled_alpha, "the alpha connect");
+    await_settled(&settled_beta, "the beta connect");
+
     let mut saw_alpha = false;
     let mut saw_beta = false;
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !(saw_alpha && saw_beta) {
-        let event = match rx.recv_timeout(Duration::from_millis(20)) {
-            Ok(event) => event,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                assert!(Instant::now() < deadline, "both connect replies arrive before the deadline");
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("connect-reply egress disconnected"),
-        };
-        let EgressEvent::ToSession { session, kind_name, payload, correlation_id, .. } = event else {
-            assert!(Instant::now() < deadline, "both connect replies arrive before the deadline");
-            continue;
-        };
-        if kind_name != ConnectResult::NAME {
-            assert!(Instant::now() < deadline, "both connect replies arrive before the deadline");
-            continue;
-        }
-        assert_eq!(kind_name, ConnectResult::NAME);
-        let ConnectResult::Ok { session_name, peer, .. } =
-            ConnectResult::decode_from_bytes(&payload).expect("decode concurrent connect reply")
-        else {
+    for _ in 0..2 {
+        let (session, correlation_id, reply) = next_reply::<ConnectResult>(&rx, "a concurrent connect reply");
+        let ConnectResult::Ok { session_name, peer, .. } = reply else {
             panic!("concurrent connect should succeed");
         };
         let peer = peer.parse::<SocketAddr>().expect("connect peer is a socket address");
@@ -809,13 +708,7 @@ fn concurrent_connects_reply_to_their_own_origins() {
             panic!("reply reached an unexpected session");
         }
     }
-    assert!(saw_alpha && saw_beta, "each caller receives its own reply");
-    settled_alpha.recv_timeout(Duration::from_secs(2)).expect("alpha settles after its staged reply");
-    settled_beta.recv_timeout(Duration::from_secs(2)).expect("beta settles after its staged reply");
-    assert!(
-        matches!(rx.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)),
-        "each staged connect emits exactly one result",
-    );
+    assert!(rx.try_recv().is_err(), "each staged connect emits exactly one result");
     assert!(server_alpha.join().expect("alpha server thread completes").ip().is_loopback());
     assert!(server_beta.join().expect("beta server thread completes").ip().is_loopback());
 }
@@ -824,11 +717,11 @@ fn concurrent_connects_reply_to_their_own_origins() {
 /// the first bind's actually-bound port to drive the second.
 #[test]
 fn bind_port_in_use_returns_err() {
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
 
     let first: BindListenerResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
         tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("first".into()), consumer: None },
@@ -840,7 +733,7 @@ fn bind_port_in_use_returns_err() {
 
     // Second bind on the same port — must fail.
     let second: BindListenerResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
         tcp,
         &BindListener { addr: format!("127.0.0.1:{local_port}"), name: Some("second".into()), consumer: None },
@@ -858,11 +751,11 @@ fn bind_port_in_use_returns_err() {
 /// echoed back.
 #[test]
 fn unbind_unknown_listener_errors() {
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
 
     let reply: UnbindListenerResult =
-        drive_and_decode(&registry, &rx, tcp, &UnbindListener { listener_name: "nope".into() });
+        drive_and_decode(&chassis, &rx, tcp, &UnbindListener { listener_name: "nope".into() });
     match reply {
         UnbindListenerResult::Err { listener_name, .. } => {
             assert_eq!(listener_name, "nope");
@@ -878,23 +771,23 @@ fn unbind_unknown_listener_errors() {
 /// session sees is the list's, and it lists nothing.
 #[test]
 fn bind_refuses_a_consumer_path_with_no_live_covering_actor() {
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let unregistered = ActorPath::<SessionConsumer>::instance(&LoadName::new("unregistered").expect("a valid key"));
 
-    enqueue(
-        &registry,
+    send_and_settle(
+        &chassis,
         tcp,
         &BindListener {
             addr: "127.0.0.1:0".into(),
             name: Some("orphan".into()),
             consumer: Some(unregistered.narrow()),
         },
-        session_reply(),
-        None,
+        Some(session_reply()),
     );
+    assert!(rx.try_recv().is_err(), "a refused bind sends no reply");
 
-    let list: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
+    let list: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
     assert!(list.listeners.is_empty(), "a refused bind must spawn no listener: {:?}", list.listeners);
 }
 
@@ -905,11 +798,13 @@ fn bind_refuses_a_consumer_path_with_no_live_covering_actor() {
 #[test]
 fn bind_listener_self_refuses_a_sender_that_does_not_cover_the_consumer_protocol() {
     let (replies_tx, replies) = mpsc::channel();
-    let (registry, _mailer, rx, chassis) =
+    let (_registry, _mailer, rx, chassis) =
         boot_tcp_substrate_with(|builder| builder.with_actor::<DataOnlyConsumer>(replies_tx));
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let tcp = chassis.actor_ref::<TcpCapability>();
 
-    let reply = replies.recv_timeout(Duration::from_secs(2)).expect("the bind reply reaches its sender");
+    let reply = replies
+        .recv_timeout(SettlementConfig::from_env().to_cap())
+        .expect("the self-bind reply never reached its sender within the settlement cap");
     match reply {
         BindListenerResult::Err { error, .. } => {
             assert!(error.contains("TcpConsumer"), "expected a consumer-protocol refusal, got: {error}");
@@ -917,7 +812,7 @@ fn bind_listener_self_refuses_a_sender_that_does_not_cover_the_consumer_protocol
         BindListenerResult::Ok { .. } => panic!("a sender that does not cover TcpConsumer must not bind"),
     }
 
-    let list: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
+    let list: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
     assert!(list.listeners.is_empty(), "a refused bind must spawn no listener: {:?}", list.listeners);
 }
 
@@ -925,12 +820,12 @@ fn bind_listener_self_refuses_a_sender_that_does_not_cover_the_consumer_protocol
 /// frame body spans TCP writes, followed by a close notice on peer EOF.
 #[test]
 fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let (consumer, consumer_rx) = spawn_consumer(&chassis, "delivery-consumer");
 
     let bind: BindListenerResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
         tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("delivery".into()), consumer: Some(consumer) },
@@ -950,6 +845,8 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
     first_write.extend_from_slice(&second_frame[..second_split]);
     client.write_all(&first_write).expect("write first frame and partial second frame");
 
+    // Session mail is driven by the socket, not by a root this test holds, so
+    // the capture channel is the only signal and its wait is time-bounded.
     let first = consumer_rx.recv_timeout(Duration::from_secs(2)).expect("first SessionData arrives");
     let CapturedSessionMail::Data(first) = first else {
         panic!("expected first SessionData, got {first:?}");
@@ -975,6 +872,9 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
     assert_eq!(closed.session_name, "conn-0");
     assert_eq!(closed.peer, second.peer);
     assert_eq!(closed.reason, "eof");
+    // The close chain starts at socket EOF, not at a root this test holds,
+    // so there is no settlement to wait on: a short quiet window is the only
+    // way to see that no further mail follows the close.
     thread::sleep(Duration::from_millis(50));
     assert!(consumer_rx.try_recv().is_err(), "consumer must receive exactly two data mails and one close mail");
 }
@@ -989,20 +889,22 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
 #[test]
 fn nested_lineage_consumer_receives_session_mail() {
     let (captures, consumer_rx) = mpsc::channel();
-    let (registry, _mailer, rx, chassis) =
-        boot_tcp_substrate_with(|builder| builder.with_actor::<ConsumerHost>(captures));
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let (born, born_rx) = mpsc::channel();
+    let (_registry, _mailer, rx, chassis) =
+        boot_tcp_substrate_with(|builder| builder.with_actor::<ConsumerHost>((captures, born)));
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let key = LoadName::new(NESTED_CONSUMER_KEY).expect("a valid key");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while chassis.child::<ConsumerHost, SessionConsumer>(chassis.actor_ref::<ConsumerHost>(), key.clone()).is_err() {
-        assert!(Instant::now() < deadline, "the nested consumer did not go live within the deadline");
-        thread::sleep(Duration::from_millis(5));
-    }
+    born_rx
+        .recv_timeout(SettlementConfig::from_env().to_cap())
+        .expect("the nested consumer's birth was never decided within the settlement cap");
+    chassis
+        .child::<ConsumerHost, SessionConsumer>(chassis.actor_ref::<ConsumerHost>(), key.clone())
+        .expect("the nested consumer is live");
     let consumer = ActorPath::<SessionConsumer>::child(&ActorPath::<ConsumerHost>::root(), &key)
         .expect("the nested path is under the caps");
 
     let bind: BindListenerResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
         tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("nested".into()), consumer: Some(consumer.narrow()) },
@@ -1016,6 +918,8 @@ fn nested_lineage_consumer_receives_session_mail() {
     let mut client = TcpStream::connect(("127.0.0.1", local_port)).expect("connect loopback client");
     client.write_all(&framed_body(body)).expect("write one complete frame");
 
+    // Session mail is driven by the socket, not by a root this test holds, so
+    // the capture channel is the only signal and its wait is time-bounded.
     let delivered = consumer_rx.recv_timeout(Duration::from_secs(2)).expect("SessionData reaches a nested consumer");
     let CapturedSessionMail::Data(delivered) = delivered else {
         panic!("expected SessionData, got {delivered:?}");
@@ -1027,12 +931,12 @@ fn nested_lineage_consumer_receives_session_mail() {
 /// silent shutdown: the bound consumer receives exactly one close notice.
 #[test]
 fn session_reports_frame_rejection_to_bound_consumer() {
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
     let (consumer, consumer_rx) = spawn_consumer(&chassis, "rejection-consumer");
 
     let bind: BindListenerResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
         tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("rejection".into()), consumer: Some(consumer) },
@@ -1045,6 +949,8 @@ fn session_reports_frame_rejection_to_bound_consumer() {
     let mut client = TcpStream::connect(("127.0.0.1", local_port)).expect("connect loopback client");
     client.write_all(&u32::MAX.to_le_bytes()).expect("write oversize frame prefix");
 
+    // Session mail is driven by the socket, not by a root this test holds, so
+    // the capture channel is the only signal and its wait is time-bounded.
     let closed = consumer_rx.recv_timeout(Duration::from_secs(2)).expect("SessionClosed arrives on frame rejection");
     let CapturedSessionMail::Closed(closed) = closed else {
         panic!("expected SessionClosed, got {closed:?}");
@@ -1052,6 +958,9 @@ fn session_reports_frame_rejection_to_bound_consumer() {
     assert_eq!(closed.session_name, "conn-0");
     assert!(closed.peer.starts_with("127.0.0.1:"));
     assert!(closed.reason.starts_with("frame rejected: frame too large:"), "unexpected reason: {}", closed.reason);
+    // The close chain starts at the rejected read, not at a root this test
+    // holds, so there is no settlement to wait on: a short quiet window is
+    // the only way to see that no second close follows.
     thread::sleep(Duration::from_millis(50));
     assert!(consumer_rx.try_recv().is_err(), "consumer must receive exactly one close mail");
 }
@@ -1060,23 +969,23 @@ fn session_reports_frame_rejection_to_bound_consumer() {
 /// `ListListeners`.
 #[test]
 fn list_enumerates_two_concurrent_listeners() {
-    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
-    let tcp = chassis.actor_ref::<TcpCapability>().erase();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
 
     let _: BindListenerResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
         tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("admin".into()), consumer: None },
     );
     let _: BindListenerResult = drive_and_decode(
-        &registry,
+        &chassis,
         &rx,
         tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("game".into()), consumer: None },
     );
 
-    let list: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
+    let list: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
     let mut names: Vec<String> = list.listeners.iter().map(|l| l.name.clone()).collect();
     names.sort();
     assert_eq!(names, vec!["admin".to_string(), "game".to_string()]);

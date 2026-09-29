@@ -185,6 +185,32 @@ observer) beats a pixel check whenever the mail already carries the answer. When
 assertion — pin a band, not an exact pixel, since GPU / anti-aliasing nondeterminism
 makes an exact golden image the wrong primary oracle.
 
+## Waiting on a pumped slot
+
+A test that owns a pumped actor is that actor's driver, and it waits the way a
+pumped chassis driver waits (ADR-0161 §Decision 2): the slot's mail wake and
+each awaited root's settlement feed one channel, the slot drains on each mail
+wake, and the wait returns when the roots settle. Boot the actor through
+`aether_substrate::testing::PumpedDriver` rather than holding the slot:
+
+- **An effect on a chain the test sends.** `send_tracked` (several sends stage
+  on the inbox before any turn runs), then `settle` on their roots, or
+  `send_and_settle` for one. A reply precedes its root's settlement, so read
+  replies after `settle` with `try_recv`, never as a wait condition.
+- **A detached effect that lands on the pumped actor** — a departure's
+  `MonitorNotice`, a worker's self-wake. `pump_until` over the actor's own
+  state: only the driver's drains change it, so a mail wake is the only thing
+  that can make the condition true.
+- **A chain whose actors all dispatch on the pool.** There is no slot to pump:
+  send tracked through the chassis and `testing::await_settled` on the root's
+  settlement receiver, under the same patience a chassis gate gets.
+
+Never wait in a `loop { drain; check; sleep }` against a deadline. That loop
+is not the production wait, it fails a slow but healthy chain under load, and
+every test that copies it adds another. A wedged wait through these helpers
+fails at the chassis settlement cap (`AETHER_SETTLEMENT_CAP_SECS`) with the
+gate named.
+
 ## Running a wasm-gated scenario
 
 Every scenario that loads a component opens with `require_wasm("<crate_stem>")`, which
