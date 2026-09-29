@@ -1069,6 +1069,7 @@ dependencies = [
  "aether-actor",
  "aether-clipboard",
  "aether-kinds",
+ "aether-test-fixtures-kinds",
 ]
 
 [[package]]

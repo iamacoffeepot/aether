@@ -17,7 +17,9 @@ publish = false
 # - `republish_subject_*`: `test.republish.subject` as a base and one successor
 #   per behavior change: a dropped row, a changed reply, an added row, an added
 #   fallback, an added dependency, an inline child with a dependency, and an
-#   added boot.
+#   added boot. `republish_subject_helper` (issue 6867) is a base with a
+#   dependency-free inline child that the inline-dependency successor
+#   republishes.
 # - `republish_group_v{1,2}`: the instanced `test.republish.gate` and the root
 #   `test.republish.peer`. Only v2's gate handles `GateProbe`, and v2's peer
 #   traps in `on_rehydrate` when its config says so.
@@ -72,6 +74,10 @@ crate-type = ["cdylib"]
 
 [[example]]
 name = "republish_subject_inline_depends"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_subject_helper"
 crate-type = ["cdylib"]
 
 [[example]]

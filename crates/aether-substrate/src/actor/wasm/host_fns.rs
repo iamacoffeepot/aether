@@ -49,6 +49,13 @@ pub const REPLY_BLOB_REFUSED: u32 = 6;
 /// Nothing is sent and no correlation is minted.
 pub const SEND_BLOB_REFUSED: u32 = 4;
 
+/// `spawn_inline_child_p32` status: the child's type declares a dependency
+/// with no `Live` route (ADR-0230), so no alias is staged and the child is
+/// never constructed. Every other refusal answers `0`. A real alias carries
+/// the mailbox tag in its high nibble, so no alias is ever `1`. The SDK
+/// mirrors it as `aether_actor::wasm`'s `INLINE_SPAWN_DEPENDENCY_NOT_LIVE`.
+pub const INLINE_SPAWN_DEPENDENCY_NOT_LIVE: u64 = 1;
+
 /// ADR-0016 §2: maximum size of a single state bundle. A `save_state`
 /// call with `len > MAX_STATE_BUNDLE_BYTES` is rejected (status 3) and
 /// the failure is recorded on the ctx so the substrate can abort the
@@ -175,6 +182,14 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // warn-logs and returns 0 without staging — the child simply never
     // becomes addressable.
     //
+    // ADR-0230 / ADR-0241 §4: spawn is where an inline child stands up, so
+    // its type's declared dependencies are checked here, through the same
+    // `missing_dependency` read every other stand-up site asks. One with no
+    // `Live` route warn-logs naming the child and the missing namespace and
+    // returns `INLINE_SPAWN_DEPENDENCY_NOT_LIVE` without staging; the guest
+    // allocates the alias before it builds the child, so the child's `init`
+    // never runs.
+    //
     // Issue 4490: nested inline births use the executing actor mailbox as
     // their routing seed and rendered-name parent. The target endpoint stays
     // the physical trampoline root; only logical route identity nests.
@@ -271,6 +286,17 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     "spawn_inline_child: the child's name is retired",
                 );
                 return 0;
+            }
+            let dependencies = child.dependencies.iter().map(|d| (d.resolver, d.namespace.as_str()));
+            if let Some(missing) = caller.data().binding.missing_dependency(dependencies) {
+                tracing::warn!(
+                    target: "aether_substrate::component",
+                    child = %child.namespace,
+                    %missing,
+                    component = %caller.data().actor_name(),
+                    "spawn_inline_child: a declared dependency is not live",
+                );
+                return INLINE_SPAWN_DEPENDENCY_NOT_LIVE;
             }
             let target_parent = caller.data().sender;
             let alias_name = format!("{parent_name}/{}:{full_subname}", child.namespace);

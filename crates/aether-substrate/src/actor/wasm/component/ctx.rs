@@ -6,6 +6,7 @@ use rustc_hash::FxHashMap;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::blob_table::BlobTable;
+use crate::actor::wasm::kind_manifest::Dependency;
 use crate::actor::wasm::reply_table::{HeldChain, ReplyEntry, ReplyMail, ReplyOrigin, ReplyTable};
 use crate::mail::attachments::{Attachments, EncodedMail, ResolveError, plain_payload, resolve_on_send};
 use crate::mail::mailer::Mailer;
@@ -200,15 +201,18 @@ pub struct ComponentCtx {
 }
 
 /// The declared type of one inline-child actor the resident module can
-/// spawn (ADR-0231 §4): its declared `NAMESPACE` and the contract it
-/// publishes on its alias. Built by the trampoline from the module's
-/// exported and private input groups, keyed by actor-type tag
+/// spawn (ADR-0231 §4): its declared `NAMESPACE`, the contract it
+/// publishes on its alias, and the dependencies it declares, which the
+/// `spawn_inline_child_p32` host fn checks before it stages the alias
+/// (ADR-0230). Built by the trampoline from the module's exported and
+/// private input groups, keyed by actor-type tag
 /// (`ActorId::singleton(namespace)`), and installed on `ComponentCtx`
 /// before `Component::instantiate` and again on every replace.
 #[derive(Clone)]
 pub struct InlineChildType {
     pub namespace: Arc<str>,
     pub contract: RouteContract,
+    pub dependencies: Arc<[Dependency]>,
 }
 
 /// Issue iamacoffeepot/aether#1465: starting value of

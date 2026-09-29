@@ -4,8 +4,8 @@
 //! reinstalled.
 //!
 //! Inline-child types (ADR-0231 §4): the namespace and contract each actor
-//! type a module can spawn inline publishes on its alias, keyed by
-//! actor-type tag.
+//! type a module can spawn inline publishes on its alias, and the
+//! dependencies its spawn checks (ADR-0230), keyed by actor-type tag.
 
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -18,10 +18,10 @@ use aether_substrate::mail::KindId;
 use aether_substrate::mail::registry::RouteContract;
 
 /// The type every actor a module can spawn inline publishes on its alias,
-/// keyed by its actor-type tag (`ActorId::singleton(NAMESPACE)`): the
-/// exported groups, then the private children of
-/// `aether.kinds.inputs.private`, each under the namespace the manifest
-/// resolves for it.
+/// with the dependencies its spawn checks, keyed by its actor-type tag
+/// (`ActorId::singleton(NAMESPACE)`): the exported groups, then the private
+/// children of `aether.kinds.inputs.private`, each under the namespace the
+/// manifest resolves for it.
 pub(super) fn inline_children(manifest: &ModuleManifest) -> Vec<(u64, InlineChildType)> {
     manifest
         .exported_groups()
@@ -29,7 +29,8 @@ pub(super) fn inline_children(manifest: &ModuleManifest) -> Vec<(u64, InlineChil
         .map(|(namespace, group)| {
             let namespace: Arc<str> = namespace.into();
             let contract = RouteContract::from_capabilities(&group.capabilities);
-            (ActorId::singleton(&namespace).0, InlineChildType { namespace, contract })
+            let dependencies = group.dependencies.as_slice().into();
+            (ActorId::singleton(&namespace).0, InlineChildType { namespace, contract, dependencies })
         })
         .collect()
 }

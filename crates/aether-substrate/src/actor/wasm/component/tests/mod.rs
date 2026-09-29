@@ -1241,7 +1241,11 @@ fn wat_inline_spawn(parent: MailboxId, tag: u64) -> String {
 /// The single declared inline-child type these tests install, keyed by
 /// [`TEST_INLINE_TAG`].
 fn test_inline_child_type() -> InlineChildType {
-    InlineChildType { namespace: Arc::from("test.inline.child"), contract: RouteContract::empty() }
+    InlineChildType {
+        namespace: Arc::from("test.inline.child"),
+        contract: RouteContract::empty(),
+        dependencies: Arc::from([]),
+    }
 }
 
 #[test]

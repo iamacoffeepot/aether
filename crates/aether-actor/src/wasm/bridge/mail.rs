@@ -147,8 +147,9 @@ pub fn reply_correlation() -> u64 {
 /// caller-supplied name; `subname` is the bare `Named` segment (empty for
 /// `Counter`). No config crosses here — the guest runs the child's `init`
 /// in-process (see [`crate::WasmCtx::spawn_inline_child`]). The returned id
-/// is the ADR-0099 §3 lineage fold, known synchronously; `0` on a host-side
-/// error.
+/// is the ADR-0099 §3 lineage fold, known synchronously; `1` when the child's
+/// type declares a dependency with no `Live` route, and `0` on any other
+/// host-side error.
 #[must_use]
 pub fn spawn_inline_child(parent: u64, tag: u64, is_counter: bool, subname: &str) -> u64 {
     let subname_bytes = subname.as_bytes();

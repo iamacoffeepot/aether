@@ -54,6 +54,14 @@ pub enum SpawnError {
     /// closing and its name tombstones (ADR-0241 §8), so a key whose child
     /// was despawned, or whose parent closed, is never spawned again.
     AliasAllocationFailed,
+    /// The child's type declares a dependency (`#[actor(depends(R))]`,
+    /// ADR-0230) with no `Live` route, so the host refused the spawn before
+    /// allocating its alias. Dependencies are checked where an actor stands
+    /// up (ADR-0241 §4), and for an inline child that is its spawn: the
+    /// module loaded, but this child is not built until what it depends on
+    /// is live. The host's warning names the child and the missing
+    /// namespace.
+    DependencyNotLive,
     /// The ctx's mailbox did not identify either the constructed entry actor
     /// or a registered inline actor, so its logical parent type could not be
     /// validated before spawning.
@@ -102,8 +110,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// child's address as origin and its replies route back.
     ///
     /// A [`Subname::Named`] that fails validation returns
-    /// [`SpawnError::SubnameInvalid`]; a synchronous `init` `Err` returns
-    /// [`SpawnError::InitFailed`].
+    /// [`SpawnError::SubnameInvalid`]; a `C` that declares a dependency with
+    /// no `Live` route returns [`SpawnError::DependencyNotLive`] before `init`;
+    /// a synchronous `init` `Err` returns [`SpawnError::InitFailed`].
     ///
     /// The alias extends the executing actor's lineage, so the same subname
     /// can exist beneath distinct parents in one component cluster. The same
@@ -201,8 +210,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         // alias's contract rows by (ADR-0231 §4).
         let type_tag = ActorTypeTag::of::<C>().0;
         // A zero alias is the host's refusal, a spent name among them
-        // (ADR-0241 §8): stop before a child is built at an address that
-        // never routes.
+        // (ADR-0241 §8), and an unmet dependency its own status (ADR-0230):
+        // stop before a child is built at an address that never routes.
         let alias =
             __validate_inline_child_alias(mail::spawn_inline_child(self.mailbox, type_tag, is_counter, &full_subname))?;
         // Re-decode an owned `C::Config` for the in-guest `init` from the
@@ -263,8 +272,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// [`SpawnError::SubnameInvalid`] before any type lookup. The generated
     /// resolver rejects an unknown tag, a non-instanced actor, an unavailable
     /// parent identity, or denied placement before allocating a host alias. A
-    /// synchronous `init` `Err` or a `Config` decode miss returns
-    /// [`SpawnError::InitFailed`].
+    /// type that declares a dependency with no `Live` route returns
+    /// [`SpawnError::DependencyNotLive`] before `init`. A synchronous `init`
+    /// `Err` or a `Config` decode miss returns [`SpawnError::InitFailed`].
     pub fn spawn_inline_child_by_tag(
         &self,
         tag: ActorTypeTag,

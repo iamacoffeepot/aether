@@ -4,9 +4,9 @@
 //!
 //! In order: an unchanged module answers with no swap; a content-addressed
 //! module, a module with no predecessor, a namespace already republishing,
-//! and a boot module on either side are refused; then admission, the
-//! module's inline dependencies, each member's added dependencies, and each
-//! member's config.
+//! and a boot module on either side are refused; then admission, the added
+//! dependencies of each live instance the republish rebuilds, loaded or
+//! inline, and each instance's config.
 
 use std::collections::{HashMap, HashSet};
 
@@ -18,7 +18,7 @@ use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::actor::wasm::module::{Module, ModuleManifest};
 use aether_substrate::mail::registry::Admitted;
 
-use crate::component::runtime::dependencies::{inline_dependency_refusal, replacement_refusal};
+use crate::component::runtime::dependencies::replacement_refusal;
 use crate::component::runtime::{ComponentHostCapabilityState, GuestControl};
 
 use super::Member;
@@ -84,11 +84,10 @@ impl ComponentHostCapabilityState {
         if let Err(refusal) = admitted {
             return Err(format!("module publish refused: {refusal}"));
         }
-        if let Some(error) = inline_dependency_refusal(ctx, manifest) {
-            return Err(error);
-        }
 
         let members = self.members(ctx, &namespaces);
+        let predecessors = predecessors(&members);
+        let inline = self.inline_instances(&members);
         let paired: Vec<(&str, &ActorInputs, &ActorInputs)> = members
             .iter()
             .map(|(path, guest)| {
@@ -101,10 +100,23 @@ impl ComponentHostCapabilityState {
                 )
             })
             .collect();
+        // ADR-0241 §4: a live inline child is rebuilt by its parent's
+        // rehydrate, so a dependency its successor type adds is checked here
+        // like a member's. A type with no live instance is checked when it
+        // is next spawned.
+        let inline_types: Vec<(&str, &ActorInputs, &ActorInputs)> = inline
+            .iter()
+            .filter_map(|instance| {
+                let before = predecessors.iter().find_map(|module| declared_group(module, &instance.namespace))?;
+                let after = declared_group(module, &instance.namespace)?;
+                Some((instance.path.as_str(), before, after))
+            })
+            .collect();
         if let Some(error) = replacement_refusal(
             ctx,
             paired
                 .iter()
+                .chain(&inline_types)
                 .map(|(path, before, after)| (*path, before.dependencies.as_slice(), after.dependencies.as_slice())),
         ) {
             return Err(error);
@@ -119,7 +131,7 @@ impl ComponentHostCapabilityState {
                 Err(error) => refusals.push(format!("{path}: {error}")),
             }
         }
-        refusals.extend(self.inline_config_refusals(module, &members));
+        refusals.extend(inline_config_refusals(module, &predecessors, &inline));
         if !refusals.is_empty() {
             return Err(refusals.join("; "));
         }
@@ -173,52 +185,67 @@ impl ComponentHostCapabilityState {
         Ok(supplied)
     }
 
-    /// A refusal for each live inline instance whose type's config kind
-    /// changes. An inline child cannot be named in `configs` (its parent
-    /// rebuilds it on rehydrate), so the replace is refused for it rather
-    /// than left to fail in that parent's rehydrate, which would name only
-    /// the parent. Inline instances are found in the registry inventory: a
-    /// guest route at `parent/NS:key` that the host did not load.
-    fn inline_config_refusals(&self, module: &Module, members: &[(ErasedActorPath, GuestView<'_>)]) -> Vec<String> {
-        let mut predecessors: Vec<&Module> = Vec::new();
-        for (_, guest) in members {
-            if !predecessors.iter().any(|known| known.hash() == guest.module.hash()) {
-                predecessors.push(guest.module);
-            }
-        }
-        let changed: HashSet<&str> = predecessors
-            .iter()
-            .flat_map(|predecessor| declared_groups(predecessor.manifest()))
-            .filter(|(namespace, before)| {
-                declared_groups(module.manifest())
-                    .find(|(candidate, _)| candidate == namespace)
-                    .is_some_and(|(_, after)| config_id(before) != config_id(after))
-            })
-            .map(|(namespace, _)| namespace)
-            .collect();
-        if changed.is_empty() {
-            return Vec::new();
-        }
-
+    /// Every live inline instance, found in the registry inventory: a guest
+    /// route at `parent/NS:key` that the host did not load. The checks read
+    /// only those whose namespace a member's module declares.
+    fn inline_instances(&self, members: &[(ErasedActorPath, GuestView<'_>)]) -> Vec<InlineInstance> {
         let loaded: HashSet<&str> = members.iter().map(|(path, _)| path.as_str()).collect();
         self.subscription()
             .inventory()
             .mailboxes
             .into_iter()
             .filter(|mailbox| mailbox.category == Some(MailboxCategory::Trampoline))
+            .filter(|mailbox| !loaded.contains(mailbox.name.as_str()))
             .filter_map(|mailbox| {
                 let (_, leaf) = mailbox.name.rsplit_once('/')?;
-                let namespace = leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace);
-                (changed.contains(namespace) && !loaded.contains(mailbox.name.as_str())).then(|| {
-                    format!(
-                        "{} is an inline instance of {namespace}, whose config kind changes, and an inline child \
-                         cannot be given a config",
-                        mailbox.name
-                    )
-                })
+                let namespace = leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace).to_owned();
+                Some(InlineInstance { namespace, path: mailbox.name })
             })
             .collect()
     }
+}
+
+/// One live inline instance: its path and its type's declared namespace.
+struct InlineInstance {
+    path: String,
+    namespace: String,
+}
+
+/// The modules the members run, each once.
+fn predecessors<'a>(members: &[(ErasedActorPath, GuestView<'a>)]) -> Vec<&'a Module> {
+    let mut predecessors: Vec<&Module> = Vec::new();
+    for (_, guest) in members {
+        if !predecessors.iter().any(|known| known.hash() == guest.module.hash()) {
+            predecessors.push(guest.module);
+        }
+    }
+    predecessors
+}
+
+/// A refusal for each live inline instance whose type's config kind
+/// changes. An inline child cannot be named in `configs` (its parent
+/// rebuilds it on rehydrate), so the replace is refused for it rather than
+/// left to fail in that parent's rehydrate, which would name only the
+/// parent.
+fn inline_config_refusals(module: &Module, predecessors: &[&Module], inline: &[InlineInstance]) -> Vec<String> {
+    let changed: HashSet<&str> = predecessors
+        .iter()
+        .flat_map(|predecessor| declared_groups(predecessor.manifest()))
+        .filter(|(namespace, before)| {
+            declared_group(module, namespace).is_some_and(|after| config_id(before) != config_id(after))
+        })
+        .map(|(namespace, _)| namespace)
+        .collect();
+    inline
+        .iter()
+        .filter(|instance| changed.contains(instance.namespace.as_str()))
+        .map(|InlineInstance { path, namespace }| {
+            format!(
+                "{path} is an inline instance of {namespace}, whose config kind changes, and an inline child cannot \
+                 be given a config"
+            )
+        })
+        .collect()
 }
 
 /// What the pre-checks read of one live guest.
@@ -239,6 +266,11 @@ fn published_group<'a>(module: &'a Module, published: &str) -> Option<&'a ActorI
 /// namespace.
 fn declared_groups(manifest: &ModuleManifest) -> impl Iterator<Item = (&str, &ActorInputs)> {
     manifest.exported_groups().chain(manifest.private_groups())
+}
+
+/// The type `module` declares at `namespace`, exported or private.
+fn declared_group<'a>(module: &'a Module, namespace: &str) -> Option<&'a ActorInputs> {
+    declared_groups(module.manifest()).find(|(declared, _)| *declared == namespace).map(|(_, group)| group)
 }
 
 fn config_id(group: &ActorInputs) -> Option<aether_data::KindId> {

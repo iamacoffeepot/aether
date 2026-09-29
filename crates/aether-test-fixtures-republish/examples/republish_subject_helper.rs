@@ -1,13 +1,10 @@
-//! Issue 7109: a `test.republish.subject` successor that keeps every row of
-//! the base module and spawns a private inline child, `SubjectHelper`, from
-//! `wire`. The child declares `depends(ClipboardCapability)`, which is
-//! checked where a helper stands up (ADR-0241 §4): a republish from
-//! `republish_subject_helper`, whose helper declares no dependency, is
-//! refused for its live helper wherever no clipboard actor is live, while a
-//! republish from the helperless base proceeds, since no helper is rebuilt.
+//! Issue 6867: `test.republish.subject` as the base module has it, plus a
+//! private inline child, `SubjectHelper`, spawned from `wire` and declaring
+//! no dependency. Republishing it to `republish_subject_inline_depends`,
+//! whose helper adds `depends(ClipboardCapability)`, rebuilds a live helper,
+//! so that republish checks the added dependency (ADR-0241 §4).
 
 use aether_actor::{ActorInitError, Subname, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
-use aether_clipboard::ClipboardCapability;
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, SubstrateHarnessObserver, TickObserved};
 
 pub struct Subject {
@@ -49,13 +46,13 @@ impl WasmActor for Subject {
     }
 }
 
-/// The inline child whose declared dependency the host checks when it is
-/// spawned or rebuilt. It counts the `Bump`s it receives.
+/// The inline child, which declares no dependency. It counts the `Bump`s
+/// it receives.
 pub struct SubjectHelper {
     bumps: u32,
 }
 
-#[actor(instanced, composable, depends(ClipboardCapability))]
+#[actor(instanced, composable)]
 impl WasmActor for SubjectHelper {
     const NAMESPACE: &'static str = "test.republish.subject_helper";
 

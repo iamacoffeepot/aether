@@ -17,7 +17,7 @@ use aether_substrate::actor::wasm::kind_manifest::Dependency;
 use aether_substrate::actor::wasm::module::{Module, ModuleManifest};
 
 use super::LoadResult;
-use super::dependencies::{dependency_refusal, inline_dependency_refusal};
+use super::dependencies::dependency_refusal;
 use super::placement::{child_refusal, root_refusal};
 use crate::component::runtime::{ComponentHostCapabilityState, GuestControl, LoadedGuest};
 use crate::component::{ComponentHostCapability, LoadDelivered};
@@ -292,13 +292,6 @@ impl ComponentHostCapabilityState {
             .map_err(|error| LoadResult::Err { error })?;
         let manifest = module.manifest();
         let actors = manifest.actors();
-
-        // ADR-0230 §3: an actor the module can spawn inline runs before the
-        // host sees it, so its declared dependencies are checked here, before
-        // the module publishes, the module boot actor, or the requested actor.
-        if let Some(error) = inline_dependency_refusal(ctx, manifest) {
-            return Err(LoadResult::Err { error });
-        }
 
         // ADR-0241 §5: a module boot is always a root singleton, whatever the
         // requested placement, so its type must declare `root`.

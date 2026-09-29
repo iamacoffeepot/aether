@@ -316,7 +316,8 @@ impl NativeBinding {
     }
 
     /// The first declared dependency with no `Live` route. The path behind
-    /// [`NativeCtx::missing_dependency`](crate::actor::native::ctx::NativeCtx::missing_dependency).
+    /// [`NativeCtx::missing_dependency`](crate::actor::native::ctx::NativeCtx::missing_dependency)
+    /// and the inline spawn host fn's check.
     #[cfg(feature = "wasm")]
     pub(crate) fn missing_dependency<'a>(
         &self,
