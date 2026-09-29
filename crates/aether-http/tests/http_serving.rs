@@ -82,20 +82,16 @@ const ROUTED_STREAM_HANDLER_NAMESPACE: &str = "test.web_stream_routed";
 /// The `WebSocketHandler` fixture's `NAMESPACE` const (ADR-0129).
 const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
 
-/// Poll the chassis's boundary address parser until the handler loaded under
-/// `name` resolves to its trampoline, answering its canonical address. Panics
-/// after 30s with the address and the parser's last answer.
-fn await_live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> ErasedActorPath {
+/// Assert the handler loaded under `name` resolves to its trampoline through
+/// the chassis's boundary address parser, answering its canonical address.
+/// `build` returns only once every boot component has answered its load, and
+/// the trampoline answers that load after its birth completes, so the guest
+/// resolves at once, with no wait (as `headless_autoload.rs` relies on).
+fn live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> ErasedActorPath {
     let address = ErasedActorPath::new(name).expect("a loaded handler name forms a well-formed actor path");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let resolved = built.resolve_address(&address);
-        if resolved.is_ok() {
-            return address;
-        }
-        assert!(Instant::now() < deadline, "guest {address} did not come up within 30s; last lookup: {resolved:?}");
-        thread::sleep(Duration::from_millis(25));
-    }
+    let resolved = built.resolve_address(&address);
+    assert!(resolved.is_ok(), "boot guest {address} is not live when build returns: {resolved:?}");
+    address
 }
 
 /// RFC 6455 §1.3 worked-vector handshake key, and the `Sec-WebSocket-Accept`
@@ -397,16 +393,16 @@ mod tests {
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
-        // Wait for the wasm handler trampoline to come up.
-        await_live_trampoline(&built, HANDLER_NAMESPACE);
+        live_trampoline(&built, HANDLER_NAMESPACE);
 
         // Retrieve the OS-assigned port from the published handle.
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        // The handler binds the `/` catch-all via async `wire` mail, so poll
-        // it live before the assertions rather than racing the registration.
+        // The handler binds the `/` catch-all from its `wire`, a handler-staged
+        // birth's `wire` with no wire root (ADR-0244 §2), so no settlement the
+        // test can await covers the registration: poll it live.
         poll_body_contains(
             port,
             b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -494,14 +490,15 @@ mod tests {
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
-        await_live_trampoline(&built, STREAM_HANDLER_NAMESPACE);
+        live_trampoline(&built, STREAM_HANDLER_NAMESPACE);
 
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        // The handler binds the `/` catch-all via async `wire` mail, so poll
-        // it live before the assertions rather than racing the registration.
+        // The handler binds the `/` catch-all from its `wire`, a handler-staged
+        // birth's `wire` with no wire root (ADR-0244 §2), so no settlement the
+        // test can await covers the registration: poll it live.
         poll_body_contains(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", "chunk-");
 
         let response =
@@ -587,14 +584,15 @@ mod tests {
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
-        await_live_trampoline(&built, ROUTED_STREAM_HANDLER_NAMESPACE);
+        live_trampoline(&built, ROUTED_STREAM_HANDLER_NAMESPACE);
 
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        // Route registration is async mail — poll until the streamed body
-        // reassembles rather than racing the `register_route_self`.
+        // The `register_route_self` rides a handler-staged birth's `wire`,
+        // which has no wire root (ADR-0244 §2), so no settlement the test can
+        // await covers it: poll until the streamed body reassembles.
         let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT).flat_map(|i| format!("chunk-{i}\n").into_bytes()).collect();
         let request = b"GET /routed-stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -685,15 +683,16 @@ mod tests {
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
-        await_live_trampoline(&built, WS_HANDLER_NAMESPACE);
+        live_trampoline(&built, WS_HANDLER_NAMESPACE);
 
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        // Handshake. The handler binds the `/` catch-all via async `wire`
-        // mail, so poll the upgrade live (reconnecting each attempt) rather
-        // than racing the registration — a pre-registration upgrade is 503.
+        // Handshake. The handler binds the `/` catch-all from a handler-staged
+        // birth's `wire`, which has no wire root (ADR-0244 §2), so no
+        // settlement the test can await covers it: poll the upgrade live
+        // (reconnecting each attempt) — a pre-registration upgrade is 503.
         let handshake = format!(
             "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
              Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
@@ -817,8 +816,11 @@ mod tests {
     }
 
     /// Poll `request` until the response body contains `expected`
-    /// (bounded deadline): route registration, and later the drop's
-    /// route purge, are asynchronous mail the test must not race.
+    /// (bounded deadline). A boot guest's route registration rides a
+    /// handler-staged birth's `wire`, which has no wire root (ADR-0244 §2),
+    /// and the drop's route purge rides the departing trampoline's
+    /// `MonitorNotice` fan-out; the test holds no chain for either, so no
+    /// settlement covers them and they are polled.
     fn poll_body_contains(port: u16, request: &[u8], expected: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -901,23 +903,24 @@ mod tests {
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
-        // Wait for both trampolines (fallback + routed guest).
-        let routed_address = await_live_trampoline(&built, ROUTED_NAMESPACE);
-        await_live_trampoline(&built, HANDLER_NAMESPACE);
+        // Both trampolines (fallback + routed guest) are live at build.
+        let routed_address = live_trampoline(&built, ROUTED_NAMESPACE);
+        live_trampoline(&built, HANDLER_NAMESPACE);
 
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
 
-        // Route live (registration is async mail — poll, don't race).
+        // Route live: a handler-staged `wire` registration has no wire root
+        // (ADR-0244 §2) the test can await, so poll it.
         poll_body_contains(
             port,
             b"GET /routed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
             "routed handler",
         );
 
-        // `/routed/drop` is a second exact route (#3697) with its own async
-        // registration — confirm it live before the destructive POST so that
-        // request cannot race its registration. An empty body is a clean 400
+        // `/routed/drop` is a second exact route (#3697) with its own
+        // rootless registration — confirm it live before the destructive POST
+        // so that request cannot race its registration. An empty body is a clean 400
         // ("component actor path"), so this probe drops nothing.
         poll_body_contains(
             port,
@@ -941,7 +944,8 @@ mod tests {
             "drop bridge should acknowledge, got: {drop_str:?}",
         );
 
-        // The purge rides the drop fan-out; once it lands, /routed falls
+        // The purge rides the drop's `MonitorNotice` fan-out, a chain the test
+        // does not hold, so it is polled; once it lands, /routed falls
         // back to the `web` fixture, which echoes the path in its 200 body
         // — distinct from the routed component's fixed "routed handler"
         // body, so this still discriminates route-live from route-purged.

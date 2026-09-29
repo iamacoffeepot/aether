@@ -11,7 +11,9 @@
 //! injects its `register_route_self` registration — so the tests exercise what a
 //! component author writes. The conflict-`Err` and idempotent
 //! double-claim handlers stay on the raw registration surface, so a
-//! macro regression cannot mask a registration-semantics one.
+//! macro regression cannot mask a registration-semantics one, and the
+//! self-releasing `/tmp` router is hand-written so it can hold its reply
+//! until the server confirms the release (ADR-0243 §4).
 
 use std::sync::Arc;
 

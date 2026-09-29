@@ -10,8 +10,7 @@ use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::kinds::{HttpRouter, RegisterRoute, UnregisterRoute};
 use crate::server::HttpServerCapability;
@@ -20,23 +19,25 @@ use super::handlers::{
     ApiRouteHandler, ApiV2Handler, BookRouteHandler, EchoHttpHandler, ExtractRouteHandler, FixedBodyHttpHandler,
     MethodAnyHandler, MethodPostHandler, NestedRouteHandler, TmpRouteHandler, WiredRouteHandler,
 };
-use super::support::{
-    body_of, config_for, keep_alive_config_for, poll_body, port_of, read_one_response, round_trip, round_trip_live,
-};
+use super::support::{body_of, config_for, expect_body, keep_alive_config_for, port_of, read_one_response, round_trip};
 
 /// Boot the server (first, so the routed handlers' `wire` registrations
 /// find its mailbox live) with [`FixedBodyHttpHandler`] as the `/`
 /// catch-all (its `wire` binds `prefix: "/"`), then the given routed
-/// handlers.
+/// handlers, and wait for the boot's wire root to settle (ADR-0244): every
+/// handler's `wire` registration rides that root and the server writes the
+/// route table inside its handler, so every route is live on return.
 macro_rules! routed_chassis {
     ($($handler:ty),+ $(,)?) => {{
         let (registry, mailer) = fresh_substrate();
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor_configured::<HttpServerCapability>((), config_for(1024))
             .with_actor::<FixedBodyHttpHandler>(())
             $(.with_actor::<$handler>(()))+
             .build_passive()
-            .expect("caps boot")
+            .expect("caps boot");
+        chassis.await_boot_settled();
+        chassis
     }};
 }
 
@@ -49,7 +50,7 @@ fn routed_prefix_dispatches_to_its_router() {
     let chassis = routed_chassis!(ApiRouteHandler);
     let port = port_of(&chassis);
 
-    poll_body(port, b"GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api");
+    expect_body(port, b"GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api");
 
     // A deeper path under the claimed prefix is not swallowed (#3697): the cap
     // routes it to the `/api` dispatcher, which matches exactly and 404s rather
@@ -57,9 +58,8 @@ fn routed_prefix_dispatches_to_its_router() {
     let deeper = round_trip(port, b"GET /api/widgets HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(deeper.starts_with("HTTP/1.1 404 "), "an exact route does not swallow a deeper path: {deeper:?}");
 
-    // A path under no claimed prefix falls back to the `/` catch-all — its own
-    // async registration, so poll it live.
-    poll_body(port, b"GET /other HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
+    // A path under no claimed prefix falls back to the `/` catch-all.
+    expect_body(port, b"GET /other HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
 }
 
 /// A macro-authored route with a real `FromRequest` extractor dispatches
@@ -72,9 +72,9 @@ fn routed_extractor_success_and_failure() {
     let port = port_of(&chassis);
 
     // Success: the extracted `name` reaches the handler and is echoed.
-    poll_body(port, b"GET /extract?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n", "hello:ada");
+    expect_body(port, b"GET /extract?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n", "hello:ada");
 
-    // Failure: with the route proven live, a request missing `name`
+    // Failure: a request missing `name`
     // short-circuits to the extractor's 400 response body.
     let missing = round_trip(port, b"GET /extract HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(missing.starts_with("HTTP/1.1 400 "), "extractor Err becomes the reply status: {missing:?}");
@@ -93,11 +93,11 @@ fn path_template_routes_dispatch_and_capture() {
     // Collection and captured-member routes share one (Get, /books) group;
     // `/books` and `/books/{id}` each match their exact segment count, so a
     // member request selects the capture route.
-    poll_body(port, b"GET /books HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:list");
-    poll_body(port, b"GET /books/42 HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:get:42");
+    expect_body(port, b"GET /books HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:list");
+    expect_body(port, b"GET /books/42 HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:get:42");
 
     // The sibling POST group under the same static head, with the capture.
-    poll_body(port, b"POST /books/7/checkout HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:checkout:7");
+    expect_body(port, b"POST /books/7/checkout HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:checkout:7");
 
     // A non-numeric capture short-circuits to the FromPathSegment 400
     // rather than falling through to the `/books` prefix.
@@ -120,8 +120,8 @@ fn a_router_answers_from_the_group_whose_key_the_server_chose() {
     let chassis = routed_chassis!(NestedRouteHandler);
     let port = port_of(&chassis);
 
-    poll_body(port, b"GET /a/b HTTP/1.1\r\nHost: localhost\r\n\r\n", "a/b");
-    poll_body(port, b"GET /a/x/y HTTP/1.1\r\nHost: localhost\r\n\r\n", "a:x:y");
+    expect_body(port, b"GET /a/b HTTP/1.1\r\nHost: localhost\r\n\r\n", "a/b");
+    expect_body(port, b"GET /a/x/y HTTP/1.1\r\nHost: localhost\r\n\r\n", "a:x:y");
 
     let nested = round_trip(port, b"GET /a/b/c HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(nested.starts_with("HTTP/1.1 404 "), "the /a/b group has no template for /a/b/c: {nested:?}");
@@ -138,12 +138,12 @@ fn longest_prefix_wins_on_segment_boundaries() {
     let port = port_of(&chassis);
 
     // The exact `/api` hit routes to the `/api` handler.
-    poll_body(port, b"GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api");
+    expect_body(port, b"GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api");
 
     // Longest registered prefix wins: `/api/v2` beats `/api` for an exact
     // `/api/v2` request (had `/api` won, its exact route would not match the
     // deeper path and would 404 — so `api-v2` proves `/api/v2` was selected).
-    poll_body(port, b"GET /api/v2 HTTP/1.1\r\nHost: localhost\r\n\r\n", "api-v2");
+    expect_body(port, b"GET /api/v2 HTTP/1.1\r\nHost: localhost\r\n\r\n", "api-v2");
 
     // A deeper path under the winning prefix is not swallowed (#3697): it
     // routes to the `/api/v2` dispatcher, which matches exactly and 404s.
@@ -151,8 +151,8 @@ fn longest_prefix_wins_on_segment_boundaries() {
     assert!(deeper.starts_with("HTTP/1.1 404 "), "exact route does not swallow a deeper path: {deeper:?}");
 
     // `/apiary` is not under `/api` (segment boundary), so it takes the `/`
-    // catch-all; poll it live (its own async registration) before asserting.
-    poll_body(port, b"GET /apiary HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
+    // catch-all.
+    expect_body(port, b"GET /apiary HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
 }
 
 /// A method-specific route beats a method-agnostic one at equal
@@ -162,10 +162,10 @@ fn method_specific_route_beats_agnostic() {
     let chassis = routed_chassis!(MethodPostHandler, MethodAnyHandler);
     let port = port_of(&chassis);
 
-    // Each route's first positive assertion polls it live; together
-    // they then pin the precedence (POST → specific, GET → agnostic).
-    poll_body(port, b"POST /m HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", "post-m");
-    poll_body(port, b"GET /m HTTP/1.1\r\nHost: localhost\r\n\r\n", "any-m");
+    // Both routes are live at boot settlement, so together these pin the
+    // precedence (POST → specific, GET → agnostic).
+    expect_body(port, b"POST /m HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", "post-m");
+    expect_body(port, b"GET /m HTTP/1.1\r\nHost: localhost\r\n\r\n", "any-m");
 
     let specific = round_trip(port, b"POST /m HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
     assert_eq!(body_of(&specific), "post-m", "POST takes the method-specific route with both routes live");
@@ -198,10 +198,8 @@ fn route_registered_mid_connection_serves_next_request() {
         .with_actor_configured::<HttpServerCapability>((), keep_alive_config_for(5_000))
         .build_passive()
         .expect("caps boot");
+    chassis.await_boot_settled();
     let port = port_of(&chassis);
-
-    // Poll the echo `/` catch-all live before the pre-registration read.
-    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
@@ -225,21 +223,11 @@ fn route_registered_mid_connection_serves_next_request() {
     let (_, registered) = chassis.send_tracked(chassis.actor_ref::<HttpServerCapability>(), &mail, None);
     registered.recv_timeout(Duration::from_secs(10)).expect("the route registration settles");
 
-    // The registration lands asynchronously; poll on the SAME socket.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
-        let response = read_one_response(&mut stream, &mut carry);
-        if body_of(&response) == "no matching route" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "mid-connection registration should reach the next request within 10s; \
-             last: {response:?}",
-        );
-        thread::sleep(Duration::from_millis(25));
-    }
+    // The server wrote the route table inside the settled registration, so
+    // the next request on the SAME socket reaches the wired handler.
+    stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
+    let routed = read_one_response(&mut stream, &mut carry);
+    assert_eq!(body_of(&routed), "no matching route", "the next request takes the new route: {routed:?}");
 
     // Release the same key by the holder's plain path: the route drops and
     // /late falls back to the echo catch-all, which stamps the path header.
@@ -247,20 +235,12 @@ fn route_registered_mid_connection_serves_next_request() {
     let (_, released) = chassis.send_tracked(chassis.actor_ref::<HttpServerCapability>(), &mail, None);
     released.recv_timeout(Duration::from_secs(10)).expect("the route release settles");
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
-        let response = read_one_response(&mut stream, &mut carry);
-        if response.contains("x-aether-path: /late") {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "releasing the route should return /late to the echo catch-all within 10s; \
-             last: {response:?}",
-        );
-        thread::sleep(Duration::from_millis(25));
-    }
+    stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
+    let fallback = read_one_response(&mut stream, &mut carry);
+    assert!(
+        fallback.contains("x-aether-path: /late"),
+        "the released route returns /late to the echo catch-all: {fallback:?}",
+    );
 }
 
 /// A macro route composes with a hand-written `wire`: the macro appends
@@ -275,27 +255,24 @@ fn hand_written_wire_and_macro_route_compose() {
     let port = port_of(&chassis);
 
     // The macro-appended registration reaches the cap.
-    poll_body(port, b"GET /wired HTTP/1.1\r\nHost: localhost\r\n\r\n", "wired-macro");
+    expect_body(port, b"GET /wired HTTP/1.1\r\nHost: localhost\r\n\r\n", "wired-macro");
     // The author's own `wire` registration survived the append.
-    poll_body(port, b"GET /wired-extra HTTP/1.1\r\nHost: localhost\r\n\r\n", "no matching route");
+    expect_body(port, b"GET /wired-extra HTTP/1.1\r\nHost: localhost\r\n\r\n", "no matching route");
 }
 
 /// `unregister_route_self` releases the sender's route: the first
-/// request reaches the routed handler (which releases the route while
-/// answering), and a subsequent request falls back. The release is a
-/// separate mail racing the reply, so the fallback is asserted with a
-/// bounded poll rather than a single follow-up request.
+/// request reaches the routed handler, which holds its reply, releases the
+/// route, and answers only from the release's confirmation (ADR-0243 §4),
+/// so a subsequent request falls back to the `/` catch-all. Catches a
+/// release that does not drop the sender's route, and a confirmation that
+/// arrives before the route table changed.
 #[test]
 fn self_unregister_releases_route() {
     let chassis = routed_chassis!(TmpRouteHandler);
     let port = port_of(&chassis);
 
-    // Poll the route live (a pre-registration request harmlessly falls
-    // back without triggering the handler's release); the first "tmp"
-    // response is also the one that releases the route.
-    poll_body(port, b"GET /tmp HTTP/1.1\r\nHost: localhost\r\n\r\n", "tmp");
+    // The "tmp" response arrives only after the server confirmed the release.
+    expect_body(port, b"GET /tmp HTTP/1.1\r\nHost: localhost\r\n\r\n", "tmp");
 
-    // The release is a separate mail racing the reply, so the fallback
-    // is asserted with the same bounded poll.
-    poll_body(port, b"GET /tmp HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
+    expect_body(port, b"GET /tmp HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
 }

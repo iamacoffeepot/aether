@@ -7,8 +7,7 @@ use aether_substrate::testing::{TestChassis, fresh_substrate};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::server::{HttpServerCapability, HttpServerConfig, HttpServerHandle};
 
@@ -73,16 +72,23 @@ pub(super) fn keep_alive_config_for(keep_alive_timeout_millis: u64) -> HttpServe
 /// server cap under `config` — the single-handler shape most server
 /// tests share. Multi-handler and cap-only boots stay explicit at their
 /// call sites.
+///
+/// Returns once the boot's wire root has settled (ADR-0244): `H`'s `wire`
+/// sends its route registration under that root and the server writes the
+/// route table inside the handler, so every boot-wired route is live and
+/// the first request needs no retry.
 pub(super) fn boot_chassis<H>(config: HttpServerConfig) -> PassiveChassis<TestChassis>
 where
     H: aether_actor::Root + NativeActor<Config = (), Params = ()>,
 {
     let (registry, mailer) = fresh_substrate();
-    Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<H>(())
         .with_actor_configured::<HttpServerCapability>((), config)
         .build_passive()
-        .expect("caps boot")
+        .expect("caps boot");
+    chassis.await_boot_settled();
+    chassis
 }
 
 pub(super) fn boot_single_shard_fixed_body() -> PassiveChassis<TestChassis> {
@@ -171,40 +177,13 @@ pub(super) fn round_trip(port: u16, request: &[u8]) -> String {
     String::from_utf8_lossy(&response).into_owned()
 }
 
-/// Round-trip `request`, retrying past the pre-registration `503` until the
-/// catch-all route's async `wire` mail (ADR-0130) has landed, then return
-/// that first non-`503` response. The head/header-asserting sibling of
-/// [`poll_body`] (which only matches on the body) for a catch-all route's
-/// first positive assertion. None of these handlers legitimately reply
-/// `503`, so the first non-`503` is the live response.
-pub(super) fn round_trip_live(port: u16, request: &[u8]) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let response = round_trip(port, request);
-        if !response.starts_with("HTTP/1.1 503 ") {
-            return response;
-        }
-        assert!(Instant::now() < deadline, "route did not go live within 10s; last response: {response:?}");
-        thread::sleep(Duration::from_millis(25));
-    }
-}
-
-/// Poll `request` until its response body equals `expected` (bounded
-/// deadline, house pattern — see `tcp/tests.rs` / the bundle
-/// `http_serving.rs`). The `wire` route registrations are asynchronous
-/// mail, so a route's *first* positive assertion must poll it live
-/// rather than race the registration; assertions that depend on an
-/// already-proven-live route can then be direct.
-pub(super) fn poll_body(port: u16, request: &[u8], expected: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let response = round_trip(port, request);
-        if body_of(&response) == expected {
-            return;
-        }
-        assert!(Instant::now() < deadline, "expected body {expected:?} within 10s; last response: {response:?}");
-        thread::sleep(Duration::from_millis(25));
-    }
+/// Round-trip `request` once and assert its response body is exactly
+/// `expected`, naming the full response on failure. The route must already
+/// be live: its registration settled on the boot's wire root, a spawn's
+/// wire root, or a tracked send.
+pub(super) fn expect_body(port: u16, request: &[u8], expected: &str) {
+    let response = round_trip(port, request);
+    assert_eq!(body_of(&response), expected, "unexpected body; full response: {response:?}");
 }
 
 pub(super) fn body_of(response: &str) -> &str {
