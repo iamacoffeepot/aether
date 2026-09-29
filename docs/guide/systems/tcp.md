@@ -34,6 +34,24 @@ separate actor creation from a socket being usable. A connect timeout or bind
 failure must resolve the initiating request; it must not leave a permanent
 settlement hold.
 
+Connect, bind, and unbind answer later than the handler turn that receives
+them, through typed held replies (ADR-0243). Each handler holds its reply as a
+`Held<R>` and returns `Pending<R>`, so `describe_handlers` names its reply
+kind. The `Held` waits in the capability's state, keyed by the work that
+answers it:
+
+- A connect waits under its connect id until the dial sidecar reports, then
+  until the staged session's birth completes.
+- A bind waits under its listener name until the staged listener's birth
+  completes and the capability has installed its monitor.
+- An unbind waits on the listener's entry until the listener's close notice
+  arrives.
+
+A staged birth carries only its key (`aether.tcp.session_spawn_key` or
+`aether.tcp.listener_spawn_key`) into its task completion, which looks up the
+`Held` and answers it. An early failure answers the `Held` at once. When the
+capability closes, the ledger settles every reply it still holds.
+
 ## Session data contract
 
 TCP is a byte stream, but Aether's session surface is framed. Reader sidecars
