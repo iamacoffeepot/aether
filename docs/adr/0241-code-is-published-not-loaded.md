@@ -295,13 +295,17 @@ not return.
 ### 9. The mail surface
 
 Remote callers (MCP, RPC, the Bloomery driver, chassis autoload) publish and
-spawn by mail, answered by the registry owner's engine mailbox: a front door
-to an engine system, not an address parent.
+spawn by mail, answered by the component host (`aether.component`), which
+owns the module cache and stages every publish batch: a front door to an
+engine system, not an address parent. The publication table stays with the
+registry owner (§3), and the host reads it there.
 
-- `Publish { code: Blob }` checks the bytes in, builds the `Module`, and runs
-  admission. Publishing a module whose namespaces already point at the same
-  hash is a no-op. Its reply names each namespace it bound, so a caller of a
-  content-addressed module never recomputes the hash.
+- `Publish { code: Blob, configs }` checks the bytes in, builds the
+  `Module`, and runs admission. Publishing a module whose namespaces already
+  point at the same hash is a no-op. A successor republishes its group (§7),
+  with `configs` as each listed instance's new config. Its reply names each
+  namespace it bound, so a caller of a content-addressed module never
+  recomputes the hash.
 - `Spawn { namespace, key, parent, config }` asks for an instance to exist,
   and the name decides the answer. A live name: the reply names it and
   nothing is re-initialised. An absent name: the engine stands the instance
@@ -403,9 +407,9 @@ Each step lands on its own:
    lands, and the trampoline's `check_contract` and the `RepublishContract`
    guard retire, with step 4. `try_claim_namespace` by `TypeId` has retired:
    each native birth holds its namespace in the publication table (§3), and
-   dependencies stay a stand-up check (§4). The `Publish` mail door (§9) and the module
-   cache's move to the registry owner land with step 5, when a remote caller
-   first publishes by mail.
+   dependencies stay a stand-up check (§4). The `Publish` mail door (§9)
+   lands on the component host, which keeps the module cache, with step 5,
+   when a remote caller first publishes by mail.
 3. **Forwarding host and native naming for guests**: guests spawn as
    `NS` / `NS:key` / `parent/NS:key`; `Embedded` retires; CLAUDE.md and the
    guide state the new addresses.

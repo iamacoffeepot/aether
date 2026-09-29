@@ -629,15 +629,18 @@ mod control_plane {
         }
     }
 
-    /// `aether.component.load` — request the substrate load a WASM
-    /// component into a freshly allocated mailbox at its published name
-    /// (ADR-0241 §5): `NS` for a singleton, which a load names no key for,
-    /// or `NS:name` for an instanced type, `NS:<counter>` when `name` is
-    /// `None`. Carries the raw WASM bytes and the optional key. The
-    /// component's kind vocabulary ships embedded in the wasm's
-    /// `aether.kinds` custom section (ADR-0028) — the substrate
-    /// reads it directly and the loader doesn't need to declare
-    /// anything. Substrate replies with `LoadResult`.
+    /// `aether.component.load` — publish a module and spawn one of its types
+    /// in one call (ADR-0241 §9): a [`Publish`] of `wasm`, then a [`Spawn`]
+    /// of the type `export` selects, keyed by `name`. The instance is named
+    /// by its published name (ADR-0241 §5): `NS` for a singleton, which a
+    /// load names no key for, or `NS:name` for an instanced type,
+    /// `NS:<counter>` when `name` is `None`. A module that succeeds the one
+    /// publishing its namespaces republishes every live instance of them as
+    /// one group before the spawn (§7), and a name already live answers with
+    /// that instance, which is not re-initialised. The component's kind
+    /// vocabulary ships embedded in the wasm's `aether.kinds` custom section
+    /// (ADR-0028) — the substrate reads it directly and the loader doesn't
+    /// need to declare anything. Substrate replies with `LoadResult`.
     #[aether_data::kind(name = "aether.component.load")]
     pub struct LoadComponent {
         #[serde(with = "aether_data::bytes")]
@@ -677,6 +680,8 @@ mod control_plane {
     /// [`LoadComponent`]: production load callers keep the established
     /// `aether.component.load` root placement, while `SubstrateHarness`
     /// scenarios use this request to construct nested component topologies.
+    /// It is the same publish and spawn as a load, with [`Spawn::parent`], and
+    /// an adapter over them until its callers move to [`Spawn`] (#7163).
     #[aether_data::kind(name = "aether.component.load_under")]
     pub struct LoadComponentUnder {
         pub parent: String,
@@ -824,7 +829,9 @@ mod control_plane {
     /// whole replace before any instance prepares; a refusal while preparing
     /// or a publish failure leaves every instance on its old code. Kind
     /// vocabulary rides in the wasm's `aether.kinds` custom section
-    /// (ADR-0028). Reply: `ReplaceResult`.
+    /// (ADR-0028). It is a [`Publish`] of a successor, answered as a replace,
+    /// and an adapter over it until its callers move to [`Publish`] (#7163).
+    /// Reply: `ReplaceResult`.
     #[aether_data::kind(name = "aether.component.replace")]
     pub struct ReplaceComponent {
         #[serde(with = "aether_data::bytes")]
@@ -864,6 +871,87 @@ mod control_plane {
         pub capabilities: ComponentCapabilities,
     }
 
+    /// `aether.component.publish` — bind every namespace a module exports to
+    /// it (ADR-0241 §3, §9), addressed to the component host. Publishing a
+    /// module whose namespaces already point at the same hash is a no-op. A
+    /// first publish binds the module and spawns its boot once (ADR-0147). A
+    /// successor of the module that publishes its namespaces republishes
+    /// every live instance of them as one group, or none (§7): `configs`
+    /// gives an instance whose type's config kind changed its new config, and
+    /// every other instance keeps its stored one. Reply: [`PublishResult`].
+    #[aether_data::kind(name = "aether.component.publish")]
+    pub struct Publish {
+        /// The module's wasm bytes.
+        pub code: aether_data::Blob,
+        pub configs: Vec<InstanceConfig>,
+    }
+
+    /// One live instance's config in a [`Publish`] of a successor: the
+    /// instance's canonical or short actor path, and the config bytes its
+    /// successor type is built with, decoded strictly against that type's
+    /// config kind (ADR-0090 §5, ADR-0241 §4).
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct InstanceConfig {
+        pub path: aether_data::ErasedActorPath,
+        #[serde(with = "aether_data::bytes")]
+        pub config: Vec<u8>,
+    }
+
+    /// Reply to [`Publish`]. `Ok` names each namespace the module is bound
+    /// to, as published: `NS`, or `NS.<hash>` for a content-addressed module
+    /// (ADR-0241 §3), so its caller never recomputes the hash; a republish
+    /// answers once every instance has committed and every chain its commit
+    /// released has settled. `Err` carries a free-form reason, and nothing
+    /// was bound or moved.
+    #[aether_data::kind(name = "aether.component.publish_result")]
+    pub enum PublishResult {
+        Ok { types: Vec<PublishedType> },
+        Err { error: String },
+    }
+
+    /// One namespace a [`Publish`] bound: its published name and its type's
+    /// receive surface.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct PublishedType {
+        pub namespace: String,
+        pub capabilities: ComponentCapabilities,
+    }
+
+    /// `aether.component.spawn` — ask for an instance of a published type to
+    /// exist (ADR-0241 §9), addressed to the component host. `namespace` is
+    /// the published name a [`PublishResult`] reported. The name the instance
+    /// takes (`NS`, `NS:key`, or `parent/NS:key`, §5) decides the answer: a
+    /// live name answers with that instance, which is not re-initialised; an
+    /// absent name stands the instance up with `config`; a tombstoned name is
+    /// refused, because it is spent (§8). A singleton names no key; an
+    /// instanced type takes `key`, or a counter when it is `None`. A spawn of
+    /// a namespace whose module is republishing waits until the republish
+    /// answers (§7). Reply: [`SpawnResult`].
+    #[aether_data::kind(name = "aether.component.spawn")]
+    pub struct Spawn {
+        pub namespace: String,
+        pub key: Option<String>,
+        /// The live actor the instance is spawned beneath, whose type the
+        /// spawned type must declare `child_of`.
+        pub parent: Option<aether_data::ErasedActorPath>,
+        /// The init config a new instance is built with (ADR-0090).
+        #[serde(with = "aether_data::bytes")]
+        pub config: Vec<u8>,
+    }
+
+    /// Reply to [`Spawn`]. `Spawned` and `Live` are sent by the instance
+    /// itself, so a requester takes its proven reference from the reply's
+    /// stamped sender (ADR-0230 §3): `Spawned` when the spawn stood it up,
+    /// `Live` when it was already live and nothing was stood up. Each carries
+    /// the instance's canonical `path` and its receive surface. `Err` comes
+    /// from the component host.
+    #[aether_data::kind(name = "aether.component.spawn_result")]
+    pub enum SpawnResult {
+        Spawned { path: aether_data::ErasedActorPath, capabilities: ComponentCapabilities },
+        Live { path: aether_data::ErasedActorPath, capabilities: ComponentCapabilities },
+        Err { error: String },
+    }
+
     /// `aether.component.list` — enumerate the components an engine has
     /// actually loaded and registered, addressed to its `aether.component`
     /// mailbox (issue 2020). Fieldless: the query is a definitive snapshot
@@ -895,13 +983,16 @@ mod control_plane {
     /// `LoadResult.path` hand back; iamacoffeepot/aether#2421).
     /// Name-addressed because a boot-manifest-loaded component never returns
     /// a load reply to its spawner — the substrate is the only process that
-    /// always holds the live loaded set, so it owns the answer. Reply:
+    /// always holds the live loaded set, so it owns the answer. A published
+    /// namespace that names no live actor, such as an instanced type's, is
+    /// answered from its published module (ADR-0241 §3). Reply:
     /// `DescribeComponentResult`.
     #[aether_data::kind(name = "aether.component.describe")]
     pub struct DescribeComponent {
         /// The component's ADR-0099 lineage name (e.g. `aether.kit.camera`),
         /// as returned by
-        /// `ListComponentsResult.names` or `LoadResult.path`.
+        /// `ListComponentsResult.names` or `LoadResult.path`, or a published
+        /// namespace, as `PublishResult` names it.
         pub name: String,
     }
 

@@ -138,6 +138,20 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.binding.mailer().registry().admission_preview(module)
     }
 
+    /// The module that publishes `namespace`, read from the registry's
+    /// publication table (ADR-0241 §3): `None` for a native or unpublished
+    /// namespace. The table is the one record of which code implements a
+    /// namespace, so a reader keeps no copy of it.
+    ///
+    /// Consumer: the component host's spawn, which stands an instance up from
+    /// the module its namespace is published by, and its describe of a
+    /// published namespace that names no live actor.
+    #[cfg(feature = "wasm")]
+    #[must_use]
+    pub fn published_module(&self, namespace: &str) -> Option<Module> {
+        self.binding.mailer().registry().published_module(namespace)
+    }
+
     /// This envelope's payload as wire bytes: tag-1 `Blob` fields rewritten
     /// to tag 0, bounded by the installed frame limit (ADR-0238 decisions 3
     /// and 5). An envelope with no attachments has no tag-1 field, so its

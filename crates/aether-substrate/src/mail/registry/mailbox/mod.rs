@@ -294,6 +294,14 @@ impl Registry {
             |kind| inner.kinds.get(&kind).map(|slot| Arc::clone(&slot.name)),
         )
     }
+
+    /// The module that publishes `namespace` in the publication table
+    /// (ADR-0241 §3), read under one `Inner` lock: `None` for a native or
+    /// unpublished namespace.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn published_module(&self, namespace: &str) -> Option<Module> {
+        self.inner.lock().expect("registry lock poisoned; fail-fast per ADR-0063").publications.module(namespace)
+    }
 }
 
 impl Default for Registry {

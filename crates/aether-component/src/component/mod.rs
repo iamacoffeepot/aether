@@ -1,8 +1,13 @@
 //! `aether.component` cap (issue 603, renamed in issue 638 phase 3
-//! from `aether.control`). The wasm-component lifecycle endpoint:
-//! receives [`LoadComponent`](aether_kinds::LoadComponent) mail and spawns a per-component
-//! `WasmTrampoline` (issue 634 Phase 4 PR 1) named by the guest's own
-//! published namespace: `NS`, `NS:key`, or `parent/NS:key` (ADR-0241 §5).
+//! from `aether.control`). The wasm-component lifecycle endpoint and the
+//! front door that publishes and spawns code by mail (ADR-0241 §9):
+//! [`Publish`](aether_kinds::Publish) binds a module's namespaces,
+//! [`Spawn`](aether_kinds::Spawn) asks for an instance of a published type,
+//! which runs in a per-component `WasmTrampoline` (issue 634 Phase 4 PR 1)
+//! named by the guest's own published namespace: `NS`, `NS:key`, or
+//! `parent/NS:key` (ADR-0241 §5). A live name answers with the instance
+//! there, and [`LoadComponent`](aether_kinds::LoadComponent) is a publish
+//! then a spawn.
 //! [`DropComponent`](aether_kinds::DropComponent) mail flows through the cap
 //! as well — it hands each to the addressed trampoline with the original
 //! caller as its reply target, so the trampoline replies directly to the
@@ -10,16 +15,16 @@
 //! [`NativeActor`]: a drop closes it and its name tombstones (ADR-0241 §8),
 //! and the host refuses a later drop at that path.
 //!
-//! Every load first publishes its module (ADR-0241 §3): one registry-owner
-//! batch runs admission (§4) and registers the module's kinds, all or
-//! nothing. A load spawns only once that batch commits; a refusal answers
-//! the caller with `module publish refused: …`.
-//!
-//! [`ReplaceComponent`](aether_kinds::ReplaceComponent) republishes a module
-//! as one group (ADR-0241 §7): the host pre-checks the successor against
-//! every live instance of the module's namespaces, drives each through the
-//! trampoline's prepare, then publishes the module and commits every
-//! instance, or aborts every one.
+//! Every publish, and so every load, runs one path (ADR-0241 §3): a module
+//! already published changes nothing, a first publish runs admission (§4)
+//! and registers the module's kinds in one registry-owner batch, all or
+//! nothing, and a successor republishes as one group (§7): the host
+//! pre-checks it against every live instance of the module's namespaces,
+//! drives each through the trampoline's prepare, then publishes the module
+//! and commits every instance, or aborts every one. A load spawns only once
+//! its module is bound; a refusal answers the caller with the reason.
+//! [`ReplaceComponent`](aether_kinds::ReplaceComponent) is a publish of a
+//! successor answered as a replace.
 //!
 //! Pre-Phase-4 the cap also owned the wasm dispatcher infrastructure
 //! (the retired `ComponentEntry`, `dispatcher_loop`, `kill_actor`,
@@ -45,14 +50,11 @@
 //! dispatcher thread.
 //!
 //! The implementation is split across files:
-//! - `mod.rs` — this file: the identity ZST, the `#[actor(singleton)] impl
-//!   NativeActor` with `init` + the four lifecycle handlers over
-//!   `state: &mut Self::State`.
-//! - `runtime.rs` — the `feature = "runtime"` half: the state struct and the
-//!   substrate / wasmtime imports.
-//! - `load.rs` — the `handle_load` sequence as a method on the state; the
-//!   state fields carry `pub` so this sibling reaches
-//!   them.
+//! - `mod.rs` — this file: the identity ZST and the always-on control rows.
+//! - `runtime/` — the `feature = "runtime"` half: the state struct, the
+//!   `#[runtime] impl NativeActor` and its handlers, and one file or
+//!   directory per door: `publish`, `spawn`, `load` (the spawn half every
+//!   door shares), and `republish`.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
@@ -108,6 +110,25 @@ pub struct LoadDelivered {
     pub path: aether_data::ErasedActorPath,
     /// The component's receive-side capabilities (ADR-0033).
     pub capabilities: aether_kinds::ComponentCapabilities,
+}
+
+/// `aether.component.spawn_delivered` — the component host hands a spawn to
+/// the guest it names, which answers the requester in its own name:
+/// [`SpawnResult::Live`](aether_kinds::SpawnResult::Live) when it was
+/// already live, [`SpawnResult::Spawned`](aether_kinds::SpawnResult::Spawned)
+/// when the spawn just stood it up.
+///
+/// The host's held reply rides this mail as it rides [`LoadDelivered`], so
+/// the requester keeps the reply's stamped sender as its reference (ADR-0230
+/// §3).
+#[aether_data::kind(name = "aether.component.spawn_delivered", no_serde)]
+pub struct SpawnDelivered {
+    /// The instance's canonical lineage path.
+    pub path: aether_data::ErasedActorPath,
+    /// The instance's receive-side capabilities (ADR-0033).
+    pub capabilities: aether_kinds::ComponentCapabilities,
+    /// Whether the instance was live before the spawn arrived.
+    pub live: bool,
 }
 
 // The prepare, commit and abort rows a republish drives each guest through
