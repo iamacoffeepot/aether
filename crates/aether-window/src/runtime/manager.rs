@@ -1,6 +1,6 @@
 //! The mail surface every concrete window manager carries (ADR-0169).
 
-use aether_actor::{Manual, OutboundReply, Protocol, ProtocolRef, RowAt, Undeclared, handler_set, protocol};
+use aether_actor::{Manual, OutboundReply, Protocol, ProtocolRef, RowAt, handler_set, protocol};
 use aether_data::{ActorMail, ErasedActorPath};
 use aether_substrate::actor::native::{Erased, NativeCtx};
 
@@ -12,18 +12,19 @@ use crate::{
     UnsubscribeWindow, UnsubscribeWindowSelf,
 };
 
-/// The seven manual command rows a concrete window endpoint exposes. A
-/// manager retains only this view of each successfully published child, so a
-/// root forward cannot select a kind outside the shared endpoint surface.
+/// The seven command rows a concrete window endpoint exposes, each naming the
+/// reply its endpoint holds and answers later. A manager retains only this
+/// view of each successfully published child, so a root forward cannot select
+/// a kind outside the shared endpoint surface.
 #[protocol]
 pub trait WindowCommands {
-    fn close(mail: CloseWindow) -> Undeclared;
-    fn set_mode(mail: SetWindowMode) -> Undeclared;
-    fn set_title(mail: SetWindowTitle) -> Undeclared;
-    fn set_menu(mail: SetWindowMenu) -> Undeclared;
-    fn set_cursor(mail: SetWindowCursor) -> Undeclared;
-    fn focus(mail: FocusWindow) -> Undeclared;
-    fn request_redraw(mail: RequestWindowRedraw) -> Undeclared;
+    fn close(mail: CloseWindow) -> CloseWindowResult;
+    fn set_mode(mail: SetWindowMode) -> SetWindowModeResult;
+    fn set_title(mail: SetWindowTitle) -> SetWindowTitleResult;
+    fn set_menu(mail: SetWindowMenu) -> SetWindowMenuResult;
+    fn set_cursor(mail: SetWindowCursor) -> SetWindowCursorResult;
+    fn focus(mail: FocusWindow) -> FocusWindowResult;
+    fn request_redraw(mail: RequestWindowRedraw) -> RequestWindowRedrawResult;
 }
 
 /// One listed window and the retained command proof for its current child.
@@ -41,9 +42,9 @@ pub struct RoutableWindow {
 /// The seven command kinds are the window endpoint's (`runtime::instance`), so
 /// the root owns no copy of their semantics: it proves the sole window live
 /// (ADR-0230) and forwards the request verbatim through that proof with the
-/// requester's own `reply_to` pinned, and the endpoint's existing
-/// retain-and-answer plumbing replies straight to the caller under the
-/// caller's correlation. Every per-window consequence the endpoint owns — a
+/// requester's own `reply_to` pinned, and the reply the endpoint holds
+/// captures that pinned target, so its answer goes straight to the caller
+/// under the caller's correlation. Every per-window consequence the endpoint owns — a
 /// close retiring its own actor — still happens, and the manager keeps no
 /// correlation state.
 ///

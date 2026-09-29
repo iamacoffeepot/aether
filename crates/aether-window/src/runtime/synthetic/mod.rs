@@ -4,10 +4,11 @@ mod instance;
 
 use std::collections::{BTreeMap, HashMap};
 
-use aether_actor::{ActorRef, ErasedActorRef, Manual, ProtocolRef, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef, runtime};
 use aether_data::ErasedActorPath;
 use aether_kinds::MonitorNotice;
-use aether_substrate::{InboundMail, MonitorHandle, Subname};
+use aether_substrate::actor::native::{Held, Pending};
+use aether_substrate::{MonitorHandle, Subname};
 
 use super::manager::{RoutableWindow, WindowCommands, WindowManagerSurface};
 use super::subscribers::{Published, WindowSubscribers};
@@ -30,7 +31,7 @@ const DEFAULT_HEIGHT: u32 = 600;
 /// actor, so the window stays out of `windows` — and therefore out of
 /// `ListWindows`, every subscriber fan-out, and `WindowOpened` — until the
 /// owner completes the birth. The reservation still participates in
-/// duplicate-name detection, and it owns the caller's reply so exactly one
+/// duplicate-name detection, and it holds the caller's reply so exactly one
 /// `CreateWindowResult` is ever sent.
 struct PendingWindowCreate {
     spec: WindowSpec,
@@ -39,7 +40,7 @@ struct PendingWindowCreate {
     /// Taken by whichever path settles the reservation, so the caller sees
     /// exactly one `CreateWindowResult`. `Option` mirrors the desktop
     /// manager's `PendingCreate`, whose boot window has no caller to answer.
-    reply: Option<Box<InboundMail>>,
+    held: Option<Held<CreateWindowResult>>,
 }
 
 /// The context a staged window child carries into its task completion
@@ -110,13 +111,14 @@ impl SyntheticWindowCapabilityState {
         child: ActorRef<SyntheticWindowInstance>,
         pending: PendingWindowCreate,
     ) {
-        let PendingWindowCreate { spec, path, mut reply } = pending;
+        let PendingWindowCreate { spec, path, held } = pending;
         let monitor = match ctx.monitor(child.erase()) {
             Ok(monitor) => monitor,
             Err(error) => {
                 ctx.send_to(child, &RetireWindow);
                 answer(
-                    &mut reply,
+                    ctx,
+                    held,
                     &CreateWindowResult::Err { error: format!("failed to monitor window child: {error:?}") },
                 );
                 return;
@@ -130,7 +132,7 @@ impl SyntheticWindowCapabilityState {
         self.windows
             .insert(path.clone(), SyntheticWindow { info: window.clone(), commands: child.narrow::<WindowCommands>() });
         self.publish(ctx, &path, &WindowOpened { window: window.clone() });
-        answer(&mut reply, &CreateWindowResult::Ok { window });
+        answer(ctx, held, &CreateWindowResult::Ok { window });
     }
 
     /// Apply one forwarded command to `window`, which the handler resolved
@@ -217,10 +219,10 @@ impl SyntheticWindowCapabilityState {
     }
 }
 
-/// Discharge a reservation's deferred reply, if it owes one.
-fn answer(reply: &mut Option<Box<InboundMail>>, result: &CreateWindowResult) {
-    if let Some(reply) = reply.take() {
-        reply.reply(result);
+/// Answer a reservation's held reply, if it owes one.
+fn answer<A>(ctx: &mut NativeCtx<'_, A>, held: Option<Held<CreateWindowResult>>, result: &CreateWindowResult) {
+    if let Some(held) = held {
+        held.answer(ctx, result);
     }
 }
 
@@ -240,29 +242,19 @@ impl NativeActor for SyntheticWindowCapability {
         })
     }
 
-    /// Settle every reservation the manager still owes a reply for. It retires
-    /// no staged window child: this boot singleton unwires only after chassis
-    /// teardown has closed the registry owner, which cancels every staged birth,
-    /// and closed every instanced actor, window children included.
-    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        for (_, mut pending) in state.pending_creates.drain() {
-            answer(&mut pending.reply, &CreateWindowResult::Err { error: "window manager shutting down".to_owned() });
-        }
-    }
-
     #[handler::single]
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListWindows) -> ListWindowsResult {
         ListWindowsResult::Ok { windows: state.windows.values().map(|window| window.info.clone()).collect() }
     }
 
-    #[handler::manual]
-    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: CreateWindow) {
-        let reply = ctx.take_inbound();
+    #[handler::single]
+    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: CreateWindow) -> Pending<CreateWindowResult> {
+        let (pending, held) = ctx.hold::<CreateWindowResult>();
         let path = match state.check_create(&mail.spec) {
             Ok(path) => path,
             Err(error) => {
-                reply.reply(&CreateWindowResult::Err { error });
-                return;
+                held.answer(ctx, &CreateWindowResult::Err { error });
+                return pending;
             }
         };
         // The birth carries the window's name as its completion context, since
@@ -271,14 +263,14 @@ impl NativeActor for SyntheticWindowCapability {
             .spawn_child::<SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ())
             .stage_with(WindowSpawnKey { name: mail.spec.name.clone() })
         {
-            reply.reply(&CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") });
-            return;
+            held.answer(ctx, &CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") });
+            return pending;
         }
-        let replaced = state.pending_creates.insert(
-            mail.spec.name.clone(),
-            PendingWindowCreate { spec: mail.spec, path, reply: Some(Box::new(reply)) },
-        );
+        let replaced = state
+            .pending_creates
+            .insert(mail.spec.name.clone(), PendingWindowCreate { spec: mail.spec, path, held: Some(held) });
         debug_assert!(replaced.is_none(), "a window name is reserved exactly once");
+        pending
     }
 
     #[handler(task)]
@@ -291,7 +283,7 @@ impl NativeActor for SyntheticWindowCapability {
             return;
         };
         let result = done.into_output().result;
-        let Some(mut pending) = state.pending_creates.remove(&name) else {
+        let Some(pending) = state.pending_creates.remove(&name) else {
             if let Ok(child) = &result {
                 ctx.send_to(child, &RetireWindow);
             }
@@ -299,7 +291,8 @@ impl NativeActor for SyntheticWindowCapability {
         };
         match result {
             Err(error) => answer(
-                &mut pending.reply,
+                ctx,
+                pending.held,
                 &CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") },
             ),
             Ok(child) => state.publish_applied_window(ctx, child, pending),
@@ -505,7 +498,7 @@ mod tests {
         // still blocks a second create for the same name.
         state.pending_creates.insert(
             "palette".to_owned(),
-            PendingWindowCreate { spec: spec("palette", "Tools"), path: window_path("palette"), reply: None },
+            PendingWindowCreate { spec: spec("palette", "Tools"), path: window_path("palette"), held: None },
         );
         assert!(state.check_create(&spec("palette", "Other tools")).is_err());
         assert!(!state.windows.values().any(|window| window.info.name == "palette"));

@@ -86,9 +86,10 @@ pub enum Uncaused {
 /// from the emitting call alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderingDevice {
-    /// A retained [`InboundMail`](crate::chassis::inbox::InboundMail) reply
-    /// debt. The request's `Finished` stays un-recorded while the debt is
-    /// held, so its chain cannot settle across the effect; answering the debt
-    /// once the effect has landed is what releases it.
+    /// A retained reply debt: the causing request's
+    /// [`Held`](crate::actor::native::Held) reply (ADR-0243 §1), whose ledger
+    /// entry keeps the request's settlement hold until it is answered, so the
+    /// chain cannot settle across the effect; answering the held reply once
+    /// the effect has landed is what releases it.
     RetainedReplyDebt,
 }

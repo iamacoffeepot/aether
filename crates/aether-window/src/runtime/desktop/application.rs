@@ -122,7 +122,7 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
                             Some(Err(error)) => {
                                 let effects = self
                                     .window_slot
-                                    .host_turn(|state, _ctx| state.fail_window_creation(path, error))
+                                    .host_turn(|state, ctx| state.fail_window_creation(ctx, path, error))
                                     .unwrap_or_default();
                                 self.apply_effects(effects, &mut dirty, &mut should_shutdown);
                             }
@@ -133,7 +133,7 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
                     Err(error) => {
                         let effects = self
                             .window_slot
-                            .host_turn(|state, _ctx| state.fail_window_creation(path, error))
+                            .host_turn(|state, ctx| state.fail_window_creation(ctx, path, error))
                             .unwrap_or_default();
                         self.apply_effects(effects, &mut dirty, &mut should_shutdown);
                     }

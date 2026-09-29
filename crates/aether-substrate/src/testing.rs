@@ -236,6 +236,14 @@ where
         .expect("test chassis boots")
 }
 
+/// Boot a `TestChassis` composing no actor, for a test that boots its actor
+/// itself: a pumped actor through
+/// [`PassiveChassis::boot_pumped_actor`], whose namespace a composed actor
+/// sharing it would already hold.
+pub fn boot_bare_test_chassis(registry: &Arc<Registry>, mailer: &Arc<Mailer>) -> PassiveChassis<TestChassis> {
+    Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer)).build_passive().expect("test chassis boots")
+}
+
 /// [`boot_test_chassis_with`] whose chassis escalates a fatal abort into
 /// `aborter` instead of the default [`PanicAborter`](crate::runtime::lifecycle::PanicAborter),
 /// so a test can wrap it in a

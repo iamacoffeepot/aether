@@ -229,10 +229,9 @@ fn a_forwarded_command_from_a_non_child_sender_is_refused() {
     assert_eq!(windows.iter().map(|window| window.title.as_str()).collect::<Vec<_>>(), ["Main"]);
 }
 
-/// A new per-window command has four places to be wired — the endpoint's
-/// forwarding handler, the manager's apply arm, the endpoint's
-/// correlation arm in `complete`, and its shutdown arm in `unwire` — and
-/// only the first is compile-checked. A missing apply arm leaves the
+/// A new per-window command has three places to be wired — the endpoint's
+/// forwarding handler, the manager's apply arm, and the endpoint's
+/// correlation arm in `complete` — and only the first is compile-checked. A missing apply arm leaves the
 /// caller with no reply; a missing correlation arm `fatal_abort`s the
 /// endpoint on the way back. Driving both new commands through a live
 /// window's own mailbox and reading their replies is what covers the round

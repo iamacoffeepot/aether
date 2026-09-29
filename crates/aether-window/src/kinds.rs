@@ -1,6 +1,6 @@
 //! Public wire vocabulary for the `aether.window` manager.
 
-use aether_actor::{ProtocolPath, Subscriber};
+use aether_actor::{HeldReply, ProtocolPath, Subscriber};
 use aether_data::{ErasedActorPath, KindId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
@@ -75,6 +75,12 @@ pub enum CreateWindowResult {
     Err { error: String },
 }
 
+impl HeldReply for CreateWindowResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "window manager closed before answering".into() }
+    }
+}
+
 /// Begin closing the addressed window.
 #[aether_data::kind(name = "aether.window.close", copy, eq)]
 pub struct CloseWindow;
@@ -84,6 +90,12 @@ pub struct CloseWindow;
 pub enum CloseWindowResult {
     Ok,
     Err { error: String },
+}
+
+impl HeldReply for CloseWindowResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "window endpoint closed before answering".into() }
+    }
 }
 
 /// Change one window's presentation mode.
@@ -103,6 +115,12 @@ pub enum SetWindowModeResult {
     Err { error: String },
 }
 
+impl HeldReply for SetWindowModeResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "window endpoint closed before answering".into() }
+    }
+}
+
 /// Change one window's title.
 #[aether_data::kind(name = "aether.window.set_title", eq)]
 pub struct SetWindowTitle {
@@ -114,6 +132,12 @@ pub struct SetWindowTitle {
 pub enum SetWindowTitleResult {
     Ok { title: String },
     Err { error: String },
+}
+
+impl HeldReply for SetWindowTitleResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "window endpoint closed before answering".into() }
+    }
 }
 
 /// One command in a native menu.
@@ -155,6 +179,12 @@ pub struct SetWindowMenu {
 pub enum SetWindowMenuResult {
     Ok,
     Err { error: String },
+}
+
+impl HeldReply for SetWindowMenuResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "window endpoint closed before answering".into() }
+    }
 }
 
 /// Published when a native menu item is chosen, carrying the window whose
@@ -204,6 +234,12 @@ pub enum SetWindowCursorResult {
     Err { error: String },
 }
 
+impl HeldReply for SetWindowCursorResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "window endpoint closed before answering".into() }
+    }
+}
+
 /// Bring the addressed window to the foreground.
 #[aether_data::kind(name = "aether.window.focus", copy, eq)]
 pub struct FocusWindow;
@@ -215,6 +251,12 @@ pub enum FocusWindowResult {
     Err { error: String },
 }
 
+impl HeldReply for FocusWindowResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "window endpoint closed before answering".into() }
+    }
+}
+
 /// Ask the platform to schedule the addressed window for redraw.
 #[aether_data::kind(name = "aether.window.request_redraw", copy, eq)]
 pub struct RequestWindowRedraw;
@@ -224,6 +266,12 @@ pub struct RequestWindowRedraw;
 pub enum RequestWindowRedrawResult {
     Ok,
     Err { error: String },
+}
+
+impl HeldReply for RequestWindowRedrawResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "window endpoint closed before answering".into() }
+    }
 }
 
 /// Manager-private command forwarded by one window child. It names no window:
@@ -291,19 +339,18 @@ pub enum ApplyWindowCommandResult {
     SetCursor(SetWindowCursorResult),
     Focus(FocusWindowResult),
     RequestRedraw(RequestWindowRedrawResult),
+    /// The manager closed before it answered the forwarded command (ADR-0243
+    /// §1). The forwarding child answers its caller with that command's own
+    /// `Err` carrying `error`.
+    Unanswered {
+        error: String,
+    },
 }
 
-/// Correlation stored on the private manager request: the forwarding child's
-/// own key for the public request it retained. The child mints it, so it
-/// exists whether or not the public request carried a lineage id.
-///
-/// Only a window-bearing runtime forwards, so this and [`RetireWindow`] carry
-/// the same gate their crate-root re-export already carries. This is a reply
-/// context, not a handled kind, so it stays `pub(crate)` in place.
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
-#[aether_data::kind(name = "aether.window.internal.forward_context", copy, eq)]
-pub(crate) struct WindowForwardContext {
-    pub request: u64,
+impl HeldReply for ApplyWindowCommandResult {
+    fn unanswered() -> Self {
+        Self::Unanswered { error: "window manager closed before answering".into() }
+    }
 }
 
 /// The manager-private kinds a window child handles. A handled kind enters

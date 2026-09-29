@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-31
 - **Accepted:** 2026-07-31 — all three requirements implemented: #4200 (requirement 2), #4211 (requirement 1), #4214 (requirement 3).
-- **Last amended:** 2026-07-31 (iamacoffeepot/aether#4199) — requirement 2's diagnostic reach corrected, the conforming table extended to the shapes the implementation actually found. See "Amendment" below.
+- **Last amended:** 2026-09-28 (iamacoffeepot/aether#6965) — the retained-reply-debt row now names ADR-0243's held reply as the device. See "Third amendment" below. Earlier: 2026-07-31 (iamacoffeepot/aether#4199) — requirement 2's diagnostic reach corrected, the conforming table extended to the shapes the implementation actually found. See "Amendment" below.
 
 ## Context
 
@@ -92,12 +92,12 @@ The existing cases that do not hold remain correct and are not exceptions to thi
 | `send_detached` | the causal edge is cut at the call site by a distinct verb | conforms — declared |
 | an actor's post-`wire` activity | caused by later mail, not by the birth | conforms — not descended |
 | a chassis-boot birth | no causing mail exists; the chain is empty | conforms — rule over an empty chain |
-| an effect staged behind a retained reply debt | the chain cannot settle because the inbound's `Finished` is un-recorded while the debt is held | conforms — ordered by another device |
+| an effect staged behind a retained reply debt | the chain cannot settle because the request's held reply keeps its settlement hold in the ledger until answered (ADR-0243 §1) | conforms — ordered by another device |
 | a `wire`-staged registry effect on a runtime spawn | context carried `MailId::NONE` | **violates — silent** |
 
 The first four cut causality visibly, have none to cut, or keep the chain open by another means. Only the last cuts it by accident.
 
-The fourth row is the one an auditor is most likely to misread. `DesktopWindowCapabilityState` stages its window child from a rootless `PumpedSlot::host_turn` and acquires no hold, yet the ordering holds: `PendingCreate.reply` retains the `create_window` request's `InboundMail` and answers it only in `finish_window_child_spawn`, so the inbound never records `Finished` across the staged birth. A retained reply debt and a settlement hold are different devices reaching the same guarantee. Requirement 3 asks such a site to say which one it is relying on, because the reasoning is not visible from the staging call alone.
+The fourth row is the one an auditor is most likely to misread. `DesktopWindowCapabilityState` stages its window child from a rootless `PumpedSlot::host_turn` and the birth acquires no hold of its own, yet the ordering holds: `PendingCreate.held` keeps the `create_window` request's ledger entry, and with it the request's settlement hold, until `finish_window_child_spawn` answers it, so the request's chain cannot settle across the staged birth. The birth still takes no hold, so it is still declared `OrderedBy`. A retained reply debt and the birth's own settlement hold are different devices reaching the same guarantee. Requirement 3 asks such a site to say which one it is relying on, because the reasoning is not visible from the staging call alone.
 
 ## Consequences
 
@@ -159,3 +159,11 @@ What the first amendment actually widened is the number of sites that must **dec
 A related correction to requirement 1's framing: staging does not uniformly carry a chain. `HandlerSpawnBuilder::stage_with` receives `completion_root == MailId::NONE` when the calling context is a `host_turn` — the desktop-window case — which is why requirement 3's declaration belongs on the builder rather than being derived unconditionally from a root.
 
 Both of this ADR's amendments correct claims about which code paths carry a chain, asserted without tracing them. The decision has held under implementation; its supporting factual claims needed the implementation to check them.
+
+## Third amendment (2026-09-28, iamacoffeepot/aether#6965)
+
+ADR-0243 replaced the retained `InboundMail` with a typed held reply, which changes the mechanism behind the conforming table's fourth row but not its classification.
+
+The desktop window manager's `on_create` now holds its reply with `ctx.hold::<CreateWindowResult>()` and returns, so the `create_window` request records `Finished` as any handler's does. What keeps the chain open is the settlement hold the held reply's ledger entry keeps (ADR-0243 §1). The `Held` waits in `PendingCreate.held` until `finish_window_child_spawn` answers it, and the answer releases the hold. The staged birth still takes no hold of its own and is still declared `OrderedBy(OrderingDevice::RetainedReplyDebt)`; the device keeps its name, and its documentation names the held reply.
+
+The boot window has no caller, so it owes no reply and no chain caused it. Its birth drops the declaration and takes the builder's `Uncaused::ChainlessTurn` default.
