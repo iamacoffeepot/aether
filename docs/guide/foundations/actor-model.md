@@ -264,9 +264,21 @@ window capability's one instanced child family, the address above expands to:
 aether.window/aether.window.instance:main
 ```
 
-A loaded component needs no short path: it is named by its own namespace, so
-its canonical address is already short (`aether.kit.camera`, or
-`aether.widget:panel` for an instanced one).
+The same expansion reads every published module's lineage (ADR-0241 §5): its
+`#[actor(root)]` exports, each exported and private type's cardinality, its
+`child_of(..)` edges, and a `composable` type as a child of every type the
+module declares. The index is rebuilt in the registry-owner apply that
+publishes a module, and a module's facts about a native namespace are ignored,
+so a module never changes a native short path.
+
+A loaded component needs no short path to reach it: it is named by its own
+namespace, so its canonical address is already short (`aether.kit.camera`, or
+`aether.widget:panel` for an instanced one). Its children are reached by a hole
+beneath it: `game.world/:north/:gate` for an inline child and its own inline
+child, or `game.world/:k` for a guest a `load_under` placed at
+`game.world/NS:k`. A `composable` type is a candidate beneath every parent in
+its module, so a hole beneath a parent that declares another instanced child
+as well is ambiguous.
 
 A path is `/`-separated steps. After the root, a bare step always names a
 singleton child, `namespace:discriminator` names an instance of that instanced

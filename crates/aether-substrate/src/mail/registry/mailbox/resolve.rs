@@ -156,14 +156,15 @@ impl Registry {
     /// Resolve a canonical or ADR-0166 short [`ErasedActorPath`] to one live
     /// mailbox: the one place an address becomes a position (ADR-0230 §3).
     /// Canonical inputs preserve the existing fold/exact-name lookup. A short
-    /// path fills its holes through the generated root/child inventory before
+    /// path fills its holes through the published address index — the linked
+    /// root/child inventory plus every published module's lineage — before
     /// that canonical lookup, so short spellings are never hashed, stored, or
     /// reverse-reported.
     pub fn resolve_address(&self, address: &ErasedActorPath) -> Result<ResolvedAddress, AddressResolutionError> {
         let canonical_path = match address.form() {
             ActorPathForm::Canonical(path) => path.to_owned(),
             ActorPathForm::Short { root, steps } => {
-                self.addresses.as_ref().map_err(Clone::clone)?.expand(root, &steps)?
+                self.addresses.load().table().as_ref().map_err(Clone::clone)?.expand(root, &steps)?
             }
         };
         let mailbox_id = self

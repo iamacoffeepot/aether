@@ -1085,14 +1085,12 @@ macro_rules! __export_internal {
         // section beside the boundary-free single-actor inputs.
         $crate::__export_internal!(@private_inputs $($private),*);
 
-        // ADR-0166: pin only this exported actor's anonymous placement facts.
-        // The actor macro emits associated const data; retention stays at the
-        // cdylib-root `export!` call so transitive rlibs contribute no custom
-        // section of their own.
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(link_section = "aether.actor.lineage")]
-        static __AETHER_LINEAGE_SECTION: [u8; <$component>::__AETHER_LINEAGE_MANIFEST_LEN] =
-            <$component>::__AETHER_LINEAGE_MANIFEST;
+        // ADR-0166: pin this exported actor's anonymous placement facts, then
+        // each private inline child's, so the host's address index reads a
+        // private child's `child_of` too (ADR-0241 §5). The actor macro emits
+        // associated const data; retention stays at the cdylib-root `export!`
+        // call so transitive rlibs contribute no custom section of their own.
+        $crate::__export_internal!(@lineage $component $(, $private)*);
 
         // Issue 525 Phase 1B: pin the actor's `Addressable::NAMESPACE` bytes
         // into a sibling `aether.namespace` custom section. The
@@ -1573,6 +1571,38 @@ macro_rules! __export_internal {
         $crate::__export_internal!(@listed_index [$crate::There<$index>] $($tail),*);
     };
 
+    // ADR-0166: one `aether.actor.lineage` section concatenating each listed
+    // type's associated lineage bytes, in list order. Unlike inputs, lineage
+    // records carry both actor tags and namespaces, so no boundary record is
+    // needed. Every `export!` form calls this once, exported types first and
+    // then its private inline children, so the host's address index reads a
+    // private child's placement the way it reads an exported one's.
+    (@lineage $($listed:ty),+) => {
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        const __AETHER_LINEAGE_LEN: usize = 0usize $(+ <$listed>::__AETHER_LINEAGE_MANIFEST_LEN)+;
+
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        #[unsafe(link_section = "aether.actor.lineage")]
+        static __AETHER_LINEAGE_SECTION: [u8; __AETHER_LINEAGE_LEN] = {
+            let mut out = [0u8; __AETHER_LINEAGE_LEN];
+            let mut pos = 0usize;
+            $(
+                {
+                    const MANIFEST_LEN: usize = <$listed>::__AETHER_LINEAGE_MANIFEST_LEN;
+                    const MANIFEST_BYTES: [u8; MANIFEST_LEN] = <$listed>::__AETHER_LINEAGE_MANIFEST;
+                    let mut index = 0;
+                    while index < MANIFEST_LEN {
+                        out[pos] = MANIFEST_BYTES[index];
+                        pos += 1;
+                        index += 1;
+                    }
+                }
+            )+
+            let _ = pos;
+            out
+        };
+    };
+
     // Issue 6590: pin the private inline children's inputs into the sibling
     // `aether.kinds.inputs.private` section, so the host's module-load
     // dependency check (ADR-0230 §3) reads their `#[actor(depends(..))]`
@@ -1964,34 +1994,9 @@ macro_rules! __export_multi_internal {
         $crate::__export_internal!(@private_inputs $($private),*);
 
         // ADR-0166: concatenate the associated lineage bytes for exactly the
-        // types selected by this `export!` invocation. Unlike inputs, lineage
-        // records carry both actor tags and namespaces, so no boundary record
-        // is needed.
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        const __AETHER_MULTI_LINEAGE_LEN: usize =
-            0usize $(+ <$component>::__AETHER_LINEAGE_MANIFEST_LEN)+;
-
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(link_section = "aether.actor.lineage")]
-        static __AETHER_LINEAGE_SECTION: [u8; __AETHER_MULTI_LINEAGE_LEN] = {
-            let mut out = [0u8; __AETHER_MULTI_LINEAGE_LEN];
-            let mut pos = 0usize;
-            $(
-                {
-                    const MANIFEST_LEN: usize = <$component>::__AETHER_LINEAGE_MANIFEST_LEN;
-                    const MANIFEST_BYTES: [u8; MANIFEST_LEN] =
-                        <$component>::__AETHER_LINEAGE_MANIFEST;
-                    let mut index = 0;
-                    while index < MANIFEST_LEN {
-                        out[pos] = MANIFEST_BYTES[index];
-                        pos += 1;
-                        index += 1;
-                    }
-                }
-            )+
-            let _ = pos;
-            out
-        };
+        // types selected by this `export!` invocation, the exported types and
+        // then the private inline children (ADR-0241 §5).
+        $crate::__export_internal!(@lineage $($component),+ $(, $private)*);
 
         /// # Safety
         /// ADR-0090 legacy zero-config init; forwards to the 3-arg

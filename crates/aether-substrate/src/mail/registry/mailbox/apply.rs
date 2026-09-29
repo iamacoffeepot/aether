@@ -485,6 +485,7 @@ impl Registry {
         #[cfg(feature = "wasm")]
         if let Some(publications) = staged_publications {
             inner.publications = publications;
+            publication.addresses_dirty = true;
         }
         // The promoted route is Live now, so the mail parked behind its
         // `Starting` reservation continues to the endpoint the caller thread

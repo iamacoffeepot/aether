@@ -1,10 +1,11 @@
 //! What one successful write publishes: the accumulated route updates
-//! plus the dirty flags that decide whether the kind and inventory views
-//! re-publish with them.
+//! plus the dirty flags that decide whether the kind, inventory, and address
+//! views re-publish with them.
 
 use std::process::abort;
 
 use crate::mail::MailboxId;
+use crate::mail::registry::address::AddressIndex;
 use crate::mail::registry::effect::RegistryInventory;
 use crate::mail::view::Update;
 
@@ -28,6 +29,12 @@ impl Inner {
                 .is_err()
         {
             tracing::error!("kind publication generation exhausted; registry cannot remain coherent");
+            abort();
+        }
+        if publication.addresses_dirty
+            && self.address_publisher.publish(AddressIndex::from_publications(&self.publications)).is_err()
+        {
+            tracing::error!("address index publication generation exhausted; registry cannot remain coherent");
             abort();
         }
         if inventory_dirty || kinds_dirty {
@@ -68,6 +75,9 @@ pub(super) struct Publication {
     pub(super) route_updates: Vec<Update<MailboxId, RouteRecord>>,
     pub(super) kinds_dirty: bool,
     pub(super) inventory_dirty: bool,
+    /// The publication table changed, so the short-path index is rebuilt
+    /// from it (ADR-0241 §5). Wakes no inventory subscriber.
+    pub(super) addresses_dirty: bool,
 }
 
 impl Publication {
@@ -75,5 +85,6 @@ impl Publication {
         self.route_updates.append(&mut other.route_updates);
         self.kinds_dirty |= other.kinds_dirty;
         self.inventory_dirty |= other.inventory_dirty;
+        self.addresses_dirty |= other.addresses_dirty;
     }
 }
