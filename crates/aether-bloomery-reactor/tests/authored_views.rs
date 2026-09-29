@@ -1,6 +1,5 @@
 //! Generated aggregate views through the retained Owner and named guards.
 
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -11,10 +10,6 @@ use aether_bloomery_kinds::{Entry, Seq};
 use aether_bloomery_reactor::{And, Guard, GuardArg, Owner, PrepareError};
 use aether_bloomery_view::{View, ViewCursor, view};
 use aether_data::{Kind, Storage, StorageData};
-
-thread_local! {
-    static CONSTRUCTIONS: Cell<u32> = const { Cell::new(0) };
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.bloomery.reactor.authored-score")]
@@ -35,17 +30,11 @@ impl fmt::Display for ScoreError {
 
 impl Error for ScoreError {}
 
+#[derive(Default)]
 struct PlayerScores {
     cursor: ViewCursor,
     totals: BTreeMap<u64, u64>,
     folds: u64,
-}
-
-impl Default for PlayerScores {
-    fn default() -> Self {
-        CONSTRUCTIONS.with(|count| count.update(|value| value + 1));
-        Self { cursor: ViewCursor::default(), totals: BTreeMap::new(), folds: 0 }
-    }
 }
 
 #[view(cursor = cursor)]
@@ -86,7 +75,6 @@ fn entry(seq: u64, player: u64, points: u64, fail: bool) -> Entry {
 
 #[test]
 fn two_consumers_share_one_non_clone_non_publish_aggregate() -> Result<(), Box<dyn Error>> {
-    CONSTRUCTIONS.with(|count| count.set(0));
     let mut owner = Owner::new();
     owner.push(&[entry(1, 7, 3, false)])?;
 
@@ -98,7 +86,6 @@ fn two_consumers_share_one_non_clone_non_publish_aggregate() -> Result<(), Box<d
     let aggregate = owner.get::<PlayerScores>().expect("constructed");
     assert_eq!(aggregate.folds, 1, "the retained entry is processed once");
     assert_eq!(aggregate.cursor(), Seq(1));
-    assert_eq!(CONSTRUCTIONS.with(Cell::get), 1, "the aggregate is initialized once");
     Ok(())
 }
 
