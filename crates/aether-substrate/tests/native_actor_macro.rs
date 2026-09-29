@@ -28,7 +28,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use aether_actor::OutboundReply;
-use aether_data::{Kind, Source, SourceAddr};
+use aether_data::Kind;
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::mail::MailRef;
@@ -36,7 +36,7 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::registry::{DispatchParts, InboxHandler, OwnedDispatch};
 use aether_substrate::runtime::lifecycle::{FatalAbortRecord, PanicAborter, RecordingAborter};
 use aether_substrate::testing::{
-    TestChassis, await_settled, await_signal, bare_substrate, registered_ref, unrouted_binding,
+    PumpedDriver, TestChassis, await_settled, await_signal, bare_substrate, boot_bare_test_chassis, registered_ref,
 };
 use aether_substrate::{
     Addressable, BootError, Builder, Dispatch, Erased, Manual, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis,
@@ -729,7 +729,7 @@ impl CfgGatedSet for CfgGatedSetAdopter {
     }
 }
 
-#[aether_actor::actor(handler_set(CfgGatedSet))]
+#[aether_actor::actor(singleton, root, handler_set(CfgGatedSet))]
 impl NativeActor for CfgGatedSetAdopter {
     type Config = ();
     const NAMESPACE: &'static str = "test.macro_native_actor.cfg_gated_set";
@@ -785,20 +785,15 @@ fn a_cfg_gated_set_handler_leaves_no_dispatch_artifact_in_an_adopter() {
     adopter_holds_set_marker::<SetCfgKept, CfgGatedSetAdopter>();
     adopter_holds_set_marker::<SetCfgPresent, CfgGatedSetAdopter>();
 
-    let (_registry, mailer) = bare_substrate();
-    let binding = unrouted_binding(&mailer);
-    let mut adopter = CfgGatedSetAdopter { seen: AtomicU32::new(0) };
-    let mut ctx: NativeCtx<'_, CfgGatedSetAdopter, Manual> =
-        NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
+    let (registry, mailer) = bare_substrate();
+    let mut driver = PumpedDriver::<CfgGatedSetAdopter>::boot(boot_bare_test_chassis(&registry, &mailer), (), ());
 
-    let handled = <CfgGatedSetAdopter as CfgGatedSet>::__aether_handler_set_dispatch(
-        &mut adopter,
-        &mut ctx,
-        <SetCfgPresent as Kind>::ID,
-        &SetCfgPresent { tag: 5 }.encode_into_bytes(),
+    driver.send_and_settle(driver.chassis().actor_ref::<CfgGatedSetAdopter>(), &SetCfgPresent { tag: 5 }, None);
+    assert_eq!(
+        driver.read_state(|adopter| adopter.seen.load(AtomicOrdering::SeqCst)),
+        Some(5),
+        "the set's arm for a satisfied gate claims its own kind and runs the handler on the adopter's state",
     );
-    assert_eq!(handled, aether_actor::DISPATCH_HANDLED, "the set's arm for a satisfied gate claims its own kind");
-    assert_eq!(adopter.seen.load(AtomicOrdering::SeqCst), 5, "and runs the handler behind it on the adopter's state");
 }
 
 /// An actor with no task handler measures exactly what it advertises, so the
@@ -1311,7 +1306,7 @@ struct ManualAck {
 /// `-> R` return value.
 struct ManualReplyCap;
 
-#[aether_actor::actor]
+#[aether_actor::actor(singleton, root)]
 impl NativeActor for ManualReplyCap {
     const NAMESPACE: &'static str = "test.macro_native_actor.manual_reply";
     type Config = ();
@@ -1328,9 +1323,9 @@ impl NativeActor for ManualReplyCap {
 }
 
 /// ADR-0112: a `#[handler::manual]` handler receives the `Manual` ctx and
-/// replies through `ctx.reply` — drive it through the macro dispatch seam
-/// (`new_dispatching` + `__aether_dispatch_envelope`) and assert the ack
-/// lands at the caller carrying the declared correlation.
+/// replies through `ctx.reply` — drive it through a real turn on a booted
+/// cap and assert the ack lands at the caller carrying the declared
+/// correlation before the chain settles.
 #[test]
 fn manual_handler_replies_through_ctx() {
     let (registry, mailer) = bare_substrate();
@@ -1338,29 +1333,15 @@ fn manual_handler_replies_through_ctx() {
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
     let caller =
         registered_ref(&registry, "test.macro_native_actor.manual_caller", forward_to(reply_tx, Arc::clone(&mailer)));
+    let mut driver = PumpedDriver::<ManualReplyCap>::boot(boot_bare_test_chassis(&registry, &mailer), (), ());
 
-    let binding = unrouted_binding(&mailer);
-    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller.id()), 91);
+    driver.send_and_settle(
+        driver.chassis().actor_ref::<ManualReplyCap>(),
+        &ManualPing { seq: 9 },
+        Some(ReplyTarget::Actor { to: caller, correlation: 91 }),
+    );
 
-    let mut cap = ManualReplyCap;
-    {
-        // ADR-0112: the dispatch seam carries the `Manual` ctx, and issue 4158
-        // types it by the dispatching actor — `new_for_actor` builds both,
-        // with the mode read off `dispatch`'s own signature.
-        let mut ctx = NativeCtx::new_for_actor(&binding, caller_reply_to, None, None);
-        let handled = <ManualReplyCap as Dispatch<ManualReplyCap>>::dispatch(
-            &mut cap,
-            &mut ctx,
-            ManualPing::ID,
-            &ManualPing { seq: 9 }.encode_into_bytes(),
-        );
-        assert_eq!(handled, Some(()), "the manual handler ran for its kind");
-        // Drop the ctx (flushing buffered outbound) before reading the reply.
-    }
-
-    let reply = reply_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("the manual handler replied to the inbound sender via ctx.reply");
+    let reply = reply_rx.try_recv().expect("the manual handler replied to the inbound sender via ctx.reply");
     assert_eq!(reply.kind, ManualAck::ID, "the reply carries the manual handler's ack kind");
     assert_eq!(reply.sender.correlation_id, 91, "the caller's correlation is echoed onto the manual reply");
     let ack = ManualAck::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");

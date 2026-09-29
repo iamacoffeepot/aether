@@ -151,13 +151,95 @@ impl HeldLedger for NativeParkLedger<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::fixture::forward_to_envelope_sender;
-    use super::*;
-    use crate::actor::native::envelope::Envelope;
-    use crate::chassis::inbox::ReplyLineage;
-    use crate::mail::{MailboxId, SourceAddr};
-    use crate::testing::{bare_substrate, boot_authority};
     use std::sync::mpsc;
+
+    use aether_actor::{ErasedActorRef, MailSender, Manual, OutboundReply};
+    use aether_kinds::Tick;
+
+    use super::*;
+    use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use crate::chassis::builder::ReplyTarget;
+    use crate::chassis::error::BootError;
+    use crate::chassis::inbox::ReplyLineage;
+    use crate::mail::mailer::Mailer;
+    use crate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
+    use crate::testing::{PumpedDriver, boot_bare_test_chassis, fresh_substrate, registered_ref};
+
+    /// Asks [`Replier`] to reply `replies` times from one manual turn.
+    #[aether_data::kind(name = "test.binding.reply.ask", copy)]
+    struct Ask {
+        replies: u32,
+    }
+
+    /// A pumped root whose manual handler replies by hand through
+    /// `ctx.reply`, the verb that reaches `send_reply_for_handler`.
+    struct Replier {
+        /// The replies its turns have sent.
+        replied: u32,
+    }
+
+    #[aether_actor::actor(singleton, root)]
+    impl NativeActor for Replier {
+        const NAMESPACE: &'static str = "test.binding.reply.replier";
+        type Config = ();
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { replied: 0 })
+        }
+
+        #[handler::manual]
+        fn on_ask(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, ask: Ask) {
+            for _ in 0..ask.replies {
+                ctx.reply(&Tick::default());
+                self.replied += 1;
+            }
+        }
+    }
+
+    /// A booted [`Replier`] and a caller that forwards each reply for the
+    /// test to read, then finishes it, so the chain the reply joined settles
+    /// only once the reply is readable.
+    struct Rig {
+        driver: PumpedDriver<Replier>,
+        caller: ErasedActorRef,
+        replies: mpsc::Receiver<OwnedDispatch>,
+    }
+
+    impl Rig {
+        fn boot() -> Self {
+            let (registry, mailer) = fresh_substrate();
+            let (caller, replies) = finishing_caller(&registry, &mailer);
+            let driver = PumpedDriver::boot(boot_bare_test_chassis(&registry, &mailer), (), ());
+
+            Self { driver, caller, replies }
+        }
+
+        /// Ask for `replies` replies answered to the caller under correlation
+        /// 55, and wait for the chain to settle.
+        fn ask(&mut self, replies: u32) -> MailId {
+            let reply = Some(ReplyTarget::Actor { to: self.caller, correlation: 55 });
+            self.driver.send_and_settle(self.driver.chassis().actor_ref::<Replier>(), &Ask { replies }, reply)
+        }
+
+        /// The send correlation the replier's binding last minted, read on a
+        /// ctx the runtime builds.
+        fn prev_correlation(&mut self) -> u64 {
+            self.driver.host_turn(|_replier, ctx| MailSender::prev_correlation(ctx)).expect("the replier is live")
+        }
+    }
+
+    fn finishing_caller(registry: &Registry, mailer: &Arc<Mailer>) -> (ErasedActorRef, mpsc::Receiver<OwnedDispatch>) {
+        let (tx, rx) = mpsc::channel::<OwnedDispatch>();
+        let mailer = Arc::clone(mailer);
+        let sink: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
+            let (mail_id, root) = (dispatch.mail_id, dispatch.root);
+            dispatch.discharge();
+            let _ = tx.send(dispatch);
+            mailer.record_finished(mail_id, root);
+        });
+
+        (registered_ref(registry, "test.binding.reply.caller", sink), rx)
+    }
 
     /// #1695 / ADR-0080 §5/§6: a synchronous `ctx.reply` from a handler
     /// with an in-flight chain stamps the reply mail with the caller's
@@ -167,42 +249,19 @@ mod tests {
     /// joins the caller's chain instead of opening a lineage-less one.
     #[test]
     fn ctx_reply_joins_caller_chain() {
-        use crate::actor::native::ctx::NativeCtx;
-        use aether_actor::OutboundReply;
-        use aether_kinds::Tick;
+        let mut rig = Rig::boot();
+        let root = rig.ask(1);
 
-        let (registry, mailer) = bare_substrate();
-        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-
-        let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
-        let caller =
-            registry.register_inbox(&boot_authority(), "test.reply_chain.caller", forward_to_envelope_sender(reply_tx));
-
-        let actor_mailbox = MailboxId(0x00BE_EF01);
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-
-        let root = MailId::new(MailboxId(0xC0), 1);
-        let request = MailId::new(MailboxId(0xC0), 1);
-        let caller_source = Source::with_correlation(SourceAddr::Component(caller), 55);
-
-        {
-            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, Some(request), Some(root));
-            OutboundReply::reply(&mut ctx, &Tick::default());
-            // ctx drops here; the reply already routed eagerly via the
-            // Mailer (replies are not buffered), so the flush is a no-op.
-        }
-
-        let reply = reply_rx.try_recv().expect("reply routed to the caller");
+        let reply = rig.replies.try_recv().expect("the reply lands on the caller before its chain settles");
         assert_eq!(reply.root, Some(root), "reply inherits the caller's root");
-        assert_eq!(reply.parent_mail, Some(request), "reply's parent is the handled request");
+        assert_eq!(reply.parent_mail, Some(root), "reply's parent is the handled request");
+        assert_eq!(reply.sender.correlation_id, 55, "the caller's correlation is echoed onto the reply");
         let reply_id = reply.mail_id.expect("reply carries a real mail id");
-        assert_eq!(reply_id.sender, actor_mailbox, "reply id is minted in the replier's id space");
-
-        // The reply's Sent keeps the caller root live (the bare forwarding
-        // sink records no Finished); the matching Finished reclaims it.
-        assert_eq!(counter.live_roots(), 1, "the reply's Sent holds the caller chain open");
-        mailer.record_finished(Some(reply_id), Some(root));
-        assert_eq!(counter.live_roots(), 0, "the reply's Finished balances its Sent exactly");
+        assert_eq!(
+            reply_id.sender,
+            rig.driver.chassis().actor_ref::<Replier>().id(),
+            "reply id is minted in the replier's id space"
+        );
     }
 
     /// #1695: minting a reply's lineage id draws from the disjoint
@@ -211,26 +270,14 @@ mod tests {
     /// trampoline's separate reply counter).
     #[test]
     fn reply_does_not_advance_send_correlation() {
-        use crate::actor::native::ctx::NativeCtx;
-        use aether_actor::OutboundReply;
-        use aether_kinds::Tick;
+        let mut rig = Rig::boot();
+        let before = rig.prev_correlation();
 
-        let (registry, mailer) = bare_substrate();
-        let (reply_tx, _reply_rx) = mpsc::channel::<Envelope>();
-        let caller =
-            registry.register_inbox(&boot_authority(), "test.reply_corr.caller", forward_to_envelope_sender(reply_tx));
+        rig.ask(2);
 
-        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF02)));
-        assert_eq!(binding.prev_correlation(), 0);
-
-        let root = MailId::new(MailboxId(0xC0), 1);
-        let caller_source = Source::with_correlation(SourceAddr::Component(caller), 7);
-        {
-            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, Some(root), Some(root));
-            OutboundReply::reply(&mut ctx, &Tick::default());
-            OutboundReply::reply(&mut ctx, &Tick::default());
-        }
-        assert_eq!(binding.prev_correlation(), 0, "replies must not advance the send correlation counter");
+        assert_eq!(rig.driver.read_state(|replier| replier.replied), Some(2), "the turn sent both replies");
+        assert_eq!(rig.replies.try_iter().count(), 2, "both replies land on the caller");
+        assert_eq!(rig.prev_correlation(), before, "replies must not advance the send correlation counter");
     }
 
     /// Step 3: reply ids minted via `send_reply_for_handler` still sit in
@@ -238,34 +285,16 @@ mod tests {
     /// a reply does not advance `prev_correlation` (the send counter).
     #[test]
     fn reply_mints_in_disjoint_space_and_does_not_advance_send_correlation() {
-        use crate::actor::native::ctx::NativeCtx;
-        use aether_actor::OutboundReply;
-        use aether_kinds::Tick;
+        let mut rig = Rig::boot();
+        let before = rig.prev_correlation();
 
-        let (registry, mailer) = bare_substrate();
-        let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
-        let caller = registry.register_inbox(
-            &boot_authority(),
-            "test.binding.reply_space.caller",
-            forward_to_envelope_sender(reply_tx),
-        );
+        rig.ask(1);
 
-        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF03)));
-        assert_eq!(binding.prev_correlation(), 0);
-
-        let root = MailId::new(MailboxId(0xC0), 1);
-        let caller_source = Source::with_correlation(SourceAddr::Component(caller), 7);
-        {
-            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, Some(root), Some(root));
-            OutboundReply::reply(&mut ctx, &Tick::default());
-        }
-
-        let reply_env = reply_rx.try_recv().expect("reply routed to the caller");
+        let reply = rig.replies.try_recv().expect("the reply lands on the caller");
         assert!(
-            reply_env.mail_id.is_some_and(|id| id.correlation_id >= ReplyLineage::BASE),
+            reply.mail_id.is_some_and(|id| id.correlation_id >= ReplyLineage::BASE),
             "reply id sits in the disjoint reply-lineage space",
         );
-        assert_eq!(binding.prev_correlation(), 0, "minting a reply must not advance the send correlation counter");
-        reply_env.discharge();
+        assert_eq!(rig.prev_correlation(), before, "minting a reply must not advance the send correlation counter");
     }
 }
