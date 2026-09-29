@@ -81,8 +81,21 @@
 //! follow-up; this spike sizes the table generously and treats a full
 //! probe sweep as a fail-fast (it cannot happen at the occupancy the
 //! stress tests or realistic fleets reach).
+//!
+//! **Probe bound (iamacoffeepot/aether#7126).** Because slots never return
+//! to `EMPTY`, churn eventually leaves no `EMPTY` anywhere, and a probe that
+//! could only stop at one would walk the whole table for every absent key —
+//! every new root, and every `is_live` on a settled one — for the rest of
+//! the process. So the table records `max_probe`, the furthest from its home
+//! slot any insert has landed, and every lookup stops there. An insert
+//! raises the bound *before* it publishes its key, and a lookup of a present
+//! key happens-after that key's insert (invariant 2: the looker holds
+//! in-flight work under the root, which the minting `record_sent` preceded),
+//! so the lookup's `Acquire` load sees a bound that reaches the key. The
+//! bound only grows, and it tracks the peak clustering of *live* roots, not
+//! the number of roots the table has ever held.
 
-use std::sync::atomic::{AtomicU64, Ordering, fence};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
 
 use aether_data::{MailId, MailboxId};
 
@@ -152,6 +165,10 @@ fn with_state(sv: u64, new_state: u64) -> u64 {
 pub struct SettlementTable {
     slots: Box<[Slot]>,
     mask: u64,
+    /// The furthest any insert has landed from its home slot, in slots.
+    /// Every lookup probes at most `max_probe + 1` slots (see the module's
+    /// probe-bound note). Only ever grows.
+    max_probe: AtomicUsize,
 }
 
 impl SettlementTable {
@@ -171,6 +188,7 @@ impl SettlementTable {
             slots: slots.into_boxed_slice(),
             #[allow(clippy::cast_possible_truncation)]
             mask: n as u64 - 1,
+            max_probe: AtomicUsize::new(0),
         }
     }
 
@@ -243,53 +261,48 @@ impl SettlementTable {
     /// concurrent reclaim of *other* slots.
     ///
     /// # Panics
-    /// Panics if a full probe sweep finds neither the key nor a reusable
-    /// slot — the table is saturated. This spike sizes the table so that
-    /// cannot happen; production sizing + cold-overflow is a follow-up.
+    /// Panics if no slot in the table is reusable — the table is saturated.
+    /// This spike sizes the table so that cannot happen; production sizing +
+    /// cold-overflow is a follow-up.
     fn cell_for(&self, root: MailId) -> &CounterCell {
-        let key = (root.sender.0, root.correlation_id);
+        // A present key lies within the probe bound, so a miss here means
+        // `root` is new. Unique keys mean no concurrent same-key insert can
+        // land between this miss and the claim below.
+        if let Some(slot) = self.find_slot(root) {
+            return &slot.cell;
+        }
         let home = self.home(root);
-        'attempt: loop {
-            let mut first_reusable: Option<usize> = None;
-            let mut idx = home;
-            for _ in 0..=self.mask {
-                let slot = &self.slots[idx];
-                match slot.sv.load(Ordering::Acquire) & STATE_MASK {
-                    STATE_OCCUPIED if Self::read_key(slot) == Some(key) => return &slot.cell,
-                    STATE_EMPTY => {
-                        // Key is absent in [home..=idx] (slots never revert
-                        // to EMPTY, so a present key would have been found
-                        // before this EMPTY). Claim the first reusable slot
-                        // seen, or this EMPTY. Unique keys mean no
-                        // concurrent same-key insert to recheck for.
-                        let target = first_reusable.unwrap_or(idx);
-                        if self.try_claim(target, root) {
-                            return &self.slots[target].cell;
-                        }
-                        // Lost the slot to another key's claim → re-probe.
-                        continue 'attempt;
-                    }
-                    STATE_TOMBSTONE if first_reusable.is_none() => first_reusable = Some(idx),
-                    // OCCUPIED-other / CLAIMING / already-noted TOMBSTONE →
-                    // probe past.
-                    _ => {}
-                }
-                idx = self.next_index(idx);
-            }
-            // Probed every slot without hitting an EMPTY. If a tombstone
-            // was seen, recycle it; otherwise the table is saturated.
-            match first_reusable {
-                Some(target) if self.try_claim(target, root) => {
-                    return &self.slots[target].cell;
-                }
-                Some(_) => {} // lost the race → retry the whole probe
-                None => panic!(
+        loop {
+            let Some((target, distance)) = self.first_reusable(home) else {
+                panic!(
                     "settlement table saturated ({} slots); resize / cold-overflow is unimplemented \
                      (iamacoffeepot/aether#1059 spike)",
                     self.slots.len()
-                ),
+                );
+            };
+            // Raise the bound before the key is published, so every lookup
+            // that happens-after the publish probes far enough to find it.
+            self.max_probe.fetch_max(distance, Ordering::Release);
+            if self.try_claim(target, root) {
+                return &self.slots[target].cell;
             }
+            // Lost the slot to another key's claim → re-probe.
         }
+    }
+
+    /// The first `EMPTY` or `TOMBSTONE` slot probing from `home`, with its
+    /// distance from `home`. Unbounded by `max_probe`: this is where the
+    /// bound gets extended. `None` only when every slot is live or claiming.
+    fn first_reusable(&self, home: usize) -> Option<(usize, usize)> {
+        let mut idx = home;
+        for distance in 0..self.slots.len() {
+            let state = self.slots[idx].sv.load(Ordering::Acquire) & STATE_MASK;
+            if state == STATE_EMPTY || state == STATE_TOMBSTONE {
+                return Some((idx, distance));
+            }
+            idx = self.next_index(idx);
+        }
+        None
     }
 
     /// CAS `slots[idx]` from a reusable state (`EMPTY`/`TOMBSTONE`) into
@@ -313,12 +326,12 @@ impl SettlementTable {
     }
 
     /// Find the slot for an *existing* root without inserting. `None` if
-    /// the key is absent (probe hit an `EMPTY`).
+    /// the key is absent (probe hit an `EMPTY` or ran past `max_probe`).
     #[inline]
     fn find_slot(&self, root: MailId) -> Option<&Slot> {
         let key = (root.sender.0, root.correlation_id);
         let mut idx = self.home(root);
-        for _ in 0..=self.mask {
+        for _ in 0..=self.max_probe.load(Ordering::Acquire) {
             let slot = &self.slots[idx];
             match slot.sv.load(Ordering::Acquire) & STATE_MASK {
                 STATE_OCCUPIED if Self::read_key(slot) == Some(key) => return Some(slot),
@@ -672,6 +685,43 @@ mod tests {
 
         assert_eq!(fires, total, "every root settles exactly once");
         assert_eq!(t.live_roots(), 0);
+    }
+
+    /// The probe bound follows *live* roots, not churn (iamacoffeepot/aether#7126).
+    /// Thousands of roots through a 16-slot table leave no `EMPTY` slot, but
+    /// with at most `window` roots live at any insert, the first reusable
+    /// slot is never more than `window` probes from home — so the bound stays
+    /// there. A bound fed by the distance to the next `EMPTY` (which grows to
+    /// the whole table under churn) instead of the claimed slot fails this,
+    /// and so does one never raised: a live root past the bound would go
+    /// unfound and never settle.
+    #[test]
+    fn probe_bound_tracks_live_roots_not_churn() {
+        let t = SettlementTable::with_slots(16);
+        let window = 2u64;
+        let total = 5_000u64;
+        let mut fires = 0u64;
+
+        for i in 0..total {
+            t.record_sent(root(1, i));
+            if i >= window && t.record_finished(root(1, i - window)) {
+                fires += 1;
+            }
+        }
+        for i in total - window..total {
+            if t.record_finished(root(1, i)) {
+                fires += 1;
+            }
+        }
+
+        assert_eq!(fires, total, "every root settles exactly once");
+        assert!(
+            (0..16).all(|i| t.slots[i].sv.load(Ordering::Acquire) & STATE_MASK != STATE_EMPTY),
+            "the churn used every slot, so no lookup can stop at an EMPTY"
+        );
+        let bound = t.max_probe.load(Ordering::Acquire);
+        assert!(bound <= usize::try_from(window).unwrap(), "probe bound {bound} grew past the live window {window}");
+        assert!(!t.is_live(root(1, 0)), "a settled root reads as not live within the bound");
     }
 
     /// The kernel's riskiest property through the full table path: seed
