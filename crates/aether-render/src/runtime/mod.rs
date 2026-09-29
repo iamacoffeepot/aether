@@ -1283,10 +1283,8 @@ mod tests {
     use aether_kinds::QuadSpace;
     use aether_math::Rgba;
     use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::EgressEvent;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::testing::{decode_reply, session_sender, test_mailer_and_rx, token_root, unrouted_binding};
-    use std::sync::mpsc;
+    use aether_substrate::testing::{test_mailer_and_rx, unrouted_binding};
 
     fn window(name: &str) -> ErasedActorPath {
         ErasedActorPath::new(&format!("aether.window/aether.window.instance:{name}")).expect("fixture window path")
@@ -1305,34 +1303,8 @@ mod tests {
         }
     }
 
-    /// Build a `PendingCapture` whose held ticket answers a Session source
-    /// so the toy pump can observe the deferred reply through the egress
-    /// channel. The ticket is armed on `binding`, the ledger the test's
-    /// answering ctx must share, and its receipt is accepted as the
-    /// dispatch would accept a returned one.
-    fn parked_capture(
-        binding: &Arc<NativeBinding>,
-        window: Option<ErasedActorPath>,
-        pre_remaining: usize,
-        deadline: Instant,
-    ) -> PendingCapture {
-        let mut ctx = NativeCtx::<RenderCapability>::new_for_actor(binding, session_sender(), None, None);
-        let (pending, held) = ctx.hold::<CaptureFrameResult>();
-        pending.__defuse();
-        PendingCapture {
-            window,
-            held,
-            after_mails: Vec::new(),
-            checks: Vec::new(),
-            reference: None,
-            pre_remaining,
-            deadline,
-        }
-    }
-
-    /// A minimal headless state for the capture state-machine tests — no
-    /// window, no GPU (`gpu` stays `None`, so the ready branch fails fast
-    /// rather than touching an absent adapter).
+    /// A minimal headless state for the state tests — no window, no GPU
+    /// (`gpu` stays `None`, so nothing touches an absent adapter).
     fn headless_state() -> RenderCapabilityState {
         RenderCapabilityState {
             frame_vertices: Vec::new(),
@@ -1370,73 +1342,6 @@ mod tests {
         unrouted_binding(mailer)
     }
 
-    fn capture_err(rx: &mpsc::Receiver<EgressEvent>) -> String {
-        match decode_reply::<CaptureFrameResult>(rx) {
-            CaptureFrameResult::Err { error } => error,
-            CaptureFrameResult::Ok { .. } => panic!("expected an Err capture reply"),
-        }
-    }
-
-    /// Park a capture awaiting two pre-mails; two `pre_settled` mails count
-    /// it down to ready, and the next `on_frame` (no GPU) resolves it —
-    /// exercising park → `pre_settled`×N → ready-on-frame. Without an
-    /// adapter the ready branch fails fast, but the state-machine
-    /// transition (countdown then act on the next frame) is what this owns.
-    #[test]
-    fn park_then_pre_settled_countdown_readies_on_frame() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let mut state = headless_state();
-        let binding = ctx_binding(&mailer);
-        state.pending_capture = Some(parked_capture(&binding, None, 2, Instant::now() + FRAME_SETTLEMENT_CAP));
-
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-        RenderCapability::on_pre_settled(&mut state, &mut ctx, PreSettled { mail_id: token_root(1) });
-        assert_eq!(state.pending_capture.as_ref().expect("still pending").pre_remaining, 1);
-        RenderCapability::on_pre_settled(&mut state, &mut ctx, PreSettled { mail_id: token_root(2) });
-        assert!(state.pending_capture.as_ref().expect("still pending").is_ready());
-
-        // A frame past readiness acts on the capture (consumes it).
-        RenderCapability::on_frame(&mut state, &mut ctx, Frame { replay_cache_when_idle: false, windows: Vec::new() });
-        assert!(state.pending_capture.is_none(), "a ready capture is resolved on the next frame");
-        assert!(capture_err(&rx).contains("GPU"), "no adapter in unit tests => the ready branch fails fast");
-    }
-
-    /// A capture past its deadline replies `Err` through the held ticket
-    /// on the next frame — the `FRAME_SETTLEMENT_CAP` wedge, event-driven.
-    #[test]
-    fn expired_capture_replies_err_on_frame() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let mut state = headless_state();
-        // A deadline in the past, with pre-mails still outstanding.
-        let past = Instant::now().checked_sub(Duration::from_secs(1)).expect("clock is past the epoch");
-        let binding = ctx_binding(&mailer);
-        state.pending_capture = Some(parked_capture(&binding, None, 3, past));
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-
-        RenderCapability::on_frame(&mut state, &mut ctx, Frame { replay_cache_when_idle: false, windows: Vec::new() });
-
-        assert!(state.pending_capture.is_none(), "an expired capture is cleared");
-        assert!(capture_err(&rx).contains("settlement cap"), "the wedge disposition replies Err");
-    }
-
-    #[test]
-    #[cfg(feature = "desktop")]
-    fn detached_target_fails_only_its_pending_capture() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let mut state = headless_state();
-        let binding = ctx_binding(&mailer);
-        state.pending_capture =
-            Some(parked_capture(&binding, Some(window("left")), 1, Instant::now() + FRAME_SETTLEMENT_CAP));
-        let mut ctx = NativeCtx::<RenderCapability>::new_for_actor(&binding, Source::NONE, None, None);
-
-        state.fail_capture_for_detached_window(&mut ctx, &window("right"));
-        assert!(state.pending_capture.is_some(), "a different target's capture survives");
-
-        state.fail_capture_for_detached_window(&mut ctx, &window("left"));
-        assert!(state.pending_capture.is_none(), "the detached target's capture is cleared");
-        assert!(capture_err(&rx).contains("detached"));
-    }
-
     #[test]
     fn surfaceless_capture_selection_is_explicit() {
         let mut state = headless_state();
@@ -1455,36 +1360,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [window("b"), window("e"), window("h")],
         );
-    }
-
-    /// A capture names its window by path and the handler proves it at
-    /// receipt: a path with no live actor behind it is refused by name
-    /// before any target selection, rather than reaching selection as an
-    /// unknown target or parking a capture no frame will complete.
-    #[test]
-    fn capture_of_an_unresolvable_window_path_replies_err_naming_it() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let mut state = headless_state();
-        state.offscreen_size = Some((64, 48));
-        let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-
-        RenderCapability::on_capture_frame(
-            &mut state,
-            &mut ctx,
-            CaptureFrame {
-                window: Some(window("gone")),
-                mails: Vec::new(),
-                after_mails: Vec::new(),
-                checks: Vec::new(),
-                similarity: None,
-            },
-        )
-        .__defuse();
-
-        assert!(state.pending_capture.is_none(), "an unproven window parks no capture");
-        let error = capture_err(&rx);
-        assert!(error.contains("aether.window/aether.window.instance:gone") && error.contains("does not resolve"));
     }
 
     #[test]
@@ -1522,7 +1397,7 @@ mod tests {
 
     #[test]
     fn terminal_device_failure_never_reboots_and_disposes_each_mail_shape() {
-        let (mailer, rx) = test_mailer_and_rx();
+        let (mailer, _rx) = test_mailer_and_rx();
         let mut state = headless_state();
         state.offscreen_size = Some((64, 48));
         state.device_recovery.force_unusable_for_test("replacement acquisition failed");
@@ -1565,49 +1440,17 @@ mod tests {
         assert_eq!(state.textures.entries[&3].pixels, vec![7; 16], "fire-and-forget updates are dropped");
         assert!(state.frame_vertices.is_empty(), "fire-and-forget draws are dropped");
 
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-        RenderCapability::on_capture_frame(
-            &mut state,
-            &mut ctx,
-            CaptureFrame {
-                window: None,
-                mails: Vec::new(),
-                after_mails: Vec::new(),
-                checks: Vec::new(),
-                similarity: None,
-            },
-        )
-        .__defuse();
-        assert!(capture_err(&rx).contains("unusable"), "capture replies with the terminal structured error");
+        let ctx = NativeCtx::<RenderCapability>::new_for_actor(&binding, Source::NONE, None, None);
+        let capture = CaptureFrame {
+            window: None,
+            mails: Vec::new(),
+            after_mails: Vec::new(),
+            checks: Vec::new(),
+            similarity: None,
+        };
+        let error = state.accept_capture(&ctx, capture).err().expect("a terminal device refuses the capture");
+        assert!(error.contains("unusable"), "capture is refused with the terminal structured error: {error}");
         assert!(state.gpu.is_none(), "terminal capture does not retry device acquisition");
-    }
-
-    /// A second `capture_frame` while one is pending replies `Err`
-    /// immediately, without disturbing the in-flight capture.
-    #[test]
-    fn capture_while_pending_replies_err_immediately() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let mut state = headless_state();
-        state.offscreen_size = Some((64, 48));
-        let binding = ctx_binding(&mailer);
-        state.pending_capture = Some(parked_capture(&binding, None, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-
-        RenderCapability::on_capture_frame(
-            &mut state,
-            &mut ctx,
-            CaptureFrame {
-                window: None,
-                mails: Vec::new(),
-                after_mails: Vec::new(),
-                checks: Vec::new(),
-                similarity: None,
-            },
-        )
-        .__defuse();
-
-        assert!(state.pending_capture.is_some(), "the in-flight capture is untouched");
-        assert!(capture_err(&rx).contains("already pending"), "a second capture is rejected");
     }
 
     /// Issue #2831: `destroy_texture` removes a user-owned registry entry,

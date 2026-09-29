@@ -41,12 +41,15 @@ use aether_harness_substrate_capture::visual::{
 };
 use aether_harness_substrate_capture::{
     RenderHarnessBuilderExt,
-    test_helpers::{envelope, has_wgpu_adapter, init_save_sandbox, pixel_is_lit},
+    test_helpers::{envelope, has_wgpu_adapter, init_save_sandbox, pixel_is_lit, write_fixture},
 };
 use aether_kinds::{CachedFontMetrics, ClipRect, CostTailResult, QuadScale, QuadSpace};
 use aether_math::{Mat4, Rgba, Vec3};
 use aether_render::{DrawShapes, RenderCapability, Shape, ViewProjection};
-use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
+use aether_text::{
+    DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes, LoadFontResult,
+    MEMORY_FONT_NAMESPACE, TextCapability,
+};
 
 /// Namespace-relative path of the vendored font under the `assets` root.
 const FONT_PATH: &str = "fonts/RobotoMono.ttf";
@@ -515,6 +518,19 @@ fn font_metrics_grab_measures_like_the_draw_path() {
     assert_eq!(local, draw_pen, "local measure must equal the draw-path advance sum exactly");
 }
 
+/// A harness composing render, text, and the fs namespaces the font
+/// requests read through; the scenarios that only exchange replies with the
+/// text cap need nothing else.
+fn font_harness() -> SubstrateHarness {
+    SubstrateHarness::builder()
+        .with_render()
+        .with_actor::<TextCapability>(())
+        .size(64, 32)
+        .namespace_roots(font_namespace_roots())
+        .build()
+        .expect("boot")
+}
+
 /// What three requests for one font, in flight together, came back with:
 /// two `load_font`s and one `font_metrics` grab by the same path.
 struct JoinedReplies {
@@ -530,13 +546,7 @@ struct JoinedReplies {
 /// dispatched, and a font's waiters stay joined across its read and parse,
 /// so the later two find the first's load in flight.
 fn load_one_font_three_ways(path: &str) -> JoinedReplies {
-    let mut harness = SubstrateHarness::builder()
-        .with_render()
-        .with_actor::<TextCapability>(())
-        .size(64, 32)
-        .namespace_roots(font_namespace_roots())
-        .build()
-        .expect("boot");
+    let mut harness = font_harness();
     let text = harness.actor_ref::<TextCapability>();
     let load = LoadFont { namespace: "assets".to_owned(), path: path.to_owned() };
     let grab = FontMetricsRequest { font: FontRef::Path { namespace: "assets".to_owned(), path: path.to_owned() } };
@@ -601,6 +611,109 @@ fn a_failed_font_read_answers_every_request_waiting_on_it() {
         matches!(metrics, FontMetricsResult::Err { .. }),
         "the grab is answered with the read's failure: {metrics:?}"
     );
+}
+
+/// Catches a parse failure that is swallowed or reported as a read error: a
+/// file that reads but is not a font is answered with the parse error.
+#[test]
+fn a_font_file_that_does_not_parse_replies_a_parse_err() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = font_harness();
+    let path = write_fixture("junk.ttf", &[0xDE, 0xAD, 0xBE, 0xEF]);
+
+    let text = harness.actor_ref::<TextCapability>();
+    let loaded = harness
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_await_reply(&text, &LoadFont { namespace: "save".to_owned(), path }),
+        )])
+        .expect("load_font sequence");
+
+    let LoadFontResult::Err { error, .. } = loaded.reply::<LoadFontResult>("load").expect("decode LoadFontResult")
+    else {
+        panic!("a file that is not a font does not load");
+    };
+    assert!(error.contains("parse"), "the reply is the parse error: {error}");
+}
+
+/// Catches an in-memory load that answers before registering, or registers
+/// under an id metrics cannot find: the `Ok` reply's font id resolves a
+/// `font_metrics` grab, and the reply reports the bytes held resident.
+#[test]
+fn font_bytes_register_a_font_metrics_can_grab_by_id() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = font_harness();
+    let ttf = fs::read(font_assets_root().join(FONT_PATH)).expect("read vendored Roboto Mono");
+    let resident = u64::try_from(ttf.len()).expect("the font fits in u64");
+
+    let text = harness.actor_ref::<TextCapability>();
+    let loaded = harness
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_await_reply(&text, &LoadFontBytes { name: "embedded.ttf".to_owned(), bytes: ttf }),
+        )])
+        .expect("load_font_bytes sequence");
+    let (font_id, name, resident_bytes) = match loaded.reply::<LoadFontResult>("load").expect("decode LoadFontResult") {
+        LoadFontResult::Ok { font_id, name, resident_bytes } => (font_id, name, resident_bytes),
+        LoadFontResult::Err { error, .. } => panic!("load_font_bytes failed: {error}"),
+    };
+    assert_eq!(name, "embedded.ttf");
+    assert_eq!(resident_bytes, resident, "the reply reports the bytes held resident");
+
+    let grabbed = harness
+        .execute(vec![(
+            "grab",
+            HarnessOp::send_and_await_reply(&text, &FontMetricsRequest { font: FontRef::Id(font_id) }),
+        )])
+        .expect("font_metrics sequence");
+    match grabbed.reply::<FontMetricsResult>("grab").expect("decode FontMetricsResult") {
+        FontMetricsResult::Ok { metrics } => assert!(!metrics.advances.is_empty(), "a real font has glyphs"),
+        FontMetricsResult::Err { error } => panic!("the loaded font id resolves: {error}"),
+    }
+}
+
+/// Catches malformed in-memory bytes that register anyway, or a metrics grab
+/// that answers an unknown id with some other font: the bytes are answered
+/// with the parse error naming the memory path, and a grab for an id nothing
+/// registered is refused by that id.
+#[test]
+fn malformed_font_bytes_and_an_unknown_font_id_reply_err() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = font_harness();
+
+    let text = harness.actor_ref::<TextCapability>();
+    let replies = harness
+        .execute(vec![
+            (
+                "load",
+                HarnessOp::send_and_await_reply(
+                    &text,
+                    &LoadFontBytes { name: "junk.ttf".to_owned(), bytes: vec![0xDE, 0xAD, 0xBE, 0xEF] },
+                ),
+            ),
+            ("grab", HarnessOp::send_and_await_reply(&text, &FontMetricsRequest { font: FontRef::Id(99) })),
+        ])
+        .expect("load_font_bytes + font_metrics sequence");
+
+    match replies.reply::<LoadFontResult>("load").expect("decode LoadFontResult") {
+        LoadFontResult::Err { namespace, path, error } => {
+            assert_eq!((namespace.as_str(), path.as_str()), (MEMORY_FONT_NAMESPACE, "junk.ttf"));
+            assert!(error.contains("parse"), "the reply is the parse error: {error}");
+        }
+        LoadFontResult::Ok { .. } => panic!("malformed bytes do not load"),
+    }
+    let FontMetricsResult::Err { error } =
+        replies.reply::<FontMetricsResult>("grab").expect("decode FontMetricsResult")
+    else {
+        panic!("an unknown font id is refused");
+    };
+    assert!(error.contains("99"), "the refusal names the id: {error}");
 }
 
 /// ADR-0105 screen-space text origin (issue 1773): drawing `Screen` text
