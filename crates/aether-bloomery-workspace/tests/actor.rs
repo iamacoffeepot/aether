@@ -43,14 +43,17 @@ fn an_import_answers_ok_and_holds_settlement_until_it_is_done() -> TestResult {
         .symlink("etc/localtime", "/usr/share/zoneinfo/UTC")
         .finish();
 
-    let served_before_settling = thread::scope(|scope| -> Result<bool, Box<dyn Error>> {
-        let served = scope.spawn(|| stub.answer(StubReply::import_script(IMAGE, "c0ffee", &export)));
+    let script = StubReply::import_script(IMAGE, "c0ffee", &export);
+    let expected = script.len();
+    let requests_before = stub.requests_read();
+    thread::scope(|scope| -> TestResult {
+        let served = scope.spawn(|| stub.answer(script));
         harness.execute(vec![("settle", HarnessOp::send_and_settle(&workspace, &import))])?;
-        let finished = served.is_finished();
         served.join().map_err(|_| "the stub thread panicked")??;
-        Ok(finished)
+        Ok(())
     })?;
-    assert!(served_before_settling, "the chain settled before the import's last request was served");
+    let requests_read = stub.requests_read() - requests_before;
+    assert_eq!(requests_read, expected, "the chain settled before the import's last request was served");
 
     let answer = thread::scope(|scope| -> Result<ImportResult, Box<dyn Error>> {
         let served = scope.spawn(|| stub.serve(StubReply::import_script(IMAGE, "c0ffee", &export)));
@@ -122,14 +125,16 @@ fn a_run_answers_its_result_and_holds_settlement_until_it_is_done() -> TestResul
     let output = TarWriter::new().directory("work/").file("work/out", b"o\n").finish();
     let script = RunScript { environment: &hex, logs: &[(1, b"ok\n")], exit_code: 0, output: &output };
 
-    let served_before_settling = thread::scope(|scope| -> Result<bool, Box<dyn Error>> {
+    let expected = script.replies().len();
+    let requests_before = stub.requests_read();
+    thread::scope(|scope| -> TestResult {
         let served = scope.spawn(|| stub.answer(script.replies()));
         harness.execute(vec![("settle", HarnessOp::send_and_settle(&workspace, &run))])?;
-        let finished = served.is_finished();
         served.join().map_err(|_| "the stub thread panicked")??;
-        Ok(finished)
+        Ok(())
     })?;
-    assert!(served_before_settling, "the chain settled before the run's last request was served");
+    let requests_read = stub.requests_read() - requests_before;
+    assert_eq!(requests_read, expected, "the chain settled before the run's last request was served");
 
     let answer = thread::scope(|scope| -> Result<RunResult, Box<dyn Error>> {
         let served = scope.spawn(|| stub.serve(script.replies()));
@@ -162,15 +167,17 @@ fn on_one_core_a_second_run_waits_for_the_first_holding_its_settlement_and_both_
     let script = RunScript { environment: &hex, logs: &[(1, b"ok\n")], exit_code: 0, output: &output };
     let back_to_back = || script.replies().into_iter().chain(script.replies()).collect::<Vec<_>>();
 
-    let served_before_settling = thread::scope(|scope| -> Result<bool, Box<dyn Error>> {
+    let expected = back_to_back().len();
+    let requests_before = stub.requests_read();
+    thread::scope(|scope| -> TestResult {
         let served = scope.spawn(|| stub.answer(back_to_back()));
         let _first = harness.send_deferred(workspace, &run);
         harness.execute(vec![("second", HarnessOp::send_and_settle(&workspace, &run))])?;
-        let finished = served.is_finished();
         served.join().map_err(|_| "the stub thread panicked")??;
-        Ok(finished)
+        Ok(())
     })?;
-    assert!(served_before_settling, "the queued run's chain settled before its requests were served");
+    let requests_read = stub.requests_read() - requests_before;
+    assert_eq!(requests_read, expected, "the queued run's chain settled before its requests were served");
 
     let (first, second, requests) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
         let served = scope.spawn(|| stub.serve(back_to_back()));
