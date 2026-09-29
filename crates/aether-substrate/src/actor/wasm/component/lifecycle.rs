@@ -7,6 +7,8 @@ use super::{
     StateBundle,
 };
 use crate::actor::native::ctx::NativeCtx;
+use crate::actor::wasm::host_fns::{GuestReply, guest_answer};
+use crate::actor::wasm::reply_table::{HeldChain, HeldUnanswered};
 use crate::mail::registry::{PreparedAliasRetirement, PreparedAliasRoute};
 
 impl Component {
@@ -91,6 +93,42 @@ impl Component {
     /// (#6134).
     pub fn resume_correlations(&mut self, cursor: CorrelationCursor) {
         self.store.data_mut().resume_correlations(cursor);
+    }
+
+    /// Answer every reply this guest still holds with the `unanswered`
+    /// value it registered when it held (ADR-0243 §6), because it is
+    /// unloading or its actor is closing, and no guest is left to answer.
+    /// Each answer goes out on its requester's chain, and only then does
+    /// that chain's settlement hold release, so `Sent` precedes `Release`
+    /// as for a guest's own answer. Under engine teardown every requester
+    /// is closing with the engine, so the chains release unanswered, as
+    /// they do for a native actor. A slot reserved to a held answer is
+    /// skipped; its candidate is aborted first, which restores it.
+    ///
+    /// The consumers are the component trampoline's guest release and its
+    /// close.
+    pub fn answer_held_at_close(&mut self) {
+        let ctx = self.store.data_mut();
+        let held = ctx.reply_table.drain_held();
+        if ctx.binding.is_engine_teardown() {
+            drop(held);
+            return;
+        }
+
+        let from = ctx.sender;
+        for (entry, HeldChain { hold, root, parent, unanswered }) in held {
+            let HeldUnanswered { kind, kind_name, payload } = unanswered;
+            match guest_answer(ctx, entry, GuestReply { kind, kind_name, payload, count: 1, from }) {
+                Ok(answer) => ctx.answer(answer, Some((parent, root))),
+                Err(status) => tracing::warn!(
+                    target: "aether_substrate::component",
+                    actor = %ctx.actor_name(),
+                    status,
+                    "a held reply's unanswered value could not be sent; its requester's chain releases unanswered",
+                ),
+            }
+            drop(hold);
+        }
     }
 
     /// Move out the guest's reply table — its pending handles and the next

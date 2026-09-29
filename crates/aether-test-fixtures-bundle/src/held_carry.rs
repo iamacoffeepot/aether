@@ -6,9 +6,11 @@
 //! held actor its `target` names. The send is detached, so the held reply's
 //! chain stays out of the chain the harness settles, and a scenario can
 //! replace the holder while the reply is still owed. On each [`HeldRequestResult`]
-//! that echoes a tag it sent, the requester reports [`HeldReplyMatched`] and
-//! counts the match; it answers [`CountQuery`] with that count, which is the
-//! barrier a scenario polls, since the reply lands on a chain it never joins.
+//! that echoes a tag it sent, the requester reports [`HeldReplyMatched`]; on
+//! one carrying [`HELD_UNANSWERED_TAG`], which a holder that closed first sends
+//! in its place (issue 7015), it reports [`HeldReplyUnanswered`]. It counts
+//! both and answers [`CountQuery`] with that count, which is the barrier a
+//! scenario polls, since the reply lands on a chain it never joins.
 //!
 //! Each held actor answers its [`HeldRequest`] through a `Held<HeldRequestResult>`:
 //!
@@ -23,8 +25,8 @@
 use aether_actor::{ActorInitError, Held, Pending, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{
     CarriedRequest, CarriedRequestResult, CountQuery, CountReport, HELD_TARGET_FORGETTER, HELD_TARGET_KEEPER,
-    HELD_TARGET_RELAY, HeldReplyMatched, HeldRequest, HeldRequestResult, ReleaseHeld, RunHeldRequest,
-    SubstrateHarnessObserver,
+    HELD_TARGET_RELAY, HELD_UNANSWERED_TAG, HeldReplyMatched, HeldReplyUnanswered, HeldRequest, HeldRequestResult,
+    ReleaseHeld, RunHeldRequest, SubstrateHarnessObserver,
 };
 
 use crate::correlation_carry::ReplyHolder;
@@ -44,11 +46,12 @@ struct KeptHelds {
     tags: Vec<u32>,
 }
 
-/// Sends each [`HeldRequest`] detached and counts the replies that echo a
-/// tag it sent.
+/// Sends each [`HeldRequest`] detached and counts the replies it receives:
+/// those that echo a tag it sent, and those a holder that closed first sent
+/// unanswered.
 pub struct HeldRequester {
     sent: Vec<u32>,
-    matched: u32,
+    replies: u32,
 }
 
 #[actor(root, depends(HeldRelay, HeldKeeper, HeldForgetter, SubstrateHarnessObserver))]
@@ -56,7 +59,7 @@ impl WasmActor for HeldRequester {
     const NAMESPACE: &'static str = "test.held.requester";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(HeldRequester { sent: Vec::new(), matched: 0 })
+        Ok(HeldRequester { sent: Vec::new(), replies: 0 })
     }
 
     #[handler::single]
@@ -76,18 +79,23 @@ impl WasmActor for HeldRequester {
 
     #[handler::single]
     fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: HeldRequestResult) {
+        if reply.tag == HELD_UNANSWERED_TAG {
+            self.replies += 1;
+            ctx.send::<SubstrateHarnessObserver>(&HeldReplyUnanswered);
+            return;
+        }
         let Some(index) = self.sent.iter().position(|tag| *tag == reply.tag) else {
             tracing::warn!(target: "test.held.requester", tag = reply.tag, "held reply echoes no tag sent");
             return;
         };
         self.sent.swap_remove(index);
-        self.matched += 1;
+        self.replies += 1;
         ctx.send::<SubstrateHarnessObserver>(&HeldReplyMatched);
     }
 
     #[handler::single]
     fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
-        CountReport { count: self.matched }
+        CountReport { count: self.replies }
     }
 }
 

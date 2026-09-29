@@ -14,7 +14,9 @@
 //! defines: that crate cannot depend on this one, which depends on it.
 
 use aether_data::ActorMail;
-use aether_kinds::{CaptureFrameResult, LoadResult, ReplaceResult, SpawnEngineResult};
+use aether_kinds::{CaptureFrameResult, LoadResult, MeshLoadResult, ReplaceResult, SpawnEngineResult};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// The reply a caller receives when the actor holding its debt closes before
 /// answering (ADR-0243 §1). Written by hand per kind, never derived.
@@ -45,5 +47,20 @@ impl HeldReply for SpawnEngineResult {
 impl HeldReply for CaptureFrameResult {
     fn unanswered() -> Self {
         Self::Err { error: "render capability closed before the capture answered".into() }
+    }
+}
+
+/// A mesh actor that unloads before its read answers leaves the request's
+/// `namespace` and `path` empty: the caller correlates the reply by its
+/// correlation id alone.
+impl HeldReply for MeshLoadResult {
+    fn unanswered() -> Self {
+        Self {
+            ok: false,
+            namespace: String::new(),
+            path: String::new(),
+            error: Some("mesh actor closed before the load answered".into()),
+            warnings: Vec::new(),
+        }
     }
 }

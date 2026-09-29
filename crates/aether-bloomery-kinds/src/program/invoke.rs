@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::error::Error as StdError;
 use core::fmt;
 
+use aether_actor::HeldReply;
 use aether_data::{Blob, BlobReader, KindId, MAX_READ_BYTES};
 
 use crate::program::executor::ExecutorFault;
@@ -220,18 +221,29 @@ pub enum Invoked {
     Rejected { seq: u64, reason: Detail },
     /// An executor the program called ended the invocation; nothing it staged is recorded.
     Faulted { seq: u64, fault: ExecutorFault },
+    /// The bundle closed before the invocation answered (ADR-0243 §1). It
+    /// carries no seq: the host sends it in the bundle's place.
+    Closed,
 }
 
 impl Invoked {
-    /// The driver's `Requested` sequence this reply answers.
+    /// The driver's `Requested` sequence this reply answers; `None` for
+    /// [`Self::Closed`], which answers the request its reply handle names.
     #[must_use]
-    pub const fn seq(&self) -> u64 {
+    pub const fn seq(&self) -> Option<u64> {
         match self {
             Self::Completed { seq, .. }
             | Self::Refused { seq, .. }
             | Self::Rejected { seq, .. }
-            | Self::Faulted { seq, .. } => *seq,
+            | Self::Faulted { seq, .. } => Some(*seq),
+            Self::Closed => None,
         }
+    }
+}
+
+impl HeldReply for Invoked {
+    fn unanswered() -> Self {
+        Self::Closed
     }
 }
 

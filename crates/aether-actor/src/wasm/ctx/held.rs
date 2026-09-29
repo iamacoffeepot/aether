@@ -27,6 +27,7 @@ use aether_data::{ActorMail, CastEligible, Kind, LabelNode, Schema, SchemaType};
 use alloc::vec::Vec;
 
 use super::WasmCtx;
+use crate::HeldReply;
 use crate::blob::guest::encode_guest;
 use crate::mail::{NO_REPLY_HANDLE, ReplyHandle};
 use crate::model::ctx::reply_mode::{ReplyMode, Single};
@@ -193,16 +194,25 @@ impl<A> WasmCtx<'_, A, Single> {
     /// For mail with no reply target the ticket is detached: it answers
     /// nothing and drops silently.
     ///
+    /// A live ticket also stages `R::unanswered()` for the host (ADR-0243
+    /// §6): the `receive` shim registers it once the dispatch returns, and
+    /// the host sends it to the requester if this instance unloads or
+    /// closes before answering, since it cannot call into a guest that is
+    /// gone. A detached ticket stages nothing.
+    ///
     /// # Panics
     ///
     /// On a second `hold` in one dispatch, which would owe two replies to
     /// one request.
-    pub fn hold<R: ActorMail>(&mut self) -> (Pending<R>, Held<R>) {
+    pub fn hold<R: HeldReply>(&mut self) -> (Pending<R>, Held<R>) {
         assert!(!self.held_armed, "aether-actor: `hold` called twice in one dispatch; a request owes one reply");
         self.held_armed = true;
 
         let ticket = self.sender.map_or(NO_REPLY_HANDLE, ReplyHandle::raw);
         self.inline.arm_held(ticket, <R as Kind>::ID);
+        if ticket != NO_REPLY_HANDLE {
+            self.inline.stage_unanswered(ticket, <R as Kind>::ID, encode_guest(&R::unanswered()));
+        }
         (Pending::new(), Held::new(ticket))
     }
 }

@@ -635,6 +635,29 @@ fn an_executor_fault_records_its_fault_reason_caused_by_the_request_and_no_trans
 }
 
 #[test]
+fn a_closed_bundle_faults_its_request_as_unavailable() {
+    // Catches a driver that reads the seq-less `Closed` as a seq mismatch and
+    // records a protocol violation, or that drops it and leaves the request
+    // active with no answer to its caller.
+    let (mut world, initial) = World::open();
+    let fixed = fixtures(&mut world);
+    assert!(world.drive(initial).is_empty());
+    world.script_invoke(2, Invoked::Closed);
+    let (_, commands) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
+
+    assert!(world.drive(commands).is_empty());
+
+    assert!(world.abort.is_none());
+    let [(_, CallOutcome::Fault { fault, .. })] = &world.answers[..] else {
+        panic!("expected one fault answer, got {:?}", world.answers);
+    };
+    let FaultReason::BundleUnavailable { reason } = &fault.reason else {
+        panic!("expected the bundle unavailable, got {:?}", fault.reason);
+    };
+    assert!(reason.as_str().contains("closed"), "names the close: {reason:?}");
+}
+
+#[test]
 fn completed_invocation_appends_staged_artifacts_with_a_caused_transition() {
     // Catches a broken cause link, a wrong outcome seq, and artifacts left unstaged.
     let (mut world, initial) = World::open();

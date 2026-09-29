@@ -64,6 +64,30 @@ fails fast:
 - `on_dehydrate` refuses the replace while a `Held` is still live and unsaved,
   and the host keeps the old instance running.
 
+`R` must implement `aether_actor::HeldReply`, whose `unanswered()` names the
+failure reply the caller receives if the guest never answers. `hold` encodes it,
+and the `receive` shim registers it with the host when the dispatch returns,
+because the host cannot call into a guest that is gone. If the guest is dropped,
+or its actor closes while the engine keeps running, the host sends the registered
+reply for each debt still owed, on the request's chain, before it releases the
+settlement. A replace carries the registration with the debt. An engine teardown
+sends nothing, since every requester is closing too. Write the impl by hand next
+to the kind, with a failure arm the caller can tell from a real answer:
+
+```rust
+impl HeldReply for MeshLoadResult {
+    fn unanswered() -> Self {
+        Self {
+            ok: false,
+            namespace: String::new(),
+            path: String::new(),
+            error: Some("mesh actor closed before the load answered".into()),
+            warnings: Vec::new(),
+        }
+    }
+}
+```
+
 ## Where to read more
 
 - The full end-to-end loop for a component — crate setup, the `#[actor]` block,

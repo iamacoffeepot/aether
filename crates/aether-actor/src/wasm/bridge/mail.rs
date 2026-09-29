@@ -99,6 +99,20 @@ pub fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32, from: u64) -
     unsafe { raw::reply_mail(sender, kind, bytes.as_ptr().addr() as u32, bytes.len() as u32, count, from) }
 }
 
+/// Register the reply the dispatch in progress held on reply handle
+/// `sender` (ADR-0243 §6): `kind` and the encoded `unanswered` value the
+/// host sends the requester if this instance closes before answering.
+/// Returns `0` on success and one of `reply_mail`'s refusal statuses
+/// otherwise; the caller panics on a refusal.
+#[must_use]
+pub fn held_unanswered(sender: u32, kind: u64, bytes: &[u8]) -> u32 {
+    // SAFETY: forwards to `raw::held_unanswered`, whose ABI is documented at
+    // the import site in `raw.rs`. The `(ptr, len)` pair is derived from the
+    // `&[u8]` slice we just received, valid for the call; the host copies
+    // before returning.
+    unsafe { raw::held_unanswered(sender, kind, bytes.as_ptr().addr() as u32, bytes.len() as u32) }
+}
+
 /// Correlation id the host minted for this actor's most recent
 /// `send_mail` call (ADR-0042). `0` before any send. Universal —
 /// every send mints a correlation; a handler stashes it and

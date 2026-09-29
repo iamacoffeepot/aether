@@ -50,6 +50,12 @@ struct DeferredAnswer {
     value: u32,
 }
 
+impl crate::HeldReply for DeferredAnswer {
+    fn unanswered() -> Self {
+        Self { value: 0 }
+    }
+}
+
 /// Answers [`DeferredAsk`] later: its handler holds the reply, parks the
 /// ticket in its state and returns the receipt.
 struct Deferrer {

@@ -34,13 +34,15 @@
 //
 // A single arm that returned a `Pending<R>` (`DISPATCH_HANDLED_HOLD`,
 // ADR-0243 §6) keeps its handle too, and its slot also holds a
-// `HeldChain`: the requester's settlement hold and the inbound's lineage.
-// The chain leaves the slot with the entry when the guest answers, so the
-// reply is stamped on the requester's chain and the hold is released only
-// after the reply's `Sent`. An unload, which saves no guest state, frees
-// every held slot through `settle_held` and releases its hold unanswered;
-// a replace carries the chains to the next occupant unchanged; actor close
-// drops the table and every hold with it.
+// `HeldChain`: the requester's settlement hold, the inbound's lineage, and
+// the `R::unanswered()` value the guest registered when it held. The chain
+// leaves the slot with the entry when the guest answers, so the reply is
+// stamped on the requester's chain and the hold is released only after the
+// reply's `Sent`. An unload or an actor close, which leave no guest to
+// answer, free every held slot through `drain_held` and send each one's
+// registered value in its place before releasing its hold; an engine
+// teardown releases them unanswered. A replace or an abort carries the
+// chains, registrations included, to the next occupant unchanged.
 //
 // A candidate guest whose outbox is held (a republish preparing its
 // replacement while the old guest is kept) answers a handle without sending:
@@ -49,7 +51,7 @@
 // to the same handle finds it unknown. A flush sends the answer and
 // `release_reserved` frees the slot under its next generation; a discard
 // `restore`s the entry and chain exactly, so the old guest can still answer
-// its requester on the same chain. `settle_held` skips a reserved slot, and
+// its requester on the same chain. `drain_held` skips a reserved slot, and
 // the table is never moved to another guest while one is reserved.
 //
 // The table lives on `ComponentCtx` rather than `Component` because
@@ -62,7 +64,10 @@
 
 use std::collections::VecDeque;
 
-use crate::mail::{MailId, MailboxId, SourceAddr};
+use std::fmt;
+
+use crate::mail::attachments::EncodedMail;
+use crate::mail::{KindId, MailId, MailboxId, SourceAddr};
 use crate::runtime::trace::SettlementHold;
 
 /// Sentinel passed to the guest's `receive` shim when the inbound
@@ -140,10 +145,11 @@ const fn next_generation(index: u32, generation: u32) -> u32 {
 }
 
 /// What a held slot keeps past its dispatch (ADR-0243 §6): the settlement
-/// hold that keeps the requester's root open, and the inbound's lineage a
-/// held reply is stamped with, whatever dispatch is in flight when the
-/// guest answers. Dropping it releases the hold, so a caller that sends the
-/// reply drops it only after the send has recorded its `Sent`.
+/// hold that keeps the requester's root open, the inbound's lineage a held
+/// reply is stamped with, whatever dispatch is in flight when the guest
+/// answers, and the reply the requester receives if the guest never does.
+/// Dropping it releases the hold, so a caller that sends the reply drops it
+/// only after the send has recorded its `Sent`.
 #[derive(Debug)]
 pub struct HeldChain {
     /// `None` when the inbound carried no root, so there is no chain to hold.
@@ -152,6 +158,28 @@ pub struct HeldChain {
     pub root: Option<MailId>,
     /// The inbound's own `mail_id`, the held reply's `parent_mail`.
     pub parent: Option<MailId>,
+    /// The `R::unanswered()` value the guest registered when it held.
+    pub unanswered: HeldUnanswered,
+}
+
+/// The reply a guest registered for a slot it held (ADR-0243 §6), through
+/// the `held_unanswered_p32` host fn: sent to the requester if the guest
+/// unloads or closes before answering, because the host cannot call into a
+/// guest that is gone. Its kind is registered and its payload's blobs are
+/// resolved, both checked when it was registered.
+pub struct HeldUnanswered {
+    pub kind: KindId,
+    pub kind_name: String,
+    pub payload: EncodedMail,
+}
+
+impl fmt::Debug for HeldUnanswered {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeldUnanswered")
+            .field("kind", &self.kind_name)
+            .field("bytes", &self.payload.bytes.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl HeldChain {
@@ -352,18 +380,22 @@ impl ReplyTable {
         true
     }
 
-    /// Free every held slot and drop its chain, releasing each requester's
-    /// settlement hold unanswered. Slots a manual handler keeps without a
-    /// chain stay live. The consumer is the trampoline's unload: no guest
-    /// state survives it, so no ticket is left to answer a held slot.
-    pub(crate) fn settle_held(&mut self) {
-        let held: Vec<u32> = (0..self.slots.len())
-            .filter(|index| self.slots[*index].chain.is_some())
-            .map(|index| u32::try_from(index).expect("a slot index fits the handle's index bits"))
-            .collect();
-        for index in held {
-            drop(self.free_slot(index));
-        }
+    /// Free every held slot and return its entry and chain, in slot order.
+    /// Slots a manual handler keeps without a chain stay live, and a slot
+    /// reserved to a held answer, whose chain is out with that answer, is
+    /// skipped. The consumer is `Component::answer_held_at_close`: once the
+    /// guest unloads or closes, no ticket is left to answer a held slot, so
+    /// the caller answers each with its registered value and then releases
+    /// its chain.
+    pub(crate) fn drain_held(&mut self) -> Vec<(ReplyEntry, HeldChain)> {
+        (0..self.slots.len())
+            .filter_map(|index| {
+                self.slots[index].chain.as_ref()?;
+                let index = u32::try_from(index).expect("a slot index fits the handle's index bits");
+                let (entry, chain) = self.free_slot(index);
+                Some((entry, chain.expect("a held slot holds its chain")))
+            })
+            .collect()
     }
 
     /// The index of the live slot a guest-supplied handle names, if its
@@ -442,7 +474,9 @@ mod tests {
 
     /// A chain holding `root` open on `trace`.
     fn chain_on(trace: &TraceHandle, root: MailId) -> HeldChain {
-        HeldChain { hold: Some(trace.acquire_settlement_hold(root)), root: Some(root), parent: Some(root) }
+        let payload = EncodedMail { bytes: Vec::new(), attachments: None };
+        let unanswered = HeldUnanswered { kind: KindId(1), kind_name: "test.unanswered".into(), payload };
+        HeldChain { hold: Some(trace.acquire_settlement_hold(root)), root: Some(root), parent: Some(root), unanswered }
     }
 
     fn root(correlation: u64) -> MailId {
@@ -488,16 +522,24 @@ mod tests {
         assert_eq!(trace.settlement_counter().held_open(root(2)), 0);
     }
 
+    // Catches: a drain that frees a manual handler's handle, which could still
+    // answer, or that leaves a held slot live, so the close answers it twice or
+    // never.
     #[test]
-    fn settle_held_frees_only_held_slots() {
+    fn drain_held_frees_only_held_slots() {
         let trace = TraceHandle::new();
         let mut t = ReplyTable::new();
-        let held = t.allocate(ReplyEntry::new(SourceAddr::Session(token(4)), 0)).expect("room");
+        let entry = ReplyEntry::new(SourceAddr::Session(token(4)), 0);
+        let held = t.allocate(entry).expect("room");
         let kept = t.allocate(ReplyEntry::new(SourceAddr::Session(token(5)), 0)).expect("room");
         assert!(t.hold(held, chain_on(&trace, root(3))));
 
-        t.settle_held();
+        let drained = t.drain_held();
 
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0, entry);
+        assert_eq!(trace.settlement_counter().held_open(root(3)), 1, "the drained chain still holds its root");
+        drop(drained);
         assert_eq!(trace.settlement_counter().held_open(root(3)), 0);
         assert!(t.take(held).is_none());
         assert!(t.take(kept).is_some(), "a manual handler's handle stays answerable");
@@ -557,18 +599,18 @@ mod tests {
         assert_ne!(unpack(next).0, unpack(handle).0, "a reserved slot is never reallocated");
     }
 
-    // Catches: an unload's settle freeing a reserved slot, whose entry is
+    // Catches: an unload's drain freeing a reserved slot, whose entry is
     // out with a held answer, so the restore after it panics or the answer
     // is sent to a freed slot.
     #[test]
-    fn settle_held_skips_a_reserved_slot() {
+    fn drain_held_skips_a_reserved_slot() {
         let trace = TraceHandle::new();
         let mut t = ReplyTable::new();
         let handle = t.allocate(ReplyEntry::new(SourceAddr::Session(token(5)), 0)).expect("room");
         assert!(t.hold(handle, chain_on(&trace, root(5))));
         let (entry, chain) = t.reserve(handle).expect("live");
 
-        t.settle_held();
+        assert!(t.drain_held().is_empty());
 
         assert_eq!(trace.settlement_counter().held_open(root(5)), 1);
         t.restore(handle, entry, chain);

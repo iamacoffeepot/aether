@@ -223,8 +223,11 @@ impl ProgramCore {
             self.abort(format!("invoked reply for request {seq} arrived with no matching active request"), out);
             return;
         }
-        let invoked_seq = invoked.seq();
-        if invoked_seq != seq {
+        // ADR-0243 §1: a `Closed` reply carries no seq; the host sent it in
+        // the closed bundle's place, on this request's reply handle.
+        if let Some(invoked_seq) = invoked.seq()
+            && invoked_seq != seq
+        {
             self.fail_active(
                 bundle,
                 seq,
@@ -247,6 +250,10 @@ impl ProgramCore {
             }
             Invoked::Faulted { fault, .. } => {
                 self.fail_active(bundle, seq, FaultReason::from(fault), out);
+            }
+            Invoked::Closed => {
+                let reason = Detail::new("the bundle closed before the invocation answered");
+                self.fail_active(bundle, seq, FaultReason::BundleUnavailable { reason }, out);
             }
         }
     }

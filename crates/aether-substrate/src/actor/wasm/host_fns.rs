@@ -14,7 +14,7 @@ use wasmtime::{Caller, Linker};
 use crate::actor::native::ResolvePathError;
 use crate::actor::wasm::component::GuestAnswer;
 use crate::actor::wasm::component::{ComponentCtx, StateBundle};
-use crate::actor::wasm::reply_table::ReplyEntry;
+use crate::actor::wasm::reply_table::{HeldUnanswered, ReplyEntry};
 use crate::mail::attachments::{EncodedMail, inline_payload};
 use crate::mail::boundary::is_engine_only;
 use crate::mail::registry::PreparedAliasRoute;
@@ -472,6 +472,53 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
+    // ADR-0243 §6: register the reply a held dispatch's requester receives
+    // if the guest unloads or closes before answering: the `export!`
+    // `receive` shim calls it once the dispatch that held `sender` returns.
+    // The kind is checked the way `reply_mail_p32` checks a reply's, so a
+    // registration that could not be sent later is refused now, and the
+    // guest panics. `Component::deliver` takes the stored registration when
+    // `receive` returns and moves it into the held slot's chain.
+    linker.func_wrap(
+        "aether",
+        "held_unanswered_p32",
+        |mut caller: Caller<'_, ComponentCtx>, sender: u32, kind: u64, ptr: u32, len: u32| -> u32 {
+            if is_engine_only(KindId(kind)) {
+                tracing::warn!(target: "aether_substrate::mail", kind = %KindId(kind), "actor-originated engine-only mail refused");
+                return REPLY_ENGINE_ONLY_KIND;
+            }
+            let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
+                return REPLY_OOB;
+            };
+            let data = memory.data(&caller);
+            let start = ptr as usize;
+            let end = match start.checked_add(len as usize) {
+                Some(e) if e <= data.len() => e,
+                _ => return REPLY_OOB,
+            };
+            let bytes = data[start..end].to_vec();
+
+            // ADR-0238 decision 3: resolve the tag-1 fields now, while the
+            // blobs they name are still held; the entries ride the
+            // registration until it is sent.
+            let attachments = match caller.data().resolve_send(KindId(kind), &bytes) {
+                Ok(attachments) => attachments,
+                Err(error) => {
+                    tracing::warn!(target: "aether_substrate::mail", kind = %KindId(kind), %error, "guest held reply registration refused");
+                    return REPLY_BLOB_REFUSED;
+                }
+            };
+            let kind = KindId(kind);
+            let Some(kind_name) = caller.data().registry.kind_name(kind) else {
+                return REPLY_KIND_NOT_FOUND;
+            };
+
+            let payload = EncodedMail { bytes, attachments };
+            caller.data_mut().register_unanswered(sender, HeldUnanswered { kind, kind_name, payload });
+            REPLY_OK
+        },
+    )?;
+
     // `resolve_mailbox_p32` was retired in ADR-0029: mailbox ids are
     // now a deterministic hash of the mailbox name, computed on the
     // guest side. The corresponding host fn is gone.
@@ -859,15 +906,16 @@ fn resolve_dispatch_identity(ctx: &ComponentCtx, from: MailboxId) -> MailboxId {
     }
 }
 
-/// One reply as the `reply_mail_p32` host fn read it from the guest, its
-/// kind validated, before its handle's entry says where it goes.
-struct GuestReply {
-    kind: KindId,
-    kind_name: String,
-    payload: EncodedMail,
-    count: u32,
+/// One reply as the `reply_mail_p32` host fn read it from the guest, or as a
+/// held slot's registration carries it, its kind validated, before its
+/// handle's entry says where it goes.
+pub(super) struct GuestReply {
+    pub(super) kind: KindId,
+    pub(super) kind_name: String,
+    pub(super) payload: EncodedMail,
+    pub(super) count: u32,
     /// The dispatch identity the guest carried (issue 1987).
-    from: MailboxId,
+    pub(super) from: MailboxId,
 }
 
 /// The guest's `reply` to the reply `entry`, resolved for sending: a session
@@ -881,7 +929,7 @@ struct GuestReply {
 /// `REPLY_BLOB_REFUSED` when an answer leaving the process would not fit one
 /// frame once its blobs are written as bytes, and `REPLY_UNKNOWN_HANDLE` for
 /// an entry with no reply target, which the table never allocates.
-fn guest_answer(ctx: &ComponentCtx, entry: ReplyEntry, reply: GuestReply) -> Result<GuestAnswer, u32> {
+pub(super) fn guest_answer(ctx: &ComponentCtx, entry: ReplyEntry, reply: GuestReply) -> Result<GuestAnswer, u32> {
     let GuestReply { kind, kind_name, payload, count, from } = reply;
     let correlation = entry.correlation_id;
     let egress = |payload| egress_payload(ctx, kind, payload).ok_or(REPLY_BLOB_REFUSED);

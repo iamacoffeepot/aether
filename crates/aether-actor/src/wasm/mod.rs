@@ -1338,6 +1338,11 @@ macro_rules! __export_internal {
                     instance.__aether_dispatch(&mut ctx, __aether_mail)
                 })
             };
+            // ADR-0243 §6: register the reply the dispatch held, with the
+            // `unanswered` value its requester receives if this instance
+            // closes first. Only the top-level dispatch has a reply handle
+            // to hold; the in-place drain below carries none.
+            __AETHER_INLINE.__flush_unanswered();
             // ADR-0243 §7: a reply whose stored context parked a held reply
             // must have taken that context before its handler returned.
             __AETHER_INLINE.__check_held_contexts_taken();
@@ -2153,6 +2158,11 @@ macro_rules! __export_multi_internal {
                     instance.erased_dispatch(&mut ctx, __aether_mail)
                 })
             };
+            // ADR-0243 §6: register the reply the dispatch held, with the
+            // `unanswered` value its requester receives if this instance
+            // closes first. Only the top-level dispatch has a reply handle
+            // to hold; the in-place drain below carries none.
+            __AETHER_INLINE.__flush_unanswered();
             // ADR-0243 §7: a reply whose stored context parked a held reply
             // must have taken that context before its handler returned.
             __AETHER_INLINE.__check_held_contexts_taken();

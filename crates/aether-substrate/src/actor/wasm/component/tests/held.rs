@@ -1,8 +1,9 @@
 //! Held replies on the host side (ADR-0243 §6). A guest arm that returns
 //! `DISPATCH_HANDLED_HOLD` keeps its reply handle, and its reply-table slot
 //! holds the requester's settlement open until the handle is answered. The
-//! fixture guest stores kind A's handle and returns the hold code; kind B
-//! answers the stored handle through `reply_mail_p32`. Each test stands in
+//! fixture guest stores kind A's handle, registers its unanswered reply
+//! through `held_unanswered_p32`, and returns the hold code; kind B answers
+//! the stored handle through `reply_mail_p32`. Each test stands in
 //! for the trampoline's dispatcher by bracketing a delivery with its root's
 //! `Sent` and `Finished`, and the reply lands in a sink that records its
 //! lineage, whether its requester's root was still live when it arrived, and
@@ -39,10 +40,12 @@ type Received = (Option<MailId>, Option<MailId>, Option<MailId>, bool);
 
 /// A guest whose kind-A arm stores its handle at offset 500 and returns
 /// `DISPATCH_HANDLED_HOLD`, first replying inside the dispatch when
-/// `reply_in_dispatch` is set. Its kind-B arm answers the stored handle
-/// with `reply_kind`, stores the status at offset 504, and returns
+/// `reply_in_dispatch` is set, then registering `unanswered_kind` as the
+/// held reply's unanswered value when it is `Some`, as the `receive` shim
+/// does after the dispatch. Its kind-B arm answers the stored handle with
+/// `reply_kind`, stores the status at offset 504, and returns
 /// `DISPATCH_HANDLED_RELEASE`.
-fn wat_holds(reply_kind: u64, reply_in_dispatch: bool) -> String {
+fn wat_holds(reply_kind: u64, unanswered_kind: Option<u64>, reply_in_dispatch: bool) -> String {
     let hold = KIND_HOLD.0;
     let inline_reply = if reply_in_dispatch {
         format!(
@@ -52,11 +55,16 @@ fn wat_holds(reply_kind: u64, reply_in_dispatch: bool) -> String {
     } else {
         String::new()
     };
+    let register = unanswered_kind.map_or_else(String::new, |kind| {
+        format!("(drop (call $held_unanswered (local.get 4) (i64.const {kind}) (i32.const 0) (i32.const 0)))")
+    });
     format!(
         r#"
         (module
             (import "aether" "reply_mail_p32"
                 (func $reply_mail (param i32 i64 i32 i32 i32 i64) (result i32)))
+            (import "aether" "held_unanswered_p32"
+                (func $held_unanswered (param i32 i64 i32 i32) (result i32)))
             (memory (export "memory") 1)
             {WAT_REALLOC}
             (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
@@ -64,6 +72,7 @@ fn wat_holds(reply_kind: u64, reply_in_dispatch: bool) -> String {
                     (then
                         (i32.store (i32.const 500) (local.get 4))
                         {inline_reply}
+                        {register}
                         (return (i32.const {DISPATCH_HANDLED_HOLD}))))
                 (i32.store (i32.const 504) (call $reply_mail
                     (i32.load (i32.const 500))
@@ -88,9 +97,16 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// The guest from [`wat_holds`], answering with `test.pong` or, when
-    /// `unknown_reply_kind` is set, with a kind id no registry knows.
+    /// The guest from [`wat_holds`], registering `test.pong` as its
+    /// unanswered reply and answering with it or, when `unknown_reply_kind`
+    /// is set, with a kind id no registry knows.
     fn new(reply_in_dispatch: bool, unknown_reply_kind: bool) -> Self {
+        Self::build(reply_in_dispatch, unknown_reply_kind, true)
+    }
+
+    /// [`Self::new`]'s guest, holding without registering its unanswered
+    /// reply when `register` is unset.
+    fn build(reply_in_dispatch: bool, unknown_reply_kind: bool, register: bool) -> Self {
         let registry = Arc::new(Registry::new());
         let pong = registry
             .register_kind_with_descriptor(
@@ -125,7 +141,8 @@ impl Fixture {
             pong.0
         };
         let ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), MailboxId(0), None);
-        let component = instantiate_with_ctx(&wat_holds(reply_kind, reply_in_dispatch), ctx);
+        let unanswered_kind = register.then_some(pong.0);
+        let component = instantiate_with_ctx(&wat_holds(reply_kind, unanswered_kind, reply_in_dispatch), ctx);
         Self { component, trace, settlement, sink, received }
     }
 
@@ -133,6 +150,11 @@ impl Fixture {
     /// bracketed with the root's `Sent` and `Finished` as the dispatcher
     /// records them.
     fn dispatch(&mut self, kind: KindId, mail_id: MailId, root: MailId) -> u32 {
+        self.try_dispatch(kind, mail_id, root).expect("deliver")
+    }
+
+    /// [`Self::dispatch`], returning a failed delivery.
+    fn try_dispatch(&mut self, kind: KindId, mail_id: MailId, root: MailId) -> wasmtime::Result<u32> {
         let sender = Source::with_correlation(SourceAddr::Component(self.sink), 0x5151);
         let parts = DispatchParts {
             sender,
@@ -141,7 +163,7 @@ impl Fixture {
             ..DispatchParts::new(kind, MailRef::from(Vec::new()))
         };
         self.trace.record_sent_inflight(root);
-        let rc = self.component.deliver(&Envelope::disarmed_at(parts, MailboxId(0))).expect("deliver");
+        let rc = self.component.deliver(&Envelope::disarmed_at(parts, MailboxId(0)));
         self.trace.record_finished(Some(mail_id), Some(root));
         rc
     }
@@ -237,10 +259,12 @@ fn a_bad_reply_kind_leaves_the_slot_held() {
     assert!(fixture.component.store.data().reply_table.resolve(handle).is_some(), "the handle stays answerable");
 }
 
-/// Catches a guest release that keeps its held slots: no ticket survives
-/// the release, so the requester's chain would stay open until actor close.
+/// Catches an unload that releases a held slot without sending its
+/// registered reply, so the requester's handler never runs; one that sends it
+/// after the hold releases, so the root settles before the reply lands; and
+/// one stamped on no chain or the wrong one.
 #[test]
-fn settle_held_releases_on_unload() {
+fn unload_sends_the_registered_reply_before_release() {
     let mut fixture = Fixture::new(false, false);
     let request_root = token_root(7);
     let settled = fixture.subscribe(request_root);
@@ -248,11 +272,43 @@ fn settle_held_releases_on_unload() {
     fixture.dispatch(KIND_HOLD, request_id(), request_root);
     assert!(settled.try_recv().is_err());
 
-    let mut replies = fixture.component.take_pending_replies();
-    replies.settle_held();
+    fixture.component.answer_held_at_close();
 
+    let received = fixture.received.lock().unwrap();
+    assert_eq!(received.len(), 1, "the registered reply reaches the requester once");
+    let (_, root, parent, live) = received[0];
+    assert_eq!((root, parent), (Some(request_root), Some(request_id())));
+    assert!(live, "the hold releases only after the reply is sent");
     assert!(settled.try_recv().is_ok());
     assert_eq!(fixture.held_open(request_root), 0);
+}
+
+/// Catches an engine teardown that answers held replies, which would mail
+/// requesters that are closing with the engine, or that keeps their holds.
+#[test]
+fn engine_teardown_answers_nothing() {
+    let mut fixture = Fixture::new(false, false);
+    let request_root = token_root(7);
+    let settled = fixture.subscribe(request_root);
+    fixture.dispatch(KIND_HOLD, request_id(), request_root);
+
+    fixture.component.store.data().binding.signal_engine_teardown();
+    fixture.component.answer_held_at_close();
+
+    assert!(fixture.received.lock().unwrap().is_empty());
+    assert!(settled.try_recv().is_ok());
+    assert_eq!(fixture.held_open(request_root), 0);
+}
+
+/// Catches a host that arms a held slot with no registered reply, so an
+/// unload or close would leave the requester with nothing to receive.
+#[test]
+fn a_hold_without_its_unanswered_reply_fails_the_delivery() {
+    let mut fixture = Fixture::build(false, false, false);
+
+    let error = fixture.try_dispatch(KIND_HOLD, request_id(), token_root(7)).expect_err("the delivery fails");
+
+    assert!(error.to_string().contains("without registering"), "{error}");
 }
 
 /// Catches a host that ignores `on_dehydrate`'s return, letting a replace
