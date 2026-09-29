@@ -236,15 +236,15 @@ pub struct DespawnChild;
 
 /// ADR-0241 §8 inline-child re-spawn trigger. Sent to the despawn fixture's
 /// parent, which spawns a child at its `respawn` key and replies a
-/// [`RespawnReport`]. Structured-shaped unit struct.
+/// [`RespawnResult`]. Structured-shaped unit struct.
 #[aether_data::kind(name = "aether.test_fixtures.respawn_child", default)]
 pub struct RespawnChild;
 
 /// Reply to [`RespawnChild`]: whether the spawn failed because the host
 /// allocated no alias for the child's key, which is how a guest learns a
 /// despawned child's name is spent.
-#[aether_data::kind(name = "aether.test_fixtures.respawn_report", copy, default, eq)]
-pub struct RespawnReport {
+#[aether_data::kind(name = "aether.test_fixtures.respawn_result", copy, default, eq)]
+pub struct RespawnResult {
     pub alias_refused: bool,
 }
 

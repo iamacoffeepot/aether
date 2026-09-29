@@ -93,7 +93,7 @@ use aether_actor::{
 };
 use aether_test_fixtures_kinds::{
     Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT,
-    InlineConfiguredChildConfig, InlineEcho, InlineProbe, RespawnChild, RespawnReport, TagSpawnQuery, TagSpawnReport,
+    InlineConfiguredChildConfig, InlineEcho, InlineProbe, RespawnChild, RespawnResult, TagSpawnQuery, TagSpawnReport,
 };
 
 /// Durable state the `InlineStatefulChild` carries across `replace_component`.
@@ -278,13 +278,13 @@ impl WasmActor for InlineDespawnParent {
     /// name is spent (ADR-0241 §8): the host allocates no alias and the spawn
     /// fails before a child is built.
     #[handler::single]
-    fn on_respawn(&mut self, ctx: &mut WasmCtx<'_>, _trigger: RespawnChild) -> RespawnReport {
+    fn on_respawn(&mut self, ctx: &mut WasmCtx<'_>, _trigger: RespawnChild) -> RespawnResult {
         match ctx.spawn_inline_child::<InlineDespawnParent, InlineDespawnChild>(Subname::Named("respawn"), &()) {
             Ok(child) => {
                 self.child = Some(child.erase());
-                RespawnReport { alias_refused: false }
+                RespawnResult { alias_refused: false }
             }
-            Err(error) => RespawnReport { alias_refused: matches!(error, SpawnError::AliasAllocationFailed) },
+            Err(error) => RespawnResult { alias_refused: matches!(error, SpawnError::AliasAllocationFailed) },
         }
     }
 

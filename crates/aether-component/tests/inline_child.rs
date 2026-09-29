@@ -27,7 +27,7 @@ use aether_test_fixtures_bundle::{
 use aether_test_fixtures_fs_demux::{InlineFsDemuxChild, InlineFsDemuxParent};
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, FsDemuxReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
-    InlineProbe, RespawnChild, RespawnReport, RunFsDemux, TagSpawnQuery, TagSpawnReport,
+    InlineProbe, RespawnChild, RespawnResult, RunFsDemux, TagSpawnQuery, TagSpawnReport,
 };
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -535,8 +535,8 @@ fn a_despawned_inline_key_is_refused_when_respawned() {
         ])
         .expect("the despawn settles and the re-spawn answers");
     assert_eq!(
-        respawned.reply::<RespawnReport>("respawn").expect("decode RespawnReport"),
-        RespawnReport { alias_refused: true },
+        respawned.reply::<RespawnResult>("respawn").expect("decode RespawnResult"),
+        RespawnResult { alias_refused: true },
         "a despawned child's key must be refused before the guest is handed an alias the owner never publishes",
     );
 }
