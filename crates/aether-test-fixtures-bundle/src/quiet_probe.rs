@@ -7,34 +7,31 @@
 //! - The ADR-0163 §3 asset-window pull: `wire` pulls the bundle's
 //!   `asset_fixture.txt` and stashes a fingerprint, which an `AssetProbe`
 //!   reads back after the window has closed.
-//! - On the first tick, a `tracing::info!("typed_send_alive")` that flows
-//!   through the actor-aware subscriber (issue #581) into the per-actor
-//!   log ring the log-ring tests read.
+//! - On every `LogMarker` delivery, a `tracing::info!("typed_send_alive")`
+//!   that flows through the actor-aware subscriber (issue #581) into the
+//!   per-actor log ring the log-ring tests read.
+
+#![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and `on_log_marker` only logs, so it reads no state — the same allow `probe` carries
 
 use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::Tick;
-use aether_lifecycle::LifecycleCapability;
-use aether_test_fixtures_kinds::{AssetProbe, AssetProbeResult};
+use aether_test_fixtures_kinds::{AssetProbe, AssetProbeResult, LogMarker};
 
 pub struct QuietProbe {
-    alive_logged: bool,
     /// ADR-0163 §3 (#3984): what `wire` pulled from the asset load window,
     /// surfaced later through [`QuietProbe::on_asset_probe`].
     asset: AssetProbeResult,
 }
 
-#[actor(root, depends(LifecycleCapability))]
+#[actor(root)]
 impl WasmActor for QuietProbe {
     const NAMESPACE: &'static str = "test.quiet_probe";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(QuietProbe { alive_logged: false, asset: AssetProbeResult::default() })
+        Ok(QuietProbe { asset: AssetProbeResult::default() })
     }
 
-    /// Subscribe `Tick` on `aether.lifecycle` (ADR-0082), then pull the
-    /// bundle's asset through the load window (open during `wire`).
+    /// Pull the bundle's asset through the load window (open during `wire`).
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) {
-        ctx.subscribe::<LifecycleCapability, Tick>();
         // ADR-0163 §3 (#3984): stash a content fingerprint — length + a
         // wrapping-sum checksum — so a later `AssetProbe` proves the
         // guest-side pull round-tripped the exact bytes across the FFI and
@@ -45,18 +42,14 @@ impl WasmActor for QuietProbe {
         }
     }
 
-    /// Emits `typed_send_alive` once, on the first tick delivered.
+    /// Emits `typed_send_alive` on every delivery.
     ///
     /// # Agent
-    /// Not sent manually; the substrate's tick fanout fires it once per
-    /// advance for every lifecycle-subscribed mailbox. Read the line back
-    /// with `actor_logs`.
+    /// Send `aether.test_fixtures.log_marker`; read the line back with
+    /// `actor_logs`.
     #[handler::single]
-    fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _: Tick) {
-        if !self.alive_logged {
-            tracing::info!(target: "aether_test_fixture_probe", "typed_send_alive");
-            self.alive_logged = true;
-        }
+    fn on_log_marker(&mut self, _ctx: &mut WasmCtx<'_>, _: LogMarker) {
+        tracing::info!(target: "aether_test_fixture_probe", "typed_send_alive");
     }
 
     /// ADR-0163 §3 (#3984): reply with the fingerprint of the asset this
