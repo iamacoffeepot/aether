@@ -9,8 +9,8 @@ use aether_actor::{ActorRef, ErasedActorRef};
 use aether_bloomery_journal::{Entry, Journal, JournalActor, JournalReader, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
     Activated, AppendRecords, AppendRecordsResult, Detail, Digest, DriverRecord, EncodedArtifact, Head, NativeOrigin,
-    OpaqueBytes, ProgramName, ProgramRef, ReactionFailed, ReactorName, RecordedHead, RecordedHeadMove, RequestSource,
-    Requested, RuleName, Transition,
+    OpaqueBytes, ProgramName, ProgramRef, ReactionFailed, ReactorName, RecordedHead, RecordedHeadMove, Ref,
+    RequestSource, Requested, RuleName, Transition, Utf8Text,
 };
 use aether_substrate::Subname;
 use aether_substrate::chassis::builder::PassiveChassis;
@@ -18,6 +18,13 @@ use aether_substrate::mail::registry::{OwnedDispatch, Registry};
 use aether_substrate::testing::{TestChassis, bare_substrate, boot_test_chassis_with};
 
 use actor_support::{TestAnchor, caller, reply, request};
+
+#[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.journal.cited-input")]
+struct CitedInput {
+    count: u64,
+    text: Ref<Utf8Text>,
+}
 
 /// One journal actor over a fresh, empty root, observed by a reader.
 struct Fixture {
@@ -143,6 +150,54 @@ fn a_cause_outside_the_fenced_prefix_is_refused() {
         assert_eq!(fixture.head(), Seq(1));
         assert!(!fixture.stored(&sibling_digest));
     }
+}
+
+#[test]
+fn citation_bearing_input_and_requested_commit_or_roll_back_together() {
+    // Catches input bytes committed without their Requested record, a citation
+    // skipped during staging, or a refused request leaving its input behind.
+    let temp = tempfile::tempdir().expect("temporary journal directory");
+    let fixture = Fixture::start(&temp.path().join("journal"));
+
+    let text = EncodedArtifact::text("hello");
+    let text_ref = Ref::from_digest(text.digest());
+    let seed = Requested { program: program_ref(), input: text.digest(), source: native_source() };
+    assert!(matches!(
+        fixture
+            .append(1, &AppendRecords::new(vec![text], vec![DriverRecord::Requested { cause: None, record: seed }], 0)),
+        AppendRecordsResult::Committed { head: 1, .. }
+    ));
+
+    let input = EncodedArtifact::new(&CitedInput { count: 7, text: text_ref }).expect("encode cited input");
+    let input_digest = input.digest();
+    assert_eq!(input.citations().len(), 1);
+    let requested = Requested { program: program_ref(), input: input_digest, source: reaction_source() };
+    assert_eq!(
+        fixture.append(
+            2,
+            &AppendRecords::new(vec![input], vec![DriverRecord::Requested { cause: Some(1), record: requested }], 1)
+        ),
+        AppendRecordsResult::Committed { head: 2, artifacts: vec![input_digest] }
+    );
+    assert!(fixture.stored(&input_digest));
+    assert_eq!(fixture.entries().len(), 2);
+
+    let missing = Ref::from_digest(Digest::from_bytes([0x55; 32]));
+    let refused_input = EncodedArtifact::new(&CitedInput { count: 9, text: missing }).expect("encode refused input");
+    let refused_digest = refused_input.digest();
+    let refused_request = Requested { program: program_ref(), input: refused_digest, source: reaction_source() };
+    let refused = fixture.append(
+        3,
+        &AppendRecords::new(
+            vec![refused_input],
+            vec![DriverRecord::Requested { cause: Some(1), record: refused_request }],
+            2,
+        ),
+    );
+    assert!(matches!(refused, AppendRecordsResult::Err { .. }), "missing citation must refuse: {refused:?}");
+    assert_eq!(fixture.head(), Seq(2));
+    assert_eq!(fixture.entries().len(), 2, "the refused Requested is absent");
+    assert!(!fixture.stored(&refused_digest), "the refused input is absent");
 }
 
 #[test]

@@ -6,8 +6,8 @@ use std::fs;
 
 use aether_actor::ErasedActorRef;
 use aether_bloomery_kinds::{
-    BUNDLE_NAMESPACE, CallProgram, Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, ProgramName,
-    Ref, Tree, artifact_digest,
+    BUNDLE_NAMESPACE, CallInput, CallProgram, Digest, EncodedArtifact, Evaluated, Event, Head, HeadMoved, JournalEntry,
+    OpaqueBytes, ProgramName, Ref, Tree, Utf8Text, artifact_digest,
 };
 use aether_data::{Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -69,7 +69,7 @@ fn call_summarize_returns_call_program_for_the_summarize_input_move() -> Result<
                 CallProgram {
                     program: SUMMARIZE_BUNDLE,
                     name: ProgramName::new(SUMMARIZE_PROGRAM)?,
-                    input: Digest::from_bytes([7; 32]),
+                    input: CallInput::Stored(Digest::from_bytes([7; 32])),
                 }
             );
         }
@@ -81,6 +81,32 @@ fn call_summarize_returns_call_program_for_the_summarize_input_move() -> Result<
     let other_kind = moved_to(2, "inputs", Ref::<Tree>::from_digest(Digest::from_bytes([9; 32])));
     match evaluated(&mut harness, root, &Event::new(other_kind)) {
         Evaluated::Completed { seq: 2, intents } => assert!(intents.is_empty()),
+        other => panic!("{other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn selected_text_returns_a_fresh_encoded_summarize_input() -> Result<(), Box<dyn Error>> {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_reactor_call") else {
+        return Ok(());
+    };
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let root = load_root(&mut harness, wasm);
+
+    let text = Ref::<Utf8Text>::from_digest(Digest::from_bytes([3; 32]));
+    let moved = moved_to(1, "test.bloomery.summarize.text", text);
+    match evaluated(&mut harness, root, &Event::new(moved)) {
+        Evaluated::Completed { seq: 1, intents } => {
+            assert_eq!(intents.len(), 1);
+            let call = CallProgram::decode_from_bytes(intents[0].bytes()).expect("CallProgram mail decodes");
+            let CallInput::Value(input) = call.input else {
+                panic!("selected text must produce a supplied input");
+            };
+            assert_eq!(input, EncodedArtifact::new(&SummarizeInput { text })?);
+            assert_eq!(input.citations().len(), 1);
+        }
         other => panic!("{other:?}"),
     }
     Ok(())

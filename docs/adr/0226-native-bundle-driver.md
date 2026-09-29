@@ -11,6 +11,7 @@
 - **Amended:** 2026-09-24 — the driver answers a bundle's fetch-on-miss itself, from a byte-bounded cache of found artifacts or one journal read shared by every fetch of that digest, and never caches a missing artifact; `SetHead` destination checks consult the same cache (issue #6258).
 - **Amended:** 2026-09-25 — the chassis opens one journal root (the SQLite database plus its `blobs` directory, ADR-0220) rather than one journal file.
 - **Amended:** 2026-09-25 — decision 10: `ReadClosure` answers with shared `Blob` values rather than inline bytes, and `ClosureLimit::MAX_BYTES` rises from 16 MiB to 4 GiB (ADR-0238 decision 10).
+- **Amended:** 2026-09-28 — decisions 6, 8, and 10: reactor calls may carry a fresh encoded input that the driver persists atomically with `Requested`; digest-only v1 intents remain decodable under their pinned kind id (issue #7011).
 
 ## Context
 
@@ -147,10 +148,15 @@ Nothing on main can carry any of this yet:
 
 6. **Reactor intents.** A rule may return exactly two intent kinds. Both
    are caused by the trigger seq `N`:
-   - `CallProgram { program: Head<OpaqueBytes>, name: ProgramName, input: Digest }`.
-     The driver records `Requested` with source
+   - `CallProgram { program: Head<OpaqueBytes>, name: ProgramName, input: CallInput }`,
+     where `CallInput` is either `Stored(Digest)` or
+     `Value(EncodedArtifact)`. The driver records `Requested` with source
      `Reaction { bundle, reactor, rule, ordinal }`. `ordinal` is the
-     intent's position within that rule's output for `N`.
+     intent's position within that rule's output for `N`. A stored input
+     already names its durable artifact. For a value, the driver computes
+     the encoded artifact's digest, retains the exact captured bytes through
+     any append conflict, and persists it in the same `AppendRecords` as the
+     request.
    - `SetHead { head, from: Option<Ref>, to: Ref }`, kind
      `aether.bloomery.driver.set_head`. It is named apart from the
      journal's `MoveHead` command. The driver records a head move. `from`
@@ -165,8 +171,18 @@ Nothing on main can carry any of this yet:
    intent, not while the reactor evaluates. A
    reactor may move any head. Restricting that is deferred. Moves are how
    ADR-0223's policy-in-rules is expressed: admission, membership, and
-   moving back after a rejection. Reactors never stage artifacts. Only
-   programs create content.
+   moving back after a rejection. Reactors never write the journal or stage
+   arbitrary batches. A `CallProgram` may supply exactly its encoded program
+   input; the native driver owns persistence. Programs continue to create
+   result content.
+
+   The public value-carrying shape is named
+   `aether.bloomery.driver.call_program.v2`. The original digest-only schema
+   remains registered and decoded under
+   `aether.bloomery.driver.call_program` and its pinned kind id. The intent
+   kind id selects one decoder; malformed bytes never fall back between
+   schemas. Both generations normalize to the same digest-based request and
+   execution pipeline.
 
 7. **Intent heads resolve through the trigger, inclusive.** The driver
    resolves a `CallProgram` head from `Heads` folded through `N`, the
@@ -213,6 +229,10 @@ Nothing on main can carry any of this yet:
    | `Warmed::Poisoned` / `Warmed::OutOfSequence` during activation | `ActivationRejected` |
    | live `Evaluated::OutOfSequence` | nothing; this is a driver bug, and the driver resyncs with `StatusQuery` |
 
+   `Requested`, `Invoke`, `Transition`, and `Fault` continue to carry input
+   digests. The supplied artifact is submission data, not a new durable event
+   shape or execution boundary.
+
 9. **Restart.** The driver rebuilds everything from folds.
    - **Programs.** Any `Requested` with no `Transition` or `Fault` is
      recorded as `Fault { Interrupted }` and isn't run again. Whether to
@@ -244,6 +264,12 @@ Nothing on main can carry any of this yet:
     - `AppendRecords`. It carries driver records and caused head moves,
       plus staged artifacts, fenced on `expected_seq`. Each cause must be
       within `1..=expected_seq`. It is all-or-nothing, like every append.
+      A value-carrying `CallProgram` puts its input artifact and `Requested`
+      in this one transaction; either both commit or neither does. A conflict
+      re-derives only journal-dependent routing choices and retains the
+      captured input bytes. Any non-conflict refusal of a routing batch keeps
+      the existing fail-fast behavior: the driver aborts, records no partial
+      request, and invokes no program from that batch.
     - `WatchHead { after }`, answered by `HeadAdvanced { head }` once the
       head passes `after`. This is a long poll. The driver sends the watch
       on a fresh chain (`send_detached_with_context`, ADR-0080 §7), because a parked watch holds its chain open and the

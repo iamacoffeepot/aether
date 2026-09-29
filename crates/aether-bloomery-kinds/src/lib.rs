@@ -27,7 +27,10 @@ pub use artifact::{
 };
 pub use bundle::{BUNDLE_NAMESPACE, PROGRAMS_SECTION};
 pub use digest::Digest;
-pub use driver::{AwaitProcessed, Call, CallOutcome, CallProgram, CallRefusal, Processed, SetHead};
+pub use driver::{
+    AwaitProcessed, Call, CallInput, CallOutcome, CallProgram, CallRefusal, LEGACY_CALL_PROGRAM_ID, Processed, SetHead,
+    decode_call_program,
+};
 pub use entry::{DecodeError, Entry, Seq};
 pub use head::{Head, HeadMoved, HeadNameError, RecordedHead, RecordedHeadMove};
 pub use journal::{
