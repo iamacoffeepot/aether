@@ -99,8 +99,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// Consumers: the http server's unmonitorable route-holder warning, the
     /// component host's replacement-boot warnings and its load-under parent,
-    /// whose proven path names the child's lineage, and the lifecycle cap's
-    /// stuck-advance warning, which names each subscriber still owed.
+    /// whose proven path names the child's lineage, the lifecycle cap's
+    /// stuck-advance warning, which names each subscriber still owed, and the
+    /// RPC server's decode refusal, which names the refusing actor.
     #[must_use]
     pub fn actor_path(&self, reference: ErasedActorRef) -> ErasedActorPath {
         self.binding.actor_path(reference)

@@ -72,6 +72,15 @@ impl RouteContract {
             .or_else(|| (self.fallback && !successor.fallback).then_some(ContractBreak::Fallback))
     }
 
+    /// Whether this contract carries a row for `kind`, one binary search over
+    /// the sorted rows. A `#[fallback]` does not count: only a declared
+    /// handler opts a route in. Its consumer is the native decode refusal,
+    /// which notifies a reply target only when it handles
+    /// [`aether_kinds::DecodeRefused`].
+    pub(crate) fn handles(&self, kind: KindId) -> bool {
+        self.rows.binary_search_by_key(&kind, |(row, _)| *row).is_ok()
+    }
+
     /// The contract of a closure route, which publishes no rows.
     pub(crate) fn empty() -> Self {
         Self { rows: Arc::from([]), fallback: false }
