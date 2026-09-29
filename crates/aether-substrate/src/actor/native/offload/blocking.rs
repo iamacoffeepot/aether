@@ -1258,10 +1258,16 @@ mod tests {
 
     use aether_data::{MailId, MailboxId, Source, SourceAddr};
 
+    use crate::NativeInitCtx;
+    use crate::actor::native::NativeActor;
     use crate::actor::native::NativeBinding;
     use crate::actor::native::ctx::NativeCtx;
+    use crate::chassis::builder::ReplyTarget;
+    use crate::chassis::error::BootError;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
-    use crate::testing::{bare_substrate, boot_authority};
+    use crate::testing::{
+        PumpedDriver, bare_substrate, boot_authority, boot_bare_test_chassis, fresh_substrate, registered_ref,
+    };
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces and `resolve`
     /// re-replies. Carries a `u64` so a test can assert the routed reply
@@ -1314,67 +1320,95 @@ mod tests {
         DispatchId(wake.dispatch_id)
     }
 
-    /// End-to-end happy path: dispatch a blocking closure, drive the
-    /// completion through `take_task_done` + `resolve`, and assert the
-    /// reply reached the original caller AND the hold released only after
-    /// the reply was sent (the chain settles).
+    /// The reply [`GatedAsk`]'s worker produces and its completion resolves
+    /// by value.
+    #[aether_data::kind(name = "test.dispatch_blocking.gated_answer", copy, partial_eq)]
+    struct GatedAnswer {
+        value: u64,
+    }
+
+    #[aether_data::kind(name = "test.dispatch_blocking.ask")]
+    struct Ask;
+
+    /// A pumped root whose request handler dispatches a blocking worker
+    /// that waits on the test's gate, and whose completion re-replies the
+    /// worker's output by value.
+    struct GatedAsk {
+        /// The gate the one worker waits on, handed in as the boot params.
+        gate: Option<mpsc::Receiver<()>>,
+        /// Set by `on_ask` once the worker is dispatched.
+        asked: bool,
+    }
+
+    #[aether_actor::actor(singleton, root)]
+    impl NativeActor for GatedAsk {
+        const NAMESPACE: &'static str = "test.dispatch_blocking.gated";
+        type Config = ();
+        type Params = mpsc::Receiver<()>;
+
+        fn init((): (), gate: mpsc::Receiver<()>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { gate: Some(gate), asked: false })
+        }
+
+        #[handler::single]
+        fn on_ask(&mut self, ctx: &mut NativeCtx<'_>, _ask: Ask) -> Pending<GatedAnswer> {
+            let gate = self.gate.take().expect("one ask per probe");
+            self.asked = true;
+            ctx.dispatch_blocking::<GatedAnswer, GatedAnswer, _>(move || {
+                gate.recv().expect("the test opens the gate");
+                GatedAnswer { value: 42 }
+            })
+        }
+
+        #[handler(task)]
+        fn on_answered(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<GatedAnswer>) {
+            assert!(self.asked, "a completion follows its ask");
+            done.resolve(ctx);
+        }
+    }
+
+    /// End-to-end happy path through a real handler turn: the request
+    /// handler dispatches a blocking worker and returns, the completion
+    /// resolves the worker's output by value, and the reply reaches the
+    /// original caller. Catches a hold released when the dispatching handler
+    /// returns, or before the reply is sent, and a reply that drops the
+    /// caller's correlation.
     #[test]
     fn dispatch_blocking_replies_and_releases_after_reply() {
-        let (registry, mailer) = bare_substrate();
+        let (registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-
-        // The original caller: a registered inbox we observe the re-reply
-        // landing on (the reply routes to SourceAddr::Component(caller)).
         let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox(&boot_authority(), "test.dispatch_blocking.caller", forward_to(reply_tx));
+        let sink_mailer = Arc::clone(&mailer);
+        let caller = registered_ref(
+            &registry,
+            "test.dispatch_blocking.caller",
+            Arc::new(move |dispatch: OwnedDispatch| {
+                // The caller forwards the reply, then finishes it so the
+                // chain it joined settles only once the test can read it.
+                let (mail_id, root) = (dispatch.mail_id, dispatch.root);
+                dispatch.discharge();
+                let _ = reply_tx.send(dispatch);
+                sink_mailer.record_finished(mail_id, root);
+            }),
+        );
+        let (open_gate, gate) = mpsc::channel::<()>();
+        let mut driver = PumpedDriver::<GatedAsk>::boot(boot_bare_test_chassis(&registry, &mailer), (), gate);
 
-        // The actor's own mailbox — the registered inbox, so the worker's
-        // wake push (recipient = self_mailbox) routes to a handler we
-        // observe, rather than warn-dropping.
-        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        let actor_mailbox =
-            registry.register_inbox(&boot_authority(), "test.dispatch_blocking.actor", forward_to(wake_tx));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-
-        let root = root_id(1);
-        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 77);
-
-        // The dispatching handler: eager-acquire the hold, spawn the
-        // worker, return.
-        {
-            let mut ctx = NativeCtx::new(&binding, caller_reply_to, None, Some(root));
-            // The bare `dispatch_blocking` returns a `Pending<R>` (ADR-0109);
-            // `R` is the declared reply kind (here `Answer`). This test stands
-            // in for the dispatch that accepts the returned receipt.
-            ctx.dispatch_blocking::<Answer, Answer, _>(move || Answer { value: 42 }).__defuse();
-        }
-
-        // The handler returned but the chain is held: settlement is
-        // gated until the reply lands.
+        let root = driver.send_tracked(
+            driver.chassis().actor_ref::<GatedAsk>(),
+            &Ask,
+            Some(ReplyTarget::Actor { to: caller, correlation: 77 }),
+        );
+        driver.pump_until("the ask dispatches its worker", |ask| ask.asked);
         assert_eq!(counter.held_open(root), 1, "the chain stays held after the dispatching handler returns");
 
-        // The worker ran, filled the ledger, and pushed the wake.
-        let id = await_wake(&wake_rx);
-        assert_eq!(counter.held_open(root), 1, "the worker finishing does not release the chain");
+        open_gate.send(()).expect("the worker waits on the gate");
+        driver.settle(&[root]);
 
-        // The completion handler runs: rebuild the TaskDone and resolve.
-        {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-            let done = ctx.take_task_done::<Answer, ()>(id).expect("the dispatch is in the ledger");
-            assert_eq!(*done.output(), Answer { value: 42 });
-            done.resolve(&mut ctx);
-        }
-
-        // The reply reached the original caller.
-        let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the re-reply lands on the caller's mailbox");
-        assert_eq!(reply.kind, Answer::ID, "reply carries the worker's output kind");
-        // A Component-targeted reply is encoded through the kind codec by
-        // `Mailer::send_reply` (not cast), so decode it the same way.
-        let answer = Answer::decode_from_bytes(reply.payload.bytes()).expect("reply decodes");
-        assert_eq!(answer, Answer { value: 42 });
+        let reply = reply_rx.try_recv().expect("the re-reply lands on the caller's mailbox");
+        assert_eq!(reply.kind, GatedAnswer::ID, "the reply carries the worker's output kind");
+        assert_eq!(GatedAnswer::decode_from_bytes(reply.payload.bytes()), Some(GatedAnswer { value: 42 }));
         assert_eq!(reply.sender.correlation_id, 77, "the caller's correlation is echoed onto the reply");
-
-        // Hold released after the reply — chain may settle.
         assert_eq!(counter.held_open(root), 0, "resolve releases the hold after re-replying");
     }
 
