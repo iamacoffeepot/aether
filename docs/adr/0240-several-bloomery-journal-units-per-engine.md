@@ -471,6 +471,10 @@ pub trait ArtifactStorage {
     /// Existing: `aether.bloomery.journal.read_artifact`, answered with the
     /// stored artifact as a `ClosureArtifact` (bytes as a `Blob`), `Missing`, or `Err`.
     fn read(mail: ReadArtifact) -> ReadArtifactResult;
+    /// Existing: `aether.bloomery.journal.read_closure`, answered with every
+    /// member of an artifact's closure as one slab of `Blob`s, `TooLarge`,
+    /// `Missing`, or `Err`.
+    fn read_closure(mail: ReadClosure) -> ReadClosureResult;
     /// New, beside it in `aether-bloomery-kinds`.
     fn stage(mail: Stage) -> StageResult;
 }
@@ -484,7 +488,12 @@ pub struct Stage { artifacts: Vec<EncodedArtifact> }
 pub enum StageResult { Staged, Err { message: String } }
 ```
 
-`JournalActor` handles `ReadArtifact` today and gains `Stage`, so
+`read_closure` is in the protocol so a tree whose closure fits the reader's
+budget is one request rather than one per node and blob; the journal already
+answers it off its thread and from its read cache, so the row costs it
+nothing new.
+
+`JournalActor` handles `ReadArtifact` and `ReadClosure` today and gains `Stage`, so
 `ArtifactStorage: CoveredBy<JournalActor>` holds and the journal stays the
 only writer (ADR-0237 open question 1). `Stage` is the write the journal's
 in-process `ArtifactStore` does for the workspace today, as mail. `Publish`
@@ -630,10 +639,11 @@ the per-unit component host.
   moved onto it, and the stdin, log, and import paths moved off the batch.
   The container logic (image build, `write_tree`, output decode, step
   execution) is unchanged.
-- Every artifact a run or import reads or writes is one mail to the
-  journal and one reply. `Blob`s are shared in process, not copied,
-  but a large tree costs one `ReadArtifact` per node and blob when the
-  daemon lacks its image or a run writes it into a container.
+- Every read or write a run or import makes is one mail to the journal and
+  one reply. `Blob`s are shared in process, not copied. A tree whose closure
+  fits the workspace's read budget is one `read_closure`; only a larger one
+  is read in pieces, one `ReadArtifact` per node and blob, when the daemon
+  lacks its image or a run writes it into a container.
 - A run or import that does not end `Ok` leaves the artifacts it staged in
   the journal, cited by nothing.
 - The workspace's storage and the bootstrap depend on the typed paths:

@@ -1,9 +1,9 @@
 //! Driver mail: pinned kind ids and the atomic `SetHeads` constructor.
 
 use aether_bloomery_kinds::{
-    AwaitProcessed, Call, CallInput, CallOutcome, CallProgram, Digest, Head, HeadChange, LEGACY_CALL_PROGRAM_ID,
-    LEGACY_SET_HEAD_ID, OpaqueBytes, Processed, ProgramName, RecordedHead, RecordedHeadMove, Ref, SetHeads, Tree,
-    Utf8Text, decode_call_program, decode_set_heads,
+    AwaitProcessed, Call, CallInput, CallOutcome, CallProgram, ClosureArtifact, Digest, Head, HeadChange,
+    LEGACY_CALL_PROGRAM_ID, LEGACY_SET_HEAD_ID, OpaqueBytes, Processed, ProgramName, RecordedHead, RecordedHeadMove,
+    Ref, SetHeads, Tree, Utf8Text, decode_call_program, decode_set_heads,
 };
 use aether_data::{Citations, Cites, Kind, KindId, Storage, StorageData, StorageError};
 
@@ -70,7 +70,7 @@ fn the_driver_mail_kind_ids_are_pinned() {
 }
 
 const TRIPWIRE_LEGACY_CALL_PROGRAM: KindId = KindId(0x298e_86d0_91bf_d585);
-const TRIPWIRE_CALL_PROGRAM_V2: KindId = KindId(0x2917_43a7_6596_2e0b);
+const TRIPWIRE_CALL_PROGRAM_V2: KindId = KindId(0x2d35_cd93_db36_da13);
 const TRIPWIRE_LEGACY_SET_HEAD: KindId = KindId(0x2842_0dd2_d83a_65e8);
 const TRIPWIRE_SET_HEADS: KindId = KindId(0x2f03_537c_84d9_dd5d);
 const TRIPWIRE_CALL: KindId = KindId(0x2dcc_bc68_65cc_027a);
@@ -138,8 +138,10 @@ fn with_input_preserves_scalar_values_and_reference_citations() -> Result<(), St
     assert_eq!(input.citations().len(), 1);
     assert_eq!(input.citations()[0].kind(), Utf8Text::ID);
     assert_eq!(input.citations()[0].bytes(), text.digest().as_bytes());
-    assert_eq!(MixedInput::decode_storage(input.bytes())?.value, value);
     let input_digest = input.digest();
+    let (kind, payload, _) = input.clone().into_parts();
+    let payload = ClosureArtifact::new(kind, payload).load(input_digest).expect("the payload reads whole");
+    assert_eq!(MixedInput::decode_storage(&payload)?.value, value);
     assert_eq!(CallProgram::decode_from_bytes(&call.encode_into_bytes()), Some(call.clone()));
 
     let stored = CallProgram { program, name, input: CallInput::Stored(input_digest) };

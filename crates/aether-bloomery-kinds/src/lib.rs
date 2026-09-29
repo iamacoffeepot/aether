@@ -34,9 +34,10 @@ pub use driver::{
 pub use entry::{DecodeError, Entry, Seq};
 pub use head::{Head, HeadMoved, HeadNameError, RecordedHead, RecordedHeadMove};
 pub use journal::{
-    AppendRecords, AppendRecordsResult, ArtifactCitation, ClosureLimit, ClosureLimitError, DriverRecord,
-    EncodedArtifact, JournalEntry, MoveHead, MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult,
-    ReadClosure, ReadClosureResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, WatchHead, WatchHeadResult,
+    AppendRecords, AppendRecordsResult, ArtifactCitation, ArtifactStorage, ClosureLimit, ClosureLimitError,
+    DriverRecord, EncodedArtifact, JournalEntry, MoveHead, MoveHeadResult, Publish, PublishResult, ReadArtifact,
+    ReadArtifactResult, ReadClosure, ReadClosureResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, Stage,
+    StageResult, WatchHead, WatchHeadResult,
 };
 pub use lifecycle::{Activated, ActivationRejected, LiveFromError, ReactionFailed};
 pub use program::{

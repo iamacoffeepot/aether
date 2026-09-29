@@ -12,9 +12,9 @@ use aether_data::{Cites, Kind, Storage};
 ///
 /// The closure carries only the encoded input: the program reads nothing but its input.
 pub fn answer<P: AsyncProgram>(input: &P::Input, reply: &RunResult) -> Result<Invoked, Box<dyn Error>> {
-    let encoded = EncodedArtifact::new(input)?;
-    let closure = ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec());
-    let invoke = Invoke::new(7, ProgramName::new(P::NAME)?, encoded.digest(), vec![closure]);
+    let (kind, bytes, _) = EncodedArtifact::new(input)?.into_parts();
+    let closure = ClosureArtifact::new(kind, bytes);
+    let invoke = Invoke::new(7, ProgramName::new(P::NAME)?, closure.claimed().unverified(), vec![closure]);
 
     let Started::Live { mut session, waiting: Some(Pending::Send(pending)) } = start_async::<P>(invoke) else {
         return Err("expected the first poll to capture the workspace run".into());

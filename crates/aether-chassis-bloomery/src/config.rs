@@ -51,9 +51,13 @@ pub struct BloomeryConfig {
     /// refused value is a boot error naming the key, never a panic.
     #[config(default = 4_294_967_296u64)]
     pub closure_limit_bytes: u64,
-    /// Byte budget for the journal owner's read cache: the members it checked
-    /// in for closure and artifact reads, kept resident so a later read skips
-    /// their files and hashes.
+    /// Engine-wide byte budget for the journal owners' read caches: the
+    /// members each checked in for closure and artifact reads, kept resident
+    /// so a later read skips their files and hashes.
+    ///
+    /// The total is divided equally among the configured units, each journal
+    /// taking the floor share, so the caches together never exceed it. With
+    /// one unit, its journal's share is the whole total.
     ///
     /// Charged per check-in allocation, so a cached member counts its whole
     /// slab, and the least recently used slab is evicted first. `0` disables

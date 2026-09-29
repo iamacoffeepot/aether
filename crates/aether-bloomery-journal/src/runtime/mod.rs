@@ -57,6 +57,14 @@
 //! the journal still holds, under the [`ReadCacheBudget`], and read only the
 //! misses.
 //!
+//! [`Stage`] is the one unfenced write: it stores encoded artifacts
+//! content-addressed, with no event and no head move, through an
+//! [`ArtifactBatch`] on a worker thread of its own task queue, streaming each
+//! payload from its [`aether_data::Blob`] into its file. The answer lands
+//! after the batch commits, and a dangling citation refuses the whole stage.
+//! Those three rows, `ReadArtifact`, `ReadClosure`, and `Stage`, are the
+//! [`aether_bloomery_kinds::ArtifactStorage`] protocol the owner covers.
+//!
 //! A blob stored for the first time records its citation edges in the
 //! `citations` table inside the same append transaction, so the edges are
 //! fixed when the blob is, and a later re-staging with a different citation
@@ -91,9 +99,10 @@ use std::ops::Range;
 
 use aether_actor::runtime;
 use aether_bloomery_kinds::{
-    AppendRecords, AppendRecordsResult, ClosureArtifact, ClosureLimit, DriverRecord, JournalEntry, MoveHead,
-    MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult,
-    ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq, WatchHead, WatchHeadResult,
+    AppendRecords, AppendRecordsResult, ClosureArtifact, ClosureLimit, DriverRecord, EncodedArtifact, JournalEntry,
+    MoveHead, MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult,
+    ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq, Stage, StageResult, WatchHead,
+    WatchHeadResult,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 use aether_substrate::chassis::error::BootError;
@@ -115,17 +124,27 @@ const MAX_CLOSURE_READS_IN_FLIGHT: usize = 2;
 /// [`ClosureLimit::MAX_BYTES`].
 const MAX_ARTIFACT_READS_IN_FLIGHT: usize = 4;
 
+/// Maximum number of stages writing on worker threads at once, bounding
+/// worker threads and the fsyncs competing for the root; a stage over the
+/// bound waits its turn in arrival order. Separate from the read queues so a
+/// large stage never holds up a read.
+const MAX_STAGES_IN_FLIGHT: usize = 2;
+
 /// One independently named journal owner over its own journal root.
 ///
 /// The composer opens the [`Journal`] and hands it over as the actor's params
 /// (ADR-0156 §3), so the root is held, and a held root refused, before the
 /// actor exists. Its config is the [`ReadCacheBudget`] that bounds the one
 /// read cache its workers share, holding the members they checked in.
+/// Stages write through the [`ArtifactStore`] taken from the journal at
+/// `init`, which holds the same root lock.
 pub struct JournalActorState {
     journal: Journal,
+    store: ArtifactStore,
     watchers: Watchers,
     closures: TaskQueue<ReadClosureResult>,
     artifacts: TaskQueue<ReadArtifactResult>,
+    stages: TaskQueue<StageResult>,
     cache: ReadCache,
 }
 
@@ -144,10 +163,12 @@ impl NativeActor for JournalActor {
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<JournalActorState, BootError> {
         Ok(JournalActorState {
+            store: journal.artifact_store(),
             journal,
             watchers: Watchers::new(),
             closures: TaskQueue::new(MAX_CLOSURE_READS_IN_FLIGHT),
             artifacts: TaskQueue::new(MAX_ARTIFACT_READS_IN_FLIGHT),
+            stages: TaskQueue::new(MAX_STAGES_IN_FLIGHT),
             cache: ReadCache::with_budget(budget),
         })
     }
@@ -245,6 +266,29 @@ impl NativeActor for JournalActor {
     #[handler(task)]
     fn on_read_closure_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<ReadClosureResult>) {
         state.closures.complete(ctx, done);
+    }
+
+    /// Store encoded artifacts content-addressed: no fence, no event, no head
+    /// move, and no watcher woken.
+    ///
+    /// The write runs on a worker thread through the actor's stage task queue
+    /// (ADR-0093): it opens an [`ArtifactBatch`], streams each payload into
+    /// its blob file a window at a time, and commits every row together, so
+    /// the actor's dispatcher never waits on a stage's fsyncs. The reply lands
+    /// after the commit, so a read sent once it arrives finds every staged
+    /// artifact; a citation naming neither a staged nor a stored artifact
+    /// refuses the whole stage.
+    #[handler::single]
+    fn on_stage(state: &mut Self::State, ctx: &mut NativeCtx<'_>, request: Stage) -> Pending<StageResult> {
+        let store = state.store.clone();
+        state.stages.submit(ctx, move || stage_reply(stage(&store, request.into_artifacts())))
+    }
+
+    /// Completion of a stage: the queue answers the request's own caller,
+    /// then starts the next queued stage in the freed slot.
+    #[handler(task)]
+    fn on_stage_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<StageResult>) {
+        state.stages.complete(ctx, done);
     }
 
     #[handler::single]
@@ -390,6 +434,24 @@ fn artifact_reply(digest: Digest, outcome: Result<Option<ClosureArtifact>, Journ
         },
         Ok(None) => ReadArtifactResult::Missing { digest },
         Err(error) => ReadArtifactResult::Err { digest, message: error.to_string() },
+    }
+}
+
+/// Stream every artifact into one batch in order, then commit their rows together.
+fn stage(store: &ArtifactStore, artifacts: Vec<EncodedArtifact>) -> Result<(), AppendError> {
+    let mut staging = store.batch()?;
+    for artifact in artifacts {
+        let (kind, payload, carried) = artifact.into_parts();
+        staging.stage_blob(kind, &payload, batch::citations(carried))?;
+    }
+    staging.commit()
+}
+
+/// The reply a finished stage answers with.
+fn stage_reply(outcome: Result<(), AppendError>) -> StageResult {
+    match outcome {
+        Ok(()) => StageResult::Staged,
+        Err(error) => StageResult::Err { message: error.to_string() },
     }
 }
 

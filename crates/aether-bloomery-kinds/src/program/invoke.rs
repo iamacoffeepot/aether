@@ -6,13 +6,14 @@ use core::error::Error as StdError;
 use core::fmt;
 
 use aether_actor::HeldReply;
-use aether_data::{Blob, BlobReader, KindId, MAX_READ_BYTES};
+use aether_data::{Blob, BlobReader, KindId};
 
+use crate::artifact::{Sink, blob_digest, stream};
 use crate::program::executor::ExecutorFault;
 use crate::program::fault::Detail;
 use crate::program::name::ProgramName;
 use crate::program::refusal::Refusal;
-use crate::{ArtifactHasher, Digest, EncodedArtifact};
+use crate::{Digest, EncodedArtifact};
 
 /// The digest a sender claims for the bytes beside it. Nothing checked it on
 /// decode, and it cannot be read as a proven [`Digest`].
@@ -44,16 +45,12 @@ pub struct ClosureArtifact {
 
 impl ClosureArtifact {
     /// Carry `bytes` under `kind`. The claim is computed here, by streaming
-    /// the bytes once through [`BlobReader`] and [`ArtifactHasher`], so a
+    /// the bytes once through [`BlobReader`] and [`ArtifactHasher`](crate::ArtifactHasher), so a
     /// constructed member's claim is true.
     #[must_use]
     pub fn new(kind: KindId, bytes: impl Into<Blob>) -> Self {
         let bytes = bytes.into();
-        let window =
-            usize::try_from(BlobReader::open(&bytes).len()).map_or(MAX_READ_BYTES, |len| len.min(MAX_READ_BYTES));
-        let mut scratch = vec![0; window];
-        let streamed = stream(kind, &bytes, Sink::Scratch(&mut scratch));
-        Self { claimed: ClaimedDigest(streamed.digest), kind, bytes }
+        Self { claimed: ClaimedDigest(blob_digest(kind, &bytes)), kind, bytes }
     }
 
     /// The digest the sender claims. It is unverified until [`Self::load`].
@@ -81,7 +78,7 @@ impl ClosureArtifact {
     }
 
     /// Every payload byte, streamed through [`BlobReader`] into
-    /// [`ArtifactHasher`] seeded with the kind prefix, and returned only when
+    /// [`ArtifactHasher`](crate::ArtifactHasher) seeded with the kind prefix, and returned only when
     /// the whole payload hashes to `expected`.
     ///
     /// Every byte is hashed before any is returned, so a returned `Vec` is
@@ -101,41 +98,6 @@ impl ClosureArtifact {
         } else {
             Err(mismatch)
         }
-    }
-}
-
-/// Where each read window lands.
-enum Sink<'b> {
-    /// One scratch window, reused by every read: hashing only.
-    Scratch(&'b mut [u8]),
-    /// A buffer of the whole payload's length; each read fills its place.
-    Whole(&'b mut [u8]),
-}
-
-/// What [`stream`] read: the digest of the kind and every byte read, and how
-/// many payload bytes that was.
-struct Streamed {
-    digest: Digest,
-    read: usize,
-}
-
-/// Stream `bytes` through [`ArtifactHasher`] seeded with `kind`, one
-/// [`BlobReader::read_range`] window at a time, until a read returns nothing.
-fn stream(kind: KindId, bytes: &Blob, mut sink: Sink<'_>) -> Streamed {
-    let reader = BlobReader::open(bytes);
-    let mut hasher = ArtifactHasher::new(kind);
-    let mut read = 0;
-    loop {
-        let window = match &mut sink {
-            Sink::Scratch(scratch) => &mut scratch[..],
-            Sink::Whole(whole) => &mut whole[read..],
-        };
-        let copied = reader.read_range(read as u64, window);
-        if copied == 0 {
-            return Streamed { digest: hasher.finish(), read };
-        }
-        hasher.update(&window[..copied]);
-        read += copied;
     }
 }
 
