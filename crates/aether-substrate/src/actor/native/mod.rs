@@ -87,6 +87,9 @@ pub use envelope::Envelope;
 pub use offload::blocking::{DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskCompletionWake, TaskDone};
 pub use offload::check_in::{BlobCheckIn, BlobSlab};
 pub use offload::held::Held;
+// ADR-0243 §1: the reply a held debt answers with at actor close; `hold`
+// names it.
+pub use aether_actor::HeldReply;
 pub use offload::self_wake::SelfWake;
 pub use offload::staged_task::StagedTask;
 pub use probe::ActorProbe;

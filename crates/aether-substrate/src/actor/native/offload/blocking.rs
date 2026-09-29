@@ -57,6 +57,7 @@ use aether_data::{ActorMail, Kind, KindId, MailId, RequestId, wire};
 use crate::mail::Source;
 use crate::runtime::trace::SettlementHold;
 
+use super::held::AnswerUnanswered;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 
@@ -286,6 +287,9 @@ enum EntryState {
     Held {
         /// The caller the ticket answers.
         reply_to: Source,
+        /// Sends the reply kind's `unanswered` value to `reply_to` when the
+        /// actor closes first.
+        answer: AnswerUnanswered,
     },
     /// A held entry whose ticket sits in the encoded bytes of a stored
     /// request context (ADR-0243 §4). Only a decode of that context under
@@ -293,6 +297,9 @@ enum EntryState {
     Parked {
         /// The caller the ticket answers.
         reply_to: Source,
+        /// Carried from [`Self::Held`] so a parked ticket is still answered
+        /// at actor close.
+        answer: AnswerUnanswered,
         /// The request whose context carries the ticket.
         request: RequestId,
         /// The reply kind the ticket answers.
@@ -313,6 +320,15 @@ enum EntryState {
         /// finishes.
         output: Option<Box<dyn Any + Send>>,
     },
+}
+
+/// A held or parked entry an actor's close removed from its ledger: the
+/// close sends `answer` to `reply_to` under the hold's root, then releases
+/// the hold, so `Sent` precedes `Release` (ADR-0243 §1).
+pub(crate) struct OwedAtClose {
+    pub(crate) hold: Option<SettlementHold>,
+    pub(crate) reply_to: Source,
+    pub(crate) answer: AnswerUnanswered,
 }
 
 /// Per-actor in-flight ledger for hold-until-resolve dispatch (ADR-0093
@@ -437,8 +453,12 @@ pub struct TaskDone<O, C = ()> {
 /// strands the caller forever, which is why [`Drop`] releases the hold and then
 /// panics outside an unwind, in every build, which the scheduler escalates
 /// through the chassis aborter (ADR-0063) — the distinction from a plain
-/// context value, whose drop means nothing. [`Self::abandon_for_actor_close`]
-/// is the only quiet discharge.
+/// context value, whose drop means nothing. A `DeferredReply` names no reply
+/// kind, so an actor close while the engine keeps running cannot answer it
+/// the way it answers a `Held<R>` (ADR-0243 §1): its owner answers it with
+/// the terminal it knows, in `unwire`. [`Self::abandon_for_actor_close`] is the one quiet discharge, and
+/// it survives only for the component host's boot waiters until #7008 removes
+/// it.
 ///
 /// A debt may also forward any number of already-encoded non-terminal
 /// replies first, through [`Self::reply_envelope`], which borrows it and
@@ -503,10 +523,14 @@ impl DeferredReply {
         self.consumed = true;
     }
 
-    /// Release the obligation because the actor that owned its pending state
-    /// is itself closing. This is the no-spurious-reply parent-disappearance
-    /// path, not an ordinary business completion, and the only way to
-    /// discharge a debt without replying that does not fail fast.
+    /// Release the obligation with no reply because the actor that owned its
+    /// pending state is itself closing. Every other close while the engine
+    /// keeps running answers its debts (ADR-0243 §1): the ledger sends
+    /// `R::unanswered()` for each `Held<R>`, and a manual owner replies to
+    /// its `DeferredReply`s in `unwire`. This
+    /// survives only for the component host's boot waiters (`PendingBoot`),
+    /// which close through a slot drop that runs no `unwire`, until #7008
+    /// turns them into `Held`s and removes it.
     #[doc(hidden)]
     pub fn abandon_for_actor_close(mut self) {
         drop(self.hold.take());
@@ -809,10 +833,11 @@ impl InflightTable {
     }
 
     /// Insert an entry armed with no worker (ADR-0243 §1) and return its
-    /// [`DispatchId`]. Only its `Held` ticket claims it back.
-    fn insert_held(&mut self, hold: Option<SettlementHold>, reply_to: Source) -> DispatchId {
+    /// [`DispatchId`]. Only its `Held` ticket claims it back, and `answer`
+    /// replies for it when the actor closes first.
+    fn insert_held(&mut self, hold: Option<SettlementHold>, reply_to: Source, answer: AnswerUnanswered) -> DispatchId {
         let id = self.mint_id();
-        self.entries.insert(id, InflightEntry { hold, state: EntryState::Held { reply_to } });
+        self.entries.insert(id, InflightEntry { hold, state: EntryState::Held { reply_to, answer } });
         id
     }
 
@@ -830,7 +855,7 @@ impl InflightTable {
     /// entry, which is left in place: a held ticket never discharges a
     /// worker's obligation.
     fn claim_held(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
-        let EntryState::Held { reply_to } = self.entries.get(&id)?.state else {
+        let EntryState::Held { reply_to, .. } = self.entries.get(&id)?.state else {
             return None;
         };
         let entry = self.entries.remove(&id)?;
@@ -840,31 +865,42 @@ impl InflightTable {
     /// Hand the held entry `id` to a worker (ADR-0243 §3): it keeps its hold
     /// and reply target, and its state becomes a worker entry carrying
     /// `context` with no output yet, so the worker's completion answers the
-    /// obligation the entry's `Held` ticket named.
+    /// obligation the entry's `Held` ticket named. The entry's close answer
+    /// drops: a worker entry names no reply kind.
     ///
     /// # Panics
     /// Panics when `id` names no held entry: an unknown id, an entry a
     /// worker already answers, or one parked in a stored context.
     fn attach_worker(&mut self, id: DispatchId, context: Box<dyn Any + Send>) {
         let entry = self.entries.get_mut(&id).expect("a worker attached to a ledger entry that is not held");
-        let EntryState::Held { reply_to } = entry.state else {
+        let EntryState::Held { reply_to, .. } = entry.state else {
             panic!("a worker attached to a ledger entry that is not held");
         };
         entry.state = EntryState::Worker { reply_to, context, output: None };
     }
 
     /// Remove every entry no worker answers, parked ones and staged tasks
-    /// included, and hand back their holds, for the actor-close tail to
-    /// release with no reply (ADR-0243 §1): a staged task owes nothing, and
-    /// a closing actor handles no completion. Worker entries stay: their
-    /// workers' fills and wakes still find them, and the binding's drop
-    /// settles them as before.
-    fn settle_held_for_actor_close(&mut self) -> Vec<Option<SettlementHold>> {
+    /// included, for the actor-close tail (ADR-0243 §1, §9). A held or parked
+    /// entry comes back owed, with the answer a close while the engine keeps
+    /// running sends before its hold releases; an engine teardown drops it
+    /// unanswered. A staged task owes nothing and a closing actor handles no
+    /// completion, so its hold comes back to release with no reply. Worker
+    /// entries stay: their workers' fills and wakes still find them, and the
+    /// binding's drop settles them as before.
+    fn close_for_actor(&mut self) -> (Vec<OwedAtClose>, Vec<Option<SettlementHold>>) {
         self.parked.clear();
-        self.entries
-            .extract_if(|_, entry| !matches!(entry.state, EntryState::Worker { .. }))
-            .map(|(_, entry)| entry.hold)
-            .collect()
+        let (mut owed, mut released) = (Vec::new(), Vec::new());
+        for (_, InflightEntry { hold, state }) in
+            self.entries.extract_if(|_, entry| !matches!(entry.state, EntryState::Worker { .. }))
+        {
+            match state {
+                EntryState::Held { reply_to, answer } | EntryState::Parked { reply_to, answer, .. } => {
+                    owed.push(OwedAtClose { hold, reply_to, answer });
+                }
+                EntryState::Task { .. } | EntryState::Worker { .. } => released.push(hold),
+            }
+        }
+        (owed, released)
     }
 
     /// Name the state of the named entry, for tests that pin which entries
@@ -893,10 +929,10 @@ impl InflightTable {
     ) -> Result<(), wire::Error> {
         let unclaimed = || wire::Error::HeldUnclaimed { ticket: id.0, reply };
         let entry = self.entries.get_mut(&id).ok_or_else(unclaimed)?;
-        let EntryState::Held { reply_to } = entry.state else {
+        let EntryState::Held { reply_to, answer } = entry.state else {
             return Err(unclaimed());
         };
-        entry.state = EntryState::Parked { reply_to, request, reply, context_name };
+        entry.state = EntryState::Parked { reply_to, answer, request, reply, context_name };
         self.parked.entry(request).or_default().push(id);
         Ok(())
     }
@@ -910,13 +946,14 @@ impl InflightTable {
     fn unpark(&mut self, id: DispatchId, request: RequestId, reply: KindId) -> Result<(), wire::Error> {
         let unclaimed = || wire::Error::HeldUnclaimed { ticket: id.0, reply };
         let entry = self.entries.get_mut(&id).ok_or_else(unclaimed)?;
-        let EntryState::Parked { reply_to, request: parked_request, reply: parked_reply, .. } = entry.state else {
+        let EntryState::Parked { reply_to, answer, request: parked_request, reply: parked_reply, .. } = entry.state
+        else {
             return Err(unclaimed());
         };
         if parked_request != request || parked_reply != reply {
             return Err(unclaimed());
         }
-        entry.state = EntryState::Held { reply_to };
+        entry.state = EntryState::Held { reply_to, answer };
         if let Some(ids) = self.parked.get_mut(&request) {
             ids.retain(|parked| *parked != id);
             if ids.is_empty() {
@@ -1100,8 +1137,13 @@ impl InflightTable {
         self.try_take(id)
     }
 
-    pub(crate) fn dispatch_insert_held(&mut self, hold: Option<SettlementHold>, reply_to: Source) -> DispatchId {
-        self.insert_held(hold, reply_to)
+    pub(crate) fn dispatch_insert_held(
+        &mut self,
+        hold: Option<SettlementHold>,
+        reply_to: Source,
+        answer: AnswerUnanswered,
+    ) -> DispatchId {
+        self.insert_held(hold, reply_to, answer)
     }
 
     pub(crate) fn dispatch_claim_held(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
@@ -1112,8 +1154,8 @@ impl InflightTable {
         self.attach_worker(id, context);
     }
 
-    pub(crate) fn dispatch_settle_held_for_actor_close(&mut self) -> Vec<Option<SettlementHold>> {
-        self.settle_held_for_actor_close()
+    pub(crate) fn dispatch_close_for_actor(&mut self) -> (Vec<OwedAtClose>, Vec<Option<SettlementHold>>) {
+        self.close_for_actor()
     }
 
     pub(crate) fn dispatch_park(

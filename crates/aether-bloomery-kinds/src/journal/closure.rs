@@ -6,6 +6,8 @@ use core::borrow::Borrow;
 use core::error::Error as StdError;
 use core::fmt;
 
+use aether_actor::HeldReply;
+
 use crate::{ClosureArtifact, Digest};
 
 /// Byte budget for one closure read: at least one stored blob's kind prefix, at most 4 GiB.
@@ -139,6 +141,15 @@ pub enum ReadClosureResult {
         /// Human-readable failure.
         message: String,
     },
+}
+
+impl HeldReply for ReadClosureResult {
+    fn unanswered() -> Self {
+        Self::Err {
+            root: Digest::from_bytes([0; 32]),
+            message: String::from("bloomery journal closed before answering"),
+        }
+    }
 }
 
 #[cfg(test)]

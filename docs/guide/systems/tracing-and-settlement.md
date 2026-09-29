@@ -173,8 +173,14 @@ exactly one `Finished` whether or not anyone wanted an answer, so dropping an
 waiting, so dropping a `DeferredReply` unreplied strands that caller forever —
 which is why its drop releases the hold and then panics, in that order and in
 every build, so the chain still settles and the scheduler escalates the lost reply
-through the chassis aborter. An actor closing with debts parked discharges them
-with `abandon_for_actor_close`, the one path that releases without failing fast.
+through the chassis aborter. An actor closing with debts still owed while the
+engine keeps running answers them: the engine sends each `Held<R>` its
+`R::unanswered()` and then releases its hold, so `Sent` precedes `Release`
+(ADR-0243 §1), and an actor that keeps a `DeferredReply` in state answers it
+in `unwire`. An engine teardown releases held debts with no reply, because
+every requester is closing with it. `abandon_for_actor_close`, the
+one path that releases without a reply or a failure, survives only for the
+component host's boot waiters until #7008 removes it.
 
 ## The trace tree
 

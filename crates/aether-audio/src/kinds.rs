@@ -9,6 +9,7 @@
 //! (`pub use kinds::*`), so `aether_audio::NoteOn`
 //! resolves for callers.
 
+use aether_actor::HeldReply;
 use serde::{Deserialize, Serialize};
 
 /// Start a note playing on the desktop chassis's MIDI synth (ADR-0039).
@@ -239,6 +240,17 @@ pub enum PlayTrackResult {
     Err { namespace: String, path: String, lane: Option<String>, error: String },
 }
 
+impl HeldReply for PlayTrackResult {
+    fn unanswered() -> Self {
+        Self::Err {
+            namespace: String::new(),
+            path: String::new(),
+            lane: None,
+            error: "audio capability closed before answering".into(),
+        }
+    }
+}
+
 /// `aether.audio.stop_track` — fade out and retire a track started by
 /// `PlayTrack`. Matched on `(sender, lane, namespace, path)` — the
 /// sender is taken from the mail envelope, not the payload — so one
@@ -292,4 +304,14 @@ pub struct LoadInstrument {
 pub enum LoadInstrumentResult {
     Ok { instrument_id: u8, name: String, resident_bytes: u64 },
     Err { namespace: String, path: String, error: String },
+}
+
+impl HeldReply for LoadInstrumentResult {
+    fn unanswered() -> Self {
+        Self::Err {
+            namespace: String::new(),
+            path: String::new(),
+            error: "audio capability closed before answering".into(),
+        }
+    }
 }

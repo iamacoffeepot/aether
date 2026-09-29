@@ -6,6 +6,7 @@
 
 use alloc::vec::Vec;
 
+use aether_actor::HeldReply;
 use aether_bloomery_kinds::{Detail, Digest, OpaqueBytes, Ref, Tree};
 
 use crate::kinds::environment::{Platform, RustToolchain, ToolName};
@@ -28,6 +29,12 @@ pub enum RunResult {
         /// The bounded fault text naming the cause or the path.
         detail: Detail,
     },
+}
+
+impl HeldReply for RunResult {
+    fn unanswered() -> Self {
+        Self::Failed { detail: Detail::new("workspace capability closed before the run answered") }
+    }
 }
 
 /// The allotment a run exhausted.

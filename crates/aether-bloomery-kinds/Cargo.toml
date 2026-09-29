@@ -7,6 +7,9 @@ publish = false
 description = "The shared vocabulary of bloomery kinds: digests, typed citations, leaf kinds, and the tree."
 
 [dependencies]
+# `HeldReply` (ADR-0243 §1): the held reply kinds here name the answer a
+# caller receives when the actor holding its debt closes first.
+aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 sha2 = { workspace = true }

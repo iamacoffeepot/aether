@@ -44,13 +44,14 @@ ProcessError ::
   | BinaryNotFound                  // the allowlisted path did not resolve to an executable file
   | SpawnFailed  { detail: String } // exec failed for another reason (not executable, permission denied)
   | WaitFailed   { detail: String } // the OS returned an error while waiting on the child
+  | Closed                          // the capability closed before the run answered (ADR-0243 §1)
 ```
 
 `run` is request/reply, and the reply always arrives. The result is an enum rather than a flat struct because the outcomes are enumerable and this repository enumerates them by rule — the neighboring edge caps already do (`FsError`'s typed variants, `FetchResult::Ok | Err`, `AnthropicError`'s variant taxonomy) — and because a wire-visible reply is exactly the schema `describe_kinds` and every caller pin against.
 
 - `Ok` carries a run that reached completion, including a run that exited non-zero. A non-zero exit is a completed run whose result the consumer judges, so it stays `Ok { exit_code: Some(code) }` rather than becoming an error; only the capability's own inability to run or reap the child is an `Err`. This is the one place the general capability's semantics diverge from `aether-anthropic/src/cli.rs`, which folds a non-zero `claude` exit into its provider error because that cap wants success semantics.
 - `TimedOut` is its own arm because a deadline overrun carries the partial `stdout` / `stderr` drained before the kill and is a distinct outcome, not an `Ok` wearing a boolean flag.
-- `Err` carries a closed `ProcessError` taxonomy. `NotPermitted` is an allowlist refusal that never spawns. `BinaryNotFound` and `SpawnFailed` split the spawn failures the cli.rs loop already distinguishes — `BinaryNotFound` maps its `ErrorKind::NotFound` / `CliNotFound` path (the resolved path is not an executable file), and `SpawnFailed { detail }` carries every other exec failure (not executable, permission denied at exec). `WaitFailed { detail }` maps the cli.rs `try_wait` / `wait` OS-error path. The taxonomy is closed: a future distinction adds an arm through an ADR amendment rather than widening a free-form string.
+- `Err` carries a closed `ProcessError` taxonomy. `NotPermitted` is an allowlist refusal that never spawns. `BinaryNotFound` and `SpawnFailed` split the spawn failures the cli.rs loop already distinguishes — `BinaryNotFound` maps its `ErrorKind::NotFound` / `CliNotFound` path (the resolved path is not an executable file), and `SpawnFailed { detail }` carries every other exec failure (not executable, permission denied at exec). `WaitFailed { detail }` maps the cli.rs `try_wait` / `wait` OS-error path. `Closed` is the answer a caller receives when the capability closes before its run answered (ADR-0243 §1). The taxonomy is closed: a future distinction adds an arm through an ADR amendment rather than widening a free-form string.
 
 `stdout` and `stderr` are `Bytes` rather than `String` because a subprocess emits arbitrary bytes; a consumer that wants text decodes lossily at its own boundary, matching how `aether.fs.read` returns bytes.
 

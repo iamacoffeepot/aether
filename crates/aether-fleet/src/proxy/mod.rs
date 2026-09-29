@@ -646,11 +646,12 @@ mod tests {
         );
     }
 
-    /// A proxy that closes with a forward still open abandons its debt
-    /// quietly, and the hub's RPC server closes the wire call behind it with
-    /// its departure error.
+    /// Catches a proxy that closes with a forward still open and answers
+    /// nothing, or whose answer and departure close the wire call twice: its
+    /// `unwire` answers the forward with `CallSettled::Err`, and the hub's
+    /// RPC server closes the wire call once, with that error (ADR-0243 §1).
     #[test]
-    fn closing_with_a_pending_forward_abandons_it_and_the_hub_closes_the_call() {
+    fn closing_with_a_pending_forward_answers_it_and_the_hub_closes_the_call() {
         let (calls_tx, calls_rx) = mpsc::channel();
         let (port, _server) = fake_server(Behavior::Scripted { calls: calls_tx, scripts: VecDeque::new() });
 
@@ -711,10 +712,17 @@ mod tests {
             chassis.send_tracked(proxy, &TerminateEngine { engine_id: engine_id.0.to_string() }, None);
         let end = conn.inbound.recv_timeout(Duration::from_secs(5)).expect("the hub closes the wire call");
         let WireFrame::ReplyEnd { cid: closed, result: Err(RpcError::Other { reason }) } = end else {
-            panic!("the hub closes the call with its departure error, got {end:?}");
+            panic!("the hub closes the call with the proxy's answer, got {end:?}");
         };
         assert_eq!(closed, cid, "the closed call is the one forwarded");
-        assert!(reason.contains("left before the call settled"), "the departure error names the departure: {reason}");
+        assert!(
+            reason.contains("engine proxy closed before the call settled"),
+            "the closing proxy's answer closes the call: {reason}"
+        );
+        assert!(
+            conn.inbound.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the proxy's departure does not close the call a second time"
+        );
 
         drop(conn);
         let teardown = catch_unwind(AssertUnwindSafe(|| drop(chassis)));

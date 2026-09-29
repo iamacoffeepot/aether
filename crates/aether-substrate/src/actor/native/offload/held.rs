@@ -26,13 +26,27 @@ use std::mem::{self, ManuallyDrop};
 use std::sync::Weak;
 use std::thread;
 
-use aether_actor::ReplyMode;
+use aether_actor::{HeldReply, ReplyMode};
 use aether_data::wire::{self, Decoder, Encoder, WireDecode, WireEncode};
-use aether_data::{ActorMail, CastEligible, LabelNode, Schema, SchemaType};
+use aether_data::{ActorMail, CastEligible, LabelNode, MailId, Schema, SchemaType, Source};
 
 use super::blocking::{DeferredReply, DispatchId, IntoDeferredReply};
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
+
+/// The answer a closing actor sends for one held ledger entry: the entry's
+/// reply kind's [`HeldReply::unanswered`], sent to the entry's reply target
+/// under the root its hold keeps open (ADR-0243 §1). `hold` stores the
+/// monomorphized [`answer_unanswered`] in the entry, so nothing is encoded
+/// until the actor closes.
+pub(crate) type AnswerUnanswered = fn(&NativeBinding, Source, Option<MailId>);
+
+/// Send `R::unanswered()` to `reply_to` through the binding reply path
+/// [`Held::answer`] takes, so the caller's correlation is echoed and the
+/// reply's `Sent` counts against `root`.
+pub(crate) fn answer_unanswered<R: HeldReply>(binding: &NativeBinding, reply_to: Source, root: Option<MailId>) {
+    binding.send_reply_for_handler(reply_to, &R::unanswered(), root, None);
+}
 
 /// A reply of kind `R` this actor still owes its caller (ADR-0243 §1).
 ///
@@ -40,9 +54,13 @@ use crate::actor::native::ctx::NativeCtx;
 /// which keeps the caller's settlement hold and reply target.
 /// [`Self::answer`] sends the one terminal `R` and releases the hold.
 /// Dropping it unanswered releases the hold and then panics outside an
-/// unwind, as [`DeferredReply`] does. Actor close is the one silent
-/// discharge: the close tail settles the ledger before the actor's state
-/// drops, so a ticket parked in that state finds its entry gone. It
+/// unwind, as [`DeferredReply`] does. When the actor closes first while the
+/// engine keeps running, the close tail answers the entry with
+/// [`HeldReply::unanswered`] and then releases its hold, so the caller still
+/// receives an `R`; an engine teardown releases it silently, because every
+/// requester is closing too. Either happens before the actor's state drops,
+/// so a ticket parked in that state finds its entry gone and drops
+/// silently. [`NativeCtx::hold`] requires `R: HeldReply` for that answer. It
 /// implements [`IntoDeferredReply`], so every staging surface that takes a
 /// deferred reply takes it unchanged.
 ///
@@ -140,14 +158,14 @@ impl<R: ActorMail> IntoDeferredReply for Held<R> {
         let (hold, reply_to) = ledger
             .upgrade()
             .and_then(|binding| binding.dispatch_claim_held(id))
-            .expect("a Held staged after actor close settled its ledger entry");
+            .expect("a Held staged after actor close answered its ledger entry");
         DeferredReply::new(hold, reply_to)
     }
 }
 
 impl<R: ActorMail> Drop for Held<R> {
     /// Fails fast when the entry is still held. An entry that is gone (actor
-    /// close settled it) or parked (a stored context's encode took the ticket,
+    /// close answered it) or parked (a stored context's encode took the ticket,
     /// ADR-0243 §4) claims nothing, so this drop stays silent: the parked
     /// entry is the context's to claim back.
     fn drop(&mut self) {
@@ -248,6 +266,13 @@ mod tests {
     impl ActorMail for Answer {}
     impl CrossesActors for Answer {}
 
+    // A sentinel: these tests never close the actor holding an `Answer`.
+    impl HeldReply for Answer {
+        fn unanswered() -> Self {
+            Self { value: u64::MAX }
+        }
+    }
+
     fn forward_to(tx: mpsc::Sender<OwnedDispatch>) -> Arc<dyn InboxHandler> {
         Arc::new(move |dispatch: OwnedDispatch| {
             dispatch.discharge();
@@ -330,7 +355,7 @@ mod tests {
         assert_eq!(counter.held_open(root), 1, "staging keeps the chain held");
         assert_eq!(binding.dispatch_state_of(id), None, "staging removed the entry");
 
-        binding.settle_held_for_actor_close();
+        binding.answer_held_for_actor_close();
         assert_eq!(counter.held_open(root), 1, "actor close finds no entry to release twice");
         owed.abandon_for_actor_close();
         assert_eq!(counter.held_open(root), 0, "the successor debt owns the one hold");

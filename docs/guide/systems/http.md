@@ -65,14 +65,15 @@ produces a small reply. A caller that fires the same URL twice back-to-back (a
 non-idempotent POST, say) leans on the per-source correlation id the substrate
 already threads through replies rather than a per-kind field.
 
-**`HttpError` is one of six shapes.** `InvalidUrl(String)` (unparseable URL,
+**`HttpError` is one of seven shapes.** `InvalidUrl(String)` (unparseable URL,
 no host, or — with HTTPS required — an `http://` scheme on the initial URL or
 a redirect hop), `Timeout`
 (the request exceeded its deadline), `BodyTooLarge` (request or response body
 over the cap), `AllowlistDenied` (the initial host, or a redirect hop's host,
 is not on the allowlist),
-`Disabled` (egress is turned off chassis-wide), and `AdapterError(String)` (the catchall, preserving
-backend detail like a DNS failure or TLS handshake error as free-form text). The
+`Disabled` (egress is turned off chassis-wide), `AdapterError(String)` (the catchall, preserving
+backend detail like a DNS failure or TLS handshake error as free-form text), and
+`Closed` (the capability closed before the fetch answered). The
 first five are precise enough to branch on — `Timeout` → reconcile effects and
 retry only when the request is idempotent, `AllowlistDenied` → a config issue,
 `BodyTooLarge` → use a smaller/bounded response, `Disabled` → surface to the

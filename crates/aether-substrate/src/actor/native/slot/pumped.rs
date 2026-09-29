@@ -159,13 +159,18 @@ where
     /// `with_stamped` (the hook a hand-rolled driver drain never had), drop
     /// the finalized mailbox's cost rows (iamacoffeepot/aether#3051), and
     /// run the registry close + parent-key release + monitor fan-out.
-    /// Idempotent — the actor is
+    /// Every caller is a chassis tearing the engine down, so the close
+    /// settles the held replies the actor still owes silently rather than
+    /// answering them (ADR-0243 §1). Idempotent — the actor is
     /// taken out on the first call, so a second `shutdown` (or any later
     /// `drain_available`) is a no-op.
     pub fn shutdown(&mut self) {
         let Some(mut actor) = self.actor.take() else {
             return;
         };
+        // Every caller is a chassis tearing the engine down, so the close
+        // tail settles held replies silently (ADR-0243 §1).
+        self.binding.signal_engine_teardown();
         // Phase 2: drain residual inbox synchronously.
         while let Some(env) = self.binding.try_recv() {
             dispatch_envelope::<A>(&mut actor, &self.binding, &self.slots, env);
@@ -210,7 +215,7 @@ mod tests {
     use aether_actor::local::ActorSlots;
     use aether_actor::log::ActorLogRing;
     use aether_actor::trace::ActorTraceRing;
-    use aether_actor::{Addressable, HandlesKind, Local as _, Manual, One};
+    use aether_actor::{Addressable, HandlesKind, HeldReply, Local as _, Manual, One};
     use aether_data::{ErasedActorPath, Kind, KindId, MailId, MailboxId, Source, SourceAddr};
     use aether_kinds::trace::TraceEvent;
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
@@ -241,6 +246,14 @@ mod tests {
     #[aether_data::kind(name = "test.pumped.pong", copy, partial_eq)]
     struct Pong {
         seq: u32,
+    }
+
+    // A sentinel: no pumped test closes the actor while the engine keeps
+    // running, so no close answers a held `Pong` with it.
+    impl HeldReply for Pong {
+        fn unanswered() -> Self {
+            Self { seq: u32::MAX }
+        }
     }
 
     #[aether_data::kind(name = "test.pumped.defer", copy, partial_eq)]
@@ -296,7 +309,7 @@ mod tests {
         /// the test replies from a worker thread (test 5).
         deferred_tx: Option<mpsc::Sender<InboundMail>>,
         /// Set by `on_hold` — a held reply parked in actor state, which the
-        /// close tail must settle before this state drops.
+        /// close tail must answer before this state drops.
         held: Option<Held<Pong>>,
     }
 
@@ -601,29 +614,37 @@ mod tests {
         slot.shutdown();
     }
 
-    /// Catches a close tail that drops actor state before settling the
-    /// ledger: the parked `Held` would then find its entry still held and
-    /// panic as a lost reply instead of releasing silently.
+    /// Catches a pumped shutdown, which only a chassis teardown runs, that
+    /// answers a held reply every requester is closing too late to read, and
+    /// a close tail that drops actor state before settling the ledger (the
+    /// `Held` kept in state would then find its entry still held and panic
+    /// as a lost reply).
     #[test]
-    fn held_parked_in_state_is_settled_by_shutdown_without_panic() {
+    fn shutdown_settles_a_held_reply_silently() {
         let fx = fixtures();
         let counter = Arc::clone(fx.mailer.trace_handle().settlement_counter());
         let self_id = MailboxId(0x_0DED_0012);
+        let (caller, reply_rx) = caller_inbox(&fx, "test.pumped.caller.held");
         let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
 
         let root = MailId::new(self_id, 1);
         fx.mailer.record_sent_inflight(root);
+        let reply_to = Source::with_correlation(SourceAddr::Component(caller), 41);
         let bytes = HoldReq { seq: 1 }.encode_into_bytes();
-        fx.mailer.push(Mail::new(self_id, HoldReq::ID, bytes, 1).with_lineage(
+        fx.mailer.push(Mail::new(self_id, HoldReq::ID, bytes, 1).with_reply_to(reply_to).with_lineage(
             Some(MailId::new(self_id, 2)),
             Some(root),
             None,
         ));
         slot.drain_available();
-        assert_eq!(counter.held_open(root), 1, "the parked Held keeps the caller's chain open");
+        assert_eq!(counter.held_open(root), 1, "the Held kept in state holds the caller's chain open");
 
         slot.shutdown();
-        assert_eq!(counter.held_open(root), 0, "shutdown released the parked hold without a reply");
+        assert_eq!(counter.held_open(root), 0, "shutdown released the held reply's hold");
+        assert!(
+            reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "an engine-teardown shutdown sends no answer for the held reply"
+        );
     }
 
     /// Catches an untaken-reply check that runs before the handler, reads

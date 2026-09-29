@@ -3,8 +3,10 @@
 
 use alloc::vec::Vec;
 
+use aether_actor::HeldReply;
 use aether_data::KindId;
 
+use crate::Detail;
 use crate::program::refusal::Refusal;
 
 /// The closed set of APIs a program's `run` may bind. The driver maps each
@@ -43,6 +45,15 @@ pub enum ApiCallResult {
     Replied { call: u64, kind: KindId, payload: Vec<u8> },
     /// A hop refused the call; no provider saw it.
     Refused { call: u64, refusal: Refusal },
+}
+
+impl HeldReply for ApiCallResult {
+    fn unanswered() -> Self {
+        Self::Refused {
+            call: 0,
+            refusal: Refusal::Refused { reason: Detail::new("bloomery driver closed before answering") },
+        }
+    }
 }
 
 impl ApiCallResult {

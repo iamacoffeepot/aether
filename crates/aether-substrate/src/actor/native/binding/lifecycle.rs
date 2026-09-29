@@ -85,6 +85,7 @@ impl NativeBinding {
             aborter,
             spawner,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            engine_teardown: AtomicBool::new(false),
             outbound: Mutex::new(OutboundBuffer::new()),
             activation_held: AtomicBool::new(false),
             burst_producer: Mutex::new(None),
@@ -151,6 +152,7 @@ impl NativeBinding {
             aborter: Arc::new(PanicAborter),
             spawner: None,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            engine_teardown: AtomicBool::new(false),
             outbound: Mutex::new(OutboundBuffer::new()),
             activation_held: AtomicBool::new(false),
             burst_producer: Mutex::new(None),
@@ -443,6 +445,23 @@ impl NativeBinding {
     /// the inbox synchronously, run `unwire`, and exit. Idempotent.
     pub(crate) fn signal_shutdown(&self) {
         self.shutdown_flag.store(true, Ordering::Release);
+    }
+
+    /// The chassis teardown's shutdown signal: mark this actor's close as
+    /// part of engine teardown, then [`Self::signal_shutdown`]. Its close
+    /// tail then settles the held replies it still owes silently, because
+    /// every requester is closing with the engine (ADR-0243 §1). Only the
+    /// teardown walks call it: `Spawner::shutdown_instanced`, the root
+    /// shutdown, and `PumpedSlot::shutdown`. Idempotent.
+    pub(crate) fn signal_engine_teardown(&self) {
+        self.engine_teardown.store(true, Ordering::Release);
+        self.signal_shutdown();
+    }
+
+    /// Whether this actor is closing as part of engine teardown
+    /// ([`Self::signal_engine_teardown`]).
+    pub(crate) fn is_engine_teardown(&self) -> bool {
+        self.engine_teardown.load(Ordering::Acquire)
     }
 
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.

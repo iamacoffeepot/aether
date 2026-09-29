@@ -207,12 +207,16 @@ impl BloomeryHarness {
     /// # Panics
     ///
     /// Panics when a round's `Processed` does not arrive within thirty seconds,
-    /// or the head is still moving after eight rounds.
+    /// when the driver answers `Processed::Closed` because it closed first, or
+    /// when the head is still moving after eight rounds.
     pub fn settle(&mut self, through: Seq) -> Seq {
         let mut bound = through;
         for _ in 0..SETTLE_ROUNDS {
             let pending = self.await_processed(bound);
-            let head = Seq(self.wait(pending).head);
+            let head = match self.wait(pending) {
+                Processed::Head { head } => Seq(head),
+                Processed::Closed => panic!("the bundle driver closed before the barrier at {bound} was reached"),
+            };
             if head == bound {
                 return head;
             }

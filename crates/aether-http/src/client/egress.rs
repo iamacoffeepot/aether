@@ -25,12 +25,14 @@
 //! idle (`in_flight == 0` and `pending` empty). A held reply exists only
 //! while a request is in flight or buffered pending a slot, so an entry that
 //! holds anything is never idle — idle-reclamation can never drop a hold on
-//! the floor. At actor close the ledger settles every held reply and every
-//! unstarted task before the dispatcher drops with the actor's state.
+//! the floor. Before the dispatcher drops with the actor's state, an actor
+//! close while the engine keeps running answers every held reply with its
+//! `R::unanswered()`, an engine teardown settles them silently, and either
+//! releases every unstarted task (ADR-0243 §1).
 
 use std::collections::{HashMap, VecDeque};
 
-use aether_actor::{ErasedActorRef, ReplyMode};
+use aether_actor::{ErasedActorRef, HeldReply, ReplyMode};
 use aether_data::{ActorMail, RequestId};
 use aether_substrate::actor::native::{Held, NativeCtx, Pending, StagedTask, TaskDone};
 
@@ -79,7 +81,7 @@ pub struct PerSenderEgress<R: ActorMail> {
     running: HashMap<RequestId, (Held<R>, Option<ErasedActorRef>)>,
 }
 
-impl<R: ActorMail + Send + 'static> PerSenderEgress<R> {
+impl<R: HeldReply + Send + 'static> PerSenderEgress<R> {
     /// Build a dispatcher bounded at `per_sender_max` concurrent fetches per
     /// sender and `global_max` across all senders. Each `0` clamps to 1 —
     /// following `TaskQueue::new`'s clamp, a zero bound would queue forever
@@ -234,7 +236,7 @@ impl<R: ActorMail> PerSenderEgress<R> {
 #[cfg(test)]
 mod tests {
     use super::PerSenderEgress;
-    use aether_actor::ErasedActorRef;
+    use aether_actor::{ErasedActorRef, HeldReply};
     use aether_data::{Kind, Source, SourceAddr};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
     use aether_substrate::chassis::builder::PassiveChassis;
@@ -261,6 +263,14 @@ mod tests {
     #[aether_data::kind(name = "test.egress.fetched", copy)]
     struct Fetched {
         gate: u32,
+    }
+
+    // A sentinel: no test here closes the dispatcher while it owes a
+    // `Fetched`.
+    impl HeldReply for Fetched {
+        fn unanswered() -> Self {
+            Self { gate: u32::MAX }
+        }
     }
 
     /// Report the dispatcher's bookkeeping, for the census's own sender.
