@@ -9,16 +9,13 @@ use crate::mail::KindId;
 use crate::mail::MailboxId;
 use crate::mail::registry;
 use crate::testing::boot_authority;
-use crate::testing::{TestChassis, bare_substrate};
+use crate::testing::{TestChassis, await_settled, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, ChildOf, HandlesKind};
 use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
-use std::thread;
-use std::time::Duration;
-use std::time::Instant;
 
 /// ADR-0165 scheduler proof: on a real one-worker pool a singleton parent's
 /// handler stages a child without waiting, the owner and activation make
@@ -34,7 +31,6 @@ use std::time::Instant;
 #[test]
 fn ctx_spawn_child_routes_through_handler() {
     use crate::actor::native::spawn::Subname;
-    use crate::mail::registry::MailboxEntry;
     use aether_actor::HandlesKind;
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -184,13 +180,11 @@ fn ctx_spawn_child_routes_through_handler() {
         .build_passive()
         .expect("ParentCap boots");
 
-    // Push Hatch at the parent's mailbox; the parent's handler
-    // calls `ctx.spawn_child::<ChildCap>` which in turn pushes a
-    // Ping at the new child via the after_init bootstrap.
-    let parent_id = registry.lookup(<ParentCap as Addressable>::NAMESPACE).expect("ParentCap claimed");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(parent_id).expect("sink") else {
-        panic!("expected mailbox entry");
-    };
+    // Send Hatch to the parent; the parent's handler calls
+    // `ctx.spawn_child::<ChildCap>` which in turn pushes a Ping at the
+    // new child via the after_init bootstrap.
+    let parent = chassis.actor_ref::<ParentCap>();
+    let parent_id = parent.id();
     let conflict_id = MailboxId(aether_data::with_tag(
         aether_data::Tag::Mailbox,
         aether_data::fold_lineage(parent_id.0, aether_data::ActorId::instanced("test.spawn_child.child", "conflict")),
@@ -203,20 +197,10 @@ fn ctx_spawn_child_routes_through_handler() {
             registry::noop_handler(),
         )
         .expect("fixture owns the authoritative conflicting route");
-    let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, &bytes, 1));
-    let conflict = (Hatch { tag: 2 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, &conflict, 1));
-
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while (child_received.lock().unwrap().len() < 2
-        || spawn_count.load(AtomicOrdering::SeqCst) < 1
-        || failure_count.load(AtomicOrdering::SeqCst) < 1
-        || mailer.trace_handle().settlement_counter().live_roots() != 0)
-        && Instant::now() < deadline
-    {
-        thread::sleep(Duration::from_millis(5));
-    }
+    let (_, hatched) = chassis.send_tracked(parent, &Hatch { tag: 1 }, None);
+    let (_, conflicted) = chassis.send_tracked(parent, &Hatch { tag: 2 }, None);
+    await_settled(&hatched, "test.spawn_child.hatch");
+    await_settled(&conflicted, "test.spawn_child.conflict");
     assert_eq!(
         spawn_count.load(AtomicOrdering::SeqCst),
         1,
@@ -258,7 +242,6 @@ fn ctx_spawn_child_routes_through_handler() {
 #[test]
 fn staged_child_init_failure_releases_parent_reservation_without_registry_write() {
     use crate::actor::native::spawn::{SpawnError, Subname};
-    use crate::mail::registry::MailboxEntry;
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -358,22 +341,14 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
         .with_actor::<ParentCap>((Arc::clone(&attempts), Arc::clone(&observed)))
         .build_passive()
         .expect("ParentCap boots");
-    let parent_id = registry.lookup(ParentCap::NAMESPACE).expect("ParentCap claimed");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(parent_id).expect("parent sink") else {
-        panic!("expected parent inbox")
-    };
-    let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, &bytes, 1));
-
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while !observed.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    let parent = chassis.actor_ref::<ParentCap>();
+    let (_, settled) = chassis.send_tracked(parent, &Hatch { tag: 1 }, None);
+    await_settled(&settled, "test.spawn_init_failure.hatch");
     assert!(observed.load(AtomicOrdering::SeqCst), "parent handler completed both local attempts");
     assert_eq!(attempts.load(AtomicOrdering::SeqCst), 2, "init failure releases the parent-local key for retry");
     let child_id = MailboxId(aether_data::with_tag(
         aether_data::Tag::Mailbox,
-        aether_data::fold_lineage(parent_id.0, aether_data::ActorId::instanced(FailingChild::NAMESPACE, "retry")),
+        aether_data::fold_lineage(parent.id().0, aether_data::ActorId::instanced(FailingChild::NAMESPACE, "retry")),
     ));
     assert!(registry.entry_at(child_id).is_none(), "failed initialization performs no registry write");
 
@@ -383,7 +358,6 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
 #[test]
 fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration() {
     use crate::actor::native::spawn::{SpawnError, Subname};
-    use crate::mail::registry::MailboxEntry;
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -487,17 +461,8 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
         .build_passive()
         .expect("ActualParent boots");
 
-    let parent_id = registry.lookup(ActualParent::NAMESPACE).expect("ActualParent claimed");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(parent_id).expect("parent sink") else {
-        panic!("expected parent inbox");
-    };
-    let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, &bytes, 1));
-
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while !invalid_subname_observed.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    let (_, settled) = chassis.send_tracked(chassis.actor_ref::<ActualParent>(), &Hatch { tag: 1 }, None);
+    await_settled(&settled, "test.checked_spawn.hatch");
 
     // Tripwire: `HandlerSpawnBuilder::stage` validates the named subname
     // *first*, before anything the birth cannot cheaply undo. Every assertion

@@ -7,14 +7,11 @@ use crate::actor::native::ctx::NativeCtx;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
 use crate::mail::MailboxId;
-use crate::mail::registry;
-use crate::testing::{TestChassis, bare_substrate};
+use crate::testing::{TestChassis, await_settled, await_signal, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::Addressable;
+use crossbeam_channel::Sender;
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-use std::time::Instant;
 
 /// Issue 607 Phase 4b verify: a `ctx.monitor(target)` registration
 /// fires exactly one `MonitorNotice` at the watcher when the
@@ -27,7 +24,6 @@ use std::time::Instant;
 #[test]
 fn ctx_monitor_fires_notice_at_target_close() {
     use crate::actor::native::spawn::Subname;
-    use crate::mail::registry::MailboxEntry;
     use aether_actor::ErasedActorRef;
     use aether_actor::HandlesKind;
     use aether_data::Kind;
@@ -46,10 +42,13 @@ fn ctx_monitor_fires_notice_at_target_close() {
 
     // Watcher — handles WatchOrder by registering a monitor;
     // handles MonitorNotice by recording whether the notice's
-    // sender is the reference it monitored and bumping a counter.
+    // sender is the reference it monitored, bumping a counter, and
+    // signalling the test: the notice is a detached send from the
+    // target's close tail, outside any root the test holds.
     struct Watcher {
         notice_count: Arc<AtomicU32>,
         sender_matched: Arc<AtomicBool>,
+        noticed: Sender<()>,
         monitored: Option<ErasedActorRef>,
         handle: Mutex<Option<MonitorHandle>>,
     }
@@ -62,12 +61,18 @@ fn ctx_monitor_fires_notice_at_target_close() {
     impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
     impl aether_actor::Lifecycle<Self> for Watcher {
         type Config = ();
-        type Params = (Arc<AtomicU32>, Arc<AtomicBool>);
+        type Params = (Arc<AtomicU32>, Arc<AtomicBool>, Sender<()>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { notice_count: params.0, sender_matched: params.1, monitored: None, handle: Mutex::new(None) })
+            Ok(Self {
+                notice_count: params.0,
+                sender_matched: params.1,
+                noticed: params.2,
+                monitored: None,
+                handle: Mutex::new(None),
+            })
         }
     }
     impl aether_actor::Declared for Watcher {
@@ -98,6 +103,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
                 <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
                 state.sender_matched.store(ctx.sender() == state.monitored, AtomicOrdering::SeqCst);
                 state.notice_count.fetch_add(1, AtomicOrdering::SeqCst);
+                let _ = state.noticed.send(());
                 return Some(());
             }
             None
@@ -111,76 +117,54 @@ fn ctx_monitor_fires_notice_at_target_close() {
 
     // Spawn target first so the watcher can register against a
     // Live id.
-    let target_id = chassis.spawn_actor::<Target>(Subname::Counter, (), ()).finish_commit().expect("spawn target");
+    let target = chassis.spawn_actor_for_test::<Target>(Subname::Counter, (), ()).finish().expect("spawn target");
 
     let notice_count = Arc::new(AtomicU32::new(0));
     let sender_matched = Arc::new(AtomicBool::new(false));
-    let watcher_id = chassis
-        .spawn_actor::<Watcher>(Subname::Counter, (), (Arc::clone(&notice_count), Arc::clone(&sender_matched)))
-        .finish_commit()
+    let (noticed, notice_rx) = crossbeam_channel::unbounded();
+    let watcher = chassis
+        .spawn_actor_for_test::<Watcher>(
+            Subname::Counter,
+            (),
+            (Arc::clone(&notice_count), Arc::clone(&sender_matched), noticed),
+        )
+        .finish()
         .expect("spawn watcher");
 
-    // Drive the watcher to register the monitor by pushing a
-    // WatchOrder through its sink handler. After this returns
-    // the watcher's handle is stored in `self.handle`.
-    let MailboxEntry::Inbox { handler: watcher_handler, .. } =
-        registry.entry_at(watcher_id).expect("watcher sink registered")
-    else {
-        panic!("expected mailbox entry for watcher");
-    };
-    let order = WatchOrder { target_id: target_id.0 };
-    watcher_handler.enqueue(registry::test_owned_dispatch(<WatchOrder as Kind>::ID, &order.encode_into_bytes(), 1));
-
-    // Wait until the registry sees the monitor entry.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().monitor_count(target_id) == 0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    // The watcher registers the monitor inside its WatchOrder
+    // handler, so the registration lands before the root settles.
+    let (_, settled) = chassis.send_tracked(watcher, &WatchOrder { target_id: target.id().0 }, None);
+    await_settled(&settled, "test.monitor.watch_order");
     assert_eq!(
-        chassis.actor_registry().monitor_count(target_id),
+        chassis.actor_registry().monitor_count(target.id()),
         1,
         "watcher's monitor should be registered against target",
     );
-    assert_eq!(chassis.actor_registry().monitoring_count(watcher_id), 1, "watcher should appear in the reverse index");
+    assert_eq!(
+        chassis.actor_registry().monitoring_count(watcher.id()),
+        1,
+        "watcher should appear in the reverse index"
+    );
 
     // Fire Quit at the target — its handler self-shuts; the
-    // dispatcher's close path runs `close_actor`, which fans out
-    // a MonitorNotice mail to watcher_id.
-    let MailboxEntry::Inbox { handler: target_handler, .. } =
-        registry.entry_at(target_id).expect("target sink registered")
-    else {
-        panic!("expected mailbox entry for target");
-    };
-    target_handler.enqueue(registry::test_owned_dispatch(
-        <Quit as Kind>::ID,
-        &(Quit { tag: 1 }).encode_into_bytes(),
-        1,
-    ));
-
-    // Wait for the notice to land at the watcher.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while notice_count.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    // close path runs `close_actor`, which marks the slot Dead and
+    // fans out a MonitorNotice mail to the watcher.
+    let _ = chassis.send_tracked(target, &Quit { tag: 1 }, None);
+    chassis.await_closed(target.erase());
+    await_signal(&notice_rx, "test.monitor.notice");
     assert_eq!(notice_count.load(AtomicOrdering::SeqCst), 1, "watcher should have received exactly one MonitorNotice");
     assert!(
         sender_matched.load(AtomicOrdering::SeqCst),
         "the MonitorNotice's sender should be the reference the watcher monitored",
     );
 
-    // Wait for target slot to flip Dead (the close path runs
-    // close_actor → mark_dead after fan-out).
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().is_live_at(target_id) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
     assert!(
-        !chassis.actor_registry().is_live_at(target_id),
+        !chassis.actor_registry().is_live_at(target.id()),
         "target slot should transition Live → Dead after close fan-out",
     );
-    assert!(chassis.actor_registry().is_tombstoned(target_id), "target id should be tombstoned");
+    assert!(chassis.actor_registry().is_tombstoned(target.id()), "target id should be tombstoned");
     // Forward index for target was drained.
-    assert_eq!(chassis.actor_registry().monitor_count(target_id), 0, "monitors_of[target] must drain after fan-out");
+    assert_eq!(chassis.actor_registry().monitor_count(target.id()), 0, "monitors_of[target] must drain after fan-out");
 
     drop(chassis);
 }
@@ -192,7 +176,6 @@ fn ctx_monitor_fires_notice_at_target_close() {
 #[test]
 fn watcher_close_prunes_targets_forward_index() {
     use crate::actor::native::spawn::Subname;
-    use crate::mail::registry::MailboxEntry;
     use aether_actor::HandlesKind;
     use aether_data::Kind;
     use std::sync::Mutex;
@@ -297,58 +280,34 @@ fn watcher_close_prunes_targets_forward_index() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let target_id = chassis.spawn_actor::<Target>(Subname::Counter, (), ()).finish_commit().expect("spawn target");
+    let target = chassis.spawn_actor_for_test::<Target>(Subname::Counter, (), ()).finish().expect("spawn target");
     let close_observed = Arc::new(AtomicU32::new(0));
-    let watcher_id = chassis
-        .spawn_actor::<Watcher>(Subname::Counter, (), Arc::clone(&close_observed))
-        .finish_commit()
+    let watcher = chassis
+        .spawn_actor_for_test::<Watcher>(Subname::Counter, (), Arc::clone(&close_observed))
+        .finish()
         .expect("spawn watcher");
 
-    // Watcher registers monitor against target.
-    let MailboxEntry::Inbox { handler: watcher_handler, .. } =
-        registry.entry_at(watcher_id).expect("watcher sink registered")
-    else {
-        panic!("expected mailbox entry for watcher");
-    };
-    let order = WatchOrder { target_id: target_id.0 };
-    watcher_handler.enqueue(registry::test_owned_dispatch(<WatchOrder as Kind>::ID, &order.encode_into_bytes(), 1));
+    // Watcher registers monitor against target inside its handler.
+    let (_, settled) = chassis.send_tracked(watcher, &WatchOrder { target_id: target.id().0 }, None);
+    await_settled(&settled, "test.monitor.watch_order2");
+    assert_eq!(chassis.actor_registry().monitor_count(target.id()), 1);
 
-    // Wait for register to land.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().monitor_count(target_id) == 0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert_eq!(chassis.actor_registry().monitor_count(target_id), 1);
-
-    // Quit watcher — its close path walks `monitoring[watcher]` and
-    // prunes watcher from `monitors_of[target]`.
-    watcher_handler.enqueue(registry::test_owned_dispatch(
-        <Quit as Kind>::ID,
-        &(Quit { tag: 1 }).encode_into_bytes(),
-        1,
-    ));
-
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while close_observed.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    // Quit watcher — its close path runs `unwire`, walks
+    // `monitoring[watcher]` and prunes watcher from
+    // `monitors_of[target]`.
+    let _ = chassis.send_tracked(watcher, &Quit { tag: 1 }, None);
+    chassis.await_closed(watcher.erase());
     assert_eq!(close_observed.load(AtomicOrdering::SeqCst), 1, "watcher's unwire fired exactly once");
 
     // Watcher slot tombstones; target slot still Live; target's
     // forward index drained of the dead watcher.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().is_live_at(watcher_id) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(chassis.actor_registry().is_tombstoned(watcher_id), "watcher tombstoned");
-    assert!(chassis.actor_registry().is_live_at(target_id), "target should still be Live (watcher closed, not target)");
-
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().monitor_count(target_id) != 0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    assert!(chassis.actor_registry().is_tombstoned(watcher.id()), "watcher tombstoned");
+    assert!(
+        chassis.actor_registry().is_live_at(target.id()),
+        "target should still be Live (watcher closed, not target)"
+    );
     assert_eq!(
-        chassis.actor_registry().monitor_count(target_id),
+        chassis.actor_registry().monitor_count(target.id()),
         0,
         "target's monitors_of should drop the dead watcher",
     );

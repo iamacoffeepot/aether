@@ -207,7 +207,8 @@ Require an explicit successful result, then re-run
 `describe_component` and a safe probe. Failure is phase-dependent: validation
 and a failed instantiation preserve the old guest untouched; a state-save,
 carried-context or rehydrate failure reinstalls the old guest after its `unwire`
-and `on_dehydrate` hooks ran, and their effects stay. Observe live behavior
+and `on_dehydrate` hooks ran and runs its `wire` again, and their effects beyond
+what `wire` rebuilds stay. Nothing the failed candidate sent leaves. Observe live behavior
 before deciding whether to retry or roll forward. After an error, both MCP's
 cache and the substrate capability registry describe the old handler set, which
 the reinstated guest may no longer fully serve if its hooks tore down state. Use

@@ -369,7 +369,7 @@ impl<C: Chassis> PassiveChassis<C> {
             let registry = mailer.registry();
             registry.reserve_starting_through_owner(A::NAMESPACE).map_err(|error| owner_boot_error(&error)).and_then(
                 |(mailbox_id, token)| {
-                    let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox();
+                    let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox(mailer);
                     let inbox = SettlingInbox::new_at(mailbox_id, receiver, Arc::clone(mailer));
                     match assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall)
                     {

@@ -156,7 +156,8 @@ observation rather than intent. The splice is structural, so there is no drain
 argument to lengthen or retry. Validation and instantiation
 errors preserve the old guest untouched; a later state-save, carried-context or
 rehydrate failure reinstalls the old guest after its `unwire` and `on_dehydrate`
-hooks ran, and whatever those hooks tore down stays gone.
+hooks ran and runs its `wire` again, and whatever those hooks tore down beyond
+what `wire` rebuilds stays gone. Nothing the failed candidate sent leaves.
 
 The phase table and stale-introspection limits are in
 [Replacement failure states](components/replacement-failure-states.md).

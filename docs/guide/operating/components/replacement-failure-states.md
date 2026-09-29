@@ -3,8 +3,10 @@
 `replace_component` preserves a trampoline mailbox on success, and a failed
 replace leaves the old guest installed (or an already-empty post-drop slot
 empty), but an error is not a clean rollback signal. Depending on which phase
-failed, the old guest may already have run its `unwire` and `on_dehydrate` hooks,
-and the candidate may have sent mail from `on_rehydrate`; neither is undone.
+failed, the old guest may already have run its `unwire` and `on_dehydrate` hooks.
+It then runs `wire` again, but whatever those hooks tore down beyond what `wire`
+rebuilds stays gone. Nothing the candidate sent leaves: its mail is held until
+the replace commits, and a failed candidate's mail is discarded.
 Introspection can also describe a retained capability snapshot rather than the
 state the installed guest is actually in.
 
@@ -18,9 +20,9 @@ replace, and drop behavior.
 | new wasm compile, manifest parse, or export selection | prior slot is unchanged: old guest or an already-empty post-drop slot | existing descriptions still reflect the prior registry snapshot, not a new guest |
 | replacement drops or changes a handler row of the hosted type, or drops its `#[fallback]` (ADR-0231 §5) | prior slot is unchanged: old guest or empty post-drop slot | existing descriptions still reflect the prior registry snapshot, not a new guest |
 | new guest instantiation failure (its `init` fails) | prior slot is unchanged: the old guest never ran a hook, or the empty post-drop slot stays empty | existing descriptions still reflect the prior registry snapshot, not a new guest |
-| `save_state` host-call rejection during dehydrate | old guest object is restored after its unwire/dehydrate hooks already ran | old description remains the best snapshot, but the guest may have changed its own lifecycle state |
-| replacement does not declare the kind of a request context the old guest carries (ADR-0139 §4) | old guest object is restored after its unwire/dehydrate hooks already ran, keeping its contexts, pending replies and counters | old description remains the best snapshot, but the guest may have changed its own lifecycle state |
-| new guest rehydrate failure | old guest object is restored after its unwire/dehydrate hooks already ran, with its pending replies and counters, still hosting its own module and type; mail the new guest sent from `on_rehydrate` is not recalled | capability re-registration has not run, so the old description stays, but the guest may have changed its own lifecycle state |
+| `save_state` host-call rejection during dehydrate | old guest object is restored after its unwire/dehydrate hooks already ran, and its `wire` runs again | old description remains the best snapshot, but the guest may have changed its own lifecycle state |
+| replacement does not declare the kind of a request context the old guest carries (ADR-0139 §4) | old guest object is restored after its unwire/dehydrate hooks already ran, keeping its contexts, pending replies and counters, and its `wire` runs again | old description remains the best snapshot, but the guest may have changed its own lifecycle state |
+| new guest rehydrate failure | old guest object is restored after its unwire/dehydrate hooks already ran, with its pending replies and counters, still hosting its own module and type, and its `wire` runs again; nothing the new guest sent from `init` or `on_rehydrate` leaves | capability re-registration has not run, so the old description stays, but the guest may have changed its own lifecycle state |
 | successful replacement | new guest remains and new capabilities are registered | MCP refreshes its cache from the success result |
 
 The exact phase matters more than the generic `Err` shape. Do not say

@@ -11,10 +11,11 @@ use std::path::Path;
 
 use aether_actor::ErasedActorRef;
 use aether_component::ComponentHostCapability;
+use aether_data::ErasedActorPath;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DescribeComponent, DescribeComponentResult, LoadComponent};
+use aether_kinds::{DescribeComponent, DescribeComponentResult, LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 use std::fs;
 
@@ -24,8 +25,8 @@ use std::fs;
 use aether_test_fixtures_kinds as _;
 
 /// Load `probe_with_config` with `config` bytes, assert it advertises its
-/// config kind, and hand back the loaded guest's reference.
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, config: Vec<u8>) -> ErasedActorRef {
+/// config kind, and hand back the loaded guest's reference and path.
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, config: Vec<u8>) -> (ErasedActorRef, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let load = LoadComponent { wasm, name: None, config, export: Some("test.probe_with_config".to_owned()) };
     let (probe, path) =
@@ -47,7 +48,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, config: Vec<u8>)
     assert_eq!(cfg.id, <ProbeConfig as Kind>::ID);
     assert_eq!(cfg.name, <ProbeConfig as Kind>::NAME);
 
-    probe
+    (probe, path)
 }
 
 /// Ask the loaded `probe_with_config` guest which config its `init` saw.
@@ -67,7 +68,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let probe = load_probe(&mut harness, &wasm_path, Vec::new());
+    let (probe, _) = load_probe(&mut harness, &wasm_path, Vec::new());
 
     let echo = echo_config(&mut harness, probe);
     let expected = ProbeConfig::default();
@@ -92,9 +93,45 @@ fn typed_config_guest_with_config_bytes_round_trips() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let config = ProbeConfig { seed: 0xABCD_1234, label: "c2-round-trip".to_owned() };
-    let probe = load_probe(&mut harness, &wasm_path, config.encode_into_bytes());
+    let (probe, _) = load_probe(&mut harness, &wasm_path, config.encode_into_bytes());
 
     let echo = echo_config(&mut harness, probe);
     assert_eq!(echo.seed, 0xABCD_1234, "seed round-trips through init");
     assert_eq!(echo.label, "c2-round-trip", "label round-trips through init");
+}
+
+/// ADR-0241 §7: a replace that supplies no config builds its candidate from
+/// the config the guest was spawned with.
+#[test]
+fn a_replace_without_config_reuses_the_spawn_config() {
+    // Catches: the trampoline forgets its spawn config, so a replace with no
+    // config hands the typed candidate empty bytes and it boots from
+    // `ProbeConfig::default()`.
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
+        return;
+    };
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let config = ProbeConfig { seed: 0x7085_0001, label: "spawn-config".to_owned() };
+    let (probe, path) = load_probe(&mut harness, &wasm_path, config.encode_into_bytes());
+
+    let replace = ReplaceComponent {
+        target: path,
+        wasm: fs::read(&wasm_path).expect("read fixture wasm"),
+        drain_timeout_ms: None,
+        config: Vec::new(),
+        export: None,
+    };
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let replaced = harness
+        .execute(vec![("replace", HarnessOp::send_and_await_reply(&host, &replace))])
+        .expect("replace sequence")
+        .reply::<ReplaceResult>("replace")
+        .expect("decode ReplaceResult");
+    assert!(matches!(replaced, ReplaceResult::Ok { .. }), "the replace commits: {replaced:?}");
+
+    assert_eq!(
+        echo_config(&mut harness, probe),
+        ConfigEcho { seed: config.seed, label: config.label },
+        "the candidate's init sees the spawn config"
+    );
 }
