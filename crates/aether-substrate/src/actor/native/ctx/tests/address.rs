@@ -100,14 +100,19 @@ fn actor_ref_mints_the_root_fold_for_a_one_dependency() {
 
 /// `sender` mints the stamped dispatch source only when it holds a route in
 /// this substrate's registry: `Some` of the very actor whose real send the
-/// turn handles, and `None` for a sourceless chassis push. Owned logic: the
-/// source classification and the route read `sender` performs itself.
+/// turn handles, `None` for a component source routed only in another
+/// substrate, and `None` for a sourceless chassis push. The unrouted source
+/// is what a chassis push answered to a foreign actor stamps. Owned logic:
+/// the source classification and the route read `sender` performs itself.
 #[test]
 fn sender_mints_only_a_routed_component_source() {
     let mut rig = ReaderRig::boot();
     let pinger = rig.pinger("routed");
+    let (foreign_registry, _foreign_mailer) = bare_substrate();
+    let foreign = registered_ref(&foreign_registry, "test.native.sender_foreign", discharging());
 
     rig.ping(pinger);
+    rig.knock(Some(foreign));
     rig.knock(None);
 
     let senders = rig.senders();
@@ -116,7 +121,8 @@ fn sender_mints_only_a_routed_component_source() {
         Some(pinger.erase()),
         "a routed sender mints its own reference"
     );
-    assert!(senders[1].is_none(), "a sourceless dispatch has no sender reference");
+    assert!(senders[1].is_none(), "a component source with no route here has no sender reference");
+    assert!(senders[2].is_none(), "a sourceless dispatch has no sender reference");
 }
 
 /// `resolve_path` proves a path whose route is `Live` to the very reference

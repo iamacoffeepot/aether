@@ -5,9 +5,11 @@
 //!
 //! Each verb runs inside a handler turn of the booted [`SendProbe`], whose
 //! trigger kinds each run one verb and record the lineage the turn ran under.
-//! The sends land in finishing sinks, one standing at [`StubActor`]'s
+//! The plain sends land in finishing sinks, one standing at [`StubActor`]'s
 //! namespace, where the sender's declared dependency folds, and one standing
-//! in for a [`ManualCastRelay`].
+//! in for a [`ManualCastRelay`]. The context sends go to the pooled
+//! [`Bouncer`], whose answer runs a real reply turn on the probe that takes
+//! the stored context back.
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
@@ -25,9 +27,9 @@ use crate::chassis::error::BootError;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::mail::{Source, SourceAddr};
-use crate::testing::{PumpedDriver, bare_substrate, boot_bare_test_chassis};
+use crate::testing::{PumpedDriver, bare_substrate, boot_test_chassis_with};
 
-use super::support::{CastOnly, NativeRequestContext, StubActor, sink};
+use super::support::{Bouncer, CastOnly, NativeRequestContext, Poke, Poked, StubActor, sink};
 
 #[aether_actor::protocol]
 trait CastRelay {
@@ -139,21 +141,36 @@ fn last_sent<M: ReplyMode>(ctx: &NativeCtx<'_, SendProbe, M>) -> MailId {
     MailId::new(ctx.binding.self_mailbox(), ctx.prev_correlation())
 }
 
-/// A pumped root that declares [`StubActor`], holds a [`ManualCastRelay`]
-/// proof, and runs one send verb per trigger.
+/// What one [`SendProbe`] reply turn read off its ctx.
+#[derive(Debug, Clone, PartialEq)]
+struct Reply {
+    /// The request the reply answers.
+    answers: Option<RequestId>,
+    /// The root of the chain the reply ran under.
+    root: Option<MailId>,
+    /// The actor that answered.
+    sender: Option<ErasedActorRef>,
+    /// The context the reply turn's `take_context` recovered.
+    taken: Option<NativeRequestContext>,
+}
+
+/// A pumped root that declares [`StubActor`] and [`Bouncer`], holds a
+/// [`ManualCastRelay`] proof, runs one send verb per trigger, and takes the
+/// context back on each [`Poked`] reply.
 struct SendProbe {
     relay: ActorRef<ManualCastRelay>,
     turns: Vec<Turn>,
+    replies: Vec<Reply>,
 }
 
-#[aether_actor::actor(singleton, root, depends(StubActor))]
+#[aether_actor::actor(singleton, root, depends(StubActor, Bouncer))]
 impl NativeActor for SendProbe {
     const NAMESPACE: &'static str = "test.native_send.sender";
     type Config = ();
     type Params = ActorRef<ManualCastRelay>;
 
     fn init((): (), relay: ActorRef<ManualCastRelay>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { relay, turns: Vec::new() })
+        Ok(Self { relay, turns: Vec::new(), replies: Vec::new() })
     }
 
     #[handler::single]
@@ -164,21 +181,16 @@ impl NativeActor for SendProbe {
 
     #[handler::single]
     fn on_send_to_with_context(&mut self, ctx: &mut NativeCtx<'_>, trigger: SendToWithContext) {
-        let stub = ctx.actor_ref::<StubActor>();
-        let borrowed = &stub;
-        let sent =
-            ctx.send_to_with_context(borrowed, &CastOnly { code: 2 }, NativeRequestContext { value: trigger.value });
+        let bouncer = ctx.actor_ref::<Bouncer>();
+        let borrowed = &bouncer;
+        let sent = ctx.send_to_with_context(borrowed, &Poke, NativeRequestContext { value: trigger.value });
         self.turns.push(Turn::of(ctx, vec![Some(sent)], Vec::new()));
     }
 
     #[handler::single]
     fn on_send_detached_to_with_context(&mut self, ctx: &mut NativeCtx<'_>, trigger: SendDetachedToWithContext) {
-        let stub = ctx.actor_ref::<StubActor>().erase();
-        let sent = ctx.send_detached_to_with_context(
-            stub,
-            &CastOnly { code: 3 },
-            NativeRequestContext { value: trigger.value },
-        );
+        let bouncer = ctx.actor_ref::<Bouncer>().erase();
+        let sent = ctx.send_detached_to_with_context(bouncer, &Poke, NativeRequestContext { value: trigger.value });
         self.turns.push(Turn::of(ctx, vec![Some(sent)], vec![sent]));
     }
 
@@ -218,9 +230,19 @@ impl NativeActor for SendProbe {
 
     #[handler::single]
     fn on_send_with_context(&mut self, ctx: &mut NativeCtx<'_>, trigger: SendWithContext) {
-        let sent =
-            ctx.send_with_context::<StubActor>(&CastOnly { code: 7 }, NativeRequestContext { value: trigger.value });
+        let sent = ctx.send_with_context::<Bouncer>(&Poke, NativeRequestContext { value: trigger.value });
         self.turns.push(Turn::of(ctx, vec![Some(sent)], Vec::new()));
+    }
+
+    #[handler::single]
+    fn on_poked(&mut self, ctx: &mut NativeCtx<'_>, _poked: Poked) {
+        let taken = ctx.take_context::<NativeRequestContext>();
+        self.replies.push(Reply {
+            answers: ctx.in_reply_to(),
+            root: ctx.in_flight_root(),
+            sender: ctx.sender(),
+            taken,
+        });
     }
 
     #[handler::single]
@@ -236,10 +258,12 @@ impl NativeActor for SendProbe {
     }
 }
 
-/// A booted [`SendProbe`] beside the sink at [`StubActor`]'s namespace and the
-/// sink its [`ManualCastRelay`] proof points at.
+/// A booted [`SendProbe`] beside its pooled [`Bouncer`], the sink at
+/// [`StubActor`]'s namespace, and the sink its [`ManualCastRelay`] proof
+/// points at.
 struct Rig {
     driver: PumpedDriver<SendProbe>,
+    bouncer: ErasedActorRef,
     stub: ErasedActorRef,
     stub_mail: Receiver<Envelope>,
     relay: ErasedActorRef,
@@ -254,12 +278,13 @@ impl Rig {
         let (stub, stub_mail) = sink(&registry, &mailer, StubActor::NAMESPACE);
         let (relay, relay_mail) = sink(&registry, &mailer, "test.native_send.relay_sink");
         let driver = PumpedDriver::boot(
-            boot_bare_test_chassis(&registry, &mailer),
+            boot_test_chassis_with::<Bouncer>(&registry, &mailer, (), ()),
             (),
             Registry::declared_dependency::<ManualCastRelay>(relay.id()),
         );
+        let bouncer = driver.chassis().actor_ref::<Bouncer>().erase();
 
-        Self { driver, stub, stub_mail, relay, relay_mail, registry, mailer }
+        Self { driver, bouncer, stub, stub_mail, relay, relay_mail, registry, mailer }
     }
 
     /// Push `trigger` to the sender as a chassis root answered to `reply`,
@@ -275,24 +300,22 @@ impl Rig {
         (root, turn)
     }
 
-    /// Take the context the sender's binding stored under `request`.
-    fn take_context(&mut self, request: MailId) -> Option<NativeRequestContext> {
-        self.driver
-            .host_turn(|_sender, ctx| {
-                ctx.binding.take_request_context::<NativeRequestContext>(RequestId(request.correlation_id))
-            })
-            .flatten()
+    /// What the sender's last reply turn read.
+    fn last_reply(&self) -> Reply {
+        self.driver.read_state(|sender| sender.replies.last().cloned()).flatten().expect("the reply turn ran")
     }
 }
 
 /// ADR-0232 §1: the flat `send_to` family sends through a held reference.
-/// `send_to` and `send_to_with_context` land at the reference's id under the
-/// turn's root with the handled mail as parent, while
-/// `send_detached_to_with_context` roots its own chain. Both context variants
-/// store the context under the correlation of the mail they routed, which is
-/// how the bloomery driver's replies find their way back to the continuation
-/// that sent them. The legs cover all three `Target` impls: a typed reference
-/// by value, a borrow of one, and an erased proof.
+/// `send_to` lands at the reference's id under the turn's root with the
+/// handled mail as parent. The context variants reach the reference's actor,
+/// `send_to_with_context` on the turn's chain and
+/// `send_detached_to_with_context` on the chain its own mail roots, and both
+/// store the context under the correlation of the mail they routed: the
+/// answering actor's real reply turn takes it back, which is how the bloomery
+/// driver's replies find their way back to the continuation that sent them.
+/// The legs cover all three `Target` impls: a typed reference by value, a
+/// borrow of one, and an erased proof.
 #[test]
 fn send_to_family_inherits_or_detaches_and_stores_context() {
     let mut rig = Rig::boot();
@@ -307,28 +330,28 @@ fn send_to_family_inherits_or_detaches_and_stores_context() {
 
     let (root, turn) = rig.run(&SendToWithContext { value: 21 }, None);
     let inherited_id = turn.emitted[0].expect("send_to_with_context returns its id");
-    let inherited = rig.stub_mail.try_recv().expect("send_to_with_context routed at flush");
-    assert_eq!(inherited.mail_id, Some(inherited_id), "the returned id is the routed mail's");
-    assert_eq!(inherited.recipient, rig.stub.id(), "send_to_with_context addresses the reference's id");
-    assert_eq!(inherited.root, Some(root), "send_to_with_context inherits the caller's root");
-    assert_eq!(inherited.parent_mail, turn.mail, "send_to_with_context's parent is the handled mail");
     assert_eq!(
-        rig.take_context(inherited_id),
-        Some(NativeRequestContext { value: 21 }),
-        "the context is stored under the routed mail's correlation",
+        rig.last_reply(),
+        Reply {
+            answers: Some(RequestId(inherited_id.correlation_id)),
+            root: Some(root),
+            sender: Some(rig.bouncer),
+            taken: Some(NativeRequestContext { value: 21 }),
+        },
+        "the reference's actor answers on the caller's chain, and its reply takes the context back",
     );
 
     let (_root, turn) = rig.run(&SendDetachedToWithContext { value: 34 }, None);
     let detached_id = turn.emitted[0].expect("send_detached_to_with_context returns its id");
-    let detached = rig.stub_mail.try_recv().expect("send_detached_to_with_context routed at flush");
-    assert_eq!(detached.mail_id, Some(detached_id), "the returned id is the routed mail's");
-    assert_eq!(detached.recipient, rig.stub.id(), "send_detached_to_with_context addresses the proof's id");
-    assert!(detached.parent_mail.is_none(), "send_detached_to_with_context carries no parent edge");
-    assert_eq!(detached.root, detached.mail_id, "send_detached_to_with_context is its own root");
     assert_eq!(
-        rig.take_context(detached_id),
-        Some(NativeRequestContext { value: 34 }),
-        "the detached context is stored under the routed mail's correlation",
+        rig.last_reply(),
+        Reply {
+            answers: Some(RequestId(detached_id.correlation_id)),
+            root: Some(detached_id),
+            sender: Some(rig.bouncer),
+            taken: Some(NativeRequestContext { value: 34 }),
+        },
+        "the proof's actor answers on the chain the detached mail roots, and its reply takes the context back",
     );
 }
 
@@ -428,10 +451,11 @@ fn flat_send_detached_reaches_the_declared_dependency_on_a_fresh_chain() {
 }
 
 /// ADR-0232 §1: the flat `send::<R>` and `send_with_context::<R>` on a ctx
-/// typed by an actor that declares `R` land at the position the dependency's
-/// proof points to, under the handler's in-flight root with the handled mail
-/// as parent (ADR-0080 §7), and `send_with_context` stores its context under
-/// the routed mail's correlation. A body copied from `send_detached` with no
+/// typed by an actor that declares `R` reach the actor the dependency's proof
+/// points to under the handler's in-flight root (ADR-0080 §7); `send` lands
+/// with the handled mail as parent, and `send_with_context` stores its
+/// context under the routed mail's correlation, which the answering actor's
+/// real reply turn takes back. A body copied from `send_detached` with no
 /// lineage, a wrong recipient, or a context stored under another correlation
 /// fails here rather than only in the audio and text caps' fs round trips.
 #[test]
@@ -447,15 +471,15 @@ fn flat_send_and_send_with_context_reach_the_declared_dependency_on_the_handlers
 
     let (root, turn) = rig.run(&SendWithContext { value: 55 }, None);
     let context_id = turn.emitted[0].expect("send_with_context returns its id");
-    let with_context = rig.stub_mail.try_recv().expect("flat send_with_context routed at flush");
-    assert_eq!(with_context.mail_id, Some(context_id), "the returned id is the routed mail's");
-    assert_eq!(with_context.recipient, rig.stub.id(), "flat send_with_context addresses the declared dependency");
-    assert_eq!(with_context.root, Some(root), "flat send_with_context inherits the caller's root");
-    assert_eq!(with_context.parent_mail, turn.mail, "flat send_with_context's parent is the handled mail");
     assert_eq!(
-        rig.take_context(context_id),
-        Some(NativeRequestContext { value: 55 }),
-        "the context is stored under the routed mail's correlation",
+        rig.last_reply(),
+        Reply {
+            answers: Some(RequestId(context_id.correlation_id)),
+            root: Some(root),
+            sender: Some(rig.bouncer),
+            taken: Some(NativeRequestContext { value: 55 }),
+        },
+        "the declared dependency answers on the caller's chain, and its reply takes the context back",
     );
 }
 

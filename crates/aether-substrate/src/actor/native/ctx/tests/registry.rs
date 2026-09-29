@@ -11,7 +11,7 @@ use aether_data::{ErasedActorPath, Kind};
 use crate::mail::registry::{InboxHandler, OwnedDispatch};
 use crate::testing::{drop_ref, registered_ref};
 
-use super::support::{HeldRig, LedgerRead, Pinger, ReaderRig, StageReq, TestReply};
+use super::support::{HeldRig, LedgerRead, Ping, Pinger, ReaderRig, StageReq, TestReply};
 
 fn discharging() -> Arc<dyn InboxHandler> {
     Arc::new(|dispatch: OwnedDispatch| dispatch.discharge())
@@ -40,7 +40,8 @@ fn actor_path_names_a_peer_before_and_after_it_departs() {
 /// reference `sender` hands a handler must name one. A real send stamps the
 /// sending actor's position on the envelope; the receiving turn's `sender`
 /// proves exactly that actor, and its path answers the sender's name — while
-/// the sender is live and after it departs.
+/// the sender is live, and on a knock it sent that the reader handles only
+/// after the sender has departed.
 #[test]
 fn actor_path_names_the_sender_a_real_dispatch_stamps() {
     let mut rig = ReaderRig::boot();
@@ -52,17 +53,17 @@ fn actor_path_names_the_sender_a_real_dispatch_stamps() {
     let stamped = rig.senders()[0].clone().expect("a routed actor's send carries its sender");
     assert_eq!(stamped, (pinger.erase(), expected.clone()), "the turn proves the sending actor and names it");
 
+    // The pinger handles `Ping` before `Leave`, so its knock waits in the
+    // pumped reader's inbox while the pinger closes; settling the ping's
+    // chain then runs the reader's turn after its sender departed.
+    let knock = rig.driver.send_tracked(pinger, &Ping, None);
     rig.close(pinger);
-
-    let departed = rig.driver.host_turn(|_reader, ctx| ctx.actor_path(pinger.erase()));
-    assert_eq!(departed, Some(expected.clone()), "a departed sender's path is still named");
-
-    rig.knock(Some(pinger.erase()));
+    rig.driver.settle(&[knock]);
 
     assert_eq!(
         rig.senders()[1],
         Some((pinger.erase(), expected)),
-        "a departed sender still holds its route record, so a turn it stamps still proves it",
+        "a departed sender still holds its route record, so a knock it sent before departing still proves it",
     );
 }
 
