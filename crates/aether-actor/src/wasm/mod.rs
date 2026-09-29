@@ -1232,9 +1232,10 @@ macro_rules! __export_internal {
         }
 
         /// # Safety
-        /// Called by the substrate exactly once after `init` returns
-        /// Ok and the component's mailbox is published, before the
-        /// first `receive` (issue 584 Phase 2b, ADR-0079 amended).
+        /// Called by the substrate once after `init` returns Ok and the
+        /// component's mailbox is published, before the first `receive`
+        /// (issue 584 Phase 2b, ADR-0079 amended), and again on an
+        /// instance a republish reinstates after its `unwire` (ADR-0241 §7).
         /// Mail-allowed — peer mailboxes are addressable. Receives the
         /// component's own mailbox id so the SDK ctx can self-address.
         ///
