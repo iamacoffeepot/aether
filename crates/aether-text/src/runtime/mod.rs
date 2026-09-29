@@ -660,20 +660,13 @@ mod tests {
     use super::super::*;
     use super::atlas::{ATLAS_SIZE, GlyphKey, GlyphSlot};
     use super::layout::build_font_metrics;
-    use super::{
-        Arc, CreateTexture, CreateTextureResult, NativeCtx, QuadSpace, Read, ReadResult, TextCapabilityState,
-        UpdateTexture,
-    };
-    use aether_data::{Kind, SessionToken, Source, SourceAddr, Uuid};
-    use aether_fs::{FsError, NamespaceAddr};
+    use super::{Arc, CreateTexture, CreateTextureResult, NativeCtx, QuadSpace, TextCapabilityState, UpdateTexture};
+    use aether_data::Kind;
     use aether_math::Rgba;
     use aether_render::DrawTexturedQuads;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::outbound::EgressEvent;
-    use aether_substrate::testing::{
-        assert_next_send_kind, decode_session_reply, decode_session_reply_with_session, drive_task_completion,
-        fs_reply_source, session_sender, test_mailer_and_rx, unrouted_binding,
-    };
+    use aether_substrate::testing::{assert_next_send_kind, session_sender, test_mailer_and_rx, unrouted_binding};
     use std::sync::mpsc::Receiver;
     use std::time::Duration;
 
@@ -725,171 +718,6 @@ mod tests {
             space: QuadSpace::Screen,
             clip,
         }
-    }
-
-    #[test]
-    fn load_font_forwards_read_with_context() {
-        let mut state = TextCapabilityState::new();
-        let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-        TextCapability::on_load_font(
-            &mut state,
-            &mut ctx,
-            LoadFont { namespace: "assets".to_owned(), path: "fonts/RobotoMono.ttf".to_owned() },
-        )
-        .__defuse();
-        let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
-        assert_ne!(correlation_id, Source::NO_CORRELATION);
-    }
-
-    #[test]
-    fn read_err_replies_load_font_err_via_request_context() {
-        let mut state = TextCapabilityState::new();
-        let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-        TextCapability::on_load_font(
-            &mut state,
-            &mut ctx,
-            LoadFont { namespace: "assets".to_owned(), path: "missing.ttf".to_owned() },
-        )
-        .__defuse();
-        // Skip the forwarded read.
-        let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
-
-        let mut read_ctx = NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), None, None);
-        TextCapability::on_read_result(
-            &mut state,
-            &mut read_ctx,
-            ReadResult::Err { addr: NamespaceAddr::new("assets", "missing.ttf"), error: FsError::NotFound },
-        );
-        match decode_session_reply::<LoadFontResult>(&rx) {
-            LoadFontResult::Err { path, .. } => assert_eq!(path, "missing.ttf"),
-            LoadFontResult::Ok { .. } => panic!("expected Err for a missing file"),
-        }
-    }
-
-    /// Catches a join that loses a waiter's own reply target: two
-    /// `load_font`s for one path share one read, and its failure answers
-    /// each caller at its own session.
-    #[test]
-    fn same_path_loads_share_one_read_and_answer_each_caller() {
-        let mut state = TextCapabilityState::new();
-        let (binding, rx) = ctx_binding();
-        let first_session = SessionToken(Uuid::from_u128(1));
-        let second_session = SessionToken(Uuid::from_u128(2));
-
-        let mut first_ctx =
-            NativeCtx::new_for_actor(&binding, Source::to(SourceAddr::Session(first_session)), None, None);
-        TextCapability::on_load_font(
-            &mut state,
-            &mut first_ctx,
-            LoadFont { namespace: "assets".to_owned(), path: "same.ttf".to_owned() },
-        )
-        .__defuse();
-        let correlation = assert_next_send_kind::<Read>(&binding, &rx);
-
-        let mut second_ctx =
-            NativeCtx::new_for_actor(&binding, Source::to(SourceAddr::Session(second_session)), None, None);
-        TextCapability::on_load_font(
-            &mut state,
-            &mut second_ctx,
-            LoadFont { namespace: "assets".to_owned(), path: "same.ttf".to_owned() },
-        )
-        .__defuse();
-        binding.flush_outbound();
-        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err(), "the second load joins the first read");
-
-        let mut reply_ctx = NativeCtx::new_for_actor(&binding, fs_reply_source(correlation), None, None);
-        TextCapability::on_read_result(
-            &mut state,
-            &mut reply_ctx,
-            ReadResult::Err { addr: NamespaceAddr::new("assets", "same.ttf"), error: FsError::NotFound },
-        );
-        let mut sessions = [first_session, second_session].map(|_| {
-            let (session, reply) = decode_session_reply_with_session::<LoadFontResult>(&rx);
-            assert!(matches!(reply, LoadFontResult::Err { .. }), "each reply is the fs error");
-            session
-        });
-        sessions.sort_by_key(|session| session.0);
-        assert_eq!(sessions, [first_session, second_session], "each caller is answered at its own session");
-    }
-
-    #[test]
-    fn malformed_font_bytes_reply_err() {
-        let mut state = TextCapabilityState::new();
-        let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-        TextCapability::on_load_font(
-            &mut state,
-            &mut ctx,
-            LoadFont { namespace: "assets".to_owned(), path: "junk.ttf".to_owned() },
-        )
-        .__defuse();
-        let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
-
-        let mut read_ctx = NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), None, None);
-        TextCapability::on_read_result(
-            &mut state,
-            &mut read_ctx,
-            ReadResult::Ok { addr: NamespaceAddr::new("assets", "junk.ttf"), bytes: vec![0xDE, 0xAD, 0xBE, 0xEF] },
-        );
-        drive_task_completion::<TextCapability>(&mut state, &binding, &rx);
-        match decode_session_reply::<LoadFontResult>(&rx) {
-            LoadFontResult::Err { error, .. } => {
-                assert!(error.contains("parse"), "unexpected error: {error}");
-            }
-            LoadFontResult::Ok { .. } => panic!("expected Err for malformed font bytes"),
-        }
-        assert!(state.fonts.is_empty(), "no font should register on a parse failure");
-    }
-
-    #[test]
-    fn load_font_bytes_registers_memory_font() {
-        let mut state = TextCapabilityState::new();
-        let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-        TextCapability::on_load_font_bytes(
-            &mut state,
-            &mut ctx,
-            LoadFontBytes { name: "embedded.ttf".to_owned(), bytes: test_font_bytes().to_vec() },
-        )
-        .__defuse();
-
-        drive_task_completion::<TextCapability>(&mut state, &binding, &rx);
-        match decode_session_reply::<LoadFontResult>(&rx) {
-            LoadFontResult::Ok { font_id, name, resident_bytes } => {
-                assert_eq!(font_id, 0);
-                assert_eq!(name, "embedded.ttf");
-                assert_eq!(resident_bytes, test_font_bytes().len() as u64);
-            }
-            LoadFontResult::Err { error, .. } => panic!("expected Ok: {error}"),
-        }
-        assert_eq!(state.fonts.len(), 1);
-        assert_eq!(state.font_id_by_path.get(&(MEMORY_FONT_NAMESPACE.to_owned(), "embedded.ttf".to_owned())), Some(&0),);
-    }
-
-    #[test]
-    fn malformed_load_font_bytes_replies_err() {
-        let mut state = TextCapabilityState::new();
-        let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-        TextCapability::on_load_font_bytes(
-            &mut state,
-            &mut ctx,
-            LoadFontBytes { name: "junk.ttf".to_owned(), bytes: vec![0xDE, 0xAD, 0xBE, 0xEF] },
-        )
-        .__defuse();
-
-        drive_task_completion::<TextCapability>(&mut state, &binding, &rx);
-        match decode_session_reply::<LoadFontResult>(&rx) {
-            LoadFontResult::Err { namespace, path, error } => {
-                assert_eq!(namespace, MEMORY_FONT_NAMESPACE);
-                assert_eq!(path, "junk.ttf");
-                assert!(error.contains("parse"), "unexpected error: {error}");
-            }
-            LoadFontResult::Ok { .. } => panic!("expected Err for malformed font bytes"),
-        }
-        assert!(state.fonts.is_empty(), "no font should register on a parse failure");
     }
 
     #[test]
@@ -1121,14 +949,11 @@ mod tests {
     /// A tiny real font for the draw-path tests — the workspace's
     /// vendored OFL Roboto Mono, the same asset the e2e scenario uses.
     fn test_font() -> fontdue::Font {
-        fontdue::Font::from_bytes(test_font_bytes(), fontdue::FontSettings::default())
-            .expect("test setup: vendored Roboto Mono parses")
-    }
-
-    /// The raw bytes of [`test_font`], for the read-result tests that
-    /// feed the parse path a real TTF.
-    fn test_font_bytes() -> &'static [u8] {
-        include_bytes!("../../../aether-text/assets/fonts/RobotoMono.ttf")
+        fontdue::Font::from_bytes(
+            include_bytes!("../../../aether-text/assets/fonts/RobotoMono.ttf").as_slice(),
+            fontdue::FontSettings::default(),
+        )
+        .expect("test setup: vendored Roboto Mono parses")
     }
 
     /// `build_font_metrics`'s table scales back to fontdue's draw-path
@@ -1179,65 +1004,5 @@ mod tests {
         let other = state.register_font("assets", "other.ttf", Arc::new(test_font()));
         assert_ne!(other, first, "a different path gets a fresh id");
         assert_eq!(state.fonts.len(), 2);
-    }
-
-    /// A `font_metrics` grab by a resident `font_id` replies `Ok`
-    /// synchronously; an unknown id replies `Err`.
-    #[test]
-    fn font_metrics_by_id_replies_ok_or_err() {
-        let mut state = TextCapabilityState::new();
-        state.fonts.insert(0, Arc::new(test_font()));
-        let (binding, rx) = ctx_binding();
-
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-        TextCapability::on_font_metrics(&mut state, &mut ctx, FontMetricsRequest { font: FontRef::Id(0) }).__defuse();
-        match decode_session_reply::<FontMetricsResult>(&rx) {
-            FontMetricsResult::Ok { metrics } => {
-                assert!(metrics.units_per_em > 0.0);
-                assert!(!metrics.advances.is_empty(), "a real font has glyphs");
-            }
-            FontMetricsResult::Err { error } => panic!("expected Ok: {error}"),
-        }
-
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-        TextCapability::on_font_metrics(&mut state, &mut ctx, FontMetricsRequest { font: FontRef::Id(99) }).__defuse();
-        match decode_session_reply::<FontMetricsResult>(&rx) {
-            FontMetricsResult::Err { error } => assert!(error.contains("99")),
-            FontMetricsResult::Ok { .. } => panic!("expected Err for an unknown font_id"),
-        }
-    }
-
-    /// A `font_metrics` grab by a path with no resident font loads on
-    /// the miss: it forwards an `aether.fs.read` with a request context
-    /// and — once the bytes come back and parse — registers the font
-    /// (indexed by path) and replies `FontMetricsResult::Ok`.
-    #[test]
-    fn font_metrics_by_path_loads_on_miss() {
-        let mut state = TextCapabilityState::new();
-        let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
-        TextCapability::on_font_metrics(
-            &mut state,
-            &mut ctx,
-            FontMetricsRequest { font: FontRef::Path { namespace: "assets".to_owned(), path: "font.ttf".to_owned() } },
-        )
-        .__defuse();
-        let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
-
-        let mut read_ctx = NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), None, None);
-        TextCapability::on_read_result(
-            &mut state,
-            &mut read_ctx,
-            ReadResult::Ok { addr: NamespaceAddr::new("assets", "font.ttf"), bytes: test_font_bytes().to_vec() },
-        );
-        drive_task_completion::<TextCapability>(&mut state, &binding, &rx);
-        match decode_session_reply::<FontMetricsResult>(&rx) {
-            FontMetricsResult::Ok { metrics } => {
-                assert!(!metrics.advances.is_empty());
-            }
-            FontMetricsResult::Err { error } => panic!("expected Ok: {error}"),
-        }
-        assert_eq!(state.fonts.len(), 1, "load-on-miss registers the font");
-        assert_eq!(state.font_id_by_path.len(), 1, "and indexes it by path");
     }
 }

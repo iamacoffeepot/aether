@@ -253,6 +253,69 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     );
 }
 
+/// A capture with no pre-mails for the offscreen target: it parks and is
+/// answered on the next frame.
+fn offscreen_capture(window: Option<ErasedActorPath>) -> CaptureFrame {
+    CaptureFrame { window, mails: Vec::new(), after_mails: Vec::new(), checks: Vec::new(), similarity: None }
+}
+
+/// Catches a capture handler that selects or parks before proving the
+/// window path: a path with no live actor behind it is refused by name,
+/// rather than reaching target selection as an unknown window or parking a
+/// capture no frame will complete.
+#[test]
+fn capture_of_an_unresolvable_window_path_replies_err_naming_it() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+    let gone = ErasedActorPath::new("aether.window/aether.window.instance:gone").expect("window path");
+
+    let result = harness
+        .execute(vec![(
+            "snap",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &offscreen_capture(Some(gone))),
+        )])
+        .expect("send_and_await_reply(CaptureFrame)");
+
+    let CaptureFrameResult::Err { error } = result.reply("snap").expect("decode CaptureFrameResult") else {
+        panic!("an unresolvable window is refused");
+    };
+    assert!(
+        error.contains("aether.window/aether.window.instance:gone") && error.contains("does not resolve"),
+        "the refusal names the path: {error}",
+    );
+}
+
+/// Catches a second capture that displaces or drops the one in flight: both
+/// requests reach the render actor in one drain, before any frame, so the
+/// second is refused while the first is parked, and the first is still
+/// answered with its frame.
+#[test]
+fn capture_while_pending_replies_err_and_leaves_the_first_in_flight() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+    let render = harness.actor_ref::<RenderCapability>();
+
+    let first = harness.send_deferred(render, &offscreen_capture(None));
+    let second = harness.send_deferred(render, &offscreen_capture(None));
+
+    let CaptureFrameResult::Err { error } =
+        harness.await_deferred::<CaptureFrameResult>(second).expect("the second capture is answered")
+    else {
+        panic!("a capture sent while one is pending is refused");
+    };
+    assert!(error.contains("already pending"), "the refusal names the in-flight capture: {error}");
+    let CaptureFrameResult::Ok { png, .. } =
+        harness.await_deferred::<CaptureFrameResult>(first).expect("the first capture is answered")
+    else {
+        panic!("the in-flight capture completes with its frame");
+    };
+    assert!(png.starts_with(&[0x89, 0x50, 0x4E, 0x47]), "the first capture returns a PNG");
+}
+
 /// Render-pipeline proof: load the `cube` fixture, drive one tick, and
 /// capture. The fixture publishes a fixed `ViewProjection { view_proj }` and a
 /// twelve-triangle world-space unit cube, so the captured frame puts
