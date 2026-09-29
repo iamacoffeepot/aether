@@ -168,10 +168,12 @@ pub struct NativeBinding {
     /// [`super::ctx::NativeCtx::dispatch_blocking`] to its held
     /// `(SettlementHold, Source, context)` plus the worker's eventual
     /// output. The actor thread writes the entry at dispatch and reads +
-    /// removes it when the completion-wake lands; the worker thread fills
-    /// the output slot once. `Mutex` only for `&self` interior
-    /// mutability — the same single-logical-writer discipline as
-    /// `outbound` / `burst_producer`.
+    /// removes it when the completion-wake lands. The table sits behind a
+    /// `Mutex` because it has writers off the actor's dispatch thread:
+    /// offload workers filling or abandoning output, child activations and
+    /// the registry owner completing deferred work, a dropped `Held`, and
+    /// close and teardown. Its lock-free `any_parked` flag lets a reply's
+    /// parked-context check skip the lock while nothing is parked.
     ///
     /// Lock order: `request_contexts` → `inflight`. A request context's
     /// store or take parks and claims its `Held` tickets here while the

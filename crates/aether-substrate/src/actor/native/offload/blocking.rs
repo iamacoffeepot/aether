@@ -25,10 +25,13 @@
 //!   `DispatchId` to its held `(hold, reply_to, context)` plus a
 //!   completion output slot the worker fills. A staged task's entry
 //!   (ADR-0243 §9) holds only its hold, its request id, and the output
-//!   slot: it owes no reply. Lives behind a `&self`
-//!   interior-mutability `Mutex` on [`NativeBinding`](crate::actor::native::binding),
-//!   like `outbound` / `burst_producer`; the single logical writer is the
-//!   actor's own dispatch thread.
+//!   slot: it owes no reply. Lives in the `InflightLedger` on
+//!   [`NativeBinding`](crate::actor::native::binding): a `Mutex`, because
+//!   threads other than the actor's own write it — offload workers filling
+//!   or abandoning output, child activations and the registry owner
+//!   completing deferred work, a `Held` dropped wherever it is dropped, and
+//!   close and teardown — beside a lock-free flag that says whether any
+//!   entry is parked in a request context.
 //! - [`TaskCompletionWake`] — a substrate-internal framework kind the
 //!   worker pushes (carrying just the `DispatchId`) to the actor's own
 //!   mailbox, the same loopback-wake mechanism `InFlightDispatch`'s
@@ -47,7 +50,8 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::{Mutex, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, Weak};
 use std::thread;
 
 use aether_actor::{ActorRef, ErasedActorRef, HandlesKind, ReplyMode, Single};
@@ -338,12 +342,13 @@ pub(crate) struct OwedAtClose {
 /// bookkeeping, so centralising it here doesn't violate the
 /// plain-actor-state rule (ADR-0038).
 ///
-/// The `Mutex` is for `&self` interior mutability + `Sync` only, like
-/// [`NativeBinding`](crate::actor::native::binding)'s `outbound` / `burst_producer`: the
-/// actor's own dispatch thread is the single logical writer of the
-/// `(hold, reply_to, context)` slot and the reader of the output, while
-/// the worker thread fills the output slot once. Contention is the brief
-/// worker-fill / actor-read overlap, not a steady-state hot path.
+/// It lives behind the [`InflightLedger`]'s `Mutex` because it has writers
+/// off the actor's dispatch thread: offload workers fill or abandon an
+/// entry's output, child activations and the registry owner complete
+/// deferred work, a dropped `Held` claims its entry from whichever thread
+/// drops it, and close and teardown drain it. Only the actor's own turn
+/// parks or unparks an entry, which is what lets the ledger keep its
+/// lock-free `any_parked` flag exact.
 pub(crate) struct InflightTable {
     next_id: u64,
     entries: HashMap<DispatchId, InflightEntry>,
@@ -1102,8 +1107,8 @@ impl InflightTable {
     }
 }
 
-/// Crate-internal accessors the [`NativeBinding`](crate::actor::native::binding) wraps
-/// in its `Mutex<InflightTable>` field expose to
+/// Crate-internal accessors the [`NativeBinding`](crate::actor::native::binding)'s
+/// [`InflightLedger`] lock exposes to
 /// [`NativeCtx`](crate::actor::native::ctx). Kept here next to the table so the
 /// ledger's invariants (mint-then-insert, fill-once, take-removes) stay
 /// in one file.
@@ -1154,43 +1159,93 @@ impl InflightTable {
         self.attach_worker(id, context);
     }
 
-    pub(crate) fn dispatch_close_for_actor(&mut self) -> (Vec<OwedAtClose>, Vec<Option<SettlementHold>>) {
-        self.close_for_actor()
-    }
-
-    pub(crate) fn dispatch_park(
-        &mut self,
-        id: DispatchId,
-        request: RequestId,
-        reply: KindId,
-        context_name: &'static str,
-    ) -> Result<(), wire::Error> {
-        self.park(id, request, reply, context_name)
-    }
-
-    pub(crate) fn dispatch_unpark(
-        &mut self,
-        id: DispatchId,
-        request: RequestId,
-        reply: KindId,
-    ) -> Result<(), wire::Error> {
-        self.unpark(id, request, reply)
-    }
-
-    pub(crate) fn dispatch_parked_context(&self, request: RequestId) -> Option<&'static str> {
-        self.parked_context(request)
-    }
-
     #[cfg(test)]
     pub(crate) fn dispatch_state_of(&self, id: DispatchId) -> Option<&'static str> {
         self.state_of(id)
     }
 }
 
-/// Wrap [`InflightTable`] for the [`NativeBinding`](crate::actor::native::binding)
-/// field: a `Mutex` for `&self` interior mutability matching the binding's
-/// other single-writer buffers.
-pub(crate) type InflightLedger = Mutex<InflightTable>;
+/// The [`NativeBinding`](crate::actor::native::binding)'s in-flight ledger:
+/// the [`InflightTable`] behind a `Mutex`, for its off-thread writers, and
+/// `any_parked`, which lets a reply's dispatch tail skip the lock when no
+/// entry is parked in a request context (ADR-0243 §7).
+///
+/// `any_parked` is `!table.parked.is_empty()`, stored under `table`'s lock
+/// by [`Self::park`], [`Self::unpark`] and [`Self::close_for_actor`], the
+/// only operations that change `parked`; the table's own versions are
+/// private to this module, so nothing else can. Every one of them runs on
+/// the actor's turn or in its close, and a park for a request happens in a
+/// turn before that request's reply is dispatched, so the scheduler's slot
+/// handoff orders the `Release` store before the reply's `Acquire` load. A
+/// `true` read is only conservative: the locked lookup still decides.
+pub(crate) struct InflightLedger {
+    table: Mutex<InflightTable>,
+    any_parked: AtomicBool,
+}
+
+impl InflightLedger {
+    pub(crate) fn new() -> Self {
+        Self { table: Mutex::new(InflightTable::new()), any_parked: AtomicBool::new(false) }
+    }
+
+    /// Lock the table for one ledger operation.
+    ///
+    /// # Panics
+    /// Panics if the ledger mutex is poisoned — fail-fast per ADR-0063.
+    pub(crate) fn lock(&self) -> MutexGuard<'_, InflightTable> {
+        self.table.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+    }
+
+    /// Park the held entry `id` in the context stored under `request`
+    /// (ADR-0243 §4) and set `any_parked`.
+    ///
+    /// # Errors
+    /// [`wire::Error::HeldUnclaimed`] when `id` names no held entry.
+    pub(crate) fn park(
+        &self,
+        id: DispatchId,
+        request: RequestId,
+        reply: KindId,
+        context_name: &'static str,
+    ) -> Result<(), wire::Error> {
+        let mut table = self.lock();
+        let parked = table.park(id, request, reply, context_name);
+        self.any_parked.store(!table.parked.is_empty(), Ordering::Release);
+        parked
+    }
+
+    /// Claim the parked entry `id` back to held for a decode of the context
+    /// stored under `request`, clearing `any_parked` when it was the last.
+    ///
+    /// # Errors
+    /// [`wire::Error::HeldUnclaimed`] when `id` is not parked under both
+    /// `request` and `reply`.
+    pub(crate) fn unpark(&self, id: DispatchId, request: RequestId, reply: KindId) -> Result<(), wire::Error> {
+        let mut table = self.lock();
+        let unparked = table.unpark(id, request, reply);
+        self.any_parked.store(!table.parked.is_empty(), Ordering::Release);
+        unparked
+    }
+
+    /// Remove every entry no worker answers for the actor-close tail and
+    /// clear `any_parked`, as the table's `close_for_actor` describes.
+    pub(crate) fn close_for_actor(&self) -> (Vec<OwedAtClose>, Vec<Option<SettlementHold>>) {
+        let mut table = self.lock();
+        let closed = table.close_for_actor();
+        self.any_parked.store(!table.parked.is_empty(), Ordering::Release);
+        closed
+    }
+
+    /// The kind name of the context stored under `request` while it still
+    /// carries a parked ticket, without taking the lock when no entry is
+    /// parked anywhere.
+    pub(crate) fn parked_context(&self, request: RequestId) -> Option<&'static str> {
+        if !self.any_parked.load(Ordering::Acquire) {
+            return None;
+        }
+        self.lock().parked_context(request)
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]

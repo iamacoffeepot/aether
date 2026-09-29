@@ -276,7 +276,18 @@ mod tests {
         seq: u32,
     }
 
-    /// A request context whose debt the reply handler never takes.
+    #[aether_data::kind(name = "test.pumped.park", copy, partial_eq)]
+    struct Park {
+        seq: u32,
+    }
+
+    #[aether_data::kind(name = "test.pumped.unstash", copy, partial_eq)]
+    struct Unstash {
+        seq: u32,
+    }
+
+    /// A request context carrying a held reply: `on_unstash` takes it and
+    /// answers, any other reply to its request leaves it untaken.
     #[aether_data::kind(name = "test.pumped.stash")]
     struct Stash {
         held: Held<Pong>,
@@ -311,6 +322,10 @@ mod tests {
         /// Set by `on_hold` — a held reply parked in actor state, which the
         /// close tail must answer before this state drops.
         held: Option<Held<Pong>>,
+        /// The requests `on_park` stored a `Stash` under, in arrival order.
+        parked: Vec<MailId>,
+        /// Set by `on_unstash` — the stashed contexts it took and answered.
+        unstashed: u32,
     }
 
     #[aether_actor::actor(depends(Peer))]
@@ -352,6 +367,21 @@ mod tests {
             let (pending, held) = ctx.hold::<Pong>();
             self.held = Some(held);
             pending
+        }
+
+        #[handler::single]
+        fn on_park(&mut self, ctx: &mut NativeCtx<'_>, park: Park) -> Pending<Pong> {
+            let (pending, held) = ctx.hold::<Pong>();
+            self.parked.push(ctx.send_with_context::<Peer>(&Poke { note: park.seq }, Stash { held }));
+            pending
+        }
+
+        #[handler::single]
+        fn on_unstash(&mut self, ctx: &mut NativeCtx<'_>, unstash: Unstash) {
+            if let Some(Stash { held }) = ctx.take_context::<Stash>() {
+                held.answer(ctx, &Pong { seq: unstash.seq });
+                self.unstashed += 1;
+            }
         }
 
         fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
@@ -670,6 +700,50 @@ mod tests {
         let bytes = Defer { seq: 1 }.encode_into_bytes();
         fx.mailer.push(Mail::new(self_id, Defer::ID, bytes, 1).with_reply_to(reply_to).with_lineage(None, None, None));
 
+        let payload =
+            catch_unwind(AssertUnwindSafe(|| slot.drain_available())).expect_err("the untaken context fails fast");
+        let message =
+            payload.downcast_ref::<&str>().copied().or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert!(
+            message.is_some_and(|message| message.contains(Stash::NAME)),
+            "the panic names the stored context kind, got {message:?}",
+        );
+    }
+
+    /// Catches a parked-context gate that one take clears, or miscounts,
+    /// while another request still holds a parked `Held`: after the first
+    /// request's context is taken and answered, a reply to the second that
+    /// leaves its context untaken still fails fast naming the context kind.
+    #[test]
+    fn untaken_held_context_fails_fast_after_another_request_is_taken() {
+        let fx = fixtures();
+        let self_id = MailboxId(0x_0DED_0014);
+        let (_peer_id, _peer_rx) = caller_inbox(&fx, Peer::NAMESPACE);
+        let (caller, reply_rx) = caller_inbox(&fx, "test.pumped.caller.park");
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
+
+        for seq in [1, 2] {
+            let reply_to = Source::with_correlation(SourceAddr::Component(caller), u64::from(seq));
+            let bytes = Park { seq }.encode_into_bytes();
+            fx.mailer
+                .push(Mail::new(self_id, Park::ID, bytes, 1).with_reply_to(reply_to).with_lineage(None, None, None));
+        }
+        slot.drain_available();
+        let [first, second] = slot
+            .read_state(|state| <[MailId; 2]>::try_from(state.parked.as_slice()).expect("both requests parked"))
+            .expect("the actor is live");
+
+        let reply_to = Source::with_correlation(SourceAddr::None, first.correlation_id);
+        let bytes = Unstash { seq: 1 }.encode_into_bytes();
+        fx.mailer
+            .push(Mail::new(self_id, Unstash::ID, bytes, 1).with_reply_to(reply_to).with_lineage(None, None, None));
+        slot.drain_available();
+        let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the taken Held answered its caller");
+        assert_eq!(reply.kind, Pong::ID, "the taken Held answers with its reply kind");
+
+        let reply_to = Source::with_correlation(SourceAddr::None, second.correlation_id);
+        let bytes = Defer { seq: 2 }.encode_into_bytes();
+        fx.mailer.push(Mail::new(self_id, Defer::ID, bytes, 1).with_reply_to(reply_to).with_lineage(None, None, None));
         let payload =
             catch_unwind(AssertUnwindSafe(|| slot.drain_available())).expect_err("the untaken context fails fast");
         let message =
