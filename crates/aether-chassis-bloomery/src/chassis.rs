@@ -13,9 +13,9 @@
 //! (ADR-0237 decision 8), which runs steps and imports digest-pinned images
 //! through the Docker Engine API at `--workspace-endpoint` /
 //! `AETHER_WORKSPACE_ENDPOINT`, reading and staging through the journal each
-//! request names as its `source` (ADR-0240 D7). A credential rides the HTTP capability:
-//! `--http-secrets` binds a secret from the `--secrets-dir` directory to an
-//! allowlisted host (ADR-0235), so no program carries one. The workspace
+//! request names as its `source` (ADR-0240 D7). A credential rides the HTTP
+//! capability: `--http-secrets` binds a secret from the `--secrets-dir`
+//! directory to an allowlisted host (ADR-0235), so no program carries one. The workspace
 //! actor is the engine's only route to a container; `aether.process` is not
 //! composed, and no TCP, HTTP-serving, or fs capability rides this engine,
 //! while the RPC server and the inventory composed with it keep it drivable
@@ -71,10 +71,10 @@ impl Chassis for BloomeryChassis {
 
 impl BloomeryChassis {
     /// Build the bloomery chassis: the hub's prologue with headless's lift —
-    /// lower the bloomery knobs, open the unit's journal root, stand up the substrate, re-apply the resolved
-    /// log filter, lift the base out of the env, compose the shared stratum
-    /// plus the component host, HTTP egress, the workspace actor, and the held
-    /// RPC server, sweep for unknown env
+    /// lower the bloomery knobs, open the unit's journal root, stand up the
+    /// substrate, re-apply the resolved log filter, lift the base out of the
+    /// env, compose the shared stratum plus the component host, HTTP egress,
+    /// the workspace actor, and the held RPC server, sweep for unknown env
     /// keys, install the signal-blocking driver, mount the journal owner and
     /// the bundle driver, and only then open the RPC server's bind gate. The
     /// order is build, mount, bind: until the gate opens a dial is refused, so

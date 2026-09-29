@@ -29,10 +29,10 @@
 //! executor failure after the request was accepted is `Failed { detail }`,
 //! never a refusal. The detail is [`RunError::cause`]: the failed call or the
 //! in-tree path and the class of failure, never a host path, a socket, or the
-//! daemon's or the source's words, because the driver records it; the log keeps the full
-//! text. Beside the result, [`Runner::answer`] hands back what it
-//! observed of the run — its peak memory and wall time — for the estimate,
-//! which never reaches the result.
+//! daemon's or the source's words, because the driver records it; the log
+//! keeps the full text. Beside the result, [`Runner::answer`] hands back what
+//! it observed of the run — its peak memory and wall time — for the
+//! estimate, which never reaches the result.
 
 mod cleanup;
 mod environment;

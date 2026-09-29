@@ -2,9 +2,10 @@
 //!
 //! `GET /containers/{last}/archive?path=/work` answers a tar whose one
 //! top-level entry is `work`. It decodes under the canonical rules and the
-//! output bounds, staged through the run's source as it decodes, so a FIFO, a device, an
-//! absolute symlink, or a name the kinds refuse fails the run, as does an
-//! output over the bounds. The `work` entry's subtree is the output.
+//! output bounds, staged through the run's source as it decodes, so a FIFO,
+//! a device, an absolute symlink, or a name the kinds refuse fails the run,
+//! as does an output over the bounds. The `work` entry's subtree is the
+//! output.
 //!
 //! Each scratch path was a tmpfs, which the archive holds as an empty
 //! directory, so removing it rebuilds only its ancestors. The decode keeps in

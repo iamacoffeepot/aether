@@ -3,10 +3,11 @@
 //!
 //! The image is `aether-workspace-environment:<hex>`. Before every run its
 //! label `aether.workspace.environment` must equal `<hex>`. When the daemon
-//! holds no such image, the root tree streams as a filesystem tar to
-//! `POST /images/create?fromSrc=-`, which applies the label, and the image is
-//! inspected again. Only then is the root prefetched from the run's source. The imported image has no `Env` of its own, so every
-//! variable a step sees is constructed per step.
+//! holds no such image, and only then, the root is prefetched from the run's
+//! source and streams as a filesystem tar to `POST /images/create?fromSrc=-`,
+//! which applies the label, and the image is inspected again. The imported
+//! image has no `Env` of its own, so every variable a step sees is
+//! constructed per step.
 //!
 //! A daemon that answers but cannot produce the image, and an image whose
 //! label does not match, are `Refused(EnvironmentUnavailable)`, the one place

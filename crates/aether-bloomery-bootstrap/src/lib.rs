@@ -26,9 +26,9 @@
 //! crates. The script names the journal owner's type through the journal's
 //! identity half, so its config path is typed and each import names that
 //! journal as its storage `source`; it proves both paths once at `wire` with
-//! `resolve_path` and keeps the two proofs. Bootstrap is
-//! ordinary mail from an ordinary component, which is why it lives in its own
-//! throwaway crate rather than in the workspace or the engine.
+//! `resolve_path` and keeps the two proofs. Bootstrap is ordinary mail from an
+//! ordinary component, which is why it lives in its own throwaway crate rather
+//! than in the workspace or the engine.
 
 #![forbid(unsafe_code)]
 
