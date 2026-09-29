@@ -225,19 +225,25 @@ fn fallback_contract() -> RouteContract {
 }
 
 /// The registry's `PublishedRoutes` answer, which a `ProtocolPath` decode
-/// checks coverage against, reads only the `Live` route standing under
-/// exactly the path. Each case names the bug it catches:
+/// checks coverage against, reads the `Live` or `Dropped` route standing
+/// under exactly the path. Each case names the bug it catches:
 ///
 /// - a `Live` route answers exactly its published rows, and a closure route
 ///   its empty rows: an answer built from anything but the published
 ///   contract;
-/// - a `Starting` reservation and a dropped route answer `None`: a read of a
-///   route that is not `Live`;
-/// - a route at the path's fold under another canonical name answers `None`:
-///   a `published_contract` read at the fold without `live_route`'s name
-///   check, which answers another route's rows.
+/// - a dropped route answers the rows it last published while
+///   `published_contract` still reads `None`: a retire that discards the
+///   contract, so a closed actor's path is refused at decode and its
+///   handler never answers, or a live-only read widened to dead senders;
+/// - a never-registered path, a `Starting` reservation, and a route at the
+///   path's fold under another canonical name answer `None`: a read that
+///   proves a path no route has stood at, or skips `live_route`'s name
+///   check and answers another route's rows;
+/// - a `Carries` payload decodes over the registry for the dropped path and
+///   is refused for the never-registered one: the decode reading anything
+///   but these rows.
 #[test]
-fn published_rows_answer_only_the_live_route_under_the_path() {
+fn route_rows_answer_live_and_dropped_routes_under_the_path() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let owner = RegistryOwnerLease::attach(
@@ -249,17 +255,25 @@ fn published_rows_answer_only_the_live_route_under_the_path() {
     );
     let rows = [(Load::ID, ReplyContract::One(Loaded::ID))];
 
-    let live = "test.published_rows.live";
+    let live = "test.route_rows.live";
     let live_id = registry.try_register_inbox(&auth(), live, noop_handler()).expect("the route name is free");
     registry.publish_contract(&auth(), live_id, contract(&rows)).expect("an empty contract takes any rows");
 
-    let closure = "test.published_rows.closure";
+    let closure = "test.route_rows.closure";
     registry.try_register_inbox(&auth(), closure, noop_handler()).expect("the route name is free");
 
     assert_eq!(registry.published_rows(&path(live)).as_deref(), Some(&rows[..]));
     assert_eq!(registry.published_rows(&path(closure)).as_deref(), Some(&[][..]));
 
-    let starting = "test.published_rows.starting";
+    let dropped = "test.route_rows.dropped";
+    let dropped_id = registry.try_register_inbox(&auth(), dropped, noop_handler()).expect("the route name is free");
+    registry.publish_contract(&auth(), dropped_id, contract(&rows)).expect("an empty contract takes any rows");
+    registry.drop_mailbox(&auth(), dropped_id).expect("the live route retires");
+
+    assert_eq!(registry.published_rows(&path(dropped)).as_deref(), Some(&rows[..]));
+    assert!(registry.published_contract(dropped_id).is_none(), "a dropped route publishes no live contract");
+
+    let starting = "test.route_rows.starting";
     let reserved =
         registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(starting.to_owned())])).expect("submits");
     owner.run_once();
@@ -267,20 +281,23 @@ fn published_rows_answer_only_the_live_route_under_the_path() {
         &reserved.wait_timeout(Duration::from_millis(100)).expect("reservation completes").expect("reserves"),
     );
 
-    let dropped = "test.published_rows.dropped";
-    let dropped_id = registry.try_register_inbox(&auth(), dropped, noop_handler()).expect("the route name is free");
-    registry.publish_contract(&auth(), dropped_id, contract(&rows)).expect("an empty contract takes any rows");
-    registry.drop_mailbox(&auth(), dropped_id).expect("the live route retires");
-
-    let folded = "test.published_rows.folded";
+    let folded = "test.route_rows.folded";
     let impostor = registry
-        .try_register_inbox_with_id(&auth(), lineage_mailbox_id(folded), "test.published_rows.impostor", noop_handler())
+        .try_register_inbox_with_id(&auth(), lineage_mailbox_id(folded), "test.route_rows.impostor", noop_handler())
         .expect("the fold is free");
     registry.publish_contract(&auth(), impostor, contract(&rows)).expect("an empty contract takes any rows");
 
-    for name in [starting, dropped, folded] {
+    let never = "test.route_rows.never";
+    for name in [never, starting, folded] {
         assert_eq!(registry.published_rows(&path(name)), None, "{name}");
     }
+
+    let decode = |name: &str| {
+        let bytes = wire::encode_to_vec(&path(name)).expect("a path encodes");
+        Carries::decode_with(&bytes, &mut DecodeCtx::empty().routes(&*registry)).map(|carries| carries.path)
+    };
+    assert_eq!(decode(dropped).expect("a dropped route's path proves its type").as_erased(), &path(dropped),);
+    decode(never).expect_err("a path no route has stood at is refused");
 }
 
 /// ADR-0231 §4's guard cast types a held reference as `Subscriber<Load>`

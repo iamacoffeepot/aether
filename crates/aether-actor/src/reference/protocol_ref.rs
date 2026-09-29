@@ -11,7 +11,7 @@ use super::ErasedActorRef;
 /// Proof that a route under a protocol path's canonical name reached `Live`,
 /// in this engine session (ADR-0231 §3). `P` is the path's claim:
 /// [`ActorPath::narrow`](crate::ActorPath::narrow) proves it at compile time,
-/// and a decoded path's decode proved it against the live route's published
+/// and a decoded path's decode proved it against the route's published
 /// rows.
 ///
 /// The proven target plus a phantom protocol. A send through it compiles only

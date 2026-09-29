@@ -90,9 +90,10 @@ An agent, or a capability binding a different actor, names that actor in the
 `consumer` field of `bind_listener` or `connect`. The field is a
 `ProtocolPath<TcpConsumer>`: in code an `ActorPath<R>` narrowed with
 `.narrow::<TcpConsumer>()`, and over MCP the canonical `path` a component load
-returns. The path must be canonical; a short `root/:key` path is refused. Its decode proves that the live route at the path publishes both
-silent rows, and a path that does not is refused at decode: the mail is logged
-at warn and gets no reply. A route that left between decode and receipt gets
+returns. The path must be canonical; a short `root/:key` path is refused. Its decode proves that the route at the path, live or closed,
+publishes both silent rows, and a path no route has stood at, or whose route
+does not publish them, is refused at decode: the mail is logged at warn and
+gets no reply. A consumer that has closed decodes, and its request gets
 `Err`. Sessions and listeners are addressed as
 `aether.tcp/aether.tcp.session:<session_name>` and
 `aether.tcp/aether.tcp.listener:<listener_name>`, from the names the results

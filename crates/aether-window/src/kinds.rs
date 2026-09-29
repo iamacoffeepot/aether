@@ -372,7 +372,8 @@ macro_rules! subscription {
     ($($kind:ident $field:ident),+ $(,)?) => {
         /// One published kind and the subscriber to hold for it: the path of an
         /// actor that handles the kind silently (ADR-0231 §8). The path decodes
-        /// only against a live route that publishes that silent row.
+        /// only against a route, live or closed, that publishes that silent
+        /// row.
         ///
         /// Over MCP each variant takes the subscriber's canonical path, as in
         /// `{"Key": "test.ui.root"}`.
@@ -390,8 +391,10 @@ published_window_kinds!(subscription);
 
 /// Subscribe an explicitly named actor to one published kind for a window
 /// selector. `subscription` names the kind and the subscriber's canonical
-/// path; the manager proves it live at receipt and replies `Err` when it is
-/// not.
+/// path; the manager proves it live at receipt and replies `Err` naming it
+/// when its actor has closed. A path no actor has stood at, or whose actor
+/// does not handle the kind silently, is refused at decode with a warn and
+/// gets no reply.
 #[aether_data::kind(name = "aether.window.subscribe", no_serde, eq)]
 pub struct SubscribeWindow {
     pub selector: WindowSelector,
@@ -408,7 +411,8 @@ pub struct SubscribeWindowSelf {
 }
 
 /// Remove an explicitly named actor's subscription for a selector and kind,
-/// named by the same `subscription` its subscribe carried.
+/// named by the same `subscription` its subscribe carried, with
+/// [`SubscribeWindow`]'s decode rules.
 #[aether_data::kind(name = "aether.window.unsubscribe", no_serde, eq)]
 pub struct UnsubscribeWindow {
     pub selector: WindowSelector,

@@ -1,7 +1,8 @@
 //! Native dispatch proves a received `ProtocolPath` against the registry
 //! (ADR-0231 §3): a typed arm decodes through `__decode_inbound`, whose
-//! context carries the mail registry, so a path whose live route does not
-//! publish the protocol's rows never reaches a handler.
+//! context carries the mail registry, so a path whose route does not publish
+//! the protocol's rows, or that no route has stood at, never reaches a
+//! handler.
 //!
 //! [`Keeper`] and [`Bystander`] stand `Live` with the contracts their own
 //! `#[actor]` tables declare. Each [`Carries`] payload names one path and is
@@ -153,7 +154,7 @@ fn a_received_path_reaches_the_handler_only_when_its_live_route_covers_the_proto
         "the same kind with a silent reply does not cover the manual row",
     );
     assert!(!deliver(&mut keeper, &binding, Bystander::NAMESPACE), "the bystander's route lacks its row");
-    assert!(!deliver(&mut keeper, &binding, "test.protocol_path.nobody"), "no live route stands there");
+    assert!(!deliver(&mut keeper, &binding, "test.protocol_path.nobody"), "no route has stood there");
     assert_eq!(keeper.received.iter().map(ToString::to_string).collect::<Vec<_>>(), [Keeper::NAMESPACE]);
     assert_eq!(rx.try_recv().expect("the resolved manual protocol receives the typed send").kind, Poke::ID);
 }

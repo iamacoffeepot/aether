@@ -399,13 +399,16 @@ schema. Decoding either accepts only a well-formed canonical path, and decoding
 an `ActorPath<R>` also refuses a path whose leaf namespace is not
 `R::NAMESPACE`, so an `ActorPath<R>` that exists names an `R`. A decoded
 `ProtocolPath<P>` is checked against the mail registry's published contract
-for the live route at its path: the decode refuses a path with no live route,
-or whose route does not publish every row of `P`, so a `ProtocolPath<P>` that
-exists names an actor covering `P`. Native dispatch decodes with the registry;
+for the route at its path, live or closed: the decode refuses a path no route
+has stood at, one still starting, or one whose route does not publish every
+row of `P`, so a `ProtocolPath<P>` that exists names an actor, live or closed,
+covering `P`. A refused decode reaches no handler, and nothing is sent back. Native dispatch decodes with the registry;
 a guest's decode has none, so a guest refuses a `ProtocolPath<P>` until
 [ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md).
-Neither path grants a send: the route can leave after the decode, so its
-receiver's `resolve` proves that a live actor stands at the path. The first
+Neither path grants a send: a closed actor's path decodes, since names are
+never reused, and the route can leave after the decode, so its receiver's
+`resolve` proves that a live actor stands at the path and the handler answers
+the closure itself. The first
 consumer, a Bloomery unit's driver, is to write its journal's storage source
 this way (ADR-0240 D7):
 

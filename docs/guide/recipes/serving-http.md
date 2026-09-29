@@ -252,10 +252,11 @@ the round-robin set on it).
 
 The `handler` path must be canonical — the `path` a `load_component` reply
 returns, `api` for a singleton component whose `NAMESPACE` is `api`. The named actor has to take `aether.http.server.request` and reply
-`HttpRouterResult`: the path is `ProtocolPath<HttpRouter>`, so a path whose
-live route does not publish that row is refused when the mail is
-decoded — logged at warn, with no `register_route_result` reply at all, rather
-than accepted and then answering `502` on every request. In Rust the same path
+`HttpRouterResult`: the path is `ProtocolPath<HttpRouter>`, so a path no
+route has stood at, or whose route does not publish that row, is refused when
+the mail is decoded — logged at warn, with no `register_route_result` reply at
+all, rather than accepted and then answering `502` on every request. A path
+whose handler has closed decodes, and the reply is `Err` naming it. In Rust the same path
 is written `ActorPath::<Handler>::root().narrow::<HttpRouter>()`, which will
 not compile unless `Handler` has the row. Every route holder has it, including
 a streaming, websocket, or deferred handler and a `#[http::router]` actor.

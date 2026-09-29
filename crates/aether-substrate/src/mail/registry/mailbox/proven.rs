@@ -269,7 +269,7 @@ impl Registry {
         let routes = self.routes.load();
         match resolve_route(position, |candidate| routes.entry_for(&candidate)) {
             ResolvedRoute::Live { .. } => Ok(__mint_erased_actor_ref(position)),
-            ResolvedRoute::Dropped => Err(ResolveLiveError::Dropped(position)),
+            ResolvedRoute::Dropped { .. } => Err(ResolveLiveError::Dropped(position)),
             ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => Err(ResolveLiveError::Unknown(position)),
         }
     }
@@ -299,7 +299,7 @@ impl Registry {
         let routes = self.routes.load();
         match resolve_route(position, |candidate| routes.entry_for(&candidate)) {
             ResolvedRoute::Live { .. } => Ok(__mint_actor_ref(position)),
-            ResolvedRoute::Dropped | ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => {
+            ResolvedRoute::Dropped { .. } | ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => {
                 Err(ChildRefused { namespace: C::NAMESPACE, key })
             }
         }

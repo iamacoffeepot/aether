@@ -18,17 +18,22 @@ use crate::{CoveredBy, Protocol, RowSet};
 /// - [`ActorPath::narrow`], which compiles only when the compiler has
 ///   proved `P: CoveredBy<R>`;
 /// - a decode through [`Kind::decode_with`](aether_data::Kind::decode_with),
-///   whose context proves that the `Live` route standing at the path
-///   published every row of `P` (ADR-0231 §4). The decode refuses
+///   whose context proves that the `Live` or `Dropped` route standing at
+///   the path published every row of `P` (ADR-0231 §4). The decode refuses
 ///   [`WireError::ProtocolPathUnchecked`] when the context has no published
-///   routes, [`WireError::ProtocolPathUnpublished`] when no live route stands
-///   at the path, and [`WireError::UncoveredProtocolPath`] naming the first
-///   row of `P` the route does not publish. The plain shorthand
-///   (`decode_from_bytes`, `wire::decode_from_slice`) decodes with an empty
-///   context, so it always refuses.
+///   routes, [`WireError::ProtocolPathUnpublished`] when no route has stood
+///   at the path or it is still starting, and
+///   [`WireError::UncoveredProtocolPath`] naming the first row of `P` the
+///   route does not publish. The plain shorthand (`decode_from_bytes`,
+///   `wire::decode_from_slice`) decodes with an empty context, so it always
+///   refuses.
 ///
-/// It grants no send: the route can leave between decode and use, so a
-/// receiver's `resolve` proves that a live actor still stands at the path.
+/// It proves type, not liveness, and grants no send. A path whose actor has
+/// closed still decodes, since names are never reused, and the route can
+/// leave between decode and use either way, so a receiver's `resolve`
+/// proves that a live actor still stands at the path and its handler
+/// answers the "not live" case itself. A refused decode reaches no handler:
+/// the mail is dropped with a warn and nothing is sent back.
 ///
 /// On the wire it is the path text alone, with [`ErasedActorPath`]'s schema
 /// and codec, so it may be a kind field. It serializes but has no
@@ -121,7 +126,7 @@ impl<R> ActorPath<R> {
     }
 }
 
-/// A canonical path whose live route covers `P`. The canonical check comes
+/// A canonical path whose `Live` or `Dropped` route covers `P`. The canonical check comes
 /// first, so a malformed or short path is `WireError::InvalidActorPath` and
 /// the decoder is never asked; any actor covering `P` may live at the text,
 /// so no leaf namespace is compared. The plain [`WireDecode::decode`] goes

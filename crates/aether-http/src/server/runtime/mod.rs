@@ -301,10 +301,10 @@ impl NativeActor for HttpServerCapability {
     /// Claim a route for an explicitly named handler (ADR-0130).
     ///
     /// The handler arrives as a `ProtocolPath<HttpRouter>`, so the contextual
-    /// decode already proved that the live route at the path takes
-    /// `aether.http.server.request` and replies `HttpRouterResult` (ADR-0231 §3);
-    /// `resolve` proves it still stands there, and the route holds that
-    /// proof. Its erased twin is the identity the table, the monitors, and a
+    /// decode already proved that the route at the path, live or closed,
+    /// takes `aether.http.server.request` and replies `HttpRouterResult`
+    /// (ADR-0231 §3); `resolve` proves it is live, answering `Err` naming the
+    /// path when its handler has closed, and the route holds that proof. Its erased twin is the identity the table, the monitors, and a
     /// departure are keyed by.
     ///
     /// # Agent

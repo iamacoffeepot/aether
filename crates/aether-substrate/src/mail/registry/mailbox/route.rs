@@ -46,7 +46,14 @@ pub(super) enum RouteLifecycle {
         target_parent: MailboxId,
         contract: RouteContract,
     },
-    Dropped,
+    /// A retired route: its actor has closed, and the route stays as a
+    /// tombstone under its proven name (ADR-0079 §7). `contract` is the one
+    /// the route last published, moved across by the apply that retired it,
+    /// so a typed path naming the closed actor still proves its type at
+    /// decode (ADR-0231 §3) and the receiver's `resolve` answers "not live".
+    Dropped {
+        contract: RouteContract,
+    },
 }
 
 #[derive(Clone)]

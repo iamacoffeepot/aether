@@ -19,8 +19,11 @@ use crate::{ErasedActorPath, KindId, ReplyContract};
 /// The engine's published route contracts (ADR-0231 §4): an input to
 /// [`DecodeCtx::routes`], never handed to a leaf.
 pub trait PublishedRoutes {
-    /// The rows the `Live` route standing under exactly `path` published, or
-    /// `None` when none stands there.
+    /// The rows the `Live` or `Dropped` route standing under exactly `path`
+    /// published, or `None` when no route has stood there or it is still
+    /// starting. A dropped route answers because names are never reused: its
+    /// path still proves its type, and liveness is the receiver's `resolve`
+    /// to answer, not the decode's.
     fn published_rows(&self, path: &ErasedActorPath) -> Option<Arc<[(KindId, ReplyContract)]>>;
 }
 
@@ -80,17 +83,20 @@ impl<'a> DecodeCtx<'a> {
         self.held.as_deref_mut().map_or(Err(Error::HeldUngranted { reply }), |held| held.claim(ticket, reply))
     }
 
-    /// Prove that the `Live` route standing under exactly `path` publishes
-    /// every one of `rows` with the exact same [`ReplyContract`]. Protocol
-    /// coverage is exact: replacement compatibility is a separate rule and
-    /// does not make a manual row interchangeable with a declared one.
+    /// Prove that the `Live` or `Dropped` route standing under exactly `path`
+    /// publishes every one of `rows` with the exact same [`ReplyContract`]. A
+    /// path whose actor has closed proves here, so its receiver's handler
+    /// sees it and answers the closure itself. Protocol coverage is exact:
+    /// replacement compatibility is a separate rule and does not make a
+    /// manual row interchangeable with a declared one.
     ///
     /// # Errors
     ///
     /// [`Error::ProtocolPathUnchecked`] when this context has no published
-    /// routes, [`Error::ProtocolPathUnpublished`] when no `Live` route stands
-    /// at `path`, and [`Error::UncoveredProtocolPath`] naming the first row
-    /// the route does not publish or answers differently.
+    /// routes, [`Error::ProtocolPathUnpublished`] when no route has stood at
+    /// `path` or it is still starting, and [`Error::UncoveredProtocolPath`]
+    /// naming the first row the route does not publish or answers
+    /// differently.
     pub fn prove_route_covers(&self, path: &ErasedActorPath, rows: &[(KindId, ReplyContract)]) -> Result<(), Error> {
         let routes = self.routes.ok_or_else(|| Error::ProtocolPathUnchecked { path: path.clone() })?;
         let published =

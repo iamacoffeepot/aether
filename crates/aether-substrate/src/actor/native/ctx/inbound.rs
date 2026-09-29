@@ -80,12 +80,15 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///   tag-1 `Blob` field resolves to the entry its hash names and yields a
     ///   `Shared` value over it, and a hash no attachment carries refuses;
     /// - the mail registry `resolve` reads: each `ProtocolPath` field is
-    ///   proven against the contract the `Live` route at its path published,
-    ///   and a path with no live route, or whose route does not cover the
-    ///   protocol, refuses.
+    ///   proven against the contract the `Live` or `Dropped` route at its
+    ///   path published, and a path no route has stood at, one still
+    ///   starting, or one whose route does not cover the protocol, refuses.
+    ///   A closed actor's path decodes, so the handler's own `resolve`
+    ///   answers it.
     ///
     /// A refusal is logged once at warn, naming the kind and the error, and
-    /// answers `None`, the typed arm's miss. The `#[actor]` typed arms and
+    /// answers `None`, the typed arm's miss: the handler does not run, and
+    /// nothing is sent back, a request's reply included. The `#[actor]` typed arms and
     /// native handler-set arms call it; a hand decoder of an `&Envelope` is
     /// not affected. It decodes only the mail being handled, so it grants
     /// nothing the handler does not already receive.

@@ -113,10 +113,10 @@ pub trait WindowManagerSurface {
     /// Subscribe an explicitly named actor to one kind for one selector.
     ///
     /// The subscriber's path reached this handler only because its decode
-    /// proved the live route there handles the kind silently (ADR-0231 §3);
-    /// it is proven live once more here, at receipt, and the table keeps the
-    /// `ProtocolRef<Subscriber<K>>` that proof returns. A path whose actor
-    /// has gone answers `Err` naming it.
+    /// proved the route there, live or closed, handles the kind silently
+    /// (ADR-0231 §3); it is proven live here, at receipt, and the table keeps
+    /// the `ProtocolRef<Subscriber<K>>` that proof returns. A path whose
+    /// actor has gone answers `Err` naming it.
     #[handler::single]
     fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
         match Self::subscribers(state).subscribe_path(ctx, mail.selector, &mail.subscription) {

@@ -10,9 +10,9 @@
 //! where the compiler proves coverage. It crosses the wire as the path text
 //! alone; a decoded path is canonical, a decoded `ActorPath<R>`'s leaf names
 //! an `R`, and a decoded `ProtocolPath<P>` is checked at decode against the
-//! engine's published route contracts: the live route at its path publishes
-//! every row of `P`. On receipt, `resolve` proves liveness: that a live actor
-//! still stands at the path. Neither type holds a position.
+//! engine's published route contracts: the route at its path, live or
+//! closed, publishes every row of `P`. On receipt, `resolve` proves liveness:
+//! that a live actor still stands at the path. Neither type holds a position.
 //!
 //! The paths sit beside [`reference`](crate::reference), which holds the
 //! proofs: a path names, a reference sends.
