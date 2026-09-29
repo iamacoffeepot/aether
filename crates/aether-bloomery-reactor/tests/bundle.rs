@@ -95,6 +95,18 @@ fn reactor_root_loads_by_digest_and_answers_its_caller() {
         other => panic!("{other:?}"),
     }
 
+    let other = reply::<Evaluated>(&mut harness, root, &Event::new(journal_moved(3, "other", tree)), "other");
+    assert!(matches!(other, Evaluated::Completed { seq: 3, ref intents } if intents.len() == 2), "{other:?}");
+
+    let repeated = reply::<Evaluated>(&mut harness, root, &Event::new(journal_moved(4, "source", tree)), "repeat");
+    match repeated {
+        Evaluated::Completed { seq: 4, intents } => {
+            assert_eq!(intents.len(), 1, "the keyed aggregate reports source has moved twice");
+            assert_eq!(intents[0].reactor().as_str(), "test.bloomery.source.witness");
+        }
+        other => panic!("{other:?}"),
+    }
+
     let declined = {
         let wasm_path = require_wasm("aether_test_fixtures_reactor").expect("wasm");
         let mut second = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
@@ -111,13 +123,13 @@ fn reactor_root_loads_by_digest_and_answers_its_caller() {
     }
 
     let gap = reply::<Evaluated>(&mut harness, root, &Event::new(journal_moved(9, "source", tree)), "gap");
-    assert!(matches!(gap, Evaluated::OutOfSequence { seq: 9, expected: 3 }), "{gap:?}");
+    assert!(matches!(gap, Evaluated::OutOfSequence { seq: 9, expected: 5 }), "{gap:?}");
 
-    let poisoned = reply::<Evaluated>(&mut harness, root, &Event::new(fold_fail(3)), "poison");
-    assert!(matches!(poisoned, Evaluated::Poisoned { seq: 3, last_trusted: 2, .. }), "{poisoned:?}");
+    let poisoned = reply::<Evaluated>(&mut harness, root, &Event::new(fold_fail(5)), "poison");
+    assert!(matches!(poisoned, Evaluated::Poisoned { seq: 5, last_trusted: 4, .. }), "{poisoned:?}");
     let status = reply::<Status>(&mut harness, root, &StatusQuery, "status");
     assert!(status.poisoned());
-    assert_eq!(status.cursor(), 2);
+    assert_eq!(status.cursor(), 4);
 }
 
 fn section_bytes(wasm: &[u8]) -> Vec<u8> {

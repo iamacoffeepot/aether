@@ -1,0 +1,61 @@
+error: #[fold] methods are synchronous; remove `async`
+  --> tests/ui/fail_signatures.rs:20:5
+   |
+20 |     async fn event(&mut self, _event: Event) {}
+   |     ^^^^^
+
+error: #[fold] methods cannot be `const`
+  --> tests/ui/fail_signatures.rs:27:5
+   |
+27 |     const fn event(&mut self, _event: Event) {}
+   |     ^^^^^
+
+error: #[fold] methods cannot be `unsafe`
+  --> tests/ui/fail_signatures.rs:34:5
+   |
+34 |     unsafe fn event(&mut self, _event: Event) {}
+   |     ^^^^^^
+
+error: #[fold] methods cannot be generic
+  --> tests/ui/fail_signatures.rs:41:13
+   |
+41 |     fn event<T>(&mut self, _event: Event) {}
+   |             ^^^
+
+error: #[fold] methods take exactly `&mut self`
+  --> tests/ui/fail_signatures.rs:48:14
+   |
+48 |     fn event(&self, _event: Event) {}
+   |              ^^^^^
+
+error: #[fold] event parameters are owned values
+  --> tests/ui/fail_signatures.rs:55:33
+   |
+55 |     fn event(&mut self, _event: &Event) {}
+   |                                 ^^^^^^
+
+error: #[fold] methods take exactly `&mut self` and one owned typed event
+  --> tests/ui/fail_signatures.rs:62:14
+   |
+62 |     fn event(&mut self, _event: Event, _other: Event) {}
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: #[fold] methods return `()` or `Result<(), E>`
+  --> tests/ui/fail_signatures.rs:69:40
+   |
+69 |     fn event(&mut self, _event: Event) -> bool {
+   |                                        ^^^^^^^
+
+error: #[fold] methods cannot have an extern ABI
+  --> tests/ui/fail_signatures.rs:78:5
+   |
+78 |     extern "C" fn event(&mut self, _event: Event) {}
+   |     ^^^^^^^^^^
+
+warning: unused import: `View`
+ --> tests/ui/fail_signatures.rs:1:28
+  |
+1 | use aether_bloomery_view::{View, ViewCursor, view};
+  |                            ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
