@@ -43,3 +43,22 @@ impl WasmActor for ParentPeerTarget {
         ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
     }
 }
+
+/// An instanced stand-in for [`ParentPeerTarget`]: it answers `Bump` as the
+/// target does, but under a key its load names, so a test can host a
+/// target-shaped actor beside the singleton target itself.
+pub struct ParentPeerStandIn;
+
+#[actor(instanced, root, depends(SubstrateHarnessObserver))]
+impl WasmActor for ParentPeerStandIn {
+    const NAMESPACE: &'static str = "test.parent_peer.stand_in";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(ParentPeerStandIn)
+    }
+
+    #[handler::single]
+    fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
+        ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
+    }
+}

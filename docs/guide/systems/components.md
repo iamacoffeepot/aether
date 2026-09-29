@@ -91,8 +91,8 @@ reactor with one root exported as `aether.bloomery.bundle`
 (`BUNDLE_NAMESPACE`), at the first one's position. Every bundle is
 content-addressed (see [Publishing a module](#publishing-a-module)), so the
 root publishes as `aether.bloomery.bundle.<module hash>` while
-`export: Some("aether.bloomery.bundle")` still selects it. The bundle driver
-loads that root as `aether.component/aether.embedded:<key>-<digest>` (short path
+`export: Some("aether.bloomery.bundle")` still selects it. The root is
+`instanced`, and the bundle driver loads it as `aether.component/aether.embedded:<key>-<digest>` (short path
 `aether.component/:<key>-<digest>`), the name `UnitBundle::name` builds from
 the unit's key and the bundle digest (ADR-0240 D4). A module provides
 programs, reactors, or both; neither is a compile error. With programs, the
@@ -131,11 +131,11 @@ mailbox:
 | `aether.component.replace` | hot-swap the wasm behind a stable mailbox | `ReplaceResult` |
 
 `LoadResult::Ok` carries the component's canonical **`path`** (so a caller that
-omitted `name` learns the substrate-defaulted one) and the parsed
+omitted `name` learns the key the load took) and the parsed
 `ComponentCapabilities` (handlers, fallback, doc, config) read from the manifest.
 It carries no mailbox id. A loaded component registers at
-**`aether.component/aether.embedded:NAME`** — that full string is the address you
-send subsequent mail to, and `aether.component/:NAME` is its short path. Bare
+**`aether.component/aether.embedded:KEY`** — that full string is the address you
+send subsequent mail to, and `aether.component/:KEY` is its short path. Bare
 names (`"player"`) are *not* registered and warn-drop; always use the path from
 `LoadResult`.
 
@@ -163,12 +163,22 @@ For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the
 target type's `NAMESPACE` — and stands up that type. Omission defaults only when
 the module declared an explicit default; a defaultless multi-actor module returns a
-load error. The selected type's namespace also becomes the default trampoline
-name, so loading the `Panel` export with `export: "ui.panel"` registers it at
-`aether.component/aether.embedded:ui.panel` and the `LoadResult` reports that type's
-capabilities. A selector naming a type the module doesn't export is a clean load
-error. A single-actor module is unambiguous, so an omitted selector is the whole
-story there.
+load error. The `LoadResult` reports the selected type's capabilities. A selector
+naming a type the module doesn't export is a clean load error. A single-actor
+module is unambiguous, so an omitted selector is the whole story there.
+
+The selected type's cardinality decides the load's key
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§5). A singleton is named by its namespace, so **a load names no key** for it:
+loading the singleton `RootManager` export with `export: "ui.root"` and no `name`
+registers it at `aether.component/aether.embedded:ui.root`, and a load that names
+any key for a singleton, its own namespace included, answers `Err` ("`ui.root` is a
+singleton; a load names no key") before the module publishes or anything is
+staged. An `#[actor(instanced)]` type is named by the load's `name`, or, when the
+load names none, by a counter the spawn allocates, as a native `spawn_child` with
+`Subname::Counter` is. Several instances of one type are therefore several loads
+of an instanced type; a replicated boot entry names every replica, so it must
+select one.
 
 A load places the selected type at the component host, and a module boot type is
 always placed there, so each must declare **`root`** — `#[actor(root)]`, or

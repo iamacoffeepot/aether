@@ -22,6 +22,7 @@ use aether_test_fixtures_kinds::Bump;
 
 const PROBE_EXPORT: &str = "test.probe";
 const TARGET_EXPORT: &str = "test.parent_peer.target";
+const STAND_IN_EXPORT: &str = "test.parent_peer.stand_in";
 const DEPENDENT_EXPORT: &str = "test.parent_peer.dependent";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
@@ -87,7 +88,7 @@ fn missing_declared_dependency_refuses_the_load() {
         return;
     };
 
-    let outer = load_named(&mut harness, &wasm, "outer", None, Some("outer"), PROBE_EXPORT);
+    let outer = load_named(&mut harness, &wasm, "outer", None, None, PROBE_EXPORT);
 
     let refused = load_result(&mut harness, &wasm, "dependent-alone", Some(&outer), None, DEPENDENT_EXPORT);
     let LoadResult::Err { error } = refused else {
@@ -100,7 +101,7 @@ fn missing_declared_dependency_refuses_the_load() {
     );
 
     // Refusal happens before creation: no dependent stands beneath the parent.
-    let outer_trampoline = root_trampoline(&harness, "outer");
+    let outer_trampoline = root_trampoline(&harness, PROBE_EXPORT);
     let unserved = harness.child::<WasmTrampoline, WasmTrampoline>(&outer_trampoline, key(DEPENDENT_EXPORT));
     assert!(unserved.is_err(), "the refused load must not have created anything: {unserved:?}");
     let baseline = harness.count_observed(TICK_OBSERVED);
@@ -145,8 +146,8 @@ fn replace_with_unmet_dependency_keeps_running_module() {
         return;
     };
 
-    let outer = load_named(&mut harness, &wasm, "outer", None, Some("outer"), PROBE_EXPORT);
-    let victim = load_named(&mut harness, &wasm, "victim", Some(&outer), Some("victim"), TARGET_EXPORT);
+    let outer = load_named(&mut harness, &wasm, "outer", None, None, PROBE_EXPORT);
+    let victim = load_named(&mut harness, &wasm, "victim", Some(&outer), Some("victim"), STAND_IN_EXPORT);
     let victim_path = ErasedActorPath::new(&victim).expect("a loaded component's address is an actor path");
 
     let replace = |harness: &mut SubstrateHarness, label: &str, export: Option<&str>| {
@@ -176,7 +177,7 @@ fn replace_with_unmet_dependency_keeps_running_module() {
     // A refused replacement keeps the running module: the victim still
     // answers `Bump` at its mailbox with exactly one `TickObserved`.
     let victim_trampoline = harness
-        .child::<WasmTrampoline, WasmTrampoline>(&root_trampoline(&harness, "outer"), key("victim"))
+        .child::<WasmTrampoline, WasmTrampoline>(&root_trampoline(&harness, PROBE_EXPORT), key("victim"))
         .expect("the victim is live");
     let baseline = harness.count_observed(TICK_OBSERVED);
     harness

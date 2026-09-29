@@ -27,7 +27,6 @@ const FALLBACK_EXPORT: &str = "test.contract.fallback";
 const COUNT_QUERY: &str = "aether.test_fixtures.count_query";
 const INLINE_PROBE: &str = "aether.test_fixtures.inline_probe";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
-const VICTIM: &str = "victim";
 
 struct Fixture {
     harness: SubstrateHarness,
@@ -36,17 +35,13 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Boot a harness and load `test.contract.base` as `victim`.
+    /// Boot a harness and load `test.contract.base`, the victim.
     fn start() -> Option<Self> {
         let wasm = fs::read(require_wasm("aether_test_fixtures_bundle")?).expect("read fixture wasm");
         let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
 
-        let load = LoadComponent {
-            wasm: wasm.clone(),
-            name: Some(VICTIM.to_owned()),
-            config: Vec::new(),
-            export: Some(BASE_EXPORT.to_owned()),
-        };
+        let load =
+            LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: Some(BASE_EXPORT.to_owned()) };
         let operation = HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), &load);
         let result = harness.execute(vec![("load", operation)]).expect("component load operation");
         let victim = match result.reply::<LoadResult>("load").expect("decode LoadResult") {
@@ -77,7 +72,10 @@ impl Fixture {
     fn trampoline(&self) -> ActorRef<WasmTrampoline> {
         let host = self.harness.actor_ref::<ComponentHostCapability>();
         self.harness
-            .child::<ComponentHostCapability, WasmTrampoline>(&host, LoadName::new(VICTIM).expect("a valid load name"))
+            .child::<ComponentHostCapability, WasmTrampoline>(
+                &host,
+                LoadName::new(BASE_EXPORT).expect("a valid load name"),
+            )
             .expect("the victim is live")
     }
 }

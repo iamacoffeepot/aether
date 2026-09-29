@@ -77,9 +77,6 @@ use aether_test_fixtures_kinds::SetRender;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-/// Caller-supplied component name passed to `LoadComponent`.
-const PROBE_NAME: &str = "probe";
-
 /// Mirrors `ArtifactGuard`'s private root resolution (`CARGO_MANIFEST_DIR`
 /// two levels up to the workspace root, `CARGO_TARGET_DIR` override if
 /// set) so the artifact-guard scenario below can locate the directory a
@@ -108,12 +105,7 @@ fn artifact_dir(id: &str) -> PathBuf {
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorPath {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
-        .load_any(&LoadComponent {
-            wasm,
-            name: Some(PROBE_NAME.to_owned()),
-            config: Vec::new(),
-            export: Some("test.paint_probe".to_owned()),
-        })
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.paint_probe".to_owned()) })
         .unwrap_or_else(|error| panic!("load_component: {error}"))
         .1
 }
@@ -131,7 +123,7 @@ fn load_cube(harness: &mut SubstrateHarness, wasm_path: &Path) {
                 &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
-                    name: Some("test.cube".to_owned()),
+                    name: None,
                     config: Vec::new(),
                     // `Cube` is a non-entry actor in the bundle.
                     export: Some("test.cube".to_owned()),

@@ -3,7 +3,8 @@
 //! Every bundle is content-addressed (ADR-0241 §3): the root emits the
 //! [`CONTENT_ADDRESSED_SECTION`] marker, so the engine publishes it as
 //! `aether.bloomery.bundle.<module hash>` and every built bundle is its own
-//! publication.
+//! publication. The root is `instanced`: the driver loads one per unit and
+//! digest, each keyed by its `UnitBundle::name` (ADR-0241 §5).
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -30,9 +31,9 @@ pub fn expand_root(root: &Ident, pieces: &[RolePieces]) -> TokenStream2 {
     let items = pieces.iter().map(|piece| &piece.items);
     let spawns: Vec<&Ident> = pieces.iter().flat_map(|piece| &piece.spawns).collect();
     let actor = if spawns.is_empty() {
-        quote! { #[::aether_actor::actor(root)] }
+        quote! { #[::aether_actor::actor(instanced, root)] }
     } else {
-        quote! { #[::aether_actor::actor(root, spawns(#(#spawns),*))] }
+        quote! { #[::aether_actor::actor(instanced, root, spawns(#(#spawns),*))] }
     };
     quote! {
         struct #root {

@@ -45,8 +45,6 @@ use std::fs;
 use std::path::Path;
 
 /// User-facing component name passed to `LoadComponent`.
-const COMPONENT_NAME: &str = "mv";
-const CAMERA_COMPONENT_NAME: &str = "aether.kit.camera";
 const OUTLINE_WINDOW_WIDTH: u32 = 768;
 const OUTLINE_WINDOW_HEIGHT: u32 = 576;
 fn test_window() -> ErasedActorPath {
@@ -64,22 +62,15 @@ f 1 2 3 4
 const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 const OUTLINED_PLATE_DSL: &[u8] = b"(box 2 2 0.002 :color 6)\n";
 
-/// Load the kit export `R` under `name`, returning its reference and the
+/// Load the kit export `R` under its own namespace, returning its reference and the
 /// lineage path it registered at — the path a capture bundle's `NamedMail`
 /// carries.
-fn load_kit_export<R: Addressable>(
-    harness: &mut SubstrateHarness,
-    wasm: &[u8],
-    name: &str,
-) -> (ActorRef<R>, ErasedActorPath) {
+fn load_kit_export<R: Addressable>(harness: &mut SubstrateHarness, wasm: &[u8]) -> (ActorRef<R>, ErasedActorPath) {
+    let name = R::NAMESPACE;
     let (actor, path) = harness
-        .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: Some(name.to_owned()), config: Vec::new(), export: None })
-        .unwrap_or_else(|error| panic!("load {}: {error}", R::NAMESPACE));
-    assert!(
-        path.to_string().ends_with(&format!(":{name}")),
-        "export {} should register under :{name}; got {path}",
-        R::NAMESPACE,
-    );
+        .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load {name}: {error}"));
+    assert!(path.to_string().ends_with(&format!(":{name}")), "export {name} should register under :{name}; got {path}");
     (actor, path)
 }
 
@@ -91,8 +82,8 @@ fn load_kit_export<R: Addressable>(
 /// surfaces the error message rather than wedging on a missing subscription.
 fn load_viewer(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<MeshViewer> {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
-    load_kit_export::<CameraComponent>(harness, &wasm, CAMERA_COMPONENT_NAME);
-    load_kit_export::<MeshViewer>(harness, &wasm, COMPONENT_NAME).0
+    load_kit_export::<CameraComponent>(harness, &wasm);
+    load_kit_export::<MeshViewer>(harness, &wasm).0
 }
 
 fn capture_outlined_mesh(
@@ -167,8 +158,8 @@ fn edge_on_outline_stays_visible_and_keeps_apparent_width() {
         .build()
         .expect("boot");
 
-    let (camera, camera_path) = load_kit_export::<CameraComponent>(&mut harness, &wasm, CAMERA_COMPONENT_NAME);
-    let (viewer, viewer_path) = load_kit_export::<MeshViewer>(&mut harness, &wasm, COMPONENT_NAME);
+    let (camera, camera_path) = load_kit_export::<CameraComponent>(&mut harness, &wasm);
+    let (viewer, viewer_path) = load_kit_export::<MeshViewer>(&mut harness, &wasm);
     let loaded = harness
         .execute(vec![
             (

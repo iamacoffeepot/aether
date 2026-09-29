@@ -40,8 +40,8 @@ fn harness() -> SubstrateHarness {
     SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot")
 }
 
-fn load_request(wasm: Vec<u8>, name: &str) -> LoadComponent {
-    LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None }
+fn load_request(wasm: Vec<u8>) -> LoadComponent {
+    LoadComponent { wasm, name: None, config: Vec::new(), export: None }
 }
 
 /// Poll `actor`'s published contract until it equals `expected`, to a bounded
@@ -92,7 +92,7 @@ fn a_loaded_component_publishes_its_guest_contract_through_replace_and_drop() {
     let mut harness = harness();
 
     let (victim, path) = harness
-        .load::<ContractBase>(load_request(wasm.clone(), "victim"))
+        .load::<ContractBase>(load_request(wasm.clone()))
         .unwrap_or_else(|error| panic!("the base must load: {error}"));
     let base = sorted(vec![(Bump::ID, ReplyContract::None), (CountQuery::ID, ReplyContract::One(CountReport::ID))]);
     assert_eq!(harness.published_contract(victim.erase()), Some((base.clone(), false)));
@@ -140,7 +140,7 @@ fn an_inline_child_alias_publishes_its_own_type_contract() {
     let mut harness = harness();
 
     let (stateful_parent, _) = harness
-        .load::<InlineStatefulParent>(load_request(wasm.clone(), "stateful_parent"))
+        .load::<InlineStatefulParent>(load_request(wasm.clone()))
         .unwrap_or_else(|error| panic!("the stateful parent must load: {error}"));
     let stateful_child = await_child::<InlineStatefulParent, InlineStatefulChild>(&harness, stateful_parent, "widget");
     assert_eq!(harness.published_contract(stateful_parent.erase()), Some((Vec::new(), true)));
@@ -153,7 +153,7 @@ fn an_inline_child_alias_publishes_its_own_type_contract() {
     );
 
     let (private_parent, _) = harness
-        .load::<InlineParent>(load_request(wasm, "private_parent"))
+        .load::<InlineParent>(load_request(wasm))
         .unwrap_or_else(|error| panic!("the private-child parent must load: {error}"));
     let private_child = await_child::<InlineParent, InlineChild>(&harness, private_parent, "widget");
     assert_eq!(

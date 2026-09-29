@@ -31,11 +31,12 @@ use std::fs;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-fn load_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> (ErasedActorRef, ErasedActorPath) {
+/// Load the bundle's default export, the singleton `test.probe`.
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> (ErasedActorRef, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
-        .load_any(&LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None })
-        .unwrap_or_else(|error| panic!("load_component({name}): {error}"))
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load_component(test.probe): {error}"))
 }
 
 /// A freshly-loaded probe's trampoline mailbox accepts the kinds the
@@ -47,7 +48,7 @@ fn cap_registry_reports_accepted_kinds() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let (probe, _) = load_named(&mut harness, &wasm_path, "probe");
+    let (probe, _) = load_probe(&mut harness, &wasm_path);
 
     assert!(harness.accepts(probe, Tick::ID), "probe should accept its declared Tick handler");
     assert!(harness.accepts(probe, UnsubscribeKeys::ID), "probe should accept its declared UnsubscribeKeys handler");
@@ -63,7 +64,7 @@ fn cap_registry_reports_fallback() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let (strict, _) = load_named(&mut harness, &wasm_path, "strict");
+    let (strict, _) = load_probe(&mut harness, &wasm_path);
 
     assert!(!harness.accepts(strict, Ping::ID), "a strict receiver rejects an undeclared kind");
 }
@@ -86,7 +87,7 @@ fn cap_registry_updates_on_replace() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let base = LoadComponent {
         wasm: wasm.clone(),
-        name: Some("swappable".to_owned()),
+        name: None,
         config: Vec::new(),
         export: Some("test.contract.base".to_owned()),
     };
@@ -138,7 +139,7 @@ fn cap_registry_clears_on_drop() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let (victim, path) = load_named(&mut harness, &wasm_path, "victim");
+    let (victim, path) = load_probe(&mut harness, &wasm_path);
     assert!(harness.accepts(victim, Tick::ID), "sanity: loaded probe accepts Tick before drop");
 
     let host = harness.actor_ref::<ComponentHostCapability>();

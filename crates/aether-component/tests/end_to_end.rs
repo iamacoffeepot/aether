@@ -24,8 +24,6 @@ use aether_kinds::{LoadComponent, LoadResult};
 use aether_test_fixtures_kinds::TickObserved;
 use std::fs;
 
-const PROBE_NAME: &str = "probe";
-
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = harness
@@ -33,7 +31,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) {
             "load",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
+                &LoadComponent { wasm, name: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("load sequence");

@@ -394,7 +394,7 @@ mod tests {
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
-                name: Some(HANDLER_NAMESPACE.to_owned()),
+                name: None,
                 // `HttpHandler` is a non-entry actor in the bundle.
                 export: Some(HANDLER_NAMESPACE.to_owned()),
             }],
@@ -492,7 +492,7 @@ mod tests {
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
-                name: Some(STREAM_HANDLER_NAMESPACE.to_owned()),
+                name: None,
                 export: Some(STREAM_HANDLER_NAMESPACE.to_owned()),
             }],
         };
@@ -585,7 +585,7 @@ mod tests {
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
-                name: Some(ROUTED_STREAM_HANDLER_NAMESPACE.to_owned()),
+                name: None,
                 export: Some(ROUTED_STREAM_HANDLER_NAMESPACE.to_owned()),
             }],
         };
@@ -683,7 +683,7 @@ mod tests {
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
-                name: Some(WS_HANDLER_NAMESPACE.to_owned()),
+                name: None,
                 export: Some(WS_HANDLER_NAMESPACE.to_owned()),
             }],
         };
@@ -897,15 +897,10 @@ mod tests {
                 AutoloadComponent {
                     wasm: wasm.clone(),
                     config: Vec::new(),
-                    name: Some(HANDLER_NAMESPACE.to_owned()),
+                    name: None,
                     export: Some(HANDLER_NAMESPACE.to_owned()),
                 },
-                AutoloadComponent {
-                    wasm,
-                    config: Vec::new(),
-                    name: Some(ROUTED_NAMESPACE.to_owned()),
-                    export: Some(ROUTED_NAMESPACE.to_owned()),
-                },
+                AutoloadComponent { wasm, config: Vec::new(), name: None, export: Some(ROUTED_NAMESPACE.to_owned()) },
             ],
         };
 

@@ -44,9 +44,6 @@ use aether_kit as _;
 use std::fs;
 use std::path::Path;
 
-/// User-facing component name passed to `LoadComponent`.
-const COMPONENT_NAME: &str = "tile";
-
 /// Load `aether-kit`'s pre-built wasm into the harness selecting
 /// the `aether.kit.bundle` export (ADR-0096; the kit is defaultless per
 /// ADR-0138, so the selector is required), await `LoadResult`, and return
@@ -60,12 +57,7 @@ fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorP
             "load",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &LoadComponent {
-                    wasm,
-                    name: Some(COMPONENT_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: Some("aether.kit.bundle".to_owned()),
-                },
+                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("aether.kit.bundle".to_owned()) },
             ),
         )])
         .expect("load sequence");
