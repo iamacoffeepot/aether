@@ -11,8 +11,6 @@ use aether_test_fixtures_kinds as _;
 
 mod tests {
     use std::fs;
-    use std::thread;
-    use std::time::Duration;
 
     use aether_harness_substrate::test_helpers::require_wasm;
     use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -22,14 +20,8 @@ mod tests {
     /// `aether.log.*`.
     const LEVEL_INFO: u8 = 2;
 
-    /// Polling budget: after `advance(1)` the entry should already be in the
-    /// ring (the tick settled before `advance` returned), but a few retries
-    /// absorb any edge-case timing without lengthening the happy path.
-    const POLL_ATTEMPTS: usize = 10;
-    const POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-    /// Load `probe`, advance one tick, poll its reference with
-    /// `SubstrateHarness::log_tail` until the `typed_send_alive` info entry appears,
+    /// Load `probe`, advance one tick, read its reference once with
+    /// `SubstrateHarness::log_tail` for the `typed_send_alive` info entry,
     /// then re-query past the returned cursor and assert it is not
     /// re-yielded — the in-process counterpart to
     /// `fleetharness_actor_logs_surface_the_probe_first_tick_entry`.
@@ -52,26 +44,18 @@ mod tests {
 
         harness.execute(vec![("tick", HarnessOp::advance(1))]).expect("advance one tick");
 
-        let mut last_reply = None;
-        let mut found = None;
-        for _ in 0..POLL_ATTEMPTS {
-            let reply = harness.log_tail(probe, None, None);
-            if let LogTailResult::Ok { ref entries, next_since, .. } = reply
-                && let Some(entry) = entries.iter().find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
-            {
-                found = Some((entry.clone(), next_since));
-                break;
-            }
-            last_reply = Some(reply);
-            thread::sleep(POLL_INTERVAL);
-        }
-
-        let (entry, next_since) = found.unwrap_or_else(|| {
-            panic!(
-                "probe's `typed_send_alive` info entry never appeared after {POLL_ATTEMPTS} \
-                     polls; last reply: {last_reply:?}",
-            )
-        });
+        // The guest's log host fn pushes into the actor's log ring on the
+        // dispatcher thread, inside the tick handler, and `advance` returns
+        // only once the tick's subtree settled — so one read sees the entry.
+        let reply = harness.log_tail(probe, None, None);
+        let LogTailResult::Ok { ref entries, next_since, .. } = reply else {
+            panic!("LogTail failed: {reply:?}");
+        };
+        let entry = entries
+            .iter()
+            .find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
+            .unwrap_or_else(|| panic!("probe's `typed_send_alive` info entry is not in the ring: {reply:?}"))
+            .clone();
 
         assert!(entry.sequence >= 1, "a buffered entry should carry a 1-based ring sequence, got {}", entry.sequence);
 

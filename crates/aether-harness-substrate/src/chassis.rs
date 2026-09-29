@@ -21,11 +21,12 @@ use aether_kinds::FrameVerdict;
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::settlement::{SettlementRegistry, WaitOutcome};
+use aether_substrate::chassis::settlement::{PumpWake, SettlementRegistry, WaitOutcome};
 use aether_substrate::config::ConfigSources;
 use aether_substrate::{Chassis, RingCapacities, SchedulerTuning, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 use aether_window::SyntheticWindowCapability;
+use crossbeam_channel::{Receiver, Sender};
 
 use aether_lifecycle::{LifecycleConfig, frame_lifecycle_params};
 use aether_substrate::mail::registry::MailDispatch;
@@ -133,15 +134,32 @@ pub trait FrameHook {
     /// any queued render mail (advance draws, capture pre-mails, the
     /// `pre_settled` notices). Called each pump-loop iteration so a
     /// render-recipient chain settles while the harness blocks on a reply.
+    /// It only drains: the render slot's wake lands on the harness's one
+    /// [`PumpWake`] channel ([`RenderHookWiring::wake`]), and the pump loop
+    /// alone empties that queue, always before it drains its sources, so a
+    /// wake is never discarded ahead of the drain that services its mail.
     fn pump(&mut self);
     /// Block until `root` settles, draining the pumped render slot on its
     /// mail wake while waiting (ADR-0161 §Decision 2) — the harness's call
-    /// into the same `await_settlement_pumped` the drivers wait in. A chain
-    /// that reaches the render actor settles only because this drain runs,
-    /// and it runs on mail arrival, never on a timer. `cap` is the
-    /// cumulative patience before the wait reports
-    /// [`WaitOutcome::Wedged`].
-    fn settle(&mut self, settlement: &SettlementRegistry, root: MailId, cap: Duration) -> WaitOutcome;
+    /// into the same `await_settlement_pumped` the drivers wait in, on the
+    /// harness's one [`PumpWake`] channel `wake`. A chain that reaches the
+    /// render actor settles only because this drain runs, and it runs on
+    /// mail arrival, never on a timer. `cap` is the cumulative patience
+    /// before the wait reports [`WaitOutcome::Wedged`].
+    ///
+    /// The settle runs between pump waits, never inside one. It empties
+    /// `wake` before subscribing, so a `Settled` left by an earlier settle
+    /// that wedged cannot end this one early, and drains the slot after
+    /// emptying so no render mail loses its wake. A loopback or event wake
+    /// it consumes is harmless: the next pump wait drains every source
+    /// before it first blocks.
+    fn settle(
+        &mut self,
+        settlement: &SettlementRegistry,
+        root: MailId,
+        cap: Duration,
+        wake: &Receiver<PumpWake>,
+    ) -> WaitOutcome;
     /// Whether the pumped render actor holds a capture that is **ready to
     /// read back** — every pre-mail chain has settled (ADR-0161 R4 / issue
     /// 860), read from its state without mutating it (via
@@ -176,6 +194,11 @@ pub trait FrameHook {
 pub struct RenderHookWiring {
     /// Resolved `"assets"` root for `capture_frame` similarity references.
     pub assets_dir: Option<PathBuf>,
+    /// The harness's one [`PumpWake`] channel (ADR-0161 §Decision 2). The
+    /// hook installs it on the render slot's mailbox wake, so render mail
+    /// wakes the pump loop and the settle wait alike, and each
+    /// [`FrameHook::settle`] subscription sends its `Settled` here.
+    pub wake: Sender<PumpWake>,
 }
 
 /// Bag of resolved configs the substrate-harness chassis takes at build
@@ -249,6 +272,9 @@ pub struct SubstrateHarnessEnv {
     /// Resolved `"assets"` root handed to [`Self::render_hook`] for
     /// `capture_frame` similarity references.
     pub render_assets_dir: Option<PathBuf>,
+    /// The embedder's [`PumpWake`] sender, handed to [`Self::render_hook`]
+    /// as [`RenderHookWiring::wake`].
+    pub render_wake: Sender<PumpWake>,
 }
 
 /// Output of [`SubstrateHarnessChassis::build_passive`]. Bundles the
@@ -305,6 +331,7 @@ impl SubstrateHarnessChassis {
             render_hook,
             render_size: (width, height),
             render_assets_dir,
+            render_wake,
         } = env;
 
         let mut boot = SubstrateBoot::build()?;
@@ -450,7 +477,7 @@ impl SubstrateHarnessChassis {
         let (passive, hook) = builder.build_passive_with_start(|passive| {
             render_hook
                 .map(|factory| {
-                    let wiring = RenderHookWiring { assets_dir: render_assets_dir };
+                    let wiring = RenderHookWiring { assets_dir: render_assets_dir, wake: render_wake };
                     factory(passive, wiring, width, height)
                 })
                 .transpose()

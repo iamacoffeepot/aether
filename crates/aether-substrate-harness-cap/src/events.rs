@@ -16,6 +16,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use aether_substrate::InboundMail;
+use aether_substrate::chassis::ctx::MailboxWakeFn;
 
 /// Events the event loop consumes. Single-consumer (the loop); the producers
 /// are the `aether.substrate_harness.advance` handler (`Advance`) and the
@@ -41,15 +42,26 @@ pub enum ChassisEvent {
     RenderMail,
 }
 
+/// The producer half. `wake`, when present, fires after each send, so a
+/// consumer that blocks on a wake channel shared with other sources learns
+/// the event is queued.
 #[derive(Clone)]
-pub struct EventSender(mpsc::Sender<ChassisEvent>);
+pub struct EventSender {
+    tx: mpsc::Sender<ChassisEvent>,
+    wake: Option<MailboxWakeFn>,
+}
 
 impl EventSender {
-    /// Push an event. Returns `Ok(())` on success, `Err` only if
-    /// the receiver has been dropped — at that point the chassis
-    /// is shutting down and the failure is informational.
+    /// Push an event, then fire the wake: the event is queued before its
+    /// wake is, so a consumer woken by it finds the event. Returns `Ok(())`
+    /// on success, `Err` only if the receiver has been dropped — at that
+    /// point the chassis is shutting down and the failure is informational.
     pub fn send(&self, event: ChassisEvent) -> Result<(), mpsc::SendError<ChassisEvent>> {
-        self.0.send(event)
+        self.tx.send(event)?;
+        if let Some(wake) = &self.wake {
+            wake();
+        }
+        Ok(())
     }
 }
 
@@ -83,11 +95,14 @@ impl EventReceiver {
     }
 }
 
-/// Build the sender/receiver pair the chassis wires once at boot.
+/// Build the sender/receiver pair the chassis wires once at boot. `wake`
+/// fires after each send; the standalone binary blocks on the receiver itself
+/// and passes `None`, while the in-process harness passes the wake of the one
+/// channel its pump loop blocks on.
 #[must_use]
-pub fn channel() -> (EventSender, EventReceiver) {
+pub fn channel(wake: Option<MailboxWakeFn>) -> (EventSender, EventReceiver) {
     let (tx, rx) = mpsc::channel();
-    (EventSender(tx), EventReceiver(rx))
+    (EventSender { tx, wake }, EventReceiver(rx))
 }
 
 #[cfg(test)]
@@ -96,7 +111,7 @@ mod tests {
 
     #[test]
     fn recv_errors_after_all_senders_drop() {
-        let (tx, rx) = channel();
+        let (tx, rx) = channel(None);
         drop(tx);
         // No clones outstanding — the receiver returns Err once the
         // last sender goes away. The chassis loop interprets this

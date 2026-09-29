@@ -43,11 +43,10 @@ use aether_kinds::{ListComponents, ListComponentsResult, LoadComponent, LoadResu
 use aether_trace::walk::TreeWalk;
 // The driver sends encode each kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape).
-use crate::poll_config::PollConfig;
-use crate::pump_stats::PumpStats;
 use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root};
 use aether_fs::NamespaceRoots;
-use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
+use aether_substrate::chassis::ctx::MailboxWakeFn;
+use aether_substrate::chassis::settlement::{PumpWake, TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 #[cfg(test)]
 use aether_substrate::mail::MailboxId;
@@ -65,65 +64,17 @@ use super::chassis::{
 };
 use aether_substrate_harness_cap::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
-use std::thread;
 
-use crossbeam_channel::{Receiver, TryRecvError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
-/// Finest cadence the settle pump uses while an exact causal chain is
-/// known to remain outstanding. Slow untracked waits still ramp toward
-/// their configured ceiling.
-const PUMP_BACKOFF_FLOOR: Duration = Duration::from_micros(50);
-
-/// Adaptive delay for quiet settle-pump iterations.
-///
-/// A tracked chain stays at [`PUMP_BACKOFF_FLOOR`], because sleeping at
-/// the coarse ceiling while its handler is silent makes the observer's
-/// sleep look like handler work. Once that chain settles — or for waits
-/// with no exact chain signal — the geometric ramp keeps slow capability
-/// waits from pinning a core.
-struct PumpBackoff {
-    current: Duration,
-    cap: Duration,
-}
-
-impl PumpBackoff {
-    fn new(cap: Duration) -> Self {
-        Self { current: PUMP_BACKOFF_FLOOR, cap }
-    }
-
-    fn reset(&mut self) {
-        self.current = PUMP_BACKOFF_FLOOR;
-    }
-
-    fn quiet_sleep(&mut self, tracked_chain_outstanding: bool) -> Duration {
-        if tracked_chain_outstanding {
-            self.reset();
-            return PUMP_BACKOFF_FLOOR;
-        }
-
-        let sleep = self.current;
-        self.current = (self.current * 2).min(self.cap);
-        sleep
-    }
-}
-
-/// Consume an exact chain's one-shot settlement signal when it fires.
-///
-/// The signal is a backoff hint only: the correlated reply remains the
-/// functional gate. A disconnected sender is equivalent to no known
-/// outstanding chain, so the pump may resume its ordinary ramp.
-fn tracked_chain_outstanding(settlement: &mut Option<Receiver<()>>) -> bool {
-    let Some(receiver) = settlement.as_ref() else {
-        return false;
-    };
-
-    match receiver.try_recv() {
-        Err(TryRecvError::Empty) => true,
-        Ok(()) | Err(TryRecvError::Disconnected) => {
-            *settlement = None;
-            false
-        }
-    }
+/// A reply source's wake: sends [`PumpWake::Mail`] on the harness's one wake
+/// channel. The source fires it after it enqueues, so the pump loop woken by
+/// it finds the item.
+fn mail_wake(wake: &Sender<PumpWake>) -> MailboxWakeFn {
+    let wake = wake.clone();
+    Arc::new(move || {
+        let _ = wake.send(PumpWake::Mail);
+    })
 }
 
 /// Boxed [`FrameHook`] constructor the render extension registers on the
@@ -236,6 +187,14 @@ pub struct SubstrateHarness {
 
     events_rx: EventReceiver,
 
+    /// The one wake channel every reply source signals (ADR-0161 §Decision
+    /// 2): the loopback recorder and the event channel after each enqueue,
+    /// the pumped render slot after each accepted mail, and a render settle's
+    /// subscription on settlement. [`Self::pump_until_event`] blocks here
+    /// instead of sleeping, and it alone empties the queue inside a pump
+    /// wait — always before it drains the sources, so no wake is lost.
+    wake_rx: Receiver<PumpWake>,
+
     /// Frame-pump render seam, `Some` iff the builder registered a
     /// render extension (issues #3764/#3765). Captures require it; an
     /// advance without one skips the per-frame draw. ADR-0161 slice R4:
@@ -262,14 +221,6 @@ pub struct SubstrateHarness {
     /// reaches under nextest saturation; [`Duration::MAX`] is the "no cap —
     /// wait forever" sentinel (`AETHER_SETTLEMENT_CAP_SECS=0`).
     settlement_cap: Duration,
-    /// Ceiling the pump clamps its quiet backoff to (issue 4453),
-    /// resolved like `settlement_cap` — builder override, else
-    /// `AETHER_HARNESS_POLL_CAP_MICROS` via `PollConfig`.
-    poll_cap: Duration,
-    /// Where the pump slept while waiting, since the last
-    /// [`Self::take_pump_stats`]. Per-harness so two harnesses in one
-    /// test binary cannot share or reset each other's numbers.
-    pump_stats: PumpStats,
     /// Stable session identity for reply addressing. The substrate
     /// echoes this on every reply addressed to `SourceAddr::Session`,
     /// so the loopback receiver can recognise its own replies.
@@ -335,7 +286,6 @@ pub struct SubstrateHarnessBuilder {
     trace_ring_capacity: Option<usize>,
     trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
-    poll_cap: Option<Duration>,
     render_hook: Option<HookFactory>,
     component_host: bool,
     compose: Vec<ComposeFn>,
@@ -353,7 +303,6 @@ impl Default for SubstrateHarnessBuilder {
             trace_ring_capacity: None,
             trace_ring_max_capacity: None,
             settlement_cap: None,
-            poll_cap: None,
             render_hook: None,
             component_host: false,
             compose: Vec::new(),
@@ -458,19 +407,6 @@ impl SubstrateHarnessBuilder {
     #[must_use]
     pub fn settlement_cap(mut self, cap: Option<Duration>) -> Self {
         self.settlement_cap = cap;
-        self
-    }
-
-    /// Issue 4453: override the ceiling the pump clamps its quiet backoff
-    /// to. `None` (the default) resolves `AETHER_HARNESS_POLL_CAP_MICROS`
-    /// (argv > env > default 10 ms) via `PollConfig`; `Some(d)` pins it.
-    /// The exact lifecycle chain used by a frame stays at the pump's fine
-    /// floor while outstanding (issue 4454); this ceiling governs
-    /// untracked and post-settlement quiet, where a fine value trades CPU
-    /// for observation resolution. Per-harness, no process env.
-    #[must_use]
-    pub fn poll_cap(mut self, cap: Option<Duration>) -> Self {
-        self.poll_cap = cap;
         self
     }
 
@@ -645,7 +581,6 @@ impl SubstrateHarness {
             trace_ring_capacity,
             trace_ring_max_capacity,
             settlement_cap,
-            poll_cap,
             render_hook,
             component_host,
             compose,
@@ -669,9 +604,12 @@ impl SubstrateHarness {
             trace_max: trace_ring_max_capacity.unwrap_or(trace),
         };
         let settlement_cap = settlement_cap.unwrap_or_else(|| SettlementConfig::from_env().to_cap());
-        let poll_cap = poll_cap.unwrap_or_else(|| PollConfig::from_env().to_cap());
 
-        let (events_tx, events_rx) = event_channel();
+        // The one wake channel the pump loop blocks on: the event channel,
+        // the loopback recorder and the render slot each fire it after they
+        // enqueue.
+        let (wake_tx, wake_rx) = crossbeam_channel::unbounded::<PumpWake>();
+        let (events_tx, events_rx) = event_channel(Some(mail_wake(&wake_tx)));
         let observed_kinds = Arc::new(Mutex::new(Vec::<KindId>::new()));
 
         // ADR-0161 slice R4: the pumped render slot is booted in the build's
@@ -706,6 +644,7 @@ impl SubstrateHarness {
             render_hook,
             render_size: (width, height),
             render_assets_dir,
+            render_wake: wake_tx.clone(),
         };
         let SubstrateHarnessBuild { passive, boot, mut hook } =
             SubstrateHarnessChassis::build_passive(env).map_err(|e| SubstrateHarnessError::Boot(e.to_string()))?;
@@ -722,7 +661,7 @@ impl SubstrateHarness {
         // mailer's reply path and arrive here as
         // `EgressEvent::ToSession`, which `pump_until_reply`
         // correlates by `correlation_id`.
-        let loopback_rx = boot.outbound.attach_recording();
+        let loopback_rx = boot.outbound.attach_recording(Some(mail_wake(&wake_tx)));
 
         // The loopback driver's route to the lifecycle cap: the reference the
         // chassis recorded when it composed the cap.
@@ -731,27 +670,18 @@ impl SubstrateHarness {
         Ok(Self {
             loopback_rx,
             events_rx,
+            wake_rx,
             hook,
             lifecycle,
             frame: 0,
             next_correlation_id: AtomicU64::new(1),
             settlement_cap,
-            poll_cap,
-            pump_stats: PumpStats::default(),
             session: SessionToken(Uuid::from_u128(TESTBENCH_SESSION_UUID)),
             stashed_replies: HashMap::new(),
             observed_kinds,
             _boot: boot,
             passive,
         })
-    }
-
-    /// Read and reset where the pump slept (issue 4453). An instrument
-    /// brackets one op by calling this on either side of it; the returned
-    /// [`PumpStats::overshoot_bound`] states how much of the op's wall
-    /// clock could be observation lag rather than work.
-    pub fn take_pump_stats(&mut self) -> PumpStats {
-        self.pump_stats.take()
     }
 
     /// Count how many reports matching `kind_name` fixtures have mailed
@@ -952,7 +882,7 @@ impl SubstrateHarness {
         let cid = self.fresh_correlation_id();
         self.passive.send_for_reply(host, component, self.session_reply(cid));
 
-        let EgressEvent::ToSession { payload, sender, .. } = self.pump_until_event(cid, LoadResult::NAME, None)? else {
+        let EgressEvent::ToSession { payload, sender, .. } = self.pump_until_event(cid, LoadResult::NAME)? else {
             return Err(SubstrateHarnessError::Decode("expected a session-targeted LoadResult".to_owned()));
         };
         match LoadResult::decode_from_bytes(&payload) {
@@ -981,8 +911,7 @@ impl SubstrateHarness {
         let cid = self.fresh_correlation_id();
         self.passive.send_for_reply(host, &ListComponents {}, self.session_reply(cid));
 
-        let EgressEvent::ToSession { payload, .. } = self.pump_until_event(cid, ListComponentsResult::NAME, None)?
-        else {
+        let EgressEvent::ToSession { payload, .. } = self.pump_until_event(cid, ListComponentsResult::NAME)? else {
             return Err(SubstrateHarnessError::Decode("expected a session-targeted ListComponentsResult".to_owned()));
         };
         ListComponentsResult::decode_from_bytes(&payload)
@@ -1034,7 +963,7 @@ impl SubstrateHarness {
     fn await_settlement(&mut self, kind: KindId, root: MailId, rx: &Receiver<()>) -> Result<(), SubstrateHarnessError> {
         let gate = "substrate_harness.push_and_settle";
         let outcome = match self.hook.as_mut() {
-            Some(hook) => hook.settle(self.passive.settlement_registry(), root, self.settlement_cap),
+            Some(hook) => hook.settle(self.passive.settlement_registry(), root, self.settlement_cap, &self.wake_rx),
             None => await_internal_signal(
                 rx,
                 gate,
@@ -1338,36 +1267,13 @@ impl SubstrateHarness {
         }
     }
 
-    /// Pump the event channel and the loopback receiver until a
-    /// reply with `cid` arrives, decoded as `R`. Each iteration
-    /// fully drains the queue and processes any pending events.
-    /// Quiet iterations (no events surfaced, no reply on loopback)
-    /// sleep briefly to give ADR-0070 capability dispatcher threads
-    /// time to wake up — `FsCapability` and friends poll their mpsc
-    /// receivers on a 100ms `recv_timeout`, so without this sleep a
-    /// capability-mediated reply (e.g. `aether.fs.write` →
-    /// `WriteResult`) can't beat the bail-out check.
+    /// Pump the event channel, the render slot and the loopback receiver
+    /// until a reply with `cid` arrives, decoded as `R`.
     fn pump_until_reply<R>(&mut self, cid: u64, expected: &'static str) -> Result<R, SubstrateHarnessError>
     where
         R: Kind,
     {
-        let event = self.pump_until_event(cid, expected, None)?;
-        Self::decode_reply::<R>(event, expected)
-    }
-
-    /// Pump for a correlated reply while an exact causal chain is known
-    /// to be outstanding. Settlement controls only the quiet-poll cadence;
-    /// the reply remains the ordering gate (issue 999).
-    fn pump_until_reply_while_settling<R>(
-        &mut self,
-        cid: u64,
-        expected: &'static str,
-        settlement: Receiver<()>,
-    ) -> Result<R, SubstrateHarnessError>
-    where
-        R: Kind,
-    {
-        let event = self.pump_until_event(cid, expected, Some(settlement))?;
+        let event = self.pump_until_event(cid, expected)?;
         Self::decode_reply::<R>(event, expected)
     }
 
@@ -1376,69 +1282,55 @@ impl SubstrateHarness {
     /// [`Self::request_bytes`] and the `SendAndAwaitReply` op of
     /// [`Self::execute`], where the reply type is decoded on demand.
     fn pump_until_reply_bytes(&mut self, cid: u64, expected: &'static str) -> Result<Vec<u8>, SubstrateHarnessError> {
-        let event = self.pump_until_event(cid, expected, None)?;
+        let event = self.pump_until_event(cid, expected)?;
         Self::reply_payload(event, expected)
     }
 
-    /// Pump the event channel and the loopback receiver until a
-    /// session-targeted reply with `cid` arrives, returning the raw
+    /// Pump the event channel, the render slot and the loopback receiver
+    /// until a session-targeted reply with `cid` arrives, returning the raw
     /// [`EgressEvent`]. Shared loop body of [`Self::pump_until_reply`]
     /// (typed decode) and [`Self::pump_until_reply_bytes`] (raw bytes).
-    /// When `tracked_settlement` is present, its exact causal chain pins
-    /// quiet polling to the fine floor until settlement fires (issue 4454).
-    fn pump_until_event(
-        &mut self,
-        cid: u64,
-        expected: &'static str,
-        mut tracked_settlement: Option<Receiver<()>>,
-    ) -> Result<EgressEvent, SubstrateHarnessError> {
-        // Adaptive backoff between quiet polls. A frame's settlement
-        // round-trip (driver → pool → settlement registry → reply)
-        // completes in ~1 ms, but a flat coarse sleep makes every tick
-        // pay that sleep's full granularity (a flat 10 ms cost ~12 ms
-        // per `advance(1)` — the harness's entire wall-clock, and it
-        // parked the pool between frames so "warm" was really ~100 Hz
-        // paced; iamacoffeepot/aether#1079). So poll fine initially to
-        // catch the common case promptly, then back off geometrically
-        // to a 10 ms cap for genuine quiet — a wait on a slow cap
-        // (`FsCapability` polls its inbox at 100 ms) reaches the cap
-        // and sleeps coarsely rather than pinning a core. Each sleep
-        // yields the CPU, so capability dispatcher threads still run
-        // (ADR-0070).
-        // The cap is settable (issue 4453) so an instrument can trade CPU
-        // for observation resolution during untracked or post-settlement
-        // quiet. An exact outstanding lifecycle chain stays at the floor:
-        // otherwise a silent handler is observed up to a whole capped
-        // sleep after it actually finished, and that lag is
-        // indistinguishable from work at this seam (issue 4454).
-        let backoff_cap = self.poll_cap;
+    ///
+    /// A quiet iteration blocks on the one wake channel every source fires
+    /// after it enqueues, so the loop wakes when a source has work, never on
+    /// a clock. No wake is lost because this loop alone empties the queue
+    /// inside a pump wait, and always before it drains the sources: a wake
+    /// emptied here was fired after its item was enqueued, so the drain that
+    /// follows finds the item; an item enqueued after the empty fires its
+    /// wake after the empty too, so that wake stays queued and the block
+    /// below returns on it. A render settle ([`FrameHook::settle`]) also
+    /// reads the channel, but only between pump waits, and each pump wait
+    /// drains every source before it first blocks, so a wake that settle
+    /// consumed is covered.
+    fn pump_until_event(&mut self, cid: u64, expected: &'static str) -> Result<EgressEvent, SubstrateHarnessError> {
         // Wall-clock budget for consecutive quiet (no-progress) time
         // before giving up — a deadlock/livelock backstop, not the gate a
         // healthy reply meets, so it reads the runtime-configurable
         // settlement cap (issue 2062) rather than a 1-min constant that
-        // false-fired under nextest saturation. A deadline rather than an
-        // iteration count so the stall timeout is invariant to poll
-        // granularity. The default 5 min rides out a wasmtime compile under
+        // false-fired under nextest saturation. The block below waits at
+        // most the budget left, so this bounds a failure and never paces a
+        // poll. The default 5 min rides out a wasmtime compile under
         // parallel-test CPU pressure (issue 603 routed `LoadComponent`
         // through `ComponentHostCapability`'s thread, so a load step waits
         // on a dispatcher hop + compile when N test binaries run in
         // parallel); `Duration::MAX` (the no-cap sentinel) waits forever.
         let stall_deadline = self.settlement_cap;
 
-        // Check the stash first.
-        if let Some(frame) = self.stashed_replies.remove(&cid) {
-            return Ok(frame);
-        }
-
-        let mut backoff = PumpBackoff::new(backoff_cap);
         let mut last_progress = Instant::now();
         let mut iterations = 0u32;
         loop {
             iterations = iterations.saturating_add(1);
-            // The control mail we pushed flows through the dispatcher
-            // → control plane → chassis handler synchronously on push,
-            // which produces an event on `events_rx` for Advance /
-            // CaptureRequested kinds before this loop body runs.
+
+            // Empty the wake queue before draining any source — the order the
+            // no-lost-wake argument above rests on. No other path empties it
+            // inside a pump wait.
+            while self.wake_rx.try_recv().is_ok() {}
+
+            // A reply a nested pump (an advance's per-tick wait, run from
+            // `dispatch_event` below) read off the loopback for this `cid`.
+            if let Some(frame) = self.stashed_replies.remove(&cid) {
+                return Ok(frame);
+            }
 
             // Drain any pending chassis events. Each invocation
             // potentially produces a reply on `outbound`. A
@@ -1498,15 +1390,25 @@ impl SubstrateHarness {
             }
 
             if progressed {
-                backoff.reset();
                 last_progress = Instant::now();
+                continue;
+            }
+
+            let remaining = stall_deadline.saturating_sub(last_progress.elapsed());
+            if remaining.is_zero() {
+                return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
+            }
+            let woke = if stall_deadline == Duration::MAX {
+                self.wake_rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
             } else {
-                if last_progress.elapsed() >= stall_deadline {
-                    return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
-                }
-                let sleep = backoff.quiet_sleep(tracked_chain_outstanding(&mut tracked_settlement));
-                thread::sleep(sleep);
-                self.pump_stats.record_sleep(sleep, sleep >= backoff_cap);
+                self.wake_rx.recv_timeout(remaining)
+            };
+            // A wake loops back to empty the rest of the queue and drain; a
+            // timeout loops back to the budget check above, which reports it.
+            // A disconnect means every source's wake is gone, so no reply can
+            // arrive.
+            if woke == Err(RecvTimeoutError::Disconnected) {
+                return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
             }
         }
     }
@@ -1605,8 +1507,7 @@ impl SubstrateHarness {
         // `pending` clears — closes that race: by the time the reply
         // lands, the driver is ready for the next advance and the
         // whole broadcast subtree has settled (the reply is gated on
-        // settlement). The tracked reply wait keeps the settlement chain
-        // pinned at the active backoff floor until that reply arrives.
+        // settlement).
         // ADR-0082 §11 / issue 1378: the frame graph is `Tick →
         // Render → Tick`, so one requested tick drives a full
         // two-stage cycle. Each iteration pushes one `LifecycleAdvance`
@@ -1623,8 +1524,9 @@ impl SubstrateHarness {
             // tracks the broadcast subtree and `on_settled` fires) that *also*
             // carries this harness's session as the reply target — the driver
             // routes `LifecycleAdvanceComplete` there via `on_settled`'s
-            // `ctx.reply_to`.
-            let (_, settlement) = self.passive.send_tracked(
+            // `ctx.reply_to`. The reply is the gate, so the settlement
+            // receiver goes unread.
+            let _ = self.passive.send_tracked(
                 self.lifecycle,
                 &aether_kinds::LifecycleAdvance { delta_micros },
                 Some(self.session_reply(cid)),
@@ -1634,11 +1536,8 @@ impl SubstrateHarness {
             // settled (a genuine in_flight leak in some downstream cap)
             // or the driver never replied — same fail-loud disposition
             // the prior `SettlementTimeout` had.
-            let complete = self.pump_until_reply_while_settling::<aether_kinds::LifecycleAdvanceComplete>(
-                cid,
-                "LifecycleAdvanceComplete",
-                settlement,
-            )?;
+            let complete =
+                self.pump_until_reply::<aether_kinds::LifecycleAdvanceComplete>(cid, "LifecycleAdvanceComplete")?;
             if complete.next == <Tick as Kind>::ID.0 || complete.next == 0 {
                 break;
             }
@@ -1703,45 +1602,6 @@ fn correlation_of(event: &EgressEvent) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// Issue 4454: a silent exact lifecycle chain must never climb toward
-    /// the coarse default ceiling. Once its one-shot settlement signal
-    /// fires, the ordinary geometric ramp resumes from the fine floor.
-    #[test]
-    fn tracked_chain_pins_the_backoff_floor_until_settlement() {
-        let (settled_tx, settled_rx) = crossbeam_channel::bounded(1);
-        let mut settlement = Some(settled_rx);
-        let mut backoff = PumpBackoff::new(Duration::from_millis(10));
-
-        for _ in 0..12 {
-            let outstanding = tracked_chain_outstanding(&mut settlement);
-            assert!(outstanding);
-            assert_eq!(backoff.quiet_sleep(outstanding), PUMP_BACKOFF_FLOOR);
-        }
-
-        settled_tx.send(()).expect("the settlement receiver remains live");
-        let outstanding = tracked_chain_outstanding(&mut settlement);
-        assert!(!outstanding);
-        assert!(settlement.is_none(), "the one-shot signal is discarded after it fires");
-        assert_eq!(backoff.quiet_sleep(outstanding), Duration::from_micros(50));
-        assert_eq!(backoff.quiet_sleep(false), Duration::from_micros(100));
-        assert_eq!(backoff.quiet_sleep(false), Duration::from_micros(200));
-    }
-
-    /// Slow reply-only waits have no exact causal-chain receiver. Preserve
-    /// their prior floor/doubling/cap sequence so the frame fix does not
-    /// turn capability waits into a fine-poll CPU spin.
-    #[test]
-    fn untracked_quiet_keeps_the_existing_geometric_backoff() {
-        let mut settlement = None;
-        let mut backoff = PumpBackoff::new(Duration::from_micros(200));
-
-        for expected in [50, 100, 200, 200, 200] {
-            let outstanding = tracked_chain_outstanding(&mut settlement);
-            assert!(!outstanding);
-            assert_eq!(backoff.quiet_sleep(outstanding), Duration::from_micros(expected));
-        }
-    }
-
     /// The wedge dump renders each pending root with its counts (issue
     /// 2062) — a pure-function check, no chassis boot needed.
     #[test]
@@ -1761,8 +1621,6 @@ mod tests {
     }
 
     use crate::HarnessOp;
-    use std::thread;
-    use std::time::Instant;
 
     /// Issue 2062: a wedged settlement gate names the stuck root and its
     /// `(in_flight, held_open)` counts instead of a bare timeout. Drive
@@ -2020,7 +1878,7 @@ mod tests {
             }
         }
 
-        let tb = match SubstrateHarness::start_with_size(64, 48) {
+        let mut tb = match SubstrateHarness::start_with_size(64, 48) {
             Ok(tb) => tb,
             Err(e) => {
                 eprintln!("skipping: SubstrateHarness boot failed (likely no wgpu adapter): {e}");
@@ -2031,7 +1889,8 @@ mod tests {
         let received = Arc::new(AtomicU32::new(0));
 
         // Subname::Counter — first instance, full name "test.spawn.child:0".
-        tb.spawn_actor::<Child>(Subname::Counter, Arc::clone(&received), ())
+        let first = tb
+            .spawn_actor::<Child>(Subname::Counter, Arc::clone(&received), ())
             .after_init(Bump { tag: 1 })
             .after_init(Bump { tag: 2 })
             .finish()
@@ -2047,16 +1906,14 @@ mod tests {
             .expect_err("reused subname must fail");
         assert!(matches!(err, SpawnError::SubnameInUse { .. }), "expected SubnameInUse, got {err:?}");
 
-        // Wait briefly for the two pre-loaded `Bump` mails to land in
-        // the first instance's dispatcher.
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while received.load(AtomicOrdering::SeqCst) < 2 && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-        }
+        // Barrier: the `after_init` mails are queued on the first instance
+        // ahead of any later mail, so a tracked send to it settles only after
+        // both of them dispatched.
+        tb.settle_bytes(first, &Bump { tag: 3 }).expect("barrier bump settles");
         assert_eq!(
             received.load(AtomicOrdering::SeqCst),
-            2,
-            "both pre-loaded after_init mails should dispatch to the first instance"
+            3,
+            "both pre-loaded after_init mails should dispatch to the first instance ahead of the barrier"
         );
     }
 }

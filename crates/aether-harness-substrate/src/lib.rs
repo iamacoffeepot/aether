@@ -83,8 +83,6 @@ mod harness;
 #[cfg(test)]
 mod mail_latency;
 pub mod perf;
-mod poll_config;
-pub mod pump_stats;
 pub mod test_helpers;
 
 pub use chassis::{
@@ -98,5 +96,3 @@ pub use execute::{
 pub use harness::{
     DEFAULT_HEIGHT, DEFAULT_WIDTH, HookFactory, SubstrateHarness, SubstrateHarnessBuilder, SubstrateHarnessError,
 };
-pub use poll_config::{PollConfig, PollConfigLayer, PollOverlay};
-pub use pump_stats::PumpStats;
