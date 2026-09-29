@@ -223,27 +223,42 @@ mod tests {
         }]
     }
 
-    /// The three outcomes the bundle path must tell apart. Before #4125 the
-    /// middle one rendered identically to the last: `lookup` returned `None`
-    /// either way, so the candidate spellings were dropped and the message
-    /// claimed the recipient was unknown.
+    /// The outcomes the bundle path must tell apart. Before #4125 an
+    /// ambiguous hole rendered identically to an absent recipient: `lookup`
+    /// returned `None` either way, so the candidate spellings were dropped and
+    /// the message claimed the recipient was unknown.
     #[test]
     fn bundle_resolution_distinguishes_ambiguous_from_absent_and_resolves_canonical() {
         let registry = Registry::new();
         registry.register_kind(&boot_authority(), <Poke as Kind>::NAME);
-        let canonical = format!("{}/{}:one", DiagnosticsRoot::NAMESPACE, FirstChild::NAMESPACE);
+        let first = format!("{}/{}:one", DiagnosticsRoot::NAMESPACE, FirstChild::NAMESPACE);
         registered_ref(&registry, DiagnosticsRoot::NAMESPACE, noop_handler());
-        registered_ref(&registry, &canonical, noop_handler());
+        registered_ref(&registry, &first, noop_handler());
 
         // Canonical input is unchanged — it never touched short-path expansion.
-        let accepted = accept(&registry, bundle(&canonical), "test bundle").expect("canonical recipient resolves");
+        let accepted = accept(&registry, bundle(&first), "test bundle").expect("canonical recipient resolves");
         assert_eq!(accepted.len(), 1);
 
-        // Ambiguous: two instanced children are declared beneath the root, so a
-        // hole cannot pick one. The error must say so and list both spellings
-        // that would disambiguate it.
-        let ambiguous = format!("{}/:one", DiagnosticsRoot::NAMESPACE);
-        let error = accept(&registry, bundle(&ambiguous), "test bundle").expect_err("hole ambiguous");
+        // Two child types are declared beneath the root, but only one holds
+        // the key live, so the hole resolves to it.
+        let hole = format!("{}/:one", DiagnosticsRoot::NAMESPACE);
+        let accepted = accept(&registry, bundle(&hole), "test bundle").expect("the one live candidate resolves");
+        assert_eq!(accepted.len(), 1);
+
+        // A hole neither type holds live names both spellings.
+        let error = accept(&registry, bundle(&format!("{}/:two", DiagnosticsRoot::NAMESPACE)), "test bundle")
+            .expect_err("no live candidate");
+        assert!(error.contains("no live actor"), "the error names the missing candidate: {error}");
+        assert!(error.contains(FirstChild::NAMESPACE), "the error lists the first candidate: {error}");
+        assert!(error.contains(SecondChild::NAMESPACE), "the error lists the second candidate: {error}");
+
+        // Ambiguous: both types hold the key live, so the hole cannot pick one.
+        registered_ref(
+            &registry,
+            &format!("{}/{}:one", DiagnosticsRoot::NAMESPACE, SecondChild::NAMESPACE),
+            noop_handler(),
+        );
+        let error = accept(&registry, bundle(&hole), "test bundle").expect_err("hole ambiguous");
         assert!(error.contains("ambiguous"), "the error names the ambiguity: {error}");
         assert!(error.contains(FirstChild::NAMESPACE), "the error lists the first candidate: {error}");
         assert!(error.contains(SecondChild::NAMESPACE), "the error lists the second candidate: {error}");

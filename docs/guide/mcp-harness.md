@@ -297,8 +297,10 @@ one handler.
   [The type system](foundations/type-system.md).
 - **The engine resolves textual actor addresses.** Canonical paths and
   short paths such as `root/:name` are checked against the selected
-  engine's declared topology and live registry. Do not derive a mailbox id
-  from the spelling.
+  engine's declared topology and live registry. Beneath a parent with several
+  declared child types, a hole names the one child holding its key live, and
+  fails with the explicit spellings when none or several do. Do not derive a
+  mailbox id from the spelling.
 - **`send_mail` blocks and projects replies by default.** It waits for settlement
   and returns the terminal reply plus recognized errors. Request `replies: "all"`
   when every event matters or `"none"` when only failures matter. A no-reply

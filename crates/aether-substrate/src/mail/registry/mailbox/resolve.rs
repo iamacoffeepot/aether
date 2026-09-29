@@ -163,13 +163,20 @@ impl Registry {
     /// path fills its holes through the published address index — the linked
     /// root/child inventory plus every published module's lineage — before
     /// that canonical lookup, so short spellings are never hashed, stored, or
-    /// reverse-reported.
+    /// reverse-reported. A hole beneath several declared child namespaces
+    /// fills with the one whose canonical path is live under the same
+    /// Starting-or-Live rule, so an over-cap candidate counts as not live
+    /// (ADR-0166 §5).
     pub fn resolve_address(&self, address: &ErasedActorPath) -> Result<ResolvedAddress, AddressResolutionError> {
         let canonical_path = match address.form() {
             ActorPathForm::Canonical(path) => path.to_owned(),
-            ActorPathForm::Short { root, steps } => {
-                self.addresses.load().table().as_ref().map_err(Clone::clone)?.expand(root, &steps)?
-            }
+            ActorPathForm::Short { root, steps } => self
+                .addresses
+                .load()
+                .table()
+                .as_ref()
+                .map_err(Clone::clone)?
+                .expand(root, &steps, |candidate| matches!(self.lookup_canonical(candidate), Ok(Some(_))))?,
         };
         let mailbox_id = self
             .lookup_canonical(&canonical_path)?

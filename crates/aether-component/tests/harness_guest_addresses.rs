@@ -171,25 +171,31 @@ fn a_hole_beneath_a_guest_parent_expands_to_its_load_under_child() {
     assert_eq!(resolve(&mut harness, &format!("{HOST_EXPORT}/:k")), canonical(&path.to_string()));
 }
 
-/// Pins the ADR-0166 hole rule over guest lineage: the bundle's composable
-/// `test.inline.stateful_child` may sit beneath every actor its module
-/// declares, so a hole beneath `test.inline.parent` names two instanced
-/// children and is ambiguous rather than guessed.
+/// Pins the ADR-0166 liveness tie-break over guest lineage: the bundle's
+/// composable `test.inline.stateful_child` may sit beneath every actor its
+/// module declares, so a hole beneath `test.inline.parent` names two child
+/// types. The one holding the key live wins; a key neither holds is refused
+/// naming both.
 #[test]
-fn a_composable_sibling_makes_a_guest_parents_hole_ambiguous() {
+fn a_composable_sibling_defers_to_the_live_child_under_a_guest_parents_hole() {
     let Some((mut harness, wasm)) = fixture_of("aether_test_fixtures_bundle") else {
         return;
     };
 
-    load(&mut harness, &wasm, INLINE_PARENT_EXPORT);
+    let (_, parent) = load(&mut harness, &wasm, INLINE_PARENT_EXPORT);
 
-    let ResolveAddressResult::Err { error } = resolve(&mut harness, &format!("{INLINE_PARENT_EXPORT}/:widget")) else {
-        panic!("a hole beneath a parent with a composable sibling must not expand");
+    assert_eq!(
+        resolve(&mut harness, &format!("{INLINE_PARENT_EXPORT}/:widget")),
+        canonical(&format!("{parent}/test.inline.child:widget")),
+    );
+
+    let ResolveAddressResult::Err { error } = resolve(&mut harness, &format!("{INLINE_PARENT_EXPORT}/:gadget")) else {
+        panic!("a hole no candidate type holds live must not expand");
     };
     assert!(
-        error.contains("ambiguous")
-            && error.contains("test.inline.child:widget")
-            && error.contains("test.inline.stateful_child:widget"),
+        error.contains("no live actor")
+            && error.contains("test.inline.child:gadget")
+            && error.contains("test.inline.stateful_child:gadget"),
         "the refusal names both candidates: {error}"
     );
 }
