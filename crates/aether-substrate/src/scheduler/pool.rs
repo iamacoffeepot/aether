@@ -264,40 +264,51 @@ fn worker_loop(
             // Shutdown signalled. Exit.
             return;
         };
-        let budget = template.build();
-        let result = panic::catch_unwind(AssertUnwindSafe(|| slot.run_cycle(budget)));
-        match result {
-            Ok(CycleResult::Idle | CycleResult::Closed) => {
-                // Slot done for now; drop the popped Arc. The chassis
-                // registry's strong reference keeps the slot alive for
-                // future wakes (or its drop, in the Closed case).
-                drop(slot);
-            }
-            Ok(CycleResult::Requeue) => {
-                // Yielded mid-drain (budget hit) or post-empty recheck
-                // found new work. Spill to the shared injector (not our
-                // own deque) so the yield actually yields — any worker,
-                // incl. this one after its own deque, can steal it;
-                // notify routes to a spinner or unparks one. Shutdown is
-                // observed at the top of the next `acquire_slot`, before
-                // its pop/steal fast paths — so requeueing here cannot
-                // keep a worker alive past teardown.
-                injector.push(slot);
-                spin.notify();
-            }
-            Err(payload) => {
-                // Handler panicked. Per ADR-0063 / OQ8: escalate to
-                // fatal_abort. The aborter call diverges, so this
-                // function never returns from this branch — but log
-                // first so the panic is visible in engine_logs.
-                let reason = format_panic_payload(&payload, slot.label());
-                tracing::error!(
-                    target: "aether_substrate::scheduler",
-                    actor = slot.label(),
-                    reason = %reason,
-                    "pool worker caught actor panic; escalating fatal abort",
-                );
-                aborter.abort(reason);
+        loop {
+            let budget = template.build();
+            let result = panic::catch_unwind(AssertUnwindSafe(|| slot.run_cycle(budget)));
+            match result {
+                Ok(CycleResult::Idle | CycleResult::Closed) => {
+                    // Slot done for now; drop the popped Arc. The chassis
+                    // registry's strong reference keeps the slot alive for
+                    // future wakes (or its drop, in the Closed case).
+                    drop(slot);
+                    break;
+                }
+                // Nothing waits on this worker's deque or the injector, so a
+                // yield would only move this slot to another worker's cold
+                // cache (a fan-in nexus draining a long inbox): run it again
+                // here. Rechecked every cycle, so work that arrives meanwhile
+                // gets its turn at the next budget, and shutdown still ends
+                // the loop.
+                Ok(CycleResult::Requeue) if worker_deque::pending_depth() == 0 && !spin.is_shutdown() => {}
+                Ok(CycleResult::Requeue) => {
+                    // Yielded mid-drain (budget hit) or post-empty recheck
+                    // found new work. Spill to the shared injector (not our
+                    // own deque) so the yield actually yields — any worker,
+                    // incl. this one after its own deque, can steal it;
+                    // notify routes to a spinner or unparks one. Shutdown is
+                    // observed at the top of the next `acquire_slot`, before
+                    // its pop/steal fast paths — so requeueing here cannot
+                    // keep a worker alive past teardown.
+                    injector.push(slot);
+                    spin.notify();
+                    break;
+                }
+                Err(payload) => {
+                    // Handler panicked. Per ADR-0063 / OQ8: escalate to
+                    // fatal_abort. The aborter call diverges, so this
+                    // function never returns from this branch — but log
+                    // first so the panic is visible in engine_logs.
+                    let reason = format_panic_payload(&payload, slot.label());
+                    tracing::error!(
+                        target: "aether_substrate::scheduler",
+                        actor = slot.label(),
+                        reason = %reason,
+                        "pool worker caught actor panic; escalating fatal abort",
+                    );
+                    aborter.abort(reason);
+                }
             }
         }
     }
@@ -864,8 +875,9 @@ mod tests {
     /// perpetually-requeueing slot must still observe shutdown. The
     /// slot's `run_cycle` always returns `Requeue` — the
     /// deterministic equivalent of two actors ping-ponging mail —
-    /// so the worker requeues it to the injector and immediately
-    /// steals it back, never reaching the spin/park coordinator.
+    /// so the worker re-runs it in place (nothing else waits) or
+    /// requeues and immediately steals it back, never reaching the
+    /// spin/park coordinator.
     /// Without the `acquire_slot` shutdown gate, the join in
     /// `shutdown_with_results` hangs forever.
     #[test]
@@ -912,6 +924,60 @@ mod tests {
         for result in results {
             assert!(result.is_ok(), "every worker should exit cleanly");
         }
+    }
+
+    /// A slot that keeps requeueing re-runs in place only while nothing
+    /// else waits. On a one-worker pool, a slot scheduled behind it lands in
+    /// the injector and must still get the worker: a re-run guard that
+    /// skipped the pending check would keep the first slot forever and
+    /// starve the second.
+    #[test]
+    fn requeueing_slot_yields_to_waiting_work() {
+        struct RequeueForever {
+            started: crossbeam_channel::Sender<()>,
+        }
+        impl Drainable for RequeueForever {
+            fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+                let _ = self.started.try_send(());
+                CycleResult::Requeue
+            }
+            fn label(&self) -> &'static str {
+                "requeue-forever"
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+        struct RunOnce {
+            ran: crossbeam_channel::Sender<()>,
+        }
+        impl Drainable for RunOnce {
+            fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+                let _ = self.ran.try_send(());
+                CycleResult::Idle
+            }
+            fn label(&self) -> &'static str {
+                "run-once"
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        let handle = standard_handle(1);
+        let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+        let hog: Arc<dyn Drainable> = Arc::new(RequeueForever { started: started_tx });
+        handle.injector.push(hog);
+        handle.spin.notify();
+        started_rx.recv_timeout(Duration::from_secs(10)).expect("the requeueing slot runs");
+
+        let (ran_tx, ran_rx) = crossbeam_channel::bounded(1);
+        let waiting: Arc<dyn Drainable> = Arc::new(RunOnce { ran: ran_tx });
+        handle.injector.push(waiting);
+        handle.spin.notify();
+        ran_rx.recv_timeout(Duration::from_secs(10)).expect("work waiting behind a requeueing slot still runs");
+
+        let _ = handle.shutdown_with_results();
     }
 
     // Reuse the standard wallclock budget for fairness tests — 200µs
