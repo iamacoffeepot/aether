@@ -2,12 +2,14 @@
 //! (iamacoffeepot/aether#4127).
 //!
 //! ADR-0166 §5 lets the hole in `parent/:name` stand for the child namespace
-//! only when exactly one instanced child namespace is possible at that point.
-//! That is computed over declared placement permissions, so a `child_of(...)`
-//! added in an unrelated crate can silently collapse a short path that an MCP
-//! call, a
-//! config file, or a manifest already depends on. Nothing else notices until
-//! the address fails to resolve in a live session.
+//! from declared facts alone only when exactly one instanced child namespace
+//! is possible at that point. With several, the hole depends on liveness: it
+//! fills only while exactly one candidate holds `name`. That is computed over
+//! declared placement permissions, so a `child_of(...)` added in an unrelated
+//! crate can silently turn a short path that an MCP call, a config file, or a
+//! manifest already depends on into one that fails whenever a sibling type
+//! holds the same key. Nothing else notices until the address fails to
+//! resolve in a live session.
 //!
 //! Ambiguity is a property of the *linked* declaration graph rather than of any
 //! one crate: the collision only exists in a binary that links both
@@ -37,12 +39,12 @@ fn ambiguity_over_the_desktop_link_set() -> Vec<AmbiguousHole> {
 }
 
 /// Parents that already carry more than one instanced child, so a hole beneath
-/// them is ambiguous by design and callers must name the child namespace
-/// explicitly.
+/// them depends on which child holds its key live, and callers needing a stable
+/// address name the child namespace explicitly.
 ///
 /// This is a record of the present state, not an aspiration. An entry here says
-/// "this short path was already unavailable"; a *new* entry appearing is the
-/// regression the test exists to catch.
+/// "this short path already depended on liveness"; a *new* entry appearing is
+/// the regression the test exists to catch.
 const KNOWN_AMBIGUOUS: &[(&str, &[&str])] =
     &[("aether.tcp", &["aether.tcp.listener", "aether.tcp.session"] as &[&str])];
 
@@ -72,9 +74,9 @@ fn no_new_parent_loses_its_hole() {
     assert_eq!(
         observed, expected,
         "the set of parents with an ambiguous hole changed.\n\
-         A new entry means a `child_of(...)` collapsed a short path that used to resolve — \
+         A new entry means a `child_of(...)` made a short path depend on which child is live — \
          address those children as `namespace:discriminator`, and record the trade here.\n\
-         A removed entry means a short path became available again; drop it from KNOWN_AMBIGUOUS."
+         A removed entry means a short path resolves from facts alone again; drop it from KNOWN_AMBIGUOUS."
     );
 }
 
@@ -84,14 +86,14 @@ fn no_new_parent_loses_its_hole() {
 /// the hole names no loaded component; it still resolves unambiguously.
 ///
 /// Tripwire: asserted separately from the list above because the list's failure
-/// says "something changed" while this one says which working address broke.
-/// A second instanced child under `aether.component` fails both, and this is
-/// the one that names the cost.
+/// says "something changed" while this one says which working address now
+/// depends on liveness. A second instanced child under `aether.component` fails
+/// both, and this is the one that names the cost.
 #[test]
 fn the_component_host_keeps_its_hole() {
     let observed = ambiguity_over_the_desktop_link_set();
     assert!(
         !observed.iter().any(|point| point.parent_namespace == "aether.component"),
-        "aether.component gained a second instanced child, so `aether.component/:name` no longer resolves: {observed:?}"
+        "aether.component gained a second instanced child, so `aether.component/:name` now depends on which child is live: {observed:?}"
     );
 }

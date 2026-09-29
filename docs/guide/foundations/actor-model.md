@@ -277,25 +277,33 @@ namespace, so its canonical address is already short (`aether.kit.camera`, or
 beneath it: `game.world/:north/:gate` for an inline child and its own inline
 child, or `game.world/:k` for a guest a `load_under` placed at
 `game.world/NS:k`. A `composable` type is a candidate beneath every parent in
-its module, so a hole beneath a parent that declares another instanced child
-as well is ambiguous.
+its module, so a parent that declares another instanced child as well has
+several candidates for a hole, and the hole fills with whichever of them holds
+its key live.
 
 A path is `/`-separated steps. After the root, a bare step always names a
 singleton child, `namespace:discriminator` names an instance of that instanced
 child, and `:discriminator` is a hole naming an instance of the one instanced
 child declared under the current actor. A path with no hole is canonical and
 never consults the declarations; a path with a hole is short, and its first
-step must be a bare root namespace. A hole resolves only when the current actor
-has exactly one logical instanced-child namespace. If several are possible,
-resolution returns a deterministic ambiguity error listing the explicit
-`namespace:discriminator` steps the caller can use. The older `://` spelling
-is refused with an error naming the hole form.
+step must be a bare root namespace. A hole fills directly when the current
+actor has exactly one logical instanced-child namespace. If several are
+declared, the declarations bound the candidates and liveness picks among them:
+the hole fills with the one candidate whose canonical path
+`parent/namespace:discriminator` is live, and later holes expand beneath it.
+None live is a no-live-candidate error; two or more live is an ambiguity
+error, since a key is unique per type rather than per parent. Both list every
+explicit `namespace:discriminator` step the caller can use. Nothing is
+remembered between uses, so such a short path names whatever holds its key at
+the moment it is resolved; store the canonical path it expanded to when the
+reference must stay put. The older `://` spelling is refused with an error
+naming the hole form.
 
 Short paths are boundary input, never actor identity. The registry expands
 them before hashing and stores, lists, and reverse-reports only the canonical
-path. Unknown roots, illegal segments, ambiguous children, path-limit
-violations, and a valid expansion with no live mailbox remain distinct
-resolution errors.
+path. Unknown roots, illegal segments, ambiguous children, a hole with no live
+candidate, path-limit violations, and a valid expansion with no live mailbox
+remain distinct resolution errors.
 
 At the boundary the text becomes an `aether_data::ErasedActorPath`. Its grammar is
 checked when it is built or decoded, so a malformed address fails there rather

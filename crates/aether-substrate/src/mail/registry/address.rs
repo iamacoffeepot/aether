@@ -70,14 +70,41 @@ impl fmt::Display for CardinalityDefect {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddressResolutionError {
     InvalidInventory(ActorAddressInventoryError),
-    UnknownRoot { root: String },
-    InstancedRoot { root: String },
-    HalfDeclaredRoot { root: String, defect: CardinalityDefect },
-    IllegalSegment { parent: String, segment: String },
-    AmbiguousSegment { parent: String, segment: String, candidates: Vec<String> },
-    PathTooDeep { limit: usize },
-    PathTooLong { limit: usize },
-    NoLiveMailbox { canonical_path: String },
+    UnknownRoot {
+        root: String,
+    },
+    InstancedRoot {
+        root: String,
+    },
+    HalfDeclaredRoot {
+        root: String,
+        defect: CardinalityDefect,
+    },
+    IllegalSegment {
+        parent: String,
+        segment: String,
+    },
+    AmbiguousSegment {
+        parent: String,
+        segment: String,
+        candidates: Vec<String>,
+    },
+    /// A hole beneath a parent with several declared instanced child
+    /// namespaces, none of which holds its key live (ADR-0166 §5).
+    NoLiveCandidate {
+        parent: String,
+        segment: String,
+        candidates: Vec<String>,
+    },
+    PathTooDeep {
+        limit: usize,
+    },
+    PathTooLong {
+        limit: usize,
+    },
+    NoLiveMailbox {
+        canonical_path: String,
+    },
 }
 
 impl fmt::Display for AddressResolutionError {
@@ -98,6 +125,11 @@ impl fmt::Display for AddressResolutionError {
             Self::AmbiguousSegment { parent, segment, candidates } => write!(
                 formatter,
                 "actor address segment `{segment}` is ambiguous beneath `{parent}`; use one of: {}",
+                candidates.join(", ")
+            ),
+            Self::NoLiveCandidate { parent, segment, candidates } => write!(
+                formatter,
+                "actor address segment `{segment}` beneath `{parent}` names no live actor; none of these is live: {}",
                 candidates.join(", ")
             ),
             Self::PathTooDeep { limit } => write!(formatter, "actor address exceeds the {limit}-segment path limit"),
@@ -168,8 +200,8 @@ struct Children {
 }
 
 impl Children {
-    /// The instanced child namespaces, sorted: the candidates an ambiguous
-    /// hole lists. Only error and gate paths read this.
+    /// The instanced child namespaces, sorted: the candidates a hole beneath
+    /// several of them tries against liveness and lists on failure.
     fn instanced_namespaces(&self) -> Vec<&str> {
         let mut namespaces = self.instanced.keys().map(String::as_str).collect::<Vec<_>>();
         namespaces.sort_unstable();
@@ -192,7 +224,9 @@ pub(super) struct AddressIndex {
 }
 
 /// Every parent in *this binary's* linked actor inventory beneath which a
-/// hole is ambiguous (ADR-0166 §5), sorted by parent namespace.
+/// hole's declared facts are ambiguous (ADR-0166 §5), sorted by parent
+/// namespace. A hole beneath one of these resolves only while exactly one
+/// candidate holds its key live.
 ///
 /// The linkage is the point. A `child_of(...)` in one crate can collapse a
 /// short path that another crate's callers depend on, and the collapse is
@@ -210,9 +244,10 @@ pub fn ambiguous_holes() -> Result<Vec<AmbiguousHole>, ActorAddressInventoryErro
     Ok(AddressIndex::from_inventory()?.ambiguous_holes())
 }
 
-/// A point in the linked declaration graph where a hole cannot be filled: more
-/// than one instanced child namespace is declared beneath the same parent, so
-/// `parent/:name` names no single child (ADR-0166 §5).
+/// A point in the linked declaration graph where declared facts alone cannot
+/// fill a hole: more than one instanced child namespace is declared beneath the
+/// same parent, so `parent/:name` depends on liveness and resolves only while
+/// exactly one candidate holds `name` (ADR-0166 §5).
 ///
 /// Ambiguity is a property of the declaration graph rather than of any one
 /// actor, and a `child_of(...)` added in an unrelated crate can create it — so
@@ -220,10 +255,11 @@ pub fn ambiguous_holes() -> Result<Vec<AmbiguousHole>, ActorAddressInventoryErro
 /// an address fails to resolve (iamacoffeepot/aether#4127).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AmbiguousHole {
-    /// The parent whose holes cannot be filled.
+    /// The parent whose holes depend on liveness.
     pub parent_namespace: String,
-    /// The competing instanced child namespaces, sorted. A caller addressing
-    /// this parent must name one of these explicitly as `namespace:discriminator`.
+    /// The competing instanced child namespaces, sorted. A caller that needs
+    /// an address independent of which child is live names one of these
+    /// explicitly as `namespace:discriminator`.
     pub child_namespaces: Vec<String>,
 }
 
@@ -437,13 +473,22 @@ impl AddressIndex {
     /// steps come from an `ErasedActorPath`, so their grammar and the written caps
     /// already hold; the byte cap is rechecked as the path grows, because a
     /// hole expands into `namespace:discriminator`.
-    pub(super) fn expand(&self, root: &str, steps: &[PathSegment<'_>]) -> Result<String, AddressResolutionError> {
+    ///
+    /// `live` answers whether a canonical path is live. It is consulted only
+    /// for a hole beneath several declared instanced child namespaces, to pick
+    /// the one candidate holding the hole's key (ADR-0166 §5).
+    pub(super) fn expand(
+        &self,
+        root: &str,
+        steps: &[PathSegment<'_>],
+        live: impl Fn(&str) -> bool,
+    ) -> Result<String, AddressResolutionError> {
         let mut current = *self.roots.get(root).ok_or_else(|| self.unanchored_root(root))?;
         let mut canonical_segments = vec![root.to_owned()];
 
         for segment in steps {
             let parent = canonical_segments.join("/");
-            current = self.expand_segment(current, &parent, segment, &mut canonical_segments)?;
+            current = self.expand_segment(current, &parent, segment, &live, &mut canonical_segments)?;
             validate_owned_scope_path(&canonical_segments)?;
         }
 
@@ -469,6 +514,7 @@ impl AddressIndex {
         current: ActorId,
         parent: &str,
         segment: &PathSegment<'_>,
+        live: &impl Fn(&str) -> bool,
         canonical_segments: &mut Vec<String>,
     ) -> Result<ActorId, AddressResolutionError> {
         let illegal =
@@ -492,15 +538,29 @@ impl AddressIndex {
                     canonical_segments.push(format!("{namespace}:{discriminator}"));
                     Ok(*child)
                 }
-                _ => Err(AddressResolutionError::AmbiguousSegment {
-                    parent: parent.to_owned(),
-                    segment: segment.to_string(),
-                    candidates: children
-                        .instanced_namespaces()
-                        .into_iter()
-                        .map(|namespace| format!("{namespace}:{discriminator}"))
-                        .collect(),
-                }),
+                _ => {
+                    let namespaces = children.instanced_namespaces();
+                    let mut holders =
+                        namespaces.iter().filter(|namespace| live(&format!("{parent}/{namespace}:{discriminator}")));
+                    let candidates =
+                        || namespaces.iter().map(|namespace| format!("{namespace}:{discriminator}")).collect();
+                    match (holders.next(), holders.next()) {
+                        (Some(namespace), None) => {
+                            canonical_segments.push(format!("{namespace}:{discriminator}"));
+                            Ok(children.instanced[*namespace])
+                        }
+                        (None, _) => Err(AddressResolutionError::NoLiveCandidate {
+                            parent: parent.to_owned(),
+                            segment: segment.to_string(),
+                            candidates: candidates(),
+                        }),
+                        (Some(_), Some(_)) => Err(AddressResolutionError::AmbiguousSegment {
+                            parent: parent.to_owned(),
+                            segment: segment.to_string(),
+                            candidates: candidates(),
+                        }),
+                    }
+                }
             },
         }
     }
@@ -638,13 +698,18 @@ mod tests {
     use super::*;
 
     /// Parse `text` as a short `ErasedActorPath` and expand it, as
-    /// `Registry::resolve_address` does.
+    /// `Registry::resolve_address` does, with nothing live.
     fn expand(index: &AddressIndex, text: &str) -> Result<String, AddressResolutionError> {
+        expand_live(index, text, &[])
+    }
+
+    /// [`expand`] with exactly the canonical paths in `live` live.
+    fn expand_live(index: &AddressIndex, text: &str, live: &[&str]) -> Result<String, AddressResolutionError> {
         let path = ErasedActorPath::new(text).expect("fixture is a well-formed actor path");
         let ActorPathForm::Short { root, steps } = path.form() else {
             panic!("fixture `{text}` is not a short path");
         };
-        index.expand(root, &steps)
+        index.expand(root, &steps, |candidate| live.contains(&candidate))
     }
 
     fn root(namespace: &str) -> RootFact<'_> {
@@ -680,22 +745,54 @@ mod tests {
         assert_eq!(expand(&index, "root/manager/:camera"), Ok("root/manager/worker:camera".to_owned()));
     }
 
-    #[test]
-    fn branching_requires_an_explicit_instanced_namespace() {
-        let index = AddressIndex::build(
+    /// `root` with two declared instanced children, `camera` and
+    /// `microphone`, each with an instanced `track` child.
+    fn branching() -> AddressIndex {
+        AddressIndex::build(
             [root("root")],
-            [child("root", "camera"), child("root", "microphone")],
-            [singleton("root"), instanced("camera"), instanced("microphone")],
+            [child("root", "camera"), child("root", "microphone"), child("camera", "track")],
+            [singleton("root"), instanced("camera"), instanced("microphone"), instanced("track")],
         )
-        .expect("valid topology");
+        .expect("valid topology")
+    }
 
+    #[test]
+    fn a_branching_hole_with_no_live_holder_names_no_live_candidate() {
         assert_eq!(
-            expand(&index, "root/:main"),
+            expand(&branching(), "root/:main"),
+            Err(AddressResolutionError::NoLiveCandidate {
+                parent: "root".to_owned(),
+                segment: ":main".to_owned(),
+                candidates: vec!["camera:main".to_owned(), "microphone:main".to_owned()],
+            })
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_hole_resolves_to_its_one_live_holder() {
+        assert_eq!(
+            expand_live(&branching(), "root/:main", &["root/microphone:main", "root/camera:other"]),
+            Ok("root/microphone:main".to_owned())
+        );
+    }
+
+    #[test]
+    fn two_live_holders_stay_ambiguous() {
+        assert_eq!(
+            expand_live(&branching(), "root/:main", &["root/camera:main", "root/microphone:main"]),
             Err(AddressResolutionError::AmbiguousSegment {
                 parent: "root".to_owned(),
                 segment: ":main".to_owned(),
                 candidates: vec!["camera:main".to_owned(), "microphone:main".to_owned()],
             })
+        );
+    }
+
+    #[test]
+    fn a_later_hole_expands_beneath_the_live_holder() {
+        assert_eq!(
+            expand_live(&branching(), "root/:main/:left", &["root/camera:main"]),
+            Ok("root/camera:main/track:left".to_owned())
         );
     }
 

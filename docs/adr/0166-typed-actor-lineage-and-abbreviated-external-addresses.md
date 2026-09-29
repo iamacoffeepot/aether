@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-24
 - **Accepted:** 2026-07-24
-- **Last amended:** 2026-09-22
+- **Last amended:** 2026-09-29
 
 ## Context
 
@@ -355,9 +355,25 @@ The boundary resolver walks generated lineage records from that root:
   possible at that point; with none it is an illegal segment.
 - Several concrete child types sharing one logical namespace count as one
   choice because their canonical address node is identical.
-- Several distinct instanced child namespaces make the hole ambiguous. The
-  error lists each `namespace:discriminator` spelling, and the caller must
-  provide one.
+- Several distinct instanced child namespaces make the declared facts
+  ambiguous, and liveness breaks the tie among them. The resolver builds
+  `parent/namespace:discriminator` for each declared candidate and asks the
+  registry whether that canonical path is live, under the same
+  Starting-or-Live rule the final lookup applies:
+  - exactly one live candidate fills the hole, and later holes expand beneath
+    it;
+  - none live is a structured no-live-candidate error listing every declared
+    spelling;
+  - two or more live is ambiguous, because a key is unique per parent and
+    type rather than per parent; the error lists every declared
+    `namespace:discriminator` spelling, so its text does not depend on
+    liveness, and the caller must provide one.
+
+  Declared facts still bound the candidates, so a live mailbox no declaration
+  permits is never considered. Nothing is cached: the short path is expanded
+  again on every use, so it names whichever candidate holds its key at that
+  moment, and every typed use is checked against the canonical path it
+  expanded to.
 - Expansion is iterative and retains ADR-0099's path depth and byte limits.
 
 A declaration the index cannot use excludes its own namespace and nothing
@@ -479,7 +495,10 @@ smaller root/child path is working.
   carries two type parameters plus a runtime parent-tag check.
 - Textual short paths are resolved at runtime. An ambiguous MCP or config
   string returns an error rather than receiving Rust's compile-time
-  diagnostic.
+  diagnostic. Beneath a parent with several declared instanced child
+  namespaces, a hole's expansion depends on which candidate is live when it is
+  used, so the same string can name different canonical paths over a session;
+  a durable reference stores the canonical path it expanded to.
 - The initial child-resolution surface covers the instanced children supported
   by current spawn APIs. A true keyless singleton beneath a native parent
   requires a relative singleton resolver and a deliberate extension.
@@ -532,9 +551,14 @@ smaller root/child path is working.
   placement permissions are orthogonal; `Root` independently controls
   top-level placement.
 - **Infer short paths from only the currently live mailbox set.** Rejected
-  because a short path would change meaning as actors start and stop.
-  Generated relationship facts make ambiguity stable; liveness remains the
-  later registry check.
+  because a short path would reach any live mailbox, declared or not.
+  Generated relationship facts bound the candidates; liveness only
+  tie-breaks among the fact-declared candidates of one hole (§5), and remains
+  the later registry check.
+- **Remember the type a short path last resolved to.** Rejected because it
+  stores a short spelling, which §5 forbids.
+- **Take the first live candidate in sorted order.** Rejected because a newly
+  started sibling holding the same key would silently redirect the address.
 - **Hash or register the short string.** Rejected because it would
   create a second identity and contradict ADR-0099's canonical lineage fold.
 - **Let downstream crates implement relationships between two foreign actor

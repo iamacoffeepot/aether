@@ -551,3 +551,60 @@ fn a_publish_extends_the_short_path_index_without_touching_native_paths() {
     assert_eq!(expand(&format!("{PARENT}/:k")), Ok(guest));
     assert_eq!(expand(&format!("{NATIVE_ROOT}/:k")), Ok(native), "a module cannot switch off a native short path");
 }
+
+// Catches: a hole beneath a parent with several declared child types refused
+// as ambiguous even while one child holds its key, the probe reading a
+// different liveness rule than the final lookup, and a second live holder
+// silently picked rather than refused (ADR-0166 §5).
+#[test]
+fn a_hole_under_a_multi_type_guest_parent_resolves_to_its_live_holder() {
+    const PARENT: &str = "test.publication.multi_parent";
+    const FIRST: &str = "test.publication.multi_first";
+    const SECOND: &str = "test.publication.multi_second";
+    let fixture = Fixture::new();
+    let expand = |short: &str| {
+        let path = ErasedActorPath::new(short).expect("a well-formed short path");
+        fixture.registry.resolve_address(&path).map(|resolved| resolved.canonical_path)
+    };
+    let child = |child: &str| ActorLineageRecord::Child {
+        parent: ActorId::singleton(PARENT).0,
+        child: ActorId::singleton(child).0,
+        parent_namespace: PARENT.to_owned().into(),
+        child_namespace: child.to_owned().into(),
+    };
+    let module = fixture.placed_module(
+        &[(PARENT, &[KEPT])],
+        &[(FIRST, true), (SECOND, true)],
+        &[
+            ActorLineageRecord::Root { actor: ActorId::singleton(PARENT).0, namespace: PARENT.into() },
+            child(FIRST),
+            child(SECOND),
+        ],
+    );
+    fixture.publish(&module).expect("publish the guest module");
+    let short = format!("{PARENT}/:k");
+    let candidates = vec![format!("{FIRST}:k"), format!("{SECOND}:k")];
+
+    assert_eq!(
+        expand(&short),
+        Err(AddressResolutionError::NoLiveCandidate {
+            parent: PARENT.to_owned(),
+            segment: ":k".to_owned(),
+            candidates: candidates.clone(),
+        })
+    );
+
+    let first = format!("{PARENT}/{FIRST}:k");
+    fixture.register(&first);
+    assert_eq!(expand(&short), Ok(first));
+
+    fixture.register(&format!("{PARENT}/{SECOND}:k"));
+    assert_eq!(
+        expand(&short),
+        Err(AddressResolutionError::AmbiguousSegment {
+            parent: PARENT.to_owned(),
+            segment: ":k".to_owned(),
+            candidates
+        })
+    );
+}

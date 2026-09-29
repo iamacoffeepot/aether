@@ -463,6 +463,11 @@ mod tests {
         let canonical = format!("{ADDRESS_TEST_ROOT}/{ADDRESS_TEST_CHILD}:{name}");
         let mut fix = fixture();
         registered_ref(&fix.registry, &canonical, noop_handler());
+        // Both candidates hold `camera` live, so the hole stays ambiguous
+        // rather than filling with the one live holder (ADR-0166 §5).
+        for child in [AMBIGUOUS_ADDRESS_TEST_FIRST_CHILD, AMBIGUOUS_ADDRESS_TEST_SECOND_CHILD] {
+            registered_ref(&fix.registry, &format!("{AMBIGUOUS_ADDRESS_TEST_ROOT}/{child}:{name}"), noop_handler());
+        }
         let mut ctx = session_ctx(&fix.transport);
 
         for address in [canonical.clone(), format!("{ADDRESS_TEST_ROOT}/:{name}")] {
