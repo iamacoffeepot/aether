@@ -35,7 +35,9 @@ pub struct WasmTrampolineConfig {
     /// ADR-0090 (issue 1257): init-config bytes from the
     /// `aether.component.load` mail, handed to the guest's typed
     /// `WasmActor::init` via `Component::instantiate`. Empty means
-    /// "no config" — a `Config = ()` guest decodes `&[]` uniformly.
+    /// "no config" — a `Config = ()` guest decodes `&[]` uniformly. Stored
+    /// on the trampoline, so a republish that supplies no config builds its
+    /// candidate from it (ADR-0241 §7).
     pub config: Vec<u8>,
     /// ADR-0096: the selected export's actor-type tag
     /// (`ActorId::singleton(NAMESPACE)`), threaded through to

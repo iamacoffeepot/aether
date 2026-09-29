@@ -34,8 +34,9 @@
 //! ## Shape
 //!
 //! Instanced. Anything the trampoline doesn't handle
-//! natively (today: `DropComponent`, `ReplaceComponent`, and the host's
-//! `LoadDelivered` hand-off) falls through the
+//! natively (today: `DropComponent`, `ReplaceComponent`, the host's
+//! `LoadDelivered` hand-off, and a republish's `Prepare` / `Commit` /
+//! `Abort`) falls through the
 //! `#[fallback]` (`forward_to_wasm`) to the wasm guest via `Component::deliver`.
 //! The framework dispatcher reads from the trampoline's `NativeBinding`;
 //! un-handled kinds reach `forward_to_wasm`; the guest's `send_mail_p32` /
@@ -59,12 +60,22 @@
 //!   module's first load, and never replaced. It outlives every other
 //!   instance of the module and ends only on its own drop, which closes it
 //!   for good, or at engine stop.
+//! - **Republish** (ADR-0241 §7): `Prepare` builds a candidate `Component`
+//!   against the same binding beside the running guest, which runs `unwire`
+//!   and `on_dehydrate` and is kept. The candidate takes over the correlation
+//!   cursor and reply table and rehydrates, with its outbox held. While the
+//!   slot is prepared, mail for the guest waits at the inbox gate in arrival
+//!   order. `Commit` installs the candidate, sends its held mail on the
+//!   commit's chain, and delivers the gated mail to it; `Abort` discards the
+//!   candidate and its mail, reinstates the old guest with its cursor and
+//!   reply table, runs its `wire` again, and delivers the gated mail to it.
+//!   A drop while prepared aborts first.
 //! - **Replace**: `ReplaceComponent` mail lands on `on_replace_component`,
 //!   which checks the new bytes in through the engine's module cache
-//!   (ADR-0241 §2), instantiates a new `Component` against the same binding
-//!   and swaps `state.component`. ADR-0022 + ADR-0038 invariants hold
-//!   because the inbox channel is the trampoline's `NativeBinding` and
-//!   outlives the swap.
+//!   (ADR-0241 §2), prepares a candidate, and commits it in the same turn
+//!   when it is ready. A candidate built without a config uses the stored
+//!   spawn config. ADR-0022 + ADR-0038 invariants hold because the inbox
+//!   channel is the trampoline's `NativeBinding` and outlives the swap.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated dispatch owns the

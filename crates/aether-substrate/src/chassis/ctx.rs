@@ -226,42 +226,62 @@ pub(crate) enum RelayOutcome {
 
 /// The shared inbox-relay core (ADR-0094): upgrade the actor's `Weak`
 /// sender, move the [`OwnedDispatch`] onto its channel, and fire the
-/// wake hook — settling the settlement obligation at the two abandonment
-/// seams in exactly one place.
+/// wake hook — settling the discarded mail at the two abandonment seams
+/// in exactly one place.
 ///
-/// Both the sender-gone and receiver-gone branches call
-/// [`OwnedDispatch::mark_transferred`] before returning, so a send racing
-/// teardown discards the mail at the relay seam rather than dropping an
-/// armed dispatch and tripping the debug guard (#1564). The three
-/// production inbox closures — the two `claim_mailbox*` variants here and
-/// the instanced-actor closure in
+/// Both the sender-gone and receiver-gone branches settle the mail before
+/// returning: they record its `Finished` (ADR-0080 §2) and then discharge
+/// the ADR-0094 guard, the same tail [`InboundMail`]'s drop and the
+/// dispatcher run. A send racing teardown therefore ends its chain at the
+/// relay seam rather than dropping an armed dispatch (#1564) or leaving its
+/// root's `in_flight` count raised forever (#7116). The production inbox
+/// closures — the relay and drop-on-shutdown claims here and the
+/// instanced and activated actor closures in
 /// [`crate::actor::native::spawn`] — route through this function so the
-/// transfer contract has a single home. Per-site concerns (the instanced
-/// `pending` bracket, each site's `tracing::warn!` target + message) stay
-/// at the call site, driven by the returned [`RelayOutcome`].
+/// discard contract has a single home. Per-site concerns (each site's
+/// `tracing::warn!` target + message) stay at the call site, driven by the
+/// returned [`RelayOutcome`].
+///
+/// `mailer` is `Weak` because every caller is a registry inbox handler and
+/// the [`Mailer`] holds the registry; a strong capture would be a cycle. It
+/// is upgraded only on a discard arm, so delivery pays nothing for it.
+///
+/// [`InboundMail`]: crate::chassis::inbox::InboundMail
 pub(crate) fn relay_or_transfer(
     dispatch: OwnedDispatch,
     weak_tx: &Weak<mpsc::Sender<Envelope>>,
     wake: &MailboxWakeSlot,
+    mailer: &Weak<Mailer>,
 ) -> RelayOutcome {
     let Some(tx) = weak_tx.upgrade() else {
-        // ADR-0094: the strong sender is gone — discard at this relay
-        // seam, transferring the obligation. `mark_transferred` disarms
-        // the guard, then the kind id is copied out for the caller's log
-        // (the rest of the dispatch, guard included, drops here).
-        dispatch.mark_transferred();
+        // ADR-0094: the strong sender is gone — the mail ends at this
+        // relay seam, so settle it, then copy the kind id out for the
+        // caller's log (the rest of the dispatch drops here).
+        settle_discarded(&dispatch, mailer);
         return RelayOutcome::SenderGone { kind: dispatch.kind };
     };
     let env: Envelope = dispatch;
     if let Err(mpsc::SendError(env)) = tx.send(env) {
-        // ADR-0094: receiver disconnected — discard at the seam, transfer.
-        env.mark_transferred();
+        // ADR-0094: receiver disconnected — the mail ends here; settle it.
+        settle_discarded(&env, mailer);
         return RelayOutcome::ReceiverGone { kind: env.kind };
     }
     if let Some(wake) = wake.get() {
         wake();
     }
     RelayOutcome::Delivered
+}
+
+/// Settle mail discarded at a relay seam: record its `Finished` so its
+/// root's `in_flight` count falls, then discharge the guard. A gone
+/// `Mailer` means its trace table is gone too, so there is nothing to
+/// settle; `record_finished` no-ops on an absent mail id, so lineage-less
+/// mail settles nothing.
+fn settle_discarded(env: &Envelope, mailer: &Weak<Mailer>) {
+    if let Some(mailer) = mailer.upgrade() {
+        mailer.record_finished(env.mail_id, env.root);
+    }
+    env.discharge();
 }
 
 /// Register a plain relay mailbox inbox under `name` and return its derived
@@ -280,9 +300,10 @@ pub(crate) fn relay_or_transfer(
 pub(crate) fn register_relay_inbox(
     authority: &BootAuthority,
     registry: &Arc<Registry>,
+    mailer: &Arc<Mailer>,
     name: &str,
 ) -> Result<(MailboxId, mpsc::Receiver<Envelope>, Arc<MailboxWakeSlot>), BootError> {
-    let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox();
+    let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox(mailer);
     let id = registry.try_register_inbox(authority, name.to_owned(), handler)?;
     Ok((id, receiver, wake_slot))
 }
@@ -304,7 +325,7 @@ pub(crate) struct RelayInbox {
 /// Build a relay mailbox's channel, wake slot, and inbox handler without
 /// touching the registry. See [`register_relay_inbox`] for the semantics of
 /// the handler body.
-pub(crate) fn prepare_relay_inbox() -> RelayInbox {
+pub(crate) fn prepare_relay_inbox(mailer: &Arc<Mailer>) -> RelayInbox {
     let (tx, rx) = mpsc::channel::<Envelope>();
     let tx = Arc::new(tx);
     // iamacoffeepot/aether#1318: optional wake hook fired after each accepted
@@ -313,12 +334,13 @@ pub(crate) fn prepare_relay_inbox() -> RelayInbox {
     // `aether.window` mail nudges the winit loop under `ControlFlow::Wait`.
     let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
     let wake_for_handler = Arc::clone(&wake_slot);
+    let mailer = Arc::downgrade(mailer);
     let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
         // The strong `tx` is captured for liveness; this keeps the
         // move-closure holding it and documents that the derived `Weak`
         // below always upgrades.
         debug_assert!(Arc::strong_count(&tx) >= 1);
-        match relay_or_transfer(dispatch, &Arc::downgrade(&tx), &wake_for_handler) {
+        match relay_or_transfer(dispatch, &Arc::downgrade(&tx), &wake_for_handler, &mailer) {
             RelayOutcome::Delivered => {}
             RelayOutcome::ReceiverGone { kind } => {
                 tracing::warn!(
@@ -517,7 +539,7 @@ impl<'a> ChassisCtx<'a> {
     /// closure stored on the registry until the registry itself is
     /// dropped.
     pub fn claim_mailbox_with_override(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
-        let (id, rx, wake_slot) = register_relay_inbox(&self.authority, self.registry, name)?;
+        let (id, rx, wake_slot) = register_relay_inbox(&self.authority, self.registry, self.mailer, name)?;
         self.claimed_actor_mailboxes.push(id);
         // iamacoffeepot/aether#1272: every claim returns its
         // per-actor [`ActorSlots`] wrapped in [`SharedActorSlots`]. The
@@ -605,6 +627,7 @@ impl<'a> ChassisCtx<'a> {
         let weak = Arc::downgrade(&tx);
         let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
         let wake_for_handler = Arc::clone(&wake_slot);
+        let mailer = Arc::downgrade(self.mailer);
         let id = self.registry.try_register_inbox(
             &self.authority,
             name.to_owned(),
@@ -615,21 +638,23 @@ impl<'a> ChassisCtx<'a> {
             // shutdown — so both abandonment arms are reachable and warn.
             // #1564: settling the obligation in the helper is what keeps a
             // send racing teardown from dropping an armed dispatch.
-            Arc::new(move |dispatch: OwnedDispatch| match relay_or_transfer(dispatch, &weak, &wake_for_handler) {
-                RelayOutcome::Delivered => {}
-                RelayOutcome::SenderGone { kind } => {
-                    tracing::warn!(
-                        target: "aether_substrate::capability",
-                        kind = %kind,
-                        "capability mailbox sender dropped — mail discarded"
-                    );
-                }
-                RelayOutcome::ReceiverGone { kind } => {
-                    tracing::warn!(
-                        target: "aether_substrate::capability",
-                        kind = %kind,
-                        "capability mailbox receiver dropped — mail discarded"
-                    );
+            Arc::new(move |dispatch: OwnedDispatch| {
+                match relay_or_transfer(dispatch, &weak, &wake_for_handler, &mailer) {
+                    RelayOutcome::Delivered => {}
+                    RelayOutcome::SenderGone { kind } => {
+                        tracing::warn!(
+                            target: "aether_substrate::capability",
+                            kind = %kind,
+                            "capability mailbox sender dropped — mail discarded"
+                        );
+                    }
+                    RelayOutcome::ReceiverGone { kind } => {
+                        tracing::warn!(
+                            target: "aether_substrate::capability",
+                            kind = %kind,
+                            "capability mailbox receiver dropped — mail discarded"
+                        );
+                    }
                 }
             }),
         )?;
@@ -748,6 +773,7 @@ mod tests {
     use aether_data::ErasedActorPath;
 
     use crate::actor::registry::ActorRegistry;
+    use crate::chassis::settlement::SettlementRegistry;
     use crate::config::RingCapacities;
     use crate::mail::registry::{DispatchParts, MailboxEntry};
     use crate::mail::{KindId, MailId, MailRef};
@@ -919,7 +945,7 @@ mod tests {
     /// `MailboxSender` at shutdown the `weak.upgrade()` returns `None`. A
     /// mail arriving in that window (e.g. a loaded component's
     /// `subscribe_self` racing the lifecycle cap's teardown) must be
-    /// `mark_transferred` at the seam, not dropped armed — which would
+    /// settled at the seam, not dropped armed — which would
     /// trip the obligation guard and fatally abort the substrate.
     #[test]
     fn drop_on_shutdown_inbox_transfers_obligation_when_sender_gone() {
@@ -957,7 +983,7 @@ mod tests {
 
     /// ADR-0094 / #1564: the receiver-gone branch (`tx.send` returns
     /// `SendError` because the dispatcher's receiver dropped) must also
-    /// `mark_transferred`, not drop the armed dispatch.
+    /// settle the mail, not drop the armed dispatch.
     #[test]
     fn drop_on_shutdown_inbox_transfers_obligation_when_receiver_gone() {
         let (registry, mailer, spawner, aborter, _pool) = test_infra();
@@ -993,42 +1019,64 @@ mod tests {
         handler.enqueue(armed_subscribe_self(claim_id));
     }
 
-    /// ADR-0094 / #1565: [`relay_or_transfer`] owns both abandonment
-    /// seams. Drive it directly through sender-gone (the `Weak`'s strong
-    /// was dropped) and receiver-gone (the `Receiver` was dropped) and
-    /// assert the returned outcome plus that the armed dispatch is
-    /// transferred — dropping it armed would trip the debug guard. This
-    /// is the helper-level mirror of the `drop_on_shutdown_inbox_*` tests.
+    /// ADR-0094 / #1565 / #7116: [`relay_or_transfer`] owns both
+    /// abandonment seams. Drive it directly through sender-gone (the
+    /// `Weak`'s strong was dropped) and receiver-gone (the `Receiver` was
+    /// dropped) and assert the returned outcome, that the armed dispatch is
+    /// discharged (dropping it armed would trip the debug guard), and that
+    /// the discarded mail's root settles — a discard that only disarmed
+    /// left the root's `in_flight` raised and hung every wait on the chain.
     #[test]
     fn relay_or_transfer_settles_obligation_at_both_seams() {
         let id = MailboxId(0x1565);
         let wake = MailboxWakeSlot::default();
+        let registry = Arc::new(Registry::new());
+        let mailer = Arc::new(Mailer::new(registry));
+        let settlement = Arc::new(SettlementRegistry::new());
+        mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
+        let weak_mailer = Arc::downgrade(&mailer);
 
         // Sender gone: the only strong `Sender` dropped, so the `Weak`
         // fails to upgrade.
+        let root = MailId::new(id, 1);
+        mailer.record_sent_inflight(root);
+        let settled = settlement.subscribe_settlement(root);
         let (tx, _rx) = mpsc::channel::<Envelope>();
         let tx = Arc::new(tx);
         let weak = Arc::downgrade(&tx);
         drop(tx);
-        match relay_or_transfer(armed_subscribe_self(id), &weak, &wake) {
+        match relay_or_transfer(armed_subscribe_self(id), &weak, &wake, &weak_mailer) {
             RelayOutcome::SenderGone { kind } => {
                 assert_eq!(kind, KindId(7), "the discarded mail's kind id rides the outcome");
             }
             other => panic!("expected SenderGone, got {other:?}"),
         }
+        settled.try_recv().expect("the sender-gone discard settles its root");
 
         // Receiver gone: the `Sender` upgrades but the `Receiver` dropped,
         // so `mpsc::send` returns `SendError`.
+        let root = MailId::new(id, 2);
+        mailer.record_sent_inflight(root);
+        let settled = settlement.subscribe_settlement(root);
         let (tx, rx) = mpsc::channel::<Envelope>();
         let tx = Arc::new(tx);
         let weak = Arc::downgrade(&tx);
         drop(rx);
-        match relay_or_transfer(armed_subscribe_self(id), &weak, &wake) {
+        let dispatch = OwnedDispatch::armed(
+            DispatchParts {
+                mail_id: Some(root),
+                root: Some(root),
+                ..DispatchParts::new(KindId(7), MailRef::from(Vec::new()))
+            },
+            id,
+        );
+        match relay_or_transfer(dispatch, &weak, &wake, &weak_mailer) {
             RelayOutcome::ReceiverGone { kind } => {
                 assert_eq!(kind, KindId(7), "the discarded mail's kind id rides the outcome");
             }
             other => panic!("expected ReceiverGone, got {other:?}"),
         }
+        settled.try_recv().expect("the receiver-gone discard settles its root");
         drop(tx);
     }
 
@@ -1052,7 +1100,9 @@ mod tests {
             fired_for_hook.store(true, Ordering::SeqCst);
         }));
 
-        match relay_or_transfer(armed_subscribe_self(id), &weak, &wake) {
+        let registry = Arc::new(Registry::new());
+        let mailer = Arc::new(Mailer::new(registry));
+        match relay_or_transfer(armed_subscribe_self(id), &weak, &wake, &Arc::downgrade(&mailer)) {
             RelayOutcome::Delivered => {}
             other => panic!("expected Delivered, got {other:?}"),
         }

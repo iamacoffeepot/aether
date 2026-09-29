@@ -7,13 +7,11 @@ use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
-use crate::testing::{TestChassis, bare_substrate};
+use crate::testing::{TestChassis, await_signal, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, HandlesKind};
+use crossbeam_channel::Sender;
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-use std::time::Instant;
 
 /// Issue 697 multi-pass model: wire-time mail crosses actors
 /// regardless of declaration order. Pinger's `wire` mails Ponger;
@@ -197,8 +195,12 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
         }
     }
 
+    // Counts its pings and signals the test on each. The wire-pass send
+    // flushes through Pinger's burst producer onto the pool, outside any
+    // root the test holds, so no tracked barrier is ordered behind it.
     struct Ponger {
         received: Arc<AtomicU32>,
+        pinged: Sender<()>,
     }
     impl Addressable for Ponger {
         const NAMESPACE: &'static str = "test.barrier.ponger";
@@ -208,12 +210,12 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     impl HandlesKind<WireBarrierPing> for Ponger {}
     impl aether_actor::Lifecycle<Self> for Ponger {
         type Config = ();
-        type Params = Arc<AtomicU32>;
+        type Params = (Arc<AtomicU32>, Sender<()>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a, Self>;
-        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { received: params })
+        fn init((): (), (received, pinged): Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { received, pinged })
         }
     }
     impl aether_actor::Declared for Ponger {
@@ -233,6 +235,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
             if kind.0 == WireBarrierPing::ID.0 {
                 let _ = WireBarrierPing::decode_from_bytes(payload)?;
                 state.received.fetch_add(1, AtomicOrdering::SeqCst);
+                let _ = state.pinged.send(());
                 return Some(());
             }
             None
@@ -241,23 +244,22 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
 
     let (registry, mailer) = bare_substrate();
     let received = Arc::new(AtomicU32::new(0));
+    let (pinged, pinged_rx) = crossbeam_channel::unbounded();
     let wire_ran = Arc::new(AtomicU32::new(0));
 
     let builder = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer));
+    let ponger_params = (Arc::clone(&received), pinged);
     let builder = if pinger_first {
-        builder.with_actor::<Pinger>(Arc::clone(&wire_ran)).with_actor::<Ponger>(Arc::clone(&received))
+        builder.with_actor::<Pinger>(Arc::clone(&wire_ran)).with_actor::<Ponger>(ponger_params)
     } else {
-        builder.with_actor::<Ponger>(Arc::clone(&received)).with_actor::<Pinger>(Arc::clone(&wire_ran))
+        builder.with_actor::<Ponger>(ponger_params).with_actor::<Pinger>(Arc::clone(&wire_ran))
     };
     let chassis = builder.build_passive().expect("multi-pass boot succeeds");
 
     assert_eq!(wire_ran.load(AtomicOrdering::SeqCst), 1, "pinger's wire must have run during the wire pass");
 
     // Wait for Ponger's dispatcher to drain the wire-emitted ping.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    await_signal(&pinged_rx, "test.barrier.wire_ping");
     assert_eq!(
         received.load(AtomicOrdering::SeqCst),
         1,

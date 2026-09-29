@@ -6,14 +6,10 @@ use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
-use crate::mail::registry;
-use crate::testing::{TestChassis, bare_substrate};
+use crate::testing::{TestChassis, await_settled, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, HandlesKind};
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-use std::time::Instant;
 
 /// Issue 4269: an actor whose `init` pre-seeds cost cells still gets cells for
 /// the kinds it declares. The spawn path seeds the declaration on top of
@@ -143,7 +139,6 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
 #[test]
 fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     use crate::actor::native::spawn::Subname;
-    use crate::mail::registry::MailboxEntry;
     use aether_data::{Kind, ReplyContract};
     use aether_kinds::{ComponentCapabilities, CostTail, CostTailResult, HandlerCapability};
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -234,10 +229,11 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .build_passive()
         .expect("empty chassis boots");
-    let id = chassis
-        .spawn_actor::<SpawnCostProbe>(Subname::Named("measured"), (), Arc::clone(&ping_count))
-        .finish_commit()
+    let (probe, path) = chassis
+        .spawn_actor_for_test::<SpawnCostProbe>(Subname::Named("measured"), (), Arc::clone(&ping_count))
+        .finish_with_name()
         .expect("spawn cost probe");
+    let id = probe.id();
 
     let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: Some(CostPing::ID) }) else {
         panic!("spawned actor cost tail succeeds");
@@ -245,25 +241,15 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     assert_eq!(rows.len(), 1, "declared handler has one construction-time neutral row");
     assert_eq!(rows[0].samples, 0, "declared handler starts at the neutral seed");
 
-    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(id).expect("spawned actor inbox registered") else {
-        panic!("expected spawned actor inbox");
-    };
-    let framework = CostTail { kind: None }.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(CostTail::ID, &framework, 1));
-    let ping = CostPing { tag: 1 }.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(CostPing::ID, &ping, 1));
-
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while Instant::now() < deadline {
-        let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: Some(CostPing::ID) })
-        else {
-            panic!("spawned actor cost tail succeeds while awaiting dispatch");
-        };
-        if rows.iter().any(|row| row.samples > 0) {
-            break;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
+    // `CostTail` is framework-handled, outside the probe's declared kinds, so
+    // it enters through the boundary door a wire `Call` takes.
+    let framework = chassis
+        .accept_call(&path, CostTail::ID, CostTail { kind: None }.encode_into_bytes())
+        .expect("the spawned probe's path proves live");
+    let (_, tail_settled) = chassis.deliver_tracked(framework, None);
+    let (_, ping_settled) = chassis.send_tracked(probe, &CostPing { tag: 1 }, None);
+    await_settled(&tail_settled, "test.spawn_cost.tail");
+    await_settled(&ping_settled, "test.spawn_cost.ping");
     assert_eq!(ping_count.load(AtomicOrdering::SeqCst), 1, "declared handler dispatches exactly once");
 
     let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: Some(CostPing::ID) }) else {
@@ -278,12 +264,8 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     };
     assert!(rows.is_empty(), "framework-handled CostTail never creates a handler-cost row");
 
-    let quit = CostQuit { tag: 1 }.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(CostQuit::ID, &quit, 1));
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().is_live_at(id) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    let _ = chassis.send_tracked(probe, &CostQuit { tag: 1 }, None);
+    chassis.await_closed(probe.erase());
     assert!(!chassis.actor_registry().is_live_at(id), "quit finalizes the spawned mailbox");
 
     let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: None }) else {
