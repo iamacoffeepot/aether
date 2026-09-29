@@ -25,7 +25,7 @@
 
 use std::fs;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::{Addressable, ErasedActorRef};
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -34,6 +34,7 @@ use aether_kinds::trace::{TraceEvent, TraceTail, TraceTailResult};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{CarriedReplyMatched, CarriedRequestResult, ReleaseCarried, RunCarriedRequest};
+use aether_test_fixtures_republish::ReplyHolder;
 
 /// A module holding a carried-request holder and requester, and the
 /// replacement a test republishes it with.
@@ -58,7 +59,7 @@ const BUNDLE: Family = Family {
 /// requester reshapes its carried context.
 const RESHAPING: Family = Family {
     module: "republish_carry_v1",
-    holder: "test.republish.carry.holder",
+    holder: ReplyHolder::NAMESPACE,
     requester: "test.republish.carry.requester",
     replacement: Some("republish_carry_v2"),
 };

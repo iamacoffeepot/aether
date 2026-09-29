@@ -1219,6 +1219,25 @@ impl SubstrateHarness {
         PendingBenchReply { cid, expected: K::NAME }
     }
 
+    /// [`Self::send_deferred`] to a reference the harness handed out, such as
+    /// a loaded guest's erased reference, which no chassis target names.
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::Decode`] when `mail` cannot be prepared for
+    /// `to`.
+    pub fn send_deferred_to<K: Kind>(
+        &self,
+        to: impl SendTarget<K>,
+        mail: &K,
+    ) -> Result<PendingBenchReply, SubstrateHarnessError> {
+        let cid = self.fresh_correlation_id();
+        to.prepare(mail)
+            .for_reply(&self.passive, self.session_reply(cid))
+            .map_err(|error| SubstrateHarnessError::Decode(format!("prepare harness send: {error}")))?;
+        Ok(PendingBenchReply { cid, expected: K::NAME })
+    }
+
     /// Pump until the reply for a request returned by [`Self::send_deferred`]
     /// arrives, stashing out-of-order replies for later awaits.
     pub fn await_deferred<R>(&mut self, pending: PendingBenchReply) -> Result<R, SubstrateHarnessError>

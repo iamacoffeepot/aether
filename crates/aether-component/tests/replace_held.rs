@@ -15,7 +15,7 @@
 
 use std::fs;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::{Addressable, ErasedActorRef};
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -26,6 +26,7 @@ use aether_test_fixtures_kinds::{
     CountQuery, CountReport, HELD_TARGET_FORGETTER, HELD_TARGET_KEEPER, HELD_TARGET_RELAY, HeldReplyMatched,
     ReleaseCarried, ReleaseHeld, RunHeldRequest,
 };
+use aether_test_fixtures_republish::ReplyHolder;
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
 const HOLDER: &str = "test.carry.holder";
@@ -199,7 +200,7 @@ fn a_replacement_that_changed_a_held_reply_kind_is_refused() {
             })
             .unwrap_or_else(|error| panic!("load {export}: {error}"))
     };
-    let (reply_holder, _) = load("test.republish.carry.holder");
+    let (reply_holder, _) = load(ReplyHolder::NAMESPACE);
     let _ = load("test.republish.carry.held_relay");
     let (requester, _) = load("test.republish.carry.held_requester");
 

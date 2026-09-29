@@ -306,18 +306,29 @@ fn a_guest_load_of_a_republishing_namespace_waits() {
         .load_any(&LoadComponent { wasm: loader_wasm, name: None, config: Vec::new(), export: None })
         .expect("load the loader");
 
+    // Both requests are queued before the pumped host runs at all. The
+    // replace sits first in the host's inbox; the loader, on the pool,
+    // relays its `LoadComponent` one hop behind it. The host dispatches the
+    // replace before that load can reach it, and the republish still needs
+    // its member's prepare, the publish, the commit and its settlement, so
+    // the load lands while the namespace is held unless that single relay
+    // hop outruns all of those. A load that skipped the hold would be
+    // admitted against the old publication and succeed.
     let host = harness.actor_ref::<ComponentHostCapability>();
     let replacing = harness.send_deferred(host, &replace(&fixtures.v2));
-    harness.step_component_host_through::<Prepared>(1).expect("the gate answers its prepare");
-    // The loader's `LoadComponent` reaches the host while the gate is still
-    // prepared; the load's held reply keeps this chain open until the host
-    // answers it, so settling it waits out the load.
     let guest_load = GuestLoad { wasm: fixtures.v1.clone(), name: Some("c".to_owned()), export: Some(GATE.to_owned()) };
-    harness.execute(vec![("guest load", HarnessOp::send_and_settle(loader, &guest_load))]).expect("guest load");
+    let loading = harness.send_deferred_to(loader, &guest_load).expect("send the guest load");
 
     let replaced = harness.await_deferred::<ReplaceResult>(replacing).expect("replace reply");
+    let guest_loaded = harness.await_deferred::<LoadResult>(loading).expect("guest load reply");
 
     expect_ok(&replaced);
+    match guest_loaded {
+        LoadResult::Err { error } => {
+            assert!(error.contains("gate_probe"), "the old code is refused against the successor: {error}");
+        }
+        LoadResult::Ok { path, .. } => panic!("the old code loaded beside the successor at {path}"),
+    }
     assert!(harness.accepts(gate, GateProbe::ID), "the gate runs the successor");
     let names = harness.list_components().expect("list components");
     assert!(

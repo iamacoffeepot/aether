@@ -110,7 +110,8 @@ aether-test-fixtures-carry-reshaped = { path = "../aether-test-fixtures-carry-re
 aether-test-fixtures-inline-dependency = { path = "../aether-test-fixtures-inline-dependency" }
 aether-test-fixtures-fs-demux = { path = "../aether-test-fixtures-fs-demux" }
 # `republish` and the migrated replace tests load the same-namespace successor
-# modules this crate's examples build (issue 7109).
+# modules that crate's examples build (issue 7109); `replace_held` and
+# `replace_correlation` name the shared holder's namespace through its rlib.
 aether-test-fixtures-republish = { path = "../aether-test-fixtures-republish" }
 # `harness_guest_addresses` loads the short-path fixture, whose guest parents
 # each declare one instanced child type, so their holes resolve; the test
@@ -144,7 +145,6 @@ ignored = [
     "aether-test-fixtures-stateful-reshaped",
     "aether-test-fixtures-carry-reshaped",
     "aether-test-fixtures-inline-dependency",
-    "aether-test-fixtures-republish",
 ]
 
 [lints]
