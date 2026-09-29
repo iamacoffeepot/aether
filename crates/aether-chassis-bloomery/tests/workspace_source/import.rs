@@ -224,23 +224,10 @@ fn a_stream_cut_inside_a_large_blob_fails_and_still_removes_the_container() -> T
     Ok(())
 }
 
-#[test]
-fn an_export_larger_than_a_stage_batch_stages_every_blob_its_tree_cites() -> TestResult {
-    // Catches a batch flush that drops the blob too large for one batch, a tree sent in a stage before the blobs it
-    // cites (the journal would refuse the dangling citation), and a batch bound on artifacts that loses the
-    // artifacts past it: every blob the tree cites must be stored with the bytes its reference names.
-    let large: Vec<u8> = (0..=250u8).cycle().take(STAGE_MAX_BYTES + 1).collect();
-    let small: Vec<(String, Vec<u8>)> = (0..STAGE_MAX_ARTIFACTS + 8)
-        .map(|index| (format!("many/{index}"), format!("{index}\n").into_bytes()))
-        .collect();
-    let export = small
-        .iter()
-        .fold(TarWriter::new().file("large.bin", &large).directory("many/"), |tar, (path, content)| {
-            tar.file(path, content)
-        })
-        .finish();
-
-    let (answer, _, harness) = import_against(StubReply::import_script(IMAGE, CONTAINER, &export), &[])?;
+/// Import `export` over an empty journal, then walk the tree it answered and count its files, asserting each cited
+/// blob is stored with the bytes its reference names.
+fn stored_blobs_of(export: &[u8]) -> Result<usize, Box<dyn Error>> {
+    let (answer, _, harness) = import_against(StubReply::import_script(IMAGE, CONTAINER, export), &[])?;
 
     let reader = JournalReader::open(harness.journal_path())?;
     let mut pending = vec![tree_of_answer(answer)?];
@@ -259,7 +246,32 @@ fn an_export_larger_than_a_stage_batch_stages_every_blob_its_tree_cites() -> Tes
             }
         }
     }
-    assert_eq!(blobs, small.len() + 1, "every file of the export is a stored blob");
+    Ok(blobs)
+}
+
+#[test]
+fn a_file_larger_than_a_stage_batch_is_staged_whole_beside_the_files_around_it() -> TestResult {
+    // Catches a batch flush that drops the blob too large for one batch, or the small files queued before or after
+    // it, and a tree sent in a stage before the blob it cites (the journal would refuse the dangling citation).
+    let large: Vec<u8> = (0..=250u8).cycle().take(STAGE_MAX_BYTES + 1).collect();
+    let export =
+        TarWriter::new().file("before", b"before\n").file("large.bin", &large).file("zafter", b"after\n").finish();
+
+    assert_eq!(stored_blobs_of(&export)?, 3, "every file of the export is a stored blob");
+    Ok(())
+}
+
+#[test]
+fn an_export_of_more_files_than_one_stage_batch_holds_stages_every_blob_its_tree_cites() -> TestResult {
+    // Catches a batch bound on artifacts that loses the artifacts past it, and a directory sent in a stage before
+    // the blobs it cites that the next batch carries: every blob the tree cites must be stored with its bytes.
+    let small: Vec<(String, Vec<u8>)> = (0..STAGE_MAX_ARTIFACTS + 8)
+        .map(|index| (format!("many/{index}"), format!("{index}\n").into_bytes()))
+        .collect();
+    let export =
+        small.iter().fold(TarWriter::new().directory("many/"), |tar, (path, content)| tar.file(path, content)).finish();
+
+    assert_eq!(stored_blobs_of(&export)?, small.len(), "every file of the export is a stored blob");
     Ok(())
 }
 

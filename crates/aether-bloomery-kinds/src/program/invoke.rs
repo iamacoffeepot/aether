@@ -45,7 +45,7 @@ pub struct ClosureArtifact {
 
 impl ClosureArtifact {
     /// Carry `bytes` under `kind`. The claim is computed here, by streaming
-    /// the bytes once through [`BlobReader`] and [`ArtifactHasher`](crate::ArtifactHasher), so a
+    /// the bytes once through [`BlobReader`] and [`ArtifactHasher`], so a
     /// constructed member's claim is true.
     #[must_use]
     pub fn new(kind: KindId, bytes: impl Into<Blob>) -> Self {
@@ -78,7 +78,7 @@ impl ClosureArtifact {
     }
 
     /// Every payload byte, streamed through [`BlobReader`] into
-    /// [`ArtifactHasher`](crate::ArtifactHasher) seeded with the kind prefix, and returned only when
+    /// [`ArtifactHasher`] seeded with the kind prefix, and returned only when
     /// the whole payload hashes to `expected`.
     ///
     /// Every byte is hashed before any is returned, so a returned `Vec` is
