@@ -172,7 +172,6 @@ mod tests {
             Ok(Self)
         }
 
-        #[allow(clippy::unused_self)] // aether-suppression-request: moved test fixture; handler ABI takes self
         #[handler::single]
         fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
     }
@@ -191,7 +190,6 @@ mod tests {
             Ok(Self)
         }
 
-        #[allow(clippy::unused_self)] // aether-suppression-request: moved test fixture; handler ABI takes self
         #[handler::single]
         fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
     }
@@ -209,7 +207,6 @@ mod tests {
             Ok(Self)
         }
 
-        #[allow(clippy::unused_self)] // aether-suppression-request: moved test fixture; handler ABI takes self
         #[handler::single]
         fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
     }

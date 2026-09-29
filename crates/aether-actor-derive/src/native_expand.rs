@@ -8,10 +8,11 @@ use syn::{Expr, ImplItem, ItemImpl, ItemStruct, Type};
 use crate::diagnostics::doc_attrs;
 use crate::handler_parse::{
     HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn, NativeFallbackFn,
-    TaskReplyMode, attr_is_fallback, attr_is_handler, classify_handler_reply, classify_task_reply_mode,
-    erase_unless_ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, fill_ctx_actor,
-    handler_cfgs, parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
-    rewrite_self_state_first_param, types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
+    TaskReplyMode, allow_abi_receiver, attr_is_fallback, attr_is_handler, classify_handler_reply,
+    classify_task_reply_mode, erase_unless_ctx_names_actor, extract_native_actor_handler_kind,
+    extract_task_handler_types, fill_ctx_actor, handler_cfgs, parse_handler_class, parse_handler_variant,
+    reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param, types_token_eq,
+    validate_addressable_consts, validate_native_fallback_sig,
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
@@ -181,6 +182,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                             let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig, is_split)?;
                             let reply = classify_handler_reply(&f.sig.output);
                             fill_ctx_actor(&mut f.sig);
+                            allow_abi_receiver(&mut f);
                             handlers.push(NativeActorHandlerFn { method: f, kind_ty, is_slice, reply, class, cfgs });
                         }
                         HandlerVariant::Task => {
@@ -202,6 +204,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                             let (output_ty, context_ty, is_borrow) = extract_task_handler_types(&f.sig, is_split)?;
                             let mode = classify_task_reply_mode(&f.sig, is_borrow)?;
                             fill_ctx_actor(&mut f.sig);
+                            allow_abi_receiver(&mut f);
                             task_handlers.push(NativeActorTaskHandlerFn { method: f, output_ty, context_ty, mode });
                         }
                     }
@@ -212,6 +215,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     validate_native_fallback_sig(&f.sig, is_split)?;
                     f.attrs.remove(idx);
                     fill_ctx_actor(&mut f.sig);
+                    allow_abi_receiver(&mut f);
                     fallback = Some(NativeFallbackFn { method: f });
                 } else if f.sig.ident == "init" {
                     if init_method.is_some() {

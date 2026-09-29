@@ -184,7 +184,6 @@ impl WasmActor for InlineFsDemuxParent {
     /// The parent carries no demux state; a `#[fallback]` keeps it a valid
     /// receiver.
     #[fallback]
-    #[allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the fallback signature at `&mut self`, and this parent is stateless — the same allow the `inline_child` parents carry
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }
 

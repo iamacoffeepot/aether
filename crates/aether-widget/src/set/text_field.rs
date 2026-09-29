@@ -220,7 +220,6 @@ impl WasmActor for TextFieldWidget {
     }
 
     #[handler::single]
-    #[allow(clippy::unused_self)]
     fn on_set_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: SetClipboardTextResult) {
         report_clipboard_copy(&result);
     }

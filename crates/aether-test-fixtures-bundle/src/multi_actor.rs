@@ -13,10 +13,6 @@
 //! `#[fallback]`. The handlers do nothing; only their declared capability
 //! groups are observed.
 
-// `#[handler]` / `#[fallback]` methods take `&mut self` to match the
-// dispatch ABI even when stateless.
-#![allow(clippy::unused_self)]
-
 use aether_actor::{ActorInitError, Mail, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Ping;
 

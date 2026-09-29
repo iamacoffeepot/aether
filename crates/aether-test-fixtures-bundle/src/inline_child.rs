@@ -81,11 +81,10 @@
 //! Consumers load this actor from the `inline_child` bundle with
 //! `export: Some("test.inline.tag_parent")`.
 
-// `#[handler]` methods take `&mut self` to match the dispatch ABI even
-// though a stateless reply never reads it. `rehydrate` takes its `State`
-// by value; `InlineCounterState` is all-`Copy`, so clippy reads the
-// by-value parameter as needlessly owned — the contract is the point.
-#![allow(clippy::unused_self, clippy::needless_pass_by_value)]
+// `rehydrate` takes its `State` by value; `InlineCounterState` is
+// all-`Copy`, so clippy reads the by-value parameter as needlessly owned —
+// the contract is the point.
+#![allow(clippy::needless_pass_by_value)]
 
 use aether_actor::{
     ActorInitError, ActorTypeTag, Erased, ErasedActorRef, Mail, Manual, SpawnError, Subname, WasmActor, WasmCtx,

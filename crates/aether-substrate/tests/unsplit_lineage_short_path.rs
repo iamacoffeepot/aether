@@ -42,7 +42,6 @@ impl NativeActor for UnsplitRoot {
         Ok(Self)
     }
 
-    #[allow(clippy::unused_self)] // actor handler ABI always receives state
     #[handler::single]
     fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
 }
@@ -60,7 +59,6 @@ impl NativeActor for UnsplitChild {
         Ok(Self)
     }
 
-    #[allow(clippy::unused_self)] // actor handler ABI always receives state
     #[handler::single]
     fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
 }

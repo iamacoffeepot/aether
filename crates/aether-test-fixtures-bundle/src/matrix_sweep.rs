@@ -44,10 +44,6 @@
 //! child → parent reporting protocol keeps the fixture to the addressing
 //! verbs under test.
 
-// The handlers take `&mut self` to match the dispatch ABI even when an arm
-// reads only the shared log, not the actor's own fields.
-#![allow(clippy::unused_self)]
-
 use core::cell::UnsafeCell;
 
 use aether_actor::{

@@ -400,7 +400,6 @@ mod tests {
         }
 
         #[handler::single]
-        #[allow(clippy::unused_self)]
         fn on_emit(&mut self, ctx: &mut NativeCtx<'_>, _e: EmitReq) {
             // A non-reply peer send: buffered here, flushed at ctx drop
             // through the binding's outbound burst → the pool `WakeSink`,

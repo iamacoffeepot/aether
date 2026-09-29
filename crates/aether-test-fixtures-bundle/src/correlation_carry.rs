@@ -22,8 +22,6 @@
 //! and once after, so the two replies' trace `MailId`s differ only when the
 //! replacement's reply-lineage counter continues past its predecessor's.
 
-#![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and `CarryRequester` is stateless so its first request takes the mailbox's first id — the same allow `source_forwarder` carries
-
 use aether_actor::{
     ActorInitError, Erased, Manual, OutboundReply, PriorState, ReplyHandle, WasmActor, WasmCtx, WasmDropCtx,
     WasmInitCtx, actor,
