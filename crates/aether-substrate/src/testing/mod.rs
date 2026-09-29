@@ -14,6 +14,10 @@
 //! neither descriptor lookup nor the ADR-0037 bubble-up path), while
 //! [`fresh_substrate`] / [`fresh_substrate_and_rx`] pre-populate the kind
 //! descriptors and wire a loopback outbound for the cap tests that do.
+//!
+//! A test that owns a pumped actor drives it through [`PumpedDriver`],
+//! which waits the way a pumped chassis driver does (ADR-0161 §Decision 2);
+//! a test that waits on a pooled actor's chain uses [`await_settled`].
 
 #![allow(
     clippy::must_use_candidate,
@@ -50,6 +54,10 @@ use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry::{BootAuthority, InboxHandler, NameConflict, Registry, lineage_mailbox_id};
 use crate::mail::registry::{DispatchParts, OwnedDispatch};
 use crate::runtime::lifecycle::FatalAborter;
+
+mod pumped;
+
+pub use pumped::{PumpedDriver, await_settled};
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
 /// drives the chassis through `Builder::<TestChassis>::new(...)` directly
@@ -242,6 +250,20 @@ where
 /// sharing it would already hold.
 pub fn boot_bare_test_chassis(registry: &Arc<Registry>, mailer: &Arc<Mailer>) -> PassiveChassis<TestChassis> {
     Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer)).build_passive().expect("test chassis boots")
+}
+
+/// [`boot_bare_test_chassis`] whose chassis escalates a fatal abort into
+/// `aborter`, for a test that boots its own pumped actor and reads the reason
+/// a fail-fast path on that actor gave.
+pub fn boot_bare_test_chassis_aborting_into(
+    registry: &Arc<Registry>,
+    mailer: &Arc<Mailer>,
+    aborter: Arc<dyn FatalAborter>,
+) -> PassiveChassis<TestChassis> {
+    Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
+        .with_aborter(aborter)
+        .build_passive()
+        .expect("test chassis boots")
 }
 
 /// [`boot_test_chassis_with`] whose chassis escalates a fatal abort into

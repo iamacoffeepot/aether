@@ -698,6 +698,7 @@ dependencies = [
  "aether-render",
  "aether-substrate",
  "anyhow",
+ "crossbeam-channel",
  "pollster",
  "serde",
  "serde_json",

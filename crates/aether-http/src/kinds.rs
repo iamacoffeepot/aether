@@ -513,8 +513,8 @@ pub struct RegisterRouteSelf {
 /// (ADR-0231 §3, proven with `resolve_path`) rather than an [`HttpRouter`]
 /// path: the server never sends to a holder it is releasing, so a release
 /// needs the holder's identity and nothing its rows promise. `resolve_path`
-/// fills a short path's holes, so `aether.component/:api` releases as well as
-/// the canonical spelling does.
+/// fills a short path's holes, so an ADR-0166 short path (`root/:key`)
+/// releases as well as the canonical spelling does.
 ///
 /// [`ErasedActorPath`]: aether_data::ErasedActorPath
 #[aether_data::kind(name = "aether.http.server.unregister_route")]

@@ -13,7 +13,7 @@ use crate::testing::boot_authority as auth;
 use super::support::inventory_subscription_fixture;
 
 /// Issue iamacoffeepot/aether#730: `list_mailbox_descriptors`
-/// snapshots the table sorted by name, categorises each entry by
+/// snapshots the table sorted by name, categorises each native entry by
 /// its name prefix, and inserts a synthetic `ChassisSentinel`
 /// entry under `aether.chassis` (which is never a real registry
 /// row — `insert` rejects the reserved name).
@@ -21,12 +21,11 @@ use super::support::inventory_subscription_fixture;
 fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
     let r = Registry::new();
     r.register_inbox(&auth(), "aether.input", noop_handler());
-    r.register_inbox(&auth(), "aether.embedded:cam", noop_handler());
     r.register_inbox(&auth(), "user_thing", noop_handler());
 
     let snap = r.list_mailbox_descriptors();
-    // Four entries: 3 registered + 1 synthetic chassis sentinel.
-    assert_eq!(snap.len(), 4, "got: {snap:#?}");
+    // Three entries: 2 registered + 1 synthetic chassis sentinel.
+    assert_eq!(snap.len(), 3, "got: {snap:#?}");
 
     // Sorted by name.
     let names: Vec<&str> = snap.iter().map(|d| d.name.as_str()).collect();
@@ -40,7 +39,6 @@ fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
     };
     assert_eq!(cat("aether.chassis"), MailboxCategory::ChassisSentinel);
     assert_eq!(cat("aether.input"), MailboxCategory::Actor);
-    assert_eq!(cat("aether.embedded:cam"), MailboxCategory::Trampoline);
     // User-space names fall outside any of the recognised
     // categories; the hub's downstream renderer treats them as
     // raw tagged ids without a type prefix.

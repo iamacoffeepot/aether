@@ -9,11 +9,12 @@
 
 use std::path::Path;
 
-use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{Kind, LoadName};
+use aether_actor::ErasedActorRef;
+use aether_component::ComponentHostCapability;
+use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::{DescribeComponent, DescribeComponentResult, LoadComponent};
 use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 use std::fs;
 
@@ -22,17 +23,37 @@ use std::fs;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-/// Ask the loaded `probe_with_config` trampoline which config its `init` saw.
-fn echo_config(harness: &mut SubstrateHarness) -> ConfigEcho {
+/// Load `probe_with_config` with `config` bytes, assert it advertises its
+/// config kind, and hand back the loaded guest's reference.
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, config: Vec<u8>) -> ErasedActorRef {
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
+    let load = LoadComponent { wasm, name: None, config, export: Some("test.probe_with_config".to_owned()) };
+    let (probe, path) =
+        harness.load_any(&load).unwrap_or_else(|error| panic!("the typed-config guest failed to load: {error}"));
+
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let probe = harness
-        .child::<ComponentHostCapability, WasmTrampoline>(
-            &host,
-            LoadName::new("test.probe_with_config").expect("load name"),
-        )
-        .expect("the loaded probe_with_config is live");
+    let described = harness
+        .execute(vec![(
+            "describe",
+            HarnessOp::send_and_await_reply(&host, &DescribeComponent { name: path.to_string() }),
+        )])
+        .expect("describe sequence")
+        .reply::<DescribeComponentResult>("describe")
+        .expect("decode DescribeComponentResult");
+    let DescribeComponentResult::Ok { capabilities } = described else {
+        panic!("the loaded guest is described: {described:?}");
+    };
+    let cfg = capabilities.config.expect("typed-config component advertises its config kind");
+    assert_eq!(cfg.id, <ProbeConfig as Kind>::ID);
+    assert_eq!(cfg.name, <ProbeConfig as Kind>::NAME);
+
+    probe
+}
+
+/// Ask the loaded `probe_with_config` guest which config its `init` saw.
+fn echo_config(harness: &mut SubstrateHarness, probe: ErasedActorRef) -> ConfigEcho {
     harness
-        .execute(vec![("echo", HarnessOp::send_and_await_reply(probe.erase(), &ConfigQuery))])
+        .execute(vec![("echo", HarnessOp::send_and_await_reply(probe, &ConfigQuery))])
         .expect("echo sequence")
         .reply::<ConfigEcho>("echo")
         .expect("decode ConfigEcho")
@@ -46,35 +67,9 @@ fn typed_config_guest_without_config_bytes_uses_default() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
+    let probe = load_probe(&mut harness, &wasm_path, Vec::new());
 
-    let report = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &LoadComponent {
-                    wasm,
-                    name: None,
-                    config: Vec::new(),
-                    export: Some("test.probe_with_config".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-
-    match report.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { capabilities, .. } => {
-            let cfg = capabilities.config.expect("typed-config component advertises its config kind");
-            assert_eq!(cfg.id, <ProbeConfig as Kind>::ID);
-            assert_eq!(cfg.name, <ProbeConfig as Kind>::NAME);
-        }
-        LoadResult::Err { error } => {
-            panic!("typed-config guest without config bytes failed to load: {error}")
-        }
-    }
-
-    let echo = echo_config(&mut harness);
+    let echo = echo_config(&mut harness, probe);
     let expected = ProbeConfig::default();
     assert_eq!(echo.seed, expected.seed, "default seed reaches init");
     assert_eq!(echo.label, expected.label, "default label reaches init");
@@ -96,38 +91,10 @@ fn typed_config_guest_with_config_bytes_round_trips() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
-
     let config = ProbeConfig { seed: 0xABCD_1234, label: "c2-round-trip".to_owned() };
-    let config_bytes = config.encode_into_bytes();
+    let probe = load_probe(&mut harness, &wasm_path, config.encode_into_bytes());
 
-    let report = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &LoadComponent {
-                    wasm,
-                    name: None,
-                    config: config_bytes,
-                    export: Some("test.probe_with_config".to_owned()),
-                },
-            ),
-        )])
-        .expect("load + query sequence");
-
-    match report.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { capabilities, .. } => {
-            let cfg = capabilities.config.expect("typed-config component advertises its config kind");
-            assert_eq!(cfg.id, <ProbeConfig as Kind>::ID);
-            assert_eq!(cfg.name, <ProbeConfig as Kind>::NAME);
-        }
-        LoadResult::Err { error } => {
-            panic!("typed-config guest with config bytes failed to load: {error}")
-        }
-    }
-
-    let echo = echo_config(&mut harness);
+    let echo = echo_config(&mut harness, probe);
     assert_eq!(echo.seed, 0xABCD_1234, "seed round-trips through init");
     assert_eq!(echo.label, "c2-round-trip", "label round-trips through init");
 }

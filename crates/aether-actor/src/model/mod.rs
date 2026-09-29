@@ -102,50 +102,12 @@ impl Resolve for Many {
     }
 }
 
-/// The reserved scope under which every embedded actor — an FFI/wasm
-/// component hosted by the component-host trampoline — resolves (ADR-0099
-/// §5/§6, ADR-0119). The sole owner of the `"aether.embedded"` literal;
-/// concrete hosts (the trampoline, the substrate `TRAMPOLINE_NAMESPACE`)
-/// forward-feed this const rather than re-declaring it.
+/// The namespace of the component host's trampoline, the native actor a
+/// wasm guest runs in (ADR-0099 §5/§6, ADR-0119). The sole owner of the
+/// `"aether.embedded"` literal; the trampoline forward-feeds this const
+/// rather than re-declaring it. A guest is named by its own published
+/// namespace (ADR-0241 §5), never by this one.
 pub const EMBEDDED_SCOPE: &str = "aether.embedded";
-
-/// Keyless embedded resolution (ADR-0119): folds
-/// `instanced(EMBEDDED_SCOPE, NAMESPACE)` onto the selected parent carry — the
-/// component's own name as an instance under the reserved embed scope.
-/// The runtime retains the calling actor's logical parent mailbox and
-/// [`CallerScoped`] selects it as the routing seed. This makes the same actor
-/// type resolve beneath whichever host actually embedded it, without naming a
-/// concrete host or looking one up. Keyless (`Args<'a> = ()`), so an embedded
-/// actor is a [`Singleton`]; bare-type addressing selects its default
-/// [`Addressable::NAMESPACE`], while a named peer supplies its runtime load
-/// namespace through the same resolver.
-pub struct Embedded;
-
-impl Resolve for Embedded {
-    type Args<'a> = ();
-    fn resolve(caller_carry: u64, namespace: &str, _args: ()) -> MailboxId {
-        MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, namespace))))
-    }
-    fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
-        Some(Self::resolve(caller_carry, key.unwrap_or(namespace), ()))
-    }
-}
-
-/// Keyed embedded resolution (ADR-0119, ADR-0114): an instanced embedded
-/// child spawned inline under the embed scope, keyed by a runtime `subname`
-/// rather than the actor's own `NAMESPACE`. Folds `instanced(EMBEDDED_SCOPE, subname)` onto the caller's
-/// carry. Keyed (`Args<'a> = &'a str`), so it is an [`Instanced`].
-pub struct EmbeddedMany;
-
-impl Resolve for EmbeddedMany {
-    type Args<'a> = &'a str;
-    fn resolve(caller_carry: u64, _namespace: &str, subname: &str) -> MailboxId {
-        MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, subname))))
-    }
-    fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
-        key.map(|key| Self::resolve(caller_carry, namespace, key))
-    }
-}
 
 /// Which caller-relative lineage seed a resolver consumes.
 ///
@@ -160,31 +122,24 @@ pub enum CallerScope {
     Root,
     /// The calling actor's own mailbox lineage.
     Current,
-    /// The calling actor's logical parent's mailbox lineage.
-    Parent,
 }
 
 /// The caller carry handed to a resolver when the scope names no lineage.
 ///
-/// A root-pinned resolver ignores its carry, and no birth folds beneath this
-/// empty lineage, so a `Parent` scope with no logical parent resolves to an
-/// address that is never live.
+/// A root-pinned resolver ignores its carry.
 const EMPTY_CARRY: u64 = 0;
 
 impl CallerScope {
     /// Select the caller carry this scope names.
     ///
     /// Root-pinned resolvers receive [`EMPTY_CARRY`] because they do not
-    /// consume caller lineage, and so does a `Parent` scope when the caller
-    /// has no logical parent. Current and parent scopes otherwise receive the
-    /// logical actor mailboxes retained by the runtime; no separate untagged
-    /// hash state is required.
+    /// consume caller lineage; the current scope receives the calling actor's
+    /// mailbox, so no separate untagged hash state is required.
     #[must_use]
-    pub(crate) const fn select(self, current: MailboxId, parent: Option<MailboxId>) -> u64 {
-        match (self, parent) {
-            (Self::Root, _) | (Self::Parent, None) => EMPTY_CARRY,
-            (Self::Current, _) => current.0,
-            (Self::Parent, Some(parent)) => parent.0,
+    pub(crate) const fn select(self, current: MailboxId) -> u64 {
+        match self {
+            Self::Root => EMPTY_CARRY,
+            Self::Current => current.0,
         }
     }
 }
@@ -193,20 +148,16 @@ impl CallerScope {
 /// consumes. Every ctx send selects [`Self::SCOPE`] rather than assuming that
 /// all resolvers consume the calling actor's own lineage.
 ///
-/// Implemented for the four built-in strategies:
+/// Implemented for the two built-in strategies:
 ///
 /// - [`One`] declares [`CallerScope::Root`] and ignores caller lineage.
 /// - [`Many`] declares [`CallerScope::Current`] for a keyed child of the
-///   caller.
-/// - [`Embedded`] declares [`CallerScope::Parent`] for a co-hosted embedded
-///   singleton beneath the caller's runtime parent.
-/// - [`EmbeddedMany`] declares [`CallerScope::Current`] for an instanced
-///   embedded child spawned inline, whose lineage extends the spawner's.
+///   caller, native or spawned inline, whose lineage extends the caller's.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a caller-scoped resolution strategy",
     label = "does not declare a caller-relative scope for bare-type resolution",
-    note = "a resolver used by a typed ctx must select `Root`, `Current`, or `Parent`; use an \
-            explicit by-name or by-id route when no caller-relative scope describes the target"
+    note = "a resolver used by a typed ctx must select `Root` or `Current`; use an explicit \
+            by-name or by-id route when no caller-relative scope describes the target"
 )]
 pub trait CallerScoped: Resolve {
     /// The caller-relative scope this resolver consumes.
@@ -219,12 +170,6 @@ impl CallerScoped for One {
 impl CallerScoped for Many {
     const SCOPE: CallerScope = CallerScope::Current;
 }
-impl CallerScoped for Embedded {
-    const SCOPE: CallerScope = CallerScope::Parent;
-}
-impl CallerScoped for EmbeddedMany {
-    const SCOPE: CallerScope = CallerScope::Current;
-}
 
 mod sealed {
     /// Private supertrait sealing [`super::DependencyResolver`] — only the
@@ -235,8 +180,8 @@ mod sealed {
 
 /// A [`Resolve`] strategy that may back a declared `#[actor(depends(R))]`
 /// dependency (ADR-0230): the keyless strategies, whose candidate position
-/// the host folds without run-time data. Sealed: the only implementors are
-/// [`One`] and [`Embedded`]. A keyed strategy names an instance through
+/// the host folds without run-time data. Sealed: the only implementor is
+/// [`One`], a root singleton (ADR-0241 §5). A keyed strategy names an instance through
 /// run-time data, so its actor is reached through the reference its spawn
 /// returned rather than a declaration.
 pub trait DependencyResolver: Resolve + sealed::Sealed {
@@ -244,20 +189,15 @@ pub trait DependencyResolver: Resolve + sealed::Sealed {
     /// [`Declared::Depends`] list, into the `InputsRecord::Dependency` record
     /// the host reader matches on, and the tag the native birth check folds
     /// by.
-    /// Tags are stable: a new declarable strategy takes the next tag,
-    /// never a reused one.
+    /// Tags are stable: a new declarable strategy takes the next unused tag,
+    /// never a retired one (tag 1 was the retired embedded resolver).
     const TAG: u8;
 }
 
 impl sealed::Sealed for One {}
-impl sealed::Sealed for Embedded {}
 
 impl DependencyResolver for One {
     const TAG: u8 = 0;
-}
-
-impl DependencyResolver for Embedded {
-    const TAG: u8 = 1;
 }
 
 /// An actor that can be addressed by bare type from a peer's ctx, because its
@@ -272,8 +212,8 @@ impl DependencyResolver for Embedded {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be addressed by bare type from this context",
     label = "its resolver does not declare a caller-relative scope",
-    note = "use an explicit by-name or by-id route when the target cannot select `Root`, \
-            `Current`, or `Parent` from the caller's runtime context"
+    note = "use an explicit by-name or by-id route when the target cannot select `Root` or \
+            `Current` from the caller's runtime context"
 )]
 pub trait CallerAddressable: Addressable<Resolver: CallerScoped> {}
 impl<T: Addressable<Resolver: CallerScoped>> CallerAddressable for T {}
@@ -293,19 +233,17 @@ impl<T: Addressable<Resolver: CallerScoped>> CallerAddressable for T {}
 /// than by parking a pool worker in-handler.
 pub trait Addressable: Sized + Send + 'static {
     /// The recipient name this actor claims **within its scope**
-    /// (ADR-0098). For a root-scoped actor — every chassis capability —
-    /// it is the full mailbox name (`aether.<name>`). For an actor
-    /// hosted inside a parent the full mailbox name is the path
-    /// `"{scope}:{NAMESPACE}"`, so `NAMESPACE` is just the segment: a
-    /// wasm component declaring `NAMESPACE = "aether.kit.camera"` and loaded at its
-    /// default name registers at `aether.embedded:aether.camera`
-    /// under its component-host, not at the bare `"aether.kit.camera"`.
+    /// (ADR-0098). For a root singleton — every chassis capability, and a
+    /// wasm component declaring `NAMESPACE = "aether.kit.camera"` — it is the
+    /// full mailbox name. An instanced actor takes a key, `NAMESPACE:key`,
+    /// and a child is `parent/NAMESPACE:key` (ADR-0241 §5): a guest is named
+    /// by its own namespace, never by its host's.
     const NAMESPACE: &'static str;
 
     /// The resolution strategy this actor selects (ADR-0119). Cardinality
-    /// is derived from it: a keyless resolver ([`One`] / [`Embedded`],
-    /// `Args<'a> = ()`) makes the actor a [`Singleton`]; a keyed resolver
-    /// ([`Many`] / [`EmbeddedMany`], `Args<'a> = &'a str`) makes it
+    /// is derived from it: a keyless resolver ([`One`], `Args<'a> = ()`)
+    /// makes the actor a [`Singleton`]; a keyed resolver ([`Many`],
+    /// `Args<'a> = &'a str`) makes it
     /// [`Instanced`]. The `#[actor]` macro emits this; a hand-written
     /// actor sets it directly.
     type Resolver: Resolve;
@@ -341,7 +279,7 @@ pub trait Root: Addressable {}
 ///
 /// The bound is the point. `C: Root` says the identity may sit without an
 /// actor parent, and `Resolver = One` says its address does not depend on
-/// one. An [`Embedded`] or [`Many`] actor — whose mailbox is knowable only
+/// one. A [`Many`] actor — whose mailbox is knowable only
 /// under some caller's lineage — is a compile error here rather than a
 /// silently wrong depth-1 hash.
 #[must_use]
@@ -565,14 +503,12 @@ pub trait Lifecycle<S> {
 /// Root-scoped singletons — every chassis cap, including catch-alls like
 /// `BroadcastCapability` — have full name `== NAMESPACE`, so a sender
 /// declares the root cap as a dependency and mails it by type with
-/// `ctx.send::<R>(&k)`. A singleton hosted inside a parent resolves from the
-/// runtime-retained parent mailbox. A loaded component is reached by type:
-/// `ctx.actor_ref::<R>()` folds its default load name (`R::NAMESPACE`). Replica 0 claims the bare base name and the rest
-/// are `base-1`, `base-2`, …, so the bare type reaches the first; any other
-/// replica is reached through the reference its load proved.
+/// `ctx.send::<R>(&k)`. A loaded singleton component is a root singleton too
+/// (ADR-0241 §5): `ctx.actor_ref::<R>()` folds its published name
+/// (`R::NAMESPACE`) from the root, as it does for a chassis cap.
 ///
-/// The rendered address itself — `LoadResult.path`, e.g.
-/// `aether.component/aether.embedded:NAME` — is a boundary string: the host's
+/// The rendered address itself — `LoadResult.path`, e.g. `aether.kit.camera`
+/// — is a boundary string: the host's
 /// `resolve_address` parser at the MCP, RPC, and harness boundary is the one
 /// place text becomes a position (ADR-0230). A load requester needs no
 /// resolution at all: the load reply arrives from the loaded actor, so the
@@ -582,10 +518,10 @@ pub trait Lifecycle<S> {
 /// either one-of-a-kind within a scope (singleton) or N-instances under
 /// a shared prefix (instanced, name-keyed). ADR-0079.
 /// Derived from the resolver (ADR-0119): a keyless [`Resolver`](Addressable::Resolver)
-/// (`Args<'a> = ()` — [`One`] for root caps, [`Embedded`] for components)
-/// makes the actor a `Singleton`. The blanket impl supplies it; nobody writes
-/// `impl Singleton`. Typed addressing also asks for [`CallerAddressable`];
-/// [`Embedded`] satisfies it by selecting [`CallerScope::Parent`].
+/// (`Args<'a> = ()` — [`One`], for root caps and components alike) makes the
+/// actor a `Singleton`. The blanket impl supplies it; nobody writes
+/// `impl Singleton`. Typed addressing also asks for [`CallerAddressable`],
+/// which [`One`] satisfies by selecting [`CallerScope::Root`].
 pub trait Singleton: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>> {}
 impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {}
 
@@ -604,8 +540,8 @@ impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {
 ///
 /// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
 /// Derived from the resolver (ADR-0119): a keyed [`Resolver`](Addressable::Resolver)
-/// (`Args<'a> = &'a str` — [`Many`], or [`EmbeddedMany`] for instanced
-/// embedded children) makes the actor an `Instanced`, reached through the
+/// (`Args<'a> = &'a str` — [`Many`], native or guest) makes the actor an
+/// `Instanced`, reached through the
 /// reference its spawn returned. The blanket impl supplies it; nobody writes
 /// `impl Instanced`.
 pub trait Instanced: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>> {}
@@ -770,9 +706,8 @@ mod tests {
     }
 
     /// ADR-0119 amendments: every built-in strategy admitted to the typed send
-    /// surface declares its caller-relative scope. Embedded singletons select
-    /// the runtime parent; spawned embedded siblings still select the current
-    /// spawner whose lineage they extend (ADR-0099 §Negative).
+    /// surface declares its caller-relative scope: a root singleton selects
+    /// no lineage, and a keyed child extends its caller's (ADR-0099 §Negative).
     #[test]
     fn caller_scoped_declares_each_admitted_strategys_scope() {
         fn requires_caller_addressable<T: CallerAddressable>() {}
@@ -789,36 +724,19 @@ mod tests {
             type Resolver = Many;
         }
 
-        struct SpawnedSibling;
-        impl Addressable for SpawnedSibling {
-            const NAMESPACE: &'static str = "test.caller_scoped.sibling";
-            type Resolver = EmbeddedMany;
-        }
-
-        struct EmbeddedPeer;
-        impl Addressable for EmbeddedPeer {
-            const NAMESPACE: &'static str = "test.caller_scoped.embedded";
-            type Resolver = Embedded;
-        }
-
         requires_caller_addressable::<RootCap>();
         requires_caller_addressable::<KeyedChild>();
-        requires_caller_addressable::<EmbeddedPeer>();
-        requires_caller_addressable::<SpawnedSibling>();
 
         assert_eq!(<One as CallerScoped>::SCOPE, CallerScope::Root);
         assert_eq!(<Many as CallerScoped>::SCOPE, CallerScope::Current);
-        assert_eq!(<Embedded as CallerScoped>::SCOPE, CallerScope::Parent);
-        assert_eq!(<EmbeddedMany as CallerScoped>::SCOPE, CallerScope::Current);
     }
 
     #[test]
-    fn caller_scope_selects_current_and_parent_mailboxes() {
+    fn caller_scope_selects_the_current_mailbox_or_no_lineage() {
         let current = MailboxId(0x4010);
-        let parent = MailboxId(0x4020);
 
-        assert_eq!(CallerScope::Current.select(current, Some(parent)), current.0);
-        assert_eq!(CallerScope::Parent.select(current, Some(parent)), parent.0);
+        assert_eq!(CallerScope::Current.select(current), current.0);
+        assert_eq!(CallerScope::Root.select(current), EMPTY_CARRY);
     }
 
     /// `with_tag` replaces only the high nibble, while FNV-1a folding modulo
@@ -929,21 +847,6 @@ mod tests {
             Some(Many::resolve(carry, "test.candidate.child", "one")),
             "a keyed strategy folds the carried key",
         );
-        assert_eq!(
-            EmbeddedMany::candidate(carry, "test.candidate.sibling", Some("two")),
-            Some(EmbeddedMany::resolve(carry, "test.candidate.sibling", "two")),
-            "a keyed embedded strategy folds the carried key",
-        );
-        assert_eq!(
-            Embedded::candidate(carry, "test.candidate.peer", None),
-            Some(Embedded::resolve(carry, "test.candidate.peer", ())),
-            "an embedded strategy folds the type namespace for a keyless address",
-        );
-        assert_eq!(
-            Embedded::candidate(carry, "test.candidate.peer", Some("test.candidate.peer-1")),
-            Some(Embedded::resolve(carry, "test.candidate.peer-1", ())),
-            "an embedded strategy folds a carried load name in the namespace slot",
-        );
     }
 
     /// ADR-0230: a key of the wrong shape for the strategy is `None`,
@@ -954,6 +857,5 @@ mod tests {
 
         assert_eq!(One::candidate(carry, "test.candidate.root", Some("one")), None, "One takes no key");
         assert_eq!(Many::candidate(carry, "test.candidate.child", None), None, "Many requires a key");
-        assert_eq!(EmbeddedMany::candidate(carry, "test.candidate.sibling", None), None, "EmbeddedMany requires a key");
     }
 }

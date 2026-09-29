@@ -50,13 +50,13 @@ pub struct Direct;
 /// foreign impl cannot forward an erased proof as any kind it likes.
 ///
 /// ```
-/// use aether_actor::{ActorRef, Addressable, Embedded, HandlesKind, WasmCtx};
+/// use aether_actor::{ActorRef, Addressable, HandlesKind, One, WasmCtx};
 ///
 /// struct Peer;
 ///
 /// impl Addressable for Peer {
 ///     const NAMESPACE: &'static str = "example.peer";
-///     type Resolver = Embedded;
+///     type Resolver = One;
 /// }
 ///
 /// impl HandlesKind<()> for Peer {}
@@ -70,13 +70,13 @@ pub struct Direct;
 /// compile:
 ///
 /// ```compile_fail,E0277
-/// use aether_actor::{ActorRef, Addressable, Embedded, WasmCtx};
+/// use aether_actor::{ActorRef, Addressable, One, WasmCtx};
 ///
 /// struct Peer;
 ///
 /// impl Addressable for Peer {
 ///     const NAMESPACE: &'static str = "example.peer";
-///     type Resolver = Embedded;
+///     type Resolver = One;
 /// }
 ///
 /// fn ping(ctx: &mut WasmCtx<'_>, peer: ActorRef<Peer>) {

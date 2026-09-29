@@ -44,7 +44,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_actor::{ActorRef, Addressable};
+use aether_actor::ActorRef;
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -85,9 +85,10 @@ const LIT_TOLERANCE: u8 = 24;
 const SURFACE_SRGB: [u8; 3] = [0x19, 0x1b, 0x15];
 const ACCENT_SRGB: [u8; 3] = [0xa8, 0xc9, 0x7a];
 
-/// The full trampoline address the loaded panel registers at (ADR-0099 §4).
+/// The address the loaded `WidgetPanel` root registers at: its own
+/// namespace and the key `panel` (ADR-0241 §5).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
+    "aether.widget.panel:panel".to_owned()
 }
 
 /// The widget crate's `assets/` dir — where `RobotoMono.ttf` ships, resolved under

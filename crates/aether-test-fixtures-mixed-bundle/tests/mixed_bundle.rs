@@ -85,7 +85,13 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let (root, path) = load_root(&mut harness, wasm, &digest);
-    assert_eq!(path.to_string(), format!("aether.component/aether.embedded:{digest}"));
+    let (namespace, key) = path.as_str().split_once(':').expect("a bundle root is keyed");
+    assert_eq!(key, digest, "the root is keyed by its load name");
+    let hash = namespace.strip_prefix(BUNDLE_NAMESPACE).and_then(|hash| hash.strip_prefix('.'));
+    assert!(
+        hash.is_some_and(|hash| hash.len() == 64),
+        "the root publishes as {BUNDLE_NAMESPACE}.<module hash>: {namespace}"
+    );
 
     let text_artifact = ClosureArtifact::new(Utf8Text::ID, b"hello".to_vec());
     let input = SummarizeInput { text: Ref::of_text("hello") };

@@ -57,7 +57,23 @@ fn a_singleton_load_that_names_a_key_is_refused_and_an_unnamed_one_loads() {
     let (_, path) = harness
         .load_any(&load(&wasm, None, SINGLETON_EXPORT))
         .unwrap_or_else(|error| panic!("an unnamed singleton load must succeed: {error}"));
-    assert_eq!(path.to_string(), format!("aether.component/aether.embedded:{SINGLETON_EXPORT}"));
+    assert_eq!(path.to_string(), SINGLETON_EXPORT, "a singleton guest is named by its namespace alone");
+}
+
+/// Catches a load path that disagrees with the `Many` fold, or a key
+/// rendered beneath the component host rather than the guest's own
+/// namespace (ADR-0241 §5).
+#[test]
+fn a_named_instanced_load_is_its_namespace_and_key() {
+    let Some((mut harness, wasm)) = fixture() else {
+        return;
+    };
+
+    let (_, path) = harness
+        .load_any(&load(&wasm, Some("k"), INSTANCED_EXPORT))
+        .unwrap_or_else(|error| panic!("a named instanced load must succeed: {error}"));
+
+    assert_eq!(path.to_string(), format!("{INSTANCED_EXPORT}:k"));
 }
 
 /// Catches an unnamed instanced load keyed by its namespace instead of a

@@ -24,7 +24,7 @@
 use aether_actor::__macro_internals::{WasmPlacementFacts, dependency_records_len, write_dependency_records};
 use aether_actor::{
     ActorInitError, ActorTypeTag, Addressable, Contract, Contracts, Declared, DependencyLink, DependencyList,
-    DependencyResolver, DependsOn, Embedded, Erased, Manual, One, ReplyShape, Silent, Undeclared, WasmActor, WasmCtx,
+    DependencyResolver, DependsOn, Erased, Manual, One, ReplyShape, Silent, Undeclared, WasmActor, WasmCtx,
     WasmInitCtx, actor, handler_set,
 };
 use aether_data::Kind;
@@ -79,11 +79,11 @@ impl Addressable for SecondParent {
     type Resolver = One;
 }
 
-struct EmbeddedPeer;
+struct RootPeer;
 
-impl Addressable for EmbeddedPeer {
-    const NAMESPACE: &'static str = "manifest.peer.embedded";
-    type Resolver = Embedded;
+impl Addressable for RootPeer {
+    const NAMESPACE: &'static str = "manifest.peer.root";
+    type Resolver = One;
 }
 
 #[actor(instanced, child_of(FirstParent), child_of(SecondParent))]
@@ -197,7 +197,7 @@ impl WasmActor for ContractProbe {
 
 struct DependentProbe;
 
-#[actor(depends(FirstParent, EmbeddedPeer))]
+#[actor(depends(FirstParent, RootPeer))]
 impl WasmActor for DependentProbe {
     const NAMESPACE: &'static str = "manifest.dependent";
 
@@ -409,7 +409,7 @@ fn depends_entries_emit_dependency_records() {
         out
     };
 
-    fn assert_depends_on<T: DependsOn<FirstParent> + DependsOn<EmbeddedPeer>>() {}
+    fn assert_depends_on<T: DependsOn<FirstParent> + DependsOn<RootPeer>>() {}
 
     assert_depends_on::<DependentProbe>();
 
@@ -417,7 +417,7 @@ fn depends_entries_emit_dependency_records() {
         parse_section(&BYTES),
         vec![
             InputsRecord::Dependency { resolver: One::TAG, namespace: FirstParent::NAMESPACE.into() },
-            InputsRecord::Dependency { resolver: Embedded::TAG, namespace: EmbeddedPeer::NAMESPACE.into() },
+            InputsRecord::Dependency { resolver: One::TAG, namespace: RootPeer::NAMESPACE.into() },
         ],
         "one Dependency record per depends(...) entry, in declaration order",
     );

@@ -12,13 +12,22 @@ use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::RegistryInventory;
 use crate::mail::registry::effect::{ChangeSubscriber, RegistrySubscription, subscriber};
 use crate::mail::registry::names::categorise_mailbox_name;
+use crate::mail::registry::publication::PublicationTable;
 use crate::mail::{KindId, MailboxId};
 
 use super::Registry;
 use super::kinds::KindSlot;
 use super::route::{RouteLifecycle, RouteRecord};
 
-pub(super) fn live_inventory(mailboxes: &FxHashMap<MailboxId, RouteRecord>) -> Vec<MailboxDescriptor> {
+/// The live mailbox descriptors, categorised. A route is a
+/// [`MailboxCategory::Trampoline`] guest when a published module implements
+/// its leaf segment's namespace, or when it is an alias, which only a guest's
+/// inline child publishes (ADR-0241 §3, §6); every other route is categorised
+/// by its name.
+pub(super) fn live_inventory(
+    mailboxes: &FxHashMap<MailboxId, RouteRecord>,
+    publications: &PublicationTable,
+) -> Vec<MailboxDescriptor> {
     let mut inventory = mailboxes
         .iter()
         .filter(|(_, route)| match &route.lifecycle {
@@ -31,7 +40,7 @@ pub(super) fn live_inventory(mailboxes: &FxHashMap<MailboxId, RouteRecord>) -> V
         .map(|(id, route)| MailboxDescriptor {
             id: *id,
             name: route.canonical_name.to_string(),
-            category: categorise_mailbox_name(route.canonical_name.as_str()),
+            category: category(route, publications),
         })
         .collect::<Vec<_>>();
     inventory.push(MailboxDescriptor {
@@ -41,6 +50,17 @@ pub(super) fn live_inventory(mailboxes: &FxHashMap<MailboxId, RouteRecord>) -> V
     });
     inventory.sort_by(|left, right| left.name.cmp(&right.name));
     inventory
+}
+
+fn category(route: &RouteRecord, publications: &PublicationTable) -> Option<MailboxCategory> {
+    let name = route.canonical_name.as_str();
+    let leaf = name.rsplit('/').next().unwrap_or(name);
+    let leaf_namespace = leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace);
+    if matches!(route.lifecycle, RouteLifecycle::Alias { .. }) || publications.is_module(leaf_namespace) {
+        Some(MailboxCategory::Trampoline)
+    } else {
+        categorise_mailbox_name(name)
+    }
 }
 
 pub(super) fn kind_inventory(kinds: &FxHashMap<KindId, KindSlot>) -> Vec<KindDescriptor> {

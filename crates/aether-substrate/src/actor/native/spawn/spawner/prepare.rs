@@ -217,7 +217,7 @@ impl Spawner {
 
         // ADR-0230: a declared `depends(R)` with no `Live` route fails the
         // spawn as a failed `init` does, before `A::init` runs.
-        if let Err(e) = check_declared::<A>(self.mailer.registry(), parent) {
+        if let Err(e) = check_declared::<A>(self.mailer.registry()) {
             return Err(SpawnError::InitFailed(e));
         }
 

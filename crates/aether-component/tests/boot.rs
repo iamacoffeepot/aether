@@ -84,7 +84,8 @@ fn settle(harness: &mut SubstrateHarness) {
 
 /// Cardinality: two selector loads of the same module content instantiate the
 /// boot actor exactly once — its `wire` marker is observed once, and it appears
-/// exactly once in the loaded-component list — not once per load.
+/// exactly once in the loaded-component list, at its published name — not once
+/// per load.
 #[test]
 fn module_boot_singleton_spawns_once_across_selector_loads() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_boot") else {
@@ -112,8 +113,14 @@ fn module_boot_singleton_spawns_once_across_selector_loads() {
         )])
         .expect("list sequence");
     let names = listed.reply::<ListComponentsResult>("list").expect("decode ListComponentsResult").names;
-    let boot_listed = names.iter().filter(|n| n.ends_with(":aether.test.boot.boot")).count();
-    assert_eq!(boot_listed, 1, "exactly one boot trampoline should be listed after two selector loads; got {names:?}");
+    // ADR-0241 §5: the boot is the root singleton at its published name, so
+    // a boot spawned per load or beneath the host would list another name.
+    let boot_listed = names.iter().filter(|n| n.contains("aether.test.boot.boot")).collect::<Vec<_>>();
+    assert_eq!(
+        boot_listed,
+        ["aether.test.boot.boot"],
+        "exactly one boot guest should be listed, at its published name, after two selector loads; got {names:?}"
+    );
 }
 
 /// Two same-hash loads can both reach the component host before the first

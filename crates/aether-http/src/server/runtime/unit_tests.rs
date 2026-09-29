@@ -1,25 +1,50 @@
 use super::{
-    Arc, HttpResponseStreamOpen, NativeCtx, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT, RegisterRouteResult,
-    RwLock, SharedRoutes, WsFrameParse, http_date, normalize_prefix, parse_http_method, parse_ws_frame,
-    percent_decode_path, reason_phrase, register_route, render_stream_head, request_keeps_alive, sec_websocket_accept,
-    serialize_ws_frame, sha1, unregister_route, unregister_routes_all, validate_ws_handshake,
+    Arc, HttpResponseStreamOpen, HttpServerCapability, HttpServerConfig, OPCODE_BINARY, OPCODE_CONTINUATION,
+    OPCODE_TEXT, RegisterRouteResult, RwLock, SharedRoutes, WsFrameParse, http_date, normalize_prefix,
+    parse_http_method, parse_ws_frame, percent_decode_path, reason_phrase, register_route, render_stream_head,
+    request_keeps_alive, sec_websocket_accept, serialize_ws_frame, sha1, unregister_route, unregister_routes_all,
+    validate_ws_handshake,
 };
 use crate::kinds::{HttpHeader, HttpMethod};
 use crate::typed::route_matches;
 use aether_actor::ErasedActorRef;
-use aether_substrate::mail::Source;
+use aether_substrate::actor::native::PumpedSlot;
+use aether_substrate::chassis::builder::PassiveChassis;
+use aether_substrate::mail::outbound::EgressEvent;
 use aether_substrate::mail::registry::{Registry, noop_handler};
-use aether_substrate::testing::{fresh_substrate, registered_ref, unrouted_binding};
+use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, fresh_substrate_and_rx, registered_ref};
+use std::sync::mpsc;
 use std::time::{Duration, UNIX_EPOCH};
 
-/// Run `body` against a fresh substrate's registry and a spawner-less test
-/// ctx over it: the shape every fixture here that needs a ctx shares.
-fn with_test_ctx<T>(body: impl FnOnce(&Registry, &mut NativeCtx<'_>) -> T) -> T {
-    let (registry, mailer) = fresh_substrate();
-    let binding = unrouted_binding(&mailer);
-    let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
+/// The supervisor booted as a pumped actor on a bare `TestChassis`: nothing
+/// on its inbox runs until the test drains it, and a reducer the supervisor
+/// runs in its own handler turns runs here in a real host turn, under the
+/// actor's own binding and the chassis spawner.
+struct Supervisor {
+    slot: PumpedSlot<HttpServerCapability>,
+    chassis: PassiveChassis<TestChassis>,
+    registry: Arc<Registry>,
+    egress: mpsc::Receiver<EgressEvent>,
+}
 
-    body(&registry, &mut ctx)
+impl Drop for Supervisor {
+    /// The chassis never learns about a post-seal pumped actor, so its close
+    /// is the fixture's, before the chassis drops.
+    fn drop(&mut self) {
+        self.slot.shutdown();
+    }
+}
+
+/// Boot the supervisor under `config`. Every caller composes it disabled, so
+/// it binds no socket and spawns no accept thread; a test that needs startup
+/// state seeds it inside a host turn.
+fn boot_supervisor(config: HttpServerConfig) -> Supervisor {
+    let (registry, mailer, egress) = fresh_substrate_and_rx();
+    let chassis = boot_bare_test_chassis(&registry, &mailer);
+    let (slot, _wake) =
+        chassis.boot_pumped_actor::<HttpServerCapability>(config, ()).expect("the http supervisor boots pumped");
+
+    Supervisor { slot, chassis, registry, egress }
 }
 
 /// Register a named test-local mailbox and return its proven reference.
@@ -34,34 +59,38 @@ fn conn_header(value: &str) -> Vec<HttpHeader> {
 /// ADR-0155 §3: a server composed disabled claims its mailbox but binds
 /// no socket, so its route-registration surface must fail fast with an
 /// `Err` reply (the fail-fast convention the headless caps use) rather
-/// than the mail warn-dropping at an unknown mailbox. The disabled branch
-/// returns before touching the registry, so a bare ctx suffices.
+/// than the mail warn-dropping at an unknown mailbox. The request names a
+/// live `HttpRouter` holder, so the mail decodes and reaches the handler:
+/// the bug this catches is the disabled branch no longer answering.
 #[test]
 fn disabled_http_server_err_replies_to_register_route() {
-    use super::{HttpServerCapability, HttpServerConfig, HttpSupervisorState};
     use crate::kinds::{HttpRouter, RegisterRoute};
     use crate::server::tests::handlers::EchoHttpHandler;
     use aether_actor::ActorPath;
+    use aether_data::{SessionToken, Uuid};
+    use aether_substrate::ReplyTarget;
+    use aether_substrate::testing::decode_session_reply;
 
-    let (_registry, mailer) = fresh_substrate();
-    let binding = unrouted_binding(&mailer);
-    let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-    let mut state = HttpSupervisorState::disabled(HttpServerConfig::default());
+    let mut supervisor = boot_supervisor(HttpServerConfig::default());
+    let (mut holder, _wake) =
+        supervisor.chassis.boot_pumped_actor::<EchoHttpHandler>((), ()).expect("the route holder boots pumped");
+    let register = RegisterRoute {
+        prefix: "/".to_string(),
+        method: None,
+        handler: ActorPath::<EchoHttpHandler>::root().narrow::<HttpRouter>(),
+        shared: false,
+    };
+    let reply = ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0x7043)), correlation: 1 };
 
-    let result = HttpServerCapability::on_register_route(
-        &mut state,
-        &mut ctx,
-        RegisterRoute {
-            prefix: "/".to_string(),
-            method: None,
-            handler: ActorPath::<EchoHttpHandler>::root().narrow::<HttpRouter>(),
-            shared: false,
-        },
-    );
+    supervisor.chassis.send_for_reply(supervisor.chassis.actor_ref::<HttpServerCapability>(), &register, reply);
+    supervisor.slot.drain_available();
+
+    let result: RegisterRouteResult = decode_session_reply(&supervisor.egress);
     assert!(
-        matches!(result, RegisterRouteResult::Err { .. }),
+        matches!(&result, RegisterRouteResult::Err { error } if error.contains("disabled")),
         "a disabled http server must fail fast on register_route, got {result:?}",
     );
+    holder.shutdown();
 }
 
 /// Tripwire: keep-alive defaulting is branch logic over the HTTP version
@@ -507,20 +536,18 @@ mod route_registration {
 }
 
 mod shard_startup {
-    //! Manual reducer proofs for the startup interleavings. These tests do
-    //! not claim scheduler ordering; the loopback server tests exercise the
-    //! real owner/activation/task turns.
+    //! Reducer proofs for the startup interleavings, run in the booted
+    //! supervisor's own host turns. These tests do not claim scheduler
+    //! ordering; the loopback server tests exercise the real
+    //! owner/activation/task turns.
 
     use super::super::{
         Arc, HttpServerConfig, HttpSupervisorState, InboundEvent, PendingPeer, ShardSettlement, ShardSink, ShardSlot,
         ShardStartup,
     };
-    use aether_substrate::actor::native::NativeCtx;
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::Source;
-    use aether_substrate::mail::mailer::Mailer;
+    use super::{Supervisor, boot_supervisor};
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
-    use aether_substrate::testing::{registered_binding, registered_ref, unrouted_binding};
+    use aether_substrate::testing::registered_ref;
     use std::collections::VecDeque;
     use std::io::Read;
     use std::iter::once;
@@ -541,11 +568,6 @@ mod shard_startup {
         Arc::new(|dispatch: OwnedDispatch| dispatch.discharge())
     }
 
-    /// A binding for the supervisor's handler ctx, over a test-local inbox.
-    fn binding(registry: &Registry, mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
-        registered_binding(registry, mailer, "test.http.supervisor", discharging()).0
-    }
-
     /// A shard sink over a test-local inbox, proven the way the shard's
     /// `SpawnOutcome` hands the supervisor its proof.
     fn sink(registry: &Registry, name: &str) -> (ShardSink, mpsc::Receiver<InboundEvent>) {
@@ -555,24 +577,36 @@ mod shard_startup {
         (ShardSink { inbound_tx, dirty: Arc::new(AtomicBool::new(false)), shard }, inbound_rx)
     }
 
-    fn starting_state(
-        count: usize,
-        pending_peers: VecDeque<PendingPeer>,
-    ) -> (Arc<Registry>, Arc<Mailer>, HttpSupervisorState) {
-        let registry = Arc::new(Registry::new());
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-        let mut state = HttpSupervisorState::disabled(HttpServerConfig {
-            enabled: true,
-            max_connections: 8,
-            ..HttpServerConfig::default()
-        });
-        state.shard_startup = ShardStartup::Starting {
+    fn starting(count: usize, pending_peers: VecDeque<PendingPeer>) -> ShardStartup {
+        ShardStartup::Starting {
             remaining: count,
             next_to_stage: None,
             slots_by_index: (0..count).map(|_| ShardSlot::Pending).collect(),
             pending_peers,
-        };
-        (registry, mailer, state)
+        }
+    }
+
+    fn config(max_connections: usize) -> HttpServerConfig {
+        HttpServerConfig { max_connections, ..HttpServerConfig::default() }
+    }
+
+    /// A bare supervisor state mid-startup, for the reducers that take no ctx.
+    fn starting_state(count: usize, pending_peers: VecDeque<PendingPeer>) -> HttpSupervisorState {
+        let mut state = HttpSupervisorState::disabled(config(8));
+        state.shard_startup = starting(count, pending_peers);
+        state
+    }
+
+    /// Boot the supervisor and seed its startup state in a host turn, the
+    /// shape `assign_peer` leaves behind after the first accepted peer.
+    fn booted_starting(max_connections: usize, count: usize, pending_peers: VecDeque<PendingPeer>) -> Supervisor {
+        let mut supervisor = boot_supervisor(config(max_connections));
+        supervisor.slot.host_turn(|state, _ctx| state.shard_startup = starting(count, pending_peers));
+        supervisor
+    }
+
+    fn live_connections(supervisor: &Supervisor) -> usize {
+        supervisor.slot.read_state(|state| state.live_connections.load(Ordering::Acquire)).expect("supervisor is live")
     }
 
     fn event_peer(event: InboundEvent) -> SocketAddr {
@@ -592,27 +626,36 @@ mod shard_startup {
         let (second, second_client) = socket_pair();
         let (third, third_client) = socket_pair();
         let expected = [first.peer, second.peer, third.peer];
-        let pending_peers = [first, second, third].into_iter().collect();
-        let (registry, mailer, mut state) = starting_state(3, pending_peers);
-        let binding = binding(&registry, &mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
-        let (sink_zero, rx_zero) = sink(&registry, "test.http.shard-zero");
-        let (sink_two, rx_two) = sink(&registry, "test.http.shard-two");
+        let mut supervisor = booted_starting(8, 3, [first, second, third].into_iter().collect());
+        let (sink_zero, rx_zero) = sink(&supervisor.registry, "test.http.shard-zero");
+        let (sink_two, rx_two) = sink(&supervisor.registry, "test.http.shard-two");
 
-        assert!(matches!(state.finish_shard_spawn(2, Some(sink_two)), ShardSettlement::Pending));
+        let early = supervisor.slot.host_turn(|state, ctx| {
+            let settled = state.finish_shard_spawn(2, Some(sink_two));
+            let pending = matches!(settled, ShardSettlement::Pending);
+            state.apply_shard_settlement(ctx, settled);
+            pending
+        });
+        assert_eq!(early, Some(true));
         assert!(rx_zero.try_recv().is_err());
         assert!(rx_two.try_recv().is_err(), "a successful shard is not selectable before every attempt settles");
 
-        assert!(matches!(state.finish_shard_spawn(0, Some(sink_zero)), ShardSettlement::Pending));
-        let settled = state.finish_shard_spawn(1, None);
-        assert!(matches!(settled, ShardSettlement::Ready { shard_count: 2, .. }));
-        state.apply_shard_settlement(&mut ctx, settled);
+        let last = supervisor.slot.host_turn(|state, ctx| {
+            let middle = state.finish_shard_spawn(0, Some(sink_zero));
+            let middle_pending = matches!(middle, ShardSettlement::Pending);
+            state.apply_shard_settlement(ctx, middle);
+            let settled = state.finish_shard_spawn(1, None);
+            let ready = matches!(settled, ShardSettlement::Ready { shard_count: 2, .. });
+            state.apply_shard_settlement(ctx, settled);
+            (middle_pending, ready)
+        });
+        assert_eq!(last, Some((true, true)));
 
         assert_eq!(event_peer(rx_zero.recv().expect("first FIFO peer reaches index zero")), expected[0]);
         assert_eq!(event_peer(rx_two.recv().expect("second FIFO peer reaches index two")), expected[1]);
         assert_eq!(event_peer(rx_zero.recv().expect("third FIFO peer wraps to index zero")), expected[2]);
         assert!(rx_two.try_recv().is_err());
-        assert_eq!(state.live_connections.load(Ordering::Acquire), 3);
+        assert_eq!(live_connections(&supervisor), 3);
 
         drop((first_client, second_client, third_client));
     }
@@ -622,7 +665,8 @@ mod shard_startup {
     /// remaining index settles.
     #[test]
     fn duplicate_completion_cannot_finish_startup_twice() {
-        let (registry, _mailer, mut state) = starting_state(2, VecDeque::new());
+        let registry = Registry::new();
+        let mut state = starting_state(2, VecDeque::new());
         let (sink_zero, _rx_zero) = sink(&registry, "test.http.duplicate-zero");
 
         assert!(matches!(state.finish_shard_spawn(0, Some(sink_zero)), ShardSettlement::Pending));
@@ -638,20 +682,23 @@ mod shard_startup {
     fn all_failed_shards_refuse_every_retained_peer() {
         let (pending, mut client) = socket_pair();
         client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound refusal read");
-        let (registry, mailer, mut state) = starting_state(1, once(pending).collect());
-        let binding = binding(&registry, &mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
+        let mut supervisor = booted_starting(8, 1, once(pending).collect());
 
-        let settled = state.finish_shard_spawn(0, None);
-        assert!(matches!(settled, ShardSettlement::Failed { .. }));
-        state.apply_shard_settlement(&mut ctx, settled);
+        let failed = supervisor.slot.host_turn(|state, ctx| {
+            let settled = state.finish_shard_spawn(0, None);
+            let failed = matches!(settled, ShardSettlement::Failed { .. });
+            state.apply_shard_settlement(ctx, settled);
+            failed
+        });
+        assert_eq!(failed, Some(true));
 
         let mut response = String::new();
         client.read_to_string(&mut response).expect("read controlled startup refusal");
         assert!(response.starts_with("HTTP/1.1 503 "), "expected startup 503, got {response:?}");
-        assert_eq!(state.live_connections.load(Ordering::Acquire), 0);
+        assert_eq!(live_connections(&supervisor), 0);
 
-        assert!(matches!(state.shard_startup, ShardStartup::Failed));
+        let startup_failed = supervisor.slot.read_state(|state| matches!(state.shard_startup, ShardStartup::Failed));
+        assert_eq!(startup_failed, Some(true));
     }
 
     /// Capacity counts supervisor-owned sockets while shard activation is
@@ -662,21 +709,19 @@ mod shard_startup {
         let (first, first_client) = socket_pair();
         let (second, mut second_client) = socket_pair();
         second_client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound capacity refusal read");
-        let (_registry, mailer, mut state) = starting_state(1, once(first).collect());
-        state.config.max_connections = 1;
-        let binding = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
+        let mut supervisor = booted_starting(1, 1, once(first).collect());
 
-        state.assign_peer(&mut ctx, second.stream, second.peer);
+        supervisor.slot.host_turn(|state, ctx| state.assign_peer(ctx, second.stream, second.peer));
 
         let mut response = String::new();
         second_client.read_to_string(&mut response).expect("read pending-capacity refusal");
         assert!(response.starts_with("HTTP/1.1 503 "), "pending peer enforces the ceiling: {response:?}");
-        assert!(matches!(
-            &state.shard_startup,
-            ShardStartup::Starting { pending_peers, .. } if pending_peers.len() == 1
-        ));
-        assert_eq!(state.live_connections.load(Ordering::Acquire), 0);
+        let pending = supervisor.slot.read_state(|state| match &state.shard_startup {
+            ShardStartup::Starting { pending_peers, .. } => Some(pending_peers.len()),
+            ShardStartup::Idle | ShardStartup::Ready { .. } | ShardStartup::Failed => None,
+        });
+        assert_eq!(pending, Some(Some(1)));
+        assert_eq!(live_connections(&supervisor), 0);
 
         drop(first_client);
     }
@@ -688,7 +733,7 @@ mod shard_startup {
     fn dropping_starting_state_closes_retained_peer() {
         let (pending, mut client) = socket_pair();
         client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound teardown read");
-        let (_registry, _mailer, state) = starting_state(1, once(pending).collect());
+        let state = starting_state(1, once(pending).collect());
 
         drop(state);
 
@@ -699,39 +744,74 @@ mod shard_startup {
 }
 
 mod wake_coalescing {
-    //! ADR-0135 §4 — the wake-mail coalescing protocol on [`WakeSink`].
+    //! ADR-0135 §4 — the wake-mail coalescing protocol on [`WakeSink`],
+    //! counted as the wakes a booted actor receives.
 
     use super::super::{InboundEvent, WakeSink};
-    use aether_substrate::actor::native::NativeCtx;
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::Source;
-    use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
-    use aether_substrate::testing::registered_binding;
+    use crate::kinds::HttpInboundReady;
+    use aether_actor::actor;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, PumpedSlot};
+    use aether_substrate::chassis::builder::PassiveChassis;
+    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, fresh_substrate};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
 
-    struct CountingInbox(AtomicUsize);
-    impl InboxHandler for CountingInbox {
-        fn enqueue(&self, _dispatch: OwnedDispatch) {
-            self.0.fetch_add(1, Ordering::SeqCst);
+    /// Counts the `HttpInboundReady` wakes dispatched to it: the stand-in for
+    /// the supervisor or shard a sink wakes.
+    struct WakeCounter {
+        wakes: usize,
+    }
+
+    #[actor(singleton, root)]
+    impl NativeActor for WakeCounter {
+        const NAMESPACE: &'static str = "test.http.wake_counter";
+        type Config = ();
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { wakes: 0 })
+        }
+
+        #[handler::single]
+        fn on_wake(&mut self, _ctx: &mut NativeCtx<'_>, _wake: HttpInboundReady) {
+            self.wakes += 1;
         }
     }
 
-    /// A sink whose wake lands on a counting inbox. The binding comes back
-    /// too: the sink's `SelfWake` holds it weakly, so it must outlive the
-    /// posts.
-    fn sink_with_counter() -> (WakeSink, mpsc::Receiver<InboundEvent>, Arc<CountingInbox>, Arc<NativeBinding>) {
-        let registry = Arc::new(Registry::new());
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-        let counter = Arc::new(CountingInbox(AtomicUsize::new(0)));
-        let (binding, _) =
-            registered_binding(&registry, &mailer, "test.wake_target", Arc::clone(&counter) as Arc<dyn InboxHandler>);
-        let wake = NativeCtx::new(&binding, Source::NONE, None, None).self_wake();
+    /// The counter booted pumped, and a sink whose wake it minted in a host
+    /// turn, as `init` mints the supervisor's.
+    struct Counted {
+        slot: PumpedSlot<WakeCounter>,
+        _chassis: PassiveChassis<TestChassis>,
+        sink: WakeSink,
+        inbound_rx: mpsc::Receiver<InboundEvent>,
+    }
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.slot.shutdown();
+        }
+    }
+
+    impl Counted {
+        /// Dispatch every queued wake, then read how many the counter has seen.
+        fn drained_wakes(&mut self) -> usize {
+            self.slot.drain_available();
+            self.slot.read_state(|counter| counter.wakes).expect("counter is live")
+        }
+    }
+
+    fn counted_sink() -> Counted {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = boot_bare_test_chassis(&registry, &mailer);
+        let (mut slot, _wake) =
+            chassis.boot_pumped_actor::<WakeCounter>((), ()).expect("the wake counter boots pumped");
+        let wake = slot.host_turn(|_, ctx| ctx.self_wake::<HttpInboundReady>()).expect("counter is live");
         let (inbound_tx, inbound_rx) = mpsc::channel();
         let sink = WakeSink { inbound_tx, wake, dirty: Arc::new(AtomicBool::new(false)) };
-        (sink, inbound_rx, counter, binding)
+
+        Counted { slot, _chassis: chassis, sink, inbound_rx }
     }
 
     fn probe_event() -> InboundEvent {
@@ -744,50 +824,53 @@ mod wake_coalescing {
     /// remove).
     #[test]
     fn burst_fires_one_wake() {
-        let (sink, _rx, counter, _binding) = sink_with_counter();
+        let mut counted = counted_sink();
         for _ in 0..16 {
-            assert!(sink.post(probe_event()));
+            assert!(counted.sink.post(probe_event()));
         }
-        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+
+        assert_eq!(counted.drained_wakes(), 1);
     }
 
     /// Tripwire: the drain-side arm order (clear the flag *before*
     /// draining) means a post landing mid-drain re-fires the wake —
     /// clearing after the drain instead would swallow it and strand the
-    /// event until the next unrelated wake. `_dead_mailbox_id` never
-    /// aliases; the second wake is observable as a second count.
+    /// event until the next unrelated wake.
     #[test]
     fn post_after_arm_refires_wake() {
-        let (sink, rx, counter, _binding) = sink_with_counter();
-        assert!(sink.post(probe_event()));
-        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        let mut counted = counted_sink();
+        assert!(counted.sink.post(probe_event()));
+        assert_eq!(counted.drained_wakes(), 1);
 
         // Drain begins: arm first (the load-bearing order), then empty
         // the channel.
-        WakeSink::arm_for_drain(&sink.dirty);
-        while rx.try_recv().is_ok() {}
+        WakeSink::arm_for_drain(&counted.sink.dirty);
+        while counted.inbound_rx.try_recv().is_ok() {}
 
         // A post after the arm — even mid-drain — must fire a fresh
         // wake, or the event would sit undelivered.
-        assert!(sink.post(probe_event()));
-        assert_eq!(counter.0.load(Ordering::SeqCst), 2);
+        assert!(counted.sink.post(probe_event()));
+        assert_eq!(counted.drained_wakes(), 2);
     }
 }
 
 mod monitor_collapse {
-    use super::super::{HttpServerConfig, HttpSupervisorState};
-    use super::{proven, with_test_ctx};
+    use super::super::HttpServerConfig;
+    use super::{boot_supervisor, proven};
 
     /// The `route holder is not monitorable` warn must fire once per
     /// mailbox, not once per route. A mailbox that fails to monitor
     /// leaves its slot remembered in `unmonitorable`, so a second
-    /// `watch` for the same mailbox is a no-op.
+    /// `watch` for the same mailbox is a no-op. The targets are closure
+    /// routes, which hold no actor slot, so the supervisor's real monitor
+    /// index answers `TargetNotFound` for them.
     #[test]
     fn watch_remembers_unmonitorable_mailbox() {
-        with_test_ctx(|registry, ctx| {
-            let mut state = HttpSupervisorState::disabled(HttpServerConfig::default());
-            let target = proven(registry, "test.http.watch.target");
+        let mut supervisor = boot_supervisor(HttpServerConfig::default());
+        let target = proven(&supervisor.registry, "test.http.watch.target");
+        let other = proven(&supervisor.registry, "test.http.watch.other");
 
+        supervisor.slot.host_turn(|state, ctx| {
             assert!(!state.monitors.contains_key(&target));
             assert!(!state.unmonitorable.contains(&target));
 
@@ -799,7 +882,6 @@ mod monitor_collapse {
             state.watch(ctx, target);
             assert_eq!(state.unmonitorable.len(), after_first, "second watch for same mailbox stays collapsed");
 
-            let other = proven(registry, "test.http.watch.other");
             state.watch(ctx, other);
             assert!(state.unmonitorable.contains(&other), "different mailbox still warns");
             assert_eq!(state.unmonitorable.len(), after_first + 1);

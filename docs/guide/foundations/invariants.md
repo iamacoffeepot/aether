@@ -68,7 +68,7 @@ name *plus its schema* ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/
   scenario guards it).
 
 One sharp edge follows from the lineage fold: a `/`-rendered address
-(`aether.component/aether.embedded:camera`) resolves in the host registry,
+(`aether.widget/aether.widget.button:ok`) resolves in the host registry,
 which parses it into segments and folds their ActorIds node by node. Hashing the
 joined string as a flat name yields an id the registry never registered, and
 mail to it warn-drops — the string is a rendering of the lineage, never the
@@ -139,7 +139,7 @@ actor named — the worst diagnostic shape the runtime offers. Full treatment in
 `"player"`) or a kind name used as a recipient (`aether.audio.note_on` as an
 *address*) matches no registered mailbox and is dropped with a warning, not an
 error. Use the full address: `aether.<name>` for chassis mailboxes, the
-`LoadResult.path` (`aether.component/aether.embedded:NAME`) a loaded component hands
+`LoadResult.path` (`NS`, `NS:key`, or `parent/NS:key`) a loaded component hands
 back. *Tell:* mail seems to vanish; nothing handles it. Check the address first.
 
 **Don't encode cross-actor sequence by send order.** Per-recipient FIFO is the

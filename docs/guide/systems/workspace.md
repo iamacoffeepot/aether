@@ -411,7 +411,7 @@ Run the steps on the host whose daemon the actor dials.
    refused on an engine without the workspace. A config missing a field is
    refused naming the field, as ``aether.bloomery.bootstrap.config has no `base` ``.
 5. **Watch.** `actor_logs` on
-   `aether.component/aether.embedded:aether.bloomery.bootstrap`. It logs one
+   `aether.bloomery.bootstrap`. It logs one
    `info` line per step and ends with `the environment head moved; bootstrap
    done`. On the first refusal it logs one `error` and sends nothing more.
 

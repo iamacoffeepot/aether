@@ -77,173 +77,140 @@ impl NativeActor for TraceDispatchCapability {
 }
 
 #[cfg(all(test, feature = "runtime"))]
-// Tests hold the capture `Mutex` guard across the assertion block
-// so the snapshot reads atomically against the concurrent push.
-#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::time::Duration;
 
     use super::*;
-    use aether_data::{KindId, MailId, SessionToken, Uuid};
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::outbound::HubOutbound;
+    use aether_data::{ErasedActorPath, KindId, MailId, SessionToken, Uuid};
+    use aether_kinds::NamedMail;
+    use aether_substrate::PumpedSlot;
+    use aether_substrate::chassis::builder::{PassiveChassis, ReplyTarget};
+    use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::mail::registry::{MailDispatch, Registry};
-    use aether_substrate::mail::{Source, SourceAddr};
-    use aether_substrate::testing::{boot_authority, token_root, unrouted_binding};
+    use aether_substrate::testing::{
+        TestChassis, boot_authority, boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx,
+    };
 
-    /// Shared scaffolding for the `on_dispatch_traced` tests:
-    /// fresh registry + mailer + outbound + transport wired together.
-    /// The registry registers the stub recipients and kinds the
-    /// bundle proof reads.
-    struct DispatchTracedFixture {
-        registry: Arc<Registry>,
-        transport: Arc<NativeBinding>,
+    /// One mail a stub recipient received: `(kind, root, parent, payload)`.
+    type Capture = (KindId, Option<MailId>, Option<MailId>, Vec<u8>);
+
+    /// A real `TraceDispatchCapability` booted as a pumped actor. A batch is
+    /// pushed as a tracked chassis-root mail, so it carries the root the
+    /// RPC bridge stamps in production, and
+    /// [`PumpedSlot::drain_available`] runs the production dispatch body,
+    /// whose context drop flushes the forwarded children.
+    struct PumpedTrace {
+        rx: Receiver<EgressEvent>,
+        chassis: PassiveChassis<TestChassis>,
+        cap: PumpedSlot<TraceDispatchCapability>,
     }
 
-    fn dispatch_traced_fixture() -> DispatchTracedFixture {
-        let registry = Arc::new(Registry::new());
-        let (outbound, _rx) = HubOutbound::attached_loopback();
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
-        let transport = unrouted_binding(&mailer);
-        DispatchTracedFixture { registry, transport }
-    }
+    impl PumpedTrace {
+        /// Boot the cap after `seed` has stood the batch's recipients and
+        /// kinds in the registry, returning what `seed` returned beside it.
+        fn boot<T>(seed: impl FnOnce(&Registry) -> T) -> (Self, T) {
+            let (registry, mailer, rx) = fresh_substrate_and_rx();
+            let seeded = seed(&registry);
+            let chassis = boot_bare_test_chassis(&registry, &mailer);
+            let (cap, _wake) = chassis
+                .boot_pumped_actor::<TraceDispatchCapability>((), ())
+                .expect("TraceDispatchCapability boots pumped");
 
-    /// Build a chassis-root `NativeCtx` against the fixture's
-    /// transport, anchoring the in-flight + reply-to fields to a
-    /// session sender so the ack reply egresses as `ToSession`.
-    fn chassis_root_ctx<A>(transport: &Arc<NativeBinding>, inbound: MailId) -> NativeCtx<'_, A> {
-        let sender = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
-        NativeCtx::new_for_actor(transport, sender, Some(inbound), Some(inbound))
-    }
+            (Self { rx, chassis, cap }, seeded)
+        }
 
-    /// Issue 749: `on_dispatch_traced` proves each envelope's
-    /// recipient through `accept_bundle` (matching `CaptureFrame`'s
-    /// bundle pattern), delivers each via `deliver_forwarded` so
-    /// children inherit the chain, and
-    /// replies synchronously with `DispatchTracedAck::Ok { root }`
-    /// carrying the inbound mail id.
-    #[test]
-    fn on_dispatch_traced_resolves_each_envelope_and_acks_with_root() {
-        use aether_data::ErasedActorPath;
-        use aether_kinds::NamedMail;
-        use std::sync::Mutex;
-
-        type Capture = (KindId, Option<MailId>, Option<MailId>, Vec<u8>);
-
-        /// Inline handler that records every dispatched mail's
-        /// `(kind, root, parent, payload)` into the shared
-        /// `Vec`. Used twice to register two stub recipients.
-        fn register_capture(registry: &Registry, name: &str, sink: Arc<Mutex<Vec<Capture>>>) {
-            registry.register_inline(
-                &boot_authority(),
-                name,
-                Arc::new(move |d: MailDispatch<'_>| {
-                    sink.lock().expect("test stub: captured mutex poisoned").push((
-                        d.kind,
-                        d.root,
-                        d.parent_mail,
-                        d.payload.to_vec(),
-                    ));
-                }),
+        /// Dispatch `mails` and return the batch's minted root beside the
+        /// decoded ack.
+        fn dispatch(&mut self, mails: Vec<NamedMail>) -> (MailId, DispatchTracedAck) {
+            let (root, _settled) = self.chassis.send_tracked(
+                self.chassis.actor_ref::<TraceDispatchCapability>(),
+                &DispatchTraced { mails },
+                Some(ReplyTarget::Session { session: SessionToken(Uuid::nil()), correlation: 1 }),
             );
-        }
+            self.cap.drain_available();
 
-        let fix = dispatch_traced_fixture();
-        // The bundle proof needs both mailbox (by name) and kind to
-        // be registered, else it short-circuits with the early-
-        // abort `Err` path the other test exercises.
-        let captured: Arc<Mutex<Vec<Capture>>> = Arc::new(Mutex::new(Vec::new()));
-        register_capture(&fix.registry, "aether.test.spec_a", Arc::clone(&captured));
-        register_capture(&fix.registry, "aether.test.spec_b", Arc::clone(&captured));
-        let kind_alpha = fix.registry.register_kind(&boot_authority(), "aether.test.kind_a");
-        let kind_beta = fix.registry.register_kind(&boot_authority(), "aether.test.kind_b");
-
-        let inbound = token_root(7);
-        let mut ctx = chassis_root_ctx(&fix.transport, inbound);
-        let ack = TraceDispatchCapability::on_dispatch_traced(
-            &mut (),
-            &mut ctx,
-            DispatchTraced {
-                mails: vec![
-                    NamedMail {
-                        recipient: ErasedActorPath::new("aether.test.spec_a").expect("a well-formed actor path"),
-                        kind_name: "aether.test.kind_a".into(),
-                        payload: vec![1u8, 2],
-                        count: 1,
-                    },
-                    NamedMail {
-                        recipient: ErasedActorPath::new("aether.test.spec_b").expect("a well-formed actor path"),
-                        kind_name: "aether.test.kind_b".into(),
-                        payload: vec![3u8, 4, 5],
-                        count: 1,
-                    },
-                ],
-            },
-        );
-        // 2b: the handler buffers its forwarded envelopes into the
-        // actor's send-side ring; they route on handler-end flush.
-        // Driving the handler directly (no dispatch loop), we drop the
-        // ctx to trigger that flush — mirroring the per-envelope ctx
-        // drop in `DispatcherSlot::dispatch_one` — before inspecting
-        // the sink.
-        drop(ctx);
-
-        let snapshot = captured.lock().expect("test stub: captured mutex poisoned").clone();
-        assert_eq!(snapshot.len(), 2, "expected each envelope to dispatch");
-        assert!(
-            snapshot.iter().any(|(k, root, parent, p)| *k == kind_alpha
-                && *root == Some(inbound)
-                && *parent == Some(inbound)
-                && p == &vec![1u8, 2]),
-            "envelope A missing or chain not inherited; captured: {snapshot:?}"
-        );
-        assert!(
-            snapshot.iter().any(|(k, root, parent, p)| *k == kind_beta
-                && *root == Some(inbound)
-                && *parent == Some(inbound)
-                && p == &vec![3u8, 4, 5]),
-            "envelope B missing or chain not inherited; captured: {snapshot:?}"
-        );
-
-        match ack {
-            DispatchTracedAck::Ok { root } => {
-                assert_eq!(root, inbound, "Ok ack must echo the in-flight inbound mail id as the chassis root");
-            }
-            DispatchTracedAck::Err { error } => {
-                panic!("expected Ok ack, got Err: {error}")
-            }
+            (root, decode_session_reply(&self.rx))
         }
     }
 
-    /// Issue 749: an unresolvable name in the batch short-circuits
-    /// to `DispatchTracedAck::Err`; no envelope dispatches.
-    #[test]
-    fn on_dispatch_traced_replies_err_on_unknown_recipient() {
-        use aether_data::ErasedActorPath;
-        use aether_kinds::NamedMail;
+    impl Drop for PumpedTrace {
+        fn drop(&mut self) {
+            self.cap.shutdown();
+        }
+    }
 
-        let fix = dispatch_traced_fixture();
-        let inbound = token_root(99);
-        let mut ctx = chassis_root_ctx(&fix.transport, inbound);
-        let ack = TraceDispatchCapability::on_dispatch_traced(
-            &mut (),
-            &mut ctx,
-            DispatchTraced {
-                mails: vec![NamedMail {
-                    recipient: ErasedActorPath::new("aether.test.does_not_exist").expect("a well-formed actor path"),
-                    kind_name: "aether.test.also_missing".into(),
-                    payload: vec![],
-                    count: 1,
-                }],
-            },
+    /// Register an inline stub recipient under `name` that records every
+    /// mail it receives on `sink`.
+    fn register_capture(registry: &Registry, name: &str, sink: Sender<Capture>) {
+        registry.register_inline(
+            &boot_authority(),
+            name,
+            Arc::new(move |d: MailDispatch<'_>| {
+                let _ = sink.send((d.kind, d.root, d.parent_mail, d.payload.to_vec()));
+            }),
         );
+    }
 
-        // The batch is refused, and the refusal names both the offending
-        // recipient and why it failed. Issue 4125 replaced a flat "unknown
-        // recipient" with the structured `AddressResolutionError`, so an
-        // ambiguous address is distinguishable from an absent one here rather
-        // than collapsing to the same sentence.
+    fn named_mail(recipient: &str, kind_name: &str, payload: Vec<u8>) -> NamedMail {
+        NamedMail {
+            recipient: ErasedActorPath::new(recipient).expect("a well-formed actor path"),
+            kind_name: kind_name.into(),
+            payload,
+            count: 1,
+        }
+    }
+
+    /// Issue 749. Bug caught: a child dispatched on a fresh chain rather
+    /// than inheriting the batch's, so the tree walked from the ack's `root`
+    /// misses it; an ack whose `root` is not the batch's own id; or a spec
+    /// dropped or mis-routed.
+    #[test]
+    fn dispatch_traced_children_descend_from_the_root_the_ack_reports() {
+        let (sink, captured) = mpsc::channel();
+        let (mut trace, (kind_alpha, kind_beta)) = PumpedTrace::boot(|registry| {
+            register_capture(registry, "aether.test.spec_a", sink.clone());
+            register_capture(registry, "aether.test.spec_b", sink);
+            (
+                registry.register_kind(&boot_authority(), "aether.test.kind_a"),
+                registry.register_kind(&boot_authority(), "aether.test.kind_b"),
+            )
+        });
+
+        let (batch_root, ack) = trace.dispatch(vec![
+            named_mail("aether.test.spec_a", "aether.test.kind_a", vec![1, 2]),
+            named_mail("aether.test.spec_b", "aether.test.kind_b", vec![3, 4, 5]),
+        ]);
+
+        let DispatchTracedAck::Ok { root } = ack else {
+            panic!("expected Ok ack, got {ack:?}");
+        };
+        assert_eq!(root, batch_root, "the ack reports the batch's own id as the root");
+
+        let mut children: Vec<Capture> = (0..2)
+            .map(|_| captured.recv_timeout(Duration::from_secs(2)).expect("each spec reaches its recipient"))
+            .collect();
+        children.sort_by_key(|(_, _, _, payload)| payload.len());
+        assert_eq!(
+            children,
+            vec![(kind_alpha, Some(root), Some(root), vec![1, 2]), (kind_beta, Some(root), Some(root), vec![3, 4, 5]),],
+            "each child carries its spec's kind and payload and descends from the acked root",
+        );
+    }
+
+    /// Issue 749. Bug caught: an unresolvable recipient dispatched past, or
+    /// refused without naming which recipient failed and why.
+    #[test]
+    fn dispatch_traced_refuses_a_batch_with_an_unknown_recipient() {
+        let (mut trace, ()) = PumpedTrace::boot(|_| {});
+
+        let (_, ack) =
+            trace.dispatch(vec![named_mail("aether.test.does_not_exist", "aether.test.also_missing", vec![])]);
+
+        // Issue 4125 replaced a flat "unknown recipient" with the structured
+        // `AddressResolutionError`, so an ambiguous address is
+        // distinguishable from an absent one here.
         assert!(
             matches!(
                 &ack,

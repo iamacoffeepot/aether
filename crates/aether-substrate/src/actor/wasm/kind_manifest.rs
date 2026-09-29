@@ -42,7 +42,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use aether_actor::{DependencyResolver, Embedded, One};
+use aether_actor::{DependencyResolver, One};
 use aether_data::{
     ACTOR_LINEAGE_SECTION, ACTOR_LINEAGE_SECTION_VERSION, ActorLineageRecord, CONTENT_ADDRESSED_SECTION, EnumVariant,
     INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION, KindDescriptor, KindLabels, KindShape,
@@ -326,9 +326,9 @@ pub fn read_producers_from_bytes(wasm: &[u8]) -> String {
 /// (ADR-0230). The loader refuses the load while any entry is not live.
 #[derive(Debug, Clone)]
 pub struct Dependency {
-    /// The dependency's `DependencyResolver::TAG` — [`One`] for a root
-    /// singleton, [`Embedded`] for a co-hosted peer under the loader's
-    /// parent. The reader rejects a tag no strategy in this build claims.
+    /// The dependency's `DependencyResolver::TAG`: [`One`], a root singleton
+    /// (ADR-0241 §5). The reader rejects a tag no strategy in this build
+    /// claims, the retired embedded tag 1 among them.
     pub resolver: u8,
     /// `R::NAMESPACE` of the depended-on actor.
     pub namespace: String,
@@ -439,7 +439,7 @@ fn read_inputs_groups(wasm: &[u8], section: &str) -> Result<Vec<ActorInputs>, St
                 caps.config = Some(ConfigCapability { id, name: name.into_owned() });
             }
             InputsRecord::Dependency { resolver, namespace } => {
-                if resolver != One::TAG && resolver != Embedded::TAG {
+                if resolver != One::TAG {
                     return Err(format!(
                         "{section}: dependency resolver tag {resolver:#x} not understood by this substrate build"
                     ));
@@ -1419,18 +1419,29 @@ mod tests {
         let section = inputs_section(&[
             InputsRecord::ActorBoundary { namespace: "ui.root".into() },
             InputsRecord::Dependency { resolver: One::TAG, namespace: "aether.kit.camera".into() },
-            InputsRecord::Dependency { resolver: Embedded::TAG, namespace: "ui.peer".into() },
+            InputsRecord::Dependency { resolver: One::TAG, namespace: "ui.peer".into() },
             InputsRecord::ActorBoundary { namespace: "ui.panel".into() },
         ]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let actors = read_actor_inputs_from_bytes(&wasm).unwrap();
         assert_eq!(actors.len(), 2);
         assert_eq!(actors[0].dependencies.len(), 2);
-        assert_eq!(actors[0].dependencies[0].resolver, One::TAG);
         assert_eq!(actors[0].dependencies[0].namespace, "aether.kit.camera");
-        assert_eq!(actors[0].dependencies[1].resolver, Embedded::TAG);
         assert_eq!(actors[0].dependencies[1].namespace, "ui.peer");
         assert!(actors[1].dependencies.is_empty());
+    }
+
+    // Catches: a stale module built against the retired embedded resolver
+    // loading with a dependency nothing can resolve (ADR-0241 §5).
+    #[test]
+    fn a_retired_embedded_dependency_tag_is_refused() {
+        let section = inputs_section(&[
+            InputsRecord::ActorBoundary { namespace: "ui.root".into() },
+            InputsRecord::Dependency { resolver: 1, namespace: "ui.peer".into() },
+        ]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let err = read_actor_inputs_from_bytes(&wasm).unwrap_err();
+        assert!(err.contains("dependency resolver tag 0x1 not understood"), "err: {err}");
     }
 
     #[test]

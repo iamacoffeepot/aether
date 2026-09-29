@@ -2109,10 +2109,12 @@ sealed to this crate, so a new stock widget adds its impl in `lanes.rs` beside
 its siblings, and a lane it claims but does not cover is a compile error there.
 
 Inline children are externally addressable by lineage. Keep the exact root
-`name` returned by `load_component`, then append
-`/aether.embedded:<subname>`. For example, a panel loaded as `panel` returns
-`aether.component/aether.embedded:panel`, and its built-in Button is
-`aether.component/aether.embedded:panel/aether.embedded:button`. The empty
+`name` returned by `load_component`, then append `/<child NS>:<subname>`, the
+child type's own namespace
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
+§6). For example, a `WidgetPanel` loaded as `panel` returns
+`aether.widget.panel:panel`, and its built-in Button is
+`aether.widget.panel:panel/aether.widget.button:button`. The empty
 `children` fallback uses the stable subnames `label`, `slider`, `radio`,
 `text_field`, and `button`; a declared `WidgetChildSpec` uses its own `subname`
 in the same position. These aliases are ordinary mailbox names, so MCP
@@ -2123,7 +2125,7 @@ without resetting its label or any sibling state:
 {
   "mails": [{
     "engine_id": "<engine-id>",
-    "address": "aether.component/aether.embedded:panel/aether.embedded:button",
+    "address": "aether.widget.panel:panel/aether.widget.button:button",
     "kind_name": "aether.widget.set_state",
     "params": {
       "state": {

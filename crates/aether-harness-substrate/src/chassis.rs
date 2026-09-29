@@ -15,12 +15,13 @@ use std::time::Duration;
 
 use aether_actor::ErasedActorRef;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
-use aether_data::KindId;
+use aether_data::{KindId, MailId};
 use aether_fs::{FsCapability, NamespaceRoots};
 use aether_kinds::FrameVerdict;
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::chassis::settlement::{SettlementRegistry, WaitOutcome};
 use aether_substrate::config::ConfigSources;
 use aether_substrate::{Chassis, RingCapacities, SchedulerTuning, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
@@ -133,6 +134,14 @@ pub trait FrameHook {
     /// `pre_settled` notices). Called each pump-loop iteration so a
     /// render-recipient chain settles while the harness blocks on a reply.
     fn pump(&mut self);
+    /// Block until `root` settles, draining the pumped render slot on its
+    /// mail wake while waiting (ADR-0161 §Decision 2) — the harness's call
+    /// into the same `await_settlement_pumped` the drivers wait in. A chain
+    /// that reaches the render actor settles only because this drain runs,
+    /// and it runs on mail arrival, never on a timer. `cap` is the
+    /// cumulative patience before the wait reports
+    /// [`WaitOutcome::Wedged`].
+    fn settle(&mut self, settlement: &SettlementRegistry, root: MailId, cap: Duration) -> WaitOutcome;
     /// Whether the pumped render actor holds a capture that is **ready to
     /// read back** — every pre-mail chain has settled (ADR-0161 R4 / issue
     /// 860), read from its state without mutating it (via

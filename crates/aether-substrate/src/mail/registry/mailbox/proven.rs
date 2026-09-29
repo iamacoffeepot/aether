@@ -32,7 +32,6 @@ use aether_actor::{
 };
 use aether_data::{LoadName, MailboxCategory};
 
-use crate::mail::registry::names::categorise_mailbox_name;
 use crate::mail::{KindId, MailboxId};
 
 use super::resolve::{ResolvedRoute, resolve_route};
@@ -214,8 +213,9 @@ impl Registry {
     /// A successful load reply is sent by the loaded actor itself, so the
     /// embedder already holds its erased reference from the reply event's
     /// stamped sender; this narrows it after checking the claim the typing
-    /// adds: the sender's route is `Live` and is a component trampoline, the
-    /// only actor the component host hands a load to. `R` is the export the
+    /// adds: the sender's route is `Live` and is a guest, one whose namespace
+    /// a published module implements, the only actor the component host hands
+    /// a load to. `R` is the export the
     /// embedder named in its load, which the host instantiated.
     ///
     /// Its one caller is
@@ -226,7 +226,10 @@ impl Registry {
         if !self.is_live_at(position) {
             return Err(AdoptRefused::NotLive);
         }
-        let category = self.mailbox_name(position).as_deref().and_then(categorise_mailbox_name);
+        // The category the inventory publication gave the route, read from
+        // the publication table rather than the name (ADR-0241 §3).
+        let inventory = self.inventory.load();
+        let category = inventory.table().mailboxes.iter().find(|entry| entry.id == position).and_then(|d| d.category);
         if category != Some(MailboxCategory::Trampoline) {
             return Err(AdoptRefused::NotComponent);
         }
@@ -450,31 +453,5 @@ mod tests {
             registry.resolve_live(MailboxId(0xdead_beef)),
             Err(ResolveLiveError::Unknown(MailboxId(0xdead_beef))),
         );
-    }
-
-    // A typed adoption over an arbitrary live actor would hand an embedder
-    // an `ActorRef<R>` for something that never loaded as `R`; the refusal
-    // is what keeps `adopt_load` a load door rather than a generic mint.
-    #[test]
-    fn loaded_refuses_a_live_actor_that_is_not_a_component() {
-        let registry = Registry::new();
-        let authority = boot_authority();
-        let cap = registry.register_inbox(&authority, "aether.test.not-a-component", noop_handler());
-        // A trampoline's id is its lineage fold; any id serves this test, which
-        // reads only the canonical name the route carries.
-        let trampoline = registry
-            .try_register_inbox_with_id(
-                &authority,
-                MailboxId(0x7A11_0001),
-                "aether.component/aether.embedded:probe",
-                noop_handler(),
-            )
-            .expect("register a trampoline-named route");
-
-        let cap = registry.resolve_live(cap).expect("the capability route is live");
-        let trampoline = registry.resolve_live(trampoline).expect("the trampoline route is live");
-
-        assert_eq!(registry.loaded::<ProbeChild>(cap), Err(AdoptRefused::NotComponent));
-        assert!(registry.loaded::<ProbeChild>(trampoline).is_ok());
     }
 }

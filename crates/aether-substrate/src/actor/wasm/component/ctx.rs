@@ -212,18 +212,6 @@ pub struct InlineChildType {
     pub contract: RouteContract,
 }
 
-/// The mailbox-name prefix every wasm component (loaded or spawned)
-/// registers under: `aether.embedded:<name>` — the embedding-host scope
-/// namespace (ADR-0099 §5/§6, ADR-0119). The inline-child spawn host fns
-/// (ADR-0114) fold an alias with it to predict the child's
-/// `MailboxId = fold(parent_carry, hash("{prefix}:{subname}"))`
-/// synchronously. It **forward-feeds** the sole owner of the literal,
-/// [`EMBEDDED_SCOPE`](aether_actor::EMBEDDED_SCOPE), which sits below this
-/// crate, so substrate and the capabilities-layer `WasmTrampoline` now
-/// reference one const instead of mirroring two literals; capabilities'
-/// `trampoline_namespace_matches_substrate` test guards the match.
-pub const TRAMPOLINE_NAMESPACE: &str = aether_actor::EMBEDDED_SCOPE;
-
 /// Issue iamacoffeepot/aether#1465: starting value of
 /// [`ComponentCtx::reply_lineage_counter`]. Sits at the top half of the
 /// `u64` space, above the `send` correlation counter (which starts at

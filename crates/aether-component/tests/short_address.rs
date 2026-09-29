@@ -1,50 +1,46 @@
-//! ADR-0166 §5/§6 — `aether.component/:camera` resolved against the real
-//! link-time lineage inventory.
+//! ADR-0241 §5: a loaded guest is named by its own published namespace, so
+//! the component host's short-path hole (`aether.component/:NAME`, ADR-0166
+//! §5/§6) no longer reaches it. The host still declares the trampoline as
+//! its one instanced child, so the hole expands, but no guest is born there.
 //!
-//! The host and the trampoline are the first consumer of short paths: the
-//! host declares the root, the trampoline declares the one instanced child
-//! beneath it, and the pair is what lets a caller write the short path the ADR
-//! documents. The substrate's `AddressIndex` unit tests
-//! feed hand-written facts, so nothing there observes what these two
-//! `#[actor]` declarations actually submit — this test closes the loop
-//! through the public `Registry::resolve_address` seam.
+//! Driven through a real load and the host's own address resolution, the
+//! `DescribeComponent` read.
+
+use std::fs;
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
-use aether_data::ErasedActorPath;
-use aether_substrate::mail::registry::noop_handler;
-use aether_substrate::testing::registered_ref;
-use aether_substrate::{AddressResolutionError, Registry};
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_kinds::{DescribeComponent, DescribeComponentResult, LoadComponent};
 
-/// The canonical address a loaded component named `camera` registers under.
-const CANONICAL: &str = "aether.component/aether.embedded:camera";
+const PROBE_EXPORT: &str = "test.probe";
 
-/// Tripwire: the expansion is computed from link-time `#[actor]` output — the
-/// host's `RootEntry` plus singleton `NameEntry`, the trampoline's
-/// `ChildEntry` plus instanced `TemplateEntry`. It drifts if either
-/// declaration loses `root` / `child_of` / its cardinality, if the embedded
-/// scope is renamed, or if the substrate stops reading one of those facts,
-/// none of which the substrate's synthetic-fact tests can see.
+fn describe(harness: &mut SubstrateHarness, name: &str) -> DescribeComponentResult {
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let described = harness
+        .execute(vec![(
+            "describe",
+            HarnessOp::send_and_await_reply(&host, &DescribeComponent { name: name.to_owned() }),
+        )])
+        .expect("describe sequence");
+    described.reply::<DescribeComponentResult>("describe").expect("decode DescribeComponentResult")
+}
+
+/// Catches a guest still born beneath the component host: its short path
+/// would resolve to it, and its published name would not.
 #[test]
-fn the_component_host_hole_expands_through_the_linked_inventory() {
-    // The prefix is read off the cap rather than spelled out, which both keeps
-    // the namespace single-owner and references the cap so aether-component's
-    // inventory submissions link into this test binary — the linker drops
-    // unreferenced statics out of an rlib, and without that reference the
-    // host's facts never reach `AddressIndex`.
-    let path = |text: &str| ErasedActorPath::new(text).expect("fixture is a well-formed actor path");
-    let short = format!("{}/:camera", ComponentHostCapability::NAMESPACE);
-    let registry = Registry::new();
-    registered_ref(&registry, CANONICAL, noop_handler());
+fn a_guest_is_reached_by_its_published_name_not_the_host_short_path() {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
+        return;
+    };
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    harness
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: Some(PROBE_EXPORT.to_owned()) })
+        .unwrap_or_else(|error| panic!("load {PROBE_EXPORT}: {error}"));
 
-    // The hole names the one instanced child namespace declared beneath the
-    // host.
-    let expanded = registry.resolve_address(&path(&short)).expect("short path resolves");
-    assert_eq!(expanded.canonical_path, CANONICAL);
-
-    // A child namespace is not itself a declared root, so it cannot anchor.
-    assert_eq!(
-        registry.resolve_address(&path("aether.embedded/:camera")),
-        Err(AddressResolutionError::UnknownRoot { root: "aether.embedded".to_owned() })
-    );
+    assert!(matches!(describe(&mut harness, PROBE_EXPORT), DescribeComponentResult::Ok { .. }));
+    let short = format!("{}/:{PROBE_EXPORT}", ComponentHostCapability::NAMESPACE);
+    assert!(matches!(describe(&mut harness, &short), DescribeComponentResult::Err { .. }), "{short} reaches no guest");
 }

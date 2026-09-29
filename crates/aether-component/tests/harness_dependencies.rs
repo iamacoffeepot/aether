@@ -4,75 +4,41 @@
 //! `ReplaceComponent` values. `DependentProbe` declares
 //! `depends(ParentPeerTarget)`: loading it alone is a `LoadResult::Err`
 //! naming the target, and loading the target first makes the same load
-//! `Ok`. Replacing toward the dependent while the target is absent is a
+//! `Ok`. Every declarable dependency is a root singleton (ADR-0241 §5), so
+//! the check reads the same position wherever the dependent is placed.
+//! Replacing toward the dependent while the target is absent is a
 //! `ReplaceResult::Err` that keeps the running module. The replaced victim is
-//! a second `ParentPeerTarget` loaded under its own name, so it is not the
-//! dependency, and its only row (`Bump`) is one the dependent keeps, so the
-//! satisfied replace passes the contract check (ADR-0231 §5).
+//! a keyed stand-in for the target, so it is not the dependency, and its only
+//! row (`Bump`) is one the dependent keeps, so the satisfied replace passes
+//! the contract check (ADR-0231 §5).
 
 use std::fs;
 
-use aether_actor::ActorRef;
-use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::{ErasedActorPath, LoadName};
+use aether_actor::ErasedActorRef;
+use aether_component::ComponentHostCapability;
+use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
+use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_kinds::Bump;
 
-const PROBE_EXPORT: &str = "test.probe";
 const TARGET_EXPORT: &str = "test.parent_peer.target";
 const STAND_IN_EXPORT: &str = "test.parent_peer.stand_in";
 const DEPENDENT_EXPORT: &str = "test.parent_peer.dependent";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
-fn load_result(
+fn load(
     harness: &mut SubstrateHarness,
     wasm: &[u8],
-    label: &str,
-    parent: Option<&str>,
     name: Option<&str>,
     export: &str,
-) -> LoadResult {
-    let component = LoadComponent {
+) -> Result<(ErasedActorRef, ErasedActorPath), SubstrateHarnessError> {
+    harness.load_any(&LoadComponent {
         wasm: wasm.to_vec(),
         name: name.map(str::to_owned),
         config: Vec::new(),
         export: Some(export.to_owned()),
-    };
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let operation = match parent {
-        Some(parent) => HarnessOp::load_component_under(&host, parent, component),
-        None => HarnessOp::send_and_await_reply(&host, &component),
-    };
-    let result = harness.execute(vec![(label, operation)]).expect("component load operation");
-    result.reply::<LoadResult>(label).expect("decode LoadResult")
-}
-
-fn load_named(
-    harness: &mut SubstrateHarness,
-    wasm: &[u8],
-    label: &str,
-    parent: Option<&str>,
-    name: Option<&str>,
-    export: &str,
-) -> String {
-    match load_result(harness, wasm, label, parent, name, export) {
-        LoadResult::Ok { path, .. } => path.to_string(),
-        LoadResult::Err { error } => panic!("{label} must load: {error}"),
-    }
-}
-
-fn key(name: &str) -> LoadName {
-    LoadName::new(name).expect("a valid load name")
-}
-
-/// The root trampoline the component host loaded as `name`.
-fn root_trampoline(harness: &SubstrateHarness, name: &str) -> ActorRef<WasmTrampoline> {
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    harness
-        .child::<ComponentHostCapability, WasmTrampoline>(&host, key(name))
-        .unwrap_or_else(|error| panic!("the trampoline loaded as {name} is live: {error}"))
+    })
 }
 
 fn fixture_harness() -> Option<(SubstrateHarness, Vec<u8>)> {
@@ -82,17 +48,19 @@ fn fixture_harness() -> Option<(SubstrateHarness, Vec<u8>)> {
     Some((harness, wasm))
 }
 
+/// Catches a check that answers nothing (the dependent would load alone), a
+/// refusal that runs after the guest is staged (a route would stand), and a
+/// check that folds the dependency anywhere but the root (the satisfied load
+/// would still be refused).
 #[test]
 fn missing_declared_dependency_refuses_the_load() {
     let Some((mut harness, wasm)) = fixture_harness() else {
         return;
     };
 
-    let outer = load_named(&mut harness, &wasm, "outer", None, None, PROBE_EXPORT);
-
-    let refused = load_result(&mut harness, &wasm, "dependent-alone", Some(&outer), None, DEPENDENT_EXPORT);
-    let LoadResult::Err { error } = refused else {
-        panic!("a load whose declared dependency is not live must be refused");
+    let refused = load(&mut harness, &wasm, None, DEPENDENT_EXPORT);
+    let Err(SubstrateHarnessError::Load(error)) = refused else {
+        panic!("a load whose declared dependency is not live must be refused; got {refused:?}");
     };
     assert_eq!(
         error,
@@ -100,44 +68,18 @@ fn missing_declared_dependency_refuses_the_load() {
         "the refusal names the actor and the missing namespace",
     );
 
-    // Refusal happens before creation: no dependent stands beneath the parent.
-    let outer_trampoline = root_trampoline(&harness, PROBE_EXPORT);
-    let unserved = harness.child::<WasmTrampoline, WasmTrampoline>(&outer_trampoline, key(DEPENDENT_EXPORT));
-    assert!(unserved.is_err(), "the refused load must not have created anything: {unserved:?}");
+    // Refusal happens before creation: no dependent stands.
+    let listed = harness.list_components().expect("list components");
+    assert!(!listed.iter().any(|name| name == DEPENDENT_EXPORT), "the refused load created nothing: {listed:?}");
     let baseline = harness.count_observed(TICK_OBSERVED);
 
-    load_named(&mut harness, &wasm, "target", Some(&outer), None, TARGET_EXPORT);
-
-    load_named(&mut harness, &wasm, "dependent", Some(&outer), None, DEPENDENT_EXPORT);
-    let dependent = harness
-        .child::<WasmTrampoline, WasmTrampoline>(&outer_trampoline, key(DEPENDENT_EXPORT))
-        .expect("the satisfied dependent is live");
+    load(&mut harness, &wasm, None, TARGET_EXPORT).expect("the target loads");
+    let (dependent, _) = load(&mut harness, &wasm, None, DEPENDENT_EXPORT).expect("the satisfied dependent loads");
 
     // The satisfied load really spawns: the probe answers `Bump` with
     // exactly one `TickObserved`.
-    harness.execute(vec![("bump", HarnessOp::send_and_settle(dependent.erase(), &Bump))]).expect("bump the dependent");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(dependent, &Bump))]).expect("bump the dependent");
     assert_eq!(harness.count_observed(TICK_OBSERVED), baseline + 1, "the loaded dependent must answer mail");
-}
-
-/// A load the component host places beneath itself checks its dependencies
-/// with the host as the placement parent: an `Embedded` dependency folds
-/// beneath the host, so the dependent is refused while no target stands
-/// there and loads once one does. A check under no parent would refuse both
-/// loads, and a check that answered nothing would admit the first.
-#[test]
-fn host_placed_load_checks_dependencies_beneath_the_host() {
-    let Some((mut harness, wasm)) = fixture_harness() else {
-        return;
-    };
-
-    let LoadResult::Err { error } = load_result(&mut harness, &wasm, "dependent-alone", None, None, DEPENDENT_EXPORT)
-    else {
-        panic!("a host-placed load whose declared dependency is not live must be refused");
-    };
-    assert_eq!(error, format!("{DEPENDENT_EXPORT} depends on {TARGET_EXPORT}, which is not live"));
-
-    load_named(&mut harness, &wasm, "target", None, None, TARGET_EXPORT);
-    load_named(&mut harness, &wasm, "dependent", None, None, DEPENDENT_EXPORT);
 }
 
 #[test]
@@ -146,9 +88,7 @@ fn replace_with_unmet_dependency_keeps_running_module() {
         return;
     };
 
-    let outer = load_named(&mut harness, &wasm, "outer", None, None, PROBE_EXPORT);
-    let victim = load_named(&mut harness, &wasm, "victim", Some(&outer), Some("victim"), STAND_IN_EXPORT);
-    let victim_path = ErasedActorPath::new(&victim).expect("a loaded component's address is an actor path");
+    let (victim, victim_path) = load(&mut harness, &wasm, Some("victim"), STAND_IN_EXPORT).expect("the victim loads");
 
     let replace = |harness: &mut SubstrateHarness, label: &str, export: Option<&str>| {
         let operation = HarnessOp::send_and_await_reply(
@@ -170,26 +110,21 @@ fn replace_with_unmet_dependency_keeps_running_module() {
     };
     assert_eq!(
         error,
-        format!("{victim} depends on {TARGET_EXPORT}, which is not live"),
+        format!("{victim_path} depends on {TARGET_EXPORT}, which is not live"),
         "the refusal names the actor and the missing namespace",
     );
 
     // A refused replacement keeps the running module: the victim still
     // answers `Bump` at its mailbox with exactly one `TickObserved`.
-    let victim_trampoline = harness
-        .child::<WasmTrampoline, WasmTrampoline>(&root_trampoline(&harness, PROBE_EXPORT), key("victim"))
-        .expect("the victim is live");
     let baseline = harness.count_observed(TICK_OBSERVED);
-    harness
-        .execute(vec![("bump", HarnessOp::send_and_settle(victim_trampoline.erase(), &Bump))])
-        .expect("bump the victim");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(victim, &Bump))]).expect("bump the victim");
     assert_eq!(
         harness.count_observed(TICK_OBSERVED),
         baseline + 1,
         "the victim must still serve after a refused replace"
     );
 
-    load_named(&mut harness, &wasm, "target", Some(&outer), None, TARGET_EXPORT);
+    load(&mut harness, &wasm, None, TARGET_EXPORT).expect("the target loads");
 
     match replace(&mut harness, "replace-satisfied", Some(DEPENDENT_EXPORT)) {
         ReplaceResult::Ok { .. } => {}

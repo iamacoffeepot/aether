@@ -8,7 +8,7 @@
 //! ADR-0114 inline-child fixture (#1916). The entry `InlineParent`
 //! spawns a co-located `InlineChild` in `wire` via
 //! `ctx.spawn_inline_child::<InlineParent, InlineChild>` (ADR-0114). The child gets a
-//! first-class lineage address (`{parent}/aether.embedded:widget`) routed
+//! first-class lineage address (`{parent}/test.inline.child:widget`) routed
 //! to the parent's one slot; the `export!` membrane demuxes mail
 //! addressed to that alias to the child.
 //!
@@ -166,7 +166,7 @@ impl WasmActor for InlineStatefulParent {
 
     /// ADR-0114: co-locate an `InlineStatefulChild` under the `Named`
     /// subname `widget`. The child is addressed by its rendered lineage
-    /// name (`{parent}/aether.embedded:widget`); the membrane demuxes
+    /// name (`{parent}/test.inline.stateful_child:widget`); the membrane demuxes
     /// the `Bump` / `CountQuery` mail to it.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         let _ = ctx.spawn_inline_child::<InlineStatefulParent, InlineStatefulChild>(Subname::Named("widget"), &());

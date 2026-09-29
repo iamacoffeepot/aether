@@ -9,18 +9,14 @@
 use aether_actor::{Addressable, Declared, declared_dependencies};
 
 use crate::chassis::error::BootError;
-use crate::mail::MailboxId;
 use crate::mail::registry::Registry;
 
 /// Refuse `A`'s birth when a dependency its [`Declared::Depends`] lists has
-/// no `Live` route, naming the actor and the missing namespace. A
-/// root-pinned birth has no parent (`None`); a spawned child folds beneath
-/// its placement parent.
-pub fn check_declared<A: Addressable + Declared>(
-    registry: &Registry,
-    parent: Option<MailboxId>,
-) -> Result<(), BootError> {
-    if let Some(namespace) = registry.missing_dependency(parent, declared_dependencies::<A>()) {
+/// no `Live` route, naming the actor and the missing namespace. Every
+/// declarable dependency is a root singleton (ADR-0241 §5), so the read is
+/// the same wherever `A` is placed.
+pub fn check_declared<A: Addressable + Declared>(registry: &Registry) -> Result<(), BootError> {
+    if let Some(namespace) = registry.missing_dependency(declared_dependencies::<A>()) {
         return Err(BootError::DependencyNotLive { actor: A::NAMESPACE, namespace });
     }
     Ok(())

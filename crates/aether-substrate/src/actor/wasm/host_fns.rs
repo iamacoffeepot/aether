@@ -12,7 +12,7 @@ use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
 use crate::actor::native::ResolvePathError;
-use crate::actor::wasm::component::{ComponentCtx, StateBundle, TRAMPOLINE_NAMESPACE};
+use crate::actor::wasm::component::{ComponentCtx, StateBundle};
 use crate::actor::wasm::reply_table::ReplyOrigin;
 use crate::mail::attachments::{EncodedMail, inline_payload};
 use crate::mail::boundary::is_engine_only;
@@ -166,7 +166,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // the parent actor's mailbox, the child's actor-type tag, an
     // `is_counter` flag, and the bare subname (empty for `Counter`). The
     // alias id is `with_tag(Mailbox, fold_lineage(parent,
-    // instanced(aether.embedded, subname)))`, so the synchronous prediction
+    // instanced(<child NS>, subname)))` under the child type's own namespace
+    // (ADR-0241 §6), so the synchronous prediction
     // matches a `Call`-by-name resolution. On any host-side error (no memory, OOB,
     // bad UTF-8, no spawner, missing parent name, or an undeclared tag) it
     // warn-logs and returns 0 without staging — the child simply never
@@ -206,7 +207,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 );
                 return 0;
             };
-            let Some(contract) = caller.data().inline_child(tag).map(|child| child.contract.clone()) else {
+            let Some(child) = caller.data().inline_child(tag).cloned() else {
                 tracing::warn!(
                     target: "aether_substrate::component",
                     %tag,
@@ -248,14 +249,17 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 n.to_string()
             };
 
-            let child_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
+            // ADR-0241 §6: an inline child folds under its own type's
+            // namespace, so its alias is `parent/<child NS>:key`, the
+            // position a typed `ActorPath::<C>::child` names.
+            let child_node = aether_data::ActorId::instanced(&child.namespace, &full_subname);
             let alias_id = MailboxId(aether_data::with_tag(
                 aether_data::Tag::Mailbox,
                 aether_data::fold_lineage(parent.0, child_node),
             ));
             let target_parent = caller.data().sender;
-            let alias_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:{full_subname}");
-            caller.data_mut().stage_alias(PreparedAliasRoute::new(alias_id, alias_name, target_parent, contract));
+            let alias_name = format!("{parent_name}/{}:{full_subname}", child.namespace);
+            caller.data_mut().stage_alias(PreparedAliasRoute::new(alias_id, alias_name, target_parent, child.contract));
             alias_id.0
         },
     )?;

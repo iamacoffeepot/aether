@@ -10,8 +10,7 @@
 use std::fs;
 
 use aether_actor::actor;
-use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::LoadName;
+use aether_component::ComponentHostCapability;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
@@ -44,7 +43,7 @@ impl NativeActor for Squatter {
 }
 
 /// Catches admission not wired to the load, or its refusal not reaching the
-/// reply: the bundle would load and a trampoline would stand under the
+/// reply: the bundle would load and a guest would stand at the
 /// requested name, beside a native namespace it shares.
 #[test]
 fn a_module_exporting_a_native_namespace_is_refused_before_it_spawns() {
@@ -67,9 +66,6 @@ fn a_module_exporting_a_native_namespace_is_refused_before_it_spawns() {
         error.starts_with(&format!("module publish refused: {SQUATTED_EXPORT} is published by a native actor")),
         "the refusal names the native namespace and the rule: {error}",
     );
-    let name = LoadName::new(SQUATTED_EXPORT).expect("a valid load name");
-    assert!(
-        harness.child::<ComponentHostCapability, WasmTrampoline>(&host, name).is_err(),
-        "a refused publish spawns no trampoline",
-    );
+    let listed = harness.list_components().expect("list components");
+    assert!(!listed.iter().any(|name| name == SQUATTED_EXPORT), "a refused publish spawns no guest: {listed:?}");
 }

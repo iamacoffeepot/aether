@@ -6,8 +6,8 @@ use std::fs;
 use aether_bloomery_journal::{Batch, Seq};
 use aether_bloomery_kinds::{
     BUNDLE_NAMESPACE, Call, CallOutcome, CallRefusal, Digest, Fault, FaultReason, Head, NativeOrigin, OpaqueBytes,
-    ProgramName, ProgramRef, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, Transition, UnitBundle,
-    UnitKey, Utf8Text, artifact_digest,
+    ProgramName, ProgramRef, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, Transition, Utf8Text,
+    artifact_digest,
 };
 use aether_bloomery_view::Heads;
 use aether_data::Kind;
@@ -75,9 +75,9 @@ const PROCESS: Head<OpaqueBytes> = Head::new("process");
 
 #[test]
 fn the_driver_loads_each_bundle_under_its_unit_name() -> Result<(), Box<dyn Error>> {
-    // Catches a driver that still names a bundle root by its digest alone, or
-    // by any name but `UnitBundle::name` of its unit: only the driver's own
-    // root holding that name makes a second load under it `SubnameInUse`.
+    // Catches a driver that keys a bundle root by anything but its unit key:
+    // only the driver's own root holding `<bundle namespace>.<hash>:<unit key>`
+    // makes a second load of the same bytes under that key `SubnameInUse`.
     let Some(wasm_path) = require_wasm("aether_test_fixtures_program") else {
         return Ok(());
     };
@@ -101,7 +101,7 @@ fn the_driver_loads_each_bundle_under_its_unit_name() -> Result<(), Box<dyn Erro
 
     let result = harness.load(&LoadComponent {
         wasm,
-        name: Some(UnitBundle::name(&UnitKey::new(UNIT)?, &bundle.digest()).as_str().to_owned()),
+        name: Some(UNIT.to_owned()),
         config: Vec::new(),
         export: Some(BUNDLE_NAMESPACE.to_owned()),
     });

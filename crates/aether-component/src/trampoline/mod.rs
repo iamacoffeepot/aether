@@ -1,6 +1,7 @@
 //! `WasmTrampoline` — the `NativeActor` every loaded wasm component runs
-//! as. Each loaded wasm component is one trampoline instance addressed at
-//! `aether.embedded:NAME` (issue 634 Phase 4 PR 1).
+//! in. Each loaded wasm component is one trampoline instance (issue 634
+//! Phase 4 PR 1), born under the guest's own published name: `NS`, `NS:key`,
+//! or `parent/NS:key` (ADR-0241 §5, §6).
 //!
 //! ## Identity / runtime split (ADR-0122)
 //!
@@ -18,21 +19,17 @@
 //! a transport-only build of the identity never names the state nor pulls
 //! `aether_substrate` through this cap.
 //!
-//! `WasmTrampoline::NAMESPACE` and
-//! `spawn_child::<ComponentHostCapability, WasmTrampoline>` resolve against the
-//! identity — `spawn_child` binds `A: Instanced + NativeActor`, which is the
-//! identity.
+//! `spawn_guest::<WasmTrampoline, GuestControl>` resolves against the
+//! identity — `spawn_guest` binds `H: Instanced + NativeActor`, which is the
+//! identity — while the name is the guest's.
 //!
 //! ## Where this lives (issue 654)
 //!
 //! The trampoline sits next to [`crate::component::ComponentHostCapability`] —
 //! its only consumer — and the namespace is whatever
 //! `WasmTrampoline::NAMESPACE` says it is. Single declaration, cap-owned,
-//! reachable on every target via the `Addressable` trait const. The
-//! substrate's `TRAMPOLINE_NAMESPACE` forward-feeds the same
-//! [`EMBEDDED_SCOPE`] const, collapsing the
-//! former two-literal mirror into one source; the
-//! `trampoline_namespace_matches_substrate` test guards the match.
+//! reachable on every target via the `Addressable` trait const, forward-fed
+//! from [`EMBEDDED_SCOPE`] until #6869 retires it. No guest is named by it.
 //!
 //! ## Shape
 //!
@@ -47,10 +44,10 @@
 //! ## Lifecycle
 //!
 //! - **Load**: `crate::component::ComponentHostCapability::on_load_component`
-//!   spawns a trampoline via the runtime spawn machinery (subname = the
-//!   agent-supplied component name); the spawn path runs `init` which
+//!   stages a guest birth (`spawn_guest`) under the guest's published name
+//!   and the agent-supplied key; the spawn path runs `init` which
 //!   instantiates the wasm `Component` against the trampoline's binding.
-//!   Once the birth completes the host hands its owed reply to the
+//!   Once the birth completes the host hands its held reply to the
 //!   trampoline as `LoadDelivered`, and the trampoline replies
 //!   `LoadResult::Ok` to the requester in its own name, so the requester
 //!   keeps the reply's stamped sender as its reference (ADR-0230 §3).
@@ -60,7 +57,7 @@
 //!   empty slot, refillable by `ReplaceComponent`.
 //! - **Boot teardown** (ADR-0147): when a module's last non-boot actor
 //!   unloads, the host sends `BootTeardown` through the module boot
-//!   trampoline's reference, and `on_boot_teardown` unloads the guest the way
+//!   guest's control reference, and `on_boot_teardown` unloads the guest the way
 //!   a drop does, with no reply.
 //! - **Replace**: `ReplaceComponent` mail lands on `on_replace_component`,
 //!   which checks the new bytes in through the engine's module cache
@@ -97,8 +94,8 @@ pub use runtime::WasmTrampolineConfig;
 /// state-bearing runtime (`WasmTrampolineState`, which holds the wasmtime
 /// `Component` and the substrate handles) lives behind the one
 /// `feature = "runtime"` gate, so a transport-only build never names the state
-/// nor pulls `aether_substrate` through this cap. External consumers address
-/// this name — `spawn_child::<ComponentHostCapability, WasmTrampoline>`,
-/// `WasmTrampoline::NAMESPACE`.
+/// nor pulls `aether_substrate` through this cap. The component host stages
+/// each guest through it — `spawn_guest::<WasmTrampoline, GuestControl>` —
+/// under the guest's own name.
 #[actor(instanced, child_of(ComponentHostCapability), child_of(WasmTrampoline))]
 pub struct WasmTrampoline;

@@ -3,7 +3,7 @@
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx, recording_target};
 use crate::model::ctx::{Erased, Manual};
-use crate::model::{Addressable, Embedded, HandlesKind, Protocol, Row, Silent};
+use crate::model::{Addressable, HandlesKind, One, Protocol, Row, Silent};
 use crate::reference::{ActorRef, ErasedActorRef, ProtocolRef};
 use crate::wasm::inline::{ChildRecord, drain_cluster_queue};
 use alloc::string::String;
@@ -12,7 +12,7 @@ struct SendsPeer;
 
 impl Addressable for SendsPeer {
     const NAMESPACE: &'static str = "test.wasm.sends_peer";
-    type Resolver = Embedded;
+    type Resolver = One;
 }
 
 impl HandlesKind<()> for SendsPeer {}
