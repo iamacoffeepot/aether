@@ -45,7 +45,6 @@ use aether_substrate::config::{
 use aether_substrate::runtime::log_install::apply_filter;
 
 use aether_tcp::TcpCapability;
-use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 
 use crate::autoload::{AutoloadComponent, boot_manifest_autoload, load_boot_components};
@@ -995,9 +994,11 @@ impl CommonEnv {
 }
 
 /// Wire the worker count and the full-stack app caps that desktop and headless
-/// share (`Input`, `ComponentHost`, `Fs`, `Text`, `Http`, `Tcp`, `Process`).
-/// `Inventory` rides [`with_rpc_server`] instead. The renderer / window /
-/// audio caps each chassis adds after this in `.with_actor::<_>()` chains.
+/// share (`ComponentHost`, `Fs`, `Http`, `Tcp`, `Process`). `Inventory` rides
+/// [`with_rpc_server`] instead. A chassis composes only the capabilities it
+/// serves, so the renderer / window / text / audio caps are each chassis's own
+/// `.with_actor::<_>()` additions after this, and a chassis that cannot serve
+/// one composes nothing at its mailbox.
 ///
 /// The universal base stratum — the aborter, the config sources, the non-cap
 /// ring / scheduler / settlement members, the two declare-only members, and
@@ -1034,7 +1035,6 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
         .with_actor::<ComponentHostCapability>(boot.component_host_params)
         // Programmatic: the fs cap uses the exact roots resolved chassis-side.
         .with_actor_configured::<FsCapability>((), boot.namespace_roots)
-        .with_actor::<TextCapability>(())
         // Builder-resolved off the source stack: `HttpConfig`.
         .with_actor::<HttpCapability>(())
         .with_actor::<TcpCapability>(())

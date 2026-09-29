@@ -208,8 +208,8 @@ pub enum TextureUsage {
 /// created texture (the same id-assignment shape ADR-0103 uses for
 /// instrument ids), stages any pixels CPU-side, and replies as soon as
 /// the id is assigned — the wgpu texture is realized lazily at the
-/// next frame record. Reply: `CreateTextureResult`. Desktop-only — the
-/// headless chassis replies `Err` (fail-fast, ADR-0105).
+/// next frame record. Reply: `CreateTextureResult`. The headless chassis
+/// composes no render actor.
 #[aether_data::kind(name = "aether.render.create_texture")]
 pub struct CreateTexture {
     pub width: u32,
@@ -339,8 +339,7 @@ pub fn vertex_stride_bytes(layout: &[VertexAttribute]) -> usize {
 /// vertex/index buffers are realized lazily at first GPU use. Geometry
 /// uploads happen at subject-load cadence — deformation is program
 /// content riding the uniform blob, never per-frame re-creation. Reply:
-/// `CreateGeometryResult`. Desktop-only — the headless chassis replies
-/// `Err` (fail-fast, ADR-0105).
+/// `CreateGeometryResult`. The headless chassis composes no render actor.
 #[aether_data::kind(name = "aether.render.create_geometry")]
 pub struct CreateGeometry {
     pub layout: Vec<VertexAttribute>,
@@ -991,10 +990,10 @@ pub struct ProgramPass {
 /// a later indexed-indirect draw consumes the derived buffers.
 ///
 /// Reply: `ProgramRegisterResult`; `program_id` is session-scoped,
-/// assigned like texture and instrument ids. Desktop-only — the
-/// headless chassis replies `Err` (fail-fast, ADR-0105), and a register
-/// before the render GPU boots (desktop: before the first window
-/// attaches) replies `Err` rather than parking.
+/// assigned like texture and instrument ids. The headless chassis
+/// composes no render actor, and a register before the render GPU boots
+/// (desktop: before the first window attaches) replies `Err` rather than
+/// parking.
 #[aether_data::kind(name = "aether.render.program.register")]
 pub struct ProgramRegister {
     pub wgsl: String,
@@ -1047,8 +1046,7 @@ pub enum ProgramRegisterResult {
 /// window past the blob's end, or a pass whose input and output resolve
 /// to the same texture — warn-drop the dispatch naming the program,
 /// pass, and binding in the render actor's log ring, the same
-/// convention as an unknown texture id in `draw_textured_quads`. The
-/// headless chassis absorbs it (no-op).
+/// convention as an unknown texture id in `draw_textured_quads`.
 #[aether_data::kind(name = "aether.render.program.dispatch")]
 pub struct ProgramDispatch {
     pub program_id: u32,
@@ -1065,7 +1063,7 @@ pub struct ProgramDispatch {
 /// `destroy_texture`. Fire-and-forget; an unknown `program_id` logs and
 /// drops. Dropping the entry releases the program's compiled pipelines;
 /// pooled transient textures stay in the shared pool for other
-/// programs. The headless chassis absorbs it (no-op).
+/// programs.
 #[aether_data::kind(name = "aether.render.program.destroy")]
 pub struct ProgramDestroy {
     pub program_id: u32,

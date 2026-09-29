@@ -15,11 +15,12 @@
 //! (one root render sender per cluster) is issue 2659's `widget_compositing`
 //! scenario and is not duplicated.
 //!
-//! Everything observable here is typed mail + the log ring, so the harness
-//! composes only the component host — no render target, hence no wgpu gate:
-//! the scenario skips only when the `aether_widget` wasm has not been pre-built
-//! (`require_wasm`). CI sets `AETHER_REQUIRE_RUNTIME=1` to turn that skip
-//! into a hard failure.
+//! Everything observable here is typed mail + the log ring, but the widget
+//! module declares render, and only a real render serves it, so the harness
+//! composes the pumped render. The scenario skips when no wgpu adapter is
+//! available or the `aether_widget` wasm has not been pre-built (the shared
+//! `require_runtime` gate). CI sets `AETHER_REQUIRE_RUNTIME=1` to turn either
+//! skip into a hard failure.
 
 // Integration-test skip diagnostic: emit via stderr so `cargo test` surfaces
 // "skipping: ..." alongside `test ... ok` (issue 891).
@@ -33,8 +34,9 @@ use std::fs;
 
 use aether_actor::{ActorRef, ChildOf, Instanced};
 use aether_data::{Kind, LoadName};
-use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
+use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
 use aether_kinds::keycode::{
     KEY_A, KEY_DOWN, KEY_ENTER, KEY_HOME, KEY_PAGE_DOWN, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
 };
@@ -43,7 +45,6 @@ use aether_kinds::{
     Key, KeyRelease, LoadComponent, LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput,
     Tick,
 };
-use aether_render::HeadlessRenderCapability;
 use aether_widget::set::{ButtonWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, VirtualListWidget};
 use aether_widget::{
     ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, VirtualListConfig,
@@ -56,15 +57,15 @@ fn test_window() -> aether_data::ErasedActorPath {
     aether_window::window_path(&LoadName::new("main").expect("a valid window name"))
 }
 
-/// A GPU-free bench with the component host and everything the widget module
-/// declares: the headless render stub, text (its fs from the sandbox roots) and
-/// the in-memory clipboard.
+/// A GPU bench with the component host and everything the widget module
+/// declares: the real render, text (its fs from the sandbox roots) and the
+/// in-memory clipboard.
 fn bench(width: u32, height: u32) -> SubstrateHarness {
     widget_caps(
         SubstrateHarness::builder()
             .size(width, height)
             .namespace_roots(test_namespace_roots(init_save_sandbox("widget-set")))
-            .with_actor::<HeadlessRenderCapability>(())
+            .with_render()
             .with_component_host(),
     )
     .build()
@@ -143,7 +144,7 @@ fn release(x: f32, y: f32) -> MouseButtonRelease {
 ///   text    y 148..172 button  y 178..202
 #[test]
 fn panel_routes_input_to_widgets_and_reports_values_up() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -216,7 +217,7 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
 /// mail reached the child rather than being dropped.
 #[test]
 fn load_result_lineage_reaches_builtin_button_state_externally() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -446,7 +447,7 @@ fn take_log_delta(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>, 
 /// drop one.
 #[test]
 fn panel_stacks_declared_children_in_order() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -488,7 +489,7 @@ fn panel_stacks_declared_children_in_order() {
 /// is relative to the realized window rather than the full item vector.
 #[test]
 fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -611,7 +612,7 @@ fn drive_state_and_keyboard_session(harness: &mut SubstrateHarness, panel: Actor
 /// activation fires Button exactly once per key pair.
 #[test]
 fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -657,7 +658,7 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
 /// phase was neither unrouted input nor an unobserved child event.
 #[test]
 fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -710,7 +711,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
 /// exactly `[1, 2, 1, 0]`.
 #[test]
 fn radio_up_down_clamps_at_the_ends_without_endpoint_events() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -824,7 +825,7 @@ fn drive_slider_cancellation_session(harness: &mut SubstrateHarness, panel: Acto
 /// to clear its internal arm/drag would create an observable extra event.
 #[test]
 fn live_state_changes_cancel_button_arm_and_slider_drag() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -868,7 +869,7 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
 /// is not an input-routing or log-observation false positive.
 #[test]
 fn read_only_text_field_blocks_activation_until_enabled() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -922,7 +923,7 @@ fn read_only_text_field_blocks_activation_until_enabled() {
 /// then Right + insert, must yield `axb`; a stale Shift would replace `a`.
 #[test]
 fn tab_cycle_does_not_leave_stale_shift_on_refocused_field() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -978,7 +979,7 @@ fn tab_cycle_does_not_leave_stale_shift_on_refocused_field() {
 /// gain so Ctrl+A then a replacement insert replaces the whole prior value.
 #[test]
 fn pointer_focus_inherits_already_held_ctrl() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -1022,7 +1023,7 @@ fn pointer_focus_inherits_already_held_ctrl() {
 /// next available field so `SelectAll` + replacement works without a later Tab.
 #[test]
 fn availability_focus_move_inherits_already_held_ctrl() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -1126,7 +1127,7 @@ fn assert_list_phase(
 /// re-sent config populates it; the sibling button is the empty-phase control.
 #[test]
 fn empty_virtual_list_becomes_eligible_when_populated() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -1235,7 +1236,7 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
 /// old capture or armed press.
 #[test]
 fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -1337,7 +1338,7 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
 /// explicit state enable; the sibling button is the positive control.
 #[test]
 fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");
@@ -1437,7 +1438,7 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
 /// selection mutation until an explicit mutable state update.
 #[test]
 fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
-    let Some(wasm_path) = require_wasm("aether_widget") else {
+    let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read widget wasm");

@@ -21,10 +21,8 @@
 //! upstream by `aether-mcp` and the substrate core, as do the `QuadSpace` and
 //! `QuadScale` projection types the `aether.text` kinds share.
 //!
-//! [`HeadlessRenderCapability`] is the companion for a chassis with no GPU:
-//! the same `aether.render` mailbox, no-op `DrawTriangle` and `ViewProjection`
-//! handlers so desktop-designed components do not warn-storm, and
-//! `Err`-replying `CaptureFrame` and `CreateTexture`.
+//! A chassis with no GPU composes no render actor at all, so a component that
+//! depends on [`RenderCapability`] is refused where it would stand up.
 
 #![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
@@ -60,11 +58,9 @@ pub use runtime::{
 // always-on addressing markers + handler inventory against the struct here.
 // The state-bearing, GPU-bound behavior of each cap — its `#[runtime] impl
 // NativeActor`, runtime state struct, the wgpu accumulator helpers, the
-// `HubOutbound` — lives in a per-cap runtime module: `runtime` for
-// [`RenderCapability`] and the nested `runtime::headless` for
-// [`HeadlessRenderCapability`], both under the one `mod runtime;` gate. The
-// `aether_substrate` ctx types each impl names (`NativeActor` / `NativeCtx`
-// / … / `CaptureFrameResult`) are now sourced inside each runtime
+// `HubOutbound` — lives in the `runtime` module under the one `mod runtime;`
+// gate. The `aether_substrate` ctx types the impl names (`NativeActor` /
+// `NativeCtx` / … / `CaptureFrameResult`) are sourced inside that runtime
 // module beside the body, not here — only the handler-argument kinds the
 // emitted markers lift verbatim must keep resolving at this file's root.
 use aether_actor::actor;
@@ -75,12 +71,6 @@ use aether_actor::actor;
 // (matching the `#[actor] impl`'s runtime gate).
 #[cfg(feature = "runtime")]
 mod runtime;
-
-// The headless companion's identity lives in `headless.rs` (always-on, like
-// the [`RenderCapability`] ZST below); its runtime half is the nested
-// `runtime::headless` module, covered by the `mod runtime;` gate above.
-mod headless;
-pub use headless::HeadlessRenderCapability;
 
 /// `aether.render` cap **identity** (ADR-0122 identity/runtime split). A
 /// ZST carrying only the addressing — `Addressable`, the per-handler

@@ -60,8 +60,8 @@ pub struct NoteOff {
 /// `1.0` is unity, `0.0` mutes, values above `1.0` are clamped to
 /// avoid clipping. This is the only substrate-level gain control —
 /// per-source and bus-level attenuation are user-space concerns (ADR-0039).
-/// Desktop-only: headless and hub chassis reply with an
-/// `unsupported on <chassis>` error. Fire-and-forget in the happy path.
+/// Desktop-only: headless and hub compose no audio actor, so a dependent is
+/// refused there. Fire-and-forget in the happy path.
 #[repr(C)]
 #[aether_data::kind(name = "aether.audio.set_master_gain", pod, default, partial_eq)]
 pub struct SetMasterGain {
@@ -70,9 +70,9 @@ pub struct SetMasterGain {
 
 /// Reply to `SetMasterGain` (ADR-0039). `Ok` echoes the gain the
 /// substrate actually applied — values above `1.0` are clamped, so
-/// callers that sent `1.5` learn they got `1.0`. `Err` fires on
-/// chassis without an audio device (headless, hub) or when audio
-/// was disabled at boot via `AETHER_AUDIO_OUTPUT=disabled`.
+/// callers that sent `1.5` learn they got `1.0`. `Err` fires when
+/// the host has no audio device or audio was disabled at boot via
+/// `AETHER_AUDIO_OUTPUT=disabled`.
 #[aether_data::kind(name = "aether.audio.set_master_gain_result")]
 pub enum SetMasterGainResult {
     Ok { applied_gain: f32 },
@@ -86,8 +86,8 @@ pub enum SetMasterGainResult {
 /// by default), `1.0` sends the full mix through the reverb; values
 /// above `1.0` are clamped. Room size, damping, and wet gain are fixed
 /// substrate constants — no per-send tuning in v1 (ADR-0126).
-/// Desktop-only: headless and hub chassis reply with an
-/// `unsupported on <chassis>` error. Fire-and-forget in the happy path.
+/// Desktop-only: headless and hub compose no audio actor, so a dependent is
+/// refused there. Fire-and-forget in the happy path.
 #[repr(C)]
 #[aether_data::kind(name = "aether.audio.set_reverb_send", pod, default, partial_eq)]
 pub struct SetReverbSend {
@@ -96,9 +96,9 @@ pub struct SetReverbSend {
 
 /// Reply to `SetReverbSend` (ADR-0126). `Ok` echoes the send the
 /// substrate actually applied — values above `1.0` are clamped, so
-/// callers that sent `1.5` learn they got `1.0`. `Err` fires on
-/// chassis without an audio device (headless, hub) or when audio
-/// was disabled at boot via `AETHER_AUDIO_OUTPUT=disabled`.
+/// callers that sent `1.5` learn they got `1.0`. `Err` fires when
+/// the host has no audio device or audio was disabled at boot via
+/// `AETHER_AUDIO_OUTPUT=disabled`.
 #[aether_data::kind(name = "aether.audio.set_reverb_send_result")]
 pub enum SetReverbSendResult {
     Ok { applied_send: f32 },
@@ -113,7 +113,7 @@ pub enum SetReverbSendResult {
 /// `tanh` soft clip catches overshoot). Unlike a per-note gain, this sets
 /// a set-once relative level for a whole voice line and is live: it ducks
 /// already-sounding voices on the next render block, mirroring
-/// `set_master_gain`. Desktop-only: headless and hub chassis reply `Err`.
+/// `set_master_gain`. Desktop-only: headless and hub compose no audio actor.
 #[repr(C)]
 #[aether_data::kind(name = "aether.audio.set_sender_gain", pod, default, partial_eq)]
 pub struct SetSenderGain {
@@ -122,8 +122,8 @@ pub struct SetSenderGain {
 
 /// Reply to `SetSenderGain` (ADR-0127). `Ok` echoes the gain the synth
 /// actually applied — values outside `0.0..=4.0` are clamped, so a caller
-/// that sent `5.0` learns it got `4.0`. `Err` fires on chassis without an
-/// audio device (headless, hub) or when audio was disabled at boot via
+/// that sent `5.0` learns it got `4.0`. `Err` fires when the host has no
+/// audio device or audio was disabled at boot via
 /// `AETHER_AUDIO_OUTPUT=disabled`.
 #[aether_data::kind(name = "aether.audio.set_sender_gain_result")]
 pub enum SetSenderGainResult {

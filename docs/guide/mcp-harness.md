@@ -310,8 +310,9 @@ one handler.
   completion and ordering are intentionally unobserved. (If you've seen it
   described as best-effort fire-and-forget, that's the older behavior — the default
   flipped.)
-- **Desktop-only surfaces fail fast.** `capture_frame` and the window ops need the
-  desktop chassis; the headless chassis replies with an error rather than hanging.
+- **Desktop-only surfaces are absent on headless.** `capture_frame` and the
+  window ops need the desktop chassis; headless composes no render or window
+  actor, so a mail to either path is answered `NotPresent` rather than hanging.
   Before reading back a backgrounded or minimized window, mail
   `aether.window.focus` to a named child recipient such as
   `aether.window/:main` (canonical

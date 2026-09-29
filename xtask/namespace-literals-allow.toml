@@ -94,12 +94,3 @@ reason = """
 `INVENTORY_CAP`, same deferral as `FLEET_CAP`: aether-inventory is a direct
 dependency, so the const duplicates a reachable `NAMESPACE`.
 """
-
-[[allow]]
-crate = "aether-chassis-headless"
-namespace = "aether.audio"
-reason = """
-The headless audio nop sink registers by name. aether-audio is a direct
-dependency and exports `AudioCapability`, so this is fixable; it sits outside
-iamacoffeepot/aether#5720's surface and is left for the chassis crate's own pass.
-"""

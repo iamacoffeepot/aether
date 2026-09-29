@@ -26,10 +26,11 @@ one of the five still loads the module, and refuses each widget that needs the
 missing capability: its load answers `Err`, or its spawn returns
 `SpawnError::DependencyNotLive` and the host's warning names the widget and the
 missing namespace.
-Every shipping chassis composes all five. A `SubstrateHarness` scenario gets
-the window and lifecycle from the harness basics and composes a render (the
-real one, or the `HeadlessRenderCapability` stub when it reads no pixels),
-text with namespace roots for its fs, and the in-memory clipboard.
+Desktop composes all five; headless composes none of window, render, text or
+clipboard, so no widget stands up there. A `SubstrateHarness` scenario gets
+the window and lifecycle from the harness basics and composes the real render
+(nothing else serves `aether.render`), text with namespace roots for its fs,
+and the in-memory clipboard.
 
 Every widget kind — configs, events, and the schema types nested in them — is
 declared in one place and reaches the crate root, so a consumer writes

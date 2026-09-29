@@ -7,8 +7,8 @@ use aether_harness_substrate::SubstrateHarnessBuilder;
 use aether_text::TextCapability;
 
 /// Compose text and the deterministic in-memory clipboard. Text declares render
-/// and fs, so the caller also composes a render (the real one or the headless
-/// stub) and namespace roots.
+/// and fs, so the caller also composes the real render (no stand-in serves
+/// `aether.render`) and namespace roots.
 pub fn widget_caps(builder: SubstrateHarnessBuilder) -> SubstrateHarnessBuilder {
     builder.with_actor::<TextCapability>(()).with_actor::<ClipboardCapability>(ClipboardParams::InMemory)
 }

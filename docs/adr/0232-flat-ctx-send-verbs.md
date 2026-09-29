@@ -5,6 +5,7 @@
 - **Amended:** 2026-09-23 — §3's flat subscribe names its publisher: `ctx.subscribe::<LifecycleCapability, Tick>()`, both type parameters caller-chosen and checked by the existing `Publishes<K>` marker, because the `PublishedBy` link cannot be implemented under Rust's orphan rule. Window events subscribe every window by default.
 - **Amended:** 2026-09-23 — typed flat sends take the payload as `&impl SendableTo<R>`, so the turbofish names only `R`; the native ctx's erased `send_with_context` is renamed, and the held-reference context verbs are `send_to_with_context` / `send_detached_to_with_context`; the ctx for `unwire` and `on_rehydrate` is typed by `Self` too; the per-cap handle facades and `MailboxForward` are deleted.
 - **Amended:** 2026-09-26 — §1: `send_to` and its context-carrying siblings take only an `ActorRef<R>` or a `ProtocolRef<P>`; the sentence on an `ErasedActorRef` passed to `send_to` no longer holds, because erased actor sending is being removed (#6895; the owner: "We ARE going to remove erased actor sending you do know that right").
+- **Amended:** 2026-09-29 — §6: a chassis composes only the capabilities it serves, and a dependent of an absent capability is refused where it would stand up. The stubs are deleted: `HeadlessWindowCapability` (#7136), then `HeadlessRenderCapability`, `HeadlessAudioCapability`, `HeadlessClipboardCapability`, and `UnsupportedSubstrateHarnessCapability` (#6942). Text leaves headless with render, which it depends on.
 
 Amends [ADR-0230](0230-proven-actor-references.md) §5 (what replaces the
 deleted `ctx.actor::<R>()` handle at the call site),
@@ -185,13 +186,23 @@ the slot's Claim-stage reservation, and the boot fails if the pump never goes
 
 ### 6. No optional peers
 
-A capability that may be absent on a chassis is composed there as a stub that
-claims its mailbox and answers honestly: it absorbs fire-and-forget mail, or
-replies `Err` to a request. `HeadlessRenderCapability`,
+A chassis composes only the capabilities it serves. A capability it cannot
+serve has no actor there, and nothing else claims its mailbox. A component that
+declares `depends(R)` on such a chassis is refused where it would stand up, and
+the refusal names the dependency: `<actor> depends on aether.render, which is
+not live`. A declared dependency therefore always holds wherever the actor
+runs. There is no `optional(R)` attribute and no `send_optional` verb.
+
+*(Amended 2026-09-29: this section first had every chassis compose a stub for
+each capability it could not serve, claiming the mailbox and answering with an
+`Err` reply or silent absorption. The stubs were `HeadlessRenderCapability`,
 `HeadlessWindowCapability`, `HeadlessAudioCapability`,
-`HeadlessClipboardCapability`, and `UnsupportedSubstrateHarnessCapability` are
-the existing instances. A declared dependency therefore always holds, on every
-chassis. There is no `optional(R)` attribute and no `send_optional` verb.
+`HeadlessClipboardCapability`, and `UnsupportedSubstrateHarnessCapability`. A
+stub let a component that needs render load on headless and fail later, one
+request at a time. #7136 deleted the window stub and #6942 the other four; the
+owner: "If they require an actor that cannot be added to a Chasis then those
+actors shouldn't be supported." `aether.text` depends on render, so headless no
+longer composes text either.)*
 
 ### 7. What is deleted
 
@@ -225,7 +236,9 @@ leave a second way to send per cap.)*
   touches nearly every crate. No change adds `MailboxId` surface.
 - A load now fails where a send used to warn-drop, on any chassis missing a
   dependency. The stub rule (§6) makes that a composition error to fix once,
-  not a run-time branch in every caller.
+  not a run-time branch in every caller. *(Amended 2026-09-29: there are no
+  stubs. The refusal at load is the answer, and an actor that needs a
+  capability a chassis cannot serve is not supported there, §6.)*
 - Every event kind gains a `PublishedBy` impl beside its `#[kind]` declaration.
   *(Amended 2026-09-23: no `PublishedBy` impl is added; the publisher is named
   at the subscribe call and checked by the existing `Publishes<K>` impls, §3.)*
@@ -241,7 +254,9 @@ leave a second way to send per cap.)*
 - **Optional peers with `send_optional`**, an honest `Option` lookup for a
   peer that may be absent. Rejected: every caller gains a branch the chassis
   should answer once, and a stub that claims the mailbox already exists for
-  every capability that is absent somewhere.
+  every capability that is absent somewhere. *(Amended 2026-09-29: the stubs
+  are gone, §6. The rejection stands: a dependent is refused where its
+  dependency is absent rather than branching on it.)*
 - **Implied monitoring on dependency death.** A registry watch per declared
   dependency, paid by every actor whether it cares or not, and a policy (drop,
   refuse, restart) the framework would have to pick for everyone. Rejected:

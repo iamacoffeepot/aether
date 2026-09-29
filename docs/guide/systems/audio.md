@@ -188,13 +188,11 @@ non-fatal to substrate boot: the capability stays registered in nop state.
 Immediate notes then disappear, while reply-bearing handlers implemented by
 that capability return an audio-not-initialised error.
 
-The production headless chassis composes `HeadlessAudioCapability`, the
-crate's fail-fast companion, instead. It absorbs the fire-and-forget trigger
-kinds (`note_on`, `note_off`, `stop_track`) and answers every kind that
-promises a reply — master gain, reverb send, sender gain, schedule, track
-playback, instrument load — with that kind's `Err` arm, so a caller fails fast
-rather than reading a settled-with-no-reply chain as success. The minimal hub
-and SubstrateHarness chassis do not compose the audio capability at all. These
+The production headless chassis, the minimal hub, and the SubstrateHarness
+chassis compose no audio actor at all. A chassis composes only the capabilities
+it serves, so a component that declares `depends(AudioCapability)` is refused
+at load there, naming `aether.audio` as the dependency that is not live
+([ADR-0232 §6](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0232-flat-ctx-send-verbs.md)). These
 current facts are visible in
 [`headless/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-headless/src/chassis.rs),
 [`hub/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-hub/src/chassis.rs),
@@ -214,6 +212,6 @@ and
   `runtime/handlers.rs`; change sample-clock execution in `runtime/synth.rs`.
 - Add callback DSP only with an explicit architecture decision. ADR-0126 is a
   narrow exception for one master effect, not an open effect graph.
-- Keep desktop, nop-mode, and headless behavior aligned when adding a
-  reply-bearing kind. A new desktop handler without a matching unsupported
-  reply path otherwise becomes a settlement hang on non-audio chassis.
+- Keep desktop and nop-mode behavior aligned when adding a reply-bearing kind.
+  A new handler without a matching nop-mode `Err` reply otherwise becomes a
+  settlement hang when audio is disabled or no device opens.

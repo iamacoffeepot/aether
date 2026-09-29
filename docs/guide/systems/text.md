@@ -159,18 +159,17 @@ multi-atlas spill. See
 ## Chassis and feature caveats
 
 Desktop and the render-capable SubstrateHarness compose both text and render, so all
-operations are usable. The full-stack headless chassis also composes the CPU
-text capability: font loading and `font_metrics` can work when the addressed fs
-namespace is present, but drawing cannot. Its headless render cap returns
-`CreateTextureResult::Err`, after which later draws retry and still emit no
-quads. The minimal hub chassis does not compose `aether.text` or
-`aether.render`.
+operations are usable. Text depends on render, and a chassis composes only the
+capabilities it serves, so headless and the minimal hub compose neither
+`aether.text` nor `aether.render`; a component that depends on text is refused
+at load there
+([ADR-0232 §6](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0232-flat-ctx-send-verbs.md)).
 
 The current composition is defined in
-[`aether-chassis/src/boot.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis/src/boot.rs),
-[`aether-harness-substrate/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs),
+[`aether-chassis-desktop/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-desktop/src/chassis.rs),
+[`aether-chassis-harness/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-harness/src/chassis.rs),
 and
-[`render/runtime/headless.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/runtime/headless.rs).
+[`aether-harness-substrate/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs).
 
 ## Where to change or extend it
 
