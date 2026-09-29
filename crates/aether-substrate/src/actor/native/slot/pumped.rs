@@ -686,14 +686,15 @@ mod tests {
         let fx = fixtures();
         let self_id = MailboxId(0x_0DED_0013);
         let (_peer_id, _peer_rx) = caller_inbox(&fx, Peer::NAMESPACE);
+        let (caller, _reply_rx) = caller_inbox(&fx, "test.pumped.caller.untaken");
         let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
 
-        let request = slot
-            .host_turn(|_state, ctx| {
-                let (pending, held) = ctx.hold::<Pong>();
-                pending.__defuse();
-                ctx.send_with_context::<Peer>(&Poke { note: 1 }, Stash { held })
-            })
+        let reply_to = Source::with_correlation(SourceAddr::Component(caller), 1);
+        let bytes = Park { seq: 1 }.encode_into_bytes();
+        fx.mailer.push(Mail::new(self_id, Park::ID, bytes, 1).with_reply_to(reply_to).with_lineage(None, None, None));
+        slot.drain_available();
+        let [request] = slot
+            .read_state(|state| <[MailId; 1]>::try_from(state.parked.as_slice()).expect("the request parked"))
             .expect("the actor is live");
 
         let reply_to = Source::with_correlation(SourceAddr::None, request.correlation_id);
