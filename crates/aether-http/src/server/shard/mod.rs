@@ -28,7 +28,19 @@ use aether_kinds::trace::Settled;
 #[actor(instanced, child_of(HttpServerCapability))]
 pub struct HttpDispatchShard;
 
-use aether_actor::actor;
+use crate::stream::{RequestCreditSink, ResponseSink, WebSocketSink};
+use aether_actor::{CoveredBy, actor};
+
+// The shard is the counterparty every stream handle casts to its sink
+// (ADR-0133, ADR-0231 §4). Checking coverage here turns a stream handler
+// turned manual, or dropped, into this crate's build error rather than every
+// streaming handler's cast refusing at run time.
+const _: () = {
+    const fn covered<P: CoveredBy<R>, R>() {}
+    covered::<ResponseSink, HttpDispatchShard>();
+    covered::<RequestCreditSink, HttpDispatchShard>();
+    covered::<WebSocketSink, HttpDispatchShard>();
+};
 
 #[cfg(feature = "runtime")]
 mod runtime;

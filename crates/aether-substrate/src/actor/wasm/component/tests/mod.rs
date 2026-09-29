@@ -37,6 +37,7 @@ use std::time::Duration;
 
 mod address;
 mod blob;
+mod cast;
 mod held;
 mod outbox;
 

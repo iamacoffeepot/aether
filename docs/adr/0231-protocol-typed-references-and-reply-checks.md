@@ -151,7 +151,7 @@ The rules:
 | 1 | Static reply check on typed sends | not built |
 | 2 | `#[protocol]` and `CoveredBy` | built: `Row`, `RowReply`, `RowSet`, `CoversRows`, `Protocol`, `CoveredBy` (`crates/aether-actor/src/model/protocol.rs`) and `#[protocol]` (`crates/aether-actor-derive/src/protocol.rs`), over the per-handler `Contract<K>` rows and per-actor `Contracts::CONTRACTS`; `includes` and protocol-to-protocol coverage are not built |
 | 3 | `ProtocolRef<P>`, `ProtocolPath<P>`, contextual decode, `resolve` | `ProtocolPath<P>` and `ActorPath::narrow` built (`crates/aether-actor/src/path/`), with the path text as their only wire form. `ProtocolPath<P>`'s decode proves coverage against the `Live` or `Dropped` route at its path through `Kind::decode_with` and `DecodeCtx` (`crates/aether-data/src/wire/context.rs`, over the registry's `PublishedRoutes` answer in `crates/aether-substrate/src/mail/registry/mailbox/resolve.rs`), and it has no `Deserialize`; `ActorPath<R>`'s decode checks its leaf namespace, and the type constructors `ActorPath::<R>::instance` and `ActorPath::<C>::child` replace the declared links. `ProtocolRef<P>` built (`crates/aether-actor/src/reference/protocol_ref.rs`), a `Target` for each kind `P` lists through a row index the compiler infers (`RowAt`, `crates/aether-actor/src/model/protocol.rs`), with the native liveness-only `resolve` over a `ProtocolPath<P>` (`Registry::resolve_protocol`, `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). Reference narrowing built: `ActorRef::narrow` (`crates/aether-actor/src/reference/actor_ref.rs`) and its spawn-result sibling `InlineChild::narrow` (`crates/aether-actor/src/wasm/ctx/child.rs`), with the guest `send_to` verbs taking a `ProtocolRef<P>` target, and a wasm handler set's rows reaching its adopter's `Contracts::Rows` so an adopter covers a protocol listing a set kind; the widget panel holds its children as such references (`crates/aether-widget/src/lanes.rs`). Not built: the guest's published-routes answer (ADR-0241), so a guest refuses a `ProtocolPath<P>` at decode; `ProtocolRef<P>` narrowing, which needs protocol-to-protocol coverage (§2) |
-| 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the native cast built for its `Subscriber<K>` arm and its protocol arm (`ctx.cast`, `CastTarget`; `Registry::cast` in `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). The protocol arm's exact-rows rule is written once in `crates/aether-actor/src/model/protocol.rs`, and `#[protocol]` opts each protocol in through a hidden marker. Its consumers are the window's and the lifecycle capability's typed subscriber fan-out and the tcp session's `ProtocolRef<TcpConsumer>`, cast from a `connect_self` or `bind_listener_self` sender. The erased send verb's removal (#6895), the cast's `AnyKind` arm, and a guest cast are not built |
+| 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the native cast built for its `Subscriber<K>` arm and its protocol arm (`ctx.cast`, `CastTarget`; `Registry::cast` in `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). The protocol arm's exact-rows rule is written once in `crates/aether-actor/src/model/protocol.rs`, and `#[protocol]` opts each protocol in through a hidden marker. Its consumers are the window's and the lifecycle capability's typed subscriber fan-out and the tcp session's `ProtocolRef<TcpConsumer>`, cast from a `connect_self` or `bind_listener_self` sender. The guest cast is built (`WasmCtx::cast` in `crates/aether-actor/src/wasm/ctx/cast.rs`): one host fn, `published_rows_p32`, answers the rows `Registry::published_rows_at` reads for both casts, and the guest applies the same `CastTarget::admits`; its first consumers are the HTTP stream handles, whose `ProtocolRef<ResponseSink>`, `ProtocolRef<RequestCreditSink>`, and `ProtocolRef<WebSocketSink>` are cast from the dispatching sender. The erased send verb's removal (#6895) and the cast's `AnyKind` arm are not built |
 | 5 | Replace preserves contracts | built, the fallback rule included: `crates/aether-data/src/contract.rs`, `crates/aether-substrate/src/mail/registry/contract.rs`, `crates/aether-component/src/trampoline/runtime/contract.rs` |
 | 6 | Manual rows | built: `Undeclared` row, `ReplyContract::Manual` on both manifests, and explicit `-> Undeclared` protocol rows with exact static and runtime coverage |
 | 7 | Ctx typed by its actor | built, every ctx on both transports |
@@ -653,16 +653,21 @@ sender (`ctx.sender()`) and a native `resolve_live` answer. It runs once,
 at receipt, in the handler that received the reference,
 and reads the same published rows the contextual decode reads.
 
-It is a native ctx verb over a sealed `CastTarget`, beside `resolve`, and the
-rule each target admits is a method of that sealed trait. It is not a method
-on `ErasedActorRef` over a public `ProveCtx` trait: any crate could implement
+It is a ctx verb over a sealed `CastTarget`, beside `resolve`, on a native
+ctx and on a guest ctx, and the rule each target admits is a method of that
+sealed trait. It is not a method on `ErasedActorRef` over a public
+`ProveCtx` trait: any crate could implement
 such a trait and hand the mint rows of its own choosing, so the cast reads
 the registry's published rows through the ctx and nothing else (R-0005).
 Two arms are built: `Subscriber<K>`, and the protocol arm, which every
 `#[protocol]` type opts into through a hidden marker whose rule is the one
 exact-rows check `aether-actor` writes, so the marker cannot choose rows.
 Its first consumer is the tcp capability's reflexive consumer binding. The
-`AnyKind` arm lands with its consumer, as does a guest cast.
+guest cast (`WasmCtx::cast`) reads the same rows through one host fn,
+`published_rows_p32`, which answers a `Live` route's published rows and
+mints nothing, and applies the same sealed rule; its first consumers are the
+HTTP stream handles, which cast the dispatching sender to the sink protocol
+they emit. The `AnyKind` arm lands with its consumer.
 
 | `T` | Succeeds when the published rows show |
 |---|---|
@@ -675,7 +680,8 @@ carried the reference, or drop the row. Nothing is parked and no mail is sent.
 The native mint lives beside the other mints in
 `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`, and
 `scripts/check-reference-mint.py` extends its pattern to it without widening
-its path allowlist. The guest SDK mints its own from the host's answer.
+its path allowlist. The guest SDK mints its own from the host's answer, through
+the crate-private `ProtocolRef` constructor, so no gated mint name is used.
 
 A typed link (§3) replaces a cast wherever the link is made by actors that can
 name the protocol. The cast remains for what arrives untyped.

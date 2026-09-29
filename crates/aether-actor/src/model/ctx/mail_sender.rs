@@ -18,7 +18,7 @@
 
 use aether_data::ActorMail;
 
-use crate::reference::ErasedActorRef;
+use crate::reference::Target;
 
 /// Outbound-mail surface every actor ctx exposes: the correlation accessor
 /// and the by-proof detached send.
@@ -48,14 +48,15 @@ pub trait MailSender {
     /// `send_detached::<R>`, bounded on a declared dependency); the by-proof
     /// cells are the inherent `send_to` and this method, its detached
     /// partner. There is no by-name column, because text is not a proof
-    /// (ADR-0230). The by-proof cell takes the dispatch-stamped proof rather
-    /// than a position anyone can compute, so a hand-built id does not reach
-    /// it. Its motivating consumer is the stored stream handle that answers
-    /// whoever dispatched to a handler (ADR-0133): the counterparty is
-    /// `ctx.sender()`, captured at runtime, so a typed `R` can't name it and a
-    /// fresh root is wanted per send. The kind is unchecked because that
-    /// counterparty is deliberately untyped — a mock or a middleware stands in
-    /// for the cap.
+    /// (ADR-0230). The target is a [`Target`]: an
+    /// [`ActorRef<R>`](crate::ActorRef) compiles only when `R` handles `K`, and
+    /// a [`ProtocolRef<P>`](crate::ProtocolRef) only for a kind `P` lists (its
+    /// row index `I` inferred). Its motivating consumer is the stored stream
+    /// handle that answers whoever dispatched to a handler (ADR-0133): the
+    /// counterparty is `ctx.sender()`, cast once to the sink protocol the
+    /// handle emits (`ctx.cast`, ADR-0231 §4), so a mock or a middleware that
+    /// covers the sink still stands in for the cap, and a fresh root is wanted
+    /// per send.
     ///
     /// **Fire-and-forget only.** A detached send mints no parent linkage, so
     /// any reply the recipient issues inherits the *recipient's* tree rather
@@ -64,5 +65,5 @@ pub trait MailSender {
     /// Required rather than defaulted: there is no by-id inherit method on
     /// this trait to delegate to (the inherit-by-id send is the per-ctx
     /// inherent `send_to`), so each concrete ctx supplies its own body.
-    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K);
+    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K);
 }

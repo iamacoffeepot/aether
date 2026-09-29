@@ -201,8 +201,8 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
     }
 
     // By-id detached send: the inherent `send_to` with `ChainMode::Detached`.
-    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
-        self.push(target, payload, ChainMode::Detached);
+    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+        self.push(target.erased(), payload, ChainMode::Detached);
     }
 }
 

@@ -11,9 +11,17 @@
 //!
 //! This is the transport under `WasmCtx::resolve_path`, which mints the proof
 //! from a `Live` answer.
+//!
+//! Its sibling is the guest half of the `published_rows_p32` host fn (ADR-0231
+//! §4): the guest hands the host the position of a reference it already holds,
+//! and the host answers the rows that route published while it is `Live` as
+//! one [`__PublishedRows`], delivered the same way. This is the transport
+//! under `WasmCtx::cast`, which applies the protocol's `admits` rule to the
+//! rows and mints the typed reference itself.
 
-use aether_data::{ErasedActorPath, wire};
+use aether_data::{ErasedActorPath, KindId, ReplyContract, wire};
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use super::abi32;
 use super::asset::{take_delivered, unpack};
@@ -64,5 +72,40 @@ pub fn resolve_path(path: &ErasedActorPath) -> __ResolvedPath {
     let bytes = unsafe { take_delivered(ptr, len) };
     wire::from_bytes(&bytes).unwrap_or_else(|error| {
         panic!("aether-actor: resolve_path: the host's answer does not decode as __ResolvedPath: {error}")
+    })
+}
+
+/// The host's answer to one `published_rows_p32` call, wire-encoded into the
+/// buffer it delivers. The ABI between the substrate's host fn and this SDK,
+/// defined once here beside [`__ResolvedPath`] so the two sides cannot
+/// disagree on its shape.
+///
+/// Not part of the public API: a guest reaches it only as the `Option` of
+/// `WasmCtx::cast`, and the substrate names it only to encode the answer.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct __PublishedRows {
+    /// The rows the route published, or `None` when it is not `Live`:
+    /// `Starting`, `Dropped`, or never registered.
+    pub rows: Option<Vec<(KindId, ReplyContract)>>,
+}
+
+/// Ask the host for the rows the route at `position` published while it is
+/// `Live`, and decode its answer.
+///
+/// # Panics
+///
+/// Panics when the delivered bytes do not decode as a [`__PublishedRows`]: the
+/// host and this SDK disagree on the ABI, which no guest can recover from
+/// (ADR-0063).
+pub fn published_rows(position: u64) -> __PublishedRows {
+    // SAFETY: FFI import; the host always hands back a live `(ptr, len)`, or
+    // traps.
+    let packed = unsafe { raw::published_rows(position) };
+    let (ptr, len) = unpack(packed);
+    // SAFETY: the return is always a live host-delivered buffer.
+    let bytes = unsafe { take_delivered(ptr, len) };
+    wire::from_bytes(&bytes).unwrap_or_else(|error| {
+        panic!("aether-actor: published_rows: the host's answer does not decode as __PublishedRows: {error}")
     })
 }

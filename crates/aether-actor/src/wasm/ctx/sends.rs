@@ -43,7 +43,7 @@ use crate::blob::guest::{EncodedGuestMail, encode_guest};
 use crate::model::ctx::Erased;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::reply_mode::ReplyMode;
-use crate::reference::{ErasedActorRef, Target};
+use crate::reference::Target;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, Registry};
 
@@ -83,7 +83,7 @@ impl<A> Sends<'_, A> {
     /// Send `payload` through a held reference, inheriting the handler's
     /// causal chain. Identical to [`WasmCtx::send_to`]: an [`ActorRef<R>`](crate::ActorRef) is
     /// kind-checked against `K`, a [`ProtocolRef<P>`](crate::ProtocolRef) against the kinds `P`
-    /// lists, and an [`ErasedActorRef`] is not checked.
+    /// lists, and an [`ErasedActorRef`](crate::ErasedActorRef) is not checked.
     pub fn send_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
         self.route::<K>(target.erased().id().0, encode_guest(payload), 1, ChainMode::Inherit);
     }
@@ -105,7 +105,7 @@ impl<A> MailSender for Sends<'_, A> {
         mail::prev_correlation()
     }
 
-    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
-        self.route::<K>(target.id().0, encode_guest(payload), 1, ChainMode::Detached);
+    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+        self.route::<K>(target.erased().id().0, encode_guest(payload), 1, ChainMode::Detached);
     }
 }

@@ -11,7 +11,7 @@ use crate::kinds::{
     HttpRouterResult, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
 };
 use crate::server::HttpServerCapability;
-use crate::{RequestStream, ResponseStream};
+use crate::{RequestCreditSink, RequestStream, ResponseSink, ResponseStream};
 
 use super::bind_catch_all;
 
@@ -72,10 +72,10 @@ impl NativeActor for StreamHttpHandler {
     /// never to the supervisor by type (ADR-0135).
     #[handler::single]
     fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
-        let Some(sender) = ctx.sender() else {
+        let Some(sink) = ctx.sender().and_then(|sender| ctx.cast::<ResponseSink>(sender)) else {
             return;
         };
-        let stream = ResponseStream::from_credit(sender, &credit);
+        let stream = ResponseStream::from_credit(sink, &credit);
 
         let mut budget = credit.credit;
         while budget > 0 && state.next_index < STREAM_CHUNK_COUNT {
@@ -127,10 +127,10 @@ impl NativeActor for StreamIdEchoHandler {
 
     #[handler::single]
     fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
-        let Some(sender) = ctx.sender() else {
+        let Some(sink) = ctx.sender().and_then(|sender| ctx.cast::<ResponseSink>(sender)) else {
             return;
         };
-        let stream = ResponseStream::from_credit(sender, &credit);
+        let stream = ResponseStream::from_credit(sink, &credit);
 
         if state.emitted {
             return;
@@ -183,10 +183,10 @@ impl NativeActor for FloodHttpHandler {
         }
         state.flooded = true;
 
-        let Some(sender) = ctx.sender() else {
+        let Some(sink) = ctx.sender().and_then(|sender| ctx.cast::<ResponseSink>(sender)) else {
             return;
         };
-        let stream = ResponseStream::from_credit(sender, &credit);
+        let stream = ResponseStream::from_credit(sink, &credit);
 
         for _ in 0..FLOOD_CHUNK_COUNT {
             stream.chunk(ctx, vec![b'x'; 8]);
@@ -244,7 +244,10 @@ impl NativeActor for StreamingUploadHandler {
     #[handler::single]
     fn on_stream_open(state: &mut Self::State, ctx: &mut NativeCtx<'_>, open: HttpRequestStreamOpen) {
         state.received = 0;
-        state.stream = ctx.sender().map(|sender| RequestStream::from_open(sender, &open));
+        state.stream = ctx
+            .sender()
+            .and_then(|sender| ctx.cast::<RequestCreditSink>(sender))
+            .map(|sink| RequestStream::from_open(sink, &open));
     }
 
     /// Count the piece and grant one credit back so the cap delivers the

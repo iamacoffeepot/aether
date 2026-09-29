@@ -22,16 +22,22 @@
 //! an erased reference the caller already holds as a protocol, once one read
 //! of the published view finds its route `Live` and publishing rows the
 //! protocol admits.
+//!
+//! One read beside them mints nothing: `Registry::published_rows_at` answers
+//! the rows a `Live` route published, the row source the native cast and
+//! the wasm guest's cast both read.
 
 use core::fmt;
 use std::error::Error;
+use std::sync::Arc;
 
 use aether_actor::{
     __mint_actor_ref, __mint_erased_actor_ref, __mint_protocol_ref, ActorRef, CastTarget, ErasedActorRef, Instanced,
     Protocol, ProtocolPath, ProtocolRef, ResolveError,
 };
-use aether_data::{LoadName, MailboxCategory};
+use aether_data::{LoadName, MailboxCategory, ReplyContract};
 
+use crate::mail::registry::RouteContract;
 use crate::mail::{KindId, MailboxId};
 
 use super::resolve::{ResolvedRoute, resolve_route};
@@ -320,28 +326,42 @@ impl Registry {
         self.live_route(path).map(__mint_protocol_ref).ok_or_else(|| ResolveError::NotLive { path: path.clone() })
     }
 
+    /// The rows the route at `position` published, answered only while it
+    /// resolves `Live` (ADR-0231 §4): the one row source both guard casts
+    /// read.
+    ///
+    /// One read of the published view, [`Self::published_contract`], finds
+    /// the route `Live` and reads its rows. A `Starting`, `Dropped`, or
+    /// unknown route answers `None`; a closure route answers its empty
+    /// contract. The rows are the facts `describe_component` already
+    /// exposes, and the read mints nothing, so a position that arrived from
+    /// a guest learns nothing new and gets no reference from here.
+    ///
+    /// Its callers are [`Self::cast`], the native guard cast, and
+    /// `NativeBinding::published_rows_at`, the read behind the wasm guest's
+    /// `published_rows_p32` host fn, whose guest applies the same
+    /// `CastTarget::admits` rule and mints its own reference.
+    pub(crate) fn published_rows_at(&self, position: MailboxId) -> Option<Arc<[(KindId, ReplyContract)]>> {
+        self.published_contract(position).map(RouteContract::into_rows)
+    }
+
     /// Type an erased reference the caller already holds as the protocol `T`
     /// (ADR-0231 §4's guard cast), or answer `None`.
     ///
-    /// One read of the published view, [`Self::published_contract`], finds
-    /// the route `reference` proves `Live` and reads the rows it published;
-    /// `T::admits` decides whether those rows answer `T`: the subscriber arm's
-    /// silent-or-manual rule or the protocol arm's exact-rows rule (ADR-0231
-    /// §4), both fixed in `aether-actor`. A `Starting`, `Dropped`, or unknown
-    /// route answers `None`, as does a live one whose rows `T` does not admit,
-    /// such as a closure route's empty contract.
+    /// [`Self::published_rows_at`] reads the rows the route `reference` proves
+    /// published while it is `Live`; `T::admits` decides whether those rows
+    /// answer `T`: the subscriber arm's silent-or-manual rule or the protocol
+    /// arm's exact-rows rule (ADR-0231 §4), both fixed in `aether-actor`. A
+    /// `Starting`, `Dropped`, or unknown route answers `None`, as does a live
+    /// one whose rows `T` does not admit, such as a closure route's empty
+    /// contract.
     ///
     /// Its one caller is
     /// [`NativeCtx::cast`](crate::actor::native::NativeCtx::cast).
     pub(crate) fn cast<T: CastTarget>(&self, reference: ErasedActorRef) -> Option<ProtocolRef<T>> {
         let position = reference.id();
-        let rows = self.published_contract(position)?.into_rows();
 
-        if T::admits(&rows) {
-            Some(__mint_protocol_ref(position))
-        } else {
-            None
-        }
+        T::admits(&self.published_rows_at(position)?).then(|| __mint_protocol_ref(position))
     }
 }
 

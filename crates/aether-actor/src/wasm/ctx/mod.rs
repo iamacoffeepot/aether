@@ -19,10 +19,11 @@
 //! verbs that name their publisher), `held` (the typed deferred reply a
 //! single handler holds past its return), `relative` (positional cluster-relative
 //! addressing), `child` (its typed counterpart) and `spawn` (detached and
-//! inline child creation), and `address` (proving an actor path that arrived
-//! in config or mail).
+//! inline child creation), `address` (proving an actor path that arrived
+//! in config or mail), and `cast` (typing a held reference as a protocol).
 
 mod address;
+mod cast;
 mod child;
 mod drop;
 mod held;

@@ -6,7 +6,7 @@
 
 use core::str::from_utf8;
 
-use aether_actor::{__ResolvedPath, AssetCatalog, AssetWindow};
+use aether_actor::{__PublishedRows, __ResolvedPath, AssetCatalog, AssetWindow};
 use aether_codec::frame::max_frame_size;
 use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
@@ -689,6 +689,33 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             };
             let bytes = wire::to_vec(&answer)
                 .map_err(|error| wasmtime::Error::msg(format!("resolve_path: encode failed: {error}")))?;
+            deliver_bytes_to_guest(&mut caller, &bytes)
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0231 §4 — a guest's guard cast (`WasmCtx::cast`) types
+    // a reference it already holds, such as `ctx.sender()`, as a protocol at
+    // receipt, synchronously, before the typed reference's first send, which
+    // no mail can serve. The host reads the rows the route published through
+    // `NativeBinding::published_rows_at`, the one row source the native
+    // `Registry::cast` reads, and the guest applies the same sealed `admits`
+    // rule and mints its own reference, so the guest and native answers
+    // cannot drift apart.
+    //
+    // The guest passes the reference's position. The host encodes the answer
+    // as one `__PublishedRows` — the rows while the route is `Live`, and none
+    // for a `Starting`, `Dropped`, or never-registered one — and delivers it
+    // as the packed `(ptr << 32) | len`, like `resolve_path_p32`. The rows are
+    // what `describe_component` already exposes and the host mints nothing,
+    // so a guest that passes an arbitrary position learns nothing new.
+    linker.func_wrap(
+        "aether",
+        "published_rows_p32",
+        |mut caller: Caller<'_, ComponentCtx>, position: u64| -> wasmtime::Result<u64> {
+            let rows = caller.data().binding.published_rows_at(MailboxId(position)).map(|rows| rows.to_vec());
+            let answer = __PublishedRows { rows };
+            let bytes = wire::to_vec(&answer)
+                .map_err(|error| wasmtime::Error::msg(format!("published_rows: encode failed: {error}")))?;
             deliver_bytes_to_guest(&mut caller, &bytes)
         },
     )?;
