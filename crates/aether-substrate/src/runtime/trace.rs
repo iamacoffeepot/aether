@@ -41,6 +41,7 @@ use aether_actor::trace::ActorTraceRing;
 
 use crate::chassis::settlement::SettlementRegistry;
 use crate::chassis::settlement_table::SettlementTable;
+use crate::runtime::clock::TraceClock;
 
 /// One `Sent` trace event's fields, stamped at flush (issue 1150).
 #[derive(Clone, Copy)]
@@ -73,7 +74,7 @@ pub(crate) struct SentRecord {
 /// simply skips the fire.
 #[derive(Clone)]
 pub struct TraceHandle {
-    boot_time: Instant,
+    clock: TraceClock,
     settlement_counter: Arc<SettlementTable>,
     settlement_registry: Arc<OnceLock<Arc<SettlementRegistry>>>,
     /// ADR-0086 Phase 3: ring for trace events produced *outside* any
@@ -91,7 +92,7 @@ pub struct TraceHandle {
 impl fmt::Debug for TraceHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TraceHandle")
-            .field("boot_time", &self.boot_time)
+            .field("clock", &self.clock)
             .field("settlement_registry_installed", &self.settlement_registry.get().is_some())
             .finish_non_exhaustive()
     }
@@ -99,13 +100,13 @@ impl fmt::Debug for TraceHandle {
 
 impl TraceHandle {
     /// Build a fresh handle: zeroed settlement counter, empty
-    /// chassis-host ring, `Instant::now()` boot anchor. The chassis
+    /// chassis-host ring, a fresh [`TraceClock`] anchor. The chassis
     /// builder calls this once per `build_passive`; the returned handle
     /// is installed on the chassis `Mailer`.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            boot_time: Instant::now(),
+            clock: TraceClock::start(),
             settlement_counter: Arc::new(SettlementTable::new()),
             settlement_registry: Arc::new(OnceLock::new()),
             chassis_host_ring: Arc::new(Mutex::new(ActorTraceRing::default())),
@@ -214,20 +215,14 @@ impl TraceHandle {
     /// that want to reconstruct timestamps for asserting.
     #[must_use]
     pub fn boot_time(&self) -> Instant {
-        self.boot_time
+        self.clock.boot_instant()
     }
 
-    /// Compute the current [`Nanos`] timestamp relative to this
-    /// handle's boot anchor. Sub-microsecond resolution; saturates to
-    /// `u64::MAX` after ~584 years of substrate uptime.
+    /// The current [`Nanos`] timestamp relative to this handle's boot
+    /// anchor, read off the [`TraceClock`].
     #[must_use]
     pub fn now_nanos(&self) -> Nanos {
-        let elapsed = Instant::now().saturating_duration_since(self.boot_time);
-        // u128 → u64: trace timestamps overflow after ~584 years; the
-        // handle's boot anchor is set at chassis boot, so realistic
-        // runtimes are well within u64 range.
-        #[allow(clippy::cast_possible_truncation)]
-        Nanos(elapsed.as_nanos() as u64)
+        self.clock.now_nanos()
     }
 
     /// ADR-0080 §2 producer hook for the `Sent` event. Pushes the event
