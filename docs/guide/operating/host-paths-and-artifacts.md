@@ -27,7 +27,7 @@ boundary:
 |---|---|---|
 | `upload_binary.staged_path` | hub | reads bytes, then executes the path with `--describe` |
 | `upload_component.staged_path` | hub | reads wasm bytes and parses embedded manifests without executing the module |
-| `load_component.config_path` or `replace_component.config_path` | `aether-mcp` | reads structured JSON and schema-encodes it for the selected component |
+| `load_component.config_path` or a `replace_component` config's `config_path` | `aether-mcp` | reads structured JSON and schema-encodes it for the selected component or instance type |
 | a Bytes parameter/config's `{"$file": path}` | `aether-mcp` | reads the whole host file, then rejects it if it exceeds the RPC frame cap |
 | `capture_frame.similarity.reference_path` | substrate render capability | joins a relative path beneath the configured assets root and reads the reference PNG |
 | `capture_frame.save_path` | `aether-mcp` | rejects a relative path up front, then creates missing parent directories and overwrites the destination with the full-resolution PNG |

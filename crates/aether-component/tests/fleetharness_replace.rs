@@ -1,140 +1,87 @@
-//! `FleetHarness` `replace_component` proof (issue 1459, Tier-A): load the
-//! `cube` fixture into a forked substrate, then atomically swap it for
-//! `aether-kit`'s `aether.kit.camera` export (selector `aether_kit@aether.kit.camera`) at the
-//! same trampoline mailbox id (ADR-0022) and assert the returned
-//! capability set reflects the new binary while the lineage address
-//! stays put.
+//! `FleetHarness` `replace_component` proof (issue 1459, Tier-A; ADR-0241
+//! §7): republish a module over the real hub → RPC → forked-substrate wire
+//! and assert every live instance of its namespaces moved in place, at the
+//! same lineage address and mailbox id (ADR-0022), with the reply naming
+//! each republished type.
 
 mod tests {
     use aether_data::Kind;
-    use aether_kinds::{ComponentCapabilities, LogTailResult, Ping, Tick};
-    use aether_kit::camera::CameraCreate;
+    use aether_kinds::{ComponentCapabilities, LogTailResult, ReplacedType};
+    use aether_test_fixtures_kinds::{GateProbe, GateQuery};
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
 
-    /// Load `cube` (its only handler is `Tick`), then `replace` it with
-    /// `aether-kit`'s non-entry `aether.camera` export (selector
-    /// `aether_kit@aether.kit.camera`; handlers `CameraCreate` +
-    /// `Tick` + the camera-driver kinds) targeting the captured trampoline
-    /// address — exercising `ReplaceComponent.export` (#2027) end-to-end over
-    /// the wire. The camera keeps the cube's only row, so the replace passes
-    /// the contract check (ADR-0231 §5). The returned
-    /// `ReplaceResult::Ok.capabilities` must carry the camera handler set,
-    /// with `Tick` surviving the swap; the lineage address — unchanged by
-    /// construction, since the trampoline keeps its load-time name — must
-    /// still route to the live mailbox afterward.
+    fn has(capabilities: &ComponentCapabilities, id: aether_data::KindId) -> bool {
+        capabilities.handlers.iter().any(|handler| handler.id == id)
+    }
+
+    fn published<'a>(types: &'a [ReplacedType], namespace: &str) -> &'a ComponentCapabilities {
+        &types
+            .iter()
+            .find(|replaced| replaced.namespace == namespace)
+            .unwrap_or_else(|| panic!("the replace reports {namespace}: {types:?}"))
+            .capabilities
+    }
+
+    /// Load the gate pair's first version, whose `test.republish.gate` has no
+    /// `GateProbe` row, then republish the second over the wire. The reply
+    /// must report the gate with its added `GateProbe` row and its kept
+    /// `GateQuery` row, and the loaded address must still route to the live
+    /// mailbox afterward.
+    ///
+    /// Catches: a republish that answers from the predecessor's surface, or
+    /// one that re-spawns the instance under a new name instead of swapping
+    /// it in place.
     #[test]
-    fn fleetharness_replaces_probe_with_camera_at_a_stable_address() {
-        if !dist_component_available("aether_test_fixtures_bundle") {
+    fn fleetharness_republishes_a_module_at_a_stable_address() {
+        if !dist_component_available("republish_group_v1") || !dist_component_available("republish_group_v2") {
             return;
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let loaded = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.cube");
+        let loaded = harness.load_full_export(engine, "republish_group_v1", "test.republish.gate");
 
-        let has = |caps: &ComponentCapabilities, id| caps.handlers.iter().any(|h| h.id == id);
+        assert!(has(&loaded.capabilities, GateQuery::ID), "v1 declares GateQuery: {:?}", loaded.capabilities);
+        assert!(!has(&loaded.capabilities, GateProbe::ID), "v1 declares no GateProbe: {:?}", loaded.capabilities);
 
-        // Pre-replace sanity: the cube declares Tick, not the camera's
-        // create kind, and registers at its ADR-0099 lineage address.
-        assert!(
-            has(&loaded.capabilities, Tick::ID),
-            "cube should declare a Tick handler: {:?}",
-            loaded.capabilities.handlers,
-        );
-        assert!(
-            !has(&loaded.capabilities, CameraCreate::ID),
-            "cube should not declare a CameraCreate handler: {:?}",
-            loaded.capabilities.handlers,
-        );
-        assert_eq!(loaded.addr, "test.cube", "cube should load at its published name");
+        let types = harness.replace(engine, "republish_group_v2");
 
-        let caps = harness.replace_export(engine, &loaded.addr, "aether_kit", "aether.kit.camera");
-
-        // Post-replace: the camera handler set is active, and Tick
-        // (declared by both) survives the swap.
+        let gate = published(&types, "test.republish.gate");
+        assert!(has(gate, GateProbe::ID), "the republished gate declares its added GateProbe row: {gate:?}");
+        assert!(has(gate, GateQuery::ID), "the kept GateQuery row survives the republish: {gate:?}");
         assert!(
-            has(&caps, CameraCreate::ID),
-            "post-replace should declare a CameraCreate handler: {:?}",
-            caps.handlers,
-        );
-        assert!(
-            has(&caps, Tick::ID),
-            "Tick is declared by both components and should survive the swap: {:?}",
-            caps.handlers,
-        );
-
-        // The lineage address still resolves to the live mailbox: a
-        // LogTail routed to the rendered path is answered Ok, proving
-        // the same mailbox was swapped in place.
-        assert!(
-            matches!(harness.log_tail(engine, &loaded.addr, None, None), LogTailResult::Ok { .. },),
+            matches!(harness.log_tail(engine, &loaded.addr, None, None), LogTailResult::Ok { .. }),
             "the lineage address should still route to the live mailbox after replace",
         );
     }
 
-    /// ADR-0096 wire regression for `ReplaceComponent.export`: load
-    /// the `multi_actor` module's **entry** actor (`RootManager`, a
-    /// strict receiver — no `#[fallback]`), then replace it with the
-    /// non-entry export `test.ui.panel` (`Panel`, which carries a
-    /// `#[fallback]`) at the same trampoline address. The
-    /// post-replace capabilities must be `Panel`'s — `fallback`
-    /// flips from `None` to `Some` — proving the new `export` field
-    /// survived the real `Call` wire and drove the trampoline's
-    /// effective-tag selection to a non-entry actor (which a bare
-    /// replace, reusing the hosted entry tag, could never reach).
-    /// `FleetHarness` is the right harness: the field must round-trip the
-    /// wire, not just the in-process path.
+    /// A republish moves every live instance of every namespace its module
+    /// publishes (ADR-0241 §7): two instances of two different bundle
+    /// exports both still serve at their addresses after the bundle is
+    /// republished with identical code under a new hash, and the reply
+    /// names both types.
+    ///
+    /// Catches: a republish that swaps only one instance, or reports only
+    /// the types that had one.
     #[test]
-    fn fleetharness_replace_targets_a_non_entry_export() {
+    fn fleetharness_republish_moves_every_instance_of_the_module() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
+        let cube = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.cube");
+        let root = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.ui.root");
 
-        // Load the `RootManager` actor (a strict receiver) from the
-        // bundle by its `test.ui.root` export. It is a non-entry actor in the
-        // bundle (the entry is `Probe`), so it is selected explicitly.
-        let loaded = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.ui.root");
+        let types = harness.replace_with_successor(engine, "aether_test_fixtures_bundle", 1);
 
-        // Pre-replace: the entry is a strict receiver — it declares a
-        // Ping handler and no fallback.
-        assert!(
-            loaded.capabilities.handlers.iter().any(|h| h.id == Ping::ID),
-            "the entry RootManager should declare a Ping handler: {:?}",
-            loaded.capabilities.handlers,
-        );
-        assert!(
-            loaded.capabilities.fallback.is_none(),
-            "the entry RootManager is a strict receiver — no fallback: {:?}",
-            loaded.capabilities.fallback,
-        );
-
-        // Replace into the non-entry export `test.ui.panel`, at the same
-        // mailbox id, carrying the export over the wire.
-        let caps = harness.replace_export(engine, &loaded.addr, "aether_test_fixtures_bundle", "test.ui.panel");
-
-        // Post-replace: Panel's capability group is active — still a
-        // Ping handler, but now with a fallback, the observable
-        // distinction the fixture is built to expose.
-        assert!(
-            caps.handlers.iter().any(|h| h.id == Ping::ID),
-            "Panel should declare a Ping handler: {:?}",
-            caps.handlers,
-        );
-        assert!(
-            caps.fallback.is_some(),
-            "the non-entry Panel carries a #[fallback]; the export-targeted \
-                 replace should surface it: {:?}",
-            caps.fallback,
-        );
-
-        // The lineage address still routes to the live mailbox: the
-        // same trampoline was swapped in place, now hosting Panel.
-        assert!(
-            matches!(harness.log_tail(engine, &loaded.addr, None, None), LogTailResult::Ok { .. },),
-            "the lineage address should still route to the live mailbox after an \
-                 export-targeted replace",
-        );
+        published(&types, "test.cube");
+        published(&types, "test.ui.root");
+        for address in [&cube.addr, &root.addr] {
+            assert!(
+                matches!(harness.log_tail(engine, address, None, None), LogTailResult::Ok { .. }),
+                "{address} should still route to its live mailbox after the republish",
+            );
+        }
     }
 }

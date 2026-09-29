@@ -73,6 +73,9 @@ aether-component = { path = "../aether-component" }
 aether-fs = { path = "../aether-fs" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+# `widget_exports` republishes the widget module with identical code under a
+# new hash through `aether_substrate::testing::successor_wasm`.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # The widget/editor scenarios load the `test.editor_region_probe` /
 # `test.ui_widget` fixture actors: the typed request/reply kinds come from the
 # fixtures kinds rlib, and the wasm-body dependency below keeps `xtask affected`

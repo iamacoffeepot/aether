@@ -72,6 +72,7 @@ use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
+use aether_substrate::testing::successor_wasm;
 use aether_substrate::testing::{TestChassis, boot_authority};
 use aether_trace::TraceDispatchCapability;
 
@@ -667,6 +668,15 @@ impl FleetHarness {
     /// module publishes with its advertised capabilities.
     pub fn replace(&mut self, engine: EngineId, stem: &str) -> Vec<ReplacedType> {
         self.replace_wasm(engine, read_component_wasm(stem), stem)
+    }
+
+    /// Republish on `engine` the `<stem>` module with identical code under a
+    /// new content hash ([`successor_wasm`] with `generation`), so every live
+    /// instance of its namespaces is really swapped: a republish of the
+    /// same bytes answers with no swap (ADR-0241 §7). Returns each type the
+    /// module publishes.
+    pub fn replace_with_successor(&mut self, engine: EngineId, stem: &str, generation: u32) -> Vec<ReplacedType> {
+        self.replace_wasm(engine, successor_wasm(&read_component_wasm(stem), generation), stem)
     }
 
     /// Send `wasm` as a republish with no instance configs and return the

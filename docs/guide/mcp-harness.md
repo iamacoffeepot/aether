@@ -228,8 +228,8 @@ does not query an engine.
 
 **Components.** `upload_component` takes the filesystem path to a `.wasm` and
 stages it in the hub's component registry. `load_component` and
-`replace_component` then take that upload's registry `selector` (hash, name, or
-`module@actor`), never a host wasm path or inline wasm bytes. For a typed-config
+`replace_component` then take that upload's registry `selector` (hash, name, or,
+for a load only, `module@actor`), never a host wasm path or inline wasm bytes. For a typed-config
 component, pass either `config` as inline structured JSON or `config_path` as a
 path to a JSON file; they are mutually exclusive. The harness schema-encodes the
 JSON to the Config kind that `describe_component` identifies; `describe_kinds`
@@ -237,11 +237,13 @@ shows its schema. `config_path` does not contain pre-encoded wire bytes.
 `load_component` with `replicas: N` returns one shared `capabilities` block plus
 `instances: [{address}, …]` rather than repeating capabilities per
 replica; docs on that block also follow the summary-vs-`full` projection.
-`replace_component` names its target by lineage address (canonical or short),
-sends it to the engine as the `aether.component.replace` target, and prints the
-address back. There is no drop tool: send `aether.component.drop` through
-`send_mail`. A drop closes the instance and retires its name, so a later load
-needs a new name and a replace at the dropped address is refused.
+`replace_component` names no instance: it republishes the selected module, and
+every live instance of the module's namespaces moves to it as one group, or none
+does (ADR-0241 §7). Its `configs: [{address, config | config_path}]` give named
+instances a config, encoded to the successor's Config kind for each instance's
+type; the reply lists each republished type with its capabilities. There is no
+drop tool: send `aether.component.drop` through `send_mail`. A drop closes the
+instance and retires its name, so a later load needs a new name.
 
 `list_binaries` and registry `list_components` return
 `{entries, total_matched, shown, truncated, notice}` in stable newest-first

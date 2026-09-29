@@ -16,6 +16,9 @@
 //! request context the old guest carries is refused, and the old guest keeps
 //! the context (ADR-0139 §4).
 //!
+//! A republish moves every live instance of its module together (ADR-0241
+//! §7), so the holder and the requester, which share a module, swap as one.
+//!
 //! Skipped when the fixture wasm hasn't been built (`require_wasm`); CI
 //! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes a
 //! hard panic there.
@@ -29,32 +32,56 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::trace::{TraceEvent, TraceTail, TraceTailResult};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{CarriedReplyMatched, CarriedRequestResult, ReleaseCarried, RunCarriedRequest};
 
-const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
-const REQUESTER: &str = "test.carry.requester";
-const HOLDER: &str = "test.carry.holder";
-const RESHAPED_REQUESTER: &str = "test.carry.reshaped_requester";
+/// A module holding a carried-request holder and requester, and the
+/// replacement a test republishes it with.
+struct Family {
+    module: &'static str,
+    holder: &'static str,
+    requester: &'static str,
+    /// The replacement module, or `None` for the module's own code under a
+    /// new hash.
+    replacement: Option<&'static str>,
+}
 
-/// Load the holder and the requester, send request 1, replace the `swapped`
-/// export in place with the `export` of the module `replacement_crate`
-/// builds, send request 2, then release both parked replies. With
-/// `release_before_swap`, the holder also releases between request 1 and the
-/// swap, so the pre-swap instance answers the tag-1 handle itself. Returns the
-/// harness to count matched replies on, the holder's reference and the swap's
-/// result, or `None` when a fixture wasm is not built.
+/// The bundle's carry pair, republished with its own code.
+const BUNDLE: Family = Family {
+    module: "aether_test_fixtures_bundle",
+    holder: "test.carry.holder",
+    requester: "test.carry.requester",
+    replacement: None,
+};
+
+/// The republish fixture's carry pair, republished with the version whose
+/// requester reshapes its carried context.
+const RESHAPING: Family = Family {
+    module: "republish_carry_v1",
+    holder: "test.republish.carry.holder",
+    requester: "test.republish.carry.requester",
+    replacement: Some("republish_carry_v2"),
+};
+
+/// Load the family's holder and requester, send request 1, republish their
+/// module (both move together, ADR-0241 §7), send request 2, then release
+/// both parked replies. With `release_before_swap`, the holder also releases
+/// between request 1 and the swap, so the pre-swap instance answers the
+/// tag-1 handle itself. Returns the harness to count matched replies on, the
+/// holder's reference and the swap's result, or `None` when a fixture wasm is
+/// not built.
 fn release_across_swap(
-    replacement_crate: &str,
-    swapped: &str,
-    export: &str,
+    family: &Family,
     release_before_swap: bool,
 ) -> Option<(SubstrateHarness, ErasedActorRef, ReplaceResult)> {
-    let wasm_path = require_wasm(FIXTURE_CRATE)?;
-    let replacement = fs::read(require_wasm(replacement_crate)?).expect("read replacement wasm");
+    let wasm = fs::read(require_wasm(family.module)?).expect("read fixture wasm");
+    let replacement = match family.replacement {
+        Some(module) => fs::read(require_wasm(module)?).expect("read replacement wasm"),
+        None => successor_wasm(&wasm, 1),
+    };
 
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
 
-    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let mut load = |export: &str| {
         harness
             .load_any(&LoadComponent {
@@ -65,13 +92,8 @@ fn release_across_swap(
             })
             .unwrap_or_else(|error| panic!("load {export}: {error}"))
     };
-    let (holder, holder_path) = load(HOLDER);
-    let (requester, requester_path) = load(REQUESTER);
-    let target = if swapped == HOLDER {
-        holder_path
-    } else {
-        requester_path
-    };
+    let (holder, _) = load(family.holder);
+    let (requester, _) = load(family.requester);
 
     let mut steps = vec![("request_1", HarnessOp::send_and_settle(requester, &RunCarriedRequest { tag: 1 }))];
     if release_before_swap {
@@ -82,13 +104,7 @@ fn release_across_swap(
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent {
-                    target,
-                    wasm: replacement,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: Some(export.to_owned()),
-                },
+                &ReplaceComponent { wasm: replacement, configs: Vec::new() },
             ),
         ),
         ("request_2", HarnessOp::send_and_settle(requester, &RunCarriedRequest { tag: 2 })),
@@ -105,11 +121,15 @@ fn assert_replaced(swap: &ReplaceResult) {
 }
 
 #[test]
-fn a_replaced_guest_never_reuses_a_pending_request_id() {
-    // Catches: the replacement's correlation counter restarting at 1, so its
-    // first request overwrites the rehydrated context of the still-pending
-    // request 1 and the late reply to that old request takes it.
-    let Some((harness, _, swap)) = release_across_swap(FIXTURE_CRATE, REQUESTER, REQUESTER, false) else {
+fn a_replaced_group_keeps_its_request_ids_and_carried_reply_handles() {
+    // Catches: the requester's correlation counter restarting at 1, so its
+    // first request after the swap overwrites the rehydrated context of the
+    // still-pending request 1 and the late reply to that old request takes
+    // it; or the holder's reply table restarting at 0, so the request
+    // arriving after the swap takes the carried handle's number, the carried
+    // reply goes out with that request's correlation, and the second reply
+    // finds no entry and is dropped. Either leaves fewer than two matches.
+    let Some((harness, _, swap)) = release_across_swap(&BUNDLE, false) else {
         return;
     };
     assert_replaced(&swap);
@@ -117,26 +137,7 @@ fn a_replaced_guest_never_reuses_a_pending_request_id() {
     assert_eq!(
         harness.count_observed(CarriedReplyMatched::NAME),
         2,
-        "both replies must recover their own request's context across the replace; observed kinds: {:?}",
-        harness.observed_kinds(),
-    );
-}
-
-#[test]
-fn a_replaced_guest_answers_a_carried_reply_handle_to_its_own_requester() {
-    // Catches: the replacement's reply table restarting at 0, so the request
-    // arriving after the swap takes the carried handle's number — the carried
-    // reply goes out with that request's correlation and the second reply
-    // finds no entry and is dropped.
-    let Some((harness, _, swap)) = release_across_swap(FIXTURE_CRATE, HOLDER, HOLDER, false) else {
-        return;
-    };
-    assert_replaced(&swap);
-
-    assert_eq!(
-        harness.count_observed(CarriedReplyMatched::NAME),
-        2,
-        "both parked replies must answer their own requester across the holder's replace; observed kinds: {:?}",
+        "both replies must answer and recover their own request's context across the replace; observed kinds: {:?}",
         harness.observed_kinds(),
     );
 }
@@ -146,7 +147,7 @@ fn a_replaced_guest_never_reuses_a_reply_mail_id() {
     // Catches: the replacement's reply-lineage counter restarting at `1 << 63`,
     // so its first reply reuses the `MailId` of its predecessor's first reply
     // and the trace fold, which keys nodes by `MailId`, merges the two.
-    let Some((mut harness, holder, swap)) = release_across_swap(FIXTURE_CRATE, HOLDER, HOLDER, true) else {
+    let Some((mut harness, holder, swap)) = release_across_swap(&BUNDLE, true) else {
         return;
     };
     assert_replaced(&swap);
@@ -178,16 +179,15 @@ fn a_replace_that_reshapes_a_carried_context_kind_is_refused() {
     // Catches: the replace carrying the tag-1 context into a requester whose
     // reshaped `CarriedContext` has a different `KindId`, so its `take_context`
     // misses the carried entry and the tag-1 request never completes.
-    let Some((harness, _, swap)) =
-        release_across_swap("aether_test_fixtures_carry_reshaped", REQUESTER, RESHAPED_REQUESTER, false)
-    else {
+    let Some((harness, _, swap)) = release_across_swap(&RESHAPING, false) else {
         return;
     };
 
     match swap {
         ReplaceResult::Err { error } => assert!(
             error.contains(
-                "replacement does not declare its carried request context aether.test_fixtures.carried_context"
+                "replacement does not declare its carried request context \
+                 aether.test_fixtures.republish_carried_context"
             ),
             "the refusal must name the carried context kind: {error}",
         ),

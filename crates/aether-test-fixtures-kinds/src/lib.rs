@@ -679,3 +679,27 @@ pub struct PeerConfig {
 pub struct PeerState {
     pub count: u32,
 }
+
+/// Issue 7086: the config every instance of the third version of the
+/// republish gate is built with, a kind the first two versions' gate does
+/// not declare, so republishing to the third changes the gate's config kind.
+/// The third version's gate answers `GateQuery` with `[label]`.
+#[aether_data::kind(name = "aether.test_fixtures.gate.labelled_config", copy, default, eq)]
+pub struct GateLabelledConfig {
+    pub label: u32,
+}
+
+/// Issue 7086: asks the republish loader to load `wasm` as a component under
+/// `name`, exporting `export`, through the component host, the way any
+/// guest loads one. It replies the host's `LoadResult`.
+#[aether_data::kind(name = "aether.test_fixtures.guest_load")]
+pub struct GuestLoad {
+    pub wasm: Vec<u8>,
+    pub name: Option<String>,
+    pub export: Option<String>,
+}
+
+/// Issue 7086: asks the republish gate how many times its `wire` hook has
+/// run on this instance. It replies a [`CountReport`].
+#[aether_data::kind(name = "aether.test_fixtures.wire_count_query", default)]
+pub struct WireCountQuery;

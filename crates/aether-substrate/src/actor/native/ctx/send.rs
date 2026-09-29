@@ -582,9 +582,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// inbound reply destination, and the forwarding handler's manual row
     /// declares no reply shape (ADR-0231 §9).
     ///
-    /// Its consumers are the component host's `DropComponent` forward to the
-    /// addressed trampoline and the `aether.window` root's forward of a
-    /// per-window command to the sole live window.
+    /// Its consumer is the `aether.window` root's forward of a per-window
+    /// command to the sole live window.
     /// A manual protocol row is a valid relay target:
     ///
     /// ```

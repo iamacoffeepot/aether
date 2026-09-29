@@ -1,10 +1,10 @@
 //! Issue 6134: a replace whose candidate fails to start leaves the running
-//! guest in place (ADR-0016 §4). A candidate whose `init` fails is dropped
-//! before the old guest runs any hook; a candidate whose `on_rehydrate` traps
-//! is dropped and the old guest is reinstalled, and the slot keeps hosting
-//! the old type, so a later bare replace rebuilds it. The reinstated guest
-//! runs `wire` again, and nothing the failed candidate sent leaves
-//! (ADR-0241 §7).
+//! guest in place (ADR-0016 §4). A config that does not decode as the
+//! successor's config kind refuses before any member prepares; a candidate
+//! whose `on_rehydrate` traps is dropped and the old guest is reinstalled,
+//! and the slot keeps its module and config, so a later replace rebuilds it.
+//! The reinstated guest runs `wire` again, and nothing the failed candidate
+//! sent leaves (ADR-0241 §7).
 //!
 //! Skipped when the fixture wasm hasn't been built (`require_wasm`); CI
 //! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes a
@@ -16,22 +16,37 @@ use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceConfig, ReplaceResult};
+use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{
-    Bump, ConfigEcho, ConfigQuery, CountQuery, CountReport, ProbeConfig, TickObserved, WireObserved,
+    Bump, ConfigEcho, ConfigQuery, CountQuery, CountReport, PeerConfig, ProbeConfig, TickObserved, WireObserved,
 };
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
 
-/// A replace of `target` with the same fixture wasm.
-fn replace(target: &ErasedActorPath, wasm: &[u8], config: Vec<u8>, export: Option<&str>) -> ReplaceComponent {
-    ReplaceComponent {
-        target: target.clone(),
-        wasm: wasm.to_vec(),
-        drain_timeout_ms: None,
-        config,
-        export: export.map(str::to_owned),
-    }
+/// A republish of `wasm` giving the instance at `path` the config `config`.
+fn replace_configured(wasm: &[u8], path: &ErasedActorPath, config: Vec<u8>) -> ReplaceComponent {
+    ReplaceComponent { wasm: wasm.to_vec(), configs: vec![ReplaceConfig { path: path.clone(), config }] }
+}
+
+/// The group pair's two versions, or `None` when either is not built.
+fn group_pair() -> Option<(Vec<u8>, Vec<u8>)> {
+    let v1 = fs::read(require_wasm("republish_group_v1")?).expect("read republish_group_v1");
+    let v2 = fs::read(require_wasm("republish_group_v2")?).expect("read republish_group_v2");
+    Some((v1, v2))
+}
+
+/// Load the first version of `test.republish.peer` with `trap_on_rehydrate`
+/// set, which v1 ignores and v2's `on_rehydrate` acts on.
+fn load_trapping_peer(harness: &mut SubstrateHarness, v1: &[u8]) -> (aether_actor::ErasedActorRef, ErasedActorPath) {
+    harness
+        .load_any(&LoadComponent {
+            wasm: v1.to_vec(),
+            name: None,
+            config: PeerConfig { trap_on_rehydrate: true }.encode_into_bytes(),
+            export: Some("test.republish.peer".to_owned()),
+        })
+        .expect("load test.republish.peer v1")
 }
 
 fn expect_refused(result: &ReplaceResult, reason: &str) {
@@ -42,9 +57,10 @@ fn expect_refused(result: &ReplaceResult, reason: &str) {
 }
 
 #[test]
-fn a_replace_whose_candidate_fails_init_keeps_the_running_guest() {
-    // Catches: the old guest is retired before the candidate's `init` runs,
-    // so a failed `init` empties the slot and the query finds no guest.
+fn a_config_that_does_not_decode_refuses_and_keeps_the_running_guest() {
+    // Catches: a supplied config reaching a member's prepare undecoded, so a
+    // candidate is built from bytes its typed `init` cannot read, or the old
+    // guest is retired before the refusal and the query finds no guest.
     let Some(wasm_path) = require_wasm(FIXTURE_CRATE) else {
         return;
     };
@@ -62,22 +78,20 @@ fn a_replace_whose_candidate_fails_init_keeps_the_running_guest() {
         .expect("load test.probe_with_config");
 
     // A `ProbeConfig` cut one byte short: its label's length prefix runs past
-    // the end, so the candidate's typed `init` cannot decode it.
+    // the end, so it does not decode as the successor's config kind.
     let mut undecodable = config.encode_into_bytes();
     undecodable.pop();
 
     let host = harness.actor_ref::<ComponentHostCapability>();
+    let replace = replace_configured(&successor_wasm(&wasm, 1), &path, undecodable);
     let result = harness
         .execute(vec![
-            ("replace", HarnessOp::send_and_await_reply(&host, &replace(&path, &wasm, undecodable, None))),
+            ("replace", HarnessOp::send_and_await_reply(&host, &replace)),
             ("echo", HarnessOp::send_and_await_reply(probe, &ConfigQuery)),
         ])
         .expect("replace + query sequence");
 
-    expect_refused(
-        &result.reply::<ReplaceResult>("replace").expect("decode ReplaceResult"),
-        "wasm instantiation failed",
-    );
+    expect_refused(&result.reply::<ReplaceResult>("replace").expect("decode ReplaceResult"), "does not decode");
     let echo = result.reply::<ConfigEcho>("echo").expect("decode ConfigEcho");
     assert_eq!(echo.seed, config.seed, "the running guest keeps the seed its own init saw");
     assert_eq!(echo.label, config.label, "the running guest keeps the label its own init saw");
@@ -86,40 +100,29 @@ fn a_replace_whose_candidate_fails_init_keeps_the_running_guest() {
 #[test]
 fn a_replace_whose_candidate_fails_rehydrate_keeps_the_running_guest() {
     // Catches: the candidate is installed despite its rehydrate error, so the
-    // query reads the candidate's fresh count; and the slot's hosted type or
-    // module is promoted before rehydrate, so the bare replace that follows
-    // rebuilds the trapping type and fails again.
-    let Some(wasm_path) = require_wasm(FIXTURE_CRATE) else {
+    // query reads the candidate's fresh count; and the slot's module or
+    // stored config is promoted before rehydrate, so the replace that follows
+    // with a non-trapping config fails again or loses the count.
+    let Some((v1, v2)) = group_pair() else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
-
-    let (counter, path) = harness
-        .load_any(&LoadComponent {
-            wasm: wasm.clone(),
-            name: None,
-            config: Vec::new(),
-            export: Some("test.stateful.counter".to_owned()),
-        })
-        .expect("load test.stateful.counter");
+    let (peer, path) = load_trapping_peer(&mut harness, &v1);
 
     let host = harness.actor_ref::<ComponentHostCapability>();
+    let calm = PeerConfig { trap_on_rehydrate: false }.encode_into_bytes();
     let result = harness
         .execute(vec![
-            ("bump_1", HarnessOp::send_and_settle(counter, &Bump)),
-            ("bump_2", HarnessOp::send_and_settle(counter, &Bump)),
-            ("bump_3", HarnessOp::send_and_settle(counter, &Bump)),
+            ("bump_1", HarnessOp::send_and_settle(peer, &Bump)),
+            ("bump_2", HarnessOp::send_and_settle(peer, &Bump)),
+            ("bump_3", HarnessOp::send_and_settle(peer, &Bump)),
             (
                 "trap",
-                HarnessOp::send_and_await_reply(
-                    &host,
-                    &replace(&path, &wasm, Vec::new(), Some("test.stateful.rehydrate_trap")),
-                ),
+                HarnessOp::send_and_await_reply(&host, &ReplaceComponent { wasm: v2.clone(), configs: Vec::new() }),
             ),
-            ("after_trap", HarnessOp::send_and_await_reply(counter, &CountQuery)),
-            ("bare", HarnessOp::send_and_await_reply(&host, &replace(&path, &wasm, Vec::new(), None))),
-            ("after_bare", HarnessOp::send_and_await_reply(counter, &CountQuery)),
+            ("after_trap", HarnessOp::send_and_await_reply(peer, &CountQuery)),
+            ("calm", HarnessOp::send_and_await_reply(&host, &replace_configured(&v2, &path, calm))),
+            ("after_calm", HarnessOp::send_and_await_reply(peer, &CountQuery)),
         ])
         .expect("bump + replace + query sequence");
 
@@ -127,48 +130,36 @@ fn a_replace_whose_candidate_fails_rehydrate_keeps_the_running_guest() {
     assert_eq!(
         result.reply::<CountReport>("after_trap").expect("decode CountReport").count,
         3,
-        "the reinstated counter keeps its count",
+        "the reinstated peer keeps its count",
     );
-    let bare = result.reply::<ReplaceResult>("bare").expect("decode ReplaceResult");
-    assert!(matches!(bare, ReplaceResult::Ok { .. }), "a bare replace rebuilds the counter: {bare:?}");
+    let calm = result.reply::<ReplaceResult>("calm").expect("decode ReplaceResult");
+    assert!(matches!(calm, ReplaceResult::Ok { .. }), "a replace with a non-trapping config swaps the peer: {calm:?}");
     assert_eq!(
-        result.reply::<CountReport>("after_bare").expect("decode CountReport").count,
+        result.reply::<CountReport>("after_calm").expect("decode CountReport").count,
         3,
-        "the rebuilt counter rehydrates the reinstated counter's count",
+        "the successor rehydrates the reinstated peer's count",
     );
 }
 
-/// Load `test.stateful.counter`, then replace it with the
-/// `test.stateful.rehydrate_trap` candidate, which reports `TickObserved`
-/// from `on_rehydrate` and traps. Returns the harness and the
-/// `WireObserved` count before the replace, or `None` when the fixture wasm
-/// is not built.
+/// Load the first version of `test.republish.peer` with `trap_on_rehydrate`
+/// set, then republish the second, whose `on_rehydrate` reports
+/// `TickObserved` and traps. Returns the harness and the `WireObserved`
+/// count before the replace, or `None` when the fixture wasm is not built.
 ///
 /// The observer is an inline sink, so a report reaches its count inside the
 /// sender's call: anything the candidate or the reinstated guest mails it is
 /// counted before the replace answers.
 fn replace_with_rehydrate_trap() -> Option<(SubstrateHarness, usize)> {
-    let wasm = fs::read(require_wasm(FIXTURE_CRATE)?).expect("read fixture wasm");
+    let (v1, v2) = group_pair()?;
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
-
-    let (_, path) = harness
-        .load_any(&LoadComponent {
-            wasm: wasm.clone(),
-            name: None,
-            config: Vec::new(),
-            export: Some("test.stateful.counter".to_owned()),
-        })
-        .expect("load test.stateful.counter");
+    let _ = load_trapping_peer(&mut harness, &v1);
     let wired = harness.count_observed(WireObserved::NAME);
 
     let host = harness.actor_ref::<ComponentHostCapability>();
     let result = harness
         .execute(vec![(
             "trap",
-            HarnessOp::send_and_await_reply(
-                &host,
-                &replace(&path, &wasm, Vec::new(), Some("test.stateful.rehydrate_trap")),
-            ),
+            HarnessOp::send_and_await_reply(&host, &ReplaceComponent { wasm: v2, configs: Vec::new() }),
         )])
         .expect("replace sequence");
     expect_refused(&result.reply::<ReplaceResult>("trap").expect("decode ReplaceResult"), "on_rehydrate failed");
@@ -195,5 +186,5 @@ fn a_reinstated_guest_is_wired_again() {
         return;
     };
 
-    assert_eq!(harness.count_observed(WireObserved::NAME), wired + 1, "the reinstated counter runs `wire` again");
+    assert_eq!(harness.count_observed(WireObserved::NAME), wired + 1, "the reinstated peer runs `wire` again");
 }

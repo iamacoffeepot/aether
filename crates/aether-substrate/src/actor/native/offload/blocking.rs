@@ -1226,7 +1226,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use aether_actor::Manual;
+    use aether_actor::{ErasedActorRef, Manual};
     use aether_data::{MailId, MailboxId, SessionToken, Source, Uuid};
     use aether_kinds::{MonitorNotice, Tick};
 

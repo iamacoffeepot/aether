@@ -1232,9 +1232,15 @@ impl SubstrateHarness {
     /// without pumping anything or waiting for it to settle. The push lands
     /// in the recipient's inbox before this returns, so it is ordered ahead
     /// of anything the harness drives afterwards.
-    #[must_use]
-    pub fn send_tracked<K: Kind, I>(&self, to: impl ChassisTarget<K, I>, mail: &K) -> MailId {
-        self.passive.send_tracked(to, mail, None).0
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::Decode`] when the send cannot be prepared.
+    pub fn send_tracked<K: Kind>(&self, to: impl SendTarget<K>, mail: &K) -> Result<MailId, SubstrateHarnessError> {
+        to.prepare(mail)
+            .tracked(&self.passive, None)
+            .map(|(root, _)| root)
+            .map_err(|error| SubstrateHarnessError::Decode(format!("prepare harness send: {error}")))
     }
 
     /// Run the pumped component host one envelope at a time until it has

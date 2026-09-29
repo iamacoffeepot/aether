@@ -106,8 +106,10 @@ impl WasmActor for ReplyHolder {
         }
     }
 
+    /// Saves copies, so a guest reinstated by an aborted republish still
+    /// holds its parked handles (ADR-0241 §7).
     fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        let (handles, tags) = self.parked.drain(..).unzip();
+        let (handles, tags) = self.parked.iter().copied().unzip();
         ctx.save_state_kind::<ParkedReplies>(0, &ParkedReplies { handles, tags });
     }
 

@@ -1170,7 +1170,9 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-clipboard",
+ "aether-component",
  "aether-data",
+ "aether-kinds",
  "aether-test-fixtures-kinds",
 ]
 
@@ -1258,6 +1260,7 @@ dependencies = [
  "aether-lifecycle",
  "aether-math",
  "aether-render",
+ "aether-substrate",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
  "aether-text",

@@ -18,11 +18,13 @@ use std::process;
 use aether_actor::{ActorInitError, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx, actor};
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, GateConfig, GateProbe, GateQuery, GateQueryResult, PeerConfig, PeerState,
-    SubstrateHarnessObserver, TickObserved, WireObserved,
+    SubstrateHarnessObserver, TickObserved, WireCountQuery, WireObserved,
 };
 
 pub struct Gate {
     seqs: Vec<u32>,
+    /// How many times `wire` has run on this instance.
+    wired: u32,
 }
 
 #[actor(instanced, root)]
@@ -31,7 +33,7 @@ impl WasmActor for Gate {
     const NAMESPACE: &'static str = "test.republish.gate";
 
     fn init(_config: GateConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Gate { seqs: Vec::new() })
+        Ok(Gate { seqs: Vec::new(), wired: 0 })
     }
 
     #[handler::single]
@@ -39,9 +41,20 @@ impl WasmActor for Gate {
         self.seqs.push(probe.seq);
     }
 
+    /// Count each run of the hook, without sending anything.
+    fn wire(&mut self, _ctx: &mut WireCtx<'_, '_>) {
+        self.wired += 1;
+    }
+
     #[handler::single]
     fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: GateQuery) -> GateQueryResult {
         GateQueryResult { seqs: self.seqs.clone() }
+    }
+
+    /// The number of times this instance has been wired.
+    #[handler::single]
+    fn on_wired(&mut self, _ctx: &mut WasmCtx<'_>, _query: WireCountQuery) -> CountReport {
+        CountReport { count: self.wired }
     }
 }
 

@@ -84,7 +84,7 @@ Tools (`mcp__aether-hub__*`):
 - `compare_component_contracts(baseline, candidate)` — diff two loaded revisions' typed-mail contracts and report `compatible`.
 - `describe_transforms` — the native `#[transform]` set linked into `aether-mcp`.
 - `load_component(engine_id?, selector, name?, config?, config_path?, export?, replicas?, full?)` — load a registry selector; `config` / `config_path` JSON is schema-encoded to the component's `Config` kind.
-- `replace_component(engine_id?, address, selector, config?, config_path?, export?, full?)` — in-place wasm swap behind the same mailbox (ADR-0022).
+- `replace_component(engine_id?, selector, configs?, full?)` — republish a module: every live instance of its namespaces moves to the successor as one group behind its same mailbox, or none does (ADR-0241 §7); `configs: [{address, config | config_path}]` gives an instance a config of its type's new kind.
 - `capture_frame(engine_id?, window, mails?, after_mails?, checks?, similarity?, scale?, max_dimension?, include_image?, save_path?)` — desktop PNG readback of one window; `window` is required: the window's actor path `aether.window.list` reports (the short form `aether.window/:main` is accepted).
 - `collect_failure_evidence(engine_id?, primary_error, operation?, actor_addresses?, component_addresses?, kinds?, frame?)` — a bounded, non-mutating evidence bundle around a failure you already have.
 - `actor_logs(engine_id?, address, max?, level?, since?, contains?)` — tail one actor's log ring; page by passing the prior `next_since` as `since`.

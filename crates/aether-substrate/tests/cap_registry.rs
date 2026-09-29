@@ -23,7 +23,7 @@ use aether_fs::{FsCapability, Write};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, Ping, ReplaceComponent, ReplaceResult, Tick};
-use aether_test_fixtures_kinds::{Bump, InlineProbe, UnsubscribeKeys};
+use aether_test_fixtures_kinds::{GateProbe, GateQuery, UnsubscribeKeys};
 use std::fs;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
@@ -69,52 +69,37 @@ fn cap_registry_reports_fallback() {
     assert!(!harness.accepts(strict, Ping::ID), "a strict receiver rejects an undeclared kind");
 }
 
-/// `aether.component.replace` swaps the bundle's `test.contract.base` export
-/// for its `test.contract.extended` export, which keeps both of the base's
-/// rows and adds a silent `InlineProbe` handler, so the replace passes the
-/// ADR-0231 §5 contract check. It exercises `ReplaceComponent.export`
-/// (#2027): the trampoline's hosted type is the base, so reaching the
-/// extended handler set requires naming the export. The registry reflects
-/// the post-replace accept-set at the same mailbox id (stable across replace
-/// per ADR-0022): `InlineProbe` flips rejected→accepted and `Bump` stays
-/// accepted.
+/// `aether.component.replace` republishes the gate pair's first version with
+/// its second (ADR-0241 §7), whose `test.republish.gate` keeps v1's
+/// `GateQuery` row and adds a `GateProbe` row, so admission's growth rule
+/// passes. The registry reflects the post-replace accept-set at the same
+/// mailbox id (stable across replace per ADR-0022): `GateProbe` flips
+/// rejected→accepted and `GateQuery` stays accepted.
 #[test]
 fn cap_registry_updates_on_replace() {
-    let Some(bundle_path) = require_wasm("aether_test_fixtures_bundle") else {
+    let (Some(v1_path), Some(v2_path)) = (require_wasm("republish_group_v1"), require_wasm("republish_group_v2"))
+    else {
         return;
     };
-    let wasm = fs::read(&bundle_path).expect("read fixture wasm");
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let base = LoadComponent {
-        wasm: wasm.clone(),
-        name: None,
+    let gate = LoadComponent {
+        wasm: fs::read(&v1_path).expect("read fixture wasm"),
+        name: Some("registry".to_owned()),
         config: Vec::new(),
-        export: Some("test.contract.base".to_owned()),
+        export: Some("test.republish.gate".to_owned()),
     };
-    let (swappable, path) =
-        harness.load_any(&base).unwrap_or_else(|error| panic!("load_component(swappable): {error}"));
+    let (swappable, _) = harness.load_any(&gate).unwrap_or_else(|error| panic!("load_component(gate v1): {error}"));
 
-    // Pre-replace: the base accepts Bump, rejects InlineProbe.
-    assert!(harness.accepts(swappable, Bump::ID));
-    assert!(!harness.accepts(swappable, InlineProbe::ID));
+    // Pre-replace: v1 accepts GateQuery, rejects GateProbe.
+    assert!(harness.accepts(swappable, GateQuery::ID));
+    assert!(!harness.accepts(swappable, GateProbe::ID));
 
     let host = harness.actor_ref::<ComponentHostCapability>();
+    let wasm = fs::read(&v2_path).expect("read fixture wasm");
     let swapped = harness
         .execute(vec![(
             "swap",
-            HarnessOp::send_and_await_reply(
-                &host,
-                &ReplaceComponent {
-                    target: path,
-                    wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    // ADR-0096 / #2027: select the extended export from the
-                    // same multi-actor module; a bare replace would reuse
-                    // the trampoline's base tag.
-                    export: Some("test.contract.extended".to_owned()),
-                },
-            ),
+            HarnessOp::send_and_await_reply(&host, &ReplaceComponent { wasm, configs: Vec::new() }),
         )])
         .expect("replace sequence");
     match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
@@ -122,13 +107,10 @@ fn cap_registry_updates_on_replace() {
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
-    // Post-replace: the extended accept-set wins.
-    assert!(
-        harness.accepts(swappable, InlineProbe::ID),
-        "the extended export should accept its declared InlineProbe handler after replace",
-    );
-    // Both exports declare a Bump handler, so it survives the swap.
-    assert!(harness.accepts(swappable, Bump::ID));
+    // Post-replace: v2's accept-set wins.
+    assert!(harness.accepts(swappable, GateProbe::ID), "v2 accepts its added GateProbe handler after replace");
+    // Both versions declare a GateQuery handler, so it survives the swap.
+    assert!(harness.accepts(swappable, GateQuery::ID));
 }
 
 /// `aether.component.drop` clears the dropped mailbox's caps — the guest

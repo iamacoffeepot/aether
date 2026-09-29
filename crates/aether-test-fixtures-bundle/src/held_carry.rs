@@ -46,6 +46,14 @@ struct KeptHelds {
     tags: Vec<u32>,
 }
 
+/// What `HeldRequester` carries across a republish of its module, which
+/// swaps it together with the holders it waits on (ADR-0241 §7).
+#[aether_data::kind(name = "aether.test_fixtures.held_requester_state", default)]
+pub struct HeldRequesterState {
+    sent: Vec<u32>,
+    replies: u32,
+}
+
 /// Sends each [`HeldRequest`] detached and counts the replies it receives:
 /// those that echo a tag it sent, and those a holder that closed first sent
 /// unanswered.
@@ -58,8 +66,19 @@ pub struct HeldRequester {
 impl WasmActor for HeldRequester {
     const NAMESPACE: &'static str = "test.held.requester";
 
+    type State = HeldRequesterState;
+
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(HeldRequester { sent: Vec::new(), replies: 0 })
+    }
+
+    fn dehydrate(&self) -> HeldRequesterState {
+        HeldRequesterState { sent: self.sent.clone(), replies: self.replies }
+    }
+
+    fn rehydrate(&mut self, HeldRequesterState { sent, replies }: HeldRequesterState) {
+        self.sent = sent;
+        self.replies = replies;
     }
 
     #[handler::single]

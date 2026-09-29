@@ -203,7 +203,7 @@ mod tests {
     /// Upload the probe component by staged path, then assert the store
     /// ingested it content-addressed with a manifest read from the wasm,
     /// resolves + loads it by name / hash / handled-kind, dedups an
-    /// identical re-upload, and replaces by hash.
+    /// identical re-upload, and republishes by hash.
     #[test]
     fn fleetharness_uploads_resolves_loads_and_replaces_a_component() {
         if !dist_component_available("aether_test_fixtures_bundle") {
@@ -287,10 +287,18 @@ mod tests {
             }
         }
 
-        // Replace the loaded component by hash (ADR-0022 in-place swap,
-        // ADR-0116 selector). The trampoline keeps its lineage address.
-        let caps = harness.replace_by_selector(engine, &loaded.addr, &format!("{hash}@test.quiet_probe"));
-        assert!(caps.handlers.iter().any(|h| h.id == Tick::ID), "the replaced probe still advertises its Tick handler");
+        // Republish the loaded module by hash (ADR-0116 selector, ADR-0241
+        // §7). The same bytes already publish every namespace, so the replace
+        // answers with the published types and swaps nothing.
+        let types = harness.replace_by_selector(engine, &hash);
+        let quiet = types
+            .iter()
+            .find(|replaced| replaced.namespace == "test.quiet_probe")
+            .unwrap_or_else(|| panic!("the replace reports the loaded type: {types:?}"));
+        assert!(
+            quiet.capabilities.handlers.iter().any(|h| h.id == Tick::ID),
+            "the republished probe still advertises its Tick handler"
+        );
     }
 
     /// A `spawn_substrate` boot manifest written in component selectors

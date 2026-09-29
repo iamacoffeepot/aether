@@ -18,10 +18,11 @@
 use std::fs;
 
 use aether_component::ComponentHostCapability;
-use aether_data::{ErasedActorPath, Kind};
+use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{
     CountQuery, CountReport, HELD_TARGET_FORGETTER, HELD_TARGET_KEEPER, HeldReplyMatched, HeldReplyUnanswered,
     RunHeldRequest,
@@ -39,11 +40,12 @@ const REQUESTER: &str = "test.held.requester";
 enum BeforeDrop {
     /// Nothing: the guest that held is the one dropped.
     Nothing,
-    /// A replace of the keeper, which saves its held reply, so the successor
-    /// is dropped with the hold it carried.
+    /// A republish while the keeper holds; the keeper saves its held reply,
+    /// so its successor is dropped with the hold it carried.
     Replaced,
-    /// A replace of the forgetter, refused because it saves nothing, so the
-    /// reinstated guest is dropped.
+    /// A republish while the forgetter holds, refused because the forgetter
+    /// saves nothing, so every member reinstates and the reinstated forgetter
+    /// is dropped.
     Reinstated,
 }
 
@@ -78,17 +80,13 @@ fn drop_while_held(before: BeforeDrop) -> Option<(SubstrateHarness, Option<Repla
         BeforeDrop::Reinstated => (FORGETTER, forgetter_path, HELD_TARGET_FORGETTER),
     };
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let replace = |target: ErasedActorPath| ReplaceComponent {
-        target,
-        wasm: wasm.clone(),
-        drain_timeout_ms: None,
-        config: Vec::new(),
-        export: Some(export.to_owned()),
-    };
+    // A successor build of the same module: the republish moves every live
+    // instance of the bundle, the holder among them (ADR-0241 §7).
+    let replace = ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() };
 
     let mut steps = vec![("request", HarnessOp::send_and_settle(requester, &RunHeldRequest { tag: 1, target }))];
     if !matches!(before, BeforeDrop::Nothing) {
-        steps.push(("replace", HarnessOp::send_and_await_reply(&host, &replace(path.clone()))));
+        steps.push(("replace", HarnessOp::send_and_await_reply(&host, &replace)));
     }
     steps.extend([
         ("drop", HarnessOp::send_and_await_reply(&host, &DropComponent { target: path })),

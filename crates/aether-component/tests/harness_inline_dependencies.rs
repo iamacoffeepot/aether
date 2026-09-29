@@ -5,8 +5,9 @@
 //! `depends(ClipboardCapability)`. The host checks that declaration when the
 //! module loads, before `Holder` runs: a load on a harness without clipboard
 //! is a `LoadResult::Err` naming `Needy`, and the same load is `Ok` once the
-//! in-memory clipboard is composed. A replace toward the module is refused the
-//! same way, and the replaced victim keeps serving.
+//! in-memory clipboard is composed. A republish toward a successor whose
+//! inline child declares an unmet dependency is refused the same way, and the
+//! running instance keeps serving.
 //!
 //! A private inline child (issue 6590) is checked the same way. The fs-demux
 //! fixture's `InlineFsDemuxParent` declares no dependency, but its private
@@ -24,8 +25,8 @@ use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_kinds::Bump;
 
 const HOLDER_EXPORT: &str = "test.inline_dependency.holder";
-const TARGET_EXPORT: &str = "test.parent_peer.target";
 const REFUSAL: &str = "test.inline_dependency.needy depends on aether.clipboard, which is not live";
+const SUBJECT_REFUSAL: &str = "test.republish.subject_helper depends on aether.clipboard, which is not live";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 const FS_DEMUX_PARENT_EXPORT: &str = "test.inline.fs_demux_parent";
 const PRIVATE_REFUSAL: &str = "test.inline.fs_demux_child depends on aether.fs, which is not live";
@@ -91,49 +92,49 @@ fn a_private_inline_child_dependency_refuses_its_module_load() {
     assert!(!listed.iter().any(|name| name == FS_DEMUX_PARENT_EXPORT), "the refused load created nothing: {listed:?}");
 }
 
+/// Catches a republish checked only against its live members' own types: the
+/// successor's private inline child declares a dependency that is not live,
+/// which a rehydrating member would spawn before anything could refuse it.
 #[test]
 fn a_replace_toward_an_unmet_inline_dependency_keeps_the_running_module() {
-    let Some(wasm) = fixture_wasm() else {
+    let Some(base_path) = require_wasm("republish_subject_base") else {
         return;
     };
-    let Some(bundle_path) = require_wasm("aether_test_fixtures_bundle") else {
+    let Some(inline_path) = require_wasm("republish_subject_inline_depends") else {
         return;
     };
-    let bundle = fs::read(bundle_path).expect("read bundle wasm");
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let (victim_ref, victim) = harness
+    let (subject, _) = harness
         .load_any(&LoadComponent {
-            wasm: bundle,
+            wasm: fs::read(base_path).expect("read subject base wasm"),
             name: None,
             config: Vec::new(),
-            export: Some(TARGET_EXPORT.to_owned()),
+            export: None,
         })
-        .unwrap_or_else(|error| panic!("the victim must load: {error}"));
+        .unwrap_or_else(|error| panic!("the subject must load: {error}"));
 
     let operation = HarnessOp::send_and_await_reply(
         &harness.actor_ref::<ComponentHostCapability>(),
-        &ReplaceComponent {
-            target: victim,
-            wasm,
-            drain_timeout_ms: None,
-            config: Vec::new(),
-            export: Some(HOLDER_EXPORT.to_owned()),
-        },
+        &ReplaceComponent { wasm: fs::read(inline_path).expect("read successor wasm"), configs: Vec::new() },
     );
     let result = harness.execute(vec![("replace", operation)]).expect("replace sequence");
     let ReplaceResult::Err { error } = result.reply::<ReplaceResult>("replace").expect("decode ReplaceResult") else {
-        panic!("a replace toward a module whose inline child's dependency is not live must be refused");
+        panic!("a republish whose inline child's dependency is not live must be refused");
     };
-    assert_eq!(error, REFUSAL, "the refusal names the inline child and the missing namespace");
+    assert_eq!(
+        error,
+        format!("replace refused: {SUBJECT_REFUSAL}"),
+        "the refusal names the inline child and the missing namespace"
+    );
 
-    // A refused replacement keeps the running module: the victim still
+    // A refused republish keeps the running module: the subject still
     // answers `Bump` with exactly one `TickObserved`.
     let baseline = harness.count_observed(TICK_OBSERVED);
-    harness.execute(vec![("bump", HarnessOp::send_and_settle(victim_ref, &Bump))]).expect("bump the victim");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(subject, &Bump))]).expect("bump the subject");
     assert_eq!(
         harness.count_observed(TICK_OBSERVED),
         baseline + 1,
-        "the victim must still serve after a refused replace"
+        "the subject must still serve after a refused replace"
     );
 }

@@ -5,16 +5,16 @@ use super::ids::{resolve_handled_kind, static_kind_name};
 use super::render::{frame_size_aware_error, internal, internal_msg, json, project_capabilities};
 use super::{COMPONENT_CAP, FLEET_CAP, Mcp};
 use crate::args::{
-    ArtifactPinArgs, ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, ReplaceComponentArgs, UploadBinaryArgs,
-    UploadComponentArgs,
+    ArtifactPinArgs, ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, ReplaceComponentArgs, ReplaceConfigArgs,
+    UploadBinaryArgs, UploadComponentArgs,
 };
 use aether_codec::frame::max_frame_size;
-use aether_data::{EngineId, Kind, SchemaType, wire};
+use aether_data::{EngineId, ErasedActorPath, Kind, SchemaType, wire};
 use aether_kinds::{
     BinaryEntry, ComponentCapabilities, ComponentEntry, KindDescriptorWire, ListComponentBinaries,
     ListComponentBinariesResult, ListEngineBinaries, ListEngineBinariesResult, LoadComponent, LoadResult,
-    ReplaceComponent, ReplaceResult, SetArtifactPinned, SetArtifactPinnedResult, UploadBinary, UploadBinaryResult,
-    UploadComponent, UploadComponentResult, replica_load_name,
+    ReplaceComponent, ReplaceConfig, ReplaceResult, SetArtifactPinned, SetArtifactPinnedResult, UploadBinary,
+    UploadBinaryResult, UploadComponent, UploadComponentResult, replica_load_name,
 };
 use rmcp::ErrorData as McpError;
 use serde::Serialize;
@@ -557,49 +557,74 @@ async fn load_single_component(
 
 pub(super) async fn replace_component(mcp: &Mcp, args: ReplaceComponentArgs) -> Result<String, McpError> {
     let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
-    // The engine resolves the operator's spelling to the canonical lineage,
-    // which is both the replace target the component host proves and the
-    // cache key.
-    let target = mcp.resolve_engine_path(engine, &args.address).await.map_err(internal)?;
-    let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
-    // ADR-0116: resolve the selector hub-local to the replacement wasm
-    // bytes (hash-primary, so a hash pins/rolls to an exact build).
+    let ReplaceComponentArgs { selector, configs, full, .. } = args;
+    if let Some((_, actor)) = selector.split_once('@') {
+        return Err(McpError::invalid_params(
+            format!(
+                "replace_component {selector:?}: a replace names no actor ({actor:?}); every live instance of the \
+                 module's namespaces moves, so pass the module selector alone"
+            ),
+            None,
+        ));
+    }
+    // ADR-0116: resolve the selector hub-local to the successor's wasm
+    // bytes (hash-primary, so a hash pins or rolls to an exact build).
     let resolved = mcp.resolve_component(&selector).await?;
-    let config = component_config_bytes(
-        resolved.config_kind.as_ref(),
-        args.config,
-        args.config_path.as_deref(),
-        &format!("replace_component {selector:?}"),
-    )
-    .await?
-    .unwrap_or_default();
-    // ADR-0096: an explicit `export` arg wins over the selector's
-    // `@actor` half; `None` reuses the actor type the trampoline
-    // currently hosts.
-    let export = args.export.or(resolved.export);
+
+    let mut encoded = Vec::with_capacity(configs.len());
+    for ReplaceConfigArgs { address, config, config_path } in configs {
+        let context = format!("replace_component {selector:?} config for {address:?}");
+        // The engine resolves the operator's spelling to the canonical
+        // lineage; its leaf names the instance's type (ADR-0241 §5), and
+        // resolving `module@type` answers that type's config kind in the
+        // successor module, the kind its config is encoded to.
+        let path = mcp.resolve_engine_path(engine, &address).await.map_err(internal)?;
+        let typed = mcp.resolve_component(&format!("{selector}@{}", leaf_namespace(&path))).await?;
+        let config = component_config_bytes(typed.config_kind.as_ref(), config, config_path.as_deref(), &context)
+            .await?
+            .ok_or_else(|| {
+                McpError::invalid_params(format!("{context}: set one of `config` or `config_path`"), None)
+            })?;
+        encoded.push(ReplaceConfig { path, config });
+    }
+
     let reply = mcp
         .session
-        .call_one(engine_envelope(
-            engine,
-            COMPONENT_CAP,
-            // `drain_timeout_ms` is a vestigial wire field no substrate
-            // reads (post-ADR-0038 the splice is structural). The tool no
-            // longer accepts it; the wire kind still carries it, so it is
-            // pinned to `None` here until the kind itself drops it.
-            &ReplaceComponent { target: target.clone(), wasm: resolved.wasm, drain_timeout_ms: None, config, export },
-        ))
+        .call_one(engine_envelope(engine, COMPONENT_CAP, &ReplaceComponent { wasm: resolved.wasm, configs: encoded }))
         .await
         .map_err(|e| frame_size_aware_error(&format!("replace_component {selector:?}"), e))?;
     match ReplaceResult::decode_from_bytes(&reply.payload) {
-        Some(ReplaceResult::Ok { capabilities }) => {
-            let address = target.to_string();
-            mcp.components
-                .lock()
-                .expect("component cache mutex is never poisoned")
-                .insert((engine, target), capabilities.clone());
-            component_reply(&engine_id, &address, &capabilities, args.full)
+        Some(ReplaceResult::Ok { types }) => {
+            // Every cached instance of a republished type now runs the
+            // successor, so its cached surface is the type's new one.
+            let mut cache = mcp.components.lock().expect("component cache mutex is never poisoned");
+            for ((cached_engine, path), capabilities) in cache.iter_mut() {
+                if let Some(replaced) =
+                    types.iter().find(|replaced| *cached_engine == engine && replaced.namespace == leaf_namespace(path))
+                {
+                    capabilities.clone_from(&replaced.capabilities);
+                }
+            }
+            drop(cache);
+            let types: Vec<_> = types
+                .iter()
+                .map(|replaced| {
+                    serde_json::json!({
+                        "namespace": replaced.namespace,
+                        "capabilities": project_capabilities(&replaced.capabilities, full),
+                    })
+                })
+                .collect();
+            json(&serde_json::json!({ "engine_id": engine_id, "types": types }))
         }
         Some(ReplaceResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable ReplaceResult")),
     }
+}
+
+/// The namespace of the type an actor path names: its last segment, before
+/// any `:key` (ADR-0241 §5).
+fn leaf_namespace(path: &ErasedActorPath) -> &str {
+    let leaf = path.as_str().rsplit('/').next().unwrap_or(path.as_str());
+    leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace)
 }

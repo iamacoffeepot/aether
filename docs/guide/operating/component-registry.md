@@ -25,7 +25,7 @@ on one engine, or into several engines.
 | `pin_artifact` | durable explicit pin by exact stored content hash |
 | `unpin_artifact` | drop only the explicit pin; a name still protects |
 | `load_component` | instantiate stored wasm in one engine |
-| `replace_component` | splice stored wasm behind one live component address |
+| `replace_component` | republish a stored module over every live instance of its namespaces |
 | `describe_component` | inspect a live component's receive surface |
 | `describe_kinds` | inspect its config, input, and reply schemas in the engine's live vocabulary |
 | `send_mail` | drive a component, including the generic `aether.component.drop` lifecycle mail |
@@ -40,8 +40,9 @@ Inspect that kind with `describe_kinds` before constructing params. Await its
 Drop runs the guest's `unwire`, releases the wasm, and closes the instance
 (ADR-0241 §8). The close purges capability-owned subscriptions and routes
 through each watcher's `MonitorNotice`, and the name tombstones for the engine's
-lifetime: a later load of it is refused as retired, and a replace or second drop
-at the path is refused. Load under a new name to bring the component back.
+lifetime: a later load of it is refused as retired, and a second drop at the
+path is refused. A drop that arrives while the instance's module republishes
+waits until the replace answers. Load under a new name to bring the component back.
 
 ## Upload before selector
 
@@ -110,8 +111,8 @@ engine's `aether.component` cap, and waits for `LoadResult`.
 On a single load, record both outputs:
 
 - `address`: the full lineage address used as `send_mail.address`, the
-  `aether.component.drop` kind's `target`, `replace_component.address`, and by
-  live `describe_component`.
+  `aether.component.drop` kind's `target`, a `replace_component` config's
+  `address`, and by live `describe_component`.
 - `capabilities`: handled kinds, reply contracts, fallback, docs, and config
   kind for the selected actor type.
 
@@ -187,31 +188,37 @@ engine reachability matters.
 
 ## Replacing safely
 
-Use `replace_component` with the current engine id, the component's `address`,
-and a previously uploaded selector. The address is the same spelling every other
-tool takes: a canonical ADR-0099 lineage (the component's published name) or an
-unambiguous ADR-0166 short path. Prefer a content hash for the selector so the
-replacement is unambiguous.
+`replace_component` republishes a module (ADR-0241 §7). Pass the current engine
+id and a previously uploaded selector; prefer a content hash so the successor is
+unambiguous. A replace names no instance and takes no `module@actor` selector:
+every live instance of every namespace the module publishes moves to the
+successor together, or none does, and each keeps its address and mailbox.
 
-On success the trampoline mailbox stays stable and the returned capabilities
-describe the replacement actor type. An omitted export reuses the actor type the
-trampoline currently hosts; it does not necessarily select the new module's
-default entry. The replacement must keep every handler row of the hosted type: a dropped or
-changed row is refused and a changed reply means loading under a new name. A
-dropped instance cannot be replaced.
+Identical bytes answer `Ok` with no swap. Before any instance is touched the
+host refuses the whole replace, naming each instance a check refuses, when the
+module has no predecessor (nothing publishes its namespaces: load it instead),
+is content-addressed, already has a republish in flight, declares a boot or
+succeeds one that did, drops a namespace or narrows a handler row or fallback of
+one, adds a dependency that is not live to a live instance's type, or leaves an
+instance without a config of its type's kind. An instance whose type's config
+kind changed needs a `configs` entry, `{address, config | config_path}`, which
+the harness encodes to the successor's Config kind; every other instance keeps
+its stored config. An inline child cannot be given a config, so a config-kind
+change on a live inline child's type is refused.
 
-There is no drain phase and no drain timeout. ADR-0038 made the splice
-structural, so the replace kind's `drain_timeout_ms` field is vestigial wire
-shape the MCP layer always sends empty; the tool exposes no such argument.
-Require an explicit successful result, then re-run
-`describe_component` and a safe probe. Failure is phase-dependent: validation
-and a failed instantiation preserve the old guest untouched; a state-save,
-carried-context or rehydrate failure reinstalls the old guest after its `unwire`
-and `on_dehydrate` hooks ran and runs its `wire` again, and their effects beyond
-what `wire` rebuilds stay. Nothing the failed candidate sent leaves. Observe live behavior
-before deciding whether to retry or roll forward. After an error, both MCP's
-cache and the substrate capability registry describe the old handler set, which
-the reinstated guest may no longer fully serve if its hooks tore down state. Use
+Then every instance prepares its successor while mail for it waits at its inbox
+gate, the module publishes, and every instance commits, receiving the waiting
+mail in order. The reply, `{engine_id, types: [{namespace, capabilities}]}`,
+comes once every commit's chain has settled. A refusal while preparing, or a
+publish failure, aborts every instance: each reinstates its old guest and runs
+its `wire` again, and whatever its `unwire` and `on_dehydrate` tore down beyond
+what `wire` rebuilds stays. Nothing a failed successor sent leaves. Loads and
+drops of the module's namespaces that arrive meanwhile wait for the answer.
+
+Require an explicit successful result, then re-run `describe_component` and a
+safe probe. After an error MCP's cache and the capability registry describe the
+old handler sets, which a reinstated guest may no longer fully serve if its
+hooks tore down state. Use
 [Replacement failure states](components/replacement-failure-states.md) rather
 than treating `describe_component` as rollback proof.
 
