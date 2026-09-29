@@ -29,7 +29,8 @@ off-dispatch. Sharding changes throughput topology, not the public kinds.
 The baseline handler receives `aether.http.server.request`, containing the
 method, path, query, headers, body, and peer address. It has no request-id
 field; dispatch identity and reply correlation ride the mail envelope. The
-handler replies with `aether.http.server.response`, containing status, headers,
+handler replies with `aether.http.server.router_result` (`HttpRouterResult`), whose
+`Response` variant carries an `aether.http.server.response`: status, headers,
 and a complete body.
 
 The configured `max_request_bytes` bounds a **buffered request** body, and
@@ -48,10 +49,12 @@ Handlers declare interest by mail during wiring and unregister during teardown.
 A route key includes the method and path pattern. Registration results surface
 invalid patterns and ownership conflicts explicitly.
 
-Every route holder covers one protocol, `HttpRouter`: a manual row taking
-`aether.http.server.request`, so the holder's request handler is
-`#[handler::manual]` and replies through its obligation, whatever it replies
-(a buffered response, a stream open, a websocket accept, or a deferred reply).
+Every route holder covers one protocol, `HttpRouter`: one single row taking
+`aether.http.server.request` and replying `HttpRouterResult`, whose three
+variants name a buffered response, a stream open, and a websocket accept. The
+holder's request handler returns it, or returns `Pending<HttpRouterResult>` and
+answers later through a held reply (ADR-0243); a manual handler does not cover
+the row. A router that closes while it holds a reply answers `502`.
 An actor registers itself with `register_route_self`, and the server casts the
 sender to `HttpRouter`, refusing one that does not cover it. Another actor is
 registered by its canonical path, a `ProtocolPath<HttpRouter>`. Neither form
@@ -68,7 +71,13 @@ members are removed; lifecycle cleanup is part of route ownership, not a caller
 convention.
 
 `#[http::router]` derives registration from typed `#[route]` methods and
-emits the router's one manual `aether.http.server.request` handler. The actor
+emits the router's one single `aether.http.server.request` handler, replying
+`HttpRouterResult`. A native route that returns `http::Outcome` may defer
+(ADR-0154 §2): `ctx.defer(&request).to::<Peer>()` holds the router's reply,
+parks it in the forwarded request's context, and an `#[http::reply]` method
+answers it through that held reply when the peer replies; a router with such a
+route returns `Pending<HttpRouterResult>`. A deferred request whose peer never
+replies keeps its chain open until the server's `504`. The actor
 must declare `depends(HttpServerCapability)`, because the injected `wire`
 registration mails the server; without it, the actor fails to compile at
 `#[http::router]`.
@@ -99,8 +108,8 @@ copying an old recipe.
 
 ## Response streaming
 
-A handler opts into streaming by replying with
-`aether.http.server.response_stream_open`. That initial correlated reply
+A handler opts into streaming by replying `HttpRouterResult::Stream`, carrying
+an `aether.http.server.response_stream_open`. That initial correlated reply
 declares status and headers. The capability grants a bounded number of chunks
 through `stream_credit`; the handler sends at most that many
 `response_chunk` messages before waiting for more credit, then sends
@@ -133,7 +142,8 @@ violation that can tear down the stream; ignoring credit can park the producer.
 ## Websocket upgrade
 
 An ordinary HTTP upgrade request reaches the selected route. The handler may
-reply with `websocket.accept`; after that, complete de-fragmented messages and
+reply `HttpRouterResult::WebSocket`, carrying a `websocket.accept`, or decline
+with `HttpRouterResult::Response`; after an accept, complete de-fragmented messages and
 close events use an explicit `stream_id` in both directions.
 
 `WebSocketStream` is reply-derived like response streams: it remembers the

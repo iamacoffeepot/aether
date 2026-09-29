@@ -786,6 +786,18 @@ impl HttpShardState {
         self.signal_reader(conn_id, ReaderControl::Respond { bytes, resume });
     }
 
+    /// Answer the in-flight request `correlation` with a handler's buffered
+    /// `response` (ADR-0108 §5): render it (no body for a HEAD request),
+    /// clear the in-flight entry, and hand the bytes to the parked reader,
+    /// which on keep-alive loops into the next request and otherwise exits
+    /// into the normal `ReaderClosed` teardown (HTTP/1.0, or
+    /// `Connection: close`).
+    pub fn finish_buffered(&mut self, correlation: u64, pending: PendingRequest, response: &HttpServerResponse) {
+        let bytes = render_handler_response(response, pending.method == HttpMethod::Head, pending.keep_alive);
+        self.in_flight.remove(&correlation);
+        self.respond_and_finish(pending.conn_id, bytes, pending.keep_alive);
+    }
+
     /// Release the reader for the next request on a kept-alive connection by
     /// signalling its resume channel. A send failure means the reader
     /// already exited (its own read error / EOF), so the connection is

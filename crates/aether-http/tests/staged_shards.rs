@@ -2,11 +2,11 @@
 //! harness is intentionally native-only: no component host or wasm module is
 //! composed, so the observed delay is dispatch-shard activation itself.
 
-use aether_actor::{Manual, OutboundReply, actor};
+use aether_actor::actor;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_http::{
-    HttpServerCapability, HttpServerConfig, HttpServerRequest, HttpServerResponse, RegisterRouteResult,
-    RegisterRouteSelf,
+    HttpRouterResult, HttpServerCapability, HttpServerConfig, HttpServerRequest, HttpServerResponse,
+    RegisterRouteResult, RegisterRouteSelf,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -32,13 +32,17 @@ impl NativeActor for ColdHttpHandler {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf { prefix: "/".to_owned(), method: None, shared: false });
     }
 
-    #[handler::manual]
+    #[handler::single]
     fn on_request(
         _state: &mut ColdHttpHandlerState,
-        ctx: &mut NativeCtx<'_, Self, Manual>,
+        _ctx: &mut NativeCtx<'_>,
         request: HttpServerRequest,
-    ) {
-        ctx.reply(&HttpServerResponse { status: 200, headers: Vec::new(), body: request.path.into_bytes() });
+    ) -> HttpRouterResult {
+        HttpRouterResult::Response(HttpServerResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: request.path.into_bytes(),
+        })
     }
 
     #[handler::single]

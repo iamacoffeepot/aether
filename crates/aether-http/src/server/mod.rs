@@ -15,11 +15,11 @@
 //! causal chain via `NativeCtx::send_encoded_detached_to` (the wake mail is causally unrelated
 //! to the inbound request), records the open response socket in an
 //! in-flight table keyed by the dispatch's correlation id, and subscribes
-//! to settlement of the dispatched root. The handler replies
-//! [`HttpServerResponse`](crate::kinds::HttpServerResponse); the reply
-//! routes back to the cap, the
-//! reply-interception fallback formats the HTTP/1.1 response and writes it
-//! to the held socket. A response-less chain settles into `502`, a
+//! to settlement of the dispatched root. The handler replies one
+//! [`HttpRouterResult`](crate::kinds::HttpRouterResult); the reply routes back
+//! to the dispatching shard, whose typed reply handler formats a buffered
+//! response and writes it to the held socket, or opens a response stream or
+//! a websocket. A response-less chain settles into `502`, a
 //! per-request timeout into `504`, and the trust caps reject oversize or
 //! malformed input with `413` / `431` / `501` before any dispatch.
 //!
@@ -112,8 +112,8 @@ pub struct HttpServerHandle {
 
 /// `aether.http.server` cap **identity** (ADR-0122 identity/runtime split). A
 /// ZST carrying only the addressing — `Addressable`, the per-handler
-/// `HandlesKind` markers, the `#[fallback]` reply-interception marker, and the
-/// name-inventory entry, all emitted always-on by `#[actor]`. The
+/// `HandlesKind` markers, and the name-inventory entry, all emitted always-on
+/// by `#[actor]`. The
 /// state-bearing runtime (`HttpSupervisorState`, which owns the listener +
 /// accept thread + shared route table + shard sinks, ADR-0135) lives behind
 /// the one `feature = "runtime"` gate, so a transport-only build never names
@@ -124,8 +124,8 @@ pub struct HttpServerCapability;
 // The struct-hosted `#[actor(singleton)]` reads the sibling `runtime` module
 // off disk, lifts the `NAMESPACE` + `#[handler]` kinds out of the
 // `#[runtime] impl NativeActor` there, and emits the always-on identity
-// markers (`Addressable`, one `HandlesKind<K>` per handler, the `#[fallback]`
-// marker, the name-inventory entry) against this struct. The kind types those
+// markers (`Addressable`, one `HandlesKind<K>` per handler, the
+// name-inventory entry) against this struct. The kind types those
 // markers name (`HttpInboundReady` / `Settled`) are imported at file root
 // above.
 use aether_actor::actor;

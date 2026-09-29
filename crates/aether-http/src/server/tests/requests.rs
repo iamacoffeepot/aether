@@ -1,7 +1,8 @@
 //! Request parsing, framing rejects and the rendered response head: the
 //! method / path / query / body round trip, the size and framing guards
-//! (`413` / `411` / `501`), the no-route and response-less settlement paths
-//! (`503` / `502`), interim `100 Continue`, and HEAD body suppression.
+//! (`413` / `411` / `501`), the no-route `503`, the `502` a router that
+//! closes before answering gives, interim `100 Continue`, and HEAD body
+//! suppression.
 
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
@@ -10,7 +11,7 @@ use std::sync::Arc;
 
 use crate::server::HttpServerCapability;
 
-use super::handlers::{EchoHttpHandler, FixedBodyHttpHandler, SilentHttpHandler};
+use super::handlers::{ClosingHttpHandler, EchoHttpHandler, FixedBodyHttpHandler};
 use super::support::{body_of, boot_buffered, config_for, port_of, round_trip, round_trip_live};
 
 /// A GET round-trips to the handler and its reply returns as
@@ -138,25 +139,32 @@ fn no_handler_is_503() {
     assert!(response.starts_with("HTTP/1.1 503 "), "expected 503, got: {response:?}");
 }
 
-/// A handler that receives the request but never replies settles
-/// into `502` via the settlement safety net.
+/// A router that holds the request's reply and closes before answering
+/// answers `502` at once, from its close: the engine sends
+/// `HttpRouterResult::unanswered()` for the live held reply (ADR-0243 §1).
+/// Catches a close that settles the held reply silently, which the
+/// settlement net would answer with its own `502` body, and an unanswered
+/// reply that never reaches the shard, which would wait out the request
+/// timeout into a `504`.
 #[test]
-fn response_less_chain_is_502() {
+fn closing_router_answers_502() {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         // TraceDispatchCapability folds trace events into per-root
-        // counters and fires settlement once a root drains; without it
-        // the server's settlement subscription never wakes.
+        // counters and fires settlement once a root drains; with it the
+        // server's settlement net is live, so the body tells the close's
+        // answer from the net's.
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<SilentHttpHandler>(())
+        .with_actor::<ClosingHttpHandler>(())
         .with_actor_configured::<HttpServerCapability>((), config_for(1024))
         .build_passive()
         .expect("caps boot");
 
-    // The silent handler binds `/` via async `wire` mail; poll past the
-    // pre-registration `503` to the dispatched `502` the settlement net raises.
+    // The closing handler binds `/` via async `wire` mail; poll past the
+    // pre-registration `503` to the one request it holds and closes on.
     let response = round_trip_live(port_of(&chassis), b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 502 "), "expected 502, got: {response:?}");
+    assert_eq!(body_of(&response), "router closed before answering", "the close answered, not the net: {response:?}");
 }
 
 /// A percent-encoded path is decoded before it reaches the handler

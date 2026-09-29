@@ -71,21 +71,21 @@ aether-http = { path = "../aether-http", default-features = false }
 
 ## 3. Write the handler
 
-A handler is a wasm component with one `#[handler::manual]` for
-`aether.http.server.request`: every route holder covers the `HttpRouter`
-protocol, whose one row is manual, so the handler replies through
-`ctx.reply(&…)` rather than a return value. It replies
-`aether.http.server.response` with a status code, optional headers, and a byte
-body. The server writes the formatted
+A handler is a wasm component with one `#[handler::single]` for
+`aether.http.server.request` that returns `HttpRouterResult`: every route holder
+covers the `HttpRouter` protocol, whose one row replies
+`aether.http.server.router_result`. A buffered answer is its `Response` variant,
+an `aether.http.server.response` with a status code, optional headers, and a
+byte body. The server writes the formatted
 HTTP/1.1 response to the client socket. On HTTP/1.1 the connection is kept alive
 by default and serves the next request on the same socket; a client that sends
 `Connection: close` (and HTTP/1.0, which closes by default) terminates it, and
 an idle kept-alive connection is closed after `keep_alive_timeout_millis`.
 
 ```rust
-use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_http::HttpServerCapability;
-use aether_http::kinds::{HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
+use aether_http::kinds::{HttpRouterResult, HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
 
 pub struct Web;
 
@@ -108,33 +108,34 @@ impl WasmActor for Web {
         });
     }
 
-    #[handler::manual]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, req: HttpServerRequest) {
+    #[handler::single]
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpRouterResult {
         let (status, body): (u16, &[u8]) = match req.path.as_str() {
             "/" => (200, b"hello"),
             _ => (404, b"not found"),
         };
-        ctx.reply(&HttpServerResponse {
+        HttpRouterResult::Response(HttpServerResponse {
             status,
             headers: Vec::new(),
             body: body.to_vec(),
-        });
+        })
     }
 }
 
 aether_actor::export!(public = [Web]);
 ```
 
-`#[handler::manual]` takes the `Manual` ctx (`WasmCtx<'_, Self, Manual>`),
-whose `ctx.reply(&…)` sends the reply explicitly, so one handler can reply any
-of the server's reply kinds (see "Mixing buffered and streamed routes" below).
+`HttpRouterResult` names the three answers the server accepts: `Response` (a
+buffered `HttpServerResponse`), `Stream` (an `HttpResponseStreamOpen`, see
+"Streaming a response" below), and `WebSocket` (a `WebSocketAccept`). One
+handler can return any of them per request (see "Mixing buffered and streamed
+routes" below), and returning any other kind is a compile error.
 The `register_route_self` registration casts the sender to `HttpRouter`; a
-component with no manual `aether.http.server.request` handler is answered
-`register_route_result::Err`. A handler may omit its actor, and the macro types
-the ctx by it — `WasmCtx<'_>` reads as `WasmCtx<'_, Self>`, reaching only the
-actors the component declares with `depends(R)`. The actor is the first
-parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`); spell
-`WasmCtx<'_, Erased>` for the untyped view.
+component with no `aether.http.server.request` handler replying
+`HttpRouterResult` is answered `register_route_result::Err`. A handler may omit
+its actor, and the macro types the ctx by it — `WasmCtx<'_>` reads as
+`WasmCtx<'_, Self>`, reaching only the actors the component declares with
+`depends(R)`. Spell `WasmCtx<'_, Erased>` for the untyped view.
 
 The component registers at `aether.component/aether.embedded:web` (its
 `NAMESPACE` const rendered through the ADR-0099 lineage). Its `wire` hook
@@ -189,7 +190,7 @@ curl http://127.0.0.1:8080/
 ```
 
 The server reads the request, dispatches `aether.http.server.request` to the
-handler mailbox, waits for the `aether.http.server.response` reply, and writes
+handler mailbox, waits for the `aether.http.server.router_result` reply, and writes
 the formatted response to the client. The server adds the `Connection` header
 (`keep-alive` on a persistent HTTP/1.1 connection, `close` otherwise) and an
 appropriate `Content-Length` header; your handler sets the status code,
@@ -232,7 +233,7 @@ a test) use the `register_route` / `unregister_route` forms, which name the
 handler by its canonical path.
 
 Every route dispatches as `aether.http.server.request` to the holder's one
-manual handler, so a component serving several prefixes tells them apart by
+request handler, so a component serving several prefixes tells them apart by
 `req.path` (or through the typed surface below, which does that for it).
 
 ### Registering a route for another actor
@@ -249,9 +250,9 @@ the round-robin set on it).
 
 The `handler` path must be canonical — the `path` a `load_component` reply
 returns, `aether.component/aether.embedded:api` for a component loaded as
-`api`. The named actor has to take `aether.http.server.request` in a
-`#[handler::manual]`: the path is `ProtocolPath<HttpRouter>`, so a path whose
-live route does not publish that manual row is refused when the mail is
+`api`. The named actor has to take `aether.http.server.request` and reply
+`HttpRouterResult`: the path is `ProtocolPath<HttpRouter>`, so a path whose
+live route does not publish that row is refused when the mail is
 decoded — logged at warn, with no `register_route_result` reply at all, rather
 than accepted and then answering `502` on every request. In Rust the same path
 is written `ActorPath::<Handler>::root().narrow::<HttpRouter>()`, which will
@@ -295,8 +296,8 @@ The typed surface writes that whole registration for you (ADR-0131). Put
 `#[http::router]` on the actor's impl block, above `#[actor]`, and
 `#[http::route(<Method|any>, "<prefix>")]` on a method; the macros inject the
 `register_route_self` send into `wire` and emit the router's one
-`#[handler::manual]` for `aether.http.server.request`, which picks the route and
-replies what the method returns. A routed method takes an
+`#[handler::single]` for `aether.http.server.request`, which picks the route and
+answers `HttpRouterResult::Response` with what the method returns. A routed method takes an
 `http::Ctx<'_, C>` — the transport ctx (`WasmCtx` here) plus the request and
 matched route, dereffing to the ctx so mail sends read as usual — and returns
 `HttpServerResponse`. The actor must declare `depends(HttpServerCapability)`
@@ -371,8 +372,15 @@ and its siblings, on both transports — and a route that sends to `R` needs
 `depends(R)` like any other handler.
 
 Drop to the raw `register_route_self` surface above for a streaming route
-(`HttpResponseStreamOpen`) — the typed surface returns `HttpServerResponse`, so
-a streamed response keeps its own hand-written `#[handler::manual]`.
+(`HttpRouterResult::Stream`) — the typed surface returns `HttpServerResponse`,
+so a streamed response keeps its own hand-written request handler.
+
+A native route may instead return `http::Outcome` to answer later (ADR-0154
+§2): `ctx.defer(&request).to::<Peer>()` forwards a request to a declared
+dependency and holds the router's reply (ADR-0243), and an `#[http::reply]`
+method maps the peer's reply into the `HttpServerResponse` that answers it.
+A router with such a route returns `Pending<HttpRouterResult>`. `Outcome` is
+native-only, so a wasm route returns `HttpServerResponse`.
 
 ### Scaling one handler to N instances
 
@@ -387,10 +395,14 @@ or `shared`).
 
 ## What happens when the handler doesn't reply
 
-If the handler receives the request but returns without calling `ctx.reply`, the
-settled chain triggers the `502 Bad Gateway` safety net. If the handler takes
-longer than `AETHER_HTTP_SERVER_REQUEST_TIMEOUT_MILLIS` (default 30 000 ms), the
-server sends `504 Gateway Timeout`. A request matching no route (nothing has
+A request handler always answers: it returns its `HttpRouterResult`, or holds it
+and answers later. A router that closes while it still holds a reply answers
+`502 Bad Gateway` at once (`router closed before answering`). A chain that
+settles with no answer, such as a streamed upload whose `request_stream_end`
+handler replies nothing, triggers the server's own `502` safety net. If the
+answer takes longer than `AETHER_HTTP_SERVER_REQUEST_TIMEOUT_MILLIS` (default
+30 000 ms), as a deferred route whose peer never replies does, the server sends
+`504 Gateway Timeout`. A request matching no route (nothing has
 claimed it — e.g. no handler loaded yet) returns `503 Service Unavailable`.
 
 ## Adding response headers
@@ -415,8 +427,8 @@ headers.
 
 ## Streaming a response
 
-A handler that serves a large download or a long-lived event stream replies
-`HttpResponseStreamOpen` in place of `HttpServerResponse`, then emits the body
+A handler that serves a large download or a long-lived event stream returns
+`HttpRouterResult::Stream` in place of `HttpRouterResult::Response`, then emits the body
 across many `HttpResponseChunk` mails and terminates with
 `HttpResponseStreamEnd` (ADR-0128). The server renders the response as chunked
 transfer-encoding, so the whole body never resides in memory at once.
@@ -441,10 +453,10 @@ mail with `ctx.sender()` and hands it to `from_credit`, so the credit handler is
 an ordinary `#[handler::single]`:
 
 ```rust
-use aether_actor::{Manual, OutboundReply, WasmCtx, WasmInitCtx};
+use aether_actor::{WasmCtx, WasmInitCtx};
 use aether_http::ResponseStream;
 use aether_http::kinds::{
-    HttpResponseStreamOpen, HttpServerRequest, HttpStreamCredit,
+    HttpResponseStreamOpen, HttpRouterResult, HttpServerRequest, HttpStreamCredit,
 };
 
 pub struct Feed {
@@ -463,11 +475,11 @@ impl WasmActor for Feed {
     }
 
     // Open the stream. The body arrives later, one chunk per unit of credit.
-    #[handler::manual]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _req: HttpServerRequest) {
+    #[handler::single]
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterResult {
         self.next = 0;
         self.done = false;
-        ctx.reply(&HttpResponseStreamOpen { status: 200, headers: Vec::new() });
+        HttpRouterResult::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
     }
 
     // Spend the granted credit, then terminate once the body is exhausted.
@@ -498,28 +510,28 @@ impl WasmActor for Feed {
 }
 ```
 
-The buffered `HttpServerResponse` path is unchanged — a handler that replies it
-gets a single `Content-Length`-framed response exactly as before. Streaming is
+The buffered `HttpRouterResult::Response` path is unchanged — a handler that
+returns it gets a single `Content-Length`-framed response exactly as before. Streaming is
 purely opt-in per reply.
 
 ## Mixing buffered and streamed routes
 
 "Stream one route, buffer the rest" is a single handler choosing between two
-reply kinds per request. The request handler is `#[handler::manual]` already,
-so its `ctx.reply(&…)` sends whichever one the request calls for:
+`HttpRouterResult` variants per request, returning whichever one the request
+calls for:
 
 ```rust
-use aether_actor::{Manual, OutboundReply, WasmCtx};
-use aether_http::kinds::{HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse};
+use aether_actor::WasmCtx;
+use aether_http::kinds::{HttpResponseStreamOpen, HttpRouterResult, HttpServerRequest, HttpServerResponse};
 
-#[handler::manual]
-fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, req: HttpServerRequest) {
+#[handler::single]
+fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpRouterResult {
     match req.path.as_str() {
-        "/download" => ctx.reply(&HttpResponseStreamOpen {
+        "/download" => HttpRouterResult::Stream(HttpResponseStreamOpen {
             status: 200,
             headers: Vec::new(),
         }),
-        _ => ctx.reply(&HttpServerResponse {
+        _ => HttpRouterResult::Response(HttpServerResponse {
             status: 404,
             headers: Vec::new(),
             body: b"not found".to_vec(),
@@ -532,7 +544,7 @@ fn on_request(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, req: HttpServerReq
 
 This recipe names the env keys and kind names live in the source. Before
 following it, confirm `AETHER_HTTP_SERVER_ENABLED`, `HttpServerRequest`,
-`HttpServerResponse`, `HttpServerConfig`, the `--http-server-*` argv flags
+`HttpServerResponse`, `HttpRouterResult`, `HttpServerConfig`, the `--http-server-*` argv flags
 (`cli_prefix = "http-server"` on `HttpServerConfig`), `RegisterRoute` /
 `UnregisterRoute` / `HttpRouter` / `HttpMethod`, the `http::{router, route,
 FromRequest, Ctx}` authoring surface, and `http::ResponseStream` still exist

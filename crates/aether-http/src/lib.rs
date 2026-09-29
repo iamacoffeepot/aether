@@ -11,8 +11,7 @@
 //! `FromRequest` / `Path` / `Ctx` types this crate owns.
 //!
 //! The `runtime` feature carries the `aether_substrate`-typed half: both cap
-//! states, the listener and its dispatch shards, and the deferred-reply
-//! obligation table. The kinds, cap identities, typed routes, and stream
+//! states, the listener and its dispatch shards, and deferred routes. The kinds, cap identities, typed routes, and stream
 //! handles compile always-on, so a wasm guest can send
 //! `ctx.send::<HttpCapability>(..)` and author routes without pulling the
 //! substrate through (ADR-0122).
@@ -31,9 +30,9 @@ pub mod server;
 pub mod stream;
 pub mod typed;
 
-// ADR-0154 §2/§3 native deferred-reply machinery for the typed route
-// surface (`Ctx::defer`, the reply-obligation table). Native-only — the
-// obligation hold is `InboundMail` — so behind the `runtime` feature.
+// ADR-0154 §2 native deferred routes for the typed route surface
+// (`Ctx::defer`, `Outcome`, the held-reply glue helpers). Native-only — the
+// held reply is `NativeCtx::hold`'s — so behind the `runtime` feature.
 #[cfg(feature = "runtime")]
 mod defer;
 
@@ -45,17 +44,20 @@ pub use kinds::*;
 // to — consumers write `#[http::router]` / `#[http::route]` next to
 // `http::FromRequest` / `http::Ctx` / `http::Route`.
 pub use aether_http_derive::{reply, route, router};
-pub use typed::{Ctx, FromPathSegment, FromRequest, Outcome, Path, Route, answer_now, route_matches, route_rank};
+pub use typed::{Ctx, FromPathSegment, FromRequest, Path, Route, route_matches, route_rank};
 
-// Deferred-route glue helper the `#[http::reply]` macro emits calls to
-// (ADR-0154): `answer_deferred` answers a held request from its downstream
-// reply, recovering the requester via `take_context`. Re-exported here so the
-// macro emits one `::aether_http::…` path a consumer resolves through its
-// existing dependency. Runtime-only — `reply_to` is native. The synchronous
-// `answer_now` every router arm replies through is wasm-safe and lives in
-// `typed`.
+// ADR-0154 deferred routes over ADR-0243 held replies: `Outcome` is what a
+// route that may defer returns, and the glue helpers the `#[http::router]` /
+// `#[http::reply]` macros emit calls to answer through the router's held
+// reply. `Pending` is re-exported so a router with a deferred route returns
+// `::aether_http::Pending<HttpRouterResult>`, a path whose last segment
+// `#[actor]` reads as a held reply. Re-exported here so the macros emit one
+// `::aether_http::…` path a consumer resolves through its existing
+// dependency. Runtime-only — the held reply is native.
 #[cfg(feature = "runtime")]
-pub use defer::{DeferredRequest, answer_deferred};
+pub use aether_substrate::actor::native::Pending;
+#[cfg(feature = "runtime")]
+pub use defer::{Deferred, DeferredRequest, Outcome, answer_deferred, answer_now};
 
 // ADR-0133 reply-based data-phase stream handles. Wasm-safe like `typed`,
 // so a `default-features = false` guest that streams gets them without the

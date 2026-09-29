@@ -7,7 +7,7 @@
 //! typed-path vocabulary (all three unconditional dependencies), so the
 //! `default-features = false` wasm consumers keep compiling.
 
-use aether_actor::{HeldReply, ProtocolPath, Undeclared};
+use aether_actor::{HeldReply, ProtocolPath};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
@@ -194,25 +194,55 @@ pub struct HttpServerResponse {
     pub body: Vec<u8>,
 }
 
-/// The contract every route holder covers (ADR-0231 §2, §6): one manual row,
-/// [`HttpServerRequest`] answered by hand. Both registration forms prove it,
-/// [`RegisterRoute`] through its `handler` path and [`RegisterRouteSelf`]
-/// through a cast of the stamped sender, and every route holds a reference
-/// to it, so the server delivers a request only to an actor that takes one.
+/// A router's one reply to an [`HttpServerRequest`] (ADR-0243 §8): the
+/// three answers the server accepts, named as one kind so the
+/// [`HttpRouter`] row declares its reply and a plain handler covers it.
 ///
-/// A router promises no reply shape: whatever it answers, an
-/// [`HttpServerResponse`], an [`HttpResponseStreamOpen`], a
-/// [`WebSocketAccept`], or an ADR-0154 deferred reply, it answers through its
-/// reply obligation. A manual row is covered only by a manual handler, so a
-/// holder's `HttpServerRequest` handler is `#[handler::manual]`, and a
-/// `#[http::router]` actor's generated handler is one.
+/// - [`Response`](Self::Response) answers with a buffered
+///   [`HttpServerResponse`] (ADR-0108), which is also how a router declines a
+///   websocket upgrade.
+/// - [`Stream`](Self::Stream) opens a streamed response
+///   ([`HttpResponseStreamOpen`], ADR-0128).
+/// - [`WebSocket`](Self::WebSocket) accepts an upgrade
+///   ([`WebSocketAccept`], ADR-0129).
+#[aether_data::kind(name = "aether.http.server.router_result")]
+pub enum HttpRouterResult {
+    Response(HttpServerResponse),
+    Stream(HttpResponseStreamOpen),
+    WebSocket(WebSocketAccept),
+}
+
+/// A router that closes while it still owes a reply answers `502`
+/// (ADR-0243 §1), so the waiting client hears at once instead of at the
+/// server's request timeout.
+impl HeldReply for HttpRouterResult {
+    fn unanswered() -> Self {
+        Self::Response(HttpServerResponse {
+            status: 502,
+            headers: Vec::new(),
+            body: b"router closed before answering".to_vec(),
+        })
+    }
+}
+
+/// The contract every route holder covers (ADR-0231 §2): one row,
+/// [`HttpServerRequest`] answered with one [`HttpRouterResult`]. Both
+/// registration forms prove it, [`RegisterRoute`] through its `handler` path
+/// and [`RegisterRouteSelf`] through a cast of the stamped sender, and every
+/// route holds a reference to it, so the server delivers a request only to an
+/// actor that takes one.
+///
+/// A handler that returns `HttpRouterResult` covers the row, and so does one
+/// that returns `Pending<HttpRouterResult>` and answers later through its held
+/// reply (ADR-0243), as a `#[http::router]` actor with an ADR-0154 deferred
+/// route does. A manual handler does not cover it.
 #[aether_actor::protocol]
 pub trait HttpRouter {
-    fn request(mail: HttpServerRequest) -> Undeclared;
+    fn request(mail: HttpServerRequest) -> HttpRouterResult;
 }
 
 // ADR-0128 HTTP server response streaming. A handler opts into streaming by
-// replying `HttpResponseStreamOpen` instead of `HttpServerResponse`, emits its
+// replying `HttpRouterResult::Stream` instead of `HttpRouterResult::Response`, emits its
 // body across many `HttpResponseChunk` mails paced by the cap's
 // `HttpStreamCredit` grants, and terminates with `HttpResponseStreamEnd`.
 //
@@ -228,11 +258,11 @@ pub trait HttpRouter {
 // directly.
 
 /// `aether.http.server.response_stream_open` — a handler's first reply on a
-/// streamed response (ADR-0128). Declares the status line and headers; the
-/// cap writes the response head with `Transfer-Encoding: chunked` (no
-/// `Content-Length`) and begins the stream. Replied like [`HttpServerResponse`]
-/// (correlation-echoed), so the cap keys the new stream by the request's
-/// in-flight correlation id.
+/// streamed response (ADR-0128), carried as the [`HttpRouterResult::Stream`]
+/// variant. Declares the status line and headers; the cap writes the response
+/// head with `Transfer-Encoding: chunked` (no `Content-Length`) and begins the
+/// stream. The reply is correlation-echoed, so the cap keys the new stream by
+/// the request's in-flight correlation id.
 #[aether_data::kind(name = "aether.http.server.response_stream_open")]
 pub struct HttpResponseStreamOpen {
     pub status: u16,
@@ -345,9 +375,9 @@ pub struct HttpRequestCredit {
 // ADR-0129 HTTP server websocket upgrade, amended by ADR-0132. Three kinds,
 // reusing `HttpHeader` and ADR-0128's `HttpStreamCredit`. An inbound request
 // carrying `Upgrade: websocket` dispatches to the handler as an ordinary
-// `HttpServerRequest`; the handler replies `WebSocketAccept` to accept (the
-// websocket analog of `HttpResponseStreamOpen`) or an ordinary
-// `HttpServerResponse` to decline. On accept the connection carries
+// `HttpServerRequest`; the handler replies `HttpRouterResult::WebSocket` to
+// accept (the websocket analog of `HttpRouterResult::Stream`) or an ordinary
+// `HttpRouterResult::Response` to decline. On accept the connection carries
 // `WebSocketMessage`s both directions — cap → handler on inbound (a fresh
 // causal root per message), handler → cap on outbound (framed under the
 // ADR-0128 credit window). `WebSocketClose` is the close handshake, both
@@ -359,12 +389,12 @@ pub struct HttpRequestCredit {
 // as kinds.
 
 /// `aether.http.server.websocket.accept` — the handler's opt-in reply to an
-/// upgrade request (ADR-0129), the websocket analog of
-/// [`HttpResponseStreamOpen`]. Declares an optional negotiated `subprotocol`
-/// (echoed as `Sec-WebSocket-Protocol`) and any extra `101` response
-/// `headers`; the cap supplies `Upgrade` / `Connection` /
-/// `Sec-WebSocket-Accept` itself. Replied like [`HttpServerResponse`]
-/// (correlation-echoed), so the cap keys the accept on the request's in-flight
+/// upgrade request (ADR-0129), carried as the [`HttpRouterResult::WebSocket`]
+/// variant, the websocket analog of [`HttpRouterResult::Stream`]. Declares an
+/// optional negotiated `subprotocol` (echoed as `Sec-WebSocket-Protocol`) and
+/// any extra `101` response `headers`; the cap supplies `Upgrade` /
+/// `Connection` / `Sec-WebSocket-Accept` itself. The reply is
+/// correlation-echoed, so the cap keys the accept on the request's in-flight
 /// correlation id.
 #[aether_data::kind(name = "aether.http.server.websocket.accept")]
 pub struct WebSocketAccept {
@@ -432,8 +462,8 @@ pub struct WebSocketClose {
 ///
 /// `handler` is the canonical path of an actor covering [`HttpRouter`]
 /// (ADR-0231 §3): in code `ActorPath::<R>::root().narrow::<HttpRouter>()`,
-/// which compiles only when `R` takes `aether.http.server.request` in a
-/// manual handler; over MCP the `path` a component load returns, whose
+/// which compiles only when `R` takes `aether.http.server.request` and
+/// replies `HttpRouterResult`; over MCP the `path` a component load returns, whose
 /// decode refuses a path no such live route stands at.
 ///
 /// `shared` (ADR-0136) opts the registration into the key's member

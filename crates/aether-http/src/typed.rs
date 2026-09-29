@@ -13,8 +13,6 @@
 
 use core::ops::{Deref, DerefMut};
 
-use aether_actor::OutboundReply;
-
 use super::kinds::{HttpMethod, HttpServerRequest, HttpServerResponse};
 
 /// Parse a value out of an inbound [`HttpServerRequest`]. The `Ok` value
@@ -185,39 +183,4 @@ impl<C> DerefMut for Ctx<'_, C> {
     fn deref_mut(&mut self) -> &mut C {
         self.transport
     }
-}
-
-/// What a routed method answers with (ADR-0154 §2). A synchronous route
-/// returns [`HttpServerResponse`] directly (the rung-1 shape, unchanged);
-/// a deferred route returns `Outcome` so it can choose between replying
-/// inline and forwarding the request to a peer capability and answering
-/// only when that reply lands.
-///
-/// - [`Reply`](Outcome::Reply) answers the request now with the carried
-///   response.
-/// - [`Deferred`](Outcome::Deferred) is what `ctx.defer(&request).to::<R>()`
-///   returns on the native transport: the request was forwarded to a peer over
-///   an inherited send that holds the route's chain open, so a later
-///   `#[http::reply]` route answers when the peer's reply lands.
-///
-/// `defer` is native-only, so `Deferred` is only reachable on the native
-/// transport; a wasm-guest route returns `Reply` (or an `HttpServerResponse`
-/// directly).
-pub enum Outcome {
-    /// Answer the request now with this response.
-    Reply(HttpServerResponse),
-    /// The request was forwarded to a recipient by `ctx.defer(&request).to::<R>()`;
-    /// a later `#[http::reply]` route answers when the peer replies.
-    Deferred,
-}
-
-/// Answer the request a `#[http::router]` handler is serving with
-/// `response`, through the handler's reply obligation (ADR-0231 §6): a
-/// synchronous route's return, an [`Outcome::Reply`], a bind failure's `400`,
-/// and the no-match `404` all reply here. The router's handler is manual on
-/// both transports, so this takes any manual ctx. Public for the
-/// macro-generated glue only.
-#[doc(hidden)]
-pub fn answer_now<C: OutboundReply>(ctx: &mut C, response: &HttpServerResponse) {
-    ctx.reply(response);
 }
