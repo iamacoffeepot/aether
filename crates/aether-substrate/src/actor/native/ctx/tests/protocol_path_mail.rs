@@ -4,24 +4,19 @@
 //! the protocol's rows, or that no route has stood at, never reaches a
 //! handler.
 //!
-//! [`Keeper`] and [`Bystander`] stand `Live` with the contracts their own
-//! `#[actor]` tables declare. Each [`Carries`] payload names one path and is
-//! dispatched to a `Keeper` through its `#[actor]` arms, as the native
-//! dispatcher does. The accepted manual path is resolved and receives a typed
-//! send through its protocol reference.
-
-use std::sync::Arc;
-use std::sync::mpsc;
+//! The booted [`Keeper`] and the spawned [`SilentPoke`] and [`Bystander`]
+//! stand `Live` with the contracts their own `#[actor]` tables declare. Each
+//! [`Carries`] payload names one path and crosses the boundary to the
+//! `Keeper` as a proven call, as a wire `Call` does, so the keeper's own
+//! dispatch decodes it. The accepted manual path is resolved and receives a
+//! typed send through its protocol reference.
 
 use aether_actor::{Addressable, ErasedActorRef, Manual, ProtocolPath, Row, Undeclared};
 use aether_data::{ErasedActorPath, Kind, wire};
 
-use crate::actor::native::binding::NativeBinding;
-use crate::actor::native::{Dispatch, NativeActor, NativeCtx, NativeInitCtx};
+use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Subname};
 use crate::chassis::error::BootError;
-use crate::mail::Source;
-use crate::mail::registry::{InboxHandler, OwnedDispatch, Registry, RouteContract, noop_handler};
-use crate::testing::{bare_substrate, boot_authority, manual_dispatch_ctx, registered_ref, unrouted_binding};
+use crate::testing::{PumpedDriver, bare_substrate, boot_bare_test_chassis};
 
 #[aether_data::kind(name = "test.protocol_path.poke", copy, default)]
 struct Poke {
@@ -41,13 +36,15 @@ struct Carries {
     path: ProtocolPath<KeeperProtocol>,
 }
 
-/// Covers [`KeeperProtocol`], and records every path it receives.
+/// Covers [`KeeperProtocol`], and records every path it receives and every
+/// poke that reaches it.
 #[derive(Default)]
 struct Keeper {
     received: Vec<ProtocolPath<KeeperProtocol>>,
+    pokes: Vec<u32>,
 }
 
-#[aether_actor::actor]
+#[aether_actor::actor(singleton, root)]
 impl NativeActor for Keeper {
     const NAMESPACE: &'static str = "test.protocol_path.keeper";
     type Config = ();
@@ -57,8 +54,8 @@ impl NativeActor for Keeper {
     }
 
     #[handler::manual]
-    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_, Self, Manual>, _mail: Poke) {
-        let _ = self;
+    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_, Self, Manual>, mail: Poke) {
+        self.pokes.push(mail.seq);
     }
 
     #[handler::single]
@@ -73,7 +70,7 @@ impl NativeActor for Keeper {
 /// the manual protocol.
 struct SilentPoke;
 
-#[aether_actor::actor]
+#[aether_actor::actor(instanced)]
 impl NativeActor for SilentPoke {
     const NAMESPACE: &'static str = "test.protocol_path.silent_poke";
     type Config = ();
@@ -91,7 +88,7 @@ impl NativeActor for SilentPoke {
 /// Handles [`Carries`] only, so its contract lacks [`KeeperProtocol`]'s row.
 struct Bystander;
 
-#[aether_actor::actor]
+#[aether_actor::actor(instanced)]
 impl NativeActor for Bystander {
     const NAMESPACE: &'static str = "test.protocol_path.bystander";
     type Config = ();
@@ -106,55 +103,53 @@ impl NativeActor for Bystander {
     }
 }
 
-/// Stand `A` `Live` at its namespace, publishing the contract its `#[actor]`
-/// table declares, as the chassis boot does.
-fn stand<A: NativeActor>(registry: &Registry, handler: Arc<dyn InboxHandler>) -> ErasedActorRef {
-    let reference = registered_ref(registry, A::NAMESPACE, handler);
+/// Deliver a [`Carries`] naming `path` to the keeper as a proven boundary
+/// call, and settle it.
+fn deliver(driver: &mut PumpedDriver<Keeper>, path: &ErasedActorPath) {
+    let keeper = ErasedActorPath::new(Keeper::NAMESPACE).expect("the keeper's namespace is a path");
+    let payload = wire::encode_to_vec(path).expect("encodes");
+    let call = driver.chassis().accept_call(&keeper, Carries::ID, payload).expect("the keeper proves live");
+    let (root, _settled) = driver.chassis().deliver_tracked(call, None);
 
-    registry.publish_contract(&boot_authority(), reference.id(), RouteContract::of::<A>()).expect("publishes");
-    reference
-}
-
-/// Dispatch a [`Carries`] naming `path` to `keeper` through its `#[actor]`
-/// arms, returning whether an arm handled it.
-fn deliver(keeper: &mut Keeper, binding: &Arc<NativeBinding>, path: &str) -> bool {
-    let payload = wire::encode_to_vec(&ErasedActorPath::new(path).expect("a well-formed path")).expect("encodes");
-    let mut ctx = manual_dispatch_ctx::<Keeper>(binding, Source::NONE);
-
-    let handled = <Keeper as Dispatch<Keeper>>::dispatch(keeper, &mut ctx, Carries::ID, &payload);
-    drop(ctx.take_raw_inbound());
-    handled.is_some()
+    driver.settle(&[root]);
 }
 
 /// Catches native dispatch decoding without the registry: the context-free
 /// decode refuses every path, so the keeper's own path would never arrive,
 /// and a dispatch that skipped the proof would hand the handler the
-/// bystander's and the unregistered path too. The sink also catches a resolve
-/// that fails after decode or a typed send that does not route through the
-/// manual protocol reference.
+/// bystander's and the unregistered path too. The keeper's pokes also catch
+/// a resolve that fails after decode or a typed send that does not route
+/// through the manual protocol reference.
 #[test]
 fn a_received_path_reaches_the_handler_only_when_its_live_route_covers_the_protocol() {
     let (registry, mailer) = bare_substrate();
-    let (tx, rx) = mpsc::channel();
-    stand::<Keeper>(
-        &registry,
-        Arc::new(move |dispatch: OwnedDispatch| {
-            dispatch.discharge();
-            let _ = tx.send(dispatch);
-        }),
-    );
-    stand::<SilentPoke>(&registry, noop_handler());
-    stand::<Bystander>(&registry, noop_handler());
-    let binding = unrouted_binding(&mailer);
-    let mut keeper = Keeper::default();
+    let chassis = boot_bare_test_chassis(&registry, &mailer);
+    let silent = chassis.spawn_actor_for_test::<SilentPoke>(Subname::Named("peer"), (), ()).finish().expect("spawns");
+    let bystander = chassis.spawn_actor_for_test::<Bystander>(Subname::Named("peer"), (), ()).finish().expect("spawns");
+    let path = |peer: ErasedActorRef| chassis.actor_path(peer).expect("a spawned peer keeps its path");
+    let (silent, bystander) = (path(silent.erase()), path(bystander.erase()));
+    let mut driver = PumpedDriver::<Keeper>::boot(chassis, (), ());
+    let received = |driver: &PumpedDriver<Keeper>| {
+        driver
+            .read_state(|keeper| keeper.received.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .expect("the keeper is live")
+    };
 
-    assert!(deliver(&mut keeper, &binding, Keeper::NAMESPACE), "the keeper's route covers the protocol");
-    assert!(
-        !deliver(&mut keeper, &binding, SilentPoke::NAMESPACE),
-        "the same kind with a silent reply does not cover the manual row",
+    deliver(&mut driver, &ErasedActorPath::new(Keeper::NAMESPACE).expect("a well-formed path"));
+    assert_eq!(received(&driver), [Keeper::NAMESPACE], "the keeper's route covers the protocol");
+
+    deliver(&mut driver, &silent);
+    assert_eq!(received(&driver).len(), 1, "the same kind with a silent reply does not cover the manual row");
+
+    deliver(&mut driver, &bystander);
+    assert_eq!(received(&driver).len(), 1, "the bystander's route lacks its row");
+
+    deliver(&mut driver, &ErasedActorPath::new("test.protocol_path.nobody").expect("a well-formed path"));
+    assert_eq!(received(&driver).len(), 1, "no route has stood there");
+
+    assert_eq!(
+        driver.read_state(|keeper| keeper.pokes.clone()).expect("the keeper is live"),
+        [7],
+        "the resolved manual protocol receives the typed send",
     );
-    assert!(!deliver(&mut keeper, &binding, Bystander::NAMESPACE), "the bystander's route lacks its row");
-    assert!(!deliver(&mut keeper, &binding, "test.protocol_path.nobody"), "no route has stood there");
-    assert_eq!(keeper.received.iter().map(ToString::to_string).collect::<Vec<_>>(), [Keeper::NAMESPACE]);
-    assert_eq!(rx.try_recv().expect("the resolved manual protocol receives the typed send").kind, Poke::ID);
 }

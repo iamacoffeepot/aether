@@ -4,16 +4,14 @@
 //! held reply answers the caller that reply captured.
 
 use std::sync::Arc;
-use std::sync::mpsc;
 
+use aether_actor::Addressable;
 use aether_data::{ErasedActorPath, Kind};
 
-use crate::actor::native::NativeCtx;
 use crate::mail::registry::{InboxHandler, OwnedDispatch};
-use crate::mail::{Source, SourceAddr};
-use crate::testing::{bare_substrate, drop_ref, registered_binding, registered_ref};
+use crate::testing::{drop_ref, registered_ref};
 
-use super::support::{CastOnly, HeldRig, LedgerRead, StageReq, TestReply};
+use super::support::{HeldRig, LedgerRead, Pinger, ReaderRig, StageReq, TestReply};
 
 fn discharging() -> Arc<dyn InboxHandler> {
     Arc::new(|dispatch: OwnedDispatch| dispatch.discharge())
@@ -25,57 +23,47 @@ fn discharging() -> Arc<dyn InboxHandler> {
 /// blank it.
 #[test]
 fn actor_path_names_a_peer_before_and_after_it_departs() {
-    let (registry, mailer) = bare_substrate();
-    let (binding, _caller) = registered_binding(&registry, &mailer, "test.native.path_host", discharging());
+    let mut rig = ReaderRig::boot();
     let peer_name = "test.native.path_peer";
-    let peer = registered_ref(&registry, peer_name, discharging());
+    let peer = registered_ref(&rig.registry, peer_name, discharging());
     let expected = ErasedActorPath::new(peer_name).expect("the peer name is a canonical path");
-    let ctx = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
+    let path = |rig: &mut ReaderRig| rig.driver.host_turn(|_reader, ctx| ctx.actor_path(peer));
 
-    assert_eq!(ctx.actor_path(peer), expected);
+    assert_eq!(path(&mut rig), Some(expected.clone()));
 
-    drop_ref(&registry, peer);
+    drop_ref(&rig.registry, peer);
 
-    assert_eq!(ctx.actor_path(peer), expected);
+    assert_eq!(path(&mut rig), Some(expected));
 }
 
 /// `actor_path` panics on a reference with no route record, so every
 /// reference `sender` hands a handler must name one. A real send stamps the
-/// sending actor's position on the envelope; the receiving ctx's `sender`
+/// sending actor's position on the envelope; the receiving turn's `sender`
 /// proves exactly that actor, and its path answers the sender's name — while
 /// the sender is live and after it departs.
 #[test]
 fn actor_path_names_the_sender_a_real_dispatch_stamps() {
-    let (registry, mailer) = bare_substrate();
-    let sender_name = "test.native.stamp_sender";
-    let (sender_binding, sender) = registered_binding(&registry, &mailer, sender_name, discharging());
-    let (tx, rx) = mpsc::channel::<OwnedDispatch>();
-    let (receiver_binding, receiver) = registered_binding(
-        &registry,
-        &mailer,
-        "test.native.stamp_receiver",
-        Arc::new(move |dispatch: OwnedDispatch| {
-            dispatch.discharge();
-            let _ = tx.send(dispatch);
-        }),
+    let mut rig = ReaderRig::boot();
+    let pinger = rig.pinger("stamp");
+    let expected = ErasedActorPath::new(&format!("{}:stamp", Pinger::NAMESPACE)).expect("a canonical instance path");
+
+    rig.ping(pinger);
+
+    let stamped = rig.senders()[0].clone().expect("a routed actor's send carries its sender");
+    assert_eq!(stamped, (pinger.erase(), expected.clone()), "the turn proves the sending actor and names it");
+
+    rig.close(pinger);
+
+    let departed = rig.driver.host_turn(|_reader, ctx| ctx.actor_path(pinger.erase()));
+    assert_eq!(departed, Some(expected.clone()), "a departed sender's path is still named");
+
+    rig.knock(Some(pinger.erase()));
+
+    assert_eq!(
+        rig.senders()[1],
+        Some((pinger.erase(), expected)),
+        "a departed sender still holds its route record, so a turn it stamps still proves it",
     );
-    let expected = ErasedActorPath::new(sender_name).expect("the sender name is a canonical path");
-
-    {
-        let mut ctx = NativeCtx::new(&sender_binding, Source::with_correlation(SourceAddr::None, 0), None, None);
-        ctx.send_to(receiver, &CastOnly { code: 3 });
-    }
-    let delivered = rx.try_recv().expect("the send routes at ctx flush");
-    let ctx = NativeCtx::new(&receiver_binding, delivered.sender, delivered.mail_id, delivered.root);
-    let stamped = ctx.sender().expect("a routed actor's send carries its sender");
-
-    assert_eq!(stamped, sender);
-    assert_eq!(ctx.actor_path(stamped), expected);
-
-    drop_ref(&registry, sender);
-
-    assert_eq!(ctx.sender(), Some(sender), "a departed sender still holds its route record");
-    assert_eq!(ctx.actor_path(stamped), expected);
 }
 
 /// Catches `stage_registry_batch_from` arming its completion from the staging
