@@ -9,7 +9,9 @@
 //! and `test.republish.peer` (a root singleton). v2's gate adds a
 //! `GateProbe` row, and v2's peer traps in `on_rehydrate` when its config
 //! says so. v3 changes the gate's config kind. `republish_loader` is a guest
-//! that loads a component through the host.
+//! that loads a component through the host. The courier pair's v2 mails the
+//! host from `on_rehydrate`, so its load or drop arrives on the republish's
+//! own commit chain.
 //!
 //! The tests that hold a republish in flight compose the component host
 //! pumped: it dispatches only while the harness drains it, and
@@ -32,12 +34,59 @@ use aether_kinds::{
 };
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, GateLabelledConfig, GateProbe, GateQuery, GateQueryResult, GuestLoad, PeerConfig,
-    TickObserved, WireCountQuery, WireObserved,
+    Bump, CountQuery, CountReport, CourierConfig, CourierQuery, CourierQueryResult, GateLabelledConfig, GateProbe,
+    GateQuery, GateQueryResult, GuestLoad, PeerConfig, TickObserved, WireCountQuery, WireObserved,
 };
 
 const GATE: &str = "test.republish.gate";
 const PEER: &str = "test.republish.peer";
+const COURIER: &str = "test.republish.courier";
+const PARCEL: &str = "test.republish.parcel";
+
+/// The courier pair's two versions, or `None` when they are not built.
+struct Couriers {
+    v1: Vec<u8>,
+    v2: Vec<u8>,
+}
+
+fn couriers() -> Option<Couriers> {
+    let read = |stem: &str| require_wasm(stem).map(|path| fs::read(path).expect("read fixture wasm"));
+    Some(Couriers { v1: read("republish_courier_v1")?, v2: read("republish_courier_v2")? })
+}
+
+/// Load `export` from `wasm`, keyed `key` when given, with no config.
+fn load_export(
+    harness: &mut SubstrateHarness,
+    wasm: &[u8],
+    export: &str,
+    key: Option<&str>,
+) -> (ErasedActorRef, ErasedActorPath) {
+    let load = LoadComponent {
+        wasm: wasm.to_vec(),
+        name: key.map(str::to_owned),
+        config: Vec::new(),
+        export: Some(export.to_owned()),
+    };
+    harness.load_any(&load).unwrap_or_else(|error| panic!("load {export}: {error}"))
+}
+
+/// Republish the courier pair's v2, building the courier's successor with
+/// `config`, and answer what its mail to the host came back with.
+fn republish_courier(
+    harness: &mut SubstrateHarness,
+    v2: &[u8],
+    courier: (ErasedActorRef, ErasedActorPath),
+    config: &CourierConfig,
+) -> Vec<String> {
+    let (courier, path) = courier;
+    let replace = ReplaceComponent {
+        wasm: v2.to_vec(),
+        configs: vec![ReplaceConfig { path, config: config.encode_into_bytes() }],
+    };
+
+    expect_ok(&republish(harness, &replace));
+    call::<_, CourierQueryResult>(harness, courier, &CourierQuery).outcomes
+}
 
 /// The group pair's two versions and v3, or `None` when they are not built.
 struct Group {
@@ -341,4 +390,52 @@ fn a_guest_load_of_a_republishing_namespace_waits() {
         !names.iter().any(|name| name.ends_with(":c")),
         "the old code never loaded beside the successor: {names:?}"
     );
+}
+
+#[test]
+fn a_load_on_the_commit_chain_runs_against_the_successor() {
+    // Catches: a load the committing candidate held being parked in its own
+    // republish. It rides the commit's chain, the replace answers only once
+    // that chain settles, and the parked load's held reply keeps it open, so
+    // the replace never answers and this test fails at the settlement cap.
+    // Running at once, the load is admitted against the published successor
+    // and the courier hears its answer before the replace does.
+    let Some(fixtures) = couriers() else {
+        return;
+    };
+    let mut harness = pooled();
+    let courier = load_export(&mut harness, &fixtures.v1, COURIER, None);
+
+    let config = CourierConfig { wasm: fixtures.v2.clone(), drop: None };
+    let outcomes = republish_courier(&mut harness, &fixtures.v2, courier, &config);
+
+    assert_eq!(outcomes, [format!("load ok {PARCEL}:late")], "the successor's load was served: {outcomes:?}");
+}
+
+#[test]
+fn a_drop_on_the_commit_chain_closes_the_member_after_it_commits() {
+    // Catches: a drop the committing candidate held being parked in its own
+    // republish, which deadlocks the replace as the load does; and a drop
+    // handed to a member ahead of its commit, or a dropped member's
+    // `Committed` wedging the ledger, so the replace never answers. The drop
+    // lands behind the parcel's `Commit`, so the parcel commits and then
+    // closes, and its name is spent.
+    let Some(fixtures) = couriers() else {
+        return;
+    };
+    let mut harness = pooled();
+    let courier = load_export(&mut harness, &fixtures.v1, COURIER, None);
+    let (_, parcel) = load_export(&mut harness, &fixtures.v1, PARCEL, Some("a"));
+
+    let config = CourierConfig { wasm: Vec::new(), drop: Some(parcel.clone()) };
+    let outcomes = republish_courier(&mut harness, &fixtures.v2, courier, &config);
+
+    assert_eq!(outcomes, ["drop ok"], "the successor's drop was served: {outcomes:?}");
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let again = harness
+        .execute(vec![("drop", HarnessOp::send_and_await_reply(&host, &DropComponent { target: parcel }))])
+        .expect("drop call")
+        .reply::<DropResult>("drop")
+        .expect("decode DropResult");
+    assert!(matches!(again, DropResult::Err { .. }), "the dropped parcel's name is spent: {again:?}");
 }

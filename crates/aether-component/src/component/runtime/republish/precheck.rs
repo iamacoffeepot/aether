@@ -23,9 +23,12 @@ use crate::component::runtime::{ComponentHostCapabilityState, GuestControl};
 
 use super::Member;
 
-/// The most values a supplied config may decode to, the strict decode's
-/// ceiling on what a crafted length can make it allocate.
-const MAXIMUM_CONFIG_VALUES: usize = 1 << 16;
+/// The values a supplied config may decode to beyond one per byte, the
+/// strict decode's allowance for zero-width values. A config's value count
+/// is otherwise bounded by its length (a `Bytes` leaf projects one value per
+/// byte), so the ceiling scales with the config and still stops a crafted
+/// length from allocating past it.
+const ZERO_WIDTH_CONFIG_VALUES: usize = 1 << 16;
 
 /// What the pre-checks decided for an admitted replace.
 pub(super) enum Plan {
@@ -263,9 +266,10 @@ fn member_config(
         ));
     };
     let schema = config_schema(manifest, after.capabilities.config.as_ref())?;
-    aether_codec::decode_schema_strict(&config, &schema, MAXIMUM_CONFIG_VALUES).map_err(|error| {
-        format!("its config does not decode as {}: {error}", config_name(after.capabilities.config.as_ref()))
-    })?;
+    aether_codec::decode_schema_strict(&config, &schema, config.len().saturating_add(ZERO_WIDTH_CONFIG_VALUES))
+        .map_err(|error| {
+            format!("its config does not decode as {}: {error}", config_name(after.capabilities.config.as_ref()))
+        })?;
     Ok(Some(config))
 }
 

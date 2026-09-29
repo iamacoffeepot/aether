@@ -228,10 +228,16 @@ impl ComponentHostCapabilityState {
             }
         };
         // ADR-0241 §7: a load of a namespace a republish holds waits until
-        // the replace answers, then publishes against the code that won.
-        if let Some(republish) = self.republishing.get(&load.published) {
+        // the replace answers, then publishes against the code that won,
+        // unless it arrives on that republish's own commit chain, where the
+        // successor has already published and waiting would hold the chain
+        // the replace waits on open (see the republish module docs).
+        let committing = self.committing_republish(ctx);
+        if let Some(&republish) = self.republishing.get(&load.published)
+            && committing != Some(republish)
+        {
             self.republishes
-                .get_mut(republish)
+                .get_mut(&republish)
                 .expect("a republishing namespace names a republish in flight")
                 .park_load(held, load);
             return;

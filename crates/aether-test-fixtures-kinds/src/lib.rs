@@ -710,3 +710,33 @@ pub struct GuestLoad {
 /// run on this instance. It replies a [`CountReport`].
 #[aether_data::kind(name = "aether.test_fixtures.wire_count_query", default)]
 pub struct WireCountQuery;
+
+/// Issue 7086: the config of the republish courier. The courier's successor,
+/// once committed, mails the component host from `on_rehydrate`: a load of
+/// `wasm` as a `test.republish.parcel` keyed `late` when `wasm` is not
+/// empty, and a drop of `drop` when one is named.
+#[aether_data::kind(name = "aether.test_fixtures.courier.config", default)]
+pub struct CourierConfig {
+    pub wasm: Vec<u8>,
+    pub drop: Option<aether_data::ErasedActorPath>,
+}
+
+/// Issue 7086: asks the republish courier what its successor's requests to
+/// the component host answered. It replies a [`CourierQueryResult`].
+#[aether_data::kind(name = "aether.test_fixtures.courier.query", default)]
+pub struct CourierQuery;
+
+/// Issue 7086: the republish courier's answer to a [`CourierQuery`], one
+/// line per answer it received, in arrival order: `load ok <path>`,
+/// `load err <error>`, `drop ok` or `drop err <error>`.
+#[aether_data::kind(name = "aether.test_fixtures.courier.query_result", default, eq)]
+pub struct CourierQueryResult {
+    pub outcomes: Vec<String>,
+}
+
+/// Issue 7086: the state the republish courier carries across a replace, so
+/// its successor's `on_rehydrate` runs.
+#[aether_data::kind(name = "aether.test_fixtures.courier.state", copy, default, eq)]
+pub struct CourierState {
+    pub hops: u32,
+}

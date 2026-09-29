@@ -12,6 +12,17 @@
 //! drop of a member waits the same way, and a second republish of the
 //! module is refused. A replace that arrives while a load of its
 //! namespaces is in flight queues until those births settle.
+//!
+//! One exception keeps the hold from deadlocking its own republish: a load
+//! or drop that arrives on one of the republish's commit chains runs at
+//! once. A committing candidate flushes the mail its `on_rehydrate` held on
+//! its commit's chain, and the replace answers only once that chain
+//! settles; parked, such a request's held reply would keep the chain open,
+//! and the replace would never answer. Running it is sound because commits
+//! go out only after the successor published: a load is admitted against
+//! the winning code, and a drop handed to a member lands behind that
+//! member's `Commit`, so the member commits, answers `Committed`, and then
+//! closes.
 
 mod precheck;
 
@@ -406,7 +417,12 @@ impl ComponentHostCapabilityState {
                 return;
             }
         };
-        if let Some(republish) = self.republishes.values_mut().find(|republish| republish.is_member(actor)) {
+        // The drop waits for its member's republish, unless it arrives on
+        // one of that republish's own commit chains (see the module docs).
+        let committing = self.committing_republish(ctx);
+        if let Some((_, republish)) =
+            self.republishes.iter_mut().find(|(id, republish)| republish.is_member(actor) && committing != Some(**id))
+        {
             republish.parked_drops.push((held, payload));
             return;
         }
@@ -419,6 +435,16 @@ impl ComponentHostCapabilityState {
             return;
         };
         held.hand_off(ctx, guest.control, &payload);
+    }
+}
+
+impl ComponentHostCapabilityState {
+    /// The republish whose commit chain the handled mail rides, read from
+    /// the ctx's in-flight root: a request a committing candidate held and
+    /// its commit flushed. Such a request runs at once rather than waiting
+    /// for the republish it would otherwise hold open (see the module docs).
+    pub(super) fn committing_republish<A, M: ReplyMode>(&self, ctx: &NativeCtx<'_, A, M>) -> Option<RepublishId> {
+        ctx.in_flight_root().and_then(|root| self.commit_roots.get(&root)).map(|commit| commit.republish)
     }
 }
 
