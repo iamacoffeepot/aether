@@ -8,7 +8,7 @@ use super::{
 };
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::wasm::host_fns::{GuestReply, guest_answer};
-use crate::actor::wasm::reply_table::{HeldChain, HeldUnanswered};
+use crate::actor::wasm::reply_table::HeldChain;
 use crate::mail::registry::{PreparedAliasRetirement, PreparedAliasRoute};
 
 impl Component {
@@ -103,7 +103,8 @@ impl Component {
     /// as for a guest's own answer. Under engine teardown every requester
     /// is closing with the engine, so the chains release unanswered, as
     /// they do for a native actor. A slot reserved to a held answer is
-    /// skipped; its candidate is aborted first, which restores it.
+    /// skipped; the trampoline discards its candidate's held outbox first,
+    /// which restores it.
     ///
     /// The consumers are the component trampoline's guest release and its
     /// close.
@@ -111,16 +112,16 @@ impl Component {
         let ctx = self.store.data_mut();
         let held = ctx.reply_table.drain_held();
         if ctx.binding.is_engine_teardown() {
-            drop(held);
             return;
         }
 
-        let from = ctx.sender;
-        for (entry, HeldChain { hold, root, parent, unanswered }) in held {
-            let HeldUnanswered { kind, kind_name, payload } = unanswered;
-            match guest_answer(ctx, entry, GuestReply { kind, kind_name, payload, count: 1, from }) {
+        for (entry, HeldChain { hold, root, parent, recipient, unanswered }) in held {
+            // In the name of the address that held, as the guest's own answer
+            // would be: an inline child's reply comes from the child.
+            let reply = GuestReply { mail: unanswered, count: 1, from: recipient };
+            match guest_answer(ctx, entry, reply) {
                 Ok(answer) => ctx.answer(answer, Some((parent, root))),
-                Err(status) => tracing::warn!(
+                Err(status) => tracing::error!(
                     target: "aether_substrate::component",
                     actor = %ctx.actor_name(),
                     status,

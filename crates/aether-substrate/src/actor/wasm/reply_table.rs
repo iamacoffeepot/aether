@@ -63,7 +63,6 @@
 // own requester and the free queue carries on (#6409).
 
 use std::collections::VecDeque;
-
 use std::fmt;
 
 use crate::mail::attachments::EncodedMail;
@@ -158,24 +157,30 @@ pub struct HeldChain {
     pub root: Option<MailId>,
     /// The inbound's own `mail_id`, the held reply's `parent_mail`.
     pub parent: Option<MailId>,
-    /// The `R::unanswered()` value the guest registered when it held.
-    pub unanswered: HeldUnanswered,
+    /// The address the inbound was routed to: the component, or the inline
+    /// child that held (ADR-0114 §2). The unanswered reply is sent in its
+    /// name, as the guest's own answer would be.
+    pub recipient: MailboxId,
+    /// The `R::unanswered()` value the guest registered when it held
+    /// (ADR-0243 §6), through the `held_unanswered_p32` host fn: sent to the
+    /// requester if the guest unloads or closes before answering, because
+    /// the host cannot call into a guest that is gone.
+    pub unanswered: ReplyMail,
 }
 
-/// The reply a guest registered for a slot it held (ADR-0243 §6), through
-/// the `held_unanswered_p32` host fn: sent to the requester if the guest
-/// unloads or closes before answering, because the host cannot call into a
-/// guest that is gone. Its kind is registered and its payload's blobs are
-/// resolved, both checked when it was registered.
-pub struct HeldUnanswered {
+/// One reply mail as a host fn read it from the guest: its kind registered
+/// and not engine-only, and its payload's blobs resolved. `reply_mail_p32`
+/// reads the answer it sends at once, and `held_unanswered_p32` the value a
+/// held slot keeps until an unload or close sends it.
+pub struct ReplyMail {
     pub kind: KindId,
     pub kind_name: String,
     pub payload: EncodedMail,
 }
 
-impl fmt::Debug for HeldUnanswered {
+impl fmt::Debug for ReplyMail {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HeldUnanswered")
+        f.debug_struct("ReplyMail")
             .field("kind", &self.kind_name)
             .field("bytes", &self.payload.bytes.len())
             .finish_non_exhaustive()
@@ -475,8 +480,9 @@ mod tests {
     /// A chain holding `root` open on `trace`.
     fn chain_on(trace: &TraceHandle, root: MailId) -> HeldChain {
         let payload = EncodedMail { bytes: Vec::new(), attachments: None };
-        let unanswered = HeldUnanswered { kind: KindId(1), kind_name: "test.unanswered".into(), payload };
-        HeldChain { hold: Some(trace.acquire_settlement_hold(root)), root: Some(root), parent: Some(root), unanswered }
+        let unanswered = ReplyMail { kind: KindId(1), kind_name: "test.unanswered".into(), payload };
+        let hold = Some(trace.acquire_settlement_hold(root));
+        HeldChain { hold, root: Some(root), parent: Some(root), recipient: MailboxId(0), unanswered }
     }
 
     fn root(correlation: u64) -> MailId {

@@ -166,15 +166,25 @@ impl WasmTrampolineState {
     }
 
     /// Answer the replies the guest still holds as its trampoline closes
-    /// (ADR-0243 §6): a prepared candidate is aborted first, which gives
-    /// the kept guest its reply table back, then each held reply is
-    /// answered with the `unanswered` value the guest registered. Engine
-    /// teardown answers nothing. A guest already released answered at its
-    /// release. The guest's own `unwire` export does not run here.
-    pub(crate) fn answer_held_at_close(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>) {
-        if matches!(self.slot, Slot::Prepared(_)) {
-            self.abort(ctx);
-        }
+    /// (ADR-0243 §6), each with the `unanswered` value the guest registered.
+    /// No guest code runs: the guest's own `unwire` export does not, and a
+    /// prepared candidate is discarded without an abort, which would wire
+    /// the kept guest again and deliver its gated mail inside the close.
+    /// Instead the candidate's held outbox is discarded, which restores any
+    /// slot a held answer reserved, and the reply table it took over moves
+    /// back to the kept guest; the gated mail drops, and each chain settles
+    /// as it does. Engine teardown answers nothing. A guest already released
+    /// answered at its release.
+    pub(crate) fn answer_held_at_close(&mut self) {
+        self.slot = match mem::replace(&mut self.slot, Slot::Released) {
+            Slot::Prepared(prepared) => {
+                let PreparedSlot { mut old, mut candidate, .. } = *prepared;
+                candidate.discard_held_outbox();
+                old.resume_replies(candidate.take_pending_replies());
+                Slot::Live(Box::new(old))
+            }
+            other => other,
+        };
         if let Slot::Live(component) = &mut self.slot {
             component.answer_held_at_close();
         }

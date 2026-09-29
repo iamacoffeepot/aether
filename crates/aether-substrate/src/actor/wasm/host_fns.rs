@@ -14,7 +14,7 @@ use wasmtime::{Caller, Linker};
 use crate::actor::native::ResolvePathError;
 use crate::actor::wasm::component::GuestAnswer;
 use crate::actor::wasm::component::{ComponentCtx, StateBundle};
-use crate::actor::wasm::reply_table::{HeldUnanswered, ReplyEntry};
+use crate::actor::wasm::reply_table::{ReplyEntry, ReplyMail};
 use crate::mail::attachments::{EncodedMail, inline_payload};
 use crate::mail::boundary::is_engine_only;
 use crate::mail::registry::PreparedAliasRoute;
@@ -387,46 +387,14 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          count: u32,
          from: u64|
          -> u32 {
-            if is_engine_only(KindId(kind)) {
-                tracing::warn!(target: "aether_substrate::mail", kind = %KindId(kind), "actor-originated engine-only mail refused");
-                return REPLY_ENGINE_ONLY_KIND;
-            }
-            let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
-                return REPLY_OOB;
-            };
-            let data = memory.data(&caller);
-            let start = ptr as usize;
-            let end = match start.checked_add(len as usize) {
-                Some(e) if e <= data.len() => e,
-                _ => return REPLY_OOB,
-            };
-            let payload = data[start..end].to_vec();
-
-            // ADR-0238 decision 3: resolve the payload's tag-1 fields against
-            // this instance's blob table before the handle is taken, so a
-            // refused reply leaves it answerable. An empty table skips the
-            // walk.
-            let attachments = match caller.data().resolve_send(KindId(kind), &payload) {
-                Ok(attachments) => attachments,
-                Err(error) => {
-                    tracing::warn!(target: "aether_substrate::mail", kind = %KindId(kind), %error, "guest reply refused at the sender");
-                    return REPLY_BLOB_REFUSED;
-                }
-            };
-            let payload = EncodedMail { bytes: payload, attachments };
-
-            // Validate the kind id before the handle is taken — the guest
-            // might have passed a bogus one, and we'd rather return a
-            // meaningful status than enqueue mail the receiver can't
-            // decode. Checked first so a refused reply leaves the handle
-            // answerable, and a held slot's settlement hold stays with it
+            // Validated before the handle is taken, so a refused reply leaves
+            // it answerable, and a held slot's settlement hold stays with it
             // rather than releasing with its reply unsent (ADR-0243 §6).
-            let kind = KindId(kind);
-            let Some(kind_name) = caller.data().registry.kind_name(kind) else {
-                return REPLY_KIND_NOT_FOUND;
+            let mail = match read_guest_reply(&mut caller, kind, ptr, len) {
+                Ok(mail) => mail,
+                Err(status) => return status,
             };
-
-            let reply = GuestReply { kind, kind_name, payload, count, from: MailboxId(from) };
+            let reply = GuestReply { mail, count, from: MailboxId(from) };
             let ctx = caller.data_mut();
 
             // #7067: a held candidate's answer is kept, its slot reserved so
@@ -483,39 +451,13 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "aether",
         "held_unanswered_p32",
         |mut caller: Caller<'_, ComponentCtx>, sender: u32, kind: u64, ptr: u32, len: u32| -> u32 {
-            if is_engine_only(KindId(kind)) {
-                tracing::warn!(target: "aether_substrate::mail", kind = %KindId(kind), "actor-originated engine-only mail refused");
-                return REPLY_ENGINE_ONLY_KIND;
-            }
-            let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
-                return REPLY_OOB;
-            };
-            let data = memory.data(&caller);
-            let start = ptr as usize;
-            let end = match start.checked_add(len as usize) {
-                Some(e) if e <= data.len() => e,
-                _ => return REPLY_OOB,
-            };
-            let bytes = data[start..end].to_vec();
-
-            // ADR-0238 decision 3: resolve the tag-1 fields now, while the
-            // blobs they name are still held; the entries ride the
-            // registration until it is sent.
-            let attachments = match caller.data().resolve_send(KindId(kind), &bytes) {
-                Ok(attachments) => attachments,
-                Err(error) => {
-                    tracing::warn!(target: "aether_substrate::mail", kind = %KindId(kind), %error, "guest held reply registration refused");
-                    return REPLY_BLOB_REFUSED;
+            match read_guest_reply(&mut caller, kind, ptr, len) {
+                Ok(mail) => {
+                    caller.data_mut().register_unanswered(sender, mail);
+                    REPLY_OK
                 }
-            };
-            let kind = KindId(kind);
-            let Some(kind_name) = caller.data().registry.kind_name(kind) else {
-                return REPLY_KIND_NOT_FOUND;
-            };
-
-            let payload = EncodedMail { bytes, attachments };
-            caller.data_mut().register_unanswered(sender, HeldUnanswered { kind, kind_name, payload });
-            REPLY_OK
+                Err(status) => status,
+            }
         },
     )?;
 
@@ -906,13 +848,45 @@ fn resolve_dispatch_identity(ctx: &ComponentCtx, from: MailboxId) -> MailboxId {
     }
 }
 
+/// Read one reply mail from the guest's memory at `(ptr, len)` and validate
+/// it for sending: an engine-only `kind` is refused (ADR-0233), the payload's
+/// tag-1 fields are resolved against the instance's blob table while the
+/// blobs they name are held (ADR-0238 decision 3), and the kind must be
+/// registered, so the receiver can decode it. Shared by `reply_mail_p32`
+/// and `held_unanswered_p32`.
+///
+/// # Errors
+///
+/// `REPLY_ENGINE_ONLY_KIND`, `REPLY_OOB` for a range outside guest memory,
+/// `REPLY_BLOB_REFUSED` for an attachment the blob table refuses, and
+/// `REPLY_KIND_NOT_FOUND` for an unregistered kind.
+fn read_guest_reply(caller: &mut Caller<'_, ComponentCtx>, kind: u64, ptr: u32, len: u32) -> Result<ReplyMail, u32> {
+    let kind = KindId(kind);
+    if is_engine_only(kind) {
+        tracing::warn!(target: "aether_substrate::mail", kind = %kind, "actor-originated engine-only mail refused");
+        return Err(REPLY_ENGINE_ONLY_KIND);
+    }
+    let memory = caller.get_export("memory").and_then(wasmtime::Extern::into_memory).ok_or(REPLY_OOB)?;
+    let data = memory.data(&*caller);
+    let start = ptr as usize;
+    let bytes = match start.checked_add(len as usize) {
+        Some(end) if end <= data.len() => data[start..end].to_vec(),
+        _ => return Err(REPLY_OOB),
+    };
+
+    let attachments = caller.data().resolve_send(kind, &bytes).map_err(|error| {
+        tracing::warn!(target: "aether_substrate::mail", kind = %kind, %error, "guest reply refused at the sender");
+        REPLY_BLOB_REFUSED
+    })?;
+    let kind_name = caller.data().registry.kind_name(kind).ok_or(REPLY_KIND_NOT_FOUND)?;
+    Ok(ReplyMail { kind, kind_name, payload: EncodedMail { bytes, attachments } })
+}
+
 /// One reply as the `reply_mail_p32` host fn read it from the guest, or as a
 /// held slot's registration carries it, its kind validated, before its
 /// handle's entry says where it goes.
 pub(super) struct GuestReply {
-    pub(super) kind: KindId,
-    pub(super) kind_name: String,
-    pub(super) payload: EncodedMail,
+    pub(super) mail: ReplyMail,
     pub(super) count: u32,
     /// The dispatch identity the guest carried (issue 1987).
     pub(super) from: MailboxId,
@@ -930,7 +904,7 @@ pub(super) struct GuestReply {
 /// frame once its blobs are written as bytes, and `REPLY_UNKNOWN_HANDLE` for
 /// an entry with no reply target, which the table never allocates.
 pub(super) fn guest_answer(ctx: &ComponentCtx, entry: ReplyEntry, reply: GuestReply) -> Result<GuestAnswer, u32> {
-    let GuestReply { kind, kind_name, payload, count, from } = reply;
+    let GuestReply { mail: ReplyMail { kind, kind_name, payload }, count, from } = reply;
     let correlation = entry.correlation_id;
     let egress = |payload| egress_payload(ctx, kind, payload).ok_or(REPLY_BLOB_REFUSED);
     match entry.addr {

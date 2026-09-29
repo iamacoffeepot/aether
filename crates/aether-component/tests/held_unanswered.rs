@@ -6,8 +6,10 @@
 //! Each scenario has `test.held.requester` send one detached `HeldRequest` to
 //! a held actor, optionally replaces that actor while the reply is owed, then
 //! drops it. The unanswered reply lands on the detached request's chain,
-//! which no harness step joins, so each scenario polls the requester's reply
-//! count as its barrier before it counts the requester's reports.
+//! which no harness step joins, but the drop's handler queues it at the
+//! requester before it answers the drop. A `CountQuery` sent after the drop's
+//! reply therefore reaches the requester behind it, and its answer is the
+//! barrier each scenario reads before it counts the requester's reports.
 //!
 //! Skipped when the fixture wasm hasn't been built (`require_wasm`); CI
 //! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes a
@@ -47,9 +49,10 @@ enum BeforeDrop {
 
 /// Load the held actors and the requester, send one held request to the
 /// keeper (or, for [`BeforeDrop::Reinstated`], the forgetter), run `before`,
-/// drop the holder, and wait for the requester to receive a reply. Returns
-/// the harness to count reports on and the replace's result, if one ran, or
-/// `None` when the fixture wasm is not built.
+/// drop the holder, and ask the requester how many replies it received,
+/// which must be one. Returns the harness to count reports on and the
+/// replace's result, if one ran, or `None` when the fixture wasm is not
+/// built.
 fn drop_while_held(before: BeforeDrop) -> Option<(SubstrateHarness, Option<ReplaceResult>)> {
     let wasm = fs::read(require_wasm(FIXTURE_CRATE)?).expect("read fixture wasm");
 
@@ -89,13 +92,15 @@ fn drop_while_held(before: BeforeDrop) -> Option<(SubstrateHarness, Option<Repla
     }
     steps.extend([
         ("drop", HarnessOp::send_and_await_reply(&host, &DropComponent { target: path })),
-        ("replied", HarnessOp::poll_until(requester, &CountQuery, |report: &CountReport| report.count >= 1)),
+        ("replied", HarnessOp::send_and_await_reply(requester, &CountQuery)),
     ]);
 
     let result = harness.execute(steps).unwrap_or_else(|error| panic!("drop while held from {export}: {error}"));
     if let DropResult::Err { error } = result.reply::<DropResult>("drop").expect("decode DropResult") {
         panic!("the holder drops: {error}");
     }
+    let replied = result.reply::<CountReport>("replied").expect("decode CountReport");
+    assert_eq!(replied.count, 1, "the requester has its one reply by the time the drop answers");
     let replaced =
         (!matches!(before, BeforeDrop::Nothing)).then(|| result.reply::<ReplaceResult>("replace").expect("decode"));
 

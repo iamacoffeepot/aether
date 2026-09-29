@@ -93,8 +93,9 @@ impl Component {
     /// ADR-0243 §6: a single arm that returned a `Pending<R>` reports
     /// `DISPATCH_HANDLED_HOLD`. Its handle stays held, and its slot is armed
     /// with a `HeldChain`: a settlement hold on the inbound's root, the
-    /// inbound's lineage, which the held reply is later stamped with, and
-    /// the `R::unanswered()` value the guest registered for the handle
+    /// inbound's lineage, which the held reply is later stamped with, the
+    /// routed recipient it is sent in the name of, and the `R::unanswered()`
+    /// value the guest registered for the handle
     /// through `held_unanswered_p32`, sent in its place if it unloads or
     /// closes first. The hold is taken here, after `receive` returns and
     /// before the trampoline's dispatcher records this inbound's `Finished`,
@@ -196,7 +197,9 @@ impl Component {
                     )));
                 };
                 let hold = env.root.map(|root| ctx.binding.mailer().acquire_settlement_hold(root));
-                ctx.reply_table.hold(handle, HeldChain { hold, root: env.root, parent: env.mail_id, unanswered });
+                let chain =
+                    HeldChain { hold, root: env.root, parent: env.mail_id, recipient: env.recipient, unanswered };
+                ctx.reply_table.hold(handle, chain);
             }
             _ => {}
         }

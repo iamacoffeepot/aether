@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::blob_table::BlobTable;
-use crate::actor::wasm::reply_table::{HeldChain, HeldUnanswered, ReplyEntry, ReplyOrigin, ReplyTable};
+use crate::actor::wasm::reply_table::{HeldChain, ReplyEntry, ReplyMail, ReplyOrigin, ReplyTable};
 use crate::mail::attachments::{Attachments, EncodedMail, ResolveError, plain_payload, resolve_on_send};
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
@@ -196,7 +196,7 @@ pub struct ComponentCtx {
     /// `unanswered` value the guest registered for it through the
     /// `held_unanswered_p32` host fn. [`super::Component::deliver`] takes it
     /// once `receive` returns and moves it into the slot's [`HeldChain`].
-    pending_unanswered: Option<(u32, HeldUnanswered)>,
+    pending_unanswered: Option<(u32, ReplyMail)>,
 }
 
 /// The declared type of one inline-child actor the resident module can
@@ -374,12 +374,12 @@ impl ComponentCtx {
     /// `handle`, which the dispatch in progress holds (ADR-0243 §6). A
     /// second registration in one dispatch replaces the first; `deliver`
     /// keeps only one naming the handle it dispatched.
-    pub(crate) fn register_unanswered(&mut self, handle: u32, unanswered: HeldUnanswered) {
+    pub(crate) fn register_unanswered(&mut self, handle: u32, unanswered: ReplyMail) {
         self.pending_unanswered = Some((handle, unanswered));
     }
 
     /// Take the registration the dispatch that just returned made, if any.
-    pub(super) fn take_unanswered(&mut self) -> Option<(u32, HeldUnanswered)> {
+    pub(super) fn take_unanswered(&mut self) -> Option<(u32, ReplyMail)> {
         self.pending_unanswered.take()
     }
 
